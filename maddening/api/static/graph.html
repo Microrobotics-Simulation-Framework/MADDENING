@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MADDENING - Interactive Graph</title>
+<script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #sidebar {
+    width: 320px;
+    min-width: 320px;
+    background: #1a1d27;
+    border-right: 1px solid #2a2d3a;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  #sidebar h2 {
+    padding: 16px;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8b8fa3;
+    border-bottom: 1px solid #2a2d3a;
+  }
+  .section {
+    padding: 12px 16px;
+    border-bottom: 1px solid #2a2d3a;
+  }
+  .section h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #6b6f83;
+    margin-bottom: 8px;
+  }
+  .field-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+  .field-name { color: #a0a4b8; }
+  .field-value {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: #7dd3fc;
+  }
+  .field-value.positive { color: #86efac; }
+  .field-value.negative { color: #fca5a5; }
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  #toolbar {
+    height: 48px;
+    background: #1a1d27;
+    border-bottom: 1px solid #2a2d3a;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+  }
+  #toolbar .title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-right: auto;
+  }
+  .toolbar-btn {
+    background: #2a2d3a;
+    border: 1px solid #3a3d4a;
+    color: #e0e0e0;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+  }
+  .toolbar-btn:hover { background: #3a3d4a; }
+  .toolbar-btn.active { background: #2563eb; border-color: #3b82f6; }
+  .toolbar-btn.success { background: #166534; border-color: #22c55e; }
+  .toolbar-btn.danger { background: #991b1b; border-color: #ef4444; }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #6b7280;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  .status-dot.connected { background: #22c55e; }
+  .status-dot.running { background: #22c55e; animation: pulse 1.5s infinite; }
+  .status-dot.paused { background: #eab308; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  #status-text { font-size: 12px; color: #8b8fa3; }
+  #cy {
+    flex: 1;
+    background: #0f1117;
+  }
+  #node-detail {
+    display: none;
+    padding: 12px 16px;
+  }
+  #node-detail.visible { display: block; }
+  #node-detail .node-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  #node-detail .node-type {
+    font-size: 12px;
+    color: #6b6f83;
+    margin-bottom: 12px;
+  }
+  .param-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+  .param-name { color: #8b8fa3; }
+  .param-value { color: #c4b5fd; font-family: monospace; }
+  #edge-detail {
+    display: none;
+    padding: 12px 16px;
+  }
+  #edge-detail.visible { display: block; }
+  #sim-controls {
+    padding: 12px 16px;
+  }
+  #sim-controls .ctrl-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .ctrl-btn {
+    flex: 1;
+    background: #2a2d3a;
+    border: 1px solid #3a3d4a;
+    color: #e0e0e0;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    text-align: center;
+    transition: all 0.15s;
+  }
+  .ctrl-btn:hover { background: #3a3d4a; }
+  .ctrl-btn.running { background: #166534; border-color: #22c55e; }
+  .ctrl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #time-display {
+    font-family: monospace;
+    font-size: 20px;
+    color: #7dd3fc;
+    text-align: center;
+    padding: 8px;
+  }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h2>MADDENING Graph</h2>
+
+  <div class="section" id="sim-controls">
+    <h3>Simulation</h3>
+    <div id="time-display">t = 0.000</div>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-compile" onclick="compileGraph()">Compile</button>
+      <button class="ctrl-btn" id="btn-step" onclick="simStep()">Step</button>
+      <button class="ctrl-btn" id="btn-run100" onclick="simRun(100)">Run 100</button>
+    </div>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-start" onclick="simStart()">Start</button>
+      <button class="ctrl-btn" id="btn-pause" onclick="simPause()" disabled>Pause</button>
+      <button class="ctrl-btn" id="btn-stop" onclick="simStop()" disabled>Stop</button>
+    </div>
+  </div>
+
+  <div class="section" id="graph-info">
+    <h3>Graph</h3>
+    <div class="field-row">
+      <span class="field-name">Nodes</span>
+      <span class="field-value" id="info-nodes">0</span>
+    </div>
+    <div class="field-row">
+      <span class="field-name">Edges</span>
+      <span class="field-value" id="info-edges">0</span>
+    </div>
+    <div class="field-row">
+      <span class="field-name">Schedule</span>
+      <span class="field-value" id="info-schedule">-</span>
+    </div>
+  </div>
+
+  <div class="section" id="node-detail">
+    <h3>Selected Node</h3>
+    <div class="node-title" id="detail-name"></div>
+    <div class="node-type" id="detail-type"></div>
+    <div id="detail-params"></div>
+    <h3 style="margin-top:12px">State</h3>
+    <div id="detail-state"></div>
+  </div>
+
+  <div class="section" id="edge-detail">
+    <h3>Selected Edge</h3>
+    <div id="edge-info"></div>
+  </div>
+
+  <div class="section" id="all-states">
+    <h3>All Node States</h3>
+    <div id="states-container"></div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="toolbar">
+    <span class="title">Simulation Graph</span>
+    <span><span class="status-dot" id="ws-dot"></span><span id="status-text">Disconnected</span></span>
+    <button class="toolbar-btn" onclick="resetLayout()">Re-layout</button>
+    <button class="toolbar-btn" onclick="fitGraph()">Fit</button>
+  </div>
+  <div id="cy"></div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+let cy, ws, simTime = 0, isRunning = false;
+let graphData = null, stateData = null;
+let nodeMetadata = {};  // type, params per node
+
+// ── Cytoscape setup ─────────────────────────────────────────────
+function initCytoscape() {
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'label': 'data(label)',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'background-color': '#2563eb',
+          'color': '#e0e0e0',
+          'font-size': '12px',
+          'font-family': '-apple-system, sans-serif',
+          'width': 90,
+          'height': 50,
+          'shape': 'round-rectangle',
+          'border-width': 2,
+          'border-color': '#3b82f6',
+          'text-wrap': 'wrap',
+          'text-max-width': '80px',
+        }
+      },
+      {
+        selector: 'node:selected',
+        style: {
+          'border-color': '#f59e0b',
+          'border-width': 3,
+          'background-color': '#1e40af',
+        }
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 2,
+          'line-color': '#4b5563',
+          'target-arrow-color': '#4b5563',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+          'label': 'data(label)',
+          'font-size': '9px',
+          'color': '#6b7280',
+          'text-rotation': 'autorotate',
+          'text-margin-y': -10,
+        }
+      },
+      {
+        selector: 'edge.back-edge',
+        style: {
+          'line-style': 'dashed',
+          'line-color': '#ef4444',
+          'target-arrow-color': '#ef4444',
+        }
+      },
+      {
+        selector: 'edge:selected',
+        style: {
+          'line-color': '#f59e0b',
+          'target-arrow-color': '#f59e0b',
+          'width': 3,
+        }
+      },
+    ],
+    layout: { name: 'grid' },
+    wheelSensitivity: 0.3,
+  });
+
+  cy.on('tap', 'node', function(e) {
+    showNodeDetail(e.target.id());
+  });
+  cy.on('tap', 'edge', function(e) {
+    showEdgeDetail(e.target.data());
+  });
+  cy.on('tap', function(e) {
+    if (e.target === cy) {
+      hideDetails();
+    }
+  });
+}
+
+// ── Graph loading ───────────────────────────────────────────────
+async function loadGraph() {
+  try {
+    const resp = await fetch(BASE + '/graph');
+    graphData = await resp.json();
+    buildCytoscapeGraph(graphData);
+    updateGraphInfo(graphData);
+  } catch (err) {
+    console.error('Failed to load graph:', err);
+  }
+}
+
+function buildCytoscapeGraph(data) {
+  cy.elements().remove();
+  const elements = [];
+
+  // Nodes
+  (data.nodes || []).forEach(n => {
+    nodeMetadata[n.name] = { type: n.type, params: n.params || {}, timestep: n.timestep };
+    elements.push({
+      group: 'nodes',
+      data: {
+        id: n.name,
+        label: n.name + '\n(' + n.type + ')',
+      }
+    });
+  });
+
+  // Edges
+  (data.edges || []).forEach((e, i) => {
+    elements.push({
+      group: 'edges',
+      data: {
+        id: 'e' + i,
+        source: e.source_node,
+        target: e.target_node,
+        label: e.source_field + ' -> ' + e.target_field,
+        sourceField: e.source_field,
+        targetField: e.target_field,
+      }
+    });
+  });
+
+  cy.add(elements);
+  applyLayout();
+}
+
+function applyLayout() {
+  if (cy.nodes().length === 0) return;
+  try {
+    cy.layout({
+      name: 'dagre',
+      rankDir: 'TB',
+      spacingFactor: 1.5,
+      nodeSep: 50,
+      rankSep: 80,
+      animate: true,
+      animationDuration: 300,
+    }).run();
+  } catch (e) {
+    // Fallback if dagre not available
+    cy.layout({ name: 'breadthfirst', directed: true, spacingFactor: 1.5 }).run();
+  }
+}
+
+function resetLayout() { applyLayout(); }
+function fitGraph() { cy.fit(undefined, 30); }
+
+function updateGraphInfo(data) {
+  document.getElementById('info-nodes').textContent = (data.nodes || []).length;
+  document.getElementById('info-edges').textContent = (data.edges || []).length;
+}
+
+// ── State updates ───────────────────────────────────────────────
+function updateStates(state) {
+  stateData = state;
+  updateAllStatesPanel(state);
+  updateNodeColors(state);
+  // Update detail panel if a node is selected
+  const sel = cy.$('node:selected');
+  if (sel.length > 0) {
+    updateNodeStateInDetail(sel[0].id(), state);
+  }
+}
+
+function updateAllStatesPanel(state) {
+  const container = document.getElementById('states-container');
+  let html = '';
+  for (const [nodeName, fields] of Object.entries(state)) {
+    if (nodeName === '_meta') continue;
+    html += '<div style="margin-bottom:8px"><strong style="color:#a0a4b8">' + nodeName + '</strong>';
+    for (const [field, value] of Object.entries(fields)) {
+      const formatted = formatValue(value);
+      const cls = typeof value === 'number' ? (value >= 0 ? 'positive' : 'negative') : '';
+      html += '<div class="field-row"><span class="field-name">' + field +
+              '</span><span class="field-value ' + cls + '">' + formatted + '</span></div>';
+    }
+    html += '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function updateNodeColors(state) {
+  cy.nodes().forEach(node => {
+    const name = node.id();
+    if (state[name]) {
+      // Color by activity -- brighter if state changed recently
+      node.style('background-color', '#2563eb');
+    }
+  });
+}
+
+function formatValue(v) {
+  if (typeof v === 'number') return v.toFixed(4);
+  if (Array.isArray(v)) return '[' + v.map(x => typeof x === 'number' ? x.toFixed(3) : x).join(', ') + ']';
+  return JSON.stringify(v);
+}
+
+// ── Detail panels ───────────────────────────────────────────────
+function showNodeDetail(nodeId) {
+  const meta = nodeMetadata[nodeId] || {};
+  document.getElementById('detail-name').textContent = nodeId;
+  document.getElementById('detail-type').textContent = (meta.type || '?') + '  dt=' + (meta.timestep || '?');
+
+  let paramHtml = '';
+  for (const [k, v] of Object.entries(meta.params || {})) {
+    paramHtml += '<div class="param-row"><span class="param-name">' + k +
+                 '</span><span class="param-value">' + formatValue(v) + '</span></div>';
+  }
+  document.getElementById('detail-params').innerHTML = paramHtml;
+
+  if (stateData && stateData[nodeId]) {
+    updateNodeStateInDetail(nodeId, stateData);
+  }
+  document.getElementById('node-detail').classList.add('visible');
+  document.getElementById('edge-detail').classList.remove('visible');
+}
+
+function updateNodeStateInDetail(nodeId, state) {
+  if (!state[nodeId]) return;
+  let html = '';
+  for (const [field, value] of Object.entries(state[nodeId])) {
+    const formatted = formatValue(value);
+    const cls = typeof value === 'number' ? (value >= 0 ? 'positive' : 'negative') : '';
+    html += '<div class="field-row"><span class="field-name">' + field +
+            '</span><span class="field-value ' + cls + '">' + formatted + '</span></div>';
+  }
+  document.getElementById('detail-state').innerHTML = html;
+}
+
+function showEdgeDetail(data) {
+  document.getElementById('edge-info').innerHTML =
+    '<div class="field-row"><span class="field-name">Source</span><span class="field-value">' + data.source + '.' + data.sourceField + '</span></div>' +
+    '<div class="field-row"><span class="field-name">Target</span><span class="field-value">' + data.target + '.' + data.targetField + '</span></div>';
+  document.getElementById('edge-detail').classList.add('visible');
+  document.getElementById('node-detail').classList.remove('visible');
+}
+
+function hideDetails() {
+  document.getElementById('node-detail').classList.remove('visible');
+  document.getElementById('edge-detail').classList.remove('visible');
+}
+
+// ── WebSocket ───────────────────────────────────────────────────
+function connectWebSocket() {
+  const wsUrl = BASE.replace(/^http/, 'ws') + '/ws/state';
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('connected');
+    document.getElementById('status-text').textContent = 'Connected';
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      simTime = msg.sim_time || 0;
+      document.getElementById('time-display').textContent = 't = ' + simTime.toFixed(3);
+      if (msg.state) updateStates(msg.state);
+    } catch (e) {
+      console.error('WS parse error:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('connected', 'running');
+    document.getElementById('status-text').textContent = 'Disconnected';
+    // Reconnect after 2s
+    setTimeout(connectWebSocket, 2000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+}
+
+// ── Sim controls ────────────────────────────────────────────────
+async function compileGraph() {
+  try {
+    const resp = await fetch(BASE + '/graph/compile', { method: 'POST' });
+    const data = await resp.json();
+    if (data.schedule) {
+      document.getElementById('info-schedule').textContent = data.schedule.join(' -> ');
+    }
+    document.getElementById('btn-compile').classList.add('success');
+    setTimeout(() => document.getElementById('btn-compile').classList.remove('success'), 1000);
+    // Reload state
+    loadState();
+  } catch (err) {
+    console.error('Compile failed:', err);
+  }
+}
+
+async function loadState() {
+  try {
+    const resp = await fetch(BASE + '/graph/state');
+    const state = await resp.json();
+    updateStates(state);
+  } catch (e) {}
+}
+
+async function simStep() {
+  try {
+    const resp = await fetch(BASE + '/sim/step', { method: 'POST' });
+    const state = await resp.json();
+    updateStates(state);
+    simTime += 0.01; // approximate
+    document.getElementById('time-display').textContent = 't ~ ' + simTime.toFixed(3);
+  } catch (err) {
+    console.error('Step failed:', err);
+  }
+}
+
+async function simRun(n) {
+  try {
+    const resp = await fetch(BASE + '/sim/run?n_steps=' + n, { method: 'POST' });
+    const state = await resp.json();
+    updateStates(state);
+  } catch (err) {
+    console.error('Run failed:', err);
+  }
+}
+
+async function simStart() {
+  try {
+    await fetch(BASE + '/sim/start', { method: 'POST' });
+    isRunning = true;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-pause').disabled = false;
+    document.getElementById('btn-stop').disabled = false;
+    document.getElementById('ws-dot').classList.add('running');
+    document.getElementById('status-text').textContent = 'Running';
+  } catch (err) {
+    console.error('Start failed:', err);
+  }
+}
+
+async function simPause() {
+  try {
+    await fetch(BASE + '/sim/pause', { method: 'POST' });
+    document.getElementById('ws-dot').classList.remove('running');
+    document.getElementById('ws-dot').classList.add('paused');
+    document.getElementById('status-text').textContent = 'Paused';
+  } catch (err) {
+    console.error('Pause failed:', err);
+  }
+}
+
+async function simStop() {
+  try {
+    await fetch(BASE + '/sim/stop', { method: 'POST' });
+    isRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('ws-dot').classList.remove('running', 'paused');
+    document.getElementById('status-text').textContent = 'Connected';
+  } catch (err) {
+    console.error('Stop failed:', err);
+  }
+}
+
+// ── Init ────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  initCytoscape();
+  loadGraph().then(() => loadState());
+  connectWebSocket();
+  // Poll graph topology periodically for changes
+  setInterval(async () => {
+    try {
+      const resp = await fetch(BASE + '/graph');
+      const data = await resp.json();
+      const newNodeCount = (data.nodes || []).length;
+      const oldNodeCount = graphData ? (graphData.nodes || []).length : 0;
+      const newEdgeCount = (data.edges || []).length;
+      const oldEdgeCount = graphData ? (graphData.edges || []).length : 0;
+      if (newNodeCount !== oldNodeCount || newEdgeCount !== oldEdgeCount) {
+        graphData = data;
+        buildCytoscapeGraph(data);
+        updateGraphInfo(data);
+      }
+    } catch (e) {}
+  }, 3000);
+});
+</script>
+</body>
+</html>

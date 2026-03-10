@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "maddening"
+version = "0.1.0"
+description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
+readme = "README.md"
+license = "LGPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "Nick" },
+]
+
+# Base install: the simulation engine (JAX + NumPy).
+# For viz-only / client-only installs, use [client] extra instead.
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Matplotlib-based visualization (time-series, 2D scene renderers)
+viz = ["matplotlib>=3.5"]
+
+# Rich-based terminal renderer (works over SSH, no GUI needed)
+terminal = ["rich>=12.0"]
+
+# ZMQ network transport for remote visualization and command channels
+network = ["pyzmq>=25.0"]
+
+# Visualization client only -- no JAX needed.
+# Install this on a local machine to view a simulation running on the cloud.
+#   pip install maddening[client]           # terminal renderer + ZMQ
+#   pip install maddening[client,viz]       # adds matplotlib renderer
+client = [
+    "pyzmq>=25.0",
+    "rich>=12.0",
+]
+
+# FastAPI server for HTTP/WebSocket API
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "websockets>=11.0",
+]
+
+# Everything
+all = [
+    "matplotlib>=3.5",
+    "rich>=12.0",
+    "pyzmq>=25.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "websockets>=11.0",
+]
+
+# Development / testing
+dev = [
+    "pytest>=7.0",
+    "maddening[all]",
+]
+
+[project.urls]
+Repository = "https://github.com/MSF/MADDENING"
+
+[tool.setuptools.packages.find]
+include = ["maddening*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

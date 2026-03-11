@@ -23,6 +23,8 @@ def __getattr__(name: str):
         "GraphManager": "maddening.core.graph_manager",
         "HistoryLogger": "maddening.core.history_logger",
         "SimulationNode": "maddening.core.node",
+        "SurrogateNode": "maddening.surrogates.node",
+        "SurrogateArchitecture": "maddening.surrogates.architecture",
     }
     if name in _lazy:
         import importlib
@@ -38,4 +40,6 @@ __all__ = [
     "GraphManager",
     "HistoryLogger",
     "SimulationNode",
+    "SurrogateNode",
+    "SurrogateArchitecture",
 ]

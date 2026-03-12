@@ -25,8 +25,11 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - `soup_package.md` (skeleton)
 - `SECURITY.md`, `CONTRIBUTING.md`, `CITATION.cff`
 - Algorithm guide template and HeatNode algorithm guide
-- `scripts/check_anomalies.py` and `scripts/check_impl_mapping.py`
+- `scripts/check_anomalies.py`, `scripts/check_impl_mapping.py`, and `scripts/check_citations.py`
 - GitHub issue template for anomalies
+- Developer guide: `docs/developer_guide/` with `node_authoring.md`, `documentation_standards.md`, `testing_standards.md`
+- Bibliography citation system: Pandoc-style `[@Key]` syntax with CI validation
+- Claude skill `.claude/skills/commit-and-push/` for commit/push compliance checklist
 - Migrated to `src/` layout with hatchling build backend
 - Reorganized tests into subdirectories: `core/`, `nodes/`, `surrogates/`, `api/`, `viz/`, `compliance/`, `verification/`
 

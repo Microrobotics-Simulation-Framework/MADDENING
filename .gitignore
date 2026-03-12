@@ -3,7 +3,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.claude/
+.claude/*
+!.claude/skills/
 *.png
 *.npz
 .venv/

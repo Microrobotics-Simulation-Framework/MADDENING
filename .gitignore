@@ -6,3 +6,5 @@ build/
 .claude/
 *.png
 *.npz
+.venv/
+*.jsonl

@@ -1,5 +1,8 @@
 # MADDENING
-Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph (MADDENING). It is designed to work as a stand-alone framework, but was specifically desigend to be the backbone of MIME (MIcrorobotics Multiphysics Engine).
+
+Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph (MADDENING). It is designed to work as a stand-alone framework, but was specifically designed to be the backbone of MIME (MIcrorobotics Multiphysics Engine).
+
+> **Regulatory disclaimer**: MADDENING is research software. It is not a medical device as defined by EU MDR (EU 2017/745) and is not intended for clinical use. When used in a regulated product, MADDENING is classified as SOUP (Software of Unknown Provenance) under IEC 62304. See `docs/regulatory/` for details.
 
 ## What MADDENING is intended to do, and an explanation of the Acronym.
 MADDENING is a framework designed for soft real-time high-fidelity simulation of complex systems. It is designed to run on HPC server environments. 

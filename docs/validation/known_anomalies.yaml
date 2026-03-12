@@ -1,0 +1,54 @@
+schema_version: "1.0"
+maddening_version: "0.1.0"
+generated_date: "2026-03-12"
+
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "LBM GPU segfault on CUDA 12.2 + jaxlib 0.5.1"
+    description: >
+      The LBMPipeNode causes a segmentation fault when running on GPU with
+      CUDA 12.2 and jaxlib 0.5.1.  The segfault occurs in the XLA compiler
+      during compilation of the streaming step, triggered by matmul/einsum
+      operations on 3D+ arrays.  The CPU backend is unaffected.  The workaround
+      is to use the CPU backend (JAX_PLATFORMS=cpu).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A segfault is a hard failure (crash), not a silent error — the simulation
+      stops rather than producing incorrect results.  In an intraoperative
+      context, an unexpected crash of the simulation engine could disrupt
+      surgical workflow and require fallback to non-simulated guidance.  The
+      safety relevance depends on whether the downstream product uses GPU
+      execution and whether a fallback path exists.  CPU execution is unaffected.
+    affected_components:
+      - "maddening.nodes.lbm_pipe.LBMPipeNode"
+    affected_versions: "0.1.0"
+    workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
+    resolution_status: "open"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-002"
+    title: "HeatNode CFL stability not enforced at runtime"
+    description: >
+      The HeatNode does not check the CFL stability condition (dt < dx^2 / (2*alpha))
+      at runtime.  If the user provides a timestep that violates this condition,
+      the explicit finite-difference scheme becomes unstable and produces silently
+      incorrect results (temperature values that grow without bound).  There is no
+      warning or error — the simulation runs but the output is wrong.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent production of incorrect results is the most dangerous failure mode
+      for a computational tool used in safety-relevant contexts.  If a downstream
+      product uses HeatNode (or a node derived from it) for thermal simulation
+      in a clinical context, an unstable timestep would produce incorrect
+      temperature predictions without any indication of error.  The safety
+      relevance depends on whether the downstream product relies on HeatNode's
+      temperature output for clinical decisions and whether external validation
+      checks would catch the divergence.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: "0.1.0"
+    workaround: "Manually verify CFL condition: dt * alpha / dx^2 < 0.5"
+    resolution_status: "open"
+    github_issue: null

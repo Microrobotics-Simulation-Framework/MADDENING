@@ -47,9 +47,54 @@ Prioritized by ease of implementation from the current state of the codebase.
 - SimulationServer: REST + WebSocket (JSON/binary/render) + surrogate endpoints
 - Interactive app: `/viz/app` with parameter tuning, surrogate training, binary WS
 
+### Documentation Architecture & Compliance (Phases 0-4)
+- Package restructured to src/ layout with hatchling build backend (uv-compatible)
+- `maddening.compliance` namespace: pure Python, re-exports all schema types (no JAX dep)
+- `NodeMeta` on all 7 nodes (6 physics + HealthCheckNode), `@stability` on 14 public API surfaces
+- `@verification_benchmark` decorator + registry, 2 registered benchmarks (MADD-VER-001/002)
+- Anomaly registry validator + CLI (`python -m maddening.compliance check-anomalies`)
+- AuditLogger (NullSink/JSONFileSink), SimulationProvenance, UncertaintySpec/UncertainParameter
+- HealthCheckNode: configurable NaN/Inf/bounds detection, does-not-halt design
+- Full regulatory docs: intended_use, downstream_integration, iec62304_mapping, eu_mdr_guidelines, mdcg_2019_11
+- Validation docs: known_anomalies.yaml (2 entries), soup_package.md, framework_verification.md, cou_template.md
+- Algorithm guide: heat_node.md (complete), _template.md, bibliography.bib
+- Repository: CHANGELOG.md, CITATION.cff, SECURITY.md, CONTRIBUTING.md, anomaly issue template
+- GitHub labels: anomaly:critical/major/minor, safety-relevant, soup-assessment, known-anomaly
+- CI: GitHub Actions workflow (test matrix + compliance checks)
+- Tests: 721 total (85 compliance + 6 verification + 18 health check + 612 existing)
+
 ---
 
 ## Next Steps
+
+### Compliance & Documentation (remaining from Appendix E)
+
+#### 0. Release Gate Automation (three-tier anomaly model)
+Automate the three-tier release gate from DOCUMENTATION_ARCHITECTURE.md Section 9.7.
+- `scripts/check_anomalies.py` queries GitHub Issues API for closed issues with anomaly labels
+- Tier 1/2: hard gate — safety-relevant and critical/major issues must have YAML entries
+- Tier 3: automated cycle counting — compare `anomaly:minor` close dates to release tags
+- CI emits warnings for open `known-anomaly` issues lacking YAML entries
+- **Why deferred**: Requires actual issues and releases to test against. Zero issues currently open.
+- **Priority**: Medium — becomes important at first real release, not needed during development.
+
+#### 0b. SBOM Generation
+Integrate CycloneDX SBOM into the release process.
+- `cyclonedx-bom` generates JSON/XML from installed dependencies
+- GitHub Actions release workflow attaches SBOM as release asset
+- **Why deferred**: No releases yet; `cyclonedx-bom>=4.0` is already in `[sbom]` optional extra.
+- **Priority**: Low — needed at first release, trivial to add.
+
+#### 0c. Sphinx Documentation Site (Phase 5)
+Build the full documentation site with Sphinx.
+- `docs/conf.py` + `docs/index.rst` as documentation root
+- Sphinx build step verifies `implementation_map` callables via `getattr()`
+- Algorithm guide for every node and surrogate architecture
+- Per-node verification reports generated from benchmark results
+- Complete SOUP package (all 8 sections)
+- FDA alignment document (`docs/regulatory/fda_guidelines.md`)
+- **Why deferred**: Phase 5 in Appendix E — depends on everything else being stable first.
+- **Priority**: Medium — important for downstream users but not blocking development.
 
 ### Tier 1: Easy (days of work, minimal dependencies)
 

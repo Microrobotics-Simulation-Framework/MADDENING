@@ -3330,94 +3330,94 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 **Compliance namespace:**
 
-- [ ] `maddening/compliance/__init__.py` exists and re-exports at minimum: `NodeMeta`, `EdgeMeta`, `ValidatedRegime`, `Reference`, `StabilityLevel`, `UQReadiness`, `AnomalyRecord`, `AnomalySeverity`, `SafetyRelevance`, `ResolutionStatus`, `ValidationBenchmark`, `BenchmarkType`, `verification_benchmark`, `stability` (Section 16)
-- [ ] `from maddening.compliance import NodeMeta` succeeds without importing JAX (Section 16)
-- [ ] `from maddening.compliance import validate_anomaly_registry` succeeds (Section 16)
-- [ ] `from maddening.compliance import stability` succeeds and `stability` is a **no-op identity decorator** — applying `@stability(StabilityLevel.STABLE)` to a class or function succeeds without error but does not populate a registry or generate reports. The functional implementation lands in Phase 4 (Appendix B item 30). (Section 16)
+- [x] `maddening/compliance/__init__.py` exists and re-exports at minimum: `NodeMeta`, `EdgeMeta`, `ValidatedRegime`, `Reference`, `StabilityLevel`, `UQReadiness`, `AnomalyRecord`, `AnomalySeverity`, `SafetyRelevance`, `ResolutionStatus`, `ValidationBenchmark`, `BenchmarkType`, `verification_benchmark`, `stability` (Section 16)
+- [x] `from maddening.compliance import NodeMeta` succeeds without importing JAX (Section 16)
+- [x] `from maddening.compliance import validate_anomaly_registry` succeeds (Section 16)
+- [x] `from maddening.compliance import stability` succeeds and `stability` is a **no-op identity decorator** — applying `@stability(StabilityLevel.STABLE)` to a class or function succeeds without error but does not populate a registry or generate reports. The functional implementation lands in Phase 4 (Appendix B item 30). (Section 16)
 
 **Anomaly registry validator:**
 
-- [ ] `maddening/compliance/_validate.py` exists with `validate_anomaly_registry(path, *, prefix="") -> list[str]` function (Section 16)
-- [ ] `python -m maddening.compliance check-anomalies <path>` is a valid invocation that validates a YAML file and exits 0 on success, nonzero on failure (Section 16)
-- [ ] Validator accepts a `--prefix` argument for downstream namespace enforcement (e.g., `--prefix MIME-ANO-`) (Section 16)
-- [ ] Validator correctly accepts a minimal valid `known_anomalies.yaml` containing: `schema_version`, a version field, `generated_date`, and an empty `anomalies` list (Section 16)
+- [x] `maddening/compliance/_validate.py` exists with `validate_anomaly_registry(path, *, prefix="") -> list[str]` function (Section 16)
+- [x] `python -m maddening.compliance check-anomalies <path>` is a valid invocation that validates a YAML file and exits 0 on success, nonzero on failure (Section 16)
+- [x] Validator accepts a `--prefix` argument for downstream namespace enforcement (e.g., `--prefix MIME-ANO-`) (Section 16)
+- [x] Validator correctly accepts a minimal valid `known_anomalies.yaml` containing: `schema_version`, a version field, `generated_date`, and an empty `anomalies` list (Section 16)
 
 ### Phase 1 — Regulatory Foundation
 
 **Repository root files:**
 
-- [ ] `CHANGELOG.md` exists at repository root and follows [Keep a Changelog](https://keepachangelog.com/) format with the additional sections: `Verification`, `Security`, and `Known Anomalies` (Section 5)
-- [ ] `CITATION.cff` exists at repository root and contains at minimum: `cff-version`, `title`, `type: software`, `version`, `date-released`, `license`, `repository-code`, and at least one entry in `authors` with `family-names` and `given-names` (Section 14)
-- [ ] `README.md` contains the EU MDR-aware disclaimer block: "MADDENING is research software. It is not a medical device as defined by EU MDR (EU 2017/745)..." and references `docs/regulatory/` for details (Section 8)
+- [x] `CHANGELOG.md` exists at repository root and follows [Keep a Changelog](https://keepachangelog.com/) format with the additional sections: `Verification`, `Security`, and `Known Anomalies` (Section 5)
+- [x] `CITATION.cff` exists at repository root and contains at minimum: `cff-version`, `title`, `type: software`, `version`, `date-released`, `license`, `repository-code`, and at least one entry in `authors` with `family-names` and `given-names` (Section 14)
+- [x] `README.md` contains the EU MDR-aware disclaimer block: "MADDENING is research software. It is not a medical device as defined by EU MDR (EU 2017/745)..." and references `docs/regulatory/` for details (Section 8)
 
 **docs/ directory structure:**
 
-- [ ] `docs/` directory exists
-- [ ] `docs/regulatory/` directory exists
-- [ ] `docs/validation/` directory exists
+- [x] `docs/` directory exists
+- [x] `docs/regulatory/` directory exists
+- [x] `docs/validation/` directory exists
 
 **docs/regulatory/intended_use.md:**
 
-- [ ] File exists at `docs/regulatory/intended_use.md` (Section 2)
-- [ ] Contains a **Platform Positioning Statement** that identifies MADDENING as a general-purpose computational framework, states it is not a medical device under EU MDR Article 2(1), references MDCG 2019-11 Section 3.2 general-purpose tool language, and states MADDENING is SOUP under IEC 62304 when used in a regulated product (Section 2)
-- [ ] Contains a **Layered Responsibility Model** table assigning responsibilities between MADDENING, downstream manufacturer, and downstream user (Section 2)
-- [ ] Contains a **Commercial Boundary Statement** explaining that the regulated clinical product is built by a downstream commercial entity, not by the MADDENING project (Section 2)
-- [ ] Contains a **Cybersecurity Boundary Statement** (MDCG 2019-16): MADDENING assumes trusted inputs; the commercial integration layer is responsible for input sanitization, parameter validation, and graph topology validation before data reaches the framework (Section 2)
-- [ ] Contains an **LGPL Replaceability Statement**: LGPL-3.0 "replaceability" obligation is satisfied via Python's module system — the end user can replace the `maddening` package with a modified version by installing it into the same Python environment, with no special linking or build steps required (Section 2)
+- [x] File exists at `docs/regulatory/intended_use.md` (Section 2)
+- [x] Contains a **Platform Positioning Statement** that identifies MADDENING as a general-purpose computational framework, states it is not a medical device under EU MDR Article 2(1), references MDCG 2019-11 Section 3.2 general-purpose tool language, and states MADDENING is SOUP under IEC 62304 when used in a regulated product (Section 2)
+- [x] Contains a **Layered Responsibility Model** table assigning responsibilities between MADDENING, downstream manufacturer, and downstream user (Section 2)
+- [x] Contains a **Commercial Boundary Statement** explaining that the regulated clinical product is built by a downstream commercial entity, not by the MADDENING project (Section 2)
+- [x] Contains a **Cybersecurity Boundary Statement** (MDCG 2019-16): MADDENING assumes trusted inputs; the commercial integration layer is responsible for input sanitization, parameter validation, and graph topology validation before data reaches the framework (Section 2)
+- [x] Contains an **LGPL Replaceability Statement**: LGPL-3.0 "replaceability" obligation is satisfied via Python's module system — the end user can replace the `maddening` package with a modified version by installing it into the same Python environment, with no special linking or build steps required (Section 2)
 
 **Anomaly lifecycle (three-phase model):**
 
-- [ ] `.github/ISSUE_TEMPLATE/anomaly.md` exists with mandatory fields: title, severity (critical/major/minor), safety relevance (safety_relevant/not_safety_relevant/context_dependent), safety relevance rationale, affected components, affected versions, workaround (if any) (Section 9.7)
-- [ ] The three-phase anomaly lifecycle (Discovery → Formalization → Verification) is documented in `CONTRIBUTING.md` or `docs/developer_guide/testing_standards.md` (Section 9.7)
+- [x] `.github/ISSUE_TEMPLATE/anomaly.md` exists with mandatory fields: title, severity (critical/major/minor), safety relevance (safety_relevant/not_safety_relevant/context_dependent), safety relevance rationale, affected components, affected versions, workaround (if any) (Section 9.7)
+- [x] The three-phase anomaly lifecycle (Discovery → Formalization → Verification) is documented in `CONTRIBUTING.md` or `docs/developer_guide/testing_standards.md` (Section 9.7)
 
 **docs/regulatory/downstream_integration.md (skeleton):**
 
-- [ ] File exists at `docs/regulatory/downstream_integration.md` (Section 2)
-- [ ] Contains the four-layer dependency chain: MADDENING → MIME → MICROBOTICA → [Commercial Product], with each layer's status (open source / regulated) clearly stated (Section 2)
-- [ ] Contains a one-paragraph statement that the commercial layer is responsible for EU MDR manufacturer obligations including ISO 13485 QMS, Notified Body relationship, post-market surveillance, and manufacturer liability (Section 2)
-- [ ] Contains a forward reference noting that full content (per-layer responsibility details, classification analysis, commercial boundary documentation) will be completed in Phase 3 (Section 2, Appendix B)
+- [x] File exists at `docs/regulatory/downstream_integration.md` (Section 2)
+- [x] Contains the four-layer dependency chain: MADDENING → MIME → MICROBOTICA → [Commercial Product], with each layer's status (open source / regulated) clearly stated (Section 2)
+- [x] Contains a one-paragraph statement that the commercial layer is responsible for EU MDR manufacturer obligations including ISO 13485 QMS, Notified Body relationship, post-market surveillance, and manufacturer liability (Section 2)
+- [x] Contains a forward reference noting that full content (per-layer responsibility details, classification analysis, commercial boundary documentation) will be completed in Phase 3 (Section 2, Appendix B)
 
 **docs/validation/known_anomalies.yaml:**
 
-- [ ] File exists at `docs/validation/known_anomalies.yaml` (Section 9.7)
-- [ ] File is valid YAML (parseable by `yaml.safe_load()`)
-- [ ] Contains `schema_version` field (e.g., `"1.0"`)
-- [ ] Contains `maddening_version` field matching the current release version
-- [ ] Contains `generated_date` field in ISO 8601 format
-- [ ] Contains `anomalies` key (list; may be empty for an initial release, but the key must exist)
-- [ ] Every anomaly entry (if any) contains all required fields: `anomaly_id`, `title`, `description`, `severity`, `safety_relevance`, `safety_relevance_rationale` (Section 9.7)
-- [ ] No duplicate `anomaly_id` values across entries
+- [x] File exists at `docs/validation/known_anomalies.yaml` (Section 9.7)
+- [x] File is valid YAML (parseable by `yaml.safe_load()`)
+- [x] Contains `schema_version` field (e.g., `"1.0"`)
+- [x] Contains `maddening_version` field matching the current release version
+- [x] Contains `generated_date` field in ISO 8601 format
+- [x] Contains `anomalies` key (list; may be empty for an initial release, but the key must exist)
+- [x] Every anomaly entry (if any) contains all required fields: `anomaly_id`, `title`, `description`, `severity`, `safety_relevance`, `safety_relevance_rationale` (Section 9.7)
+- [x] No duplicate `anomaly_id` values across entries
 
 **docs/validation/soup_package.md (skeleton):**
 
-- [ ] File exists at `docs/validation/soup_package.md` (Section 10)
-- [ ] Contains **Section 1: Software Identification** with at minimum: name, version, release date, licence, source repository, Python version, primary dependencies (Section 10)
-- [ ] Contains **Section 2: Functional Description** with at minimum: a brief description of core framework capabilities and a "Capabilities NOT provided" list (Section 10)
-- [ ] Contains **Section 3: Known Anomalies** with at minimum: a reference to `known_anomalies.yaml` and a summary count table (Section 10)
-- [ ] Remaining sections (4–8) may be stubs with "To be completed in Phase 2/3" notes
+- [x] File exists at `docs/validation/soup_package.md` (Section 10)
+- [x] Contains **Section 1: Software Identification** with at minimum: name, version, release date, licence, source repository, Python version, primary dependencies (Section 10)
+- [x] Contains **Section 2: Functional Description** with at minimum: a brief description of core framework capabilities and a "Capabilities NOT provided" list (Section 10)
+- [x] Contains **Section 3: Known Anomalies** with at minimum: a reference to `known_anomalies.yaml` and a summary count table (Section 10)
+- [x] Remaining sections (4–8) may be stubs with "To be completed in Phase 2/3" notes
 
 **NodeMeta dataclass:**
 
-- [ ] `NodeMeta` dataclass is defined in `maddening/core/metadata.py` (Section 9.1)
-- [ ] `NodeMeta` includes all fields: `algorithm_id`, `algorithm_version`, `stability`, `description`, `governing_equations`, `discretization`, `assumptions`, `limitations`, `validated_regimes`, `references`, `uq_readiness`, `deprecation_notice`, `hazard_hints` (Sections 9.1, 9.8)
-- [ ] `StabilityLevel` enum is defined with values: `EXPERIMENTAL`, `PROVISIONAL`, `STABLE`, `DEPRECATED` (Section 9.1)
-- [ ] `UQReadiness` enum is defined with values: `NOT_READY`, `PARAMETER_SWEEP`, `FULL` (Section 9.1)
-- [ ] `SimulationNode` has a `meta: ClassVar[Optional[NodeMeta]] = None` attribute (Section 9.1)
-- [ ] At least one existing `SimulationNode` subclass has `meta` attached as a ClassVar with at minimum: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints` (Sections 9.1, 9.8, 9.9)
+- [x] `NodeMeta` dataclass is defined in `maddening/core/metadata.py` (Section 9.1)
+- [x] `NodeMeta` includes all fields: `algorithm_id`, `algorithm_version`, `stability`, `description`, `governing_equations`, `discretization`, `assumptions`, `limitations`, `validated_regimes`, `references`, `uq_readiness`, `deprecation_notice`, `hazard_hints` (Sections 9.1, 9.8)
+- [x] `StabilityLevel` enum is defined with values: `EXPERIMENTAL`, `PROVISIONAL`, `STABLE`, `DEPRECATED` (Section 9.1)
+- [x] `UQReadiness` enum is defined with values: `NOT_READY`, `PARAMETER_SWEEP`, `FULL` (Section 9.1)
+- [x] `SimulationNode` has a `meta: ClassVar[Optional[NodeMeta]] = None` attribute (Section 9.1)
+- [x] At least one existing `SimulationNode` subclass has `meta` attached as a ClassVar with at minimum: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints` (Sections 9.1, 9.8, 9.9)
 
 **GitHub repository settings:**
 
-- [ ] GitHub Issues label `anomaly:critical` exists (red) (Section 9.7)
-- [ ] GitHub Issues label `anomaly:major` exists (orange) (Section 9.7)
-- [ ] GitHub Issues label `anomaly:minor` exists (yellow) (Section 9.7)
-- [ ] GitHub Issues label `safety-relevant` exists (purple) (Section 9.7)
-- [ ] GitHub Issues label `soup-assessment` exists (blue) (Section 9.7)
-- [ ] GitHub Issues label `known-anomaly` exists (gray) (Section 9.7)
+- [x] GitHub Issues label `anomaly:critical` exists (red) (Section 9.7)
+- [x] GitHub Issues label `anomaly:major` exists (orange) (Section 9.7)
+- [x] GitHub Issues label `anomaly:minor` exists (yellow) (Section 9.7)
+- [x] GitHub Issues label `safety-relevant` exists (purple) (Section 9.7)
+- [x] GitHub Issues label `soup-assessment` exists (blue) (Section 9.7)
+- [x] GitHub Issues label `known-anomaly` exists (gray) (Section 9.7)
 
 **CI integration:**
 
-- [ ] `scripts/check_anomalies.py` exists and validates `known_anomalies.yaml` (Section 9.7)
-- [ ] CI pipeline runs `scripts/check_anomalies.py` on every push and fails if YAML schema validation errors are found (Section 9.7)
+- [x] `scripts/check_anomalies.py` exists and validates `known_anomalies.yaml` (Section 9.7)
+- [x] CI pipeline runs `scripts/check_anomalies.py` on every push and fails if YAML schema validation errors are found (Section 9.7)
 - [ ] CI emits **warnings** (non-blocking) for open `known-anomaly` issues lacking a YAML entry (Phase 1 anomalies still under investigation) (Section 9.7)
 - [ ] Release gate implements the **three-tier model** (Section 9.7):
   - [ ] **Tier 1**: every closed issue labeled `safety-relevant` must have a YAML entry — no grace period, hard gate
@@ -3429,91 +3429,91 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 **Verification test directory:**
 
-- [ ] `tests/verification/` directory exists and is separate from unit tests (Section 4)
-- [ ] At least one test file exists in `tests/verification/` (Section 4)
+- [x] `tests/verification/` directory exists and is separate from unit tests (Section 4)
+- [x] At least one test file exists in `tests/verification/` (Section 4)
 
 **Algorithm guide documents:**
 
-- [ ] `docs/algorithm_guide/` directory exists (Section 3)
-- [ ] `docs/algorithm_guide/nodes/` directory exists (Section 3)
-- [ ] `docs/algorithm_guide/nodes/_template.md` exists and matches the template in Section 3 (Section 3)
-- [ ] At least one node has a complete algorithm guide document (recommended: `heat_node.md` or `lbm_pipe_node.md`) containing all template sections: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions, Validated Physical Regimes, Known Limitations, Stability Conditions, State Variables, Parameters, Boundary Inputs, References, Verification Evidence, Changelog (Section 3)
-- [ ] The Implementation Mapping subsection traces every governing equation term to a specific Python/JAX function, with no silent omissions — terms handled by JAX primitives are documented as such (Section 3)
+- [x] `docs/algorithm_guide/` directory exists (Section 3)
+- [x] `docs/algorithm_guide/nodes/` directory exists (Section 3)
+- [x] `docs/algorithm_guide/nodes/_template.md` exists and matches the template in Section 3 (Section 3)
+- [x] At least one node has a complete algorithm guide document (recommended: `heat_node.md` or `lbm_pipe_node.md`) containing all template sections: Summary, Governing Equations, Discretization, Implementation Mapping, Assumptions, Validated Physical Regimes, Known Limitations, Stability Conditions, State Variables, Parameters, Boundary Inputs, References, Verification Evidence, Changelog (Section 3)
+- [x] The Implementation Mapping subsection traces every governing equation term to a specific Python/JAX function, with no silent omissions — terms handled by JAX primitives are documented as such (Section 3)
 
 **Implementation Mapping CI bridge (documentation rot prevention):**
 
-- [ ] `scripts/check_impl_mapping.py` exists and parses each algorithm guide's Implementation Mapping Markdown table, extracting function qualified names from the "Implementation" column (Section 3)
-- [ ] The script verifies via `importlib` + `getattr()` that every extracted function name resolves to an existing callable in the source code (Section 3)
-- [ ] CI runs `scripts/check_impl_mapping.py` on every push and fails if any function name is stale (renamed or removed without updating the algorithm guide) (Section 3)
+- [x] `scripts/check_impl_mapping.py` exists and parses each algorithm guide's Implementation Mapping Markdown table, extracting function qualified names from the "Implementation" column (Section 3)
+- [x] The script verifies via `importlib` + `getattr()` that every extracted function name resolves to an existing callable in the source code (Section 3)
+- [x] CI runs `scripts/check_impl_mapping.py` on every push and fails if any function name is stale (renamed or removed without updating the algorithm guide) (Section 3)
 
 **Verification benchmarks:**
 
-- [ ] `maddening/core/validation.py` exists with `ValidationBenchmark` dataclass, `_BENCHMARK_REGISTRY`, and `@verification_benchmark` decorator (Section 9.3)
-- [ ] At least one test is decorated with `@verification_benchmark` and registered in the benchmark registry (Section 9.3)
+- [x] `maddening/core/validation.py` exists with `ValidationBenchmark` dataclass, `_BENCHMARK_REGISTRY`, and `@verification_benchmark` decorator (Section 9.3)
+- [x] At least one test is decorated with `@verification_benchmark` and registered in the benchmark registry (Section 9.3)
 
 **Framework verification document:**
 
-- [ ] `docs/validation/framework_verification.md` exists (Section 4)
-- [ ] Contains at minimum: link to CI system, total test count, platforms tested (OS/Python/JAX versions) (Section 4)
+- [x] `docs/validation/framework_verification.md` exists (Section 4)
+- [x] Contains at minimum: link to CI system, total test count, platforms tested (OS/Python/JAX versions) (Section 4)
 
 **Bibliography:**
 
-- [ ] `docs/bibliography.bib` exists at `docs/bibliography.bib` (Section 3)
-- [ ] Contains at least one BibTeX entry referenced by a node's algorithm guide document (Section 3)
+- [x] `docs/bibliography.bib` exists at `docs/bibliography.bib` (Section 3)
+- [x] Contains at least one BibTeX entry referenced by a node's algorithm guide document (Section 3)
 
 **IEC 62304 lifecycle mapping:**
 
-- [ ] `docs/regulatory/iec62304_mapping.md` exists (Section 11)
-- [ ] Contains the lifecycle phase mapping table from Section 11 covering all IEC 62304 phases: development planning (5.1), requirements analysis (5.2), architectural design (5.3) including the Clause 5.3.5 segregation row, detailed design (5.4), unit implementation (5.5), unit verification (5.6), integration testing (5.7), system testing (5.8), release (5.9) (Section 11)
+- [x] `docs/regulatory/iec62304_mapping.md` exists (Section 11)
+- [x] Contains the lifecycle phase mapping table from Section 11 covering all IEC 62304 phases: development planning (5.1), requirements analysis (5.2), architectural design (5.3) including the Clause 5.3.5 segregation row, detailed design (5.4), unit implementation (5.5), unit verification (5.6), integration testing (5.7), system testing (5.8), release (5.9) (Section 11)
 
 **NodeMeta coverage:**
 
-- [ ] Every existing `SimulationNode` subclass (BallNode, TableNode, SpringDamperNode, RigidBody2DNode, HeatNode, LBMPipeNode) has `meta` attached as a ClassVar (Section 9.1)
-- [ ] Each node's `meta` contains at minimum: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints` (Sections 9.1, 9.8)
-- [ ] `validated_regimes` and `hazard_hints` have non-overlapping scope per the distinction in Section 9.1: quantitative parameter-bound risks in `validated_regimes`, qualitative non-parameter-bound risks in `hazard_hints` (Section 9.1)
+- [x] Every existing `SimulationNode` subclass (BallNode, TableNode, SpringDamperNode, RigidBody2DNode, HeatNode, LBMPipeNode) has `meta` attached as a ClassVar (Section 9.1)
+- [x] Each node's `meta` contains at minimum: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints` (Sections 9.1, 9.8)
+- [x] `validated_regimes` and `hazard_hints` have non-overlapping scope per the distinction in Section 9.1: quantitative parameter-bound risks in `validated_regimes`, qualitative non-parameter-bound risks in `hazard_hints` (Section 9.1)
 
 **HealthCheck base node:**
 
-- [ ] `maddening/nodes/health_check.py` exists with `HealthCheckNode(SimulationNode)` base class (Section 9.8)
-- [ ] `HealthCheckNode` accepts check configuration (finite checks, bound checks, moment checks) via parameters (Section 9.8)
-- [ ] `HealthCheckNode.update()` receives monitored state via boundary inputs (edges from monitored nodes) and writes check results (pass/fail flags, check values) to its own state (Section 9.8)
-- [ ] `HealthCheckNode` does not halt the simulation — check results are outputs that the application layer acts on (Section 9.8)
-- [ ] `HealthCheckNode` has a `meta` ClassVar with `algorithm_id="MADD-NODE-HEALTH-001"`, `stability=EXPERIMENTAL`, and `hazard_hints` including the Algorithmic Diversity Principle warning (Section 9.8)
-- [ ] At least one test demonstrates `HealthCheckNode` detecting a NaN in a monitored field (Section 9.8)
+- [x] `maddening/nodes/health_check.py` exists with `HealthCheckNode(SimulationNode)` base class (Section 9.8)
+- [x] `HealthCheckNode` accepts check configuration (finite checks, bound checks, moment checks) via parameters (Section 9.8)
+- [x] `HealthCheckNode.update()` receives monitored state via boundary inputs (edges from monitored nodes) and writes check results (pass/fail flags, check values) to its own state (Section 9.8)
+- [x] `HealthCheckNode` does not halt the simulation — check results are outputs that the application layer acts on (Section 9.8)
+- [x] `HealthCheckNode` has a `meta` ClassVar with `algorithm_id="MADD-NODE-HEALTH-001"`, `stability=EXPERIMENTAL`, and `hazard_hints` including the Algorithmic Diversity Principle warning (Section 9.8)
+- [x] At least one test demonstrates `HealthCheckNode` detecting a NaN in a monitored field (Section 9.8)
 
 **Algorithm guide Implementation Mapping and Mode declaration:**
 
-- [ ] The algorithm guide template (`_template.md`) includes the Implementation Mapping subsection as mandatory (Section 3)
-- [ ] Code-driven generation of the Implementation Mapping table is noted as recommended but not mandated in the template (Section 3, Appendix B)
-- [ ] The algorithm guide template includes a field or section for declaring Mode 1 (Wrapping) or Mode 2 (Independent) status when the guide describes a downstream node (Section 16). For MADDENING's own nodes, this field is omitted or set to "N/A — upstream reference implementation."
+- [x] The algorithm guide template (`_template.md`) includes the Implementation Mapping subsection as mandatory (Section 3)
+- [x] Code-driven generation of the Implementation Mapping table is noted as recommended but not mandated in the template (Section 3, Appendix B)
+- [x] The algorithm guide template includes a field or section for declaring Mode 1 (Wrapping) or Mode 2 (Independent) status when the guide describes a downstream node (Section 16). For MADDENING's own nodes, this field is omitted or set to "N/A — upstream reference implementation."
 
 ### Phase 3 — Audit, Provenance, and Full Regulatory Docs
 
 **NodeMeta.implementation_map (migration from Markdown table):**
 
-- [ ] `NodeMeta` includes an `implementation_map` field: `dict[str, str]` mapping equation term descriptions to Python function qualified names (Section 3)
-- [ ] At least one node's `meta.implementation_map` is populated and matches the content of its algorithm guide's Implementation Mapping Markdown table (Section 3)
+- [x] `NodeMeta` includes an `implementation_map` field: `dict[str, str]` mapping equation term descriptions to Python function qualified names (Section 3)
+- [x] At least one node's `meta.implementation_map` is populated and matches the content of its algorithm guide's Implementation Mapping Markdown table (Section 3)
 - [ ] A Sphinx build step verifies via `getattr()` that every function name in `implementation_map` resolves to an existing callable — the documentation build fails if a function is renamed without updating the mapping (Section 3)
 
 **Audit and provenance modules:**
 
-- [ ] `maddening/core/audit.py` exists with `AuditLogger`, `AuditSink` (Protocol), `NullSink`, `JSONFileSink` as described in Section 9.6 (Section 9.6)
-- [ ] `maddening/core/provenance.py` exists with `SimulationProvenance` dataclass as described in Section 9.2 (Section 9.2)
+- [x] `maddening/core/audit.py` exists with `AuditLogger`, `AuditSink` (Protocol), `NullSink`, `JSONFileSink` as described in Section 9.6 (Section 9.6)
+- [x] `maddening/core/provenance.py` exists with `SimulationProvenance` dataclass as described in Section 9.2 (Section 9.2)
 
 **Full regulatory documents:**
 
-- [ ] `docs/regulatory/eu_mdr_guidelines.md` exists with all sections described in Section 12: Annex I GSPR mapping (including GSPR 1, 3, 4, Section 17), Annex II technical file mapping, MDCG 2019-16 cybersecurity (Section 12)
-- [ ] `docs/regulatory/mdcg_2019_11.md` exists with: Step 1 qualification analysis (why MADDENING is not a medical device), Step 2 classification analysis (how a downstream commercial product would be classified), Rule 11 analysis table, IMDRF SaMD alignment (Section 13)
-- [ ] `docs/regulatory/downstream_integration.md` is complete (not skeleton): contains full per-layer responsibility documentation, classification-by-use-mode analysis, commercial boundary details, and all content described in Section 2 (Section 2, Appendix B)
+- [x] `docs/regulatory/eu_mdr_guidelines.md` exists with all sections described in Section 12: Annex I GSPR mapping (including GSPR 1, 3, 4, Section 17), Annex II technical file mapping, MDCG 2019-16 cybersecurity (Section 12)
+- [x] `docs/regulatory/mdcg_2019_11.md` exists with: Step 1 qualification analysis (why MADDENING is not a medical device), Step 2 classification analysis (how a downstream commercial product would be classified), Rule 11 analysis table, IMDRF SaMD alignment (Section 13)
+- [x] `docs/regulatory/downstream_integration.md` is complete (not skeleton): contains full per-layer responsibility documentation, classification-by-use-mode analysis, commercial boundary details, and all content described in Section 2 (Section 2, Appendix B)
 
 **Validation documents:**
 
-- [ ] `docs/validation/cou_template.md` exists with the Context of Use template from Section 4: question of interest, quantities of interest, model influence, decision consequence, risk assessment, credibility goals, evidence plan (Section 4)
+- [x] `docs/validation/cou_template.md` exists with the Context of Use template from Section 4: question of interest, quantities of interest, model influence, decision consequence, risk assessment, credibility goals, evidence plan (Section 4)
 
 **Security:**
 
-- [ ] `SECURITY.md` exists at repository root (Section 8)
-- [ ] Contains: vulnerability reporting contact (email or mechanism), response timeline commitment, supported versions table listing which MADDENING versions receive security updates (Section 8)
+- [x] `SECURITY.md` exists at repository root (Section 8)
+- [x] Contains: vulnerability reporting contact (email or mechanism), response timeline commitment, supported versions table listing which MADDENING versions receive security updates (Section 8)
 
 **SBOM:**
 
@@ -3524,20 +3524,20 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 **UQ interface:**
 
-- [ ] `UncertaintySpec` dataclass and `UncertainParameter` dataclass are defined in `maddening/core/uq.py` (Section 9.4)
-- [ ] `SimulationNode` exposes `uncertainty_spec() -> Optional[UncertaintySpec]` method (Section 9.4)
+- [x] `UncertaintySpec` dataclass and `UncertainParameter` dataclass are defined in `maddening/core/uq.py` (Section 9.4)
+- [x] `SimulationNode` exposes `uncertainty_spec() -> Optional[UncertaintySpec]` method (Section 9.4)
 
 **Stability decorator:**
 
-- [ ] `@stability` decorator is implemented in `maddening/core/stability.py` (Section 9.5)
-- [ ] `_STABILITY_REGISTRY` global dict is maintained by the decorator (Section 9.5)
-- [ ] `generate_stability_report() -> str` function produces valid Markdown output (Section 9.5)
-- [ ] `@stability` is applied to all public API surfaces (SimulationNode subclasses, GraphManager, SurrogateArchitecture subclasses, SurrogateTrainer, DatasetGenerator) (Section 9.5)
+- [x] `@stability` decorator is implemented in `maddening/core/stability.py` (Section 9.5)
+- [x] `_STABILITY_REGISTRY` global dict is maintained by the decorator (Section 9.5)
+- [x] `generate_stability_report() -> str` function produces valid Markdown output (Section 9.5)
+- [x] `@stability` is applied to all public API surfaces (SimulationNode subclasses, GraphManager, SurrogateArchitecture subclasses, SurrogateTrainer, DatasetGenerator) (Section 9.5)
 
 **UQ documentation:**
 
-- [ ] `docs/algorithm_guide/uq/` directory exists (Section 6)
-- [ ] `docs/algorithm_guide/uq/index.md` exists with: UQ roadmap, capability mapping table (V&V 40 requirement → MADDENING capability → status) from Section 6 (Section 6)
+- [x] `docs/algorithm_guide/uq/` directory exists (Section 6)
+- [x] `docs/algorithm_guide/uq/index.md` exists with: UQ roadmap, capability mapping table (V&V 40 requirement → MADDENING capability → status) from Section 6 (Section 6)
 
 ### Phase 5 — Full Documentation Site
 

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
@@ -10,15 +10,18 @@ readme = "README.md"
 license = "LGPL-3.0-or-later"
 requires-python = ">=3.10"
 authors = [
-    { name = "Nick" },
+    { name = "Nicholas Ehsan Roy" },
 ]
 
 # Base install: the simulation engine (JAX + NumPy).
-# For viz-only / client-only installs, use [client] extra instead.
+# The compliance subpackage is included in the base install (pure Python,
+# no JAX dependency) so downstream libraries can import schema types without
+# installing the full simulation stack.
 dependencies = [
     "jax>=0.4",
     "jaxlib>=0.4",
     "numpy>=1.24",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +59,9 @@ viz3d = ["pyvista>=0.42", "Pillow>=9.0"]
 # GPU-accelerated 3D visualization (pygfx on WebGPU)
 gpu-viz = ["pygfx>=0.16", "rendercanvas>=2.0", "glfw>=2.0", "scikit-image>=0.20"]
 
+# SBOM generation (Section 14)
+sbom = ["cyclonedx-bom>=4.0"]
+
 # Everything
 all = [
     "matplotlib>=3.5",
@@ -77,14 +83,15 @@ all = [
 # Development / testing
 dev = [
     "pytest>=7.0",
+    "httpx>=0.24",
     "maddening[all]",
 ]
 
 [project.urls]
-Repository = "https://github.com/MSF/MADDENING"
+Repository = "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
 
-[tool.setuptools.packages.find]
-include = ["maddening*"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/maddening"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

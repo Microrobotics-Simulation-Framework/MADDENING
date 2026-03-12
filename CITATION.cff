@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: "MADDENING: Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
+type: software
+version: 0.1.0
+date-released: "2025-03-01"
+license: LGPL-3.0-or-later
+repository-code: "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
+abstract: >
+  A JAX-based modular simulation framework for multi-physics.
+  MADDENING provides a functional-state graph architecture for
+  composing, coupling, and differentiating physics simulations
+  with automatic differentiation and neural surrogates.
+authors:
+  - family-names: Roy
+    given-names: Nicholas Ehsan
+keywords:
+  - simulation
+  - multi-physics
+  - JAX
+  - automatic differentiation
+  - lattice Boltzmann
+  - neural surrogates
+  - microrobotics

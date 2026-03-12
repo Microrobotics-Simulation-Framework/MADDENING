@@ -50,6 +50,12 @@ api = [
 # Neural surrogate architectures and training
 surrogates = ["equinox>=0.11", "optax>=0.1"]
 
+# 3D visualization (server-side rendering with PyVista/VTK)
+viz3d = ["pyvista>=0.42", "Pillow>=9.0"]
+
+# GPU-accelerated 3D visualization (pygfx on WebGPU)
+gpu-viz = ["pygfx>=0.16", "rendercanvas>=2.0", "glfw>=2.0", "scikit-image>=0.20"]
+
 # Everything
 all = [
     "matplotlib>=3.5",
@@ -60,6 +66,12 @@ all = [
     "websockets>=11.0",
     "equinox>=0.11",
     "optax>=0.1",
+    "pyvista>=0.42",
+    "Pillow>=9.0",
+    "pygfx>=0.16",
+    "rendercanvas>=2.0",
+    "glfw>=2.0",
+    "scikit-image>=0.20",
 ]
 
 # Development / testing
@@ -76,3 +88,13 @@ include = ["maddening*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    # GraphManager.compile() emits informational warnings about disconnected
+    # nodes and cycle staggering -- expected in unit tests with minimal graphs.
+    "ignore:WARNING. node .* is disconnected:UserWarning",
+    "ignore:WARNING. cycle detected:UserWarning",
+    # ZMQ sockets not always cleanly closed in tests
+    "ignore::ResourceWarning:zmq",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MADDENING - Interactive Demo</title>
+<script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0f1117; color: #e0e0e0;
+  display: flex; height: 100vh; overflow: hidden;
+}
+
+/* -- Left panel: graph + controls -- */
+#left-panel {
+  width: 280px; min-width: 280px;
+  background: #1a1d27; border-right: 1px solid #2a2d3a;
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+#left-panel h2 {
+  padding: 12px 16px; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 1px; color: #8b8fa3; border-bottom: 1px solid #2a2d3a;
+}
+.section { padding: 10px 14px; border-bottom: 1px solid #2a2d3a; }
+.section h3 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: #6b6f83; margin-bottom: 6px;
+}
+#cy-container { height: 220px; min-height: 220px; border-bottom: 1px solid #2a2d3a; }
+#cy { width: 100%; height: 100%; }
+
+/* Controls */
+.ctrl-row { display: flex; gap: 4px; margin-bottom: 6px; }
+.ctrl-btn {
+  flex: 1; background: #2a2d3a; border: 1px solid #3a3d4a; color: #e0e0e0;
+  padding: 7px; border-radius: 5px; cursor: pointer; font-size: 11px;
+  text-align: center; transition: all 0.15s;
+}
+.ctrl-btn:hover { background: #3a3d4a; }
+.ctrl-btn.active { background: #2563eb; border-color: #3b82f6; }
+.ctrl-btn.success { background: #166534; border-color: #22c55e; }
+.ctrl-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+#time-display {
+  font-family: 'JetBrains Mono', monospace; font-size: 18px;
+  color: #7dd3fc; text-align: center; padding: 6px;
+}
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #6b7280;
+  display: inline-block; margin-right: 5px;
+}
+.status-dot.running { background: #22c55e; animation: pulse 1.5s infinite; }
+.status-dot.paused { background: #eab308; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+#status-bar { font-size: 11px; color: #8b8fa3; padding: 4px 14px; text-align: center; }
+
+/* -- Slider controls -- */
+.param-group { margin-bottom: 8px; }
+.param-label {
+  display: flex; justify-content: space-between; font-size: 11px;
+  color: #a0a4b8; margin-bottom: 2px;
+}
+.param-val { color: #7dd3fc; font-family: monospace; }
+input[type="range"] {
+  width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+  background: #3a3d4a; border-radius: 2px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #3b82f6; cursor: pointer; border: 2px solid #1e40af;
+}
+
+/* -- Center: canvas + state readout -- */
+#center {
+  flex: 1; display: flex; flex-direction: column; min-width: 0;
+}
+#canvas-wrap {
+  flex: 1; position: relative; background: #0a0c10;
+  border-bottom: 1px solid #2a2d3a;
+}
+#sim-canvas { width: 100%; height: 100%; display: block; }
+
+/* State readout bar */
+#readout {
+  height: 120px; min-height: 120px; background: #1a1d27;
+  display: flex; gap: 0; overflow-x: auto;
+}
+.readout-card {
+  flex: 1; min-width: 140px; padding: 8px 12px;
+  border-right: 1px solid #2a2d3a;
+}
+.readout-card h4 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: #6b6f83; margin-bottom: 4px;
+}
+.readout-field {
+  display: flex; justify-content: space-between; font-size: 12px; padding: 1px 0;
+}
+.readout-field .fn { color: #a0a4b8; }
+.readout-field .fv { font-family: monospace; color: #7dd3fc; }
+.readout-field .fv.pos { color: #86efac; }
+.readout-field .fv.neg { color: #fca5a5; }
+
+/* -- Right panel: surrogate -- */
+#right-panel {
+  width: 260px; min-width: 260px;
+  background: #1a1d27; border-left: 1px solid #2a2d3a;
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+#right-panel h2 {
+  padding: 12px 16px; font-size: 13px; text-transform: uppercase;
+  letter-spacing: 1px; color: #8b8fa3; border-bottom: 1px solid #2a2d3a;
+}
+.surr-info { font-size: 11px; color: #a0a4b8; line-height: 1.5; }
+.progress-bar {
+  width: 100%; height: 6px; background: #2a2d3a; border-radius: 3px;
+  margin: 6px 0; overflow: hidden;
+}
+.progress-fill {
+  height: 100%; background: #3b82f6; border-radius: 3px;
+  transition: width 0.3s;
+}
+.loss-display {
+  font-family: monospace; font-size: 11px; color: #c4b5fd;
+}
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 600;
+}
+.badge.physics { background: #1e3a5f; color: #7dd3fc; }
+.badge.surrogate { background: #3b1f5e; color: #c084fc; }
+
+/* Heat bar */
+#heat-bar {
+  height: 24px; margin: 4px 0; border-radius: 3px; overflow: hidden;
+  display: flex;
+}
+.heat-cell {
+  flex: 1; transition: background-color 0.1s;
+}
+</style>
+</head>
+<body>
+
+<!-- LEFT PANEL -->
+<div id="left-panel">
+  <h2>MADDENING Demo</h2>
+  <div id="cy-container"><div id="cy"></div></div>
+
+  <div class="section">
+    <h3>Simulation</h3>
+    <div id="time-display">t = 0.000 s</div>
+    <div id="status-bar"><span class="status-dot" id="ws-dot"></span><span id="status-text">Disconnected</span></div>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-start" onclick="simStart()">Start</button>
+      <button class="ctrl-btn" id="btn-pause" onclick="simPause()" disabled>Pause</button>
+      <button class="ctrl-btn" id="btn-stop" onclick="simStop()" disabled>Stop</button>
+    </div>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-reset" onclick="simReset()">Reset</button>
+      <button class="ctrl-btn" id="btn-step" onclick="simStep()">Step</button>
+      <button class="ctrl-btn" id="btn-run100" onclick="simRun(200)">Run 200</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Ball Parameters</h3>
+    <div class="param-group">
+      <div class="param-label"><span>Gravity</span><span class="param-val" id="val-gravity">-9.81</span></div>
+      <input type="range" id="sl-gravity" min="-20" max="0" step="0.1" value="-9.81"
+             oninput="updateParam('ball','gravity',this.value,'val-gravity')">
+    </div>
+    <div class="param-group">
+      <div class="param-label"><span>Elasticity</span><span class="param-val" id="val-elast">0.70</span></div>
+      <input type="range" id="sl-elast" min="0" max="1" step="0.05" value="0.7"
+             oninput="updateParam('ball','elasticity',this.value,'val-elast')">
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Spring Parameters</h3>
+    <div class="param-group">
+      <div class="param-label"><span>Stiffness (k)</span><span class="param-val" id="val-stiff">50.0</span></div>
+      <input type="range" id="sl-stiff" min="5" max="500" step="5" value="50"
+             oninput="updateParam('spring','stiffness',this.value,'val-stiff')">
+    </div>
+    <div class="param-group">
+      <div class="param-label"><span>Damping (c)</span><span class="param-val" id="val-damp">2.0</span></div>
+      <input type="range" id="sl-damp" min="0" max="20" step="0.5" value="2"
+             oninput="updateParam('spring','damping',this.value,'val-damp')">
+    </div>
+    <div class="param-group">
+      <div class="param-label"><span>Rest length</span><span class="param-val" id="val-rest">1.50</span></div>
+      <input type="range" id="sl-rest" min="0.5" max="4" step="0.1" value="1.5"
+             oninput="updateParam('spring','rest_length',this.value,'val-rest')">
+    </div>
+  </div>
+</div>
+
+<!-- CENTER -->
+<div id="center">
+  <div id="canvas-wrap">
+    <canvas id="sim-canvas"></canvas>
+  </div>
+  <div id="readout">
+    <div class="readout-card">
+      <h4>Ball</h4>
+      <div class="readout-field"><span class="fn">position</span><span class="fv" id="r-ball-pos">-</span></div>
+      <div class="readout-field"><span class="fn">velocity</span><span class="fv" id="r-ball-vel">-</span></div>
+      <div class="readout-field"><span class="fn">KE</span><span class="fv" id="r-ball-ke">-</span></div>
+      <div class="readout-field"><span class="fn">PE</span><span class="fv" id="r-ball-pe">-</span></div>
+    </div>
+    <div class="readout-card">
+      <h4>Spring</h4>
+      <div class="readout-field"><span class="fn">position</span><span class="fv" id="r-spr-pos">-</span></div>
+      <div class="readout-field"><span class="fn">velocity</span><span class="fv" id="r-spr-vel">-</span></div>
+      <div class="readout-field"><span class="fn">extension</span><span class="fv" id="r-spr-ext">-</span></div>
+    </div>
+    <div class="readout-card">
+      <h4>Heat Rod</h4>
+      <div id="heat-bar"></div>
+      <div class="readout-field"><span class="fn">min T</span><span class="fv" id="r-heat-min">-</span></div>
+      <div class="readout-field"><span class="fn">max T</span><span class="fv" id="r-heat-max">-</span></div>
+      <div class="readout-field"><span class="fn">mean T</span><span class="fv" id="r-heat-avg">-</span></div>
+    </div>
+    <div class="readout-card">
+      <h4>Energy</h4>
+      <div class="readout-field"><span class="fn">Total KE</span><span class="fv" id="r-tot-ke">-</span></div>
+      <div class="readout-field"><span class="fn">Total PE</span><span class="fv" id="r-tot-pe">-</span></div>
+      <div class="readout-field"><span class="fn">Total E</span><span class="fv" id="r-tot-e">-</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- RIGHT PANEL -->
+<div id="right-panel">
+  <h2>Surrogate</h2>
+  <div class="section">
+    <h3>Node: <span id="surr-node-name">ball</span></h3>
+    <div style="margin-bottom:8px">
+      <span class="badge physics" id="mode-badge">Physics</span>
+    </div>
+    <div class="surr-info">
+      Train an MLP surrogate to replace the ball physics node.
+      The surrogate learns from simulation data and can run faster.
+    </div>
+  </div>
+  <div class="section">
+    <h3>Training Config</h3>
+    <div class="param-group">
+      <div class="param-label"><span>Data steps</span><span class="param-val" id="val-datasteps">500</span></div>
+      <input type="range" id="sl-datasteps" min="100" max="2000" step="100" value="500"
+             oninput="document.getElementById('val-datasteps').textContent=this.value">
+    </div>
+    <div class="param-group">
+      <div class="param-label"><span>Epochs</span><span class="param-val" id="val-epochs">100</span></div>
+      <input type="range" id="sl-epochs" min="10" max="500" step="10" value="100"
+             oninput="document.getElementById('val-epochs').textContent=this.value">
+    </div>
+    <div class="param-group">
+      <div class="param-label"><span>Hidden size</span><span class="param-val">64, 64</span></div>
+    </div>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-train" onclick="trainSurrogate()">Train Surrogate</button>
+    </div>
+    <div id="train-progress" style="display:none">
+      <div class="progress-bar"><div class="progress-fill" id="train-bar" style="width:0%"></div></div>
+      <div class="loss-display">
+        <span id="train-epoch">Epoch 0/100</span><br>
+        <span id="train-loss">train: - | val: -</span>
+      </div>
+    </div>
+  </div>
+  <div class="section" id="surr-controls" style="display:none">
+    <h3>Surrogate Control</h3>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-activate" onclick="activateSurrogate()">Activate</button>
+      <button class="ctrl-btn" id="btn-deactivate" onclick="deactivateSurrogate()" disabled>Deactivate</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+let cy, ws, simTime = 0, isRunning = false;
+let state = null;
+let currentJobId = null;
+let surrogateActive = false;
+let paramTimers = {};
+
+// ── Cytoscape ──────────────────────────────────────────────────
+function initCytoscape() {
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    style: [
+      { selector: 'node', style: {
+        'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center',
+        'background-color': '#2563eb', 'color': '#e0e0e0', 'font-size': '10px',
+        'width': 70, 'height': 36, 'shape': 'round-rectangle',
+        'border-width': 2, 'border-color': '#3b82f6',
+        'text-wrap': 'wrap', 'text-max-width': '65px',
+      }},
+      { selector: 'node.surrogate', style: {
+        'background-color': '#7c3aed', 'border-color': '#a855f7',
+      }},
+      { selector: 'node:selected', style: {
+        'border-color': '#f59e0b', 'border-width': 3,
+      }},
+      { selector: 'edge', style: {
+        'width': 1.5, 'line-color': '#4b5563', 'target-arrow-color': '#4b5563',
+        'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+        'label': 'data(label)', 'font-size': '7px', 'color': '#6b7280',
+        'text-rotation': 'autorotate', 'text-margin-y': -8,
+      }},
+    ],
+    layout: { name: 'grid' },
+    wheelSensitivity: 0.3,
+  });
+}
+
+async function loadGraph() {
+  try {
+    const resp = await fetch(BASE + '/graph');
+    const data = await resp.json();
+    cy.elements().remove();
+    const els = [];
+    (data.nodes || []).forEach(n => {
+      els.push({ group: 'nodes', data: { id: n.name, label: n.name }, classes: '' });
+    });
+    (data.edges || []).forEach((e, i) => {
+      els.push({ group: 'edges', data: {
+        id: 'e'+i, source: e.source_node, target: e.target_node,
+        label: e.source_field + ' \u2192 ' + e.target_field,
+      }});
+    });
+    cy.add(els);
+    // Mark surrogates
+    (data.active_surrogates || []).forEach(name => {
+      cy.getElementById(name).addClass('surrogate');
+    });
+    try {
+      cy.layout({ name: 'dagre', rankDir: 'TB', spacingFactor: 1.2, nodeSep: 30, rankSep: 40, animate: false }).run();
+    } catch(e) {
+      cy.layout({ name: 'breadthfirst', directed: true }).run();
+    }
+  } catch(e) { console.error('loadGraph:', e); }
+}
+
+// ── Canvas rendering ───────────────────────────────────────────
+const canvas = document.getElementById('sim-canvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const wrap = document.getElementById('canvas-wrap');
+  canvas.width = wrap.clientWidth * devicePixelRatio;
+  canvas.height = wrap.clientHeight * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+}
+window.addEventListener('resize', resizeCanvas);
+
+function canvasW() { return canvas.width / devicePixelRatio; }
+function canvasH() { return canvas.height / devicePixelRatio; }
+
+// World -> pixel mapping
+const WORLD_Y_MIN = -2;
+const WORLD_Y_MAX = 8;
+function worldToPixelY(y) { return canvasH() * (1.0 - (y - WORLD_Y_MIN) / (WORLD_Y_MAX - WORLD_Y_MIN)); }
+function worldToPixelX(frac) { return canvasW() * frac; }
+
+function drawScene() {
+  const w = canvasW(), h = canvasH();
+  ctx.clearRect(0, 0, w, h);
+
+  // Background grid
+  ctx.strokeStyle = '#1a1d27';
+  ctx.lineWidth = 1;
+  for (let y = WORLD_Y_MIN; y <= WORLD_Y_MAX; y += 1) {
+    const py = worldToPixelY(y);
+    ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(w, py); ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = '#3a3d4a';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  for (let y = 0; y <= WORLD_Y_MAX; y += 2) {
+    ctx.fillText(y + 'm', 30, worldToPixelY(y) - 2);
+  }
+
+  if (!state) return;
+
+  const ballPos = state.ball ? state.ball.position : 5;
+  const ballVel = state.ball ? state.ball.velocity : 0;
+  const sprPos = state.spring ? state.spring.position : 3;
+  const sprVel = state.spring ? state.spring.velocity : 0;
+  const tablePos = state.table ? state.table.position : 0;
+  const heatTemp = state.heat_rod ? state.heat_rod.temperature : null;
+
+  const cx = w * 0.5;  // center x for the main column
+
+  // -- Table --
+  const tableY = worldToPixelY(tablePos);
+  ctx.fillStyle = '#374151';
+  ctx.fillRect(cx - 120, tableY, 240, 8);
+  // Hatching below table
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 1;
+  for (let i = -12; i < 24; i++) {
+    const x0 = cx - 120 + i * 10;
+    ctx.beginPath(); ctx.moveTo(x0, tableY + 8); ctx.lineTo(x0 - 8, tableY + 20); ctx.stroke();
+  }
+
+  // -- Spring (zigzag from ball to spring-end) --
+  const ballPx = worldToPixelY(ballPos);
+  const sprPx = worldToPixelY(sprPos);
+  const springLen = Math.abs(sprPx - ballPx);
+  const nCoils = 12;
+  const coilAmp = Math.min(18, springLen / nCoils * 0.8);
+
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, ballPx);
+  for (let i = 1; i <= nCoils; i++) {
+    const t = i / nCoils;
+    const py = ballPx + (sprPx - ballPx) * t;
+    const px = cx + (i % 2 === 0 ? -1 : 1) * coilAmp;
+    ctx.lineTo(px, py);
+  }
+  ctx.lineTo(cx, sprPx);
+  ctx.stroke();
+
+  // Spring mass (small rectangle)
+  ctx.fillStyle = '#d97706';
+  ctx.fillRect(cx - 10, sprPx - 5, 20, 10);
+
+  // -- Ball --
+  const ballR = 16;
+  ctx.beginPath();
+  ctx.arc(cx, ballPx, ballR, 0, Math.PI * 2);
+  // Color intensity based on speed
+  const speed = Math.abs(ballVel);
+  const r = Math.min(255, 37 + speed * 20);
+  const g = Math.min(255, 99 + speed * 5);
+  const b = 235;
+  ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+  ctx.fill();
+  ctx.strokeStyle = '#60a5fa';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Surrogate indicator
+  if (surrogateActive) {
+    ctx.strokeStyle = '#a855f7';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, ballPx, ballR + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Velocity arrow
+  if (Math.abs(ballVel) > 0.1) {
+    const arrowLen = Math.min(60, Math.abs(ballVel) * 6);
+    const arrowDir = ballVel > 0 ? -1 : 1;  // up is negative in pixel space
+    const arrowEndY = ballPx + arrowDir * arrowLen;
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + 24, ballPx);
+    ctx.lineTo(cx + 24, arrowEndY);
+    ctx.stroke();
+    // Arrowhead
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.moveTo(cx + 24, arrowEndY);
+    ctx.lineTo(cx + 20, arrowEndY - arrowDir * 6);
+    ctx.lineTo(cx + 28, arrowEndY - arrowDir * 6);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Label
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('ball', cx + ballR + 8, ballPx + 4);
+  ctx.fillText('spring', cx + 16, sprPx + 4);
+
+  // -- Heat rod --
+  if (heatTemp && Array.isArray(heatTemp)) {
+    const barX = cx - 120;
+    const barY = worldToPixelY(-1.2);
+    const barW = 240;
+    const barH = 16;
+    const cellW = barW / heatTemp.length;
+
+    for (let i = 0; i < heatTemp.length; i++) {
+      const t = Math.max(0, Math.min(1, (heatTemp[i] - 15) / 85));
+      const cr = Math.round(30 + t * 225);
+      const cg = Math.round(40 + (1 - Math.abs(t - 0.5) * 2) * 80);
+      const cb = Math.round(220 - t * 190);
+      ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
+      ctx.fillRect(barX + i * cellW, barY, cellW + 0.5, barH);
+    }
+    ctx.strokeStyle = '#3a3d4a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+
+    ctx.fillStyle = '#8b8fa3';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('heat rod', cx, barY + barH + 12);
+  }
+
+  // -- Time overlay --
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('t = ' + simTime.toFixed(3) + ' s', 8, 18);
+}
+
+let animFrame = null;
+function renderLoop() {
+  drawScene();
+  animFrame = requestAnimationFrame(renderLoop);
+}
+
+// ── State updates ──────────────────────────────────────────────
+function updateState(newState) {
+  state = newState;
+  if (!state) return;
+
+  const bp = state.ball ? state.ball.position : 0;
+  const bv = state.ball ? state.ball.velocity : 0;
+  const sp = state.spring ? state.spring.position : 0;
+  const sv = state.spring ? state.spring.velocity : 0;
+  const g = -9.81;  // approximate for energy
+
+  const bKE = 0.5 * bv * bv;
+  const bPE = Math.abs(g) * bp;
+  const sKE = 0.5 * 0.5 * sv * sv;  // spring mass = 0.5
+
+  setText('r-ball-pos', fmtF(bp));
+  setText('r-ball-vel', fmtF(bv));
+  setText('r-ball-ke', fmtF(bKE));
+  setText('r-ball-pe', fmtF(bPE));
+  setText('r-spr-pos', fmtF(sp));
+  setText('r-spr-vel', fmtF(sv));
+  setText('r-spr-ext', fmtF(bp - sp));
+  setText('r-tot-ke', fmtF(bKE + sKE));
+  setText('r-tot-pe', fmtF(bPE));
+  setText('r-tot-e', fmtF(bKE + sKE + bPE));
+
+  // Heat rod readout
+  if (state.heat_rod && state.heat_rod.temperature) {
+    const T = state.heat_rod.temperature;
+    const minT = Math.min(...T), maxT = Math.max(...T);
+    const avgT = T.reduce((a,b)=>a+b,0) / T.length;
+    setText('r-heat-min', fmtF(minT));
+    setText('r-heat-max', fmtF(maxT));
+    setText('r-heat-avg', fmtF(avgT));
+
+    // Update heat bar in readout
+    const bar = document.getElementById('heat-bar');
+    if (bar.children.length !== T.length) {
+      bar.innerHTML = '';
+      for (let i = 0; i < T.length; i++) {
+        const cell = document.createElement('div');
+        cell.className = 'heat-cell';
+        bar.appendChild(cell);
+      }
+    }
+    for (let i = 0; i < T.length; i++) {
+      const t = Math.max(0, Math.min(1, (T[i] - 15) / 85));
+      const r = Math.round(30 + t * 225);
+      const g = Math.round(40 + (1 - Math.abs(t-0.5)*2) * 80);
+      const b = Math.round(220 - t * 190);
+      bar.children[i].style.backgroundColor = `rgb(${r},${g},${b})`;
+    }
+  }
+
+  // Color values
+  colorVal('r-ball-vel', bv);
+  colorVal('r-spr-vel', sv);
+}
+
+function setText(id, v) { document.getElementById(id).textContent = v; }
+function fmtF(v) { return typeof v === 'number' ? v.toFixed(4) : '-'; }
+function colorVal(id, v) {
+  const el = document.getElementById(id);
+  el.classList.remove('pos', 'neg');
+  if (v >= 0) el.classList.add('pos'); else el.classList.add('neg');
+}
+
+// ── WebSocket (binary mode) ─────────────────────────────────────
+let binarySchema = null;  // parsed from first JSON message
+
+function connectWebSocket() {
+  const wsUrl = BASE.replace(/^http/, 'ws') + '/ws/state/binary';
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  binarySchema = null;
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('running');
+    document.getElementById('status-text').textContent = 'Connected (binary)';
+  };
+  ws.onmessage = (e) => {
+    try {
+      if (typeof e.data === 'string') {
+        // First message: JSON schema
+        binarySchema = JSON.parse(e.data);
+        return;
+      }
+      if (!binarySchema || !(e.data instanceof ArrayBuffer)) return;
+
+      // Binary frame: [f64 sim_time][f32 values...]
+      const dv = new DataView(e.data);
+      simTime = dv.getFloat64(0, true);  // little-endian
+      document.getElementById('time-display').textContent = 't = ' + simTime.toFixed(3) + ' s';
+
+      // Reconstruct state dict from flat binary using schema
+      const newState = {};
+      const floats = new Float32Array(e.data, 8);
+      for (const f of binarySchema.fields) {
+        if (!newState[f.node]) newState[f.node] = {};
+        if (f.count === 1) {
+          newState[f.node][f.field] = floats[f.offset];
+        } else {
+          newState[f.node][f.field] = Array.from(floats.subarray(f.offset, f.offset + f.count));
+        }
+      }
+      updateState(newState);
+    } catch(err) { console.error('WS:', err); }
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('running');
+    document.getElementById('status-text').textContent = 'Disconnected';
+    binarySchema = null;
+    setTimeout(connectWebSocket, 2000);
+  };
+  ws.onerror = () => { ws.close(); };
+}
+
+// ── Sim controls ───────────────────────────────────────────────
+async function simStart() {
+  try {
+    await fetch(BASE + '/sim/start', { method: 'POST' });
+    isRunning = true;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-pause').disabled = false;
+    document.getElementById('btn-stop').disabled = false;
+    document.getElementById('status-text').textContent = 'Running';
+  } catch(e) { console.error(e); }
+}
+async function simPause() {
+  try {
+    await fetch(BASE + '/sim/pause', { method: 'POST' });
+    document.getElementById('ws-dot').classList.remove('running');
+    document.getElementById('ws-dot').classList.add('paused');
+    document.getElementById('status-text').textContent = 'Paused';
+  } catch(e) { console.error(e); }
+}
+async function simStop() {
+  try {
+    await fetch(BASE + '/sim/stop', { method: 'POST' });
+    isRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('ws-dot').classList.remove('running', 'paused');
+    document.getElementById('status-text').textContent = 'Connected';
+  } catch(e) { console.error(e); }
+}
+async function simReset() {
+  try {
+    const resp = await fetch(BASE + '/sim/reset', { method: 'POST' });
+    const data = await resp.json();
+    simTime = 0;
+    document.getElementById('time-display').textContent = 't = 0.000 s';
+    if (data.state) updateState(data.state);
+    isRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('ws-dot').classList.remove('running', 'paused');
+    document.getElementById('status-text').textContent = 'Connected';
+  } catch(e) { console.error(e); }
+}
+async function simStep() {
+  try {
+    const resp = await fetch(BASE + '/sim/step', { method: 'POST' });
+    const data = await resp.json();
+    simTime += 0.01;
+    document.getElementById('time-display').textContent = 't = ' + simTime.toFixed(3) + ' s';
+    updateState(data);
+  } catch(e) { console.error(e); }
+}
+async function simRun(n) {
+  try {
+    const resp = await fetch(BASE + '/sim/run?n_steps=' + n, { method: 'POST' });
+    const data = await resp.json();
+    simTime += n * 0.01;
+    document.getElementById('time-display').textContent = 't = ' + simTime.toFixed(3) + ' s';
+    updateState(data);
+  } catch(e) { console.error(e); }
+}
+
+// ── Parameter control ──────────────────────────────────────────
+function updateParam(node, key, value, displayId) {
+  const numVal = parseFloat(value);
+  document.getElementById(displayId).textContent = numVal.toFixed(2);
+
+  // Debounce the API call
+  const timerId = node + '.' + key;
+  if (paramTimers[timerId]) clearTimeout(paramTimers[timerId]);
+  paramTimers[timerId] = setTimeout(async () => {
+    try {
+      await fetch(BASE + '/graph/params/' + node, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: { [key]: numVal } }),
+      });
+    } catch(e) { console.error('param update:', e); }
+  }, 150);
+}
+
+// ── Surrogate training ─────────────────────────────────────────
+let pollTimer = null;
+
+async function trainSurrogate() {
+  const nSteps = parseInt(document.getElementById('sl-datasteps').value);
+  const nEpochs = parseInt(document.getElementById('sl-epochs').value);
+
+  document.getElementById('btn-train').disabled = true;
+  document.getElementById('train-progress').style.display = 'block';
+  document.getElementById('train-bar').style.width = '0%';
+  document.getElementById('train-epoch').textContent = 'Generating data...';
+  document.getElementById('train-loss').textContent = '';
+
+  try {
+    // Stop sim first
+    if (isRunning) await simStop();
+
+    const resp = await fetch(BASE + '/surrogate/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        node_name: 'ball',
+        n_data_steps: nSteps,
+        n_epochs: nEpochs,
+        hidden_sizes: [64, 64],
+        batch_size: 64,
+      }),
+    });
+    const data = await resp.json();
+    currentJobId = data.job_id;
+
+    // Poll for progress
+    pollTimer = setInterval(async () => {
+      try {
+        const sr = await fetch(BASE + '/surrogate/status/' + currentJobId);
+        const st = await sr.json();
+        const pct = ((st.epoch + 1) / st.n_epochs * 100).toFixed(0);
+        document.getElementById('train-bar').style.width = pct + '%';
+        document.getElementById('train-epoch').textContent =
+          'Epoch ' + (st.epoch + 1) + '/' + st.n_epochs;
+        if (st.train_loss !== null) {
+          document.getElementById('train-loss').textContent =
+            'train: ' + st.train_loss.toExponential(3) + ' | val: ' + st.val_loss.toExponential(3);
+        }
+        if (st.status === 'done') {
+          clearInterval(pollTimer);
+          document.getElementById('train-bar').style.width = '100%';
+          document.getElementById('train-epoch').textContent = 'Training complete!';
+          document.getElementById('btn-train').disabled = false;
+          document.getElementById('surr-controls').style.display = 'block';
+        } else if (st.status === 'error') {
+          clearInterval(pollTimer);
+          document.getElementById('train-epoch').textContent = 'Error: ' + st.error;
+          document.getElementById('btn-train').disabled = false;
+        }
+      } catch(e) { console.error('poll:', e); }
+    }, 500);
+
+  } catch(e) {
+    console.error('train:', e);
+    document.getElementById('btn-train').disabled = false;
+  }
+}
+
+async function activateSurrogate() {
+  if (!currentJobId) return;
+  try {
+    await fetch(BASE + '/surrogate/activate/' + currentJobId, { method: 'POST' });
+    surrogateActive = true;
+    document.getElementById('mode-badge').textContent = 'Surrogate';
+    document.getElementById('mode-badge').className = 'badge surrogate';
+    document.getElementById('btn-activate').disabled = true;
+    document.getElementById('btn-deactivate').disabled = false;
+    // Update graph visualization
+    loadGraph();
+  } catch(e) { console.error('activate:', e); }
+}
+
+async function deactivateSurrogate() {
+  try {
+    await fetch(BASE + '/surrogate/deactivate/ball', { method: 'POST' });
+    surrogateActive = false;
+    document.getElementById('mode-badge').textContent = 'Physics';
+    document.getElementById('mode-badge').className = 'badge physics';
+    document.getElementById('btn-activate').disabled = false;
+    document.getElementById('btn-deactivate').disabled = true;
+    loadGraph();
+  } catch(e) { console.error('deactivate:', e); }
+}
+
+// ── Init ───────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  initCytoscape();
+  resizeCanvas();
+  renderLoop();
+  loadGraph();
+  connectWebSocket();
+  // Load initial state
+  fetch(BASE + '/graph/state').then(r => r.json()).then(s => {
+    updateState(s);
+  }).catch(e => {});
+});
+</script>
+</body>
+</html>

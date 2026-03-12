@@ -23,6 +23,11 @@ class RealtimeRunner:
     time_scale : float
         Ratio of sim-time to wall-time.  1.0 = real time, 2.0 = double
         speed, 0.5 = half speed, etc.
+    steps_per_frame : int
+        Number of physics steps to execute in a batch before pacing to
+        wall clock.  Default 1.  Increasing this amortises sleep/wake
+        overhead for fast-stepping simulations (e.g. dt=0.0001 physics
+        rendered at 60 fps → steps_per_frame≈167).
     command_receiver : optional
         A ``CommandReceiver`` whose ``latest_commands()`` provides
         external inputs each step.  If ``None``, no external inputs
@@ -34,11 +39,13 @@ class RealtimeRunner:
         graph_manager,
         relay,
         time_scale: float = 1.0,
+        steps_per_frame: int = 1,
         command_receiver=None,
     ):
         self._gm = graph_manager
         self._relay = relay
         self._time_scale = time_scale
+        self._steps_per_frame = max(1, steps_per_frame)
         self._cmd_recv = command_receiver
         self._paused = threading.Event()
         self._paused.set()  # starts unpaused
@@ -82,6 +89,14 @@ class RealtimeRunner:
         self._time_scale = max(0.01, value)
 
     @property
+    def steps_per_frame(self) -> int:
+        return self._steps_per_frame
+
+    @steps_per_frame.setter
+    def steps_per_frame(self, value: int) -> None:
+        self._steps_per_frame = max(1, int(value))
+
+    @property
     def sim_time(self) -> float:
         return self._sim_time
 
@@ -105,8 +120,12 @@ class RealtimeRunner:
             if self._cmd_recv is not None:
                 ext_inputs = self._cmd_recv.latest_commands()
 
-            self._gm.step(external_inputs=ext_inputs)
-            self._sim_time += dt
+            # Batch-step: execute multiple physics steps before sleeping.
+            # The relay (observer) still captures every step, but sleep
+            # overhead is amortised.
+            for _ in range(self._steps_per_frame):
+                self._gm.step(external_inputs=ext_inputs)
+                self._sim_time += dt
 
             # Pace to wall clock
             target_wall = wall_start + (self._sim_time - sim_start) / self._time_scale

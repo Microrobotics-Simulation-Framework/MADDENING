@@ -14,6 +14,8 @@ __all__ = [
     "GraphInfo",
     "StateRelay",
     "RealtimeRunner",
+    "HistoryViewer3D",
+    "GPUHistoryViewer",
 ]
 
 # Network transport (ZMQ) -- imported explicitly to avoid hard dep on pyzmq
@@ -22,3 +24,16 @@ __all__ = [
 
 # Backends are imported explicitly from maddening.viz.backends to avoid
 # pulling in matplotlib/terminal deps when only the core viz API is needed.
+
+# 3D history viewer (PyVista) -- imported explicitly to avoid hard dep:
+#   from maddening.viz.history_viewer import HistoryViewer3D
+
+
+def __getattr__(name):
+    if name == "HistoryViewer3D":
+        from maddening.viz.history_viewer import HistoryViewer3D
+        return HistoryViewer3D
+    if name == "GPUHistoryViewer":
+        from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
+        return GPUHistoryViewer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

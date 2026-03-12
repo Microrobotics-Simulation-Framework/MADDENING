@@ -12,6 +12,11 @@ Usage:
     python maddening/examples/surrogate_demo.py
 """
 
+import os
+os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
+# Use CPU by default to avoid GPU OOM on small GPUs
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 import jax
 import jax.numpy as jnp
 

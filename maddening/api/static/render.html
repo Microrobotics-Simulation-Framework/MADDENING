@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MADDENING - Server-Side Rendering</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0f1117; color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
+
+/* -- Canvas area -- */
+#frame-area {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  position: relative; background: #0a0c10; overflow: hidden;
+}
+#render-canvas {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+  image-rendering: auto;
+}
+
+/* -- Overlay HUD -- */
+#hud {
+  position: absolute; top: 0; left: 0; right: 0;
+  padding: 8px 14px; display: flex; justify-content: space-between;
+  background: linear-gradient(180deg, rgba(15,17,23,0.85) 0%, transparent 100%);
+  pointer-events: none; font-size: 12px;
+}
+#hud > * { pointer-events: auto; }
+.hud-left, .hud-right { display: flex; gap: 16px; align-items: center; }
+.hud-stat { font-family: 'JetBrains Mono', monospace; color: #7dd3fc; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #6b7280; display: inline-block; margin-right: 4px;
+}
+.status-dot.connected { background: #22c55e; }
+.status-dot.streaming { background: #22c55e; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+/* -- Control bar -- */
+#controls {
+  background: #1a1d27; border-top: 1px solid #2a2d3a;
+  padding: 8px 14px; display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
+.ctrl-btn {
+  background: #2a2d3a; border: 1px solid #3a3d4a; color: #e0e0e0;
+  padding: 6px 14px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  transition: all 0.15s;
+}
+.ctrl-btn:hover { background: #3a3d4a; }
+.ctrl-btn.active { background: #2563eb; border-color: #3b82f6; }
+.ctrl-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.ctrl-sep { width: 1px; height: 24px; background: #3a3d4a; }
+.ctrl-label { font-size: 11px; color: #8b8fa3; }
+.ctrl-val { font-family: monospace; color: #7dd3fc; font-size: 11px; min-width: 30px; }
+select, input[type="range"] {
+  background: #2a2d3a; border: 1px solid #3a3d4a; color: #e0e0e0;
+  border-radius: 4px; padding: 3px 6px; font-size: 11px;
+}
+input[type="range"] {
+  width: 80px; height: 4px; -webkit-appearance: none; appearance: none;
+  vertical-align: middle;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+  background: #3b82f6; cursor: pointer;
+}
+
+/* -- Fullscreen -- */
+body.fullscreen #controls { display: none; }
+body.fullscreen #hud { opacity: 0; transition: opacity 0.3s; }
+body.fullscreen:hover #hud { opacity: 1; }
+
+/* -- Latency indicator -- */
+.latency-good { color: #86efac; }
+.latency-ok   { color: #fde68a; }
+.latency-bad  { color: #fca5a5; }
+</style>
+</head>
+<body>
+
+<div id="frame-area">
+  <canvas id="render-canvas"></canvas>
+  <div id="hud">
+    <div class="hud-left">
+      <span><span class="status-dot" id="ws-dot"></span><span id="status-text">Connecting...</span></span>
+      <span class="hud-stat" id="fps-display">- fps</span>
+      <span class="hud-stat" id="latency-display">- ms</span>
+      <span class="hud-stat" id="bandwidth-display">- KB/s</span>
+    </div>
+    <div class="hud-right">
+      <span class="hud-stat" id="resolution-display">-</span>
+    </div>
+  </div>
+</div>
+
+<div id="controls">
+  <button class="ctrl-btn" id="btn-start" onclick="simStart()">Start</button>
+  <button class="ctrl-btn" id="btn-pause" onclick="simPause()" disabled>Pause</button>
+  <button class="ctrl-btn" id="btn-stop" onclick="simStop()" disabled>Stop</button>
+  <button class="ctrl-btn" id="btn-reset" onclick="simReset()">Reset</button>
+
+  <div class="ctrl-sep"></div>
+
+  <span class="ctrl-label">Format:</span>
+  <select id="sel-format" onchange="sendConfig()">
+    <option value="jpeg" selected>JPEG</option>
+    <option value="webp">WebP</option>
+    <option value="png">PNG</option>
+  </select>
+
+  <span class="ctrl-label">Quality:</span>
+  <input type="range" id="sl-quality" min="20" max="100" step="5" value="85"
+         oninput="document.getElementById('val-quality').textContent=this.value; sendConfig()">
+  <span class="ctrl-val" id="val-quality">85</span>
+
+  <div class="ctrl-sep"></div>
+
+  <span class="ctrl-label">Target FPS:</span>
+  <input type="range" id="sl-fps" min="5" max="60" step="5" value="30"
+         oninput="document.getElementById('val-fps').textContent=this.value; sendConfig()">
+  <span class="ctrl-val" id="val-fps">30</span>
+
+  <div class="ctrl-sep"></div>
+
+  <button class="ctrl-btn" id="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
+</div>
+
+<script>
+const BASE = window.location.origin;
+let ws = null;
+let isRunning = false;
+let frameCount = 0;
+let lastFpsTime = performance.now();
+let totalBytes = 0;
+let lastBwTime = performance.now();
+
+const canvas = document.getElementById('render-canvas');
+const ctx = canvas.getContext('2d');
+
+// ---- WebSocket: receive rendered frames ----
+
+let serverConfig = null;  // {width, height, format, content_type}
+let configSendTimer = null;
+
+function connect() {
+  const wsUrl = BASE.replace(/^http/, 'ws') + '/ws/render';
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('connected');
+    document.getElementById('status-text').textContent = 'Connected';
+  };
+
+  ws.onmessage = async (e) => {
+    if (typeof e.data === 'string') {
+      // First message: JSON server config
+      serverConfig = JSON.parse(e.data);
+      canvas.width = serverConfig.width;
+      canvas.height = serverConfig.height;
+      document.getElementById('resolution-display').textContent =
+        serverConfig.width + ' x ' + serverConfig.height;
+      document.getElementById('ws-dot').classList.add('streaming');
+      document.getElementById('status-text').textContent = 'Streaming';
+      return;
+    }
+
+    // Binary image frame
+    const startDecode = performance.now();
+    totalBytes += e.data.byteLength;
+
+    try {
+      const contentType = serverConfig ? serverConfig.content_type : 'image/jpeg';
+      const blob = new Blob([e.data], { type: contentType });
+      const bitmap = await createImageBitmap(blob);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+
+      // Latency = decode time (network latency not measurable without timestamps)
+      const decodeMs = (performance.now() - startDecode).toFixed(1);
+      const el = document.getElementById('latency-display');
+      el.textContent = decodeMs + ' ms decode';
+      el.className = 'hud-stat ' + (decodeMs < 10 ? 'latency-good' : decodeMs < 25 ? 'latency-ok' : 'latency-bad');
+    } catch (err) {
+      console.error('Frame decode error:', err);
+    }
+
+    frameCount++;
+  };
+
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('connected', 'streaming');
+    document.getElementById('status-text').textContent = 'Disconnected';
+    serverConfig = null;
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+// Send client config changes to the server
+function sendConfig() {
+  if (configSendTimer) clearTimeout(configSendTimer);
+  configSendTimer = setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'config',
+        format: document.getElementById('sel-format').value,
+        quality: parseInt(document.getElementById('sl-quality').value),
+        fps: parseInt(document.getElementById('sl-fps').value),
+      }));
+    }
+  }, 200);
+}
+
+// ---- FPS / bandwidth counter ----
+setInterval(() => {
+  const now = performance.now();
+
+  // FPS
+  const elapsed = (now - lastFpsTime) / 1000;
+  if (elapsed > 0) {
+    const fps = (frameCount / elapsed).toFixed(1);
+    document.getElementById('fps-display').textContent = fps + ' fps';
+  }
+  frameCount = 0;
+  lastFpsTime = now;
+
+  // Bandwidth
+  const bwElapsed = (now - lastBwTime) / 1000;
+  if (bwElapsed > 0) {
+    const kbps = (totalBytes / 1024 / bwElapsed).toFixed(0);
+    document.getElementById('bandwidth-display').textContent = kbps + ' KB/s';
+  }
+  totalBytes = 0;
+  lastBwTime = now;
+}, 1000);
+
+// ---- Sim controls (same REST API as app.html) ----
+async function simStart() {
+  try {
+    await fetch(BASE + '/sim/start', { method: 'POST' });
+    isRunning = true;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-pause').disabled = false;
+    document.getElementById('btn-stop').disabled = false;
+  } catch(e) { console.error(e); }
+}
+
+async function simPause() {
+  try {
+    await fetch(BASE + '/sim/pause', { method: 'POST' });
+    document.getElementById('btn-start').disabled = true;
+  } catch(e) { console.error(e); }
+}
+
+async function simStop() {
+  try {
+    await fetch(BASE + '/sim/stop', { method: 'POST' });
+    isRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+  } catch(e) { console.error(e); }
+}
+
+async function simReset() {
+  try {
+    await fetch(BASE + '/sim/reset', { method: 'POST' });
+    isRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-pause').disabled = true;
+    document.getElementById('btn-stop').disabled = true;
+    // Tell server to clear timeseries buffers
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'reset' }));
+    }
+  } catch(e) { console.error(e); }
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.body.requestFullscreen();
+    document.body.classList.add('fullscreen');
+  } else {
+    document.exitFullscreen();
+    document.body.classList.remove('fullscreen');
+  }
+}
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) document.body.classList.remove('fullscreen');
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if (e.key === ' ') { e.preventDefault(); isRunning ? simPause() : simStart(); }
+  if (e.key === 'r' || e.key === 'R') simReset();
+  if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+});
+
+// ---- Init ----
+window.addEventListener('DOMContentLoaded', () => {
+  connect();
+});
+</script>
+</body>
+</html>

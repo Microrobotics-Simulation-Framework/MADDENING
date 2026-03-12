@@ -13,6 +13,9 @@ def __getattr__(name: str):
     if name == "TerminalRenderer":
         from maddening.viz.backends.terminal_renderer import TerminalRenderer
         return TerminalRenderer
+    if name == "GPUHistoryViewer":
+        from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
+        return GPUHistoryViewer
     raise AttributeError(f"module 'maddening.viz.backends' has no attribute {name!r}")
 
 
@@ -22,4 +25,5 @@ __all__ = [
     "MatplotlibRenderer",
     "run_matplotlib",
     "TerminalRenderer",
+    "GPUHistoryViewer",
 ]

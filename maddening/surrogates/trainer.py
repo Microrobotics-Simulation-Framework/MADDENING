@@ -62,6 +62,48 @@ class TrainResult:
             integrator=integrator,
         )
 
+    def save(self, path: str, metadata: Optional[dict] = None) -> None:
+        """Save weights and metadata to an NPZ file.
+
+        Parameters
+        ----------
+        path : str
+            Output file path.
+        metadata : dict, optional
+            Extra metadata to include.
+        """
+        from maddening.surrogates.checkpoint import save_weights
+        meta = metadata or {}
+        meta.setdefault("train_losses", self.train_losses[-5:])
+        meta.setdefault("val_losses", self.val_losses[-5:])
+        save_weights(
+            path, self.weights,
+            architecture=self.architecture,
+            state_spec=self.state_spec,
+            boundary_spec=self.boundary_spec,
+            metadata=meta,
+        )
+
+    @staticmethod
+    def load(path: str, architecture: SurrogateArchitecture, rng_key=None):
+        """Load a TrainResult from a saved checkpoint.
+
+        Parameters
+        ----------
+        path : str
+            Input file path.
+        architecture : SurrogateArchitecture
+            Architecture instance of the same type used during saving.
+        rng_key : PRNGKey, optional
+            Random key for tree structure initialization.
+
+        Returns
+        -------
+        TrainResult
+        """
+        from maddening.surrogates.checkpoint import load_train_result
+        return load_train_result(path, architecture, rng_key)
+
 
 class SurrogateTrainer:
     """Train a surrogate architecture on a SurrogateDataset.
@@ -77,7 +119,8 @@ class SurrogateTrainer:
     loss_fn : callable, optional
         ``(pred_dict, target_dict) -> scalar``.  Defaults to MSE.
     physics_loss_fn : callable, optional
-        Additional physics-informed loss term.
+        Additional physics-informed loss term.  Signature:
+        ``(weights, state, boundary_inputs, pred, dt) -> scalar``.
     physics_loss_weight : float
         Weight for the physics loss (default 0.0).
     """
@@ -106,6 +149,7 @@ class SurrogateTrainer:
         rng_key=None,
         validation_split: float = 0.1,
         callback: Optional[Callable] = None,
+        callbacks: Optional[list] = None,
     ) -> TrainResult:
         """Run the training loop.
 
@@ -121,6 +165,10 @@ class SurrogateTrainer:
             Fraction of data to hold out for validation.
         callback : callable, optional
             Called each epoch with ``(epoch, {"train_loss": ..., "val_loss": ...})``.
+            Simple alternative to the ``callbacks`` list.
+        callbacks : list[TrainingCallback], optional
+            List of ``TrainingCallback`` instances for early stopping,
+            checkpointing, LR scheduling, etc.
 
         Returns
         -------
@@ -131,6 +179,7 @@ class SurrogateTrainer:
 
         ds = self.dataset
         arch = self.architecture
+        cbs = callbacks or []
 
         # Initialise weights
         init_key, shuffle_key = jax.random.split(rng_key)
@@ -165,6 +214,10 @@ class SurrogateTrainer:
 
         arrays, static = weights
 
+        # Check for LR schedule callbacks
+        from maddening.surrogates.callbacks import LRSchedule
+        lr_schedule_cbs = [cb for cb in cbs if isinstance(cb, LRSchedule)]
+
         # `static` is closed over (not passed through JIT) because it
         # contains non-array objects like activation functions.
 
@@ -187,12 +240,14 @@ class SurrogateTrainer:
             return jnp.mean(losses)
 
         @jax.jit
-        def train_step(arrays, opt_state, states_b, boundary_b, targets_b):
+        def train_step(arrays, opt_state, states_b, boundary_b, targets_b, lr_mult):
             loss, grads = jax.value_and_grad(batch_loss)(
                 arrays, states_b, boundary_b, targets_b,
             )
             updates, new_opt_state = self.optimizer.update(grads, opt_state, arrays)
-            new_arrays = optax.apply_updates(arrays, updates)
+            # Apply LR scaling
+            scaled_updates = jax.tree.map(lambda u: u * lr_mult, updates)
+            new_arrays = optax.apply_updates(arrays, scaled_updates)
             return new_arrays, new_opt_state, loss
 
         @jax.jit
@@ -202,7 +257,17 @@ class SurrogateTrainer:
         train_losses = []
         val_losses = []
 
+        # Callback state (mutable dict shared with callbacks)
+        cb_state = {"weights": (arrays, static), "opt_state": opt_state}
+        for cb in cbs:
+            cb.on_train_begin(self, cb_state)
+
         for epoch in range(n_epochs):
+            # Get current LR multiplier
+            lr_mult = jnp.float32(1.0)
+            for lr_cb in lr_schedule_cbs:
+                lr_mult = lr_mult * lr_cb.lr_multiplier
+
             # Shuffle training data
             shuffle_key, epoch_key = jax.random.split(shuffle_key)
             epoch_perm = jax.random.permutation(epoch_key, n_train)
@@ -221,7 +286,7 @@ class SurrogateTrainer:
                 t_b = _index(shuffled_targets, idx)
 
                 arrays, opt_state, loss = train_step(
-                    arrays, opt_state, s_b, b_b, t_b,
+                    arrays, opt_state, s_b, b_b, t_b, lr_mult,
                 )
                 epoch_loss += float(loss)
                 n_batches += 1
@@ -233,8 +298,29 @@ class SurrogateTrainer:
             v_loss = float(eval_loss(arrays, val_states, val_boundary, val_targets))
             val_losses.append(v_loss)
 
+            metrics = {"train_loss": avg_train_loss, "val_loss": v_loss}
+
             if callback is not None:
-                callback(epoch, {"train_loss": avg_train_loss, "val_loss": v_loss})
+                callback(epoch, metrics)
+
+            # Invoke training callbacks
+            cb_state["weights"] = (arrays, static)
+            cb_state["opt_state"] = opt_state
+            for cb in cbs:
+                cb.on_epoch_end(epoch, metrics, cb_state)
+            # Callbacks may update weights (e.g. restore best)
+            arrays, static = cb_state["weights"]
+
+            # Check for early stopping
+            if any(cb.should_stop for cb in cbs):
+                break
+
+        # Finalize callbacks
+        final_metrics = {"train_loss": train_losses[-1], "val_loss": val_losses[-1]}
+        cb_state["weights"] = (arrays, static)
+        for cb in cbs:
+            cb.on_train_end(final_metrics, cb_state)
+        arrays, static = cb_state["weights"]
 
         return TrainResult(
             weights=(arrays, static),

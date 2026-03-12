@@ -9,7 +9,7 @@ import jax.numpy as jnp
 
 from maddening.core.node import SimulationNode
 
-GRAVITY = -9.81
+GRAVITY = -9.81  # default; use gravity param on BallNode for per-instance control
 
 
 class BallNode(SimulationNode):
@@ -27,6 +27,8 @@ class BallNode(SimulationNode):
         Starting velocity (default 0.0).
     elasticity : float
         Coefficient of restitution for collisions (default 0.8).
+    gravity : float
+        Gravitational acceleration (default -9.81 m/s^2).
     """
 
     def __init__(
@@ -36,6 +38,7 @@ class BallNode(SimulationNode):
         initial_position: float = 0.0,
         initial_velocity: float = 0.0,
         elasticity: float = 0.8,
+        gravity: float = -9.81,
     ):
         super().__init__(
             name,
@@ -43,6 +46,7 @@ class BallNode(SimulationNode):
             initial_position=initial_position,
             initial_velocity=initial_velocity,
             elasticity=elasticity,
+            gravity=gravity,
         )
 
     def initial_state(self) -> dict:
@@ -53,7 +57,8 @@ class BallNode(SimulationNode):
 
     def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
         """Integrate gravity, then handle collision if table_position is provided."""
-        velocity = state["velocity"] + GRAVITY * dt
+        gravity = self.params["gravity"]
+        velocity = state["velocity"] + gravity * dt
         position = state["position"] + velocity * dt
 
         table_pos = boundary_inputs.get("table_position", None)

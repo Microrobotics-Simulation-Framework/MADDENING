@@ -65,7 +65,7 @@ def extract_qualified_names(md_path: str) -> list[tuple[str, str]]:
 
     # Extract qualified names from the Implementation column
     # Pattern: module.path.ClassName.method or module.path.ClassName
-    qname_pattern = re.compile(r"`?(maddening\.\S+?)`?")
+    qname_pattern = re.compile(r"`(maddening\.[^`]+)`")
 
     results = []
     for row in data_rows:

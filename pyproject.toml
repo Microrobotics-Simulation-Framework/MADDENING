@@ -18,8 +18,8 @@ authors = [
 # no JAX dependency) so downstream libraries can import schema types without
 # installing the full simulation stack.
 dependencies = [
-    "jax>=0.4",
-    "jaxlib>=0.4",
+    "jax>=0.4,<0.6",
+    "jaxlib>=0.4,<0.6",
     "numpy>=1.24",
     "pyyaml>=6.0",
 ]
@@ -80,7 +80,21 @@ all = [
     "scikit-image>=0.20",
 ]
 
-# Development / testing
+# CI testing -- headless-safe subset (no display-dependent packages)
+ci = [
+    "pytest>=7.0",
+    "httpx>=0.24",
+    "matplotlib>=3.5",
+    "rich>=12.0",
+    "pyzmq>=25.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "websockets>=11.0",
+    "equinox>=0.11",
+    "optax>=0.1",
+]
+
+# Development / testing (full -- requires display server for viz3d/gpu-viz)
 dev = [
     "pytest>=7.0",
     "httpx>=0.24",

@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 
+pv = pytest.importorskip("pyvista", reason="pyvista not installed")
+
 from maddening.api.frame_renderer_3d import (
     ServerFrameRenderer3D,
     View3DConfig,

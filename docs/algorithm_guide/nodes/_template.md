@@ -1,3 +1,7 @@
+---
+bibliography: ../../bibliography.bib
+---
+
 # [Node Name]
 
 **Module**: `maddening.nodes.[module]`

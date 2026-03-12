@@ -357,6 +357,10 @@ Every node type, physics model, and numerical method in MADDENING must have a co
 #### Node Algorithm Documentation Template (`docs/algorithm_guide/nodes/_template.md`)
 
 ```markdown
+---
+bibliography: ../../bibliography.bib
+---
+
 # [Node Name]
 
 **Module**: `maddening.nodes.[module]`
@@ -463,9 +467,11 @@ where $d$ is the spatial dimension.
 
 ## References
 
-[Cite from `docs/bibliography.bib`.]
+[Cite using Pandoc-style `[@Key]` syntax, where `Key` matches an entry
+in `docs/bibliography.bib`.  Multiple citations: `[@Key1; @Key2]`.
+CI validates all cited keys exist via `scripts/check_citations.py`.]
 
-- {cite}`AuthorYear` — Description of what this reference provides.
+- [@AuthorYear] Author, A. (Year). *Title*. Publisher. — Brief note on relevance to this node.
 
 ## Verification Evidence
 
@@ -486,6 +492,10 @@ where $d$ is the spatial dimension.
 **`NodeMeta.implementation_map` migration path**: The Phase 2 requirement is a Markdown table maintained manually in each algorithm guide document. The recommended migration path for Phase 3/4 is to move the Implementation Mapping into a machine-readable `NodeMeta.implementation_map` field — a dictionary mapping equation term descriptions to Python function qualified names (e.g., `{"α∇²T (diffusion)": "maddening.nodes.heat.HeatNode._diffusion_step"}`). Once this field exists, a Sphinx documentation build step can verify via `getattr()` that every function name in the mapping resolves to an existing callable in the source code, failing the documentation build if a function is renamed or removed without updating the mapping. This closes the traceability loop: the algorithm guide's Markdown table is auto-generated from `NodeMeta.implementation_map`, the Sphinx build verifies that every mapping target exists, and the mapping itself is a machine-readable artifact that downstream SOUP assessors can harvest programmatically. Until the migration is complete, the manually maintained Markdown table remains authoritative.
 
 **Phase 2 CI bridge (documentation rot prevention)**: Even before the full `NodeMeta.implementation_map` migration in Phase 3, the manually maintained Markdown table is vulnerable to documentation rot — a renamed internal function will silently break the traceability chain. To mitigate this, a lightweight CI check should be introduced in Phase 2: a script that parses each algorithm guide's Implementation Mapping table, extracts the function qualified names from the "Implementation" column, and verifies via `importlib` and `getattr()` that each name resolves to an existing callable. This script does not require Sphinx infrastructure — it is a standalone Python script (`scripts/check_impl_mapping.py`) that reads Markdown files directly. The check runs on every push and fails if any function name is stale. This is a bridge measure: it provides rot detection without requiring the full `NodeMeta.implementation_map` machinery, and it becomes redundant once the Phase 3 migration is complete.
+
+**Bibliography citation system**: Algorithm guide documents cite references using Pandoc-style `[@Key]` syntax (e.g., `[@Crank1975]`, `[@Key1; @Key2]` for multiple citations). All cited keys must correspond to BibTeX entries in `docs/bibliography.bib`. A CI script (`scripts/check_citations.py`) parses the `.bib` file for valid entry keys and scans all algorithm guide Markdown files for `[@Key]` patterns, failing the build if any cited key is missing from the bibliography. Unused bibliography entries are reported as warnings (non-blocking). Template files prefixed with `_` are excluded from scanning.
+
+**Citation rendering**: The `[@Key]` syntax is not natively rendered by GitHub or VS Code Markdown previews — it appears as literal text. This is by design: each References section includes a human-readable inline description alongside the citation key (e.g., `[@Crank1975] Crank, J. (1975). *The Mathematics of Diffusion*. ...`), so the document remains fully readable without Pandoc processing. For rendered output, Pandoc can process the citations locally via `pandoc --citeproc --bibliography=docs/bibliography.bib input.md -o output.pdf`. Each algorithm guide file includes a YAML frontmatter block specifying `bibliography: ../../bibliography.bib` so that Pandoc can locate the `.bib` file automatically. In Phase 5 (Sphinx documentation site), `sphinxcontrib-bibtex` or a Pandoc-based build step will render citations into the published documentation with proper formatting and hyperlinked reference lists. A GitHub Pages deployment with Pandoc rendering is feasible via the `pandoc/actions` GitHub Action but is deferred to Phase 5 to avoid premature CI complexity.
 
 ---
 

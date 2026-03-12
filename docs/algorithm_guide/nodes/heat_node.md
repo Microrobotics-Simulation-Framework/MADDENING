@@ -1,3 +1,7 @@
+---
+bibliography: ../../bibliography.bib
+---
+
 # HeatNode
 
 **Module**: `maddening.nodes.heat`

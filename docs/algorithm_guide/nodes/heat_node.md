@@ -7,7 +7,7 @@
 
 ## Summary
 
-1D heat diffusion on a uniform rod with Dirichlet boundary conditions, solved using explicit finite differences.
+1D heat diffusion on a uniform rod with Dirichlet boundary conditions, solved using explicit finite differences [@Crank1975; @LeVeque2007].
 
 ## Governing Equations
 
@@ -91,8 +91,8 @@ where $d = 1$ is the spatial dimension. For the explicit scheme, the CFL number 
 
 ## References
 
-- Crank, J. (1975). *The Mathematics of Diffusion*. Oxford University Press.
-- LeVeque, R.J. (2007). *Finite Difference Methods for Ordinary and Partial Differential Equations*. SIAM.
+- [@Crank1975] Crank, J. (1975). *The Mathematics of Diffusion*. Oxford University Press. — Analytical solutions for the heat equation used in verification benchmarks.
+- [@LeVeque2007] LeVeque, R.J. (2007). *Finite Difference Methods for Ordinary and Partial Differential Equations*. SIAM. — Convergence theory and stability analysis for the explicit FD scheme.
 
 ## Verification Evidence
 

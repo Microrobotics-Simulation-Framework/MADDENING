@@ -93,7 +93,11 @@ anomaly assessment.]
 
 ## References
 
-[Cite from `docs/bibliography.bib`.]
+[Cite using Pandoc-style `[@Key]` syntax, where `Key` matches an entry
+in `docs/bibliography.bib`.  Multiple citations: `[@Key1; @Key2]`.
+CI validates all cited keys exist via `scripts/check_citations.py`.]
+
+- [@ExampleKey] Author, A. (Year). *Title*. Publisher. — Brief note on relevance to this node.
 
 ## Verification Evidence
 

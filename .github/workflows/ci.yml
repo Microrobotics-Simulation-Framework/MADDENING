@@ -58,6 +58,9 @@ jobs:
       - name: Check implementation mapping
         run: python scripts/check_impl_mapping.py
 
+      - name: Check bibliography citations
+        run: python scripts/check_citations.py
+
       - name: Run compliance tests
         env:
           JAX_PLATFORMS: cpu

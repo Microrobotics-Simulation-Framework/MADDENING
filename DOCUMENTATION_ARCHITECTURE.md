@@ -750,7 +750,7 @@ The final checklist item is new — it ensures that every known limitation is ca
 
 - **Docstring format**: NumPy-style (already used throughout codebase)
 - **Math in docstrings**: ASCII-art equations in docstrings, LaTeX in Sphinx docs
-- **Bibliography**: all academic references go in `docs/bibliography.bib`
+- **Bibliography**: all academic references go in `docs/bibliography.bib`; cite using Pandoc-style `[@Key]` syntax in algorithm guide documents; CI validates all cited keys exist via `scripts/check_citations.py` (Section 3)
 - **Math-heavy code exception**: mathematical variable names may use short names matching published formulas (e.g., `tau`, `f_eq`, `dx`)
 
 #### `docs/developer_guide/testing_standards.md`
@@ -2414,7 +2414,7 @@ MADDENING's development practices provide equivalent assurance without formal ce
 | Verification and testing | CI with mandatory passing tests (545+ tests), registered verification benchmarks, analytical comparisons |
 | Change control | GitHub PRs with review, `CHANGELOG.md`, structured commit messages |
 | Corrective action | GitHub Issues with severity labels, anomaly registry with resolution tracking |
-| Design input/output traceability | Algorithm documentation with governing equations → implementation → test |
+| Design input/output traceability | Algorithm documentation with governing equations → implementation → test; centralized bibliography with CI-validated citations; implementation mapping with CI-validated function references |
 | Supplier evaluation (of own SOUP) | Dependency monitoring, version pinning, SBOM generation |
 | Independent validation | Peer-reviewed publications citing MADDENING, independent research use |
 
@@ -2744,6 +2744,7 @@ The following utilities are schema-driven and path-agnostic, making them reusabl
 | Hazard hints harvester | `maddening.compliance.collect_hazard_hints()` | Harvest hazard hints across downstream nodes for risk management input |
 | Stability report generator | `maddening.compliance.generate_stability_report()` | Generate stability report covering downstream API surfaces. **(Phase 4 — not yet available)**: depends on `@stability` decorator infrastructure (Section 9.5, Appendix B item 29). Do not import until Phase 4 is complete. |
 | Verification benchmark registry | `maddening.compliance.verification_benchmark` | Register downstream benchmarks in the same registry pattern |
+| Bibliography citation validator | `scripts/check_citations.py` (standalone) | Downstream libraries can adapt the script to validate their own algorithm guides against their own `.bib` file (or MADDENING's); set `BIB_PATH` env var to override the default path |
 
 The harvesting utilities (`collect_node_metadata()`, `collect_hazard_hints()`) use `SimulationNode.__subclasses__()` to discover all node classes in the current Python process. When MIME imports both MADDENING and MIME nodes, these utilities will harvest metadata from both — automatically producing a combined capability matrix and hazard summary. This is by design: a commercial manufacturer assessing the full MADDENING+MIME stack can call these utilities once and get a complete picture.
 
@@ -2970,7 +2971,8 @@ and the same SOUP package template as MADDENING.
 ## What MIME Inherits (by reference — not repeated here)
 
 - Documentation structure and Sphinx tooling (MADDENING Section 1)
-- Algorithm documentation template (MADDENING Section 3)
+- Algorithm documentation template and citation conventions (MADDENING Section 3)
+- Bibliography citation system: Pandoc-style `[@Key]` syntax, CI validation via `scripts/check_citations.py`, `bibliography.bib` as centralized reference store (MADDENING Section 3)
 - V&V documentation hooks and boundary language (MADDENING Section 4)
 - Versioning policy and CHANGELOG conventions (MADDENING Section 5)
 - Contributor standards and node authoring checklist (MADDENING Section 7)
@@ -3098,7 +3100,7 @@ These items are essential for EU regulatory readiness and should be prioritized 
 12. **Verification benchmark decorator and registry** (Section 9.3) — retrofit existing tests
 13. **`tests/verification/`** directory — separate verification benchmarks from unit tests
 14. **`docs/validation/framework_verification.md`** (Section 4) — aggregate existing evidence
-15. **Centralized `bibliography.bib`** (Section 3) — collect all references
+15. **Centralized `bibliography.bib` and citation validation** (Section 3) — collect all academic references in `docs/bibliography.bib`; algorithm guide documents cite using Pandoc-style `[@Key]` syntax with YAML frontmatter `bibliography: ../../bibliography.bib`; **CI bridge**: add `scripts/check_citations.py` — validates that every `[@Key]` citation in algorithm guides resolves to a BibTeX entry in the `.bib` file. Unused entries are warned, dangling citations fail the build.
 16. **`docs/regulatory/iec62304_mapping.md`** (Section 11) — IEC 62304 lifecycle mapping (include the Clause 5.3.5 segregation row)
 17. **ISO 14971 risk management documentation** (Section 9.8) — document the NodeMeta → hazard identification connection, functional purity safety argument, XLA Shadow qualification, HealthCheck node infrastructure, and anomaly → risk management workflow
 18. **`HealthCheckNode` base class** (Section 9.8) — implement the HealthCheck base node in `maddening/nodes/health_check.py`. Provides NaN/Inf trapping, physical boundary checks, and statistical moment monitoring as a graph-integrated node. Downstream libraries instantiate and configure for their context of use.
@@ -3466,10 +3468,16 @@ These items establish the shared compliance infrastructure that all subsequent p
 - [x] `docs/validation/framework_verification.md` exists (Section 4)
 - [x] Contains at minimum: link to CI system, total test count, platforms tested (OS/Python/JAX versions) (Section 4)
 
-**Bibliography:**
+**Bibliography and citation validation:**
 
 - [x] `docs/bibliography.bib` exists at `docs/bibliography.bib` (Section 3)
 - [x] Contains at least one BibTeX entry referenced by a node's algorithm guide document (Section 3)
+- [x] Algorithm guide documents use Pandoc-style `[@Key]` citation syntax where `Key` matches a BibTeX entry in `docs/bibliography.bib` (Section 3)
+- [x] Algorithm guide documents include YAML frontmatter with `bibliography: ../../bibliography.bib` for Pandoc `--citeproc` processing (Section 3)
+- [x] Each References section includes human-readable inline descriptions alongside `[@Key]` markers so documents are readable without Pandoc rendering (Section 3)
+- [x] `scripts/check_citations.py` exists and validates that every `[@Key]` citation in algorithm guide Markdown files resolves to a BibTeX entry in `docs/bibliography.bib` (Section 3)
+- [x] CI runs `scripts/check_citations.py` on every push and fails on dangling citations (cited key not in `.bib` file) (Section 3)
+- [x] Template files prefixed with `_` (e.g., `_template.md`) are excluded from citation scanning to avoid false positives from example keys (Section 3)
 
 **IEC 62304 lifecycle mapping:**
 
@@ -3650,6 +3658,15 @@ The checklist is organised around the schema/instance split: verify that the inh
 - [ ] Each downstream algorithm guide document declares the node's verification mode: Mode 1 (Wrapping) or Mode 2 (Independent) (Section 16)
 - [ ] Mode 1 declarations cite the specific MADDENING version pin and upstream verification IDs (Section 16)
 - [ ] Mode 2 declarations note that no upstream verification evidence is cited and that full independent verification is provided (Section 16)
+
+### Bibliography and Citation Validation (create fresh or extend upstream)
+
+- [ ] The downstream project maintains its own `docs/bibliography.bib` containing domain-specific references (e.g., CSF dynamics papers for MIME) (Section 3)
+- [ ] Downstream algorithm guide documents use Pandoc-style `[@Key]` citation syntax consistent with MADDENING's convention (Section 3)
+- [ ] Downstream algorithm guide documents include YAML frontmatter with `bibliography:` pointing to the downstream `.bib` file (Section 3)
+- [ ] If citing references that also appear in MADDENING's `bibliography.bib`, the downstream project either (a) copies the relevant entries into its own `.bib` file, or (b) merges both `.bib` files during the documentation build. The choice must be documented in the downstream `DOCUMENTATION_ARCHITECTURE.md` (Section 3)
+- [ ] A citation validation script (adapted from MADDENING's `scripts/check_citations.py` or using `BIB_PATH` env var override) runs in the downstream CI and fails on dangling citations (Section 3)
+- [ ] Each References section includes human-readable inline descriptions alongside `[@Key]` markers so documents are readable without Pandoc rendering (Section 3)
 
 ### SOUP Package Document (create fresh)
 

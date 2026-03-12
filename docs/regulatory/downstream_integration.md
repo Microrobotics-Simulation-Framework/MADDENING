@@ -120,7 +120,7 @@ The MADDENING documentation architecture is designed to support the most demandi
 2. **Known Anomalies Registry** (`docs/validation/known_anomalies.yaml`): Machine-readable, versioned, validated by CI
 3. **Verification Evidence**: Registered benchmarks with analytical solutions, convergence studies, and regression tests
 4. **Hazard Hints**: Per-node qualitative risk information for integration into the manufacturer's ISO 14971 risk management file
-5. **Algorithm Guides**: Per-node documentation of governing equations, discretization, assumptions, limitations, and validated regimes
+5. **Algorithm Guides**: Per-node documentation of governing equations, discretization, assumptions, limitations, and validated regimes — with CI-validated bibliography citations (`docs/bibliography.bib`) and CI-validated implementation-to-code mappings
 6. **HealthCheckNode**: Configurable execution-layer fault detection (NaN/Inf, bounds, moment checks) for use in downstream safety monitoring
 7. **Compliance Schema Types**: Importable Python types (`NodeMeta`, `AnomalyRecord`, etc.) for downstream libraries to use and extend
 8. **SBOM**: CycloneDX-format software bill of materials attached to each release

@@ -17,6 +17,11 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Subcycling within coupling groups (`subcycling=True`) for mixed-timestep coupling with linear/constant boundary interpolation
 - Spatial interpolation map factories in `interface_mapping` module: `nearest_neighbor_1d`, `linear_interpolation_1d`, `rbf_interpolation` (4 kernels), `conservative_projection_1d`
 - `auto_couple()` and `add_coupling_group()` accept `**kwargs` forwarded to `CouplingGroup`
+- Coupling examples: acceleration comparison, Jacobi vs Gauss-Seidel, subcycling, spatial interpolation, convergence diagnostics
+
+### Fixed
+- Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step
+- Coupling diagnostics were lost in multi-rate graphs when step counter overwrote `_meta`
 - `maddening.compliance` namespace with schema types, anomaly validator, and CLI
 - `NodeMeta` dataclass with `hazard_hints`, `validated_regimes`, `implementation_map` fields
 - `StabilityLevel` and `UQReadiness` enums

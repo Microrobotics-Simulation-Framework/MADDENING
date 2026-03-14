@@ -192,16 +192,20 @@ def _run_coupled_block_impl(
         spec = nodes[nn]
         return runtime_dt if runtime_dt is not None else spec.timestep
 
-    # Compute subcycling rate dividers if needed
+    # Compute subcycling rate dividers if needed.
+    # The coupling group advances at the SLOWEST node's timestep.
+    # Fast nodes take multiple substeps at their own dt to cover the
+    # same time interval.  group_dividers[nn] = group_dt / node_dt,
+    # so fast nodes have large dividers and slow nodes have 1.
     use_subcycling = group.subcycling
     if use_subcycling:
         group_timesteps_list = sorted(
             {nodes[nn].timestep for nn in group_node_names}
         )
         if len(group_timesteps_list) > 1:
-            group_base_dt = _multi_gcd(group_timesteps_list)
+            group_macro_dt = max(group_timesteps_list)
             group_dividers = {
-                nn: max(round(nodes[nn].timestep / group_base_dt), 1)
+                nn: max(round(group_macro_dt / nodes[nn].timestep), 1)
                 for nn in group_node_names
             }
         else:
@@ -273,7 +277,7 @@ def _run_coupled_block_impl(
             if use_subcycling and group_dividers[nn] > 1:
                 n_sub = group_dividers[nn]
                 s[nn] = _run_substeps(
-                    nn, n_sub, group_base_dt,
+                    nn, n_sub, _get_dt(nn),
                     latest_results, s,
                 )
             else:
@@ -290,7 +294,7 @@ def _run_coupled_block_impl(
             if use_subcycling and group_dividers[nn] > 1:
                 n_sub = group_dividers[nn]
                 results[nn] = _run_substeps(
-                    nn, n_sub, group_base_dt,
+                    nn, n_sub, _get_dt(nn),
                     latest_results, latest_results,
                 )
             else:
@@ -947,14 +951,30 @@ class GraphManager:
         self._schedule = topological_sort(node_names, self._edges)
         self._back_edges = identify_back_edges(self._schedule, self._edges)
 
-        # Compute multi-rate info
-        timesteps = sorted({spec.timestep for spec in self._nodes.values()})
+        # Compute multi-rate info.
+        # For nodes in subcycling coupling groups, use the group's
+        # macro timestep (max of member timesteps) for rate divider
+        # computation, since the coupling block handles sub-stepping.
+        effective_timesteps = {
+            name: spec.timestep for name, spec in self._nodes.items()
+        }
+        for g in self._coupling_groups:
+            if g.subcycling:
+                group_max_dt = max(
+                    self._nodes[n].timestep for n in g.nodes
+                    if n in self._nodes
+                )
+                for n in g.nodes:
+                    if n in effective_timesteps:
+                        effective_timesteps[n] = group_max_dt
+
+        timesteps = sorted(set(effective_timesteps.values()))
         if len(timesteps) > 1:
             self._is_multirate = True
             base_dt = _multi_gcd(timesteps)
             self._rate_dividers = {
-                name: round(spec.timestep / base_dt)
-                for name, spec in self._nodes.items()
+                name: round(effective_timesteps[name] / base_dt)
+                for name in self._nodes
             }
             # Initialise the step counter in the state
             self._state[_META_KEY] = {

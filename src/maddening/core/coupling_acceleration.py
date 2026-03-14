@@ -218,6 +218,124 @@ def aitken_relaxation(
     return x_relaxed, new_omega, residual
 
 
+def iqn_ils_update(
+    x_raw_flat: jnp.ndarray,
+    x_old_flat: jnp.ndarray,
+    prev_residual: jnp.ndarray,
+    prev_state: jnp.ndarray,
+    V_mat: jnp.ndarray,
+    W_mat: jnp.ndarray,
+    n_cols: jnp.ndarray,
+    omega: jnp.ndarray,
+    prev_r_aitken: jnp.ndarray,
+) -> tuple:
+    """IQN-ILS quasi-Newton update with Aitken fallback.
+
+    Builds a low-rank approximation of the inverse Jacobian from
+    residual and state differences across iterations.  Falls back
+    to Aitken relaxation when the quasi-Newton update is invalid
+    (first iteration, NaN, or excessively large step).
+
+    Parameters
+    ----------
+    x_raw_flat : jnp.ndarray
+        Raw fixed-point result (flattened), shape ``(n_dof,)``.
+    x_old_flat : jnp.ndarray
+        Previous iteration state (flattened), shape ``(n_dof,)``.
+    prev_residual : jnp.ndarray
+        Residual from the previous iteration, shape ``(n_dof,)``.
+    prev_state : jnp.ndarray
+        State from the previous iteration, shape ``(n_dof,)``.
+    V_mat : jnp.ndarray
+        Pre-allocated residual difference matrix, shape
+        ``(n_dof, max_cols)``.
+    W_mat : jnp.ndarray
+        Pre-allocated state difference matrix, shape
+        ``(n_dof, max_cols)``.
+    n_cols : jnp.ndarray
+        Number of active columns (int32 scalar).
+    omega : jnp.ndarray
+        Aitken relaxation factor (for fallback).
+    prev_r_aitken : jnp.ndarray
+        Previous Aitken residual (for fallback), shape ``(n_dof,)``.
+
+    Returns
+    -------
+    x_new : jnp.ndarray
+        Updated state vector.
+    V_mat : jnp.ndarray
+        Updated V matrix.
+    W_mat : jnp.ndarray
+        Updated W matrix.
+    n_cols : jnp.ndarray
+        Updated active column count.
+    residual : jnp.ndarray
+        Current residual.
+    x_old_flat : jnp.ndarray
+        Current state (becomes prev_state next iteration).
+    new_omega : jnp.ndarray
+        Updated Aitken omega.
+    cur_r_aitken : jnp.ndarray
+        Current Aitken residual.
+    """
+    residual = x_raw_flat - x_old_flat
+    is_first = n_cols == 0
+
+    # Compute differences for V and W
+    delta_r = residual - prev_residual
+    delta_x = x_old_flat - prev_state
+
+    # Shift existing columns right, add new column at position 0
+    max_cols = V_mat.shape[1]
+    new_V = jnp.where(
+        is_first, V_mat,
+        jnp.roll(V_mat, shift=1, axis=1).at[:, 0].set(delta_r),
+    )
+    new_W = jnp.where(
+        is_first, W_mat,
+        jnp.roll(W_mat, shift=1, axis=1).at[:, 0].set(delta_x),
+    )
+    new_n_cols = jnp.where(
+        is_first, jnp.int32(0),
+        jnp.minimum(n_cols + 1, max_cols),
+    )
+
+    # Mask inactive columns to zero
+    col_mask = jnp.arange(max_cols) < new_n_cols
+    V_masked = new_V * col_mask[None, :]
+    W_masked = new_W * col_mask[None, :]
+
+    # Solve V^T V c = -V^T r via regularized normal equations
+    VtV = V_masked.T @ V_masked + 1e-10 * jnp.eye(max_cols)
+    Vtr = V_masked.T @ (-residual)
+    c = jnp.linalg.solve(VtV, Vtr)
+
+    # QN correction
+    correction = W_masked @ c + residual
+    x_qn = x_old_flat + correction
+
+    # Aitken fallback
+    x_aitken, new_omega, cur_r_aitken = aitken_relaxation(
+        x_old_flat, x_raw_flat, prev_r_aitken, omega
+    )
+
+    # Validate QN result: must be finite and not excessively large
+    correction_norm = jnp.sqrt(jnp.sum(correction ** 2))
+    residual_norm = jnp.sqrt(jnp.sum(residual ** 2))
+    is_valid = (
+        jnp.all(jnp.isfinite(x_qn))
+        & (correction_norm < 10.0 * jnp.maximum(residual_norm, 1e-12))
+        & ~is_first
+    )
+    x_new = jnp.where(is_valid, x_qn, x_aitken)
+
+    return (
+        x_new, new_V, new_W, new_n_cols,
+        residual, x_old_flat,
+        new_omega, cur_r_aitken,
+    )
+
+
 def fixed_relaxation(
     x_old_flat: jnp.ndarray,
     x_raw_flat: jnp.ndarray,

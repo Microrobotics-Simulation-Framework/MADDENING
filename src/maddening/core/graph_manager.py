@@ -147,6 +147,7 @@ def _run_coupled_block_impl(
         coupling_residual_mixed,
         fixed_relaxation,
         flatten_coupled_state,
+        iqn_ils_update,
         unflatten_coupled_state,
     )
 
@@ -321,6 +322,79 @@ def _run_coupled_block_impl(
 
             init_carry = (
                 state_after_first, jnp.array(False),
+                jnp.array(1.0), jnp.zeros(n_dof),
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+
+    elif group.acceleration == "iqn-ils":
+        max_cols = max(max_iters - 1, 1)
+        init_V = jnp.zeros((n_dof, max_cols))
+        init_W = jnp.zeros((n_dof, max_cols))
+        init_flat = flatten_coupled_state(state_after_first, group_node_names)
+
+        if track_diag:
+            def body_fn(i, carry):
+                (s_cur, converged, icount, fres,
+                 V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                (x_new, nV, nW, nnc,
+                 cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                    x_raw, x_old, prev_r, prev_s,
+                    V, W, nc, omega, prev_ra,
+                )
+                s_accel = unflatten_coupled_state(
+                    x_new, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                new_res = jnp.where(new_converged, fres, residual)
+                return (s_merged, new_converged, new_count, new_res,
+                        nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                jnp.array(1.0), first_r,
+                init_V, init_W, jnp.int32(0),
+                jnp.zeros(n_dof), init_flat,
+                jnp.array(1.0), jnp.zeros(n_dof),
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+            iter_count, final_res = final_carry[2], final_carry[3]
+        else:
+            def body_fn(i, carry):
+                (s_cur, converged,
+                 V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                (x_new, nV, nW, nnc,
+                 cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                    x_raw, x_old, prev_r, prev_s,
+                    V, W, nc, omega, prev_ra,
+                )
+                s_accel = unflatten_coupled_state(
+                    x_new, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                return (s_merged, new_converged,
+                        nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                init_V, init_W, jnp.int32(0),
+                jnp.zeros(n_dof), init_flat,
                 jnp.array(1.0), jnp.zeros(n_dof),
             )
             final_carry = jax.lax.fori_loop(

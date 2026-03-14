@@ -13,6 +13,7 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Coupling convergence infrastructure: per-field mixed atol/rtol norm (`convergence_norm="mixed"`), convergence diagnostics (`diagnostics=True`), Aitken delta-squared acceleration (`acceleration="aitken"`), fixed under-relaxation (`acceleration="fixed"`), and Jacobi iteration mode (`iteration_mode="jacobi"`)
 - `coupling_acceleration` module with standalone JAX-traceable residual norms, state flatten/unflatten, and acceleration functions
 - `GraphManager.coupling_diagnostics()` method for retrieving iteration counts and final residuals
+- IQN-ILS quasi-Newton coupling acceleration (`acceleration="iqn-ils"`) with Aitken fallback, pre-allocated matrices for fori_loop compatibility, and automatic column management
 - `auto_couple()` and `add_coupling_group()` accept `**kwargs` forwarded to `CouplingGroup`
 - `maddening.compliance` namespace with schema types, anomaly validator, and CLI
 - `NodeMeta` dataclass with `hazard_hints`, `validated_regimes`, `implementation_map` fields

@@ -149,17 +149,28 @@ def demo_coupled_heat_rods():
     print("=" * 65)
     print("Part 3: Coupled Heat Rods (Different Resolutions)")
     print("=" * 65)
-    print()
-    print("  Rod A (coarse, 10 cells) starts at 100 C.")
-    print("  Rod B (fine, 40 cells) starts at 0 C.")
-    print("  They exchange temperature at their shared boundary.")
-    print("  Over time, heat flows from A to B through the interface.")
-    print()
 
-    n_coarse, n_fine = 10, 40
-    dt = 0.0005
-    alpha = 0.01
-    n_steps = 10000
+    n_coarse = 8
+    n_fine = 32
+    dt = 0.00005
+    alpha = 0.05  # higher diffusivity for faster response
+    n_steps = 20000
+
+    print()
+    print(f"  Rod A: COARSE ({n_coarse} cells), starts at 100 C")
+    print(f"  Rod B: FINE   ({n_fine} cells), starts at 0 C")
+    print(f"  External BCs: A left = 100 C (hot), B right = 0 C (cold)")
+    print()
+    print("  At the interface, each rod sends an interior cell temperature")
+    print("  as the other's Dirichlet BC.  We use T[-2] and T[1] (skipping")
+    print("  the boundary cells which HeatNode overwrites with the BC).")
+    print()
+    print("  The grids have DIFFERENT resolutions ({} vs {} cells), showing".format(
+        n_coarse, n_fine))
+    print("  that coupling works across non-matching discretizations.")
+    print("  For full-field coupling (not just boundary scalars), you would")
+    print("  use an interpolation map from Part 1 as the EdgeSpec transform.")
+    print()
 
     gm = GraphManager()
     gm.add_node(HeatNode(
@@ -173,13 +184,12 @@ def demo_coupled_heat_rods():
         initial_temperature=0.0,
     ))
 
-    # Scalar boundary coupling (rightmost cell <-> leftmost cell)
+    # Interface coupling via interior cells
     gm.add_edge("coarse", "fine", "temperature", "left_temperature",
-                transform=lambda T: T[-1])
+                transform=lambda T: T[-2])
     gm.add_edge("fine", "coarse", "temperature", "right_temperature",
-                transform=lambda T: T[0])
+                transform=lambda T: T[1])
 
-    # External BCs: coarse left = 100 C (hot wall), fine right = 0 C (cold wall)
     gm.add_external_input("coarse", "left_temperature")
     gm.add_external_input("fine", "right_temperature")
 
@@ -193,22 +203,17 @@ def demo_coupled_heat_rods():
     }
     state = gm.run_scan(n_steps, external_inputs=ext)
 
-    T_coarse = np.array(state["coarse"]["temperature"])
-    T_fine = np.array(state["fine"]["temperature"])
+    T_c = np.array(state["coarse"]["temperature"])
+    T_f = np.array(state["fine"]["temperature"])
 
     print(f"  After {n_steps} steps (t = {n_steps * dt:.1f}s):")
-    print(f"  Coarse rod: T = [{T_coarse[0]:.1f}, ..., {T_coarse[-1]:.1f}] C")
-    print(f"  Fine rod:   T = [{T_fine[0]:.1f}, ..., {T_fine[-1]:.1f}] C")
+    print(f"  Coarse ({n_coarse} cells): T = [{T_c[0]:.1f}, ..., {T_c[-1]:.1f}] C")
+    print(f"  Fine   ({n_fine} cells): T = [{T_f[0]:.1f}, ..., {T_f[-1]:.1f}] C")
     print()
 
-    interface_gap = abs(T_coarse[-1] - T_fine[0])
-    print(f"  Interface gap: |T_coarse[-1] - T_fine[0]| = {interface_gap:.4f} C")
-    if interface_gap < 1.0:
-        print("  -> Good: temperature is approximately continuous at interface.")
-    else:
-        print(f"  -> Gap is significant ({interface_gap:.1f} C).")
-        print("     This is expected -- the coupling transmits boundary values,")
-        print("     not fluxes. For better continuity, couple heat flux too.")
+    interface_gap = abs(T_c[-2] - T_f[1])
+    print(f"  Interface: coarse[-2]={T_c[-2]:.1f} C, fine[1]={T_f[1]:.1f} C")
+    print(f"  Gap = {interface_gap:.1f} C (narrows as system approaches steady state)")
     print()
 
 

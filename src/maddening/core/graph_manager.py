@@ -192,24 +192,112 @@ def _run_coupled_block_impl(
         spec = nodes[nn]
         return runtime_dt if runtime_dt is not None else spec.timestep
 
+    # Compute subcycling rate dividers if needed
+    use_subcycling = group.subcycling
+    if use_subcycling:
+        group_timesteps_list = sorted(
+            {nodes[nn].timestep for nn in group_node_names}
+        )
+        if len(group_timesteps_list) > 1:
+            group_base_dt = _multi_gcd(group_timesteps_list)
+            group_dividers = {
+                nn: max(round(nodes[nn].timestep / group_base_dt), 1)
+                for nn in group_node_names
+            }
+        else:
+            group_dividers = {nn: 1 for nn in group_node_names}
+            use_subcycling = False  # uniform timestep, no subcycling needed
+        use_linear_interp = group.boundary_interpolation == "linear"
+
+    def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha):
+        """Resolve boundary inputs with time interpolation.
+
+        alpha=0 means start (s_prev values), alpha=1 means end (s_cur).
+        Only interpolates edges that are internal to the coupling group.
+        External back-edges and external inputs use latest values.
+        """
+        boundary_inputs: dict[str, Any] = {}
+        for edge in edges_by_target[nn]:
+            if edge in back_edge_set and edge not in group_internal:
+                src_state = full_state
+                value = src_state[edge.source_node][edge.source_field]
+            elif edge in group_internal:
+                # Interpolate between previous and current iteration
+                v_prev = s_prev[edge.source_node][edge.source_field]
+                v_cur = s_cur[edge.source_node][edge.source_field]
+                value = jax.tree.map(
+                    lambda a, b: a + alpha * (b - a), v_prev, v_cur
+                )
+            else:
+                value = s_cur[edge.source_node][edge.source_field]
+            if edge.transform is not None:
+                value = edge.transform(value)
+            boundary_inputs[edge.target_field] = value
+
+        if nn in has_external:
+            node_ext = external_inputs.get(nn, {})
+            for ei in ext_by_target[nn]:
+                if ei.target_field in node_ext:
+                    boundary_inputs[ei.target_field] = node_ext[ei.target_field]
+        return boundary_inputs
+
+    def _run_substeps(nn, n_substeps, sub_dt, s_prev, s_cur):
+        """Run n_substeps sub-steps for a fast node using lax.scan.
+
+        Boundary conditions are interpolated between s_prev and s_cur
+        at fractional time positions.
+        """
+        init_sub_state = initial_node_states[nn]
+
+        def substep_body(sub_state, sub_idx):
+            alpha = (sub_idx + 1.0) / n_substeps
+            if use_linear_interp:
+                bi = _resolve_boundary_interpolated(
+                    nn, s_prev, s_cur, alpha
+                )
+            else:
+                # constant: use end-of-step values
+                bi = _resolve_boundary(nn, s_cur)
+            new_sub = nodes[nn].update_fn(sub_state, bi, sub_dt)
+            return new_sub, None
+
+        final_sub, _ = jax.lax.scan(
+            substep_body, init_sub_state, jnp.arange(n_substeps)
+        )
+        return final_sub
+
     def one_pass_gs(latest_results):
         """Gauss-Seidel: sequential updates, each sees latest results."""
         s = {k: v for k, v in latest_results.items()}
         for nn in group_node_names:
-            bi = _resolve_boundary(nn, s)
-            s[nn] = nodes[nn].update_fn(
-                initial_node_states[nn], bi, _get_dt(nn)
-            )
+            if use_subcycling and group_dividers[nn] > 1:
+                n_sub = group_dividers[nn]
+                s[nn] = _run_substeps(
+                    nn, n_sub, group_base_dt,
+                    latest_results, s,
+                )
+            else:
+                bi = _resolve_boundary(nn, s)
+                s[nn] = nodes[nn].update_fn(
+                    initial_node_states[nn], bi, _get_dt(nn)
+                )
         return s
 
     def one_pass_jacobi(latest_results):
         """Jacobi: all nodes read from frozen previous-iteration state."""
         results = {}
         for nn in group_node_names:
-            bi = _resolve_boundary(nn, latest_results)
-            results[nn] = nodes[nn].update_fn(
-                initial_node_states[nn], bi, _get_dt(nn)
-            )
+            if use_subcycling and group_dividers[nn] > 1:
+                n_sub = group_dividers[nn]
+                results[nn] = _run_substeps(
+                    nn, n_sub, group_base_dt,
+                    latest_results, latest_results,
+                )
+            else:
+                bi = _resolve_boundary(nn, latest_results)
+                results[nn] = nodes[nn].update_fn(
+                    initial_node_states[nn], bi, _get_dt(nn)
+                )
         s = {k: v for k, v in latest_results.items()}
         for nn in group_node_names:
             s[nn] = results[nn]
@@ -801,16 +889,18 @@ class GraphManager:
                         f"ERROR: coupling group references non-existent node '{n}'"
                     )
             # Check uniform timestep within coupling group
+            # (relaxed when subcycling is enabled)
             group_timesteps = {
                 self._nodes[n].timestep
                 for n in group.nodes
                 if n in self._nodes
             }
-            if len(group_timesteps) > 1:
+            if len(group_timesteps) > 1 and not group.subcycling:
                 issues.append(
                     f"ERROR: coupling group {set(group.nodes)} has mixed "
                     f"timesteps {group_timesteps}. All nodes in a coupling "
-                    f"group must share the same timestep."
+                    f"group must share the same timestep.  Set "
+                    f"subcycling=True to enable mixed-timestep coupling."
                 )
             coupled_nodes |= group.nodes
 
@@ -1112,6 +1202,12 @@ class GraphManager:
                             new_state[nn] = _apply_multirate(
                                 nn, coupled_result[nn], new_state
                             )
+                        # Propagate diagnostic keys from coupled result
+                        if _META_KEY in coupled_result:
+                            new_state[_META_KEY] = {
+                                **new_state.get(_META_KEY, {}),
+                                **coupled_result[_META_KEY],
+                            }
             else:
                 for node_name in schedule:
                     updated = _resolve_and_update_node(
@@ -1121,8 +1217,9 @@ class GraphManager:
                         node_name, updated, new_state
                     )
 
-            # Increment step counter
+            # Increment step counter (preserve diagnostic keys)
             new_state[_META_KEY] = {
+                **new_state.get(_META_KEY, {}),
                 "step_count": step_count + 1,
             }
             return new_state

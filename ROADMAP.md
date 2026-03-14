@@ -256,11 +256,19 @@ Full integration with Open 3D Engine for cloud-hosted robotics simulation.
 ```
 
 #### 18. Cloud Infrastructure / HPC Deployment
-- **Apache Libcloud**: Provider-agnostic cloud VM provisioning for training runs
-- **Terraform modules**: Infrastructure-as-code for GPU cluster provisioning
+- **SkyPilot**: Cloud-agnostic GPU provisioning (AWS, GCP, Azure, Lambda) for training and simulation runs
 - **SLURM integration**: Job submission scripts for HPC clusters
 - **Containerization**: Docker/Singularity images with JAX+CUDA+MADDENING
 - **Why tier 4**: Infrastructure, not library code. Orthogonal to the simulation framework.
+- **Priority**: Before multi-device coupling (item 22).
+
+#### 22. Multi-Device Parallel Jacobi Coupling
+Run Jacobi-mode coupling iterations across multiple GPUs via `jax.pmap` or sharding.
+- Jacobi mode updates nodes independently — each node can execute on a different device
+- Requires device-aware graph partitioning and cross-device state synchronization
+- `fori_loop` carry must be replicated/sharded across devices
+- **Prerequisites**: Cloud infrastructure (item 18) for easy multi-GPU access, SkyPilot for provisioning
+- **Why tier 4**: Low practical value until multi-GPU systems are routinely available. The coupling system already supports Jacobi iteration — this adds the parallelism.
 
 ### Tier 5: Research-Level (open problems)
 

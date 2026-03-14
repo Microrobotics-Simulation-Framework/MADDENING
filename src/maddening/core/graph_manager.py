@@ -99,6 +99,342 @@ def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
     return result
 
 
+def _run_coupled_block_impl(
+    group, group_schedule, new_state, full_state, external_inputs,
+    runtime_dt, *, nodes, edges_by_target, ext_by_target,
+    back_edge_set, has_external, all_edges,
+):
+    """Execute a coupling group with iterative fixed-point iteration.
+
+    Supports Gauss-Seidel and Jacobi iteration modes, multiple
+    convergence norms, and acceleration methods (Aitken, fixed
+    relaxation, IQN-ILS).
+
+    This is the shared implementation used by both ``_build_step_fn``
+    and ``_build_dt_step_fn``.
+
+    Parameters
+    ----------
+    group : CouplingGroup
+        Configuration for this coupling group.
+    group_schedule : list of str
+        Node names in execution order within the group.
+    new_state : dict
+        Current accumulated state for this timestep.
+    full_state : dict
+        State from the previous timestep (for back-edges).
+    external_inputs : dict
+        External inputs dict.
+    runtime_dt : JAX scalar or None
+        If provided, overrides each node's compiled timestep
+        (used by adaptive timestepping).
+    nodes : dict
+        Node specs keyed by name.
+    edges_by_target : dict
+        Edges indexed by target node name.
+    ext_by_target : dict
+        External inputs indexed by target node name.
+    back_edge_set : set
+        Set of back-edges (previous-timestep reads).
+    has_external : set
+        Set of node names that have external inputs.
+    all_edges : list
+        All edges in the graph.
+    """
+    from maddening.core.coupling_acceleration import (
+        aitken_relaxation,
+        coupling_residual_l2,
+        coupling_residual_mixed,
+        fixed_relaxation,
+        flatten_coupled_state,
+        unflatten_coupled_state,
+    )
+
+    max_iters = group.max_iterations
+    group_node_names = list(group_schedule)
+    group_node_set = set(group_node_names)
+    use_mixed_norm = group.convergence_norm == "mixed"
+    use_acceleration = group.acceleration != "none"
+    use_jacobi = group.iteration_mode == "jacobi"
+
+    # Edges internal to this group are forced forward
+    group_internal = set()
+    for edge in all_edges:
+        if edge.source_node in group.nodes and edge.target_node in group.nodes:
+            group_internal.add(edge)
+
+    # Save the initial state for each node at the beginning of
+    # the timestep -- this is what we always integrate FROM.
+    initial_node_states = {nn: new_state[nn] for nn in group_node_names}
+
+    def _resolve_boundary(nn, s):
+        """Resolve boundary inputs for node nn from state s."""
+        boundary_inputs: dict[str, Any] = {}
+        for edge in edges_by_target[nn]:
+            if edge in back_edge_set and edge not in group_internal:
+                src_state = full_state
+            else:
+                src_state = s
+            value = src_state[edge.source_node][edge.source_field]
+            if edge.transform is not None:
+                value = edge.transform(value)
+            boundary_inputs[edge.target_field] = value
+
+        if nn in has_external:
+            node_ext = external_inputs.get(nn, {})
+            for ei in ext_by_target[nn]:
+                if ei.target_field in node_ext:
+                    boundary_inputs[ei.target_field] = node_ext[ei.target_field]
+        return boundary_inputs
+
+    def _get_dt(nn):
+        spec = nodes[nn]
+        return runtime_dt if runtime_dt is not None else spec.timestep
+
+    def one_pass_gs(latest_results):
+        """Gauss-Seidel: sequential updates, each sees latest results."""
+        s = {k: v for k, v in latest_results.items()}
+        for nn in group_node_names:
+            bi = _resolve_boundary(nn, s)
+            s[nn] = nodes[nn].update_fn(
+                initial_node_states[nn], bi, _get_dt(nn)
+            )
+        return s
+
+    def one_pass_jacobi(latest_results):
+        """Jacobi: all nodes read from frozen previous-iteration state."""
+        results = {}
+        for nn in group_node_names:
+            bi = _resolve_boundary(nn, latest_results)
+            results[nn] = nodes[nn].update_fn(
+                initial_node_states[nn], bi, _get_dt(nn)
+            )
+        s = {k: v for k, v in latest_results.items()}
+        for nn in group_node_names:
+            s[nn] = results[nn]
+        return s
+
+    one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
+
+    def _compute_residual(s_new, s_old):
+        if use_mixed_norm:
+            return coupling_residual_mixed(
+                s_new, s_old, group_node_names,
+                group.atol, group.rtol,
+            )
+        return coupling_residual_l2(s_new, s_old, group_node_names)
+
+    # Convergence threshold depends on norm type
+    conv_threshold = jnp.array(1.0) if use_mixed_norm else jnp.array(group.tolerance)
+
+    # Run first iteration
+    state_after_first = one_pass(new_state)
+
+    if max_iters <= 1:
+        result = {k: v for k, v in new_state.items()}
+        for nn in group_node_names:
+            result[nn] = state_after_first[nn]
+        if group.diagnostics:
+            residual_val = _compute_residual(state_after_first, new_state)
+            group_key = "+".join(sorted(group.nodes))
+            result.setdefault(_META_KEY, {})
+            result[_META_KEY] = {
+                **result.get(_META_KEY, {}),
+                f"coupling_{group_key}_iterations": jnp.array(1, dtype=jnp.int32),
+                f"coupling_{group_key}_residual": residual_val,
+            }
+        return result
+
+    # Determine if we need flatten/unflatten for acceleration
+    if use_acceleration:
+        n_dof_flat = flatten_coupled_state(
+            state_after_first, group_node_names
+        )
+        n_dof = n_dof_flat.shape[0]
+
+    track_diag = group.diagnostics
+    first_r = _compute_residual(state_after_first, new_state)
+
+    # Helper: build the merge step (shared across all body_fn variants)
+    def _merge(s_cur, s_result, new_converged):
+        s_merged = {}
+        for k_s in s_cur:
+            if k_s in group_node_set:
+                s_merged[k_s] = jax.tree.map(
+                    lambda n, o: jnp.where(new_converged, o, n),
+                    s_result[k_s], s_cur[k_s],
+                )
+            else:
+                s_merged[k_s] = s_cur[k_s]
+        return s_merged
+
+    # ------------------------------------------------------------------
+    # Build fori_loop body and carry based on acceleration + diagnostics
+    # ------------------------------------------------------------------
+
+    if group.acceleration == "aitken":
+        if track_diag:
+            def body_fn(i, carry):
+                s_cur, converged, icount, fres, omega, prev_r = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                x_rel, new_omega, cur_r = aitken_relaxation(
+                    x_old, x_raw, prev_r, omega
+                )
+                s_accel = unflatten_coupled_state(
+                    x_rel, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                new_res = jnp.where(new_converged, fres, residual)
+                return s_merged, new_converged, new_count, new_res, new_omega, cur_r
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                jnp.array(1.0), first_r,
+                jnp.array(1.0), jnp.zeros(n_dof),
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+            iter_count, final_res = final_carry[2], final_carry[3]
+        else:
+            def body_fn(i, carry):
+                s_cur, converged, omega, prev_r = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                x_rel, new_omega, cur_r = aitken_relaxation(
+                    x_old, x_raw, prev_r, omega
+                )
+                s_accel = unflatten_coupled_state(
+                    x_rel, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                return s_merged, new_converged, new_omega, cur_r
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                jnp.array(1.0), jnp.zeros(n_dof),
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+
+    elif group.acceleration == "fixed":
+        omega_val = group.relaxation
+
+        if track_diag:
+            def body_fn(i, carry):
+                s_cur, converged, icount, fres = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                x_rel = fixed_relaxation(x_old, x_raw, omega_val)
+                s_accel = unflatten_coupled_state(
+                    x_rel, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                new_res = jnp.where(new_converged, fres, residual)
+                return s_merged, new_converged, new_count, new_res
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                jnp.array(1.0), first_r,
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+            iter_count, final_res = final_carry[2], final_carry[3]
+        else:
+            def body_fn(i, carry):
+                s_cur, converged = carry
+                s_raw = one_pass(s_cur)
+                residual = _compute_residual(s_raw, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                x_old = flatten_coupled_state(s_cur, group_node_names)
+                x_raw = flatten_coupled_state(s_raw, group_node_names)
+                x_rel = fixed_relaxation(x_old, x_raw, omega_val)
+                s_accel = unflatten_coupled_state(
+                    x_rel, s_cur, group_node_names
+                )
+                s_merged = _merge(s_cur, s_accel, new_converged)
+                return s_merged, new_converged
+
+            init_carry = (state_after_first, jnp.array(False))
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+
+    else:
+        # No acceleration ("none")
+        if track_diag:
+            def body_fn(i, carry):
+                s_cur, converged, icount, fres = carry
+                s_new = one_pass(s_cur)
+                residual = _compute_residual(s_new, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                s_merged = _merge(s_cur, s_new, new_converged)
+                new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                new_res = jnp.where(new_converged, fres, residual)
+                return s_merged, new_converged, new_count, new_res
+
+            init_carry = (
+                state_after_first, jnp.array(False),
+                jnp.array(1.0), first_r,
+            )
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+            iter_count, final_res = final_carry[2], final_carry[3]
+        else:
+            def body_fn(i, carry):
+                s_cur, converged = carry
+                s_new = one_pass(s_cur)
+                residual = _compute_residual(s_new, s_cur)
+                new_converged = converged | (residual <= conv_threshold)
+                s_merged = _merge(s_cur, s_new, new_converged)
+                return s_merged, new_converged
+
+            init_carry = (state_after_first, jnp.array(False))
+            final_carry = jax.lax.fori_loop(
+                1, max_iters, body_fn, init_carry
+            )
+            final_state = final_carry[0]
+
+    # Merge coupled nodes back into the full state
+    result = {k: v for k, v in new_state.items()}
+    for nn in group_node_names:
+        result[nn] = final_state[nn]
+
+    # Write diagnostics to _meta if requested
+    if track_diag:
+        group_key = "+".join(sorted(group.nodes))
+        result.setdefault(_META_KEY, {})
+        result[_META_KEY] = {
+            **result.get(_META_KEY, {}),
+            f"coupling_{group_key}_iterations": jnp.array(
+                iter_count, dtype=jnp.int32
+            ),
+            f"coupling_{group_key}_residual": final_res,
+        }
+
+    return result
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -230,11 +566,12 @@ class GraphManager:
         nodes: Sequence[str],
         max_iterations: int = 10,
         tolerance: float = 1e-6,
+        **kwargs,
     ) -> CouplingGroup:
         """Register an iteratively-coupled group of nodes.
 
         Within each timestep, the nodes in the group are executed
-        repeatedly (Gauss-Seidel) until convergence or *max_iterations*.
+        repeatedly until convergence or *max_iterations*.
         All edges between nodes in the group use current-iteration
         values rather than staggered (previous-timestep) values.
 
@@ -247,6 +584,11 @@ class GraphManager:
             Maximum iterations per timestep.
         tolerance : float
             Convergence threshold (L2 norm of state change).
+        **kwargs
+            Additional keyword arguments forwarded to
+            :class:`~maddening.core.coupling.CouplingGroup`
+            (e.g. ``convergence_norm``, ``acceleration``,
+            ``iteration_mode``, ``diagnostics``).
 
         Returns
         -------
@@ -268,6 +610,7 @@ class GraphManager:
             nodes=new_set,
             max_iterations=max_iterations,
             tolerance=tolerance,
+            **kwargs,
         )
         self._coupling_groups.append(group)
         self._dirty = True
@@ -285,6 +628,7 @@ class GraphManager:
         self,
         max_iterations: int = 10,
         tolerance: float = 1e-6,
+        **kwargs,
     ) -> list[CouplingGroup]:
         """Automatically create coupling groups from graph cycles.
 
@@ -292,7 +636,20 @@ class GraphManager:
         and creates a coupling group for each SCC with more than one
         node.  Existing coupling groups are cleared first.
 
-        Returns the list of created coupling groups.
+        Parameters
+        ----------
+        max_iterations : int
+            Maximum iterations per timestep.
+        tolerance : float
+            Convergence threshold (L2 norm of state change).
+        **kwargs
+            Additional keyword arguments forwarded to
+            :meth:`add_coupling_group`.
+
+        Returns
+        -------
+        list of CouplingGroup
+            The created coupling groups.
         """
         self._coupling_groups.clear()
         sccs = find_strongly_connected_components(
@@ -300,7 +657,9 @@ class GraphManager:
         )
         groups = []
         for scc in sccs:
-            g = self.add_coupling_group(scc, max_iterations, tolerance)
+            g = self.add_coupling_group(
+                scc, max_iterations, tolerance, **kwargs
+            )
             groups.append(g)
         return groups
 
@@ -443,6 +802,21 @@ class GraphManager:
             # Remove meta if it existed from a previous compile
             self._state.pop(_META_KEY, None)
 
+        # Ensure _meta exists with correct structure when coupling
+        # diagnostics are enabled.  Pre-populate diagnostic keys so
+        # the pytree structure is stable across lax.scan iterations.
+        has_diagnostics = any(g.diagnostics for g in self._coupling_groups)
+        if has_diagnostics:
+            meta = self._state.get(_META_KEY, {})
+            for g in self._coupling_groups:
+                if g.diagnostics:
+                    key = "+".join(sorted(g.nodes))
+                    meta[f"coupling_{key}_iterations"] = jnp.array(
+                        0, dtype=jnp.int32
+                    )
+                    meta[f"coupling_{key}_residual"] = jnp.array(0.0)
+            self._state[_META_KEY] = meta
+
         step_fn = self._build_step_fn()
         self._compiled_step = jax.jit(step_fn)
 
@@ -557,7 +931,9 @@ class GraphManager:
                 new_state[node_name], boundary_inputs, spec.timestep
             )
 
-        def _run_coupled_block(group, group_schedule, new_state, full_state, external_inputs):
+        def _run_coupled_block(group, group_schedule, new_state,
+                               full_state, external_inputs,
+                               runtime_dt=None):
             """Execute a coupling group with Gauss-Seidel iteration.
 
             In Gauss-Seidel coupling, each iteration re-solves the SAME
@@ -566,108 +942,30 @@ class GraphManager:
             *initial* state (beginning of timestep), NOT from the
             previous iteration's output.  Only the boundary conditions
             change between iterations.
+
+            Parameters
+            ----------
+            group : CouplingGroup
+                Configuration for this coupling group.
+            group_schedule : list of str
+                Node names in execution order within the group.
+            new_state : dict
+                Current accumulated state for this timestep.
+            full_state : dict
+                State from the previous timestep (for back-edges).
+            external_inputs : dict
+                External inputs dict.
+            runtime_dt : JAX scalar or None
+                If provided, overrides each node's compiled timestep
+                (used by adaptive timestepping).
             """
-            max_iters = group.max_iterations
-            tol = group.tolerance
-            group_node_names = list(group_schedule)
-
-            # Edges internal to this group are forced forward
-            group_internal = set()
-            for edge in self._edges:
-                if edge.source_node in group.nodes and edge.target_node in group.nodes:
-                    group_internal.add(edge)
-
-            # Save the initial state for each node at the beginning of
-            # the timestep -- this is what we always integrate FROM.
-            initial_node_states = {nn: new_state[nn] for nn in group_node_names}
-
-            def one_pass(latest_results):
-                """Execute all nodes in the group once (Gauss-Seidel order).
-
-                Each node integrates from its initial state but resolves
-                boundary conditions from ``latest_results`` (which
-                contains the most recent iteration outputs for other
-                nodes in the group).
-                """
-                s = {k: v for k, v in latest_results.items()}
-                for nn in group_node_names:
-                    # Resolve boundary inputs from latest results
-                    boundary_inputs: dict[str, Any] = {}
-                    for edge in edges_by_target[nn]:
-                        if edge in back_edge_set and (
-                            edge not in group_internal
-                        ):
-                            src_state = full_state
-                        else:
-                            src_state = s
-                        value = src_state[edge.source_node][edge.source_field]
-                        if edge.transform is not None:
-                            value = edge.transform(value)
-                        boundary_inputs[edge.target_field] = value
-
-                    if nn in has_external:
-                        node_ext = external_inputs.get(nn, {})
-                        for ei in ext_by_target[nn]:
-                            if ei.target_field in node_ext:
-                                boundary_inputs[ei.target_field] = node_ext[ei.target_field]
-
-                    spec = nodes[nn]
-                    # Integrate from INITIAL state (beginning of timestep),
-                    # not from the previous iteration's output.
-                    s[nn] = spec.update_fn(
-                        initial_node_states[nn], boundary_inputs, spec.timestep
-                    )
-                return s
-
-            # Run first iteration
-            state_after_first = one_pass(new_state)
-
-            def _compute_residual(s_new, s_old):
-                total = jnp.array(0.0)
-                for nn in group_node_names:
-                    for field_name in s_new[nn]:
-                        diff = s_new[nn][field_name] - s_old[nn][field_name]
-                        total = total + jnp.sum(diff ** 2)
-                return jnp.sqrt(total)
-
-            if max_iters <= 1:
-                # No iteration needed, just one pass
-                result = {k: v for k, v in new_state.items()}
-                for nn in group_node_names:
-                    result[nn] = state_after_first[nn]
-                return result
-
-            # Use fori_loop (fixed iterations, differentiable) with
-            # jnp.where for early convergence.  The update is always
-            # computed (for JAX traceability) but applied only if the
-            # solution has not yet converged.
-            def body_fn(i, carry):
-                s_cur, converged = carry
-                s_new = one_pass(s_cur)
-                residual = _compute_residual(s_new, s_cur)
-                new_converged = converged | (residual <= tol)
-                # If already converged, keep current state (no-op)
-                s_merged = {}
-                for k_s in s_cur:
-                    if k_s in {nn for nn in group_node_names}:
-                        s_merged[k_s] = jax.tree.map(
-                            lambda n, o: jnp.where(new_converged, o, n),
-                            s_new[k_s], s_cur[k_s],
-                        )
-                    else:
-                        s_merged[k_s] = s_cur[k_s]
-                return s_merged, new_converged
-
-            init_carry = (state_after_first, jnp.array(False))
-            final_state, _ = jax.lax.fori_loop(
-                1, max_iters, body_fn, init_carry
+            return _run_coupled_block_impl(
+                group, group_schedule, new_state, full_state,
+                external_inputs, runtime_dt,
+                nodes=nodes, edges_by_target=edges_by_target,
+                ext_by_target=ext_by_target, back_edge_set=back_edge_set,
+                has_external=has_external, all_edges=self._edges,
             )
-
-            # Merge coupled nodes back
-            result = {k: v for k, v in new_state.items()}
-            for nn in group_node_names:
-                result[nn] = final_state[nn]
-            return result
 
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
@@ -777,6 +1075,36 @@ class GraphManager:
         if _META_KEY not in full_state:
             return full_state
         return {k: v for k, v in full_state.items() if k != _META_KEY}
+
+    def coupling_diagnostics(self) -> dict[str, dict]:
+        """Return coupling convergence info from the last step.
+
+        Returns
+        -------
+        dict
+            Keyed by coupling group identifier (sorted node names
+            joined by ``"+"``), each containing:
+
+            - ``"iterations"`` : int — coupling iterations used
+            - ``"residual"`` : float — final residual norm
+
+            Empty dict if no coupling groups have ``diagnostics=True``
+            or no step has been taken yet.
+        """
+        meta = self._state.get(_META_KEY, {})
+        result: dict[str, dict] = {}
+        for group in self._coupling_groups:
+            if not group.diagnostics:
+                continue
+            key = "+".join(sorted(group.nodes))
+            iter_key = f"coupling_{key}_iterations"
+            res_key = f"coupling_{key}_residual"
+            if iter_key in meta:
+                result[key] = {
+                    "iterations": int(meta[iter_key]),
+                    "residual": float(meta[res_key]),
+                }
+        return result
 
     # ------------------------------------------------------------------
     # Execution
@@ -1106,74 +1434,16 @@ class GraphManager:
                         )
                     else:
                         _, group, group_schedule = block
-                        group_internal = set()
-                        for edge in self._edges:
-                            if edge.source_node in group.nodes and edge.target_node in group.nodes:
-                                group_internal.add(edge)
-
-                        # Save initial state for Gauss-Seidel
-                        init_group = {nn2: new_state[nn2] for nn2 in group_schedule}
-
-                        def one_pass(latest):
-                            s2 = {k: v for k, v in latest.items()}
-                            for nn2 in group_schedule:
-                                # Resolve boundaries from latest results
-                                bi: dict[str, Any] = {}
-                                for edge in edges_by_target[nn2]:
-                                    if edge in back_edge_set and edge not in group_internal:
-                                        src = state
-                                    else:
-                                        src = s2
-                                    val = src[edge.source_node][edge.source_field]
-                                    if edge.transform is not None:
-                                        val = edge.transform(val)
-                                    bi[edge.target_field] = val
-                                if nn2 in has_external:
-                                    ne = external_inputs.get(nn2, {})
-                                    for ei in ext_by_target[nn2]:
-                                        if ei.target_field in ne:
-                                            bi[ei.target_field] = ne[ei.target_field]
-                                spec = nodes_dict[nn2]
-                                # Integrate from INITIAL state
-                                s2[nn2] = spec.update_fn(init_group[nn2], bi, dt)
-                            return s2
-
-                        result = one_pass(new_state)
-                        if group.max_iterations > 1:
-                            tol = group.tolerance
-                            max_iters = group.max_iterations
-
-                            def _residual(s_new, s_old):
-                                total = jnp.array(0.0)
-                                for nn2 in group_schedule:
-                                    for f in s_new[nn2]:
-                                        diff = s_new[nn2][f] - s_old[nn2][f]
-                                        total += jnp.sum(diff ** 2)
-                                return jnp.sqrt(total)
-
-                            def body_fn_dt(i, carry):
-                                s_cur, converged = carry
-                                s_new2 = one_pass(s_cur)
-                                residual = _residual(s_new2, s_cur)
-                                new_converged = converged | (residual <= tol)
-                                s_merged = {}
-                                for ks in s_cur:
-                                    if ks in set(group_schedule):
-                                        s_merged[ks] = jax.tree.map(
-                                            lambda n, o: jnp.where(new_converged, o, n),
-                                            s_new2[ks], s_cur[ks],
-                                        )
-                                    else:
-                                        s_merged[ks] = s_cur[ks]
-                                return s_merged, new_converged
-
-                            init = (result, jnp.array(False))
-                            result, _ = jax.lax.fori_loop(
-                                1, max_iters, body_fn_dt, init
-                            )
-
-                        for nn2 in group_schedule:
-                            new_state[nn2] = result[nn2]
+                        new_state = _run_coupled_block_impl(
+                            group, group_schedule, new_state, state,
+                            external_inputs, runtime_dt=dt,
+                            nodes=nodes_dict,
+                            edges_by_target=edges_by_target,
+                            ext_by_target=ext_by_target,
+                            back_edge_set=back_edge_set,
+                            has_external=has_external,
+                            all_edges=self._edges,
+                        )
             else:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(

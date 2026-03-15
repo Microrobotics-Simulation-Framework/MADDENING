@@ -7,7 +7,7 @@ JAX-traceable and JIT-compilable.
 
 import jax.numpy as jnp
 
-from maddening.core.node import SimulationNode
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.stability import stability
 
@@ -103,3 +103,10 @@ class BallNode(SimulationNode):
             )
 
         return {"position": position, "velocity": velocity}
+
+    def boundary_input_spec(self):
+        return {
+            "table_position": BoundaryInputSpec(
+                shape=(), description="Surface position for collision",
+            ),
+        }

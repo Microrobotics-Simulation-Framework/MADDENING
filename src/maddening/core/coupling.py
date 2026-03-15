@@ -39,7 +39,8 @@ class CouplingGroup:
         Norm used to check convergence.  ``"l2"`` uses a global L2
         norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
         per-field mixed absolute/relative norm (converged when the
-        norm <= 1.0).
+        norm <= 1.0).  ``"interface"`` checks consistency of
+        coupling-edge values between iterations.
     atol : float
         Absolute tolerance for the ``"mixed"`` norm.
     rtol : float
@@ -52,7 +53,8 @@ class CouplingGroup:
         ``"aitken"`` uses Aitken delta-squared relaxation,
         ``"fixed"`` uses constant under-relaxation with ``relaxation``
         as the omega parameter, ``"iqn-ils"`` uses Interface
-        Quasi-Newton with Inverse Least Squares.
+        Quasi-Newton with Inverse Least Squares, ``"iqn-imvj"``
+        uses IQN-ILS with multi-timestep Jacobian reuse.
     relaxation : float
         Constant relaxation factor for ``acceleration="fixed"``.
         ``1.0`` is no relaxation, ``< 1`` is under-relaxation,
@@ -72,7 +74,17 @@ class CouplingGroup:
     boundary_interpolation : str
         Time interpolation of boundary conditions during subcycling.
         ``"constant"`` holds values constant, ``"linear"`` linearly
-        interpolates between previous and current iteration values.
+        interpolates between previous and current iteration values,
+        ``"quadratic"`` uses quadratic Lagrange interpolation through
+        three successive iteration values (falls back to linear on
+        the first iteration).
+    jacobian_reuse : int
+        For ``"iqn-imvj"``: number of V/W columns retained from the
+        previous timestep.  ``0`` means no reuse (same as IQN-ILS).
+    waveform_iterations : int
+        For subcycling groups: number of waveform relaxation
+        iterations.  ``1`` is current behaviour (single pass),
+        ``> 1`` iterates over entire sub-step windows.
     """
     nodes: frozenset[str]
     max_iterations: int = 10
@@ -87,3 +99,5 @@ class CouplingGroup:
     accelerated_fields: Optional[dict[str, tuple[str, ...]]] = None
     subcycling: bool = False
     boundary_interpolation: str = "linear"
+    jacobian_reuse: int = 0
+    waveform_iterations: int = 1

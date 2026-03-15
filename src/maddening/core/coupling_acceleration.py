@@ -2,7 +2,7 @@
 Coupling acceleration methods and convergence utilities.
 
 Provides residual norms, state flattening/unflattening, and
-acceleration strategies (Aitken, fixed relaxation, IQN-ILS)
+acceleration strategies (Aitken, fixed relaxation, IQN-ILS, IQN-IMVJ)
 for iterative coupling.
 
 All functions are JAX-traceable pure functions suitable for use
@@ -11,7 +11,7 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import jax.numpy as jnp
 
@@ -100,6 +100,55 @@ def coupling_residual_mixed(
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
 
 
+def coupling_residual_interface(
+    s_new: dict[str, dict],
+    s_old: dict[str, dict],
+    interface_edges: list,
+    atol: float = 1e-8,
+    rtol: float = 1e-6,
+) -> jnp.ndarray:
+    """Check interface consistency rather than iterate change.
+
+    Computes the difference in interface values (edge source fields)
+    between two successive iterations.  Only the fields that appear
+    on intra-group edges are compared.
+
+    Parameters
+    ----------
+    s_new : dict
+        New iteration state.
+    s_old : dict
+        Previous iteration state.
+    interface_edges : list of EdgeSpec
+        Edges internal to the coupling group.
+    atol : float
+        Absolute tolerance.
+    rtol : float
+        Relative tolerance.
+
+    Returns
+    -------
+    jnp.ndarray
+        Scalar RMS error norm.  Converged when <= 1.0.
+    """
+    sum_sq = jnp.array(0.0)
+    count = jnp.array(0, dtype=jnp.int32)
+    for edge in interface_edges:
+        new_val = s_new[edge.source_node][edge.source_field]
+        old_val = s_old[edge.source_node][edge.source_field]
+        if edge.transform is not None:
+            new_val = edge.transform(new_val)
+            old_val = edge.transform(old_val)
+        diff = jnp.abs(new_val - old_val)
+        scale = atol + rtol * jnp.maximum(
+            jnp.abs(new_val), jnp.abs(old_val)
+        )
+        scaled = diff / scale
+        sum_sq = sum_sq + jnp.sum(scaled ** 2)
+        count = count + scaled.size
+    return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+
+
 # ------------------------------------------------------------------
 # State flattening / unflattening
 # ------------------------------------------------------------------
@@ -107,6 +156,7 @@ def coupling_residual_mixed(
 def flatten_coupled_state(
     state: dict[str, dict],
     node_names: list[str],
+    fields: Optional[dict[str, tuple[str, ...]]] = None,
 ) -> jnp.ndarray:
     """Flatten coupled nodes' state fields into a single 1D vector.
 
@@ -118,6 +168,10 @@ def flatten_coupled_state(
         Nested state dict ``{node_name: {field: array}}``.
     node_names : list of str
         Which nodes to include.
+    fields : dict or None
+        If provided, only include the specified fields per node.
+        ``{node_name: (field1, field2, ...)}``
+        If None, include all fields.
 
     Returns
     -------
@@ -126,7 +180,13 @@ def flatten_coupled_state(
     """
     parts = []
     for nn in node_names:
-        for field in sorted(state[nn].keys()):
+        if fields is not None:
+            if nn not in fields:
+                continue  # Skip nodes not in the fields dict
+            field_list = sorted(fields[nn])
+        else:
+            field_list = sorted(state[nn].keys())
+        for field in field_list:
             parts.append(jnp.ravel(state[nn][field]))
     return jnp.concatenate(parts)
 
@@ -135,6 +195,7 @@ def unflatten_coupled_state(
     flat: jnp.ndarray,
     template: dict[str, dict],
     node_names: list[str],
+    fields: Optional[dict[str, tuple[str, ...]]] = None,
 ) -> dict[str, dict]:
     """Unflatten a 1D vector back into the nested state dict structure.
 
@@ -146,6 +207,8 @@ def unflatten_coupled_state(
         State dict with the correct shapes (used as a template).
     node_names : list of str
         Which nodes were included in the flat vector.
+    fields : dict or None
+        If provided, only these fields per node are in the flat vector.
 
     Returns
     -------
@@ -155,8 +218,14 @@ def unflatten_coupled_state(
     result: dict[str, dict[str, Any]] = {}
     offset = 0
     for nn in node_names:
+        if fields is not None:
+            if nn not in fields:
+                continue  # Skip nodes not in the fields dict
+            field_list = sorted(fields[nn])
+        else:
+            field_list = sorted(template[nn].keys())
         result[nn] = {}
-        for field in sorted(template[nn].keys()):
+        for field in field_list:
             shape = template[nn][field].shape
             size = 1
             for s in shape:

@@ -23,6 +23,7 @@ class EdgeSpec:
     source_field: str
     target_field: str
     transform: Optional[Callable] = None
+    additive: bool = False  # If True, ADD to existing boundary_input value
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -37,6 +38,8 @@ class EdgeSpec:
         }
         if self.transform is not None:
             d["transform"] = self.transform.__qualname__
+        if self.additive:
+            d["additive"] = True
         return d
 
     def __repr__(self) -> str:

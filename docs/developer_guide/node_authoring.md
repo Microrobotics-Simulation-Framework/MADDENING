@@ -238,10 +238,122 @@ python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 ```
 
+## Boundary Input Specification
+
+Override `boundary_input_spec()` to declare what boundary inputs your node expects. This enables validation, documentation generation, and correct initialization for additive inputs.
+
+```python
+from maddening.core.node import BoundaryInputSpec
+
+def boundary_input_spec(self):
+    return {
+        "left_temperature": BoundaryInputSpec(
+            shape=(), description="Dirichlet BC at left end",
+        ),
+        "heat_source": BoundaryInputSpec(
+            shape=(self.params["n_cells"],),
+            description="Volumetric heat source",
+            coupling_type="additive",  # multiple edges sum
+        ),
+    }
+```
+
+Each entry maps a boundary input name to a `BoundaryInputSpec` with:
+- `shape`: array shape (empty tuple for scalar)
+- `dtype`: JAX dtype (default `jnp.float32`)
+- `default`: default value if not supplied
+- `coupling_type`: `"replacive"` (last edge wins, default) or `"additive"` (edges sum)
+- `description`: human-readable description
+
+## Exposing Flux Quantities
+
+Override `compute_boundary_fluxes()` to expose derived quantities (forces, heat fluxes) that other nodes can consume via edges. Flux fields are NOT part of state — they are computed on-the-fly.
+
+```python
+def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    T = state["temperature"]
+    dx = self.params["length"] / self.params["n_cells"]
+    alpha = self.params["thermal_diffusivity"]
+    return {
+        "left_heat_flux": -alpha * (T[1] - T[0]) / dx,
+        "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx,
+    }
+```
+
+Requirements:
+- Must be a **pure JAX-traceable function** (same rules as `update`)
+- Return a dict of JAX arrays
+- Keys become available as `source_field` on edges
+- Called automatically after each node update during edge resolution
+
+## Additive vs Replacive Inputs
+
+By default, if multiple edges write to the same boundary input, the last one wins ("replacive"). For inputs that should accumulate (e.g., forces from multiple sources), mark them as `"additive"`:
+
+```python
+# In boundary_input_spec():
+"force": BoundaryInputSpec(shape=(2,), coupling_type="additive")
+
+# When adding edges:
+gm.add_edge("spring1", "body", "spring_force", "force", additive=True)
+gm.add_edge("spring2", "body", "spring_force", "force", additive=True)
+# body receives the SUM of both spring forces
+```
+
+The first additive edge sets the initial value; subsequent additive edges accumulate via addition.
+
+## Coupling Patterns
+
+### Value coupling (most common)
+One node's state field feeds another's boundary input:
+```python
+from maddening.core.coupling_helpers import add_value_coupling
+add_value_coupling(gm, "ball", "spring", "position", "anchor_position")
+```
+
+### Flux coupling
+One node's flux output feeds another's boundary input:
+```python
+from maddening.core.coupling_helpers import add_flux_coupling
+add_flux_coupling(gm, "rod_a", "rod_b", "right_heat_flux", "heat_source")
+```
+
+### Dirichlet-Neumann coupling
+The classic partitioned approach — one node gets a value BC, the other gets a flux BC:
+```python
+from maddening.core.coupling_helpers import add_dirichlet_neumann_pair
+add_dirichlet_neumann_pair(
+    gm,
+    dirichlet_node="rod_a",  # receives temperature (value)
+    neumann_node="rod_b",    # receives heat flux
+    value_field="temperature",
+    flux_field="right_heat_flux",
+    value_input="right_temperature",
+    flux_input="heat_source",
+    value_transform=lambda T: T[0],
+)
+```
+
+### Robin coupling
+Combines value and flux for better convergence:
+```python
+from maddening.core.coupling_helpers import add_robin_coupling
+add_robin_coupling(
+    gm, "rod_a", "rod_b",
+    value_field_a="temperature", flux_field_a="right_heat_flux",
+    value_field_b="temperature", flux_field_b="left_heat_flux",
+    input_a="right_temperature", input_b="left_temperature",
+    alpha=0.5,  # mixing: 0=pure Neumann, 1=pure Dirichlet
+)
+```
+
 ## New Node Checklist
 
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
 - [ ] `update()` is JAX-traceable (jit, grad, vmap compatible)
+- [ ] `boundary_input_spec()` overridden (declares expected boundary inputs)
+- [ ] `compute_boundary_fluxes()` overridden if node exposes flux quantities
+- [ ] Additive inputs marked with `coupling_type="additive"` in spec
 - [ ] `@stability(StabilityLevel.EXPERIMENTAL)` decorator applied
 - [ ] `NodeMeta` metadata attached (algorithm ID, stability, assumptions, limitations, hazard_hints)
 - [ ] NumPy-style docstring with Parameters, Boundary inputs

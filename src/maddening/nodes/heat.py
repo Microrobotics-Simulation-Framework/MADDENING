@@ -12,7 +12,7 @@ and JIT-compilable.
 
 import jax.numpy as jnp
 
-from maddening.core.node import SimulationNode
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.stability import stability
 
@@ -164,3 +164,27 @@ class HeatNode(SimulationNode):
         T_new = T_new.at[-1].set(T_right)
 
         return {"temperature": T_new}
+
+    def boundary_input_spec(self):
+        n = self.params["n_cells"]
+        return {
+            "left_temperature": BoundaryInputSpec(
+                shape=(), description="Dirichlet BC at left end",
+            ),
+            "right_temperature": BoundaryInputSpec(
+                shape=(), description="Dirichlet BC at right end",
+            ),
+            "heat_source": BoundaryInputSpec(
+                shape=(n,), description="Volumetric heat source",
+                coupling_type="additive",
+            ),
+        }
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+        T = state["temperature"]
+        dx = self.params["length"] / self.params["n_cells"]
+        alpha = self.params["thermal_diffusivity"]
+        return {
+            "left_heat_flux": -alpha * (T[1] - T[0]) / dx,
+            "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx,
+        }

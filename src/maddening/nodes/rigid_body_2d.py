@@ -14,7 +14,7 @@ JAX-traceable and JIT-compilable.
 
 import jax.numpy as jnp
 
-from maddening.core.node import SimulationNode
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.stability import stability
 
@@ -172,4 +172,16 @@ class RigidBody2DNode(SimulationNode):
             "angle": angle_new,
             "v": v_new,
             "omega": omega_new,
+        }
+
+    def boundary_input_spec(self):
+        return {
+            "force": BoundaryInputSpec(
+                shape=(2,), description="External force [Fx, Fy]",
+                coupling_type="additive",
+            ),
+            "torque": BoundaryInputSpec(
+                shape=(), description="External torque",
+                coupling_type="additive",
+            ),
         }

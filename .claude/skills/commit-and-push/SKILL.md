@@ -29,9 +29,10 @@ Run all three compliance validation scripts:
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
+python scripts/check_transforms.py
 ```
 
-**Gate**: All three must exit 0. Fix any errors before continuing.
+**Gate**: All four must exit 0. Fix any errors before continuing.
 
 ### 3. Commit Message Convention
 
@@ -105,6 +106,14 @@ If the commit renames or moves any function referenced in an algorithm guide's I
 
 - [ ] Algorithm guide updated with new qualified name
 - [ ] `python scripts/check_impl_mapping.py` passes
+
+### 8b. Transform Registry Checks (if applicable)
+
+If the commit adds or modifies edge transforms used in production examples or scenarios:
+
+- [ ] Transforms registered via `@register_transform` from `maddening.core.transforms`
+- [ ] String transform references in production code resolve in the registry
+- [ ] `python scripts/check_transforms.py` passes
 
 ### 9. API Stability Checks (if applicable)
 

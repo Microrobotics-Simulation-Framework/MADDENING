@@ -812,7 +812,16 @@ class GraphManager:
         transform: Optional[Callable] = None,
         additive: bool = False,
     ) -> None:
-        """Add a data-dependency edge between two nodes."""
+        """Add a data-dependency edge between two nodes.
+
+        The *transform* parameter accepts either a callable or a
+        string name registered via ``@register_transform``.  String
+        names are resolved immediately; a ``KeyError`` is raised if
+        the name is not in the registry.
+        """
+        if isinstance(transform, str):
+            from maddening.core.transforms import resolve_transform
+            transform = resolve_transform(transform)
         edge = EdgeSpec(source, target, source_field, target_field,
                         transform, additive)
         self._edges.append(edge)

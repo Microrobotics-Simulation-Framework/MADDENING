@@ -29,6 +29,10 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - `BoundaryInputSpec` dataclass and `boundary_input_spec()` on HeatNode, SpringDamperNode, BallNode, RigidBody2DNode
 - `compute_boundary_fluxes()` on HeatNode (left/right heat flux) and SpringDamperNode (spring force)
 - Flux coupling demo and node authoring guide sections on flux coupling patterns
+- `TransformRegistry` with `@register_transform` decorator for named, serializable edge transforms; built-in transforms (`extract_first`, `extract_last`, `negate`, `scale`, `identity`); `GraphManager.add_edge` accepts string transform names
+- `scripts/check_transforms.py` CI validation script for string transform references
+- Gradient health audit: verified `jax.grad` finite through 1000-step coupled rollouts for springs, heat rods, and multi-physics systems
+- Parameter recovery baseline: gradient-based recovery of spring stiffness and damping from trajectory data (inline physics, proving differentiability concept)
 
 ### Fixed
 - Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step

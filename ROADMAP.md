@@ -96,6 +96,23 @@ Build the full documentation site with Sphinx.
 - **Why deferred**: Phase 5 in Appendix E — depends on everything else being stable first.
 - **Priority**: Medium — important for downstream users but not blocking development.
 
+### Accuracy & USD Integration (see PLAN_accuracy_and_usd.md)
+
+Phased plan for simulation accuracy improvements and OpenUSD integration:
+
+- **Phase 0** [DONE]: Gradient health audit + parameter recovery baseline (14 tests)
+- **Phase 1**: Interface DOF awareness + coupling predictors
+- **Phase 2**: Hybrid physics+learned residual nodes, coupling auto-tune
+- **Phase 3**: Node `derivatives()` method + RK4 integrators
+- **Phase 4**: Differentiable calibration tooling
+- **Phase 5**: Implicit node support
+- **Phase 6**: USD write path (live stage for MICROBOTICA)
+- **Phase 7** [started]: Transform registry [DONE] + codeless USD schemas + GraphManager serialization
+- **Phase 8**: Spatial accuracy (higher-order FD, non-uniform grids, conservative 2D/3D mapping)
+- **Phase 9**: USD read path + bifurcating vessel phantom example
+
+See `PLAN_accuracy_and_usd.md` for full details including verification gates and dependencies.
+
 ### Tier 1: Easy (days of work, minimal dependencies)
 
 #### 1. Field Subscriptions for State Streaming

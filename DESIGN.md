@@ -612,3 +612,91 @@ For cloud-computed physics with a real robot:
 
 The `NetworkRelay` already tolerates dropped frames via `ZMQ.CONFLATE`,
 making it robust to variable network conditions.
+
+---
+
+## 9. OpenUSD Integration Architecture
+
+MADDENING's primary output bus is an OpenUSD stage, shared with
+MICROBOTICA (the interactive simulation platform above MADDENING in
+the stack).  Design decisions for the USD integration:
+
+### Codeless Schemas (not hand-coded, not full usdGenSchema)
+
+USD's codeless schema mechanism (available since USD 21.08) provides
+formally typed prim schemas without C++ code generation.  This was
+chosen over:
+
+- **Hand-coded typeName strings**: prims are untyped in USD's type
+  system — no property introspection, no fallback values, no
+  validation.  Insufficient for IEC 62304 traceability.
+- **Full usdGenSchema**: requires C++ compiler, CMake, Boost, TBB,
+  and the full USD build tree.  ABI compatibility with `usd-core`
+  from PyPI is an unsolved problem (Pixar issue #2531).
+
+Codeless schemas are shipped as two static files (`plugInfo.json`,
+`generatedSchema.usda`) as pip-distributable package data.  Prim
+types: `MaddeningSimulationGraph`, `MaddeningNode`, `MaddeningEdge`,
+`MaddeningCouplingGroup`, `MaddeningExternalInput`.
+
+**Migration path**: if C++ accessor classes are ever needed, remove
+`skipCodeGeneration = true` from `schema.usda`.  Type names and all
+downstream consumers remain unchanged.
+
+### Threading and Stage Ownership
+
+- **Single writer (MADDENING physics thread), multiple readers
+  (MICROBOTICA render threads).**
+- Frame writes are atomic via `Sdf.ChangeBlock`.
+- Readers are notified via `Tf.Notice` (USD's built-in push
+  notification).  No polling.
+- When physics outruns rendering, the renderer sees the latest
+  frame (natural frame dropping).
+
+### Late Registration Guard
+
+`Plug.Registry().RegisterPlugins()` must be called BEFORE any
+`Usd.Stage` operations (the `UsdSchemaRegistry` is a singleton
+initialised once).  `import maddening.usd` is the registration
+point.  Late registration raises `RuntimeError` with an actionable
+message.
+
+### Transform Registry
+
+Edge transforms are Python callables that aren't directly
+serializable.  The `TransformRegistry` (`maddening.core.transforms`)
+bridges this gap:
+
+- `@register_transform("name")` decorator registers a callable
+  by name (serialized to USD).
+- Registration is optional for local use; required for USD
+  serialization (`save_graph_to_usd` raises
+  `UnregisteredTransformError` for unregistered callables).
+- `compile()` emits a warning for unregistered transforms.
+- Built-in transforms: `extract_first`, `extract_last`, `negate`,
+  `scale(factor)`, `identity`, etc.
+- CI: `scripts/check_transforms.py` validates string references.
+
+### Layer Composition
+
+Simulation scenarios compose three USD layers:
+1. **Geometry layer**: meshes, transforms, materials (e.g., from
+   neuroimaging)
+2. **Graph layer**: nodes, edges, coupling groups, parameters
+3. **Results layer**: time-sampled state output per node per step
+
+---
+
+## 10. Parameter Differentiability
+
+Node parameters (`self.params`) are Python floats baked into JIT
+as compile-time constants.  They do NOT participate in JAX autodiff.
+
+**Current path**: `jax.grad` works through initial conditions and
+external inputs, which are JAX arrays in the state dict.
+
+**Planned path** (Phase 4 calibration tooling): a `calibrate()`
+utility that rebuilds the step function with parameters as JAX-traced
+values, enabling gradient-based parameter recovery from trajectory
+data.  The node contract itself does not change — the calibration
+layer constructs differentiable wrappers around existing nodes.

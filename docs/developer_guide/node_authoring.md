@@ -347,6 +347,61 @@ add_robin_coupling(
 )
 ```
 
+## Transform Registration
+
+Edge transforms are Python callables applied to data as it flows along edges. For local development, inline lambdas work fine. For **USD serialization** (and eventually IEC 62304 traceability), transforms must be registered with a unique name.
+
+### Registering a transform
+
+```python
+from maddening.core.transforms import register_transform
+
+@register_transform("extract_right_boundary")
+def extract_right_boundary(T):
+    """Extract the rightmost cell of a temperature array."""
+    return T[-1]
+```
+
+Once registered, use either the callable or its string name in edges:
+
+```python
+gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature",
+            transform="extract_right_boundary")
+# OR equivalently:
+gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature",
+            transform=extract_right_boundary)
+```
+
+### When to register
+
+| Scenario | Registration required? |
+|----------|----------------------|
+| Local development / testing | No (lambdas OK) |
+| USD graph serialization | **Yes** (unregistered raises `UnregisteredTransformError`) |
+| Production simulation scenarios | Recommended (enables traceability) |
+
+### Built-in transforms
+
+These are pre-registered and always available:
+
+| Name | Description |
+|------|-------------|
+| `extract_first` | `arr[0]` |
+| `extract_last` | `arr[-1]` |
+| `extract_second` | `arr[1]` |
+| `extract_second_last` | `arr[-2]` |
+| `negate` | `-x` |
+| `identity` | pass-through |
+| `scale(factor)` | `factor * x` (auto-registered as `"scale_{factor}"`) |
+
+### CI validation
+
+The `scripts/check_transforms.py` CI script scans production code for string transform references and verifies they resolve in the registry. Run it alongside the other compliance checks:
+
+```bash
+python scripts/check_transforms.py
+```
+
 ## New Node Checklist
 
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
@@ -370,4 +425,5 @@ add_robin_coupling(
 - [ ] Integration test within a `GraphManager`
 - [ ] Known limitations entered in `docs/validation/known_anomalies.yaml`
 - [ ] Entry in `docs/bibliography.bib` for primary reference
-- [ ] All CI checks pass: `check_anomalies.py`, `check_impl_mapping.py`, `check_citations.py`
+- [ ] Edge transforms registered via `@register_transform` if used in production scenarios
+- [ ] All CI checks pass: `check_anomalies.py`, `check_impl_mapping.py`, `check_citations.py`, `check_transforms.py`

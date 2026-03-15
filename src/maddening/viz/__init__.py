@@ -36,4 +36,13 @@ def __getattr__(name):
     if name == "GPUHistoryViewer":
         from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
         return GPUHistoryViewer
+    if name == "viewer_from_usd":
+        from maddening.viz.usd_viewer import viewer_from_usd
+        return viewer_from_usd
+    if name == "viewer_from_usd_with_geometry":
+        from maddening.viz.usd_viewer import viewer_from_usd_with_geometry
+        return viewer_from_usd_with_geometry
+    if name == "render_usd_frame":
+        from maddening.viz.usd_viewer import render_usd_frame
+        return render_usd_frame
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

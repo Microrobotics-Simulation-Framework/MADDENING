@@ -113,6 +113,33 @@ class _ParticleDef:
     periodic_x: float | None  # wrap-around period (e.g. nx), or None
 
 
+@dataclass
+class _CurveTubeDef:
+    """A tube along a 3D centerline, colored by a scalar field."""
+    node: str
+    field_name: str
+    centerline: np.ndarray  # (N, 3) array
+    radius: float
+    n_sides: int
+    cmap: str
+    clim: tuple[float, float] | None
+    opacity: float
+    label: str
+
+
+@dataclass
+class _LinePlotDef:
+    """A 1D line plot of a scalar field over its spatial index."""
+    node: str
+    field_name: str
+    positions: np.ndarray | None  # (N,) x-coordinates, or None for indices
+    y_offset: float  # vertical offset for stacking multiple plots
+    scale: float  # vertical scale factor
+    color: str
+    line_width: float
+    label: str
+
+
 # ------------------------------------------------------------------
 # HistoryViewer3D
 # ------------------------------------------------------------------
@@ -167,6 +194,8 @@ class HistoryViewer3D:
         self._static_meshes: list[_StaticMeshDef] = []
         self._rotating_meshes: list[_RotatingMeshDef] = []
         self._particles: list[_ParticleDef] = []
+        self._curve_tubes: list[_CurveTubeDef] = []
+        self._line_plots: list[_LinePlotDef] = []
 
         # Runtime state (set during show())
         self._plotter = None
@@ -326,6 +355,91 @@ class HistoryViewer3D:
         self._particles.append(_ParticleDef(
             node, field, start_pos, radius, color, opacity,
             clamp_y, clamp_z, periodic_x,
+        ))
+
+    def add_curve_tube(
+        self,
+        node: str,
+        field: str,
+        centerline: np.ndarray,
+        radius: float = 0.02,
+        n_sides: int = 12,
+        cmap: str = "coolwarm",
+        clim: tuple[float, float] | None = None,
+        opacity: float = 1.0,
+        label: str = "",
+    ):
+        """Add a 3D tube along a centerline, colored by a scalar field.
+
+        Useful for pipe/vessel visualizations where the node's state
+        (e.g. temperature) is a 1D array mapped onto a 3D centerline.
+
+        Parameters
+        ----------
+        node : str
+            Node name in the history dict.
+        field : str
+            Scalar field name (e.g. ``"temperature"``).
+        centerline : array, shape (N, 3)
+            3D coordinates of the tube centerline.
+        radius : float
+            Tube radius.
+        n_sides : int
+            Number of tube polygon sides.
+        cmap : str
+            Matplotlib colormap.
+        clim : tuple or None
+            Color limits.  Auto-computed across all frames if None.
+        opacity : float
+            Tube opacity.
+        label : str
+            Color bar label.
+        """
+        self._curve_tubes.append(_CurveTubeDef(
+            node, field, np.asarray(centerline), radius, n_sides,
+            cmap, clim, opacity, label or f"{node}.{field}",
+        ))
+
+    def add_line_plot(
+        self,
+        node: str,
+        field: str,
+        positions: np.ndarray | None = None,
+        y_offset: float = 0.0,
+        scale: float = 1.0,
+        color: str = "#2244AA",
+        line_width: float = 3.0,
+        label: str = "",
+    ):
+        """Add a 1D line plot of a scalar field rendered in 3D space.
+
+        The field values are plotted as height (z-axis) vs spatial
+        position (x-axis), useful for visualizing temperature profiles,
+        wave solutions, or any 1D field.
+
+        Parameters
+        ----------
+        node : str
+            Node name.
+        field : str
+            Scalar field name.
+        positions : array or None
+            Spatial x-coordinates of the field values.  If None,
+            uses array indices.
+        y_offset : float
+            Y-offset for stacking multiple line plots.
+        scale : float
+            Vertical scale factor for the field values.
+        color : str
+            Line color.
+        line_width : float
+            Line width.
+        label : str
+            Label.
+        """
+        self._line_plots.append(_LinePlotDef(
+            node, field, positions, y_offset, scale,
+            color, line_width, label or f"{node}.{field}",
         ))
 
     # ------------------------------------------------------------------
@@ -530,6 +644,58 @@ class HistoryViewer3D:
                        smooth_shading=True)
             self._particle_meshes.append(sphere)
 
+        # --- curve tubes ---
+        for i, cdef in enumerate(self._curve_tubes):
+            n = len(cdef.centerline)
+            cells = np.zeros(n + 1, dtype=np.int64)
+            cells[0] = n
+            cells[1:] = np.arange(n)
+            line = pv.PolyData(cdef.centerline, lines=cells)
+            tube = line.tube(radius=cdef.radius, n_sides=cdef.n_sides)
+            # Map scalar data from centerline to tube surface
+            scalars = self._get_field(cdef.node, cdef.field_name, 0)
+            scalars = np.asarray(scalars, dtype=np.float32)
+            if len(scalars) != n:
+                # Interpolate to match centerline length
+                x_s = np.linspace(0, 1, len(scalars))
+                x_c = np.linspace(0, 1, n)
+                scalars = np.interp(x_c, x_s, scalars)
+            from scipy.spatial import cKDTree
+            tree = cKDTree(cdef.centerline)
+            _, idx = tree.query(tube.points)
+            tube["scalars"] = scalars[idx]
+            self._slice_meshes[f"curve_tube_{i}"] = tube
+            self._slice_meshes[f"curve_tube_{i}_tree"] = tree
+            self._slice_meshes[f"curve_tube_{i}_idx"] = idx
+            self._slice_meshes[f"curve_tube_{i}_n_center"] = n
+            clim = cdef.clim
+            if clim is None:
+                clim = self._global_clim_curve(cdef)
+            p.add_mesh(
+                tube, scalars="scalars", cmap=cdef.cmap, clim=clim,
+                opacity=cdef.opacity, show_scalar_bar=True,
+                scalar_bar_args={"title": cdef.label},
+            )
+
+        # --- line plots ---
+        for i, ldef in enumerate(self._line_plots):
+            vals = np.asarray(self._get_field(ldef.node, ldef.field_name, 0),
+                              dtype=np.float32)
+            n = len(vals)
+            if ldef.positions is not None:
+                xs = np.asarray(ldef.positions, dtype=np.float32)
+            else:
+                xs = np.arange(n, dtype=np.float32)
+            ys = np.full(n, ldef.y_offset, dtype=np.float32)
+            zs = vals * ldef.scale
+            pts = np.column_stack([xs, ys, zs])
+            cells = np.zeros(n + 1, dtype=np.int64)
+            cells[0] = n
+            cells[1:] = np.arange(n)
+            line = pv.PolyData(pts, lines=cells)
+            self._slice_meshes[f"line_plot_{i}"] = line
+            p.add_mesh(line, color=ldef.color, line_width=ldef.line_width)
+
         p.add_axes()
         p.reset_camera()
 
@@ -543,6 +709,21 @@ class HistoryViewer3D:
             )
             vmin = min(vmin, float(scalars.min()))
             vmax = max(vmax, float(scalars.max()))
+        if vmax - vmin < 1e-10:
+            vmax = vmin + 1.0
+        return (vmin, vmax)
+
+    def _global_clim_curve(self, cdef: _CurveTubeDef):
+        """Compute colour limits across sampled frames for a curve tube."""
+        vmin, vmax = np.inf, -np.inf
+        sample = np.linspace(0, self._n_frames - 1,
+                             min(20, self._n_frames), dtype=int)
+        for f in sample:
+            vals = np.asarray(
+                self._get_field(cdef.node, cdef.field_name, int(f))
+            )
+            vmin = min(vmin, float(vals.min()))
+            vmax = max(vmax, float(vals.max()))
         if vmax - vmin < 1e-10:
             vmax = vmin + 1.0
         return (vmin, vmax)
@@ -595,6 +776,34 @@ class HistoryViewer3D:
             new_pos = traj[frame]
             old_center = np.array(self._particle_meshes[k].center)
             self._particle_meshes[k].translate(new_pos - old_center, inplace=True)
+
+        # --- curve tubes (cheap: data copy) ---
+        for i, cdef in enumerate(self._curve_tubes):
+            key = f"curve_tube_{i}"
+            tube = self._slice_meshes[key]
+            idx = self._slice_meshes[f"{key}_idx"]
+            n_center = self._slice_meshes[f"{key}_n_center"]
+            scalars = np.asarray(
+                self._get_field(cdef.node, cdef.field_name, frame),
+                dtype=np.float32,
+            )
+            if len(scalars) != n_center:
+                x_s = np.linspace(0, 1, len(scalars))
+                x_c = np.linspace(0, 1, n_center)
+                scalars = np.interp(x_c, x_s, scalars).astype(np.float32)
+            tube["scalars"] = scalars[idx]
+
+        # --- line plots (update point positions) ---
+        for i, ldef in enumerate(self._line_plots):
+            key = f"line_plot_{i}"
+            line = self._slice_meshes[key]
+            vals = np.asarray(
+                self._get_field(ldef.node, ldef.field_name, frame),
+                dtype=np.float32,
+            )
+            pts = line.points.copy()
+            pts[:, 2] = vals * ldef.scale
+            line.points = pts
 
         # --- arrows (skip during playback) ---
         if not light:

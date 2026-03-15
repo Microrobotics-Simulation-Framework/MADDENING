@@ -46,6 +46,10 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - USD geometry reader: `load_grid_from_usd()`, `create_vessel_phantom()` (Y-shaped bifurcating vessel)
 - `geometry_source` attribute on SimulationNode for USD-initialized nodes
 - Vessel bifurcation coupling example: three HeatNodes initialized from USD geometry, coupled at Y-junction
+- `HistoryViewer3D.add_curve_tube()`: render 3D centerline tubes colored by scalar fields (vessels, pipes, rods)
+- `HistoryViewer3D.add_line_plot()`: render 1D fields as 3D line plots (temperature profiles, wave solutions)
+- `viewer_from_usd()`, `viewer_from_usd_with_geometry()`, `render_usd_frame()`: bridge USD results data to the general-purpose HistoryViewer3D for interactive replay and screenshots
+- USD tests skip gracefully when `usd-core` is not installed (CI compatibility for Python 3.10/3.11)
 
 ### Fixed
 - Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step

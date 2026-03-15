@@ -104,6 +104,14 @@ class BallNode(SimulationNode):
 
         return {"position": position, "velocity": velocity}
 
+    def derivatives(self, state, boundary_inputs):
+        """dx/dt = v, dv/dt = g (no collision)."""
+        gravity = self.params["gravity"]
+        return {
+            "position": state["velocity"],
+            "velocity": jnp.array(gravity, dtype=jnp.float32),
+        }
+
     def boundary_input_spec(self):
         return {
             "table_position": BoundaryInputSpec(

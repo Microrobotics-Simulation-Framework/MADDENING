@@ -59,6 +59,9 @@ viz3d = ["pyvista>=0.42", "Pillow>=9.0"]
 # GPU-accelerated 3D visualization (pygfx on WebGPU)
 gpu-viz = ["pygfx>=0.16", "rendercanvas>=2.0", "glfw>=2.0", "scikit-image>=0.20"]
 
+# OpenUSD integration (USD read/write, codeless schemas)
+usd = ["usd-core>=21.8"]
+
 # SBOM generation (Section 14)
 sbom = ["cyclonedx-bom>=4.0"]
 
@@ -106,6 +109,10 @@ Repository = "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/maddening"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/maddening/usd/schema/generatedSchema.usda" = "maddening/usd/schema/generatedSchema.usda"
+"src/maddening/usd/schema/plugInfo.json" = "maddening/usd/schema/plugInfo.json"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

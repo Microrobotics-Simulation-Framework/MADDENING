@@ -85,6 +85,13 @@ class CouplingGroup:
         For subcycling groups: number of waveform relaxation
         iterations.  ``1`` is current behaviour (single pass),
         ``> 1`` iterates over entire sub-step windows.
+    predictor : str
+        Extrapolation of the coupling initial guess from previous
+        converged states.  ``"none"`` uses the current state (default),
+        ``"linear"`` uses linear extrapolation from the last two
+        converged states, ``"quadratic"`` uses quadratic extrapolation
+        from the last three converged states.  Reduces iteration count
+        for smoothly varying problems.
     """
     nodes: frozenset[str]
     max_iterations: int = 10
@@ -101,3 +108,4 @@ class CouplingGroup:
     boundary_interpolation: str = "linear"
     jacobian_reuse: int = 0
     waveform_iterations: int = 1
+    predictor: str = "none"

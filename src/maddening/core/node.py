@@ -62,6 +62,7 @@ class SimulationNode(ABC):
     def __init__(self, name: str, timestep: float, **params):
         self.name = name
         self.delta_t = float(timestep)
+        self.geometry_source: Optional[str] = params.pop("geometry_source", None)
         self.params = dict(params)
 
     # ------------------------------------------------------------------
@@ -110,6 +111,98 @@ class SimulationNode(ABC):
         Returns a dict mapping input names to BoundaryInputSpec
         descriptors.  Default: empty dict (backward compatible).
         Override to enable validation and documentation.
+        """
+        return {}
+
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        """Map boundary input name to (state_field, index).
+
+        Identifies which boundary inputs correspond to interface DOFs
+        where the node's internal BC enforcement may conflict with
+        coupled data.  The graph manager uses this together with
+        :meth:`compute_interface_correction` to undo internal BC
+        enforcement on coupled interface cells.
+
+        Default: ``{}`` (no interface DOFs -- backward compatible).
+
+        Example for a heat rod with Dirichlet BCs at both ends::
+
+            return {
+                "left_temperature": ("temperature", 0),
+                "right_temperature": ("temperature", -1),
+            }
+        """
+        return {}
+
+    def derivatives(
+        self, state: dict, boundary_inputs: dict
+    ) -> dict[str, Any]:
+        """Compute time derivatives of the state fields.
+
+        Returns ``{field: d_field/dt}`` for each field.  If not all
+        fields have continuous derivatives (e.g., collision detection),
+        return only the fields that do.
+
+        This enables pluggable integration (RK4, etc.) at the graph
+        level.  Default raises ``NotImplementedError`` -- override in
+        nodes that have a natural ODE form.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement derivatives(). "
+            "Override this method to enable higher-order integration."
+        )
+
+    def implicit_residual(
+        self,
+        state_new: dict,
+        state_old: dict,
+        boundary_inputs: dict,
+        dt: float,
+    ) -> dict[str, Any]:
+        """Compute the residual for implicit (backward Euler) integration.
+
+        Returns ``{field: R(x_new)}`` where the residual is::
+
+            R(x_new) = x_new - x_old - dt * f(x_new, boundary_inputs)
+
+        Zero residual means x_new satisfies the implicit equation.
+        The graph manager solves this with a fixed-count Newton
+        iteration via ``jax.lax.fori_loop``.
+
+        Default raises ``NotImplementedError`` -- override in nodes
+        that need implicit time integration (e.g., stiff systems).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement implicit_residual()."
+        )
+
+    def compute_interface_correction(
+        self,
+        pre_state: dict,
+        boundary_inputs: dict,
+        dt: float,
+    ) -> dict[str, list[tuple[int, Any]]]:
+        """Compute corrected values at interface DOFs.
+
+        After ``update()`` is called, the coupling system calls this
+        method to obtain what the interface DOF values *should* be
+        without internal BC enforcement.  The corrections are applied
+        as ``state[field].at[index].set(value)``.
+
+        Parameters
+        ----------
+        pre_state : dict
+            The node's state **before** ``update()`` was called.
+        boundary_inputs : dict
+            The boundary inputs that were passed to ``update()``.
+        dt : float
+            The timestep.
+
+        Returns
+        -------
+        dict[str, list[tuple[int, value]]]
+            ``{field_name: [(index, corrected_value), ...]}``.
+            Default: ``{}`` (no corrections -- backward compatible).
         """
         return {}
 

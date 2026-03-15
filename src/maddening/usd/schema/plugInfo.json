@@ -1,0 +1,38 @@
+{
+    "Plugins": [{
+        "Info": {
+            "Types": {
+                "MaddeningSimulationGraph": {
+                    "bases": ["UsdTyped"],
+                    "schemaIdentifier": "MaddeningSimulationGraph",
+                    "schemaKind": "concreteTyped"
+                },
+                "MaddeningNode": {
+                    "bases": ["UsdTyped"],
+                    "schemaIdentifier": "MaddeningNode",
+                    "schemaKind": "concreteTyped"
+                },
+                "MaddeningEdge": {
+                    "bases": ["UsdTyped"],
+                    "schemaIdentifier": "MaddeningEdge",
+                    "schemaKind": "concreteTyped"
+                },
+                "MaddeningCouplingGroup": {
+                    "bases": ["UsdTyped"],
+                    "schemaIdentifier": "MaddeningCouplingGroup",
+                    "schemaKind": "concreteTyped"
+                },
+                "MaddeningExternalInput": {
+                    "bases": ["UsdTyped"],
+                    "schemaIdentifier": "MaddeningExternalInput",
+                    "schemaKind": "concreteTyped"
+                }
+            }
+        },
+        "LibraryPath": ".",
+        "Name": "maddening",
+        "ResourcePath": ".",
+        "Root": ".",
+        "Type": "resource"
+    }]
+}

@@ -210,3 +210,86 @@ def conservative_projection_1d(
         return P @ source_values
 
     return transform
+
+
+# ------------------------------------------------------------------
+# 2D mapping functions
+# ------------------------------------------------------------------
+
+def nearest_neighbor_2d(
+    source_points: jnp.ndarray,
+    target_points: jnp.ndarray,
+) -> Callable:
+    """Create a nearest-neighbor interpolation for 2D point clouds.
+
+    Parameters
+    ----------
+    source_points : array, shape ``(N_src, 2)``
+        Source point coordinates in 2D.
+    target_points : array, shape ``(N_tgt, 2)``
+        Target point coordinates in 2D.
+
+    Returns
+    -------
+    callable
+        ``(source_values,) -> target_values`` where
+        ``source_values`` has shape ``(N_src,)`` or ``(N_src, C)``
+        and ``target_values`` has the corresponding target shape.
+    """
+    source_points = jnp.asarray(source_points)
+    target_points = jnp.asarray(target_points)
+
+    # Pre-compute index mapping: for each target point, find nearest source
+    # Squared distances: (N_tgt, N_src)
+    diff = target_points[:, None, :] - source_points[None, :, :]  # (N_tgt, N_src, 2)
+    dist_sq = jnp.sum(diff ** 2, axis=-1)  # (N_tgt, N_src)
+    indices = jnp.argmin(dist_sq, axis=1)  # (N_tgt,)
+
+    def transform(source_values):
+        return source_values[indices]
+
+    return transform
+
+
+def rbf_interpolation_2d(
+    source_points: jnp.ndarray,
+    target_points: jnp.ndarray,
+    epsilon: float = 1.0,
+    kernel: str = "gaussian",
+) -> Callable:
+    """Create an RBF interpolation for 2D point clouds.
+
+    This is a convenience wrapper around :func:`rbf_interpolation`
+    that ensures the input points are treated as 2D.
+
+    Parameters
+    ----------
+    source_points : array, shape ``(N_src, 2)``
+        Source point coordinates in 2D.
+    target_points : array, shape ``(N_tgt, 2)``
+        Target point coordinates in 2D.
+    epsilon : float
+        Shape parameter for the RBF kernel.
+    kernel : str
+        One of ``"gaussian"``, ``"multiquadric"``,
+        ``"inverse_multiquadric"``, ``"thin_plate_spline"``.
+
+    Returns
+    -------
+    callable
+        ``(source_values,) -> target_values`` where
+        ``source_values`` has shape ``(N_src,)`` or ``(N_src, C)``
+        and ``target_values`` has the corresponding target shape.
+    """
+    source_points = jnp.asarray(source_points)
+    target_points = jnp.asarray(target_points)
+
+    if source_points.ndim == 1:
+        source_points = source_points.reshape(-1, 1)
+    if target_points.ndim == 1:
+        target_points = target_points.reshape(-1, 1)
+
+    # Reuse the general RBF interpolation
+    return rbf_interpolation(
+        source_points, target_points, epsilon=epsilon, kernel=kernel
+    )

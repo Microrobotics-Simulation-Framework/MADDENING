@@ -133,6 +133,29 @@ class SpringDamperNode(SimulationNode):
 
         return {"position": position, "velocity": velocity}
 
+    def derivatives(self, state, boundary_inputs):
+        """dx/dt = v, dv/dt = F/m."""
+        k = self.params["stiffness"]
+        c = self.params["damping"]
+        m = self.params["mass"]
+        rest = self.params["rest_length"]
+        anchor = boundary_inputs.get(
+            "anchor_position", jnp.array(0.0, dtype=jnp.float32)
+        )
+        force = -k * (state["position"] - anchor - rest) - c * state["velocity"]
+        return {
+            "position": state["velocity"],
+            "velocity": force / m,
+        }
+
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt):
+        """Backward Euler residual: x_new - x_old - dt * f(x_new)."""
+        derivs = self.derivatives(state_new, boundary_inputs)
+        return {
+            k: state_new[k] - state_old[k] - dt * derivs[k]
+            for k in derivs
+        }
+
     def boundary_input_spec(self):
         return {
             "anchor_position": BoundaryInputSpec(

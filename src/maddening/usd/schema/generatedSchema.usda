@@ -1,0 +1,62 @@
+#usda 1.0
+(
+    subLayers = [
+        @usd/schema.usda@
+    ]
+)
+
+class MaddeningSimulationGraph "MaddeningSimulationGraph" (
+    doc = "Root prim for a MADDENING simulation graph."
+    inherits = </Typed>
+) {
+    double maddening:baseDt = 0.01 (doc = "Base timestep")
+    bool maddening:isMultirate = false (doc = "Multi-rate scheduling enabled")
+    string maddening:description = "" (doc = "Human-readable description")
+}
+
+class MaddeningNode "MaddeningNode" (
+    doc = "A MADDENING simulation node."
+    inherits = </Typed>
+) {
+    string maddening:nodeType = "" (doc = "Python class qualified name")
+    double maddening:timestep = 0.01 (doc = "Node timestep")
+    string maddening:paramsJson = "{}" (doc = "Node parameters as JSON")
+}
+
+class MaddeningEdge "MaddeningEdge" (
+    doc = "A data dependency edge between two nodes."
+    inherits = </Typed>
+) {
+    string maddening:sourceNode = "" (doc = "Source node name")
+    string maddening:targetNode = "" (doc = "Target node name")
+    string maddening:sourceField = "" (doc = "Source state/flux field")
+    string maddening:targetField = "" (doc = "Target boundary input name")
+    string maddening:transformName = "" (doc = "Registered transform name")
+    bool maddening:additive = false (doc = "Additive edge flag")
+}
+
+class MaddeningCouplingGroup "MaddeningCouplingGroup" (
+    doc = "Configuration for an iteratively-coupled group of nodes."
+    inherits = </Typed>
+) {
+    string[] maddening:nodes = [] (doc = "Node names in the group")
+    int maddening:maxIterations = 10
+    double maddening:tolerance = 1e-6
+    string maddening:convergenceNorm = "l2"
+    string maddening:acceleration = "none"
+    double maddening:relaxation = 1.0
+    string maddening:iterationMode = "gauss-seidel"
+    bool maddening:subcycling = false
+    string maddening:boundaryInterpolation = "linear"
+    bool maddening:diagnostics = false
+    string maddening:predictor = "none"
+}
+
+class MaddeningExternalInput "MaddeningExternalInput" (
+    doc = "An external input declaration."
+    inherits = </Typed>
+) {
+    string maddening:targetNode = "" (doc = "Target node name")
+    string maddening:targetField = "" (doc = "Target boundary input name")
+    int[] maddening:shape = [] (doc = "Array shape")
+}

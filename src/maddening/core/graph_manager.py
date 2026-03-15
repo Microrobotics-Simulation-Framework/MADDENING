@@ -99,6 +99,67 @@ def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
     return result
 
 
+def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
+                               node_obj, coupled_bi_names=None):
+    """Correct interface DOFs after update to undo internal BC enforcement.
+
+    Nodes like HeatNode enforce Dirichlet BCs by overwriting boundary
+    cells after the FD update.  When those BCs come from coupling,
+    the overwrite destroys the physically meaningful stencil-computed
+    value.  This function asks the node to recompute those values via
+    ``compute_interface_correction``.
+
+    Only boundary inputs that come from coupling edges are corrected.
+    External inputs and non-coupling edges are left as-is (standard
+    Dirichlet enforcement is correct for those).
+
+    Parameters
+    ----------
+    node_state : dict
+        The node's state dict after ``update()`` was called.
+    pre_state : dict
+        The node's state dict **before** ``update()`` was called.
+    boundary_inputs : dict
+        The boundary inputs that were passed to ``update()``.
+    dt : float
+        The timestep used for the update.
+    node_obj : SimulationNode
+        The node descriptor.
+    coupled_bi_names : set or None
+        Boundary input names that come from coupling edges.
+        Only these are eligible for interface correction.
+        If None, all boundary inputs are eligible (backward compat).
+
+    Returns
+    -------
+    dict
+        The (possibly modified) node state.
+    """
+    iface = node_obj.interface_dof_indices()
+    if not iface:
+        return node_state
+    # Filter boundary inputs to only coupled ones
+    if coupled_bi_names is not None:
+        filtered_bi = {k: v for k, v in boundary_inputs.items()
+                       if k in coupled_bi_names}
+    else:
+        filtered_bi = boundary_inputs
+    if not filtered_bi:
+        return node_state
+    corrections = node_obj.compute_interface_correction(
+        pre_state, filtered_bi, dt
+    )
+    if not corrections:
+        return node_state
+    result = {**node_state}
+    for field, idx_val_list in corrections.items():
+        arr = result[field]
+        for idx, val in idx_val_list:
+            arr = arr.at[idx].set(val)
+        result[field] = arr
+    return result
+
+
 def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
@@ -141,6 +202,14 @@ def _run_coupled_block_impl(
         if edge.source_node in group.nodes and edge.target_node in group.nodes:
             group_internal.add(edge)
             group_internal_list.append(edge)
+
+    # Precompute which boundary inputs come from coupling (intra-group) edges
+    # per target node -- only these get interface correction
+    coupled_bi_names_by_node: dict[str, set] = {}
+    for edge in group_internal_list:
+        coupled_bi_names_by_node.setdefault(
+            edge.target_node, set()
+        ).add(edge.target_field)
 
     # Auto-detect interface fields for IQN acceleration
     if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -317,6 +386,10 @@ def _run_coupled_block_impl(
                 # constant: use end-of-step values
                 bi = _resolve_boundary(nn, s_cur, flux_s)
             new_sub = nodes[nn].update_fn(sub_state, bi, sub_dt)
+            new_sub = _apply_interface_overrides(
+                new_sub, sub_state, bi, sub_dt, nodes[nn].node,
+                coupled_bi_names=coupled_bi_names_by_node.get(nn),
+            )
             return new_sub, None
 
         final_sub, _ = jax.lax.scan(
@@ -335,10 +408,14 @@ def _run_coupled_block_impl(
                     nn, n_sub, _get_dt(nn),
                     latest_results, s, flux_s=flux_s,
                 )
+                # Interface overrides already applied per sub-step
             else:
                 bi = _resolve_boundary(nn, s, flux_s)
-                s[nn] = nodes[nn].update_fn(
-                    initial_node_states[nn], bi, _get_dt(nn)
+                pre = initial_node_states[nn]
+                s[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                s[nn] = _apply_interface_overrides(
+                    s[nn], pre, bi, _get_dt(nn), nodes[nn].node,
+                    coupled_bi_names=coupled_bi_names_by_node.get(nn),
                 )
             # Compute fluxes for this node
             if nn in flux_producing_nodes:
@@ -368,10 +445,14 @@ def _run_coupled_block_impl(
                     nn, n_sub, _get_dt(nn),
                     latest_results, latest_results, flux_s=flux_s,
                 )
+                # Interface overrides already applied per sub-step
             else:
                 bi = _resolve_boundary(nn, latest_results, flux_s)
-                results[nn] = nodes[nn].update_fn(
-                    initial_node_states[nn], bi, _get_dt(nn)
+                pre = initial_node_states[nn]
+                results[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                results[nn] = _apply_interface_overrides(
+                    results[nn], pre, bi, _get_dt(nn), nodes[nn].node,
+                    coupled_bi_names=coupled_bi_names_by_node.get(nn),
                 )
         s = {k: v for k, v in latest_results.items()}
         for nn in group_node_names:
@@ -722,6 +803,57 @@ def _run_coupled_block_impl(
         return r, diag_data, vw_data
 
     # ------------------------------------------------------------------
+    # Predictor: extrapolate initial guess from previous converged states
+    # ------------------------------------------------------------------
+    use_predictor = group.predictor != "none"
+    group_key = "+".join(sorted(group.nodes))
+
+    if use_predictor:
+        meta = new_state.get(_META_KEY, {})
+        pred_count = meta.get(
+            f"coupling_{group_key}_pred_count", jnp.array(0, jnp.int32)
+        )
+        # Read stored converged flattened states
+        n_hist = 3 if group.predictor == "quadratic" else 2
+        pred_hist = []
+        for pi in range(n_hist):
+            pk = f"coupling_{group_key}_pred_{pi}"
+            if pk in meta:
+                pred_hist.append(meta[pk])
+
+        if len(pred_hist) >= 2:
+            # Apply extrapolation.  pred_0 is most recent, pred_1 is
+            # one step before, pred_2 (if exists) is two steps before.
+            x_n = pred_hist[0]    # most recent converged state
+            x_nm1 = pred_hist[1]  # one before
+
+            if group.predictor == "quadratic" and len(pred_hist) >= 3:
+                x_nm2 = pred_hist[2]
+                # Quadratic: x_pred = 3*x_n - 3*x_{n-1} + x_{n-2}
+                has_enough = pred_count >= 3
+                x_pred_q = 3.0 * x_n - 3.0 * x_nm1 + x_nm2
+                # Linear fallback: x_pred = 2*x_n - x_{n-1}
+                x_pred_l = 2.0 * x_n - x_nm1
+                x_pred = jnp.where(has_enough, x_pred_q, x_pred_l)
+            else:
+                # Linear: x_pred = 2*x_n - x_{n-1}
+                x_pred = 2.0 * x_n - x_nm1
+
+            # Only apply if we have at least 2 stored states
+            has_history = pred_count >= 2
+            x_cur = flatten_coupled_state(new_state, group_node_names)
+            x_use = jnp.where(has_history, x_pred, x_cur)
+
+            # Unflatten and update new_state with predicted values
+            predicted = unflatten_coupled_state(
+                x_use, new_state, group_node_names
+            )
+            new_state = {k: v for k, v in new_state.items()}
+            for nn in group_node_names:
+                if nn in predicted:
+                    new_state[nn] = predicted[nn]
+
+    # ------------------------------------------------------------------
     # Run coupling (with waveform relaxation wrapper)
     # ------------------------------------------------------------------
     current_state = new_state
@@ -733,10 +865,36 @@ def _run_coupled_block_impl(
 
     result = current_state
 
+    # ------------------------------------------------------------------
+    # Store predictor history in _meta
+    # ------------------------------------------------------------------
+    if use_predictor:
+        converged_flat = flatten_coupled_state(result, group_node_names)
+        result.setdefault(_META_KEY, {})
+        meta_update = dict(result.get(_META_KEY, {}))
+
+        n_hist = 3 if group.predictor == "quadratic" else 2
+        # Shift history: pred_2 = old pred_1, pred_1 = old pred_0,
+        # pred_0 = current converged
+        for pi in range(n_hist - 1, 0, -1):
+            prev_key = f"coupling_{group_key}_pred_{pi - 1}"
+            cur_key = f"coupling_{group_key}_pred_{pi}"
+            if prev_key in meta_update:
+                meta_update[cur_key] = meta_update[prev_key]
+        meta_update[f"coupling_{group_key}_pred_0"] = converged_flat
+
+        # Increment counter (capped at n_hist)
+        old_count = meta_update.get(
+            f"coupling_{group_key}_pred_count", jnp.array(0, jnp.int32)
+        )
+        meta_update[f"coupling_{group_key}_pred_count"] = jnp.minimum(
+            old_count + 1, n_hist
+        )
+        result[_META_KEY] = meta_update
+
     # Write diagnostics to _meta if requested
     if group.diagnostics and diag_data is not None:
         iter_count, final_res = diag_data
-        group_key = "+".join(sorted(group.nodes))
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
@@ -749,7 +907,6 @@ def _run_coupled_block_impl(
     # Store V/W matrices for IQN-IMVJ Jacobian reuse
     if group.acceleration == "iqn-imvj" and vw_data is not None:
         final_V, final_W = vw_data
-        group_key = "+".join(sorted(group.nodes))
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
@@ -1175,7 +1332,10 @@ class GraphManager:
         has_imvj = any(
             g.acceleration == "iqn-imvj" for g in self._coupling_groups
         )
-        if has_diagnostics or has_imvj:
+        has_predictor = any(
+            g.predictor != "none" for g in self._coupling_groups
+        )
+        if has_diagnostics or has_imvj or has_predictor:
             meta = self._state.get(_META_KEY, {})
             for g in self._coupling_groups:
                 key = "+".join(sorted(g.nodes))
@@ -1214,6 +1374,23 @@ class GraphManager:
                     )
                     meta[f"coupling_{key}_W"] = jnp.zeros(
                         (n_dof, max_cols)
+                    )
+                if g.predictor != "none":
+                    # Pre-populate predictor history with flattened
+                    # node states.  Use flatten_coupled_state with
+                    # all fields (no acceleration field filtering).
+                    from maddening.core.coupling_acceleration import (
+                        flatten_coupled_state as _fcs_pred,
+                    )
+                    group_names_pred = list(g.nodes)
+                    flat0 = _fcs_pred(self._state, group_names_pred)
+                    n_pred = 3 if g.predictor == "quadratic" else 2
+                    for pi in range(n_pred):
+                        meta[f"coupling_{key}_pred_{pi}"] = flat0
+                    # Counter for how many converged states have
+                    # been stored (0 at start, up to n_pred).
+                    meta[f"coupling_{key}_pred_count"] = jnp.array(
+                        0, dtype=jnp.int32
                     )
             self._state[_META_KEY] = meta
 

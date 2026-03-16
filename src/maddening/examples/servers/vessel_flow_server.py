@@ -63,26 +63,30 @@ def _build_centerlines(grid_shape, vessel_params):
     dl = vp["daughter_length"]
     angle_rad = np.deg2rad(vp["bifurcation_angle"])
 
-    # Parent: along x-axis from 0 to pl
-    n_pts = max(20, int(pl))
+    # Parent: along x-axis from 0 to slightly past the bifurcation
+    # (extend past bif to ensure watertight junction)
+    overlap = pr * 0.5  # extend into bifurcation zone
+    n_pts = max(20, int(pl + overlap))
     parent_pts = np.column_stack([
-        np.linspace(0, pl, n_pts),
+        np.linspace(0, pl + overlap, n_pts),
         np.full(n_pts, y_mid),
         np.full(n_pts, z_mid),
     ])
 
-    # Daughter directions
+    # Daughter centerlines start INSIDE the parent (overlap for watertight join)
     left_dir = np.array([np.cos(angle_rad), -np.sin(angle_rad), 0.0])
     right_dir = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
     bif = np.array([pl, y_mid, z_mid])
 
+    # Start daughters slightly before the bifurcation point
+    start_offset = -pr * 0.3  # start inside the parent
     n_d = max(16, int(dl))
-    t = np.linspace(0, dl, n_d)
+    t = np.linspace(start_offset, dl, n_d)
     left_pts = bif[None, :] + t[:, None] * left_dir[None, :]
     right_pts = bif[None, :] + t[:, None] * right_dir[None, :]
 
     return [
-        ("parent", parent_pts, pr * 0.8),  # slightly smaller for viz
+        ("parent", parent_pts, pr * 0.8),
         ("daughter_left", left_pts, dr * 0.8),
         ("daughter_right", right_pts, dr * 0.8),
     ]
@@ -134,6 +138,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     _base_mask = vessel_mask              # original geometry
     _clot_active = [False]                # mutable flag
     _clot_mask = [vessel_mask]            # current mask (may include clot)
+    _clot_pos = [None]                    # (x, y, z, radius) for 3D rendering
 
     app = FastAPI(title="MADDENING Vessel Flow")
 
@@ -214,6 +219,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
         new_mask = np.array(_base_mask, copy=True) | clot_region
         _clot_mask[0] = jnp.asarray(new_mask)
         _clot_active[0] = True
+        _clot_pos[0] = [x, y, z, radius]
 
         # Register external input if not already registered
         _ensure_mask_external()
@@ -228,6 +234,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
         """Restore original vessel geometry."""
         _clot_mask[0] = _base_mask
         _clot_active[0] = False
+        _clot_pos[0] = None
         return {"status": "clot_cleared"}
 
     _mask_ext_registered = [False]
@@ -305,16 +312,24 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
                         data["arterial_pressure"] = float(hs["arterial_pressure"])
                         data["flow_rate"] = float(hs["flow_rate"])
                         data["phase"] = float(hs["phase"])
-                    # Extract velocity magnitude along each centerline
+                    # Extract field profiles along vessel centerline
                     # for client-side 3D coloring
                     if "vessel" in state:
                         vel = np.asarray(state["vessel"]["velocity"])
+                        prs = np.asarray(state["vessel"]["pressure"])
                         if vel.ndim == 4:  # (nx,ny,nz,3)
                             mag = np.sqrt(np.sum(vel ** 2, axis=-1))
                             ny_g, nz_g = mag.shape[1], mag.shape[2]
-                            # Extract 1D profile through center
-                            center_profile = mag[:, ny_g // 2, nz_g // 2]
-                            data["velocity_profile"] = center_profile.tolist()
+                            cy, cz = ny_g // 2, nz_g // 2
+                            data["velocity_profile"] = mag[:, cy, cz].tolist()
+                        if prs.ndim == 3:
+                            ny_g, nz_g = prs.shape[1], prs.shape[2]
+                            cy, cz = ny_g // 2, nz_g // 2
+                            data["pressure_profile"] = prs[:, cy, cz].tolist()
+                    # Send clot status + position for 3D rendering
+                    data["clot_active"] = _clot_active[0]
+                    if _clot_pos[0] is not None:
+                        data["clot_pos"] = _clot_pos[0]
                     await ws.send_json(data)
                 await asyncio.sleep(0.033)  # ~30 fps
         except Exception:

@@ -227,22 +227,22 @@ def main(visualize: bool = False):
                  "field": "temperature", "radius": 0.035},
             ]
 
-            output = render_usd_frame(
-                results_path=results_path,
-                geometry_path=vessel_path,
-                tube_configs=tube_configs,
-                output_path="vessel_bifurcation.png",
-                camera_position="xy",
-                zoom=1.5,
-            )
-            print(f"   Screenshot saved to: {output}")
+            # output = render_usd_frame(
+            #     results_path=results_path,
+            #     geometry_path=vessel_path,
+            #     tube_configs=tube_configs,
+            #     output_path="vessel_bifurcation.png",
+            #     camera_position="xy",
+            #     zoom=1.5,
+            # )
+            # print(f"   Screenshot saved to: {output}")
 
-            # For interactive replay, use viewer_from_usd_with_geometry:
-            #
-            #   from maddening.viz.usd_viewer import viewer_from_usd_with_geometry
-            #   viewer = viewer_from_usd_with_geometry(
-            #       results_path, vessel_path, tube_configs)
-            #   viewer.show()  # interactive playback with time slider
+            #For interactive replay, use viewer_from_usd_with_geometry:
+            
+            from maddening.viz.usd_viewer import viewer_from_usd_with_geometry
+            viewer = viewer_from_usd_with_geometry(
+                results_path, vessel_path, tube_configs)
+            viewer.show()  # interactive playback with time slider
 
         except ImportError as e:
             print(f"   Skipping visualization: {e}")

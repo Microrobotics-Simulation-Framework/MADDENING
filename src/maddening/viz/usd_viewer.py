@@ -121,9 +121,14 @@ def _read_history_from_usd(stage, node_names=None):
         node_history = {}
         for attr in prim.GetAttributes():
             name = attr.GetName()
-            # Skip metadata attributes
+            # Skip metadata and shape attributes
             if name.startswith("maddening:"):
                 continue
+            if ":shape" in name:
+                continue
+            # Strip the "state:" prefix that USDWriter adds
+            if name.startswith("state:"):
+                name = name[len("state:"):]
             samples = attr.GetTimeSamples()
             if not samples:
                 continue

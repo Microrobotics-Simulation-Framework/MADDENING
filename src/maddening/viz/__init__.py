@@ -16,6 +16,7 @@ __all__ = [
     "RealtimeRunner",
     "HistoryViewer3D",
     "GPUHistoryViewer",
+    "PyVistaLiveRenderer",
 ]
 
 # Network transport (ZMQ) -- imported explicitly to avoid hard dep on pyzmq
@@ -45,4 +46,7 @@ def __getattr__(name):
     if name == "render_usd_frame":
         from maddening.viz.usd_viewer import render_usd_frame
         return render_usd_frame
+    if name == "PyVistaLiveRenderer":
+        from maddening.viz.backends.pyvista_live import PyVistaLiveRenderer
+        return PyVistaLiveRenderer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

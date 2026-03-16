@@ -122,6 +122,8 @@ filterwarnings = [
     # nodes and cycle staggering -- expected in unit tests with minimal graphs.
     "ignore:WARNING. node .* is disconnected:UserWarning",
     "ignore:WARNING. cycle detected:UserWarning",
+    # RigidBody2DNode is deprecated but existing tests still exercise it
+    "ignore:RigidBody2DNode is deprecated:DeprecationWarning",
     # ZMQ sockets not always cleanly closed in tests
     "ignore::ResourceWarning:zmq",
     "ignore::pytest.PytestUnraisableExceptionWarning",

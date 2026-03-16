@@ -1,6 +1,10 @@
 """
 RigidBody2DNode -- a 2D rigid body with translational and rotational dynamics.
 
+.. deprecated::
+    Use :class:`~maddening.nodes.rigid_body.RigidBodyNode` with
+    ``constraints={"z": 0, "rx": 0, "ry": 0}`` instead.
+
 Models a rigid body in 2D with position (x, y), orientation (angle),
 linear velocity (vx, vy), and angular velocity (omega).  External
 forces and torques are accepted as boundary inputs.
@@ -12,6 +16,8 @@ All operations use ``jnp`` so the entire ``update`` is fully
 JAX-traceable and JIT-compilable.
 """
 
+import warnings
+
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -22,6 +28,11 @@ from maddening.core.stability import stability
 @stability(StabilityLevel.EXPERIMENTAL)
 class RigidBody2DNode(SimulationNode):
     """A 2D rigid body subject to forces and torques.
+
+    .. deprecated::
+        Use :class:`~maddening.nodes.rigid_body.RigidBodyNode` with
+        ``constraints={"z": 0, "rx": 0, "ry": 0}`` for full 6-DOF
+        support with equivalent 2D behaviour.
 
     State
     -----
@@ -109,6 +120,12 @@ class RigidBody2DNode(SimulationNode):
         initial_angle: float = 0.0,
         initial_omega: float = 0.0,
     ):
+        warnings.warn(
+            "RigidBody2DNode is deprecated. Use RigidBodyNode with "
+            "constraints={'z': 0, 'rx': 0, 'ry': 0} instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(
             name,
             timestep,

@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MADDENING Vessel Flow</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0f1117; color: #e0e0e0;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 20px; min-height: 100vh;
+}
+h1 {
+  font-size: 22px; margin-bottom: 4px;
+  background: linear-gradient(90deg, #cc3333, #ff6655);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.subtitle { font-size: 12px; color: #6b6f83; margin-bottom: 20px; }
+
+.container {
+  display: flex; gap: 24px; flex-wrap: wrap;
+  justify-content: center; max-width: 1100px; width: 100%;
+}
+
+/* --- Controls panel --- */
+.panel {
+  background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px;
+  padding: 18px; min-width: 280px;
+}
+.panel h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+  color: #8b8fa3; margin-bottom: 12px; padding-bottom: 6px;
+  border-bottom: 1px solid #2a2d3a;
+}
+.param-group { margin-bottom: 14px; }
+.param-label {
+  display: flex; justify-content: space-between; font-size: 12px;
+  color: #a0a4b8; margin-bottom: 4px;
+}
+.param-val { color: #7dd3fc; font-family: 'JetBrains Mono', monospace; }
+input[type="range"] {
+  width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+  background: #3a3d4a; border-radius: 2px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: #3b82f6; cursor: pointer; border: 2px solid #1e40af;
+}
+
+/* --- Buttons --- */
+.btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+.btn {
+  flex: 1; background: #2a2d3a; border: 1px solid #3a3d4a; color: #e0e0e0;
+  padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  text-align: center; transition: all 0.15s;
+}
+.btn:hover { background: #3a3d4a; }
+.btn.danger { border-color: #dc2626; color: #fca5a5; }
+.btn.danger:hover { background: #7f1d1d; }
+.btn.success { border-color: #16a34a; color: #86efac; }
+.btn.success:hover { background: #14532d; }
+.btn.primary { background: #1d4ed8; border-color: #2563eb; }
+.btn.primary:hover { background: #2563eb; }
+
+/* --- Vitals readout --- */
+.vitals {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px; margin-bottom: 16px;
+}
+.vital-card {
+  background: #12141d; border: 1px solid #2a2d3a; border-radius: 8px;
+  padding: 10px; text-align: center;
+}
+.vital-label { font-size: 10px; color: #6b6f83; text-transform: uppercase; letter-spacing: 0.5px; }
+.vital-value {
+  font-size: 20px; font-family: 'JetBrains Mono', monospace;
+  color: #7dd3fc; margin-top: 2px;
+}
+.vital-value.pressure { color: #f87171; }
+.vital-value.flow { color: #34d399; }
+.vital-value.phase { color: #fbbf24; }
+
+/* --- Chart --- */
+.chart-panel {
+  background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px;
+  padding: 18px; flex: 1; min-width: 500px;
+}
+canvas {
+  width: 100%; background: #12141d; border-radius: 6px;
+  border: 1px solid #2a2d3a;
+}
+
+/* --- Connection status --- */
+.status-bar {
+  font-size: 11px; color: #6b6f83; text-align: center; margin-top: 16px;
+}
+.dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 4px; vertical-align: middle;
+}
+.dot.connected { background: #22c55e; }
+.dot.disconnected { background: #ef4444; }
+</style>
+</head>
+<body>
+
+<h1>MADDENING Vessel Flow</h1>
+<p class="subtitle">Coupled HeartPump + LBM blood flow simulation</p>
+
+<div class="container">
+  <!-- Left panel: controls -->
+  <div class="panel" style="flex: 0 0 280px;">
+    <h2>Simulation</h2>
+    <div class="btn-row">
+      <button class="btn primary" onclick="simStart()">Start</button>
+      <button class="btn" onclick="simStop()">Stop</button>
+      <button class="btn" onclick="simReset()">Reset</button>
+    </div>
+
+    <h2>Heart Parameters</h2>
+
+    <div class="param-group">
+      <div class="param-label">
+        <span>Heart Rate</span>
+        <span class="param-val"><span id="hr-val">72</span> bpm</span>
+      </div>
+      <input type="range" id="hr" min="40" max="180" value="72" step="1">
+    </div>
+
+    <div class="param-group">
+      <div class="param-label">
+        <span>Stroke Volume</span>
+        <span class="param-val"><span id="sv-val">100</span>%</span>
+      </div>
+      <input type="range" id="sv" min="10" max="300" value="100" step="1">
+    </div>
+
+    <div class="param-group">
+      <div class="param-label">
+        <span>Resistance</span>
+        <span class="param-val"><span id="res-val">100</span>%</span>
+      </div>
+      <input type="range" id="res" min="10" max="500" value="100" step="1">
+    </div>
+
+    <div class="param-group">
+      <div class="param-label">
+        <span>Compliance</span>
+        <span class="param-val"><span id="comp-val">100</span>%</span>
+      </div>
+      <input type="range" id="comp" min="10" max="500" value="100" step="1">
+    </div>
+
+    <h2>Interventions</h2>
+    <div class="btn-row">
+      <button class="btn danger" onclick="injectClot()">Inject Clot</button>
+      <button class="btn success" onclick="clearClot()">Clear Clot</button>
+    </div>
+    <p style="font-size: 10px; color: #6b6f83; margin-top: 4px;">
+      Clot placed at centre of vessel (x=40, y=mid, z=mid, radius=4)
+    </p>
+  </div>
+
+  <!-- Right panel: vitals + chart -->
+  <div class="chart-panel">
+    <h2>Vital Signs</h2>
+    <div class="vitals">
+      <div class="vital-card">
+        <div class="vital-label">Arterial Pressure</div>
+        <div class="vital-value pressure" id="v-pressure">--</div>
+      </div>
+      <div class="vital-card">
+        <div class="vital-label">Flow Rate</div>
+        <div class="vital-value flow" id="v-flow">--</div>
+      </div>
+      <div class="vital-card">
+        <div class="vital-label">Cardiac Phase</div>
+        <div class="vital-value phase" id="v-phase">--</div>
+      </div>
+    </div>
+
+    <h2>Pressure Waveform</h2>
+    <canvas id="pressure-chart" width="640" height="200"></canvas>
+
+    <h2 style="margin-top: 16px;">Flow Rate</h2>
+    <canvas id="flow-chart" width="640" height="140"></canvas>
+  </div>
+</div>
+
+<div class="status-bar">
+  <span class="dot disconnected" id="ws-dot"></span>
+  <span id="ws-status">Connecting...</span>
+  &nbsp;|&nbsp; Sim time: <span id="sim-time">0.00</span>
+</div>
+
+<script>
+// Default parameter values (baseline = 100%)
+const BASELINE_SV = 0.002;
+const BASELINE_R = 10.0;
+const BASELINE_C = 1.0;
+
+const pressureHistory = [];
+const flowHistory = [];
+const MAX_HISTORY = 400;
+
+// --- WebSocket ---
+let ws = null;
+
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws/state`);
+  ws.onopen = () => {
+    document.getElementById('ws-dot').className = 'dot connected';
+    document.getElementById('ws-status').textContent = 'Connected';
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-dot').className = 'dot disconnected';
+    document.getElementById('ws-status').textContent = 'Disconnected';
+    setTimeout(connectWS, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    updateVitals(data);
+  };
+}
+
+function updateVitals(data) {
+  if (data.sim_time !== undefined) {
+    document.getElementById('sim-time').textContent = data.sim_time.toFixed(1);
+  }
+  if (data.arterial_pressure !== undefined) {
+    const p = data.arterial_pressure;
+    document.getElementById('v-pressure').textContent = p.toFixed(4);
+    pressureHistory.push(p);
+    if (pressureHistory.length > MAX_HISTORY) pressureHistory.shift();
+  }
+  if (data.flow_rate !== undefined) {
+    const f = data.flow_rate;
+    document.getElementById('v-flow').textContent = f.toFixed(6);
+    flowHistory.push(f);
+    if (flowHistory.length > MAX_HISTORY) flowHistory.shift();
+  }
+  if (data.phase !== undefined) {
+    document.getElementById('v-phase').textContent = data.phase.toFixed(3);
+  }
+  drawChart('pressure-chart', pressureHistory, '#f87171');
+  drawChart('flow-chart', flowHistory, '#34d399');
+}
+
+function drawChart(canvasId, history, color) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (history.length < 2) return;
+
+  const min = Math.min(...history);
+  const max = Math.max(...history);
+  const range = max - min || 1e-10;
+  const margin = range * 0.1;
+
+  // Grid lines
+  ctx.strokeStyle = '#2a2d3a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 5; i++) {
+    const y = (i / 4) * H;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // Data
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < history.length; i++) {
+    const x = (i / (MAX_HISTORY - 1)) * W;
+    const y = H - ((history[i] - min + margin) / (range + 2 * margin)) * H;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#6b6f83';
+  ctx.font = '10px monospace';
+  ctx.fillText((max).toFixed(4), 4, 12);
+  ctx.fillText((min).toFixed(4), 4, H - 4);
+}
+
+// --- Control handlers ---
+document.getElementById('hr').oninput = async (e) => {
+  const val = e.target.value;
+  document.getElementById('hr-val').textContent = val;
+  await fetch(`/sim/heart_rate?bpm=${val}`, { method: 'PUT' });
+};
+
+document.getElementById('sv').oninput = async (e) => {
+  const pct = e.target.value;
+  document.getElementById('sv-val').textContent = pct;
+  const sv = BASELINE_SV * (pct / 100.0);
+  await fetch(`/sim/stroke_volume?sv=${sv}`, { method: 'PUT' });
+};
+
+document.getElementById('res').oninput = async (e) => {
+  const pct = e.target.value;
+  document.getElementById('res-val').textContent = pct;
+  const r = BASELINE_R * (pct / 100.0);
+  await fetch(`/sim/resistance?r=${r}`, { method: 'PUT' });
+};
+
+document.getElementById('comp').oninput = async (e) => {
+  const pct = e.target.value;
+  document.getElementById('comp-val').textContent = pct;
+  const c = BASELINE_C * (pct / 100.0);
+  await fetch(`/sim/compliance?c=${c}`, { method: 'PUT' });
+};
+
+async function simStart() { await fetch('/sim/start', { method: 'POST' }); }
+async function simStop()  { await fetch('/sim/stop', { method: 'POST' }); }
+async function simReset() {
+  await fetch('/sim/reset', { method: 'POST' });
+  pressureHistory.length = 0;
+  flowHistory.length = 0;
+  // Reset sliders
+  document.getElementById('hr').value = 72;
+  document.getElementById('hr-val').textContent = '72';
+  document.getElementById('sv').value = 100;
+  document.getElementById('sv-val').textContent = '100';
+  document.getElementById('res').value = 100;
+  document.getElementById('res-val').textContent = '100';
+  document.getElementById('comp').value = 100;
+  document.getElementById('comp-val').textContent = '100';
+}
+
+async function injectClot() {
+  // Place clot near the middle of the parent vessel
+  await fetch('/sim/inject_clot?x=40&y=16&z=16&radius=4', { method: 'POST' });
+}
+
+async function clearClot() {
+  await fetch('/sim/clear_clot', { method: 'POST' });
+}
+
+// --- Init ---
+connectWS();
+</script>
+</body>
+</html>

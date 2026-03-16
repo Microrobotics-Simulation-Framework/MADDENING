@@ -160,7 +160,7 @@ def main(visualize: bool = False):
     results_stage = Usd.Stage.CreateNew(results_path)
     writer = USDWriter(results_stage, gm)
 
-    n_steps = 200
+    n_steps = 10000
     write_every = 10  # write every 10th step to keep file small
 
     for step in range(n_steps):

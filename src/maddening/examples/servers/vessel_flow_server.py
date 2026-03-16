@@ -27,7 +27,9 @@ clot mask is set once per REST call and remains constant between calls.
 """
 
 import os
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# Don't override JAX_PLATFORMS if already set (e.g. JAX_PLATFORMS=gpu)
+if "JAX_PLATFORMS" not in os.environ:
+    os.environ["JAX_PLATFORMS"] = "cpu"
 
 import asyncio
 import logging
@@ -43,23 +45,90 @@ from maddening.viz.runner import RealtimeRunner
 logger = logging.getLogger(__name__)
 
 
-def create_app(grid_shape=(64, 32, 32)):
+def _build_centerlines(grid_shape, vessel_params):
+    """Compute 3D centerlines for the vessel renderer.
+
+    Returns a list of (name, centerline_array, radius) tuples.
+    """
+    from maddening.examples.coupling.vessel_flow_helpers import _DEFAULT_VESSEL_PARAMS
+    vp = vessel_params or _DEFAULT_VESSEL_PARAMS
+
+    nx, ny, nz = grid_shape
+    y_mid = (ny - 1) / 2.0
+    z_mid = (nz - 1) / 2.0
+
+    pr = vp["parent_radius"]
+    dr = vp["daughter_radius"]
+    pl = vp["parent_length"]
+    dl = vp["daughter_length"]
+    angle_rad = np.deg2rad(vp["bifurcation_angle"])
+
+    # Parent: along x-axis from 0 to pl
+    n_pts = max(20, int(pl))
+    parent_pts = np.column_stack([
+        np.linspace(0, pl, n_pts),
+        np.full(n_pts, y_mid),
+        np.full(n_pts, z_mid),
+    ])
+
+    # Daughter directions
+    left_dir = np.array([np.cos(angle_rad), -np.sin(angle_rad), 0.0])
+    right_dir = np.array([np.cos(angle_rad), np.sin(angle_rad), 0.0])
+    bif = np.array([pl, y_mid, z_mid])
+
+    n_d = max(16, int(dl))
+    t = np.linspace(0, dl, n_d)
+    left_pts = bif[None, :] + t[:, None] * left_dir[None, :]
+    right_pts = bif[None, :] + t[:, None] * right_dir[None, :]
+
+    return [
+        ("parent", parent_pts, pr * 0.8),  # slightly smaller for viz
+        ("daughter_left", left_pts, dr * 0.8),
+        ("daughter_right", right_pts, dr * 0.8),
+    ]
+
+
+def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     """Build the FastAPI application and simulation.
 
     Returns ``(app, gm, relay, runner)`` so callers can inspect
     internals or change the grid shape.
+
+    Architecture note (HPC / remote deployment)
+    --------------------------------------------
+    The server binds to ``0.0.0.0`` so it accepts connections from
+    any network interface.  For HPC deployments where physics runs
+    on a remote GPU node:
+
+    - ``/ws/render`` streams server-rendered JPEG frames (no GPU
+      needed on the client).  Works over any network.
+    - ``/ws/state`` streams raw scalar data for client-side rendering
+      or data logging.
+    - Both endpoints coexist, enabling hybrid rendering strategies.
+
+    The same binary runs identically for localhost (development) and
+    remote (HPC) — only the client's URL changes.
     """
     from fastapi import FastAPI, WebSocket
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, Response
     from pathlib import Path
 
     t0 = time.perf_counter()
-    gm, vessel_mask = build_vessel_flow_graph(grid_shape=grid_shape)
+    gm, vessel_mask = build_vessel_flow_graph(
+        grid_shape=grid_shape, vessel_params=vessel_params,
+    )
     build_time = time.perf_counter() - t0
 
     relay = StateRelay(stride=1)
     relay.attach(gm)
     runner = RealtimeRunner(gm, relay, steps_per_frame=1)
+
+    # Build centerline geometry for client-side 3D rendering.
+    # The server sends geometry once via /sim/geometry, then streams
+    # scalar data per frame via /ws/state.  The browser renders with
+    # Three.js — no PyVista/VTK needed on the server, works over any
+    # network, and the client gets interactive 3D orbit/zoom/pan.
+    centerlines = _build_centerlines(grid_shape, vessel_params)
 
     # Stash references for clot injection
     _base_mask = vessel_mask              # original geometry
@@ -185,6 +254,25 @@ def create_app(grid_shape=(64, 32, 32)):
 
     gm.step = _step_with_clot
 
+    # --- Geometry (for client-side 3D rendering) ---
+
+    @app.get("/sim/geometry")
+    async def get_geometry():
+        """Return vessel centerlines + radii for Three.js rendering.
+
+        Called once by the client on startup to build the 3D scene.
+        The client then receives per-frame scalar data via /ws/state
+        to color the tubes by velocity magnitude.
+        """
+        tubes = []
+        for name, pts, radius in centerlines:
+            tubes.append({
+                "name": name,
+                "points": pts.tolist(),
+                "radius": float(radius),
+            })
+        return {"tubes": tubes, "grid_shape": list(grid_shape)}
+
     # --- Vitals ---
 
     @app.get("/sim/vitals")
@@ -217,6 +305,16 @@ def create_app(grid_shape=(64, 32, 32)):
                         data["arterial_pressure"] = float(hs["arterial_pressure"])
                         data["flow_rate"] = float(hs["flow_rate"])
                         data["phase"] = float(hs["phase"])
+                    # Extract velocity magnitude along each centerline
+                    # for client-side 3D coloring
+                    if "vessel" in state:
+                        vel = np.asarray(state["vessel"]["velocity"])
+                        if vel.ndim == 4:  # (nx,ny,nz,3)
+                            mag = np.sqrt(np.sum(vel ** 2, axis=-1))
+                            ny_g, nz_g = mag.shape[1], mag.shape[2]
+                            # Extract 1D profile through center
+                            center_profile = mag[:, ny_g // 2, nz_g // 2]
+                            data["velocity_profile"] = center_profile.tolist()
                     await ws.send_json(data)
                 await asyncio.sleep(0.033)  # ~30 fps
         except Exception:
@@ -252,8 +350,11 @@ def create_app(grid_shape=(64, 32, 32)):
         print(f"    POST /sim/inject_clot     Inject clot (x,y,z,radius)")
         print(f"    POST /sim/clear_clot      Remove clot")
         print(f"    GET  /sim/vitals          Current vital signs")
-        print(f"    WS   /ws/state            Live vitals stream")
+        print(f"    GET  /sim/geometry         Vessel centerlines (for 3D)")
+        print(f"    WS   /ws/state            Live vitals + velocity data")
         print(f"\n  Open http://localhost:8000 in your browser")
+        print(f"  3D rendering: client-side (Three.js, no server GPU needed)")
+        print(f"  (Works from any machine — server binds to 0.0.0.0)")
         print()
 
     _print_banner()
@@ -261,14 +362,33 @@ def create_app(grid_shape=(64, 32, 32)):
 
 
 def main():
+    import argparse
     import uvicorn
-    app, gm, relay, runner = create_app(grid_shape=(64, 32, 32))
+
+    parser = argparse.ArgumentParser(description="MADDENING Vessel Flow Server")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Use GPU (CUDA) backend instead of CPU")
+    parser.add_argument("--grid", type=int, nargs=3, default=[64, 32, 32],
+                        metavar=("NX", "NY", "NZ"),
+                        help="LBM grid resolution (default: 64 32 32)")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    args = parser.parse_args()
+
+    if args.gpu:
+        # Override to auto-detect (CUDA or ROCm)
+        os.environ["JAX_PLATFORMS"] = ""
+        print(f"  GPU mode: JAX will auto-detect available backend")
+    else:
+        print(f"  CPU mode (use --gpu for GPU)")
+
+    app, gm, relay, runner = create_app(grid_shape=tuple(args.grid))
 
     # Auto-start simulation
     runner.start()
 
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
         runner.stop()
 

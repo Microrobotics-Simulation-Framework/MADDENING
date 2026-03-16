@@ -18,13 +18,10 @@ h1 {
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
 .subtitle { font-size: 12px; color: #6b6f83; margin-bottom: 20px; }
-
 .container {
   display: flex; gap: 24px; flex-wrap: wrap;
-  justify-content: center; max-width: 1100px; width: 100%;
+  justify-content: center; max-width: 1200px; width: 100%;
 }
-
-/* --- Controls panel --- */
 .panel {
   background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px;
   padding: 18px; min-width: 280px;
@@ -48,8 +45,6 @@ input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
   background: #3b82f6; cursor: pointer; border: 2px solid #1e40af;
 }
-
-/* --- Buttons --- */
 .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
 .btn {
   flex: 1; background: #2a2d3a; border: 1px solid #3a3d4a; color: #e0e0e0;
@@ -63,8 +58,6 @@ input[type="range"]::-webkit-slider-thumb {
 .btn.success:hover { background: #14532d; }
 .btn.primary { background: #1d4ed8; border-color: #2563eb; }
 .btn.primary:hover { background: #2563eb; }
-
-/* --- Vitals readout --- */
 .vitals {
   display: grid; grid-template-columns: 1fr 1fr 1fr;
   gap: 10px; margin-bottom: 16px;
@@ -81,18 +74,18 @@ input[type="range"]::-webkit-slider-thumb {
 .vital-value.pressure { color: #f87171; }
 .vital-value.flow { color: #34d399; }
 .vital-value.phase { color: #fbbf24; }
-
-/* --- Chart --- */
 .chart-panel {
   background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px;
-  padding: 18px; flex: 1; min-width: 500px;
+  padding: 18px; flex: 1; min-width: 600px;
 }
-canvas {
+canvas.chart {
   width: 100%; background: #12141d; border-radius: 6px;
   border: 1px solid #2a2d3a;
 }
-
-/* --- Connection status --- */
+#vessel-3d {
+  width: 100%; height: 400px; border-radius: 6px;
+  border: 1px solid #2a2d3a; background: #12141d;
+}
 .status-bar {
   font-size: 11px; color: #6b6f83; text-align: center; margin-top: 16px;
 }
@@ -103,11 +96,14 @@ canvas {
 .dot.connected { background: #22c55e; }
 .dot.disconnected { background: #ef4444; }
 </style>
+<!-- Three.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
 
 <h1>MADDENING Vessel Flow</h1>
-<p class="subtitle">Coupled HeartPump + LBM blood flow simulation</p>
+<p class="subtitle">Coupled HeartPump + LBM blood flow &mdash; client-side 3D rendering (Three.js)</p>
 
 <div class="container">
   <!-- Left panel: controls -->
@@ -120,7 +116,6 @@ canvas {
     </div>
 
     <h2>Heart Parameters</h2>
-
     <div class="param-group">
       <div class="param-label">
         <span>Heart Rate</span>
@@ -128,7 +123,6 @@ canvas {
       </div>
       <input type="range" id="hr" min="40" max="180" value="72" step="1">
     </div>
-
     <div class="param-group">
       <div class="param-label">
         <span>Stroke Volume</span>
@@ -136,7 +130,6 @@ canvas {
       </div>
       <input type="range" id="sv" min="10" max="300" value="100" step="1">
     </div>
-
     <div class="param-group">
       <div class="param-label">
         <span>Resistance</span>
@@ -144,7 +137,6 @@ canvas {
       </div>
       <input type="range" id="res" min="10" max="500" value="100" step="1">
     </div>
-
     <div class="param-group">
       <div class="param-label">
         <span>Compliance</span>
@@ -159,13 +151,16 @@ canvas {
       <button class="btn success" onclick="clearClot()">Clear Clot</button>
     </div>
     <p style="font-size: 10px; color: #6b6f83; margin-top: 4px;">
-      Clot placed at centre of vessel (x=40, y=mid, z=mid, radius=4)
+      Clot placed at centre of parent vessel (radius=4)
     </p>
   </div>
 
-  <!-- Right panel: vitals + chart -->
+  <!-- Right panel: 3D view + vitals + charts -->
   <div class="chart-panel">
-    <h2>Vital Signs</h2>
+    <h2>3D Blood Flow <span style="font-weight:normal; color:#6b6f83;">(drag to rotate, scroll to zoom)</span></h2>
+    <div id="vessel-3d"></div>
+
+    <h2 style="margin-top: 16px;">Vital Signs</h2>
     <div class="vitals">
       <div class="vital-card">
         <div class="vital-label">Arterial Pressure</div>
@@ -182,10 +177,9 @@ canvas {
     </div>
 
     <h2>Pressure Waveform</h2>
-    <canvas id="pressure-chart" width="640" height="200"></canvas>
-
-    <h2 style="margin-top: 16px;">Flow Rate</h2>
-    <canvas id="flow-chart" width="640" height="140"></canvas>
+    <canvas class="chart" id="pressure-chart" width="640" height="140"></canvas>
+    <h2 style="margin-top: 12px;">Flow Rate</h2>
+    <canvas class="chart" id="flow-chart" width="640" height="100"></canvas>
   </div>
 </div>
 
@@ -193,10 +187,182 @@ canvas {
   <span class="dot disconnected" id="ws-dot"></span>
   <span id="ws-status">Connecting...</span>
   &nbsp;|&nbsp; Sim time: <span id="sim-time">0.00</span>
+  &nbsp;|&nbsp; 3D: <span id="3d-status">loading...</span>
 </div>
 
 <script>
-// Default parameter values (baseline = 100%)
+// =====================================================================
+// Three.js 3D vessel renderer
+// =====================================================================
+let scene, camera, renderer3d, controls;
+let tubeMeshes = [];  // {mesh, n_center_pts, geometry} per vessel segment
+let colorScale = {min: 0, max: 0.01};
+
+function initThreeJS() {
+  const container = document.getElementById('vessel-3d');
+  const W = container.clientWidth;
+  const H = container.clientHeight || 400;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x12141d);
+
+  camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 1000);
+  camera.position.set(40, 30, 40);
+  camera.lookAt(20, 16, 16);
+
+  renderer3d = new THREE.WebGLRenderer({ antialias: true });
+  renderer3d.setSize(W, H);
+  renderer3d.setPixelRatio(window.devicePixelRatio);
+  container.appendChild(renderer3d.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer3d.domElement);
+  controls.target.set(20, 16, 16);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+  scene.add(ambient);
+  const dir1 = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir1.position.set(50, 50, 50);
+  scene.add(dir1);
+  const dir2 = new THREE.DirectionalLight(0x4488ff, 0.3);
+  dir2.position.set(-30, -20, 40);
+  scene.add(dir2);
+
+  // Handle resize
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth;
+    const h = container.clientHeight || 400;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer3d.setSize(w, h);
+  });
+
+  animate();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer3d.render(scene, camera);
+}
+
+// Coolwarm colormap: blue (0) → white (0.5) → red (1)
+function coolwarm(t) {
+  t = Math.max(0, Math.min(1, t));
+  let r, g, b;
+  if (t < 0.5) {
+    const s = t * 2;
+    r = 0.23 + s * 0.77;
+    g = 0.30 + s * 0.70;
+    b = 0.75 + s * 0.25;
+  } else {
+    const s = (t - 0.5) * 2;
+    r = 1.0;
+    g = 1.0 - s * 0.7;
+    b = 1.0 - s * 0.7;
+  }
+  return new THREE.Color(r, g, b);
+}
+
+async function loadGeometry() {
+  try {
+    const resp = await fetch('/sim/geometry');
+    const geo = await resp.json();
+    document.getElementById('3d-status').textContent =
+      `${geo.tubes.length} tubes, grid ${geo.grid_shape.join('x')}`;
+
+    // Auto-set camera target to center of geometry
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (const tube of geo.tubes) {
+      for (const p of tube.points) {
+        cx += p[0]; cy += p[1]; cz += p[2]; n++;
+      }
+    }
+    if (n > 0) {
+      cx /= n; cy /= n; cz /= n;
+      controls.target.set(cx, cy, cz);
+      camera.position.set(cx + 40, cy + 25, cz + 35);
+    }
+
+    // Build tube meshes
+    for (const tube of geo.tubes) {
+      const pts = tube.points;
+      const radius = tube.radius;
+
+      // Build a TubeGeometry from the centerline
+      const pathPts = pts.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+      const curve = new THREE.CatmullRomCurve3(pathPts, false);
+      const tubeGeo = new THREE.TubeGeometry(curve, pts.length * 2, radius, 12, false);
+
+      // Per-vertex colors (initialized to white)
+      const colors = new Float32Array(tubeGeo.attributes.position.count * 3);
+      colors.fill(0.5);
+      tubeGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const mat = new THREE.MeshPhongMaterial({
+        vertexColors: true,
+        shininess: 60,
+        specular: 0x222222,
+      });
+      const mesh = new THREE.Mesh(tubeGeo, mat);
+      scene.add(mesh);
+
+      tubeMeshes.push({
+        mesh: mesh,
+        centerline: pts,
+        n_center: pts.length,
+      });
+    }
+  } catch (e) {
+    document.getElementById('3d-status').textContent = 'geometry load failed';
+    console.error(e);
+  }
+}
+
+function updateTubeColors(velocityProfile) {
+  if (!velocityProfile || tubeMeshes.length === 0) return;
+
+  // Update color scale
+  let vmax = 0;
+  for (const v of velocityProfile) vmax = Math.max(vmax, Math.abs(v));
+  if (vmax > colorScale.max) colorScale.max = vmax;
+  // Decay slowly so the scale adapts
+  colorScale.max = colorScale.max * 0.999 + vmax * 0.001;
+  if (colorScale.max < 1e-10) colorScale.max = 1e-10;
+
+  // For each tube mesh, map velocity from the profile to vertex colors.
+  // The velocity profile is along the x-axis of the parent vessel;
+  // daughter tubes get the latter portion of the profile.
+  for (const td of tubeMeshes) {
+    const geo = td.mesh.geometry;
+    const positions = geo.attributes.position.array;
+    const colors = geo.attributes.color.array;
+    const nVerts = positions.length / 3;
+    const nProfile = velocityProfile.length;
+
+    for (let i = 0; i < nVerts; i++) {
+      const vx = positions[i * 3]; // x position of this vertex
+      // Map x to profile index (simple linear mapping)
+      const frac = Math.max(0, Math.min(1, vx / (nProfile - 1)));
+      const idx = Math.min(Math.floor(frac * (nProfile - 1)), nProfile - 2);
+      const t2 = frac * (nProfile - 1) - idx;
+      const val = velocityProfile[idx] * (1 - t2) + velocityProfile[Math.min(idx + 1, nProfile - 1)] * t2;
+
+      const norm = val / colorScale.max;
+      const c = coolwarm(norm);
+      colors[i * 3] = c.r;
+      colors[i * 3 + 1] = c.g;
+      colors[i * 3 + 2] = c.b;
+    }
+    geo.attributes.color.needsUpdate = true;
+  }
+}
+
+// =====================================================================
+// WebSocket + controls (same as before)
+// =====================================================================
 const BASELINE_SV = 0.002;
 const BASELINE_R = 10.0;
 const BASELINE_C = 1.0;
@@ -204,8 +370,6 @@ const BASELINE_C = 1.0;
 const pressureHistory = [];
 const flowHistory = [];
 const MAX_HISTORY = 400;
-
-// --- WebSocket ---
 let ws = null;
 
 function connectWS() {
@@ -223,28 +387,27 @@ function connectWS() {
   ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     updateVitals(data);
+    if (data.velocity_profile) {
+      updateTubeColors(data.velocity_profile);
+    }
   };
 }
 
 function updateVitals(data) {
-  if (data.sim_time !== undefined) {
+  if (data.sim_time !== undefined)
     document.getElementById('sim-time').textContent = data.sim_time.toFixed(1);
-  }
   if (data.arterial_pressure !== undefined) {
-    const p = data.arterial_pressure;
-    document.getElementById('v-pressure').textContent = p.toFixed(4);
-    pressureHistory.push(p);
+    document.getElementById('v-pressure').textContent = data.arterial_pressure.toFixed(4);
+    pressureHistory.push(data.arterial_pressure);
     if (pressureHistory.length > MAX_HISTORY) pressureHistory.shift();
   }
   if (data.flow_rate !== undefined) {
-    const f = data.flow_rate;
-    document.getElementById('v-flow').textContent = f.toFixed(6);
-    flowHistory.push(f);
+    document.getElementById('v-flow').textContent = data.flow_rate.toFixed(6);
+    flowHistory.push(data.flow_rate);
     if (flowHistory.length > MAX_HISTORY) flowHistory.shift();
   }
-  if (data.phase !== undefined) {
+  if (data.phase !== undefined)
     document.getElementById('v-phase').textContent = data.phase.toFixed(3);
-  }
   drawChart('pressure-chart', pressureHistory, '#f87171');
   drawChart('flow-chart', flowHistory, '#34d399');
 }
@@ -254,96 +417,65 @@ function drawChart(canvasId, history, color) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-
   if (history.length < 2) return;
-
-  const min = Math.min(...history);
-  const max = Math.max(...history);
+  const min = Math.min(...history), max = Math.max(...history);
   const range = max - min || 1e-10;
   const margin = range * 0.1;
-
-  // Grid lines
-  ctx.strokeStyle = '#2a2d3a';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#2a2d3a'; ctx.lineWidth = 1;
   for (let i = 0; i < 5; i++) {
     const y = (i / 4) * H;
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
-
-  // Data
-  ctx.beginPath();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
   for (let i = 0; i < history.length; i++) {
     const x = (i / (MAX_HISTORY - 1)) * W;
     const y = H - ((history[i] - min + margin) / (range + 2 * margin)) * H;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
-
-  // Labels
-  ctx.fillStyle = '#6b6f83';
-  ctx.font = '10px monospace';
-  ctx.fillText((max).toFixed(4), 4, 12);
-  ctx.fillText((min).toFixed(4), 4, H - 4);
+  ctx.fillStyle = '#6b6f83'; ctx.font = '10px monospace';
+  ctx.fillText(max.toFixed(4), 4, 12);
+  ctx.fillText(min.toFixed(4), 4, H - 4);
 }
 
-// --- Control handlers ---
+// Control handlers
 document.getElementById('hr').oninput = async (e) => {
-  const val = e.target.value;
-  document.getElementById('hr-val').textContent = val;
-  await fetch(`/sim/heart_rate?bpm=${val}`, { method: 'PUT' });
+  document.getElementById('hr-val').textContent = e.target.value;
+  await fetch(`/sim/heart_rate?bpm=${e.target.value}`, { method: 'PUT' });
 };
-
 document.getElementById('sv').oninput = async (e) => {
-  const pct = e.target.value;
-  document.getElementById('sv-val').textContent = pct;
-  const sv = BASELINE_SV * (pct / 100.0);
-  await fetch(`/sim/stroke_volume?sv=${sv}`, { method: 'PUT' });
+  document.getElementById('sv-val').textContent = e.target.value;
+  await fetch(`/sim/stroke_volume?sv=${BASELINE_SV * (e.target.value / 100)}`, { method: 'PUT' });
 };
-
 document.getElementById('res').oninput = async (e) => {
-  const pct = e.target.value;
-  document.getElementById('res-val').textContent = pct;
-  const r = BASELINE_R * (pct / 100.0);
-  await fetch(`/sim/resistance?r=${r}`, { method: 'PUT' });
+  document.getElementById('res-val').textContent = e.target.value;
+  await fetch(`/sim/resistance?r=${BASELINE_R * (e.target.value / 100)}`, { method: 'PUT' });
 };
-
 document.getElementById('comp').oninput = async (e) => {
-  const pct = e.target.value;
-  document.getElementById('comp-val').textContent = pct;
-  const c = BASELINE_C * (pct / 100.0);
-  await fetch(`/sim/compliance?c=${c}`, { method: 'PUT' });
+  document.getElementById('comp-val').textContent = e.target.value;
+  await fetch(`/sim/compliance?c=${BASELINE_C * (e.target.value / 100)}`, { method: 'PUT' });
 };
 
 async function simStart() { await fetch('/sim/start', { method: 'POST' }); }
 async function simStop()  { await fetch('/sim/stop', { method: 'POST' }); }
 async function simReset() {
   await fetch('/sim/reset', { method: 'POST' });
-  pressureHistory.length = 0;
-  flowHistory.length = 0;
-  // Reset sliders
-  document.getElementById('hr').value = 72;
-  document.getElementById('hr-val').textContent = '72';
-  document.getElementById('sv').value = 100;
-  document.getElementById('sv-val').textContent = '100';
-  document.getElementById('res').value = 100;
-  document.getElementById('res-val').textContent = '100';
-  document.getElementById('comp').value = 100;
-  document.getElementById('comp-val').textContent = '100';
+  pressureHistory.length = 0; flowHistory.length = 0;
+  ['hr','sv','res','comp'].forEach(id => {
+    document.getElementById(id).value = id === 'hr' ? 72 : 100;
+    document.getElementById(id + '-val').textContent = id === 'hr' ? '72' : '100';
+  });
 }
-
 async function injectClot() {
-  // Place clot near the middle of the parent vessel
   await fetch('/sim/inject_clot?x=40&y=16&z=16&radius=4', { method: 'POST' });
 }
-
 async function clearClot() {
   await fetch('/sim/clear_clot', { method: 'POST' });
 }
 
-// --- Init ---
+// Init
+initThreeJS();
+loadGeometry();
 connectWS();
 </script>
 </body>

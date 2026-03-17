@@ -94,7 +94,7 @@ def build_vessel_flow_graph(
     resistance: float = 10.0,
     compliance: float = 1.0,
     viscosity: float = 0.1,
-    dt: float = 1.0,
+    dt: float = 0.001,
     max_coupling_iters: int = 10,
     coupling_tolerance: float = 1e-6,
 ) -> tuple[GraphManager, jnp.ndarray]:

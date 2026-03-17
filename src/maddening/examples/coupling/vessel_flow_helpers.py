@@ -199,13 +199,14 @@ def build_vessel_flow_graph(
         transform=outlet_transform,
     )
 
-    # 4. Coupling group (bidirectional cycle)
-    gm.add_coupling_group(
-        ["heart", "vessel"],
-        max_iterations=max_coupling_iters,
-        tolerance=coupling_tolerance,
-        diagnostics=True,
-    )
+    # 4. No coupling group needed.
+    #
+    # The HeartPump <-> LBM coupling is weakly coupled: the Windkessel
+    # responds on a cardiac-cycle timescale (~1s) while the LBM advances
+    # at lattice dt (~1 unit).  One-step-lagged staggered feedback (via
+    # back-edges) is physically appropriate and avoids the 10x overhead
+    # of iterative coupling.  The cycle warning from compile() is
+    # expected and safe to ignore.
 
     # 5. Compile
     with warnings.catch_warnings():

@@ -80,6 +80,10 @@ class RealtimeRunner:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
+    def reset_time(self) -> None:
+        """Reset simulation time to zero (call after resetting graph state)."""
+        self._sim_time = 0.0
+
     @property
     def time_scale(self) -> float:
         return self._time_scale

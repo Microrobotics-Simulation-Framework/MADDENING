@@ -304,4 +304,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--gpu" in sys.argv:
+        os.environ["JAX_PLATFORMS"] = ""
+        print("GPU mode: JAX auto-detecting backend")
     main()

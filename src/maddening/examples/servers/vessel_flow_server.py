@@ -123,9 +123,14 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     )
     build_time = time.perf_counter() - t0
 
-    relay = StateRelay(stride=1)
+    relay = StateRelay(stride=10)  # capture every 10th step for WS
     relay.attach(gm)
-    runner = RealtimeRunner(gm, relay, steps_per_frame=1)
+    # LBM dt=1.0 in lattice units. At 16ms/step on CPU (64x32x32),
+    # we can do ~60 steps/second. Batch 10 steps per frame for
+    # smooth throughput. time_scale >> 1 to run as fast as possible
+    # (no wall-clock pacing — physics runs flat out).
+    runner = RealtimeRunner(gm, relay, steps_per_frame=10,
+                            time_scale=1e6)
 
     # Build centerline geometry for client-side 3D rendering.
     # The server sends geometry once via /sim/geometry, then streams
@@ -169,7 +174,12 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
             gm._state[name] = spec.node.initial_state()
         gm._dirty = True
         _clot_active[0] = False
+        _clot_pos[0] = None
         _clot_mask[0] = _base_mask
+        runner.reset_time()
+        relay._step_count = 0
+        relay._sim_time = 0.0
+        relay._snapshot = None
         return {"status": "reset"}
 
     # --- Parameter tuning ---
@@ -306,7 +316,10 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
                 sim_time, state = relay.latest_snapshot()
                 if state is not None and sim_time != last_sim_time:
                     last_sim_time = sim_time
-                    data = {"sim_time": sim_time}
+                    data = {
+                        "sim_time": sim_time,
+                        "step_count": int(sim_time),
+                    }
                     if "heart" in state:
                         hs = state["heart"]
                         data["arterial_pressure"] = float(hs["arterial_pressure"])
@@ -388,6 +401,8 @@ def main():
                         help="LBM grid resolution (default: 64 32 32)")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--profile", action="store_true",
+                        help="Run profiler before starting server")
     args = parser.parse_args()
 
     if args.gpu:
@@ -398,6 +413,13 @@ def main():
         print(f"  CPU mode (use --gpu for GPU)")
 
     app, gm, relay, runner = create_app(grid_shape=tuple(args.grid))
+
+    if args.profile:
+        from maddening.core.profiler import profile_graph
+        print("\nProfiling...")
+        report = profile_graph(gm, n_steps=50)
+        print(report)
+        print()
 
     # Auto-start simulation
     runner.start()

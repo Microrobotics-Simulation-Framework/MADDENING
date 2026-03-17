@@ -396,13 +396,13 @@ function connectWS() {
 }
 
 function updateVitals(data) {
-  if (data.sim_time !== undefined) {
-    stepCount = Math.round(data.sim_time);
+  if (data.step_count !== undefined) {
+    stepCount = data.step_count;
     document.getElementById('sim-steps').textContent = stepCount;
-    // Convert LBM time to physical time estimate
-    // (LBM dt=1 lattice unit; physical scale depends on problem)
-    const physTime = data.sim_time * 0.001; // ~1ms per LBM step (rough)
-    document.getElementById('sim-time').textContent = physTime.toFixed(3);
+  }
+  if (data.sim_time !== undefined) {
+    // LBM lattice time; show as-is since physical scaling depends on the problem
+    document.getElementById('sim-time').textContent = data.sim_time.toFixed(1);
   }
   if (data.arterial_pressure !== undefined) {
     document.getElementById('v-pressure').textContent = data.arterial_pressure.toFixed(4);

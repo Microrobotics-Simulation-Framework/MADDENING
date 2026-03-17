@@ -260,6 +260,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     _orig_step = gm.step
 
     def _step_with_clot(external_inputs=None):
+        import warnings as _w
         if _clot_active[0]:
             _ensure_mask_external()
             if external_inputs is None:
@@ -267,7 +268,9 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
             if "vessel" not in external_inputs:
                 external_inputs["vessel"] = {}
             external_inputs["vessel"]["wall_mask_update"] = _clot_mask[0]
-        return _orig_step(external_inputs)
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            return _orig_step(external_inputs)
 
     gm.step = _step_with_clot
 
@@ -310,11 +313,13 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     async def ws_state(ws: WebSocket):
         """Stream simulation vitals as JSON at ~30 fps."""
         await ws.accept()
-        last_sim_time = -1.0
+        last_snapshot_id = -1  # use step_count, not sim_time, to detect new data
         try:
             while True:
                 sim_time, state = relay.latest_snapshot()
-                if state is not None and sim_time != last_sim_time:
+                snapshot_id = relay._step_count
+                if state is not None and snapshot_id != last_snapshot_id:
+                    last_snapshot_id = snapshot_id
                     last_sim_time = sim_time
                     data = {
                         "sim_time": sim_time,
@@ -423,6 +428,14 @@ def main():
 
     # Auto-start simulation
     runner.start()
+    print(f"  Simulation running ({runner.steps_per_frame} steps/frame)")
+
+    import signal
+    def _shutdown(sig, frame):
+        print("\nShutting down...")
+        runner.stop()
+        raise SystemExit(0)
+    signal.signal(signal.SIGINT, _shutdown)
 
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

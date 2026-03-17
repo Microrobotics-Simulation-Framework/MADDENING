@@ -318,7 +318,7 @@ async function loadGeometry() {
 }
 
 function updateTubeColors(profile) {
-  if (!profile || tubeMeshes.length === 0) return;
+  if (!profile || !tubeMeshes || tubeMeshes.length === 0) return;
 
   let vmax = 0;
   for (const v of profile) vmax = Math.max(vmax, Math.abs(v));
@@ -348,6 +348,7 @@ function updateTubeColors(profile) {
 }
 
 function updateClot(data) {
+  if (typeof THREE === 'undefined') return;  // Three.js not loaded
   if (data.clot_active && data.clot_pos) {
     const [x, y, z, r] = data.clot_pos;
     if (!clotMesh) {
@@ -386,12 +387,16 @@ function connectWS() {
   };
   ws.onerror = () => ws.close();
   ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    updateVitals(data);
-    // Color by selected mode
-    const profile = colorMode === 'pressure' ? data.pressure_profile : data.velocity_profile;
-    if (profile) updateTubeColors(profile);
-    updateClot(data);
+    try {
+      const data = JSON.parse(event.data);
+      updateVitals(data);
+      // Color by selected mode
+      const profile = colorMode === 'pressure' ? data.pressure_profile : data.velocity_profile;
+      if (profile) updateTubeColors(profile);
+      updateClot(data);
+    } catch (e) {
+      console.error('WS message handler error:', e);
+    }
   };
 }
 
@@ -486,10 +491,18 @@ async function clearClot() {
   if (clotMesh) clotMesh.visible = false;
 }
 
-// Init
-initThreeJS();
-loadGeometry();
+// Init — connect WS first (always works), then try 3D (may fail without internet)
 connectWS();
+try {
+  initThreeJS();
+  loadGeometry();
+} catch (e) {
+  console.warn('Three.js init failed (CDN unavailable?):', e);
+  document.getElementById('vessel-3d').innerHTML =
+    '<p style="color:#6b6f83;padding:20px;text-align:center;">' +
+    '3D view unavailable (Three.js CDN not reachable).<br>' +
+    'Vital signs and charts still work below.</p>';
+}
 </script>
 </body>
 </html>

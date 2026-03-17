@@ -313,17 +313,16 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     async def ws_state(ws: WebSocket):
         """Stream simulation vitals as JSON at ~30 fps."""
         await ws.accept()
-        last_snapshot_id = -1  # use step_count, not sim_time, to detect new data
+        last_snapshot_id = -1
         try:
             while True:
                 sim_time, state = relay.latest_snapshot()
                 snapshot_id = relay._step_count
                 if state is not None and snapshot_id != last_snapshot_id:
                     last_snapshot_id = snapshot_id
-                    last_sim_time = sim_time
                     data = {
                         "sim_time": sim_time,
-                        "step_count": int(sim_time),
+                        "step_count": snapshot_id,
                     }
                     if "heart" in state:
                         hs = state["heart"]
@@ -350,8 +349,11 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
                         data["clot_pos"] = _clot_pos[0]
                     await ws.send_json(data)
                 await asyncio.sleep(0.033)  # ~30 fps
-        except Exception:
-            pass
+        except Exception as e:
+            if not isinstance(e, (
+                asyncio.CancelledError,
+            )):
+                logger.warning("WS /ws/state error: %s", e)
 
     # --- Print startup info ---
 

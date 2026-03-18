@@ -718,6 +718,7 @@ class CloudLauncher:
             instance_type,
             use_spot=job_config.use_spot,
             region=job_config.region or None,
+            zone=None,
             clouds=cloud_name,
         )
         return instance_type, hourly_cost

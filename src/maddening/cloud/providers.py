@@ -81,9 +81,10 @@ class RunPodProvider(CloudProvider):
     ``gpu_type`` values are SkyPilot accelerator names for the RunPod
     catalog.  Common examples::
 
-        A4000, RTX4090, A100-80GB, H100-SXM, L4
+        RTXA4000, A40, RTX4090, L4, A100-80GB, H100-SXM
 
-    Run ``sky show-gpus --cloud runpod`` to list all available types.
+    Run ``sky show-gpus --cloud runpod --all`` to list all types with
+    pricing.
     """
 
     def credential_file_path(self) -> Path:

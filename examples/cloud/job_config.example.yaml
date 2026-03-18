@@ -1,0 +1,27 @@
+version: 1
+
+provider: runpod   # Must match a block in cloud_credentials.yaml
+
+# gpu_type: Provider-specific SkyPilot accelerator name.
+# NOT portable across providers — "A4000" means different things on different clouds.
+# Run `sky show-gpus --cloud <provider>` to see available options.
+#
+# RunPod:      A4000, RTX4090, A100-80GB, H100-SXM, L4
+# Lambda Labs: A100-80GB, H100-SXM, A10  (STUB — not validated end-to-end)
+gpu_type: "A4000"
+gpu_count: 1
+use_spot: true
+region: "US"
+disk_size: 50
+
+cost:
+  max_cost_per_hour: 2.00
+  max_total_budget: 5.00   # SkyPilot local estimate only — NOT real-time billing.
+                           # Tracks spend on this machine via local cache.
+                           # Does not reflect spend from other machines or
+                           # clusters managed outside SkyPilot.
+  autostop_minutes: 15
+  auto_teardown: true
+
+container_image: "nvcr.io/nvidia/cuda:12.2.2-runtime-ubuntu22.04"
+stream_preset: "standard"

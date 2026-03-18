@@ -2,6 +2,16 @@
 
 This module is only imported by ``CloudSession._launch_worker()``.
 If SkyPilot is not installed, imports will fail with a clear message.
+
+Two separate paths to cloud execution exist in MADDENING:
+
+CloudLauncher  — User-facing, script/CLI path.  Loads credentials from
+                 ~/.maddening/cloud_credentials.yaml.  Calls sky.* directly.
+                 Future basis for CloudSweep and CloudGroup.
+
+CloudSession   — Server-side orchestration path.  Credentials assumed
+                 pre-configured on the machine.  Uses _skypilot.py wrapper.
+                 Future basis for cloud API endpoints in MICROBOTICA.
 """
 
 from __future__ import annotations

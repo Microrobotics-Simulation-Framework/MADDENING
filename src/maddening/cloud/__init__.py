@@ -51,6 +51,20 @@ def __getattr__(name: str):
         # Mock implementations
         "MockStreamSession": "maddening.cloud.mock_streaming",
         "MockCloudSession": "maddening.cloud.mock_session",
+        # Launcher (requires skypilot)
+        "CloudLauncher": "maddening.cloud.launcher",
+        "CloudJob": "maddening.cloud.launcher",
+        "JobConfig": "maddening.cloud.launcher",
+        "JobPhase": "maddening.cloud.launcher",
+        "CostPolicy": "maddening.cloud.launcher",
+        "CredentialError": "maddening.cloud.launcher",
+        "CostLimitError": "maddening.cloud.launcher",
+        "LaunchError": "maddening.cloud.launcher",
+        # Providers (no deps)
+        "CloudProvider": "maddening.cloud.providers",
+        "RunPodProvider": "maddening.cloud.providers",
+        "LambdaLabsProvider": "maddening.cloud.providers",
+        "PROVIDERS": "maddening.cloud.providers",
     }
     if name in _lazy:
         import importlib
@@ -81,4 +95,16 @@ __all__ = [
     "CloudSessionError",
     "MockStreamSession",
     "MockCloudSession",
+    "CloudLauncher",
+    "CloudJob",
+    "JobConfig",
+    "JobPhase",
+    "CostPolicy",
+    "CredentialError",
+    "CostLimitError",
+    "LaunchError",
+    "CloudProvider",
+    "RunPodProvider",
+    "LambdaLabsProvider",
+    "PROVIDERS",
 ]

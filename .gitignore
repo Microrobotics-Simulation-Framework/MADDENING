@@ -12,3 +12,7 @@ build/
 
 # For throwaway / convenience files that shouldn't be pushed
 tmp/
+
+# Cloud credentials — NEVER commit
+examples/cloud/cloud_credentials.yaml
+examples/cloud/.env

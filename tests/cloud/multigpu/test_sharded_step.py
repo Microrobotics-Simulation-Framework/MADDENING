@@ -2,6 +2,7 @@
 
 import os
 
+# Try to force 2 CPU devices — only effective if set before JAX import.
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
 
 import jax
@@ -14,6 +15,9 @@ from maddening.cloud.multigpu.sharded_step import (
     build_sharded_jacobi_pass,
     shard_state,
 )
+
+_HAS_2_DEVICES = len(jax.devices()) >= 2
+_SKIP_MSG = "Requires >=2 JAX devices (set XLA_FLAGS before JAX import)"
 
 
 # -- Minimal node stubs -----------------------------------------------
@@ -44,6 +48,7 @@ def _resolve_boundary(node_name, full_state):
 
 # -- Tests -------------------------------------------------------------
 
+@pytest.mark.skipif(not _HAS_2_DEVICES, reason=_SKIP_MSG)
 class TestBuildShardedJacobiPass:
     def test_basic_pass(self):
         mesh = create_device_mesh(n_devices=2)
@@ -117,6 +122,7 @@ class TestBuildShardedJacobiPass:
                 ), f"Mismatch at {node}.{field}"
 
 
+@pytest.mark.skipif(not _HAS_2_DEVICES, reason=_SKIP_MSG)
 class TestShardState:
     def test_shard_state(self):
         mesh = create_device_mesh(n_devices=2)

@@ -171,6 +171,8 @@ class SimulationServer:
         self._binary_encoder = None
         # Server-side frame renderer
         self._frame_renderer = frame_renderer
+        # Cloud session (set externally or via /cloud/launch)
+        self._cloud_session = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -687,6 +689,70 @@ class SimulationServer:
             del self._original_nodes[node_name]
 
             return {"status": "deactivated", "node": node_name}
+
+        # -- cloud endpoints ------------------------------------------------
+
+        @app.post("/cloud/launch", tags=["cloud"])
+        def cloud_launch(config: dict[str, Any] = {}):
+            """Launch a cloud GPU session."""
+            if not _cloud_deps_available():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cloud dependencies not installed. "
+                           "pip install maddening[cloud-deploy]",
+                )
+            if self._cloud_session is not None:
+                raise HTTPException(
+                    status_code=409, detail="Cloud session already active.",
+                )
+            try:
+                from maddening.cloud.session import CloudSession, CloudConfig
+                self._cloud_session = CloudSession()
+                cloud_config = CloudConfig.from_dict(config) if config else CloudConfig()
+                info = self._cloud_session.launch(cloud_config)
+                return {"status": "launching", "session_id": info.session_id}
+            except Exception as exc:
+                self._cloud_session = None
+                raise HTTPException(status_code=500, detail=str(exc))
+
+        @app.get("/cloud/status", tags=["cloud"])
+        def cloud_status():
+            """Get cloud session status."""
+            if self._cloud_session is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail="No cloud session configured. "
+                           "Use POST /cloud/launch to start one.",
+                )
+            info = self._cloud_session.info
+            result = self._cloud_session.health_check()
+            return {
+                "stage": info.stage.value,
+                "vm_ip": info.vm_ip,
+                "session_id": info.session_id,
+                "fully_ready": result.fully_ready,
+                "error_stage": result.error_stage,
+                "error_detail": result.error_detail,
+            }
+
+        @app.post("/cloud/teardown", tags=["cloud"])
+        def cloud_teardown():
+            """Tear down the cloud session."""
+            if self._cloud_session is None:
+                raise HTTPException(
+                    status_code=501,
+                    detail="No cloud session configured.",
+                )
+            try:
+                self._cloud_session.teardown()
+            finally:
+                self._cloud_session = None
+            return {"status": "torn_down"}
+
+        def _cloud_deps_available() -> bool:
+            """Check if cloud dependencies are installed."""
+            import importlib.util
+            return importlib.util.find_spec("sky") is not None
 
         # -- WebSocket endpoints --------------------------------------------
 

@@ -9,3 +9,6 @@ build/
 *.npz
 .venv/
 *.jsonl
+
+# For throwaway / convenience files that shouldn't be pushed
+tmp/

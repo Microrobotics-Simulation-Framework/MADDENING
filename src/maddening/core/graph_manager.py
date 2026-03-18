@@ -1400,6 +1400,54 @@ class GraphManager:
         self._dirty = False
         self._notify(EVENT_COMPILED, self._schedule)
 
+    # ------------------------------------------------------------------
+    # Multi-GPU
+    # ------------------------------------------------------------------
+
+    def enable_multigpu(
+        self,
+        n_devices: Optional[int] = None,
+        partition_strategy: str = "auto",
+    ) -> None:
+        """Enable multi-GPU Jacobi coupling.
+
+        Requires at least one coupling group with ``iteration_mode="jacobi"``.
+        Uses ``jax.experimental.shard_map`` to distribute node updates
+        across a device mesh.
+
+        Parameters
+        ----------
+        n_devices : int, optional
+            Number of GPUs to use.  Defaults to all available.
+        partition_strategy : str
+            ``"auto"`` (default) assigns coupled nodes to the same device.
+        """
+        from maddening.cloud.multigpu.device_mesh import create_device_mesh
+        from maddening.cloud.multigpu.partition import assign_nodes_to_devices
+
+        jacobi_groups = [
+            g for g in self._coupling_groups
+            if g.iteration_mode == "jacobi"
+        ]
+        if not jacobi_groups:
+            raise ValueError(
+                "enable_multigpu requires at least one coupling group "
+                "with iteration_mode='jacobi'"
+            )
+
+        self._multigpu_mesh = create_device_mesh(n_devices)
+        n = len(self._multigpu_mesh.devices)
+
+        coupling_sets = [set(g.nodes) for g in self._coupling_groups]
+        edges_dicts = [e.to_dict() for e in self._edges]
+        self._multigpu_device_map = assign_nodes_to_devices(
+            node_names=list(self._nodes.keys()),
+            edges=edges_dicts,
+            coupling_groups=coupling_sets,
+            n_devices=n,
+        )
+        self._dirty = True
+
     def _build_step_fn(self) -> Callable:
         """Create a pure function ``(full_state, ext_inputs) -> full_state``.
 

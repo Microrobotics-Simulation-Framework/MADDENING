@@ -62,6 +62,15 @@ gpu-viz = ["pygfx>=0.16", "rendercanvas>=2.0", "glfw>=2.0", "scikit-image>=0.20"
 # OpenUSD integration (USD read/write, codeless schemas)
 usd = ["usd-core>=21.8"]
 
+# WebRTC streaming (GStreamer + signaling)
+streaming = ["PyGObject>=3.42", "websockets>=11.0"]
+
+# Cloud VM orchestration (SkyPilot)
+cloud = ["skypilot>=0.7"]
+
+# Full cloud deployment (SkyPilot + streaming)
+cloud-deploy = ["skypilot>=0.7", "PyGObject>=3.42", "websockets>=11.0"]
+
 # SBOM generation (Section 14)
 sbom = ["cyclonedx-bom>=4.0"]
 
@@ -81,6 +90,8 @@ all = [
     "rendercanvas>=2.0",
     "glfw>=2.0",
     "scikit-image>=0.20",
+    "skypilot>=0.7",
+    "PyGObject>=3.42",
 ]
 
 # CI testing -- headless-safe subset (no display-dependent packages)
@@ -129,4 +140,6 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
     # optax 0.2.x sets jax_pmap_shmap_merge which is deprecated in JAX 0.9+
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
+    # SelkiesRenderer emits PerformanceWarning on CPU fallback
+    "ignore::maddening.warnings.PerformanceWarning",
 ]

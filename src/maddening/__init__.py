@@ -25,6 +25,8 @@ def __getattr__(name: str):
         "SimulationNode": "maddening.core.node",
         "SurrogateNode": "maddening.surrogates.node",
         "SurrogateArchitecture": "maddening.surrogates.architecture",
+        "CloudSession": "maddening.cloud.session",
+        "CloudConfig": "maddening.cloud.session",
     }
     if name in _lazy:
         import importlib
@@ -42,4 +44,6 @@ __all__ = [
     "SimulationNode",
     "SurrogateNode",
     "SurrogateArchitecture",
+    "CloudSession",
+    "CloudConfig",
 ]

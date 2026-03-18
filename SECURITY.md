@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in MADDENING, please report it responsibly:
 
-**Email**: nicholas.ehsan.roy@gmail.com
+**Email**: nick@microrobotica.org
 
 Please include:
 - Description of the vulnerability

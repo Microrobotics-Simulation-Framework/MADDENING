@@ -16,6 +16,9 @@ def __getattr__(name: str):
     if name == "GPUHistoryViewer":
         from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
         return GPUHistoryViewer
+    if name == "SelkiesRenderer":
+        from maddening.viz.backends.selkies_renderer import SelkiesRenderer
+        return SelkiesRenderer
     raise AttributeError(f"module 'maddening.viz.backends' has no attribute {name!r}")
 
 
@@ -26,4 +29,5 @@ __all__ = [
     "run_matplotlib",
     "TerminalRenderer",
     "GPUHistoryViewer",
+    "SelkiesRenderer",
 ]

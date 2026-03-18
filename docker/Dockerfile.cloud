@@ -1,0 +1,53 @@
+# MADDENING Cloud Container
+# GPU-enabled container with GStreamer for WebRTC streaming
+#
+# Build:  docker build -f docker/Dockerfile.cloud -t maddening-cloud:latest .
+# Run:    docker run --gpus all -p 8000:8000 -p 8080:8080 -p 5555:5555 -p 5556:5556 \
+#           -e MADDENING_CLOUD_CONFIG='{}' maddening-cloud:latest
+
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+
+LABEL org.opencontainers.image.title="maddening-cloud" \
+      org.opencontainers.image.description="MADDENING simulation server with GPU streaming" \
+      org.opencontainers.image.source="https://github.com/Microrobotics-Simulation-Framework/MADDENING"
+
+# Prevent interactive prompts during apt-get
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies: GStreamer + Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-nice \
+    gstreamer1.0-tools \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    gir1.2-gst-plugins-bad-1.0 \
+    gir1.2-gstreamer-1.0 \
+    python3-gi \
+    python3-gi-cairo \
+    libgirepository1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MADDENING with cloud/streaming/API extras
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src/ src/
+
+RUN pip3 install --no-cache-dir ".[api,network]" && \
+    pip3 install --no-cache-dir PyGObject websockets selkies-gstreamer || true
+
+# Expose ports:
+#   8000 — FastAPI HTTP/WS server
+#   8080 — Selkies signaling / stream
+#   5555 — ZMQ state PUB
+#   5556 — ZMQ command SUB
+EXPOSE 8000 8080 5555 5556
+
+# Entrypoint
+ENV MADDENING_HOST=0.0.0.0
+ENV MADDENING_PORT=8000
+CMD ["python3", "-m", "maddening.cloud.entrypoint"]

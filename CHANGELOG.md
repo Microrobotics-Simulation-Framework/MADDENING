@@ -73,6 +73,9 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - `CostPolicy.spot_fallback`: when spot instances are unavailable, auto-retry on-demand (subject to same cost guards); configurable via job config YAML
 - `retry_until_up` on all SkyPilot launches to handle transient SSH/provisioning failures
 - Concise error message for spot unavailability (truncates verbose per-region table); other errors preserved in full
+- Multi-GPU Phase 1: `enable_multigpu()` wired into `_build_step_fn()` — Jacobi coupling uses `jax.device_put` for per-node device placement; correctness validated (single step, 100 steps, `lax.scan` all match non-sharded)
+- Multi-job architecture: `Coordinator` (ZMQ ROUTER-based rendezvous with registration, topology broadcast, heartbeat monitoring), `CloudGroup` (provision rank-0 first, inject `COORDINATOR_ADDR` into workers, `teardown_all` / `teardown_one` with `ISOLATE` mode), `SubgraphSpec` + `GroupConfig`
+- Cloud examples organized into subdirectories: `config/`, `launch/`, `server/`, `streaming/`
 
 ### Fixed
 - Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step

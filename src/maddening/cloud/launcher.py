@@ -130,12 +130,33 @@ class JobConfig:
     envs: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
+        # Check for reserved env vars in user-provided envs.
+        # CloudGroup injects reserved vars internally via _with_envs().
         bad = _RESERVED_ENV_VARS & set(self.envs)
-        if bad:
+        if bad and not getattr(self, "_skip_env_check", False):
             raise ValueError(
                 f"envs contains reserved key(s): {bad}. "
                 f"These are injected automatically by CloudLauncher/CloudGroup."
             )
+
+    def _with_envs(self, extra_envs: dict[str, str]) -> "JobConfig":
+        """Return a copy with extra env vars, bypassing reserved-var check.
+
+        Used internally by CloudGroup to inject COORDINATOR_ADDR etc.
+        """
+        merged = {**self.envs, **extra_envs}
+        new = JobConfig(
+            provider=self.provider, gpu_type=self.gpu_type,
+            gpu_count=self.gpu_count, use_spot=self.use_spot,
+            region=self.region, disk_size=self.disk_size,
+            cost=self.cost, container_image=self.container_image,
+            stream_preset=self.stream_preset, setup=self.setup,
+            run=self.run, workdir=self.workdir,
+            envs={k: v for k, v in merged.items() if k not in _RESERVED_ENV_VARS},
+        )
+        # Store the full envs (including reserved) for _do_launch to use
+        object.__setattr__(new, "_extra_envs", extra_envs)
+        return new
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "JobConfig":
@@ -661,6 +682,10 @@ class CloudLauncher:
         envs["MADDENING_CLOUD_CONFIG"] = json.dumps({
             "stream_preset": job_config.stream_preset,
         })
+        # Merge any internal extra envs (from CloudGroup._with_envs)
+        extra = getattr(job_config, "_extra_envs", None)
+        if extra:
+            envs.update(extra)
 
         run_cmd = (
             job_config.run
@@ -1047,7 +1072,7 @@ def _load_credentials_file(path: Path) -> dict:
         raise CredentialError(
             f"Credentials file not found: {path}\n"
             f"Create it from the example:\n"
-            f"  cp src/maddening/examples/cloud/cloud_credentials.example.yaml {path}"
+            f"  cp src/maddening/examples/cloud/config/cloud_credentials.example.yaml {path}"
         )
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)

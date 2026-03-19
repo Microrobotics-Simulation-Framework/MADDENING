@@ -85,6 +85,12 @@ def __getattr__(name: str):
         "RunPodProvider": "maddening.cloud.providers",
         "LambdaLabsProvider": "maddening.cloud.providers",
         "PROVIDERS": "maddening.cloud.providers",
+        # Multi-job (requires pyzmq for coordinator)
+        "CloudGroup": "maddening.cloud.group",
+        "GroupConfig": "maddening.cloud.group",
+        "GroupFailureMode": "maddening.cloud.group",
+        "SubgraphSpec": "maddening.cloud.group",
+        "Coordinator": "maddening.cloud.multigpu.coordinator",
     }
     if name in _lazy:
         import importlib

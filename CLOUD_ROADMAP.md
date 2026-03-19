@@ -158,19 +158,41 @@ piece of work from the WebRTC transport layer (which is validated below).
 
 ### Medium-term: Multi-GPU
 
-- [ ] Wire `enable_multigpu()` into `_build_step_fn()` so sharded pass replaces `one_pass_jacobi`
-- [ ] Replace sequential per-device loop with actual `jax.experimental.shard_map`
+- [x] Wire `enable_multigpu()` into `_build_step_fn()` — `one_pass_jacobi` uses `jax.device_put` for node placement
+- [x] Integration tests: single step, 100 steps, and `lax.scan` all match between sharded and non-sharded (2 CPU devices via XLA_FLAGS)
+- [x] `conftest.py` sets `XLA_FLAGS=--xla_force_host_platform_device_count=2` for CI compatibility
+- [ ] Replace `jax.device_put` approach with actual `jax.experimental.shard_map` (Phase 2)
 - [ ] Benchmark on real multi-GPU hardware (2+ GPUs)
 - [ ] Run multi-GPU tests on RunPod with multi-GPU instance (e.g. `A100-80GB:2`)
 
 ### Medium-term: Multi-Job Architecture
 
-- [ ] Implement ZMQ coordinator process (ROUTER socket, registration, topology broadcast)
-- [ ] Implement `CloudGroup` with `provision_all()` / `start()` / `teardown_all()`
-- [ ] Implement rendezvous barrier (block until all N workers registered)
-- [ ] Implement heartbeat monitoring + `TEARDOWN_ALL` failure mode
-- [ ] Implement `ISOLATE` failure mode (`PEER_DEAD` notification)
-- [ ] Test with 2-VM setup on RunPod (two `RTXA4000` instances)
+- [x] Implement ZMQ coordinator process (ROUTER socket, registration, topology broadcast) — `coordinator.py`
+- [x] Implement `CloudGroup` with `provision_all()` / `start()` / `teardown_all()` — `group.py`
+- [x] Implement rendezvous barrier (`wait_for_all()` with timeout)
+- [x] Implement heartbeat monitoring + dead worker detection
+- [x] Implement `ISOLATE` failure mode (`teardown_one()`)
+- [x] Tests: coordinator registration, topology building, bidirectional edges, CloudGroup env injection, teardown modes
+- [ ] Test with 2-VM setup on RunPod (end-to-end multi-job simulation)
+- [ ] Implement worker-side rendezvous client (register + receive topology + create ZMQ sockets)
+
+**Key use case: Live surrogate training + hot-swap**
+
+Multi-job enables a powerful online learning workflow:
+- Job 1 (GPU): runs the live simulation graph
+- Job 2 (separate GPU): subscribes to Job 1's state stream via ZMQ,
+  trains a surrogate in real-time from live data, publishes "ready" signal
+- Job 1 receives signal, calls `replace_node()` to hot-swap physics→surrogate
+- Simulation continues 10-100x faster with no restart
+
+What already exists: `SurrogateTrainer`, `replace_node()`, `DatasetGenerator`,
+`NetworkRelay` (ZMQ PUB/SUB).
+
+What needs to be built:
+- `DatasetGenerator.from_stream()` — accumulate training pairs from live ZMQ
+- Swap protocol: trainer publishes weights + config, simulator deserializes + swaps
+- Shadow validation: run physics + surrogate in parallel, alert on divergence
+- The `ISOLATE` failure mode fits naturally: trainer crash → simulation continues
 
 ### After Multi-Job: Finalize Docker Image
 

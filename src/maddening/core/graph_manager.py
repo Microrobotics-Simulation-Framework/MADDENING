@@ -164,6 +164,7 @@ def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
+    multigpu_device_map=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -447,8 +448,18 @@ def _run_coupled_block_impl(
                 )
                 # Interface overrides already applied per sub-step
             else:
+                # Optionally place computation on assigned device
                 bi = _resolve_boundary(nn, latest_results, flux_s)
                 pre = initial_node_states[nn]
+                if multigpu_device_map is not None and nn in multigpu_device_map:
+                    dev_idx = multigpu_device_map[nn]
+                    devices = jax.devices()
+                    if dev_idx < len(devices):
+                        device = devices[dev_idx]
+                        pre = jax.device_put(pre, device)
+                        bi = jax.tree.map(
+                            lambda x: jax.device_put(x, device), bi,
+                        )
                 results[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
                 results[nn] = _apply_interface_overrides(
                     results[nn], pre, bi, _get_dt(nn), nodes[nn].node,
@@ -940,6 +951,9 @@ class GraphManager:
         self._is_multirate: bool = False
         self._rate_dividers: dict[str, int] = {}
         self._coupling_groups: list[CouplingGroup] = []
+        # Multi-GPU state (set by enable_multigpu)
+        self._multigpu_mesh = None
+        self._multigpu_device_map: Optional[dict[str, int]] = None
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -1615,6 +1629,7 @@ class GraphManager:
                 nodes=nodes, edges_by_target=edges_by_target,
                 ext_by_target=ext_by_target, back_edge_set=back_edge_set,
                 has_external=has_external, all_edges=self._edges,
+                multigpu_device_map=self._multigpu_device_map,
             )
 
         if not is_multirate and not has_coupling:
@@ -2105,6 +2120,7 @@ class GraphManager:
                             back_edge_set=back_edge_set,
                             has_external=has_external,
                             all_edges=self._edges,
+                            multigpu_device_map=self._multigpu_device_map,
                         )
             else:
                 for nn in schedule:

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MADDENING WebRTC Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: monospace; }
+  #container { display: flex; flex-direction: column; align-items: center; padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 10px; color: #4ecdc4; }
+  #video-box { position: relative; background: #000; border: 2px solid #333;
+    border-radius: 8px; overflow: hidden; margin: 10px 0; }
+  video { display: block; max-width: 90vw; max-height: 70vh; }
+  #status { padding: 8px 16px; border-radius: 4px; font-size: 0.9em; margin: 8px 0; }
+  .connecting { background: #e6a817; color: #000; }
+  .connected { background: #27ae60; color: #fff; }
+  .error { background: #c0392b; color: #fff; }
+  .disconnected { background: #555; color: #ddd; }
+  #controls { margin: 10px 0; display: flex; gap: 10px; align-items: center; }
+  input { background: #2a2a3e; color: #eee; border: 1px solid #555; padding: 6px 10px;
+    border-radius: 4px; font-family: monospace; width: 400px; }
+  button { background: #4ecdc4; color: #1a1a2e; border: none; padding: 8px 16px;
+    border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
+  button:hover { background: #45b7b0; }
+  #stats { color: #888; font-size: 0.85em; margin: 8px 0; }
+  #perf { color: #888; font-size: 0.85em; margin: 4px 0; }
+</style>
+</head>
+<body>
+<div id="container">
+  <h1>MADDENING WebRTC Viewer</h1>
+  <div id="controls">
+    <input id="signaling-url" type="text"
+      placeholder="ws://host:port/signaling/session_id?token=...">
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+  </div>
+  <div id="status" class="disconnected">Disconnected</div>
+  <div id="video-box">
+    <video id="video" autoplay playsinline muted></video>
+  </div>
+  <div id="stats"></div>
+  <div id="perf"></div>
+</div>
+
+<script>
+let pc = null;
+let ws = null;
+let statsInterval = null;
+let frameCount = 0;
+let lastFrameTime = 0;
+
+function setStatus(text, cls) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = cls;
+}
+
+function connect() {
+  const url = document.getElementById('signaling-url').value.trim();
+  if (!url) {
+    setStatus('Enter a signaling URL', 'error');
+    return;
+  }
+
+  disconnect();
+  setStatus('Connecting...', 'connecting');
+
+  // Create peer connection
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate }));
+    }
+  };
+
+  pc.ontrack = (e) => {
+    console.log('Track received:', e.track.kind);
+    const video = document.getElementById('video');
+    video.srcObject = e.streams[0];
+    setStatus('Streaming', 'connected');
+    startStats();
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('Connection state:', pc.connectionState);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      setStatus('Connection ' + pc.connectionState, 'error');
+    }
+  };
+
+  // Add receive-only transceiver
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  // Connect signaling
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    console.log('Signaling connected');
+    // Create and send offer
+    pc.createOffer().then(offer => {
+      return pc.setLocalDescription(offer);
+    }).then(() => {
+      ws.send(JSON.stringify({
+        type: 'sdp',
+        sdp: pc.localDescription
+      }));
+    }).catch(err => {
+      setStatus('Offer failed: ' + err.message, 'error');
+    });
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'sdp' && msg.sdp) {
+      pc.setRemoteDescription(new RTCSessionDescription(msg.sdp))
+        .catch(err => console.error('SDP error:', err));
+    } else if (msg.type === 'ice' && msg.candidate) {
+      pc.addIceCandidate(new RTCIceCandidate(msg.candidate))
+        .catch(err => console.error('ICE error:', err));
+    }
+  };
+
+  ws.onerror = () => setStatus('Signaling error', 'error');
+  ws.onclose = () => {
+    if (pc && pc.connectionState !== 'connected') {
+      setStatus('Signaling closed', 'disconnected');
+    }
+  };
+}
+
+function disconnect() {
+  if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+  if (ws) { ws.close(); ws = null; }
+  if (pc) { pc.close(); pc = null; }
+  document.getElementById('video').srcObject = null;
+  setStatus('Disconnected', 'disconnected');
+  document.getElementById('stats').textContent = '';
+  document.getElementById('perf').textContent = '';
+}
+
+function startStats() {
+  if (statsInterval) clearInterval(statsInterval);
+  let prevBytes = 0;
+  let prevFrames = 0;
+  let prevTime = performance.now();
+
+  statsInterval = setInterval(async () => {
+    if (!pc) return;
+    const stats = await pc.getStats();
+    stats.forEach(report => {
+      if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        const now = performance.now();
+        const dt = (now - prevTime) / 1000;
+        const bytes = report.bytesReceived || 0;
+        const frames = report.framesDecoded || 0;
+        const bps = ((bytes - prevBytes) * 8 / dt / 1000).toFixed(0);
+        const fps = ((frames - prevFrames) / dt).toFixed(1);
+        prevBytes = bytes;
+        prevFrames = frames;
+        prevTime = now;
+
+        document.getElementById('stats').textContent =
+          `${fps} fps | ${bps} kbps | ${(bytes/1024/1024).toFixed(1)} MB total | ` +
+          `${report.framesDecoded} frames decoded | ${report.framesDropped || 0} dropped`;
+
+        // Jitter and RTT
+        const jitter = report.jitter ? (report.jitter * 1000).toFixed(1) : '?';
+        document.getElementById('perf').textContent =
+          `Jitter: ${jitter}ms | ` +
+          `Resolution: ${report.frameWidth || '?'}x${report.frameHeight || '?'} | ` +
+          `Codec: ${report.decoderImplementation || '?'}`;
+      }
+    });
+  }, 1000);
+}
+
+// Auto-fill URL from query params
+const params = new URLSearchParams(window.location.search);
+if (params.get('url')) {
+  document.getElementById('signaling-url').value = params.get('url');
+}
+</script>
+</body>
+</html>

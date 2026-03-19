@@ -123,8 +123,38 @@ Flow: `sky.launch()` (no setup/run) → SSH in → `pip install` in system pytho
   - **Must use python3.10** (system python) for `gi` bindings — python3.12 can't load system `_gi.so`
   - System packages needed: `gstreamer1.0-plugins-{base,good,bad,ugly}`, `gstreamer1.0-nice`,
     `gir1.2-{gst-plugins-bad-1.0,gstreamer-1.0}`, `python3-gi`, `python3-gi-cairo`
-- [ ] Verify WebRTC streaming from cloud GPU to local browser (requires browser-side WebRTC client)
+- [x] WebRTC pipeline validated: SelkiesRenderer wraps matplotlib ServerFrameRenderer via adapter,
+  GStreamer x264enc pipeline runs, signaling WebSocket reachable, `pipeline_alive: True`
+  - **Performance on RTX 4090 (854x480 JPEG @ 75% quality):**
+    - Matplotlib render: 13.5ms avg (74 FPS max)
+    - + GStreamer push: 17.5ms avg (57 FPS max)
+    - GStreamer overhead: 4.0ms (23% of total)
+    - Frame size: 36 KB
+  - x264enc warns about 4:4:4 baseline profile (RGBA→YUV conversion by videoconvert) but continues
+  - `webrtc_client.html` browser client built (single-file, raw RTCPeerConnection)
+  - **Needs `FrameRendererAdapter`** to bridge `ServerFrameRenderer` (render→bytes) to `Renderer` ABC (setup/update/teardown)
+  - Full browser WebRTC playback not yet tested (requires manual browser connection)
 - [x] Test `SelkiesRenderer` wrapping a real renderer — works with DummyRenderer on cloud GPU
+
+### Future: USD Scene Rendering via Hydra Storm
+
+For MIME/MICROBOTICA, the target is rendering live USD scenes via Selkies WebRTC.
+This requires a `USDFrameRenderer` that reads a live USD stage and renders to a
+framebuffer in a headless GPU pipeline.
+
+**Preferred path: Hydra Storm (OpenGL via EGL)**
+- USD's built-in GPU renderer via `UsdImagingGLEngine`
+- Requires `usd-core` compiled with OpenGL + EGL headless support
+- No X11/display server needed (EGL renders directly on GPU)
+- This is the "proper" path for MIME's viewport streaming
+
+**Fallback paths:**
+- PyVista + Xvfb (simpler but needs X11 shim)
+- pygfx/wgpu offscreen (WebGPU, no X11, but reads from history format not USD)
+
+**Current state:** `USDWriter` writes USD, `viewer_from_usd` reads into PyVista
+for replay, but no headless USD→pixels pipeline exists yet. This is a separate
+piece of work from the WebRTC transport layer (which is validated below).
 
 ### Medium-term: Multi-GPU
 

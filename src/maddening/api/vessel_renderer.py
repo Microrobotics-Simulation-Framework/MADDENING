@@ -106,7 +106,8 @@ class VesselFlowRenderer(ServerFrameRendererBase):
         width: int = 960,
         height: int = 540,
     ):
-        import pyvista as pv
+        from maddening.viz._imports import _import_pyvista
+        pv = _import_pyvista()
         from scipy.spatial import cKDTree
 
         self._config = config

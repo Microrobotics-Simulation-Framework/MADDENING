@@ -28,6 +28,8 @@ from typing import Optional
 
 import numpy as np
 
+from maddening.viz._imports import _import_pyvista
+
 from maddening.api.frame_renderer_base import ServerFrameRendererBase
 
 try:
@@ -285,7 +287,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
     def _ensure_plotter(self):
         if self._plotter is not None:
             return
-        import pyvista as pv
+        pv = _import_pyvista()
         pv.OFF_SCREEN = True
         self._plotter = pv.Plotter(
             off_screen=True,
@@ -302,7 +304,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
 
     def _build_static(self):
         """Add static elements (pipe wall, axes) to the plotter."""
-        import pyvista as pv
+        pv = _import_pyvista()
         cfg = self._config
         nx, ny, nz = self._grid_dims
 
@@ -356,7 +358,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
 
     def _make_slice_grid(self, axis: int, idx: int):
         """Create a 2D StructuredGrid for a fixed slice plane."""
-        import pyvista as pv
+        pv = _import_pyvista()
         nx, ny, nz = self._grid_dims
 
         if axis == 0:  # x-normal
@@ -424,7 +426,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
     # ------------------------------------------------------------------
 
     def _update_arrows(self, state: dict):
-        import pyvista as pv
+        pv = _import_pyvista()
 
         for i, ac in enumerate(self._config.arrows):
             vel = np.asarray(state[ac.node][ac.field], dtype=np.float32)
@@ -508,7 +510,7 @@ class ServerFrameRenderer3D(ServerFrameRendererBase):
     # ------------------------------------------------------------------
 
     def _update_streamlines(self, state: dict):
-        import pyvista as pv
+        pv = _import_pyvista()
 
         for i, sc in enumerate(self._config.streamlines):
             vel = np.asarray(state[sc.node][sc.field], dtype=np.float32)

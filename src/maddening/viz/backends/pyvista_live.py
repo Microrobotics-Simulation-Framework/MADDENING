@@ -31,6 +31,7 @@ from typing import Optional
 
 import numpy as np
 
+from maddening.viz._imports import _import_pyvista
 from maddening.viz.renderer import Renderer, GraphInfo
 
 
@@ -161,7 +162,7 @@ class PyVistaLiveRenderer(Renderer):
 
     def setup(self, graph_info: GraphInfo) -> None:
         """Build the PyVista scene."""
-        import pyvista as pv
+        pv = _import_pyvista()
         from scipy.spatial import cKDTree
 
         self._graph_info = graph_info
@@ -292,7 +293,7 @@ class PyVistaLiveRenderer(Renderer):
             ])
 
             if line.n_points != n:
-                import pyvista as pv
+                pv = _import_pyvista()
                 cells = np.zeros(n + 1, dtype=np.int64)
                 cells[0] = n
                 cells[1:] = np.arange(n)

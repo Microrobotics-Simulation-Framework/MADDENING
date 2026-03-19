@@ -1,12 +1,13 @@
 # Cloud Module Roadmap
 
 Status of the cloud module (`maddening/cloud/`) and planned next steps.
+Last updated: 2026-03-19.
 
 ---
 
 ## Completed
 
-### Phase 1-7: Core Cloud Module (PR cc6fab3)
+### Core Cloud Module (PR cc6fab3)
 
 All code in `src/maddening/cloud/`, 88 tests passing.
 
@@ -19,7 +20,6 @@ All code in `src/maddening/cloud/`, 88 tests passing.
 - **Multi-GPU Jacobi** — `create_device_mesh()`, `assign_nodes_to_devices()`, `build_sharded_jacobi_pass()`, `GraphManager.enable_multigpu()`
 - **Cloud container** — `docker/Dockerfile.cloud`, `entrypoint.py`
 - **Server endpoints** — `POST /cloud/launch`, `GET /cloud/status`, `POST /cloud/teardown`
-- **Package extras** — `streaming`, `cloud`, `cloud-deploy` (being restructured, see below)
 
 ### CloudLauncher (PR 8d86392 + 65f190b)
 
@@ -31,52 +31,108 @@ User-facing launch path, 46 tests passing.
 - **JobConfig** + `CostPolicy` — YAML-based, reserved env var validation
 - **Credential context manager** — write/delete with pre-existing file preservation
 - **Cost guards** — hourly rate check (hard reject) + budget check (best-effort, lagged)
-- **Examples** — `01_validate.py`, `02_runpod_launch.py`
+- **Examples** — `src/maddening/examples/cloud/01_validate.py`, `02_runpod_launch.py`
+
+### Package Restructure + Import Guards (PR 0a3980b)
+
+Consistent install experience, 146 cloud + guard tests passing.
+
+- **Pyproject.toml restructured** — hardware extras (`cuda12`, `tpu`), per-provider cloud (`runpod`, `lambda`, `aws`, `gcp`), combo (`cloud`, `cloud-all`), task bundles (`server`, `client`)
+- **Import guards on all optional deps** — every missing dep raises `ImportError` with exact `pip install maddening[extra]` command
+- **`__getattr__` lazy imports improved** — `viz/`, `viz/backends/`, `surrogates/`, `cloud/` all catch ImportError with install hints
+- **Cloud examples consolidated** — moved from `examples/cloud/` to `src/maddening/examples/cloud/`
+- **User documentation** — `docs/user_guide/installation.md`, `docs/user_guide/quickstart.md`
+- **Import guard tests** — `tests/test_import_guards.py` (subprocess-based) + TOML consistency checks
+- **Removed obsolete extras** — `cloud-deploy` (conflated streaming + cloud)
+
+### Launch Improvements + End-to-End Validation
+
+- **Spot fallback** — `CostPolicy(spot_fallback=True)` auto-retries on-demand when spot is unavailable, subject to the same cost guards
+- **`retry_until_up`** — handles transient SSH/provisioning failures automatically
+- **Hourly cost tracking** — `CloudJob` stores resolved hourly cost from catalog; `status()` returns it correctly
+- **Error truncation** — spot unavailability errors are truncated to a one-line summary with actionable advice; other errors preserved in full
+- **Remaining pyvista/usd import guards** — all bare `import pyvista` calls now go through `_import_pyvista()` helper with `maddening[viz3d]` message
+- **End-to-end validated** — A40 spot launch on RunPod: provision → status → teardown, all confirmed clean via both SkyPilot and RunPod API
 
 ---
 
-## In Progress
+## Next Steps Checklist
 
-### Pyproject.toml Restructure + Import Guards
+### Immediate: End-to-End Cloud Launch
 
-Replace the current extras with task-oriented bundles and add consistent dependency error messages across the codebase. See the plan below.
+- [x] Run real launch on RunPod (A40 on-demand, A40 spot) — VM provisioned, status checked, teardown confirmed
+- [x] Verify `CloudJob.status()` returns correct `cluster_status: UP`, `vm_ip`, `hourly_cost`
+- [x] Verify spot fallback: RTXA4000 spot sold out → auto-retry on-demand works
+- [x] Verify truncated error messages for spot unavailability
+- [x] Verify `retry_until_up` handles transient SSH failures
+- [x] Verify credential cleanup: `~/.runpod/config.toml` deleted after teardown, RunPod API confirms zero pods
+- [ ] Test `CloudJob.from_cluster_name()` reconnect after script restart
 
-**New extras:**
-- `cuda12`, `tpu` — hardware acceleration
-- `runpod`, `lambda`, `aws`, `gcp` — per-provider cloud (includes SkyPilot + provider SDK)
-- `cloud` — all MADDENING-supported providers (RunPod + Lambda)
-- `cloud-all` — every SkyPilot provider
-- `server` — FastAPI + ZMQ + rich + matplotlib (Docker image target)
-- `client` — ZMQ + rich (thin viewer)
-- Keep fine-grained extras (`viz`, `terminal`, `network`, `api`, `surrogates`, `viz3d`, `gpu-viz`, `usd`, `streaming`, `sbom`)
+### Short-term: Docker Image + Server
 
-**Import guard work:**
-- Every optional dep import boundary gets a try/except with `pip install maddening[extra]` message
-- `__getattr__` lazy imports catch ImportError and re-raise with install hint
-- New `tests/test_import_guards.py` (subprocess-based) + `tests/test_packaging.py` (TOML validation)
+- [ ] Build `docker/Dockerfile.cloud` and push to a container registry
+- [ ] Launch the Docker image on RunPod via `job_config.yaml` with `container_image` set
+- [ ] Verify FastAPI server accessible on `:8000` from local machine
+- [ ] Verify WebSocket state streaming (`/ws/state/binary`) works over the network
+- [ ] Test `maddening[server,cuda12]` install inside the container
 
-**Extras being removed:** `cloud` (bare SkyPilot, useless), `cloud-deploy` (conflated streaming + cloud)
+### Short-term: SelkiesSession Integration Testing
+
+- [ ] Test `SelkiesSession` with real GStreamer inside the Docker container
+- [ ] Verify WebRTC streaming from cloud GPU to local browser
+- [ ] Test `SelkiesRenderer` wrapping a real renderer (not just MockStreamSession)
+
+### Medium-term: Multi-GPU
+
+- [ ] Wire `enable_multigpu()` into `_build_step_fn()` so sharded pass replaces `one_pass_jacobi`
+- [ ] Replace sequential per-device loop with actual `jax.experimental.shard_map`
+- [ ] Benchmark on real multi-GPU hardware (2+ GPUs)
+- [ ] Run multi-GPU tests on RunPod with multi-GPU instance (e.g. `A100-80GB:2`)
+
+### Medium-term: Multi-Job Architecture
+
+- [ ] Implement ZMQ coordinator process (ROUTER socket, registration, topology broadcast)
+- [ ] Implement `CloudGroup` with `provision_all()` / `start()` / `teardown_all()`
+- [ ] Implement rendezvous barrier (block until all N workers registered)
+- [ ] Implement heartbeat monitoring + `TEARDOWN_ALL` failure mode
+- [ ] Implement `ISOLATE` failure mode (`PEER_DEAD` notification)
+- [ ] Test with 2-VM setup on RunPod (two `RTXA4000` instances)
+- [ ] Test `CloudSweep` as degenerate case (N independent jobs, no ZMQ)
+
+### Medium-term: Lambda Labs Validation
+
+- [ ] Test `LambdaLabsProvider` end-to-end (currently stub only)
+- [ ] Validate credential write/delete lifecycle with real Lambda API key
+- [ ] Test `sky check lambda` after `CloudLauncher` writes credentials
+- [ ] Run a real job on Lambda Labs
+
+### Future: Additional Providers
+
+- [ ] AWS provider (credential handling for `~/.aws/credentials`)
+- [ ] GCP provider (credential handling for service account JSON)
+- [ ] Test cross-provider multi-job (e.g. rank-0 on RunPod, workers on Lambda)
 
 ---
 
-## Next: End-to-End Cloud Testing
+## Architecture: Two Paths to Cloud
 
-### Prerequisites
-- User has `~/.maddening/cloud_credentials.yaml` with RunPod API key
-- `pip install maddening[runpod]`
-- `sky check runpod` shows enabled
+```
+CloudLauncher  — User-facing, script/CLI path. Loads credentials from
+                 ~/.maddening/cloud_credentials.yaml. Calls sky.* directly.
+                 Future basis for CloudSweep and CloudGroup.
 
-### Test sequence
-1. `python src/maddening/examples/cloud/01_validate.py` — parse config, resolve GPU, check cost ✅ (done)
-2. `python src/maddening/examples/cloud/02_runpod_launch.py` — real launch on RunPod, stream logs, status, teardown
-3. Launch with `maddening[server,cuda12]` Docker image on RunPod
-4. Connect to running simulation via WebSocket from local machine
+CloudSession   — Server-side orchestration path. Credentials assumed
+                 pre-configured on the machine. Uses _skypilot.py wrapper.
+                 Future basis for cloud API endpoints in MICROBOTICA.
+```
+
+Both use `providers.py` for credential file management.
 
 ---
 
-## Future: Multi-Job Architecture
+## Future: Multi-Job Architecture (Design Only)
 
-### Architecture Decision: Coordinator on Rank-0
+### Coordinator on Rank-0
 
 For distributed MADDENING graphs (each subgraph on a separate cloud VM), we use a coordinator process on the rank-0 VM to solve the rendezvous problem.
 
@@ -189,7 +245,7 @@ Broadcast from coordinator to each worker after rendezvous:
 | `SUBGRAPH_ID` | CloudGroup | At provision (task.envs) |
 | `MADDENING_TOPOLOGY` | Coordinator process | At runtime (ZMQ message, not env var) |
 
-### CloudJob Fields Added for Multi-Job
+### CloudJob Fields for Multi-Job
 
 These exist now on CloudJob but are unused in single-job mode:
 - `phase` — `PROVISIONING | WAITING | EXECUTING | DONE | FAILED` (WAITING = at rendezvous barrier)
@@ -253,19 +309,3 @@ These findings constrain the design. Recorded here to avoid re-verification.
 - NOT `A4000` — SkyPilot catalog names don't always match marketing names
 - `sky show-gpus --cloud runpod --all` to list
 - RunPod regions use country codes: `NL`, `SE`, `US`, `CZ`, `NO`, `IS`, `CA`, `RO` (not `EU`)
-
----
-
-## Architecture: Two Paths to Cloud
-
-```
-CloudLauncher  — User-facing, script/CLI path. Loads credentials from
-                 ~/.maddening/cloud_credentials.yaml. Calls sky.* directly.
-                 Future basis for CloudSweep and CloudGroup.
-
-CloudSession   — Server-side orchestration path. Credentials assumed
-                 pre-configured on the machine. Uses _skypilot.py wrapper.
-                 Future basis for cloud API endpoints in MICROBOTICA.
-```
-
-Both use `providers.py` for credential file management.

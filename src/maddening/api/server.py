@@ -699,7 +699,7 @@ class SimulationServer:
                 raise HTTPException(
                     status_code=400,
                     detail="Cloud dependencies not installed. "
-                           "pip install maddening[cloud-deploy]",
+                           "pip install maddening[cloud]",
                 )
             if self._cloud_session is not None:
                 raise HTTPException(

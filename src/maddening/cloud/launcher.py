@@ -96,6 +96,7 @@ class CostPolicy:
     max_total_budget: float = 5.00
     autostop_minutes: int = 15
     auto_teardown: bool = True
+    spot_fallback: bool = False  # If True, fall back to on-demand when spot unavailable
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ class CloudJob:
         creds: Optional[dict] = None,
         vm_ip: Optional[str] = None,
         ports: Optional[dict[str, int]] = None,
+        hourly_cost: float = 0.0,
     ) -> None:
         self._cluster_name = cluster_name
         self._request_id = request_id
@@ -214,6 +216,7 @@ class CloudJob:
         self._creds = creds
         self._vm_ip = vm_ip
         self._ports = ports or {}
+        self._hourly_cost = hourly_cost
         self._phase = (
             JobPhase.DONE if cluster_name == "dry-run"
             else JobPhase.PROVISIONING
@@ -329,7 +332,7 @@ class CloudJob:
             "cluster_status": status_str,
             "job_id": c.get("job_id"),
             "vm_ip": self._vm_ip,
-            "hourly_cost": c.get("hourly_cost", 0.0),
+            "hourly_cost": self._hourly_cost,
         }
 
     def cost_so_far(self) -> float:
@@ -494,6 +497,10 @@ class CloudLauncher:
         Non-blocking after the SkyPilot request is accepted.  Call
         ``job.stream_logs()`` to follow provisioning output.
 
+        If ``job_config.use_spot`` is True and ``job_config.cost.spot_fallback``
+        is True, a spot failure will automatically retry with on-demand
+        instances (subject to the same cost guards).
+
         Parameters
         ----------
         job_config : JobConfig or path
@@ -513,7 +520,42 @@ class CloudLauncher:
         budget_used = self._get_budget_used()
         self._check_cost_guards(job_config.cost, hourly_cost, budget_used)
 
-        # Build SkyPilot task
+        try:
+            return self._do_launch(
+                job_config, provider, creds, hourly_cost, dry_run,
+                use_spot=job_config.use_spot,
+            )
+        except LaunchError as exc:
+            # If spot failed and fallback is enabled, retry on-demand
+            if (job_config.use_spot
+                    and job_config.cost.spot_fallback
+                    and _is_spot_unavailable_error(exc)):
+                logger.info(
+                    "Spot instances unavailable, falling back to on-demand"
+                )
+                # Re-resolve cost for on-demand pricing
+                od_instance, od_cost = self._resolve_resources(
+                    provider, job_config, use_spot_override=False,
+                )
+                self._check_cost_guards(
+                    job_config.cost, od_cost, budget_used,
+                )
+                return self._do_launch(
+                    job_config, provider, creds, od_cost, dry_run,
+                    use_spot=False,
+                )
+            raise
+
+    def _do_launch(
+        self,
+        job_config: JobConfig,
+        provider: CloudProvider,
+        creds: dict,
+        hourly_cost: float,
+        dry_run: bool,
+        use_spot: bool,
+    ) -> CloudJob:
+        """Internal: execute a single SkyPilot launch attempt."""
         import sky
 
         envs = dict(job_config.envs)
@@ -521,11 +563,11 @@ class CloudLauncher:
             "stream_preset": job_config.stream_preset,
         })
 
-        run_cmd = job_config.container_image or "echo 'No container image specified'"
-        if job_config.container_image:
-            run_cmd = (
-                f"echo 'MADDENING cloud job running on $HOSTNAME'"
-            )
+        run_cmd = (
+            "echo 'MADDENING cloud job running on $HOSTNAME'"
+            if job_config.container_image
+            else "echo 'No container image specified'"
+        )
 
         task = sky.Task(
             name=f"maddening-{int(time.time())}",
@@ -548,7 +590,7 @@ class CloudLauncher:
         resources = sky.Resources(
             cloud=cloud_cls(),
             accelerators=accelerators,
-            use_spot=job_config.use_spot,
+            use_spot=use_spot,
             region=job_config.region or None,
             disk_size=job_config.disk_size,
             image_id=(
@@ -561,12 +603,12 @@ class CloudLauncher:
 
         cluster_name = f"maddening-{int(time.time())}"
 
-        # Launch inside credential context
         with _credential_context(provider, creds):
             try:
                 request_id = sky.launch(
                     task,
                     cluster_name=cluster_name,
+                    retry_until_up=True,
                     idle_minutes_to_autostop=(
                         job_config.cost.autostop_minutes
                     ),
@@ -576,8 +618,6 @@ class CloudLauncher:
                 if dry_run:
                     return CloudJob("dry-run")
 
-                # Block until the request is accepted and provisioning begins.
-                # Credentials must remain on disk through this call.
                 result = sky.get(request_id)
                 job_id = None
                 handle = None
@@ -586,13 +626,16 @@ class CloudLauncher:
 
             except Exception as exc:
                 raise LaunchError(
-                    f"SkyPilot launch failed: {exc}"
+                    _format_launch_error(exc)
                 ) from exc
 
-        # Extract VM IP from handle or status
         vm_ip = None
         if handle is not None and hasattr(handle, "head_ip"):
             vm_ip = handle.head_ip
+
+        spot_str = "spot" if use_spot else "on-demand"
+        logger.info("Launched %s (%s, %s, $%.2f/hr)",
+                     cluster_name, job_config.gpu_type, spot_str, hourly_cost)
 
         job = CloudJob(
             cluster_name,
@@ -600,6 +643,7 @@ class CloudLauncher:
             provider=provider,
             creds=creds,
             vm_ip=vm_ip,
+            hourly_cost=hourly_cost,
         )
         job._phase = JobPhase.EXECUTING
         return job
@@ -688,6 +732,7 @@ class CloudLauncher:
         self,
         provider: CloudProvider,
         job_config: JobConfig,
+        use_spot_override: Optional[bool] = None,
     ) -> tuple[str, float]:
         """Resolve gpu_type → instance_type → hourly_cost.
 
@@ -700,10 +745,14 @@ class CloudLauncher:
         cloud_name = provider.skypilot_cloud_name()
         acc = job_config.gpu_type
         count = job_config.gpu_count
+        use_spot = (
+            use_spot_override if use_spot_override is not None
+            else job_config.use_spot
+        )
 
         instance_list, _ = catalog.get_instance_type_for_accelerator(
             acc, count,
-            use_spot=job_config.use_spot,
+            use_spot=use_spot,
             region=job_config.region or None,
             clouds=cloud_name,
         )
@@ -716,7 +765,7 @@ class CloudLauncher:
 
         hourly_cost = catalog.get_hourly_cost(
             instance_type,
-            use_spot=job_config.use_spot,
+            use_spot=use_spot,
             region=job_config.region or None,
             zone=None,
             clouds=cloud_name,
@@ -763,6 +812,48 @@ class CloudLauncher:
                 actual=budget_used,
                 guard_type="budget",
             )
+
+
+def _is_spot_unavailable_error(exc: LaunchError) -> bool:
+    """Return True if the error is specifically about spot capacity."""
+    # Check both the LaunchError message and the original cause
+    marker = "Failed to provision all possible launchable resources"
+    if marker in str(exc):
+        return True
+    if exc.__cause__ is not None and marker in str(exc.__cause__):
+        return True
+    if "Spot instances unavailable" in str(exc):
+        return True
+    return False
+
+
+def _format_launch_error(exc: Exception) -> str:
+    """Format a SkyPilot launch exception into a concise message.
+
+    Truncates the verbose per-region table from
+    ``ResourcesUnavailableError`` while preserving other errors in full.
+    """
+    msg = str(exc)
+    # The "Failed to provision" error includes a huge table of regions.
+    # Truncate it to just the summary line.
+    marker = "Failed to provision all possible launchable resources"
+    if marker in msg:
+        # Extract just the first line (the summary) and the resource spec
+        lines = msg.split("\n")
+        summary_parts = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            summary_parts.append(stripped)
+            if stripped.startswith("To keep retrying") or len(summary_parts) >= 3:
+                break
+        return (
+            "Spot instances unavailable across all regions. "
+            "Use spot_fallback=True in CostPolicy to auto-retry on-demand, "
+            "or set use_spot=False."
+        )
+    return f"SkyPilot launch failed: {exc}"
 
 
 def _resolve_sky_cloud_class(sky_module, cloud_name: str):

@@ -70,6 +70,9 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Restructured package extras: per-provider cloud (`runpod`, `lambda`, `aws`, `gcp`), hardware acceleration (`cuda12`, `tpu`), task bundles (`server`, `client`), combo (`cloud`, `cloud-all`)
 - Consistent import guards across all optional dependencies: missing extras now raise `ImportError` with the exact `pip install maddening[extra]` command
 - User guide: `docs/user_guide/installation.md` (full install reference), `docs/user_guide/quickstart.md` (5-minute intro)
+- `CostPolicy.spot_fallback`: when spot instances are unavailable, auto-retry on-demand (subject to same cost guards); configurable via job config YAML
+- `retry_until_up` on all SkyPilot launches to handle transient SSH/provisioning failures
+- Concise error message for spot unavailability (truncates verbose per-region table); other errors preserved in full
 
 ### Fixed
 - Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step

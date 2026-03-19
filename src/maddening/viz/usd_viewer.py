@@ -43,6 +43,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from maddening.viz._imports import _import_pyvista, _import_pxr
+
 import numpy as np
 
 
@@ -68,7 +70,7 @@ def _read_history_from_usd(stage, node_names=None):
     dt : float
         Time step between frames (inferred from time codes).
     """
-    from pxr import Usd
+    Usd, = _import_pxr("Usd")
 
     # Discover time codes
     all_times = set()
@@ -175,7 +177,7 @@ def viewer_from_usd(
     HistoryViewer3D
         Configured viewer ready for ``viewer.show()``.
     """
-    from pxr import Usd
+    Usd, = _import_pxr("Usd")
     from maddening.viz.history_viewer import HistoryViewer3D
 
     stage = Usd.Stage.Open(filepath)
@@ -222,7 +224,7 @@ def viewer_from_usd_with_geometry(
     -------
     HistoryViewer3D
     """
-    from pxr import Usd
+    Usd, = _import_pxr("Usd")
     from maddening.viz.history_viewer import HistoryViewer3D
 
     # Load results
@@ -304,8 +306,8 @@ def render_usd_frame(
     node_names : list of str or None
         Which nodes to load.
     """
-    import pyvista as pv
-    from pxr import Usd
+    pv = _import_pyvista()
+    Usd, = _import_pxr("Usd")
     from scipy.spatial import cKDTree
 
     results_stage = Usd.Stage.Open(results_path)

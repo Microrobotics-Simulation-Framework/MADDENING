@@ -27,6 +27,8 @@ from typing import Optional
 
 import numpy as np
 
+from maddening.viz._imports import _import_pyvista
+
 
 # ------------------------------------------------------------------
 # Configuration dataclasses
@@ -474,7 +476,7 @@ class HistoryViewer3D:
     # ------------------------------------------------------------------
 
     def _make_slice_grid(self, axis, idx, dims):
-        import pyvista as pv
+        pv = _import_pyvista()
         nx, ny, nz = dims
         if axis == 0:
             a, b = np.arange(ny, dtype=np.float32), np.arange(nz, dtype=np.float32)
@@ -490,7 +492,7 @@ class HistoryViewer3D:
             return pv.StructuredGrid(aa, bb, np.full_like(aa, float(idx)))
 
     def _compute_streamline_tubes(self, sdef: _StreamlineDef, frame: int):
-        import pyvista as pv
+        pv = _import_pyvista()
         vel = self._get_field(sdef.node, sdef.field_name, frame).astype(np.float32)
         nx, ny, nz = sdef.dims
 
@@ -523,7 +525,7 @@ class HistoryViewer3D:
         return sl.tube(radius=sdef.tube_radius)
 
     def _compute_isosurface(self, idef: _IsosurfaceDef, frame: int):
-        import pyvista as pv
+        pv = _import_pyvista()
         scalar = self._get_field(idef.node, idef.field_name, frame).astype(np.float32)
         dims = scalar.shape
         key_grid = f"iso_grid_{id(idef)}"
@@ -596,7 +598,7 @@ class HistoryViewer3D:
     # ------------------------------------------------------------------
 
     def _build_scene(self):
-        import pyvista as pv
+        pv = _import_pyvista()
         p = self._plotter
 
         # --- static meshes ---
@@ -846,7 +848,7 @@ class HistoryViewer3D:
                 )
 
     def _update_arrows(self, frame):
-        import pyvista as pv
+        pv = _import_pyvista()
         for i, adef in enumerate(self._arrows):
             key = f"arrows_{i}"
             if key in self._arrow_actors:
@@ -981,7 +983,7 @@ class HistoryViewer3D:
 
     def show(self):
         """Open the interactive viewer window."""
-        import pyvista as pv
+        pv = _import_pyvista()
 
         self._plotter = pv.Plotter(
             window_size=list(self._window_size),

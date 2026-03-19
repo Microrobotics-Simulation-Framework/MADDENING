@@ -68,20 +68,27 @@ Deploy simulations to cloud GPU providers via SkyPilot. Each provider has its ow
 | `cloud` | All supported providers (RunPod + Lambda) | `pip install maddening[cloud]` |
 | `cloud-all` | Every SkyPilot provider | `pip install maddening[cloud-all]` |
 
-After installing, configure your provider credentials:
+After installing, set up your credentials file:
 
 ```bash
-# RunPod
-pip install maddening[runpod]
-runpod config                    # paste your API key
-sky check runpod                 # verify: should show "enabled"
-
-# Lambda Labs
-pip install maddening[lambda]
-mkdir -p ~/.lambda_cloud
-echo "api_key = YOUR_KEY" > ~/.lambda_cloud/lambda_keys
-sky check lambda
+mkdir -p ~/.maddening
+cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+# Edit ~/.maddening/cloud_credentials.yaml and fill in your API key(s)
+# ~/.maddening/cloud_credentials.yaml is the default path. For a different location, use:
+# CloudLauncher(credentials_path='path/to/cloud_credentials.yaml')
 ```
+
+The credentials file holds keys for all providers in one place:
+
+```yaml
+runpod:
+  api_key: "rp_xxxxxxxxxxxx"
+
+lambda_labs:
+  api_key: "llxxxxxxxxxxxxxxxxxx"
+```
+
+`CloudLauncher` reads only the block matching the `provider:` field in your job config. See `src/maddening/examples/cloud/` for complete examples.
 
 ## Task Bundles
 

@@ -35,7 +35,11 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import warnings
 import numpy as np
 
-import pyvista as pv
+try:
+    import pyvista as pv
+except ImportError:
+    print("This example requires PyVista. Install with: pip install maddening[viz3d]")
+    import sys; sys.exit(1)
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.lbm_pipe import LBMPipeNode

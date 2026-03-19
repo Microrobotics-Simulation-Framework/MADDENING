@@ -104,13 +104,19 @@ Run your simulation on a cloud GPU:
 
 ```bash
 pip install maddening[runpod]
-runpod config                     # paste your API key
+
+# Set up credentials (one-time)
+mkdir -p ~/.maddening
+cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+# Edit ~/.maddening/cloud_credentials.yaml with your RunPod API key
+# You can also choose a different path, in which case use the `creds` argument in the CloudLauncher constructor.
 ```
 
 ```python
-from maddening.cloud import CloudLauncher
+from maddening.cloud.launcher import CloudLauncher
 
-launcher = CloudLauncher()
+launcher = CloudLauncher() 
+# launcher = CloudLauncher(credentials_path='path/to/cloud_credentials.yaml')
 info = launcher.validate("job_config.yaml")
 print(f"Instance: {info['instance_type']}, ${info['hourly_cost']:.2f}/hr")
 
@@ -120,7 +126,7 @@ print(f"VM IP: {job.vm_ip}")
 job.teardown()
 ```
 
-See `src/maddening/examples/cloud/` for complete cloud deployment examples.
+See `src/maddening/examples/cloud/` for complete examples and config templates.
 
 ## Next Steps
 

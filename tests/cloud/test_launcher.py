@@ -204,6 +204,7 @@ class TestCloudLauncherLaunch:
         mock_handle.head_ip = "10.0.0.42"
         mock_sky.launch.return_value = "req-123"
         mock_sky.get.return_value = (1, mock_handle)
+        mock_sky.stream_and_get.return_value = (1, mock_handle)
         mock_sky.clouds = MagicMock()
         mock_sky.RunPod = MagicMock  # Cloud class lookup fallback
 
@@ -268,6 +269,9 @@ class TestCloudLauncherLaunch:
         ), patch.object(
             launcher, "_resolve_provider",
             return_value=(RunPodProvider(), {"api_key": "rp_test"}),
+        ), patch.object(
+            launcher, "_poll_until_up",
+            side_effect=LaunchError("poll failed"),
         ), patch.dict(sys.modules, {"sky": mock_sky}):
             with pytest.raises(LaunchError, match="SkyPilot exploded"):
                 launcher.launch(config)

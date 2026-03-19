@@ -1,0 +1,14 @@
+# SkyPilot workdir sync exclusions
+# Only sync source code + config, not venvs/caches/artifacts
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.git/
+.claude/
+tmp/
+*.npz
+*.png
+*.jsonl

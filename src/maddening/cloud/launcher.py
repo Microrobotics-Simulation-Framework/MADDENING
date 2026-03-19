@@ -124,6 +124,9 @@ class JobConfig:
     cost: CostPolicy = field(default_factory=CostPolicy)
     container_image: str = ""
     stream_preset: str = "standard"
+    setup: str = ""    # Shell commands to run during VM setup (pip install, etc.)
+    run: str = ""      # Shell commands to run as the job
+    workdir: str = ""  # Local directory to sync to VM (SkyPilot workdir)
     envs: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -564,14 +567,16 @@ class CloudLauncher:
         })
 
         run_cmd = (
-            "echo 'MADDENING cloud job running on $HOSTNAME'"
-            if job_config.container_image
-            else "echo 'No container image specified'"
+            job_config.run
+            or "echo 'MADDENING cloud job running on $HOSTNAME'"
         )
+        setup_cmd = job_config.setup or None
 
         task = sky.Task(
             name=f"maddening-{int(time.time())}",
+            setup=setup_cmd,
             run=run_cmd,
+            workdir=job_config.workdir or None,
             envs=envs,
         )
 
@@ -603,12 +608,15 @@ class CloudLauncher:
 
         cluster_name = f"maddening-{int(time.time())}"
 
+        # Credentials must be on disk during sky.launch() AND
+        # sky.stream_and_get() (the API server reads creds during
+        # provisioning, which happens inside stream_and_get).
         with _credential_context(provider, creds):
             try:
                 request_id = sky.launch(
                     task,
                     cluster_name=cluster_name,
-                    retry_until_up=True,
+                    retry_until_up=not use_spot,
                     idle_minutes_to_autostop=(
                         job_config.cost.autostop_minutes
                     ),
@@ -618,16 +626,35 @@ class CloudLauncher:
                 if dry_run:
                     return CloudJob("dry-run")
 
-                result = sky.get(request_id)
+                # stream_and_get blocks until provisioning + setup + run
+                # start, streaming logs to stdout. More reliable than
+                # sky.get() which can raise spurious AssertionError.
+                result = sky.stream_and_get(request_id)
                 job_id = None
                 handle = None
                 if result is not None:
                     job_id, handle = result
 
             except Exception as exc:
-                raise LaunchError(
-                    _format_launch_error(exc)
-                ) from exc
+                # Check if the cluster actually came up despite the error
+                try:
+                    poll_handle = self._poll_until_up(
+                        cluster_name, timeout=30,
+                    )
+                    if poll_handle is not None:
+                        logger.warning(
+                            "sky.stream_and_get raised %s but cluster %s "
+                            "is UP — continuing", type(exc).__name__,
+                            cluster_name,
+                        )
+                        handle = poll_handle
+                        job_id = None
+                    else:
+                        raise
+                except LaunchError:
+                    raise LaunchError(
+                        _format_launch_error(exc)
+                    ) from exc
 
         vm_ip = None
         if handle is not None and hasattr(handle, "head_ip"):
@@ -697,6 +724,27 @@ class CloudLauncher:
         return results
 
     # -- Internal helpers ----------------------------------------------
+
+    @staticmethod
+    def _poll_until_up(cluster_name: str, timeout: float = 900):
+        """Poll sky.status() until the cluster reaches UP or timeout."""
+        import sky as _sky
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                clusters = _sky.get(_sky.status(
+                    cluster_names=[cluster_name],
+                ))
+                if clusters:
+                    status = clusters[0].get("status")
+                    if str(status) == "ClusterStatus.UP":
+                        return clusters[0].get("handle")
+            except Exception:
+                pass
+            time.sleep(10)
+        raise LaunchError(
+            f"Cluster {cluster_name} did not reach UP within {timeout}s"
+        )
 
     def _load_credentials(self) -> dict:
         """Load and cache the credentials file."""

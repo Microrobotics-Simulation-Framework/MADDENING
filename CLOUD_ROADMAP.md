@@ -66,19 +66,55 @@ Consistent install experience, 146 cloud + guard tests passing.
 - [x] Verify truncated error messages for spot unavailability
 - [x] Verify `retry_until_up` handles transient SSH failures
 - [x] Verify credential cleanup: `~/.runpod/config.toml` deleted after teardown, RunPod API confirms zero pods
-- [ ] Test `CloudJob.from_cluster_name()` reconnect after script restart
+- [x] Test `CloudJob.from_cluster_name()` reconnect — status() and teardown() work on reconnected handle
+- [x] Fix: `retry_until_up` now only set for on-demand (spot + retry = infinite loop on no capacity)
+- **Note:** SkyPilot setup overhead is ~12 min on RunPod (Ray install, SSH config). The pod starts in seconds but SkyPilot's runtime setup is slow. This is a known SkyPilot issue, not a MADDENING bug.
 
-### Short-term: Docker Image + Server
+### Short-term: Cloud Simulation Server (Option A — setup script, no Docker)
 
-- [ ] Build `docker/Dockerfile.cloud` and push to a container registry
-- [ ] Launch the Docker image on RunPod via `job_config.yaml` with `container_image` set
-- [ ] Verify FastAPI server accessible on `:8000` from local machine
-- [ ] Verify WebSocket state streaming (`/ws/state/binary`) works over the network
-- [ ] Test `maddening[server,cuda12]` install inside the container
+Using SkyPilot `setup:` to `pip install` on a base CUDA image. This lets us
+discover system deps, JAX CUDA quirks, port requirements, and entrypoint bugs
+before baking them into a Docker image.
+
+**Issues discovered so far (2026-03-19):**
+
+1. **Python version mismatch on `runpod/base`**: `python3` is 3.10 but `pip` targets 3.12.
+   Must use `python3.12` explicitly or create a venv.
+2. **JAX CUDA plugin conflict**: Base image has `jax_cuda12_plugin 0.9.2` pre-installed,
+   incompatible with `jax 0.5.3`. Need `pip install "jax[cuda12]==0.5.3" "jaxlib==0.5.3"`
+   with explicit version pins, or uninstall pre-installed plugin first.
+3. **SkyPilot Ray workers can't see GPU**: `CUDA_ERROR_NO_DEVICE` in Ray worker processes.
+   GPU visible from SSH but not from Ray's sandboxed environment.
+4. **`sky.get()` raises spurious `AssertionError`**: Workaround via `stream_and_get()` +
+   fallback status polling implemented in launcher.py.
+5. **SkyPilot overhead**: ~2 min US (cached image), ~12+ min EU (cold cache), ~35+ min
+   CZ (very slow Docker pull). Prefer US region.
+6. **RunPod port mapping**: Ports use NAT. Must query RunPod API for `port2endpoint`
+   mapping (private_port -> public ip:port). Cannot use `vm_ip:8000` directly.
+7. **`.skyignore` required**: Without it, SkyPilot rsyncs `.venv/` (1.4 GB). With it, 2.5 MB.
+
+**Recommended approach for next attempt:**
+Instead of running through SkyPilot's Ray job scheduler, run the server directly
+via SSH after `sky.launch()` brings the VM UP. This bypasses Ray's GPU isolation.
+Flow: `sky.launch()` (no setup/run) → SSH in → `pip install` in system python3.12
+→ fix JAX versions → start server directly.
+
+- [x] Added `.skyignore` to exclude `.venv/`, `.git/`, `__pycache__/`, etc.
+- [x] Added `setup` and `run` fields to `JobConfig` + `workdir` support
+- [x] Fixed `sky.get()` AssertionError via `stream_and_get` + fallback polling
+- [x] Discovered RunPod port mapping requirement (NAT, port2endpoint)
+- [x] Discovered Python 3.10/3.12 mismatch on runpod/base image
+- [x] Discovered JAX CUDA plugin version conflict
+- [x] Discovered Ray worker GPU isolation issue
+- [ ] Fix Python version: use python3.12 or create venv in setup
+- [ ] Fix JAX: pin versions to avoid plugin conflict
+- [ ] Bypass Ray: run server via SSH directly instead of Ray job
+- [ ] Verify FastAPI server accessible via RunPod port mapping
+- [ ] Verify WebSocket state streaming (`/ws/state/binary`) over network
 
 ### Short-term: SelkiesSession Integration Testing
 
-- [ ] Test `SelkiesSession` with real GStreamer inside the Docker container
+- [ ] Test `SelkiesSession` with real GStreamer (requires system packages in setup script)
 - [ ] Verify WebRTC streaming from cloud GPU to local browser
 - [ ] Test `SelkiesRenderer` wrapping a real renderer (not just MockStreamSession)
 
@@ -97,6 +133,19 @@ Consistent install experience, 146 cloud + guard tests passing.
 - [ ] Implement heartbeat monitoring + `TEARDOWN_ALL` failure mode
 - [ ] Implement `ISOLATE` failure mode (`PEER_DEAD` notification)
 - [ ] Test with 2-VM setup on RunPod (two `RTXA4000` instances)
+
+### After Multi-Job: Finalize Docker Image
+
+Build `docker/Dockerfile.cloud` only after multi-job is working via Option A.
+By then we'll have discovered all system deps, CUDA requirements, port
+mappings, and coordinator process needs. One image serves both single-job
+and multi-job (coordinator is a lightweight Python process, not a separate
+container).
+
+- [ ] Bake all discovered system deps into Dockerfile
+- [ ] Build and push to Docker Hub / GHCR
+- [ ] Verify launch with `image_id: docker:...` matches Option A behavior
+- [ ] Remove setup script workarounds
 - [ ] Test `CloudSweep` as degenerate case (N independent jobs, no ZMQ)
 
 ### Medium-term: Lambda Labs Validation

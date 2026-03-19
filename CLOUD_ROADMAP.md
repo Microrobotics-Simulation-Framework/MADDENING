@@ -111,13 +111,20 @@ Flow: `sky.launch()` (no setup/run) → SSH in → `pip install` in system pytho
 - [x] Bypass Ray: SSH-based approach works — `CloudJob.ssh_run()` method added
 - [x] Verify FastAPI server accessible via RunPod port mapping — all endpoints work
 - [x] Verify REST API: `/graph`, `/graph/state`, `/sim/step`, `/sim/run` all tested end-to-end
-- [ ] Verify WebSocket state streaming (`/ws/state/binary`) over network
+- [x] Verify WebSocket state streaming — JSON (`/ws/state`) and binary (`/ws/state/binary`) both work over network from cloud GPU
 
 ### Short-term: SelkiesSession Integration Testing
 
-- [ ] Test `SelkiesSession` with real GStreamer (requires system packages in setup script)
-- [ ] Verify WebRTC streaming from cloud GPU to local browser
-- [ ] Test `SelkiesRenderer` wrapping a real renderer (not just MockStreamSession)
+- [x] Test `SelkiesSession` with real GStreamer on cloud GPU — all 5 tests pass
+  - GStreamer 1.20.3 imports, pipeline builds with x264enc (needs `gstreamer1.0-plugins-ugly`)
+  - Session start/stop lifecycle works, signaling URL generated
+  - CPU framebuffer push works
+  - SelkiesRenderer wraps inner renderer + pushes frames correctly
+  - **Must use python3.10** (system python) for `gi` bindings — python3.12 can't load system `_gi.so`
+  - System packages needed: `gstreamer1.0-plugins-{base,good,bad,ugly}`, `gstreamer1.0-nice`,
+    `gir1.2-{gst-plugins-bad-1.0,gstreamer-1.0}`, `python3-gi`, `python3-gi-cairo`
+- [ ] Verify WebRTC streaming from cloud GPU to local browser (requires browser-side WebRTC client)
+- [x] Test `SelkiesRenderer` wrapping a real renderer — works with DummyRenderer on cloud GPU
 
 ### Medium-term: Multi-GPU
 

@@ -33,10 +33,16 @@ import io
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.gridspec import GridSpec
-import matplotlib.patches as mpatches
+try:
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.gridspec import GridSpec
+    import matplotlib.patches as mpatches
+except ImportError as _exc:
+    raise ImportError(
+        "ServerFrameRenderer requires 'matplotlib'. "
+        "Install with:  pip install maddening[viz]"
+    ) from _exc
 import numpy as np
 
 from maddening.api.frame_renderer_base import ServerFrameRendererBase

@@ -37,7 +37,13 @@ import json
 import threading
 from typing import Any, Optional
 
-import zmq
+try:
+    import zmq
+except ImportError as _exc:
+    raise ImportError(
+        "Network transport requires 'pyzmq'. "
+        "Install with:  pip install maddening[network]"
+    ) from _exc
 
 
 # ------------------------------------------------------------------

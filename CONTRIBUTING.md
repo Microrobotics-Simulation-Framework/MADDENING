@@ -52,6 +52,16 @@ When the anomaly is resolved:
 - All node `update()` functions must be JAX-traceable (no Python-level side effects)
 - All new nodes must have a `meta` ClassVar with `NodeMeta`
 
+## Installation for Development
+
+```bash
+pip install -e ".[dev]"        # all features + pytest
+# Or for GPU development:
+pip install -e ".[dev,cuda12]"
+```
+
+See [docs/user_guide/installation.md](docs/user_guide/installation.md) for all available extras.
+
 ## Testing
 
 Run the test suite:
@@ -59,6 +69,33 @@ Run the test suite:
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short
 ```
+
+## Optional Dependency Guards
+
+When writing code that uses an optional dependency, wrap the import with a try/except that tells the user which extra to install:
+
+```python
+# Module-level guard (for modules dedicated to one dep)
+try:
+    import pyvista as pv
+except ImportError as _exc:
+    raise ImportError(
+        "HistoryViewer3D requires 'pyvista'. "
+        "Install with:  pip install maddening[viz3d]"
+    ) from _exc
+
+# Lazy import guard (in __getattr__)
+try:
+    mod = importlib.import_module(module_path)
+    return getattr(mod, name)
+except ImportError as exc:
+    raise ImportError(
+        f"'{name}' requires additional dependencies. "
+        f"Install with:  pip install maddening[extra_name]"
+    ) from exc
+```
+
+The error message must always contain the exact `pip install maddening[...]` command.
 
 ## NodeMeta Requirements
 

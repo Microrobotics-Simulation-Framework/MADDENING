@@ -14,5 +14,5 @@ build/
 tmp/
 
 # Cloud credentials — NEVER commit
-examples/cloud/cloud_credentials.yaml
-examples/cloud/.env
+src/maddening/examples/cloud/cloud_credentials.yaml
+src/maddening/examples/cloud/.env

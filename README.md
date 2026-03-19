@@ -11,3 +11,30 @@ The framework works by managing a graph (hence the Graph part of the acronym), w
 The edges of the graph represent the coupling between simulations.
 
 Nodes are written in JAX (hence the Automatic Differentiation part of the acronym), and can be reduced to Physics Informed Neural Networks (PINNs) for real time simulation. The training of PINNs can also be augmented by real-world data (hence the Data-Enhanced Neural Network part of the acronym).
+
+## Installation
+
+```bash
+pip install maddening                    # CPU (base)
+pip install maddening[cuda12]            # GPU with CUDA 12
+pip install maddening[cuda12,viz]        # GPU + matplotlib plots
+pip install maddening[server,cuda12]     # GPU simulation server (Docker)
+pip install maddening[runpod]            # Cloud deploy to RunPod
+```
+
+Install only what you need. Common extras:
+
+| Extra | What it adds |
+|-------|-------------|
+| `cuda12` / `tpu` | GPU / TPU acceleration |
+| `viz` | Matplotlib renderers |
+| `terminal` | Rich terminal renderer |
+| `api` | FastAPI HTTP/WS server |
+| `network` | ZeroMQ remote transport |
+| `surrogates` | Neural surrogate training |
+| `runpod` / `lambda` / `aws` / `gcp` | Cloud deploy via SkyPilot |
+| `server` | Bundle: FastAPI + ZMQ + rich + matplotlib |
+| `cloud` | All supported cloud providers |
+| `all` | Everything |
+
+Works with both pip and [uv](https://docs.astral.sh/uv/). See [docs/user_guide/installation.md](docs/user_guide/installation.md) for the full guide.

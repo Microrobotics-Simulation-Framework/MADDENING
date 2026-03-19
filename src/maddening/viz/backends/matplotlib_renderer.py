@@ -10,9 +10,15 @@ Both poll a ``StateRelay`` and are driven by ``matplotlib.animation.FuncAnimatio
 Use ``run_matplotlib()`` to drive one or more renderers from a single event loop.
 """
 
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import matplotlib.animation as animation
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    import matplotlib.animation as animation
+except ImportError as _exc:
+    raise ImportError(
+        "Matplotlib renderers require 'matplotlib'. "
+        "Install with:  pip install maddening[viz]"
+    ) from _exc
 
 from maddening.viz.renderer import Renderer, GraphInfo
 from maddening.viz.relay import StateRelay

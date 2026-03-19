@@ -35,6 +35,26 @@ from maddening.cloud.streaming import (
 from maddening.cloud._auth import generate_session_token, validate_session_token
 
 
+_INSTALL_HINTS = {
+    "SelkiesSession": "streaming",
+    "CloudSession": "cloud",
+    "CloudConfig": "cloud",
+    "CloudStage": "cloud",
+    "CloudSessionInfo": "cloud",
+    "CloudReadyResult": "cloud",
+    "PreemptionPolicy": "cloud",
+    "CloudSessionError": "cloud",
+    "CloudLauncher": "runpod",
+    "CloudJob": "runpod",
+    "JobConfig": "runpod",
+    "JobPhase": "runpod",
+    "CostPolicy": "runpod",
+    "CredentialError": "runpod",
+    "CostLimitError": "runpod",
+    "LaunchError": "runpod",
+}
+
+
 def __getattr__(name: str):
     """Lazy imports for components that need external dependencies."""
     _lazy = {
@@ -68,8 +88,15 @@ def __getattr__(name: str):
     }
     if name in _lazy:
         import importlib
-        mod = importlib.import_module(_lazy[name])
-        return getattr(mod, name)
+        try:
+            mod = importlib.import_module(_lazy[name])
+            return getattr(mod, name)
+        except ImportError as exc:
+            extra = _INSTALL_HINTS.get(name, "cloud")
+            raise ImportError(
+                f"'{name}' requires additional dependencies. "
+                f"Install with:  pip install maddening[{extra}]"
+            ) from exc
     raise AttributeError(f"module 'maddening.cloud' has no attribute {name!r}")
 
 

@@ -23,13 +23,29 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+_SKY_INSTALL_MSG = (
+    "Cloud orchestration requires SkyPilot. Install with:\n"
+    "  pip install maddening[runpod]     # for RunPod\n"
+    "  pip install maddening[lambda]     # for Lambda Labs\n"
+    "  pip install maddening[cloud]      # all supported providers"
+)
+
+
+def _import_sky():
+    """Import sky with a clear error message if not installed."""
+    try:
+        import sky
+        return sky
+    except ImportError as exc:
+        raise ImportError(_SKY_INSTALL_MSG) from exc
+
 
 def launch_vm(config) -> tuple[str, str]:
     """Provision a VM via SkyPilot.
 
     Returns ``(vm_ip, job_id)``.
     """
-    import sky
+    sky = _import_sky()
 
     task = sky.Task(
         run=f"docker run --gpus all -p 8000:8000 -p 8080:8080 -p 5555:5555 -p 5556:5556 "
@@ -62,7 +78,7 @@ def launch_vm(config) -> tuple[str, str]:
 
 def check_status(job_id: str) -> str:
     """Check the status of a SkyPilot cluster."""
-    import sky
+    sky = _import_sky()
 
     status = sky.status(cluster_names=[job_id])
     if not status:
@@ -72,7 +88,7 @@ def check_status(job_id: str) -> str:
 
 def teardown_vm(job_id: str) -> None:
     """Tear down a SkyPilot cluster."""
-    import sky
+    sky = _import_sky()
 
     try:
         sky.down(job_id, purge=True)

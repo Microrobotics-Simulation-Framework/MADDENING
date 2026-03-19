@@ -71,8 +71,14 @@ def __getattr__(name: str):
     }
     if name in _lazy:
         import importlib
-        mod = importlib.import_module(_lazy[name])
-        return getattr(mod, name)
+        try:
+            mod = importlib.import_module(_lazy[name])
+            return getattr(mod, name)
+        except ImportError as exc:
+            raise ImportError(
+                f"'{name}' requires equinox and/or optax. "
+                f"Install with:  pip install maddening[surrogates]"
+            ) from exc
     raise AttributeError(f"module 'maddening.surrogates' has no attribute {name!r}")
 
 

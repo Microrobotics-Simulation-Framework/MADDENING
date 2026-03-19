@@ -1,6 +1,10 @@
 """
 MADDENING USD integration -- codeless schemas and USD I/O.
 
+Requires the ``usd`` extra::
+
+    pip install maddening[usd]
+
 **Import order matters**: this module registers MADDENING's codeless
 USD schemas via ``Plug.Registry().RegisterPlugins``.  The USD
 ``SchemaRegistry`` is a process-level singleton that caches type
@@ -13,7 +17,13 @@ Always ``import maddening.usd`` before any ``Usd.Stage`` operations.
 
 import pathlib
 
-from pxr import Plug, Usd
+try:
+    from pxr import Plug, Usd
+except ImportError as _exc:
+    raise ImportError(
+        "maddening.usd requires 'usd-core'. "
+        "Install with:  pip install maddening[usd]"
+    ) from _exc
 
 _schema_dir = pathlib.Path(__file__).parent / "schema"
 Plug.Registry().RegisterPlugins([_schema_dir.absolute().as_posix()])

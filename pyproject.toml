@@ -13,10 +13,8 @@ authors = [
     { name = "Nicholas Ehsan Roy" },
 ]
 
-# Base install: the simulation engine (JAX + NumPy).
-# The compliance subpackage is included in the base install (pure Python,
-# no JAX dependency) so downstream libraries can import schema types without
-# installing the full simulation stack.
+# Base install: simulation engine (CPU JAX + NumPy + PyYAML).
+# For GPU acceleration, add the cuda12 or tpu extra.
 dependencies = [
     "jax>=0.4,<0.6",
     "jaxlib>=0.4,<0.6",
@@ -25,6 +23,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+# ── Hardware acceleration ──────────────────────────────────────────
+# Base install gives CPU JAX.  These upgrade to GPU/TPU.
+# Combine with any other extra:  pip install maddening[cuda12,server]
+cuda12 = ["jax[cuda12]>=0.4,<0.6"]
+tpu = ["jax[tpu]>=0.4,<0.6"]
+
+# ── Cloud providers ────────────────────────────────────────────────
+# One extra per provider.  Installs SkyPilot WITH the provider SDK.
+runpod = ["skypilot[runpod]>=0.11"]
+lambda = ["skypilot[lambda]>=0.11"]
+aws = ["skypilot[aws]>=0.11"]
+gcp = ["skypilot[gcp]>=0.11"]
+
+# All providers supported in maddening.cloud.providers (RunPod + Lambda)
+cloud = ["skypilot[runpod,lambda]>=0.11"]
+
+# Every provider SkyPilot supports
+cloud-all = ["skypilot[all]>=0.11"]
+
+# ── Feature modules (fine-grained) ─────────────────────────────────
 # Matplotlib-based visualization (time-series, 2D scene renderers)
 viz = ["matplotlib>=3.5"]
 
@@ -33,15 +52,6 @@ terminal = ["rich>=12.0"]
 
 # ZMQ network transport for remote visualization and command channels
 network = ["pyzmq>=25.0"]
-
-# Visualization client only -- no JAX needed.
-# Install this on a local machine to view a simulation running on the cloud.
-#   pip install maddening[client]           # terminal renderer + ZMQ
-#   pip install maddening[client,viz]       # adds matplotlib renderer
-client = [
-    "pyzmq>=25.0",
-    "rich>=12.0",
-]
 
 # FastAPI server for HTTP/WebSocket API
 api = [
@@ -65,16 +75,28 @@ usd = ["usd-core>=21.8"]
 # WebRTC streaming (GStreamer + signaling)
 streaming = ["PyGObject>=3.42", "websockets>=11.0"]
 
-# Cloud VM orchestration (SkyPilot)
-cloud = ["skypilot>=0.7"]
-
-# Full cloud deployment (SkyPilot + streaming)
-cloud-deploy = ["skypilot>=0.7", "PyGObject>=3.42", "websockets>=11.0"]
-
-# SBOM generation (Section 14)
+# SBOM generation
 sbom = ["cyclonedx-bom>=4.0"]
 
-# Everything
+# ── Task bundles ───────────────────────────────────────────────────
+# "I'm running a simulation server on a GPU" (Docker image target)
+server = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "websockets>=11.0",
+    "pyzmq>=25.0",
+    "rich>=12.0",
+    "matplotlib>=3.5",
+]
+
+# "I'm a thin client viewing a remote simulation"
+client = [
+    "pyzmq>=25.0",
+    "rich>=12.0",
+]
+
+# ── Meta extras ────────────────────────────────────────────────────
+# Everything (all features + RunPod cloud)
 all = [
     "matplotlib>=3.5",
     "rich>=12.0",
@@ -90,7 +112,7 @@ all = [
     "rendercanvas>=2.0",
     "glfw>=2.0",
     "scikit-image>=0.20",
-    "skypilot>=0.7",
+    "skypilot[runpod,lambda]>=0.11",
     "PyGObject>=3.42",
 ]
 
@@ -106,6 +128,7 @@ ci = [
     "websockets>=11.0",
     "equinox>=0.11",
     "optax>=0.1",
+    "skypilot[runpod]>=0.11",
 ]
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)
@@ -142,4 +165,6 @@ filterwarnings = [
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
     # SelkiesRenderer emits PerformanceWarning on CPU fallback
     "ignore::maddening.warnings.PerformanceWarning",
+    # SkyPilot deprecation warnings
+    "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
 ]

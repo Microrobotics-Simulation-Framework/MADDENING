@@ -9,9 +9,15 @@ dependencies.
 import threading
 from typing import Optional
 
-from rich.live import Live
-from rich.table import Table
-from rich.text import Text
+try:
+    from rich.live import Live
+    from rich.table import Table
+    from rich.text import Text
+except ImportError as _exc:
+    raise ImportError(
+        "TerminalRenderer requires 'rich'. "
+        "Install with:  pip install maddening[terminal]"
+    ) from _exc
 
 from maddening.viz.renderer import Renderer, GraphInfo
 from maddening.viz.relay import StateRelay

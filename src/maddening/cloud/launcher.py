@@ -800,7 +800,7 @@ def _load_credentials_file(path: Path) -> dict:
         raise CredentialError(
             f"Credentials file not found: {path}\n"
             f"Create it from the example:\n"
-            f"  cp examples/cloud/cloud_credentials.example.yaml {path}"
+            f"  cp src/maddening/examples/cloud/cloud_credentials.example.yaml {path}"
         )
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)

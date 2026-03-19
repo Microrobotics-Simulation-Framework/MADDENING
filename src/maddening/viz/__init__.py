@@ -30,23 +30,35 @@ __all__ = [
 #   from maddening.viz.history_viewer import HistoryViewer3D
 
 
+_INSTALL_HINTS = {
+    "HistoryViewer3D": "viz3d",
+    "PyVistaLiveRenderer": "viz3d",
+    "GPUHistoryViewer": "gpu-viz",
+    "viewer_from_usd": "usd",
+    "viewer_from_usd_with_geometry": "usd",
+    "render_usd_frame": "usd",
+}
+
+
 def __getattr__(name):
-    if name == "HistoryViewer3D":
-        from maddening.viz.history_viewer import HistoryViewer3D
-        return HistoryViewer3D
-    if name == "GPUHistoryViewer":
-        from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
-        return GPUHistoryViewer
-    if name == "viewer_from_usd":
-        from maddening.viz.usd_viewer import viewer_from_usd
-        return viewer_from_usd
-    if name == "viewer_from_usd_with_geometry":
-        from maddening.viz.usd_viewer import viewer_from_usd_with_geometry
-        return viewer_from_usd_with_geometry
-    if name == "render_usd_frame":
-        from maddening.viz.usd_viewer import render_usd_frame
-        return render_usd_frame
-    if name == "PyVistaLiveRenderer":
-        from maddening.viz.backends.pyvista_live import PyVistaLiveRenderer
-        return PyVistaLiveRenderer
+    _lazy = {
+        "HistoryViewer3D": ("maddening.viz.history_viewer", "HistoryViewer3D"),
+        "GPUHistoryViewer": ("maddening.viz.backends.pygfx_viewer", "GPUHistoryViewer"),
+        "viewer_from_usd": ("maddening.viz.usd_viewer", "viewer_from_usd"),
+        "viewer_from_usd_with_geometry": ("maddening.viz.usd_viewer", "viewer_from_usd_with_geometry"),
+        "render_usd_frame": ("maddening.viz.usd_viewer", "render_usd_frame"),
+        "PyVistaLiveRenderer": ("maddening.viz.backends.pyvista_live", "PyVistaLiveRenderer"),
+    }
+    if name in _lazy:
+        mod_path, attr = _lazy[name]
+        try:
+            import importlib
+            mod = importlib.import_module(mod_path)
+            return getattr(mod, attr)
+        except ImportError as exc:
+            extra = _INSTALL_HINTS.get(name, "")
+            raise ImportError(
+                f"'{name}' requires additional dependencies. "
+                f"Install with:  pip install maddening[{extra}]"
+            ) from exc
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

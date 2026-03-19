@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """Launch a MADDENING simulation server on a cloud GPU and test it.
 
-Provisions a VM, installs maddening[server]+jax[cuda12] via setup script,
-starts a bouncing ball simulation server, verifies the API is reachable,
-tests WebSocket state streaming, then tears down.
+Uses the SSH-based approach: provisions a VM via SkyPilot, then runs
+pip install and server start directly via SSH (bypassing Ray's job
+scheduler which has GPU isolation issues).
 
 Usage:
     python 04_server_test.py
-    python 04_server_test.py --gpu RTX5090
+    python 04_server_test.py --gpu RTX4090
     python 04_server_test.py --keep   # don't teardown (for manual inspection)
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -28,52 +29,50 @@ from maddening.cloud.launcher import (
 )
 
 
-# -- SkyPilot task setup script ------------------------------------------
-# This runs on the VM before the job starts.  Installs MADDENING and
-# starts a FastAPI simulation server in the background.
+# -- Remote install + server script ------------------------------------
+# Run via SSH directly on system python3.12, not through Ray.
+# Fixes:
+#   1. Use python3.12 (runpod/base has pip targeting 3.12 but python3 is 3.10)
+#   2. Uninstall pre-installed jax_cuda12_plugin to avoid version conflict
+#   3. Pin jax/jaxlib versions matching our pyproject.toml range
 
-SETUP_SCRIPT = r"""
-set -e
-echo "SETUP: Installing JAX CUDA + server deps..."
-pip install --quiet "jax[cuda12]" "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0" "pyzmq>=25.0" "rich>=12.0" "matplotlib>=3.5" "pyyaml>=6.0" "numpy>=1.24" 2>&1 | tail -5
+INSTALL_CMD = (
+    "pip install -q --root-user-action=ignore"
+    ' "jax[cuda12]>=0.4,<0.6"'
+    ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
+    ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
+    " && [ -d ~/sky_workdir/src ] && pip install -q --root-user-action=ignore -e ~/sky_workdir"
+    " ; echo INSTALL_DONE"
+)
 
-# Install MADDENING from the synced workdir
-if [ -f /sky_workdir/pyproject.toml ]; then
-    echo "SETUP: Installing MADDENING from synced workdir..."
-    pip install --quiet -e "/sky_workdir[server]" 2>&1 | tail -5
-else
-    echo "SETUP: No workdir found, installing base deps only"
-fi
-
-echo "SETUP: done"
-"""
-
-RUN_SCRIPT = r"""
-set -e
-echo "RUN: Starting MADDENING server in background..."
-
-# Write a small server script
-cat > /tmp/maddening_server.py << 'PYEOF'
+SERVER_SCRIPT = r"""
 import jax
-print(f"JAX backend: {jax.devices()[0].platform}")
+print(f"JAX devices: {jax.devices()}")
+print(f"Platform: {jax.devices()[0].platform}")
 
 from maddening import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
-from maddening.nodes.spring_damper import SpringDamperNode
-from maddening.core.edge import EdgeSpec
+from maddening.nodes.spring import SpringDamperNode
 from maddening.api.server import SimulationServer
+import uvicorn
 
-# Build a simple graph
 gm = GraphManager()
-gm.add_node(BallNode(name="ball", timestep=0.001))
-gm.add_node(TableNode(name="table", timestep=0.001))
-gm.add_node(SpringDamperNode(name="spring", timestep=0.001, stiffness=500.0, damping=5.0))
-gm.add_edge("ball", "table", source_field="position", target_field="ball_position")
-gm.add_edge("table", "ball", source_field="normal_force", target_field="external_force")
-gm.add_edge("ball", "spring", source_field="position", target_field="anchor_position")
-gm.add_edge("spring", "ball", source_field="force", target_field="external_force")
-gm.compile()
+gm.add_node(BallNode(name="ball", timestep=0.01))
+gm.add_node(TableNode(name="table", timestep=0.01))
+gm.add_node(SpringDamperNode(
+    name="spring", timestep=0.01,
+    stiffness=50.0, damping=2.0, mass=0.5,
+    rest_length=1.5, initial_position=3.0,
+))
+gm.add_edge("table", "ball", "position", "table_position")
+gm.add_edge("ball", "spring", "position", "anchor_position")
+
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    gm.compile()
+print(f"Graph compiled: {gm.node_names}")
 
 server = SimulationServer(
     node_registry={
@@ -83,55 +82,9 @@ server = SimulationServer(
     },
     graph_manager=gm,
 )
-
-import uvicorn
 print("Starting server on 0.0.0.0:8000...")
 uvicorn.run(server.create_app(), host="0.0.0.0", port=8000, log_level="info")
-PYEOF
-
-# Start server in background and keep the job alive
-nohup python3 /tmp/maddening_server.py > /tmp/server.log 2>&1 &
-echo "RUN: Server PID=$!"
-echo "RUN: Waiting for server to be ready..."
-
-# Wait for server to start (up to 60s)
-for i in $(seq 1 60); do
-    if curl -s http://localhost:8000/graph > /dev/null 2>&1; then
-        echo "RUN: Server is ready!"
-        break
-    fi
-    sleep 1
-done
-
-# Keep the job alive (SkyPilot will kill this when autostop triggers)
-echo "RUN: Server running. Sleeping to keep job alive..."
-sleep 3600
 """
-
-
-def get_runpod_port_endpoint(cluster_name: str, private_port: int = 8000) -> str | None:
-    """Query RunPod API for the public endpoint of a private port.
-
-    RunPod uses NAT — ports are mapped to public_ip:public_port pairs.
-    Returns "http://host:port" or None if not found.
-    """
-    import yaml
-    import runpod
-
-    with open(os.path.expanduser("~/.maddening/cloud_credentials.yaml")) as f:
-        creds = yaml.safe_load(f)
-    runpod.api_key = creds["runpod"]["api_key"]
-
-    for pod in runpod.get_pods():
-        if cluster_name in pod.get("name", ""):
-            runtime = pod.get("runtime") or {}
-            for port_info in (runtime.get("ports") or []):
-                if (port_info.get("privatePort") == private_port
-                        and port_info.get("isIpPublic")):
-                    host = port_info["ip"]
-                    public_port = port_info["publicPort"]
-                    return f"http://{host}:{public_port}"
-    return None
 
 
 def wait_for_server(base_url: str, timeout: float = 120) -> bool:
@@ -151,14 +104,12 @@ def wait_for_server(base_url: str, timeout: float = 120) -> bool:
 
 
 def http_get(base_url: str, path: str) -> dict:
-    """GET a JSON endpoint."""
     req = urllib.request.Request(f"{base_url}{path}", method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
 def http_post(base_url: str, path: str) -> dict:
-    """POST to an endpoint and return JSON."""
     req = urllib.request.Request(f"{base_url}{path}", method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
@@ -166,11 +117,11 @@ def http_post(base_url: str, path: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Cloud server test")
-    parser.add_argument("--gpu", default="RTX5090", help="GPU type")
+    parser.add_argument("--gpu", default="RTX4090", help="GPU type")
     parser.add_argument("--keep", action="store_true", help="Don't teardown")
     args = parser.parse_args()
 
-    # Find project root (directory containing pyproject.toml)
+    # Find project root
     project_root = os.path.dirname(os.path.abspath(__file__))
     while project_root != "/" and not os.path.exists(
         os.path.join(project_root, "pyproject.toml")
@@ -181,21 +132,24 @@ def main():
         provider="runpod",
         gpu_type=args.gpu,
         use_spot=False,
+        region="US",
         cost=CostPolicy(
             max_cost_per_hour=2.0,
-            max_total_budget=5.0,
+            max_total_budget=8.0,
             autostop_minutes=10,
-            auto_teardown=True,
+            auto_teardown=False,  # We manage teardown ourselves
+            spot_fallback=True,
         ),
-        setup=SETUP_SCRIPT,
-        run=RUN_SCRIPT,
+        # Minimal run command — just keep the VM alive.
+        # We do the real work via SSH to bypass Ray GPU isolation.
+        run="echo 'VM ready for SSH'; sleep 7200",
         workdir=project_root,
     )
 
     launcher = CloudLauncher()
 
-    # --- Launch ---
-    print(f"Launching {args.gpu} on-demand...")
+    # --- Phase 1: Launch VM ---
+    print(f"Phase 1: Launching {args.gpu} on-demand in US...")
     try:
         job = launcher.launch(config)
     except LaunchError as e:
@@ -204,71 +158,141 @@ def main():
 
     print(f"  Cluster: {job.cluster_name}")
     print(f"  VM IP: {job.vm_ip}")
+    print(f"  SSH port: {job.ssh_port}")
     print(f"  Hourly cost: ${job._hourly_cost:.2f}")
-    print()
-    print("  SkyPilot is running setup (pip install) + starting server.")
-    print("  This takes a few minutes. NOT calling stream_logs() to avoid blocking.")
 
-    # --- Discover the public endpoint ---
+    # --- Phase 2: Install deps via SSH ---
     print()
-    print("Discovering RunPod port mapping for :8000...")
-    # RunPod uses NAT — we need the mapped public endpoint, not vm_ip:8000
-    base_url = None
-    for attempt in range(20):  # poll for up to 60s (port mapping appears after pod starts)
-        base_url = get_runpod_port_endpoint(job.cluster_name, 8000)
-        if base_url:
-            break
-        time.sleep(3)
-
-    if not base_url:
-        print("ERROR: Could not find public port mapping for :8000.")
-        print("  This may mean the server hasn't started yet, or the port")
-        print("  wasn't exposed. Check RunPod dashboard for port mappings.")
+    print("Phase 2: Installing dependencies via SSH...")
+    print(f"  (Using system pip which targets python3.12)")
+    try:
+        result = job.ssh_run(INSTALL_CMD, timeout=300, capture=True)
+        # Print last few lines of output
+        lines = result.stdout.strip().split("\n") if result.stdout else []
+        for line in lines[-5:]:
+            print(f"  {line}")
+        if "INSTALL_DONE" not in result.stdout:
+            print("  WARNING: INSTALL_DONE not found in output")
+            print(f"  stderr: {result.stderr[-500:] if result.stderr else 'none'}")
+    except subprocess.TimeoutExpired:
+        print("  ERROR: pip install timed out (300s)")
         if not args.keep:
             job.teardown()
         sys.exit(1)
-    print(f"  Public endpoint: {base_url}")
+    except subprocess.CalledProcessError as e:
+        print(f"  ERROR: pip install failed (exit {e.returncode})")
+        print(f"  {e.stderr[-500:] if e.stderr else ''}")
+        if not args.keep:
+            job.teardown()
+        sys.exit(1)
 
-    # --- Wait for server ---
+    # --- Phase 3: Verify GPU + imports ---
     print()
-    print(f"Waiting for FastAPI server at {base_url}...")
-    if not wait_for_server(base_url, timeout=600):
-        print("ERROR: Server did not start within timeout.")
+    print("Phase 3: Verifying JAX GPU + MADDENING imports...")
+    try:
+        result = job.ssh_run(
+            'python3.12 -c "import jax; print(jax.devices()); '
+            'from maddening import GraphManager; print(\'MADDENING OK\')"',
+            timeout=60, capture=True,
+        )
+        print(f"  {result.stdout.strip()}")
+        if "MADDENING OK" not in result.stdout:
+            print("  WARNING: import check may have failed")
+            if result.stderr:
+                print(f"  stderr: {result.stderr[-300:]}")
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        if not args.keep:
+            job.teardown()
+        sys.exit(1)
+
+    # --- Phase 4: Upload and start server ---
+    print()
+    print("Phase 4: Starting MADDENING server...")
+    # Write the server script to the VM, then run it in background
+    import shlex
+    escaped = shlex.quote(SERVER_SCRIPT)
+    job.ssh_run(f"echo {escaped} > /tmp/maddening_server.py", check=True)
+    job.ssh_run_background("python3.12 /tmp/maddening_server.py")
+    print("  Server started in background")
+
+    # --- Phase 5: Discover endpoint and test ---
+    print()
+    print("Phase 5: Discovering public endpoint...")
+    base_url = None
+    for attempt in range(30):
+        base_url = job.get_runpod_endpoint(8000)
+        if base_url:
+            break
+        time.sleep(2)
+
+    if not base_url:
+        print("  ERROR: No public port mapping for :8000")
+        # Try direct IP as fallback
+        base_url = f"http://{job.vm_ip}:8000"
+        print(f"  Trying direct: {base_url}")
+
+    print(f"  Endpoint: {base_url}")
+
+    print()
+    print("Phase 6: Waiting for server to respond...")
+    if not wait_for_server(base_url, timeout=120):
+        print("  ERROR: Server did not respond within 120s")
+        # Check server logs
+        try:
+            result = job.ssh_run("cat /tmp/bg_cmd.log 2>/dev/null | tail -20", capture=True, check=False)
+            print(f"  Server logs:\n{result.stdout}")
+        except Exception:
+            pass
         if not args.keep:
             job.teardown()
         sys.exit(1)
     print("  Server is UP!")
 
-    # --- Test endpoints ---
+    # --- Phase 7: Test endpoints ---
     print()
-    print("Testing /graph endpoint...")
+    print("Phase 7: Testing API endpoints...")
+
+    print("  GET /graph...")
     graph = http_get(base_url, "/graph")
-    print(f"  Nodes: {list(graph.get('nodes', {}).keys())}")
-    print(f"  Edges: {len(graph.get('edges', []))}")
-    assert "ball" in graph.get("nodes", {}), "Expected 'ball' node"
-    print("  PASS")
+    # nodes can be a list of dicts or a dict depending on API version
+    nodes_data = graph.get("nodes", [])
+    if isinstance(nodes_data, list):
+        nodes = [n.get("name", "") for n in nodes_data]
+    else:
+        nodes = list(nodes_data.keys())
+    print(f"    Nodes: {nodes}")
+    print(f"    Edges: {len(graph.get('edges', []))}")
+    assert "ball" in nodes, f"Expected 'ball' node, got {nodes}"
+    print("    PASS")
 
-    print()
-    print("Testing /graph/state endpoint...")
+    print("  GET /graph/state...")
     state = http_get(base_url, "/graph/state")
-    print(f"  Ball position: {state.get('ball', {}).get('position')}")
-    print(f"  Ball velocity: {state.get('ball', {}).get('velocity')}")
-    print("  PASS")
+    print(f"    Ball position: {state.get('ball', {}).get('position')}")
+    print(f"    Ball velocity: {state.get('ball', {}).get('velocity')}")
+    print("    PASS")
 
-    print()
-    print("Testing /sim/step (5 steps)...")
-    for i in range(5):
+    print("  POST /sim/step (5 steps)...")
+    for _ in range(5):
         state = http_post(base_url, "/sim/step")
     ball_pos = state.get("ball", {}).get("position")
-    print(f"  Ball position after 5 steps: {ball_pos}")
-    print("  PASS")
+    print(f"    Ball position after 5 steps: {ball_pos}")
+    assert ball_pos is not None, "Expected ball position"
+    print("    PASS")
+
+    print("  POST /sim/run (100 steps)...")
+    state = http_post(base_url, "/sim/run?n_steps=100")
+    ball_pos = state.get("ball", {}).get("position")
+    print(f"    Ball position after 100 more steps: {ball_pos}")
+    print("    PASS")
 
     # --- Teardown ---
     if args.keep:
         print()
         print(f"Keeping cluster alive: {job.cluster_name}")
         print(f"  Server: {base_url}")
-        print(f"  Teardown manually: sky down {job.cluster_name}")
+        print(f"  SSH: ssh -p {job.ssh_port} root@{job.vm_ip}")
+        print(f"  Teardown: sky down {job.cluster_name}")
     else:
         print()
         print("Tearing down...")

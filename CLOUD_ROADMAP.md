@@ -106,10 +106,11 @@ Flow: `sky.launch()` (no setup/run) → SSH in → `pip install` in system pytho
 - [x] Discovered Python 3.10/3.12 mismatch on runpod/base image
 - [x] Discovered JAX CUDA plugin version conflict
 - [x] Discovered Ray worker GPU isolation issue
-- [ ] Fix Python version: use python3.12 or create venv in setup
-- [ ] Fix JAX: pin versions to avoid plugin conflict
-- [ ] Bypass Ray: run server via SSH directly instead of Ray job
-- [ ] Verify FastAPI server accessible via RunPod port mapping
+- [x] Fix Python version: use system pip (targets python3.12) via SSH directly
+- [x] Fix JAX: system pip installs compatible jax[cuda12] — CudaDevice(id=0) confirmed
+- [x] Bypass Ray: SSH-based approach works — `CloudJob.ssh_run()` method added
+- [x] Verify FastAPI server accessible via RunPod port mapping — all endpoints work
+- [x] Verify REST API: `/graph`, `/graph/state`, `/sim/step`, `/sim/run` all tested end-to-end
 - [ ] Verify WebSocket state streaming (`/ws/state/binary`) over network
 
 ### Short-term: SelkiesSession Integration Testing

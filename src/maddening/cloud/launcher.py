@@ -210,6 +210,7 @@ class CloudJob:
         provider: Optional[CloudProvider] = None,
         creds: Optional[dict] = None,
         vm_ip: Optional[str] = None,
+        ssh_port: int = 22,
         ports: Optional[dict[str, int]] = None,
         hourly_cost: float = 0.0,
     ) -> None:
@@ -218,6 +219,7 @@ class CloudJob:
         self._provider = provider
         self._creds = creds
         self._vm_ip = vm_ip
+        self._ssh_port = ssh_port
         self._ports = ports or {}
         self._hourly_cost = hourly_cost
         self._phase = (
@@ -256,6 +258,100 @@ class CloudJob:
         ``SubgraphSpec.zmq_ports``.
         """
         return dict(self._ports)
+
+    @property
+    def ssh_port(self) -> int:
+        """SSH port on the public IP (may be remapped by RunPod NAT)."""
+        return self._ssh_port
+
+    def ssh_run(
+        self,
+        command: str,
+        timeout: Optional[int] = None,
+        check: bool = True,
+        capture: bool = False,
+    ) -> "subprocess.CompletedProcess":
+        """Run a shell command on the remote VM via SSH.
+
+        Bypasses SkyPilot's Ray job scheduler — runs directly on the
+        system Python with full GPU visibility.
+
+        Parameters
+        ----------
+        command : str
+            Shell command to execute.
+        timeout : int, optional
+            Seconds before the SSH command times out.
+        check : bool
+            If True, raise ``subprocess.CalledProcessError`` on non-zero exit.
+        capture : bool
+            If True, capture stdout/stderr instead of printing to terminal.
+        """
+        import subprocess
+
+        if not self._vm_ip:
+            raise LaunchError("No VM IP available — cluster may not be UP yet")
+
+        ssh_cmd = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-p", str(self._ssh_port),
+            f"root@{self._vm_ip}",
+            command,
+        ]
+
+        kwargs: dict[str, Any] = {"timeout": timeout, "check": check}
+        if capture:
+            kwargs["capture_output"] = True
+            kwargs["text"] = True
+
+        return subprocess.run(ssh_cmd, **kwargs)
+
+    def ssh_run_background(self, command: str) -> None:
+        """Start a command on the remote VM in the background via SSH.
+
+        Uses ``nohup ... &`` so the process survives after SSH disconnects.
+        """
+        # Wrap in nohup and redirect output
+        bg_cmd = f"nohup bash -c {_shell_quote(command)} > /tmp/bg_cmd.log 2>&1 &"
+        self.ssh_run(bg_cmd, check=False)
+
+    def get_runpod_endpoint(self, private_port: int = 8000) -> Optional[str]:
+        """Query RunPod API for the public endpoint of a private port.
+
+        RunPod uses NAT — internal ports are mapped to
+        ``public_ip:public_port``.  Returns ``"http://host:port"``
+        or ``None`` if not found.
+        """
+        if self._provider is None or self._creds is None:
+            return None
+        try:
+            import yaml as _yaml
+            import runpod
+            # Load API key from our credentials
+            creds_path = Path.home() / ".maddening" / "cloud_credentials.yaml"
+            if creds_path.exists():
+                with open(creds_path) as f:
+                    all_creds = _yaml.safe_load(f)
+                if "runpod" in all_creds:
+                    runpod.api_key = all_creds["runpod"]["api_key"]
+            elif self._creds and "api_key" in self._creds:
+                runpod.api_key = self._creds["api_key"]
+
+            for pod in runpod.get_pods():
+                if self._cluster_name in pod.get("name", ""):
+                    runtime = pod.get("runtime") or {}
+                    for port_info in (runtime.get("ports") or []):
+                        if (port_info.get("privatePort") == private_port
+                                and port_info.get("isIpPublic")):
+                            host = port_info["ip"]
+                            pub_port = port_info["publicPort"]
+                            return f"http://{host}:{pub_port}"
+        except Exception:
+            logger.debug("Failed to query RunPod port mapping", exc_info=True)
+        return None
 
     @classmethod
     def from_cluster_name(
@@ -657,8 +753,13 @@ class CloudLauncher:
                     ) from exc
 
         vm_ip = None
-        if handle is not None and hasattr(handle, "head_ip"):
-            vm_ip = handle.head_ip
+        ssh_port = 22
+        if handle is not None:
+            if hasattr(handle, "head_ip"):
+                vm_ip = handle.head_ip
+            # SkyPilot stores the mapped SSH port for RunPod
+            if hasattr(handle, "stable_ssh_ports") and handle.stable_ssh_ports:
+                ssh_port = handle.stable_ssh_ports[0]
 
         spot_str = "spot" if use_spot else "on-demand"
         logger.info("Launched %s (%s, %s, $%.2f/hr)",
@@ -670,6 +771,7 @@ class CloudLauncher:
             provider=provider,
             creds=creds,
             vm_ip=vm_ip,
+            ssh_port=ssh_port,
             hourly_cost=hourly_cost,
         )
         job._phase = JobPhase.EXECUTING
@@ -902,6 +1004,12 @@ def _format_launch_error(exc: Exception) -> str:
             "or set use_spot=False."
         )
     return f"SkyPilot launch failed: {exc}"
+
+
+def _shell_quote(s: str) -> str:
+    """Quote a string for safe shell use."""
+    import shlex
+    return shlex.quote(s)
 
 
 def _resolve_sky_cloud_class(sky_module, cloud_name: str):

@@ -105,6 +105,25 @@ class SimulationNode(ABC):
     # Boundary and flux introspection (Phase 6)
     # ------------------------------------------------------------------
 
+    @property
+    @abstractmethod
+    def requires_halo(self) -> bool:
+        """Whether this node's ``update()`` accesses spatial neighbors.
+
+        Returns ``True`` for nodes with stencil operations (e.g. finite
+        differences, LBM streaming) where sharding the state along a
+        spatial axis requires halo exchange between shards.
+
+        Returns ``False`` for pointwise nodes (e.g. ODE-based, rigid
+        body, surrogate models) where each element is independent.
+
+        ``ShardedNode`` checks this property and refuses to shard nodes
+        that require halos until halo exchange is implemented.
+
+        Every ``SimulationNode`` subclass **must** override this.
+        """
+        ...
+
     def boundary_input_spec(self) -> dict[str, "BoundaryInputSpec"]:
         """Declare expected boundary inputs with shapes and semantics.
 

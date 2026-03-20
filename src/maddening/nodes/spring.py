@@ -100,6 +100,11 @@ class SpringDamperNode(SimulationNode):
             initial_velocity=initial_velocity,
         )
 
+    @property
+    def requires_halo(self) -> bool:
+        """Pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["initial_position"], dtype=jnp.float32),

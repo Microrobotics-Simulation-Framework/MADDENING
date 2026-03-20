@@ -92,6 +92,11 @@ class SurrogateNode(SimulationNode):
         self.state_spec = state_spec
         self._integrator = integrator or euler_integrator
 
+    @property
+    def requires_halo(self) -> bool:
+        """Surrogate nodes are pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         vals = self.params["initial_values"]
         return {

@@ -161,8 +161,15 @@ piece of work from the WebRTC transport layer (which is validated below).
 - [x] Wire `enable_multigpu()` into `_build_step_fn()` — `one_pass_jacobi` uses `jax.device_put` for node placement
 - [x] Integration tests: single step, 100 steps, and `lax.scan` all match between sharded and non-sharded (2 CPU devices via XLA_FLAGS)
 - [x] `conftest.py` sets `XLA_FLAGS=--xla_force_host_platform_device_count=2` for CI compatibility
-- [ ] Benchmark on real multi-GPU hardware (2+ GPUs)
-- [ ] Run multi-GPU tests on RunPod with multi-GPU instance (e.g. `A100-80GB:2`)
+- [x] Benchmark on real multi-GPU hardware (2xRTX4090 on RunPod)
+  - Both GPUs visible: `[CudaDevice(id=0), CudaDevice(id=1)]`
+  - Correctness: PASS on all node sizes (n_cells=10 to 5000)
+  - Performance: no speedup or overhead — JIT fuses the entire graph into one XLA
+    computation that runs on a single device regardless of `device_put` placement
+  - **Finding:** `device_put` task-parallel approach is correct but ineffective under
+    JIT — JAX's compiler ignores device hints when the whole graph is one computation.
+    Real multi-GPU benefit requires `shard_map` (data-parallel) or separate per-device
+    JIT compilations (breaks single-graph model). This is expected and documented.
 
 **Note on shard_map:** The `jax.device_put` approach is correct for MADDENING's
 task-parallel model (each node on its own GPU). `shard_map` is for data-parallel
@@ -184,7 +191,7 @@ doesn't fit on one GPU (e.g. 256x128x128 LBM). This is a separate use case.
   - ZMQ 4.3.5 works correctly on runpod/base, both localhost (rank-0 self-connect) and cross-VM (RunPod NAT)
   - PID health checks catch silent crashes immediately
 
-**Key use case: Live surrogate training + hot-swap**
+**Key use case: Live surrogate training + hot-swap (deferred to post-Khalil)**
 
 Multi-job enables a powerful online learning workflow:
 - Job 1 (GPU): runs the live simulation graph
@@ -193,10 +200,10 @@ Multi-job enables a powerful online learning workflow:
 - Job 1 receives signal, calls `replace_node()` to hot-swap physics→surrogate
 - Simulation continues 10-100x faster with no restart
 
-What already exists: `SurrogateTrainer`, `replace_node()`, `DatasetGenerator`,
-`NetworkRelay` (ZMQ PUB/SUB).
+Infrastructure already exists: `SurrogateTrainer`, `replace_node()`,
+`DatasetGenerator`, `NetworkRelay` (ZMQ PUB/SUB), `Coordinator`, `WorkerClient`.
 
-What needs to be built:
+Deferred items (natural post-Khalil addition):
 - `DatasetGenerator.from_stream()` — accumulate training pairs from live ZMQ
 - Swap protocol: trainer publishes weights + config, simulator deserializes + swaps
 - Shadow validation: run physics + surrogate in parallel, alert on divergence

@@ -179,6 +179,11 @@ class RigidBodyNode(SimulationNode):
     # State
     # ------------------------------------------------------------------
 
+    @property
+    def requires_halo(self) -> bool:
+        """Pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         p = self.params
         return {

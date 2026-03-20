@@ -648,6 +648,11 @@ class LBMNode(SimulationNode):
     # SimulationNode interface
     # ------------------------------------------------------------------
 
+    @property
+    def requires_halo(self) -> bool:
+        """LBM uses streaming (neighbor access) — requires halo exchange."""
+        return True
+
     def initial_state(self) -> dict:
         shape = self._grid_shape
         D = self._D

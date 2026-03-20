@@ -45,6 +45,11 @@ class TableNode(SimulationNode):
     def __init__(self, name: str, timestep: float, position: float = 0.0):
         super().__init__(name, timestep, position=position)
 
+    @property
+    def requires_halo(self) -> bool:
+        """Pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["position"], dtype=jnp.float32),

@@ -653,6 +653,11 @@ class LBMPipeNode(SimulationNode):
         """Kinematic viscosity in lattice units."""
         return (self.params["tau"] - 0.5) / 3.0
 
+    @property
+    def requires_halo(self) -> bool:
+        """LBM uses streaming (neighbor access) — requires halo exchange."""
+        return True
+
     def initial_state(self) -> dict:
         nx = self.params["nx"]
         ny = self.params["ny"]

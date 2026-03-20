@@ -91,6 +91,10 @@ class BallWithForceNode(SimulationNode):
             mass=mass,
         )
 
+    @property
+    def requires_halo(self) -> bool:
+        return False
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["initial_position"], dtype=jnp.float32),

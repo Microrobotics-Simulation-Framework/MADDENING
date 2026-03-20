@@ -211,6 +211,11 @@ class HeatNode(SimulationNode):
         )
 
     @property
+    def requires_halo(self) -> bool:
+        """HeatNode uses finite difference stencils — requires halo exchange."""
+        return True
+
+    @property
     def _is_nonuniform(self) -> bool:
         return self.params.get("grid_points") is not None
 

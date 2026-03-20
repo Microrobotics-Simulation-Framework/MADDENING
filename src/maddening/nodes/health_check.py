@@ -74,6 +74,11 @@ class HealthCheckNode(SimulationNode):
     def __init__(self, name: str, timestep: float, checks: dict | None = None):
         super().__init__(name, timestep, checks=checks or {})
 
+    @property
+    def requires_halo(self) -> bool:
+        """Pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         checks = self.params.get("checks", {})
         n_checks = len(checks)

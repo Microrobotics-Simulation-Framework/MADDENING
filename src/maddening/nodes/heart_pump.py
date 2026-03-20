@@ -158,6 +158,11 @@ class HeartPumpNode(SimulationNode):
         freq = hr / 60.0  # beats per second
         return sv * jnp.pi * freq / (2.0 * sf)
 
+    @property
+    def requires_halo(self) -> bool:
+        """Pointwise (no spatial neighbor access)."""
+        return False
+
     def initial_state(self) -> dict:
         return {
             "arterial_pressure": jnp.array(

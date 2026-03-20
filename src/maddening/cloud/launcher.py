@@ -127,6 +127,7 @@ class JobConfig:
     setup: str = ""    # Shell commands to run during VM setup (pip install, etc.)
     run: str = ""      # Shell commands to run as the job
     workdir: str = ""  # Local directory to sync to VM (SkyPilot workdir)
+    ports: list[int] = field(default_factory=lambda: [8000])  # Ports to expose via RunPod NAT
     envs: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -152,6 +153,7 @@ class JobConfig:
             cost=self.cost, container_image=self.container_image,
             stream_preset=self.stream_preset, setup=self.setup,
             run=self.run, workdir=self.workdir,
+            ports=self.ports,
             envs={k: v for k, v in merged.items() if k not in _RESERVED_ENV_VARS},
         )
         # Store the full envs (including reserved) for _do_launch to use
@@ -723,7 +725,7 @@ class CloudLauncher:
                 f"docker:{job_config.container_image}"
                 if job_config.container_image else None
             ),
-            ports=[8000],
+            ports=job_config.ports or [8000],
         )
         task.set_resources(resources)
 

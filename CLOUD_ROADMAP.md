@@ -161,9 +161,13 @@ piece of work from the WebRTC transport layer (which is validated below).
 - [x] Wire `enable_multigpu()` into `_build_step_fn()` — `one_pass_jacobi` uses `jax.device_put` for node placement
 - [x] Integration tests: single step, 100 steps, and `lax.scan` all match between sharded and non-sharded (2 CPU devices via XLA_FLAGS)
 - [x] `conftest.py` sets `XLA_FLAGS=--xla_force_host_platform_device_count=2` for CI compatibility
-- [ ] Replace `jax.device_put` approach with actual `jax.experimental.shard_map` (Phase 2)
 - [ ] Benchmark on real multi-GPU hardware (2+ GPUs)
 - [ ] Run multi-GPU tests on RunPod with multi-GPU instance (e.g. `A100-80GB:2`)
+
+**Note on shard_map:** The `jax.device_put` approach is correct for MADDENING's
+task-parallel model (each node on its own GPU). `shard_map` is for data-parallel
+sharding of a single large array, which would only apply if a single node's state
+doesn't fit on one GPU (e.g. 256x128x128 LBM). This is a separate use case.
 
 ### Medium-term: Multi-Job Architecture
 
@@ -173,8 +177,13 @@ piece of work from the WebRTC transport layer (which is validated below).
 - [x] Implement heartbeat monitoring + dead worker detection
 - [x] Implement `ISOLATE` failure mode (`teardown_one()`)
 - [x] Tests: coordinator registration, topology building, bidirectional edges, CloudGroup env injection, teardown modes
-- [ ] Test with 2-VM setup on RunPod (end-to-end multi-job simulation)
-- [ ] Implement worker-side rendezvous client (register + receive topology + create ZMQ sockets)
+- [x] Implement worker-side rendezvous client — `WorkerClient` with `register_and_wait()`, heartbeat, shutdown/peer_dead callbacks
+- [x] Local integration tests pass: 3-node bidirectional rendezvous, timeout handling, heartbeat
+- [ ] Test with 2-VM setup on RunPod — **BLOCKED**: coordinator ROUTER socket unreachable from DEALER clients even on localhost. Suspected ZMQ version/config issue on runpod/base image. Needs debugging with `--keep` and manual ZMQ testing via SSH.
+  - Ports 5580 correctly exposed via RunPod NAT
+  - Coordinator starts and logs "Starting coordinator"
+  - Workers connect but never receive ACK
+  - Same failure for localhost (rank-0 worker) and cross-VM (structure worker)
 
 **Key use case: Live surrogate training + hot-swap**
 

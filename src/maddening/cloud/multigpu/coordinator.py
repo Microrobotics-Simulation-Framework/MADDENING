@@ -237,6 +237,34 @@ class Coordinator:
                             self._broadcast_topology(sock)
                             self._state = CoordinatorState.RUNNING
 
+                elif msg_type == "get_topology":
+                    subgraph_id = msg.get("subgraph_id", "")
+                    topos = getattr(self, "_topologies", None)
+                    if topos and subgraph_id in topos:
+                        topo = topos[subgraph_id]
+                        sock.send_multipart([
+                            identity, b"",
+                            json.dumps({
+                                "type": "topology",
+                                "subgraph_id": subgraph_id,
+                                "peers": [
+                                    {
+                                        "peer_id": p.peer_id,
+                                        "address": p.address,
+                                        "role": p.role,
+                                        "socket_type": p.socket_type,
+                                        "edge_name": p.edge_name,
+                                    }
+                                    for p in topo.peers
+                                ],
+                            }).encode(),
+                        ])
+                    else:
+                        sock.send_multipart([
+                            identity, b"",
+                            json.dumps({"type": "not_ready"}).encode(),
+                        ])
+
                 elif msg_type == "heartbeat":
                     subgraph_id = msg.get("subgraph_id", "")
                     last_heartbeat[subgraph_id] = time.monotonic()

@@ -187,7 +187,7 @@ class CloudGroup:
 
     def _inject_rank0_env(self, spec: SubgraphSpec) -> JobConfig:
         """Build a JobConfig for rank-0 with coordinator setup."""
-        return spec.job_config._with_envs({
+        config = spec.job_config._with_envs({
             "SUBGRAPH_ID": spec.subgraph_id,
             "COORDINATOR_PORT": str(self._config.coordinator_port),
             "IS_RANK0": "1",
@@ -196,6 +196,13 @@ class CloudGroup:
             ),
             "INTER_JOB_EDGES": json.dumps(self._edges),
         })
+        # Ensure coordinator port is exposed through NAT
+        coord_port = self._config.coordinator_port
+        if coord_port not in config.ports:
+            object.__setattr__(
+                config, "ports", list(config.ports) + [coord_port],
+            )
+        return config
 
     def _inject_worker_env(
         self, spec: SubgraphSpec, coordinator_addr: str,

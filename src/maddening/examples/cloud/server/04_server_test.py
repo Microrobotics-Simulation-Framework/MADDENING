@@ -30,19 +30,25 @@ from maddening.cloud.launcher import (
 
 
 # -- Remote install + server script ------------------------------------
-# Run via SSH directly on system python3.12, not through Ray.
+# Run via SSH directly on system python3, not through Ray.
 # Fixes:
-#   1. Use python3.12 (runpod/base has pip targeting 3.12 but python3 is 3.10)
+#   1. Use python3 (runpod/base has pip targeting 3.12 but python3 is 3.10)
 #   2. Uninstall pre-installed jax_cuda12_plugin to avoid version conflict
 #   3. Pin jax/jaxlib versions matching our pyproject.toml range
 
+# If using the pre-built Docker image, MADDENING is already installed.
+# Only pip install if needed (bare image or missing deps).
 INSTALL_CMD = (
-    "pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6"'
-    ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
-    ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
-    " && [ -d ~/sky_workdir/src ] && pip install -q --root-user-action=ignore -e ~/sky_workdir"
-    " ; echo INSTALL_DONE"
+    "python3 -c 'from maddening import GraphManager; print(\"MADDENING pre-installed\")' 2>/dev/null"
+    " && echo INSTALL_DONE"
+    " || ("
+    "  pip3 install -q"
+    '  "jax[cuda12]>=0.4,<0.6"'
+    '  "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
+    '  "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
+    "  && [ -d ~/sky_workdir/src ] && pip3 install -q -e ~/sky_workdir"
+    "  ; echo INSTALL_DONE"
+    ")"
 )
 
 SERVER_SCRIPT = r"""
@@ -164,7 +170,7 @@ def main():
     # --- Phase 2: Install deps via SSH ---
     print()
     print("Phase 2: Installing dependencies via SSH...")
-    print(f"  (Using system pip which targets python3.12)")
+    print(f"  (Using system pip which targets python3)")
     try:
         result = job.ssh_run(INSTALL_CMD, timeout=300, capture=True)
         # Print last few lines of output
@@ -191,7 +197,7 @@ def main():
     print("Phase 3: Verifying JAX GPU + MADDENING imports...")
     try:
         result = job.ssh_run(
-            'python3.12 -c "import jax; print(jax.devices()); '
+            'python3 -c "import jax; print(jax.devices()); '
             'from maddening import GraphManager; print(\'MADDENING OK\')"',
             timeout=60, capture=True,
         )
@@ -213,7 +219,7 @@ def main():
     import shlex
     escaped = shlex.quote(SERVER_SCRIPT)
     job.ssh_run(f"echo {escaped} > /tmp/maddening_server.py", check=True)
-    job.ssh_run_background("python3.12 /tmp/maddening_server.py")
+    job.ssh_run_background("python3 /tmp/maddening_server.py")
     print("  Server started in background")
 
     # --- Phase 5: Discover endpoint and test ---

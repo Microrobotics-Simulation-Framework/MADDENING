@@ -24,5 +24,7 @@ cost:
   auto_teardown: true
   spot_fallback: true   # If spot is unavailable, automatically retry on-demand
 
-container_image: "nvcr.io/nvidia/cuda:12.2.2-runtime-ubuntu22.04"
+# Default: MADDENING pre-built image with JAX CUDA, GStreamer, ZMQ, FastAPI
+# Override only if you need a custom base image
+container_image: "ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest"
 stream_preset: "standard"

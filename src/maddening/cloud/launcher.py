@@ -122,7 +122,7 @@ class JobConfig:
     region: str = ""
     disk_size: int = 50
     cost: CostPolicy = field(default_factory=CostPolicy)
-    container_image: str = ""
+    container_image: str = "ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest"
     stream_preset: str = "standard"
     setup: str = ""    # Shell commands to run during VM setup (pip install, etc.)
     run: str = ""      # Shell commands to run as the job

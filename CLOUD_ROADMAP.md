@@ -179,11 +179,10 @@ doesn't fit on one GPU (e.g. 256x128x128 LBM). This is a separate use case.
 - [x] Tests: coordinator registration, topology building, bidirectional edges, CloudGroup env injection, teardown modes
 - [x] Implement worker-side rendezvous client — `WorkerClient` with `register_and_wait()`, heartbeat, shutdown/peer_dead callbacks
 - [x] Local integration tests pass: 3-node bidirectional rendezvous, timeout handling, heartbeat
-- [ ] Test with 2-VM setup on RunPod — **BLOCKED**: coordinator ROUTER socket unreachable from DEALER clients even on localhost. Suspected ZMQ version/config issue on runpod/base image. Needs debugging with `--keep` and manual ZMQ testing via SSH.
-  - Ports 5580 correctly exposed via RunPod NAT
-  - Coordinator starts and logs "Starting coordinator"
-  - Workers connect but never receive ACK
-  - Same failure for localhost (rank-0 worker) and cross-VM (structure worker)
+- [x] Test with 2-VM setup on RunPod — **PASSED**: coordinator on rank-0 (VM 0), structure worker on VM 1, bidirectional coupling edges, both workers registered and received topology
+  - Root cause of earlier failure: `nohup` env var inheritance — fixed by embedding values directly in Python script templates instead of relying on shell `export`
+  - ZMQ 4.3.5 works correctly on runpod/base, both localhost (rank-0 self-connect) and cross-VM (RunPod NAT)
+  - PID health checks catch silent crashes immediately
 
 **Key use case: Live surrogate training + hot-swap**
 

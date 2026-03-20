@@ -46,17 +46,32 @@ INSTALL_CMD = (
 )
 
 # Coordinator script (runs on rank-0)
-COORDINATOR_SCRIPT = r"""
-import json, os, sys, time
+COORDINATOR_SCRIPT_TEMPLATE = """
+import json, os, sys, time, traceback
 sys.path.insert(0, os.path.expanduser("~/sky_workdir/src"))
+print(f"Python: {{sys.executable}}", flush=True)
+print(f"sys.path: {{sys.path[:3]}}", flush=True)
 
-from maddening.cloud.multigpu.coordinator import Coordinator
+try:
+    from maddening.cloud.multigpu.coordinator import Coordinator
+    print("Coordinator imported OK", flush=True)
+except Exception as e:
+    print(f"IMPORT FAILED: {{e}}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 
-expected = json.loads(os.environ.get("EXPECTED_WORKERS", '["flow", "structure"]'))
-edges = json.loads(os.environ.get("INTER_JOB_EDGES", '[]'))
-port = int(os.environ.get("COORDINATOR_PORT", "5580"))
+expected = {expected_json}
+edges = {edges_json}
+port = {port}
 
-print(f"Starting coordinator on :{port}, expecting {expected}")
+print(f"Starting coordinator on :{{port}}, expecting {{expected}}", flush=True)
+try:
+    import zmq
+    print(f"ZMQ version: {{zmq.zmq_version()}}", flush=True)
+except Exception as e:
+    print(f"ZMQ IMPORT FAILED: {{e}}", flush=True)
+    sys.exit(1)
+
 coord = Coordinator(
     expected_workers=expected,
     edges=edges,
@@ -64,74 +79,75 @@ coord = Coordinator(
     heartbeat_timeout=60.0,
 )
 coord.start()
+print("Coordinator thread started, waiting for workers...", flush=True)
 
-# Wait for all workers
 if coord.wait_for_all(timeout=300):
-    print("All workers registered!")
+    print("All workers registered!", flush=True)
     topo = coord.build_topology()
     for wid, t in topo.items():
-        print(f"  {wid}: {len(t.peers)} peers")
-    # Write success marker
+        print(f"  {{wid}}: {{len(t.peers)}} peers", flush=True)
     with open("/tmp/coordinator_ready.json", "w") as f:
-        json.dump({"status": "ready", "workers": list(coord.registered_workers.keys())}, f)
-    print("Coordinator ready. Sleeping...")
-    # Keep alive for heartbeats
+        json.dump({{"status": "ready", "workers": list(coord.registered_workers.keys())}}, f)
+    print("Coordinator ready. Sleeping...", flush=True)
     while True:
         time.sleep(1)
 else:
-    print("TIMEOUT: not all workers registered")
+    print("TIMEOUT: not all workers registered", flush=True)
     with open("/tmp/coordinator_ready.json", "w") as f:
-        json.dump({"status": "timeout"}, f)
+        json.dump({{"status": "timeout"}}, f)
     sys.exit(1)
 """
 
-# Worker script (runs on worker VMs)
-WORKER_SCRIPT = r"""
-import json, os, sys, time
+WORKER_SCRIPT_TEMPLATE = """
+import json, os, sys, time, socket, traceback
 sys.path.insert(0, os.path.expanduser("~/sky_workdir/src"))
+print(f"Python: {{sys.executable}}", flush=True)
 
-from maddening.cloud.multigpu.worker_client import WorkerClient
+try:
+    from maddening.cloud.multigpu.worker_client import WorkerClient
+    print("WorkerClient imported OK", flush=True)
+except Exception as e:
+    print(f"IMPORT FAILED: {{e}}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 
-coordinator_addr = os.environ.get("COORDINATOR_ADDR", "")
-subgraph_id = os.environ.get("SUBGRAPH_ID", "unknown")
-# Get our public IP from the hostname or env
-import socket
+coordinator_addr = "{coordinator_addr}"
+subgraph_id = "{subgraph_id}"
 my_ip = socket.gethostbyname(socket.gethostname())
 
-print(f"Worker {subgraph_id} connecting to coordinator at {coordinator_addr}")
-print(f"My IP: {my_ip}")
+print(f"Worker {{subgraph_id}} connecting to coordinator at {{coordinator_addr}}", flush=True)
+print(f"My IP: {{my_ip}}", flush=True)
 
 client = WorkerClient(
     coordinator_addr=coordinator_addr,
     subgraph_id=subgraph_id,
-    address=f"{my_ip}:5555",
-    zmq_ports={"state": 5555},
+    address=f"{{my_ip}}:5555",
+    zmq_ports={{"state": 5555}},
 )
 
 try:
     topology = client.register_and_wait(timeout=120)
-    print(f"Topology received: {len(topology)} peers")
+    print(f"Topology received: {{len(topology)}} peers", flush=True)
     for peer in topology:
-        print(f"  {peer.peer_id}: {peer.role} {peer.socket_type} @ {peer.address}")
+        print(f"  {{peer.peer_id}}: {{peer.role}} {{peer.socket_type}} @ {{peer.address}}", flush=True)
 
-    # Write success marker
     with open("/tmp/worker_ready.json", "w") as f:
-        json.dump({
+        json.dump({{
             "status": "ready",
             "subgraph_id": subgraph_id,
             "peers": len(topology),
-        }, f)
+        }}, f)
 
-    # Start heartbeat and keep alive
     client.start_heartbeat(interval=5.0)
-    print("Worker ready. Heartbeating...")
+    print("Worker ready. Heartbeating...", flush=True)
     while True:
         time.sleep(1)
 
 except Exception as e:
-    print(f"Worker {subgraph_id} FAILED: {e}")
+    print(f"Worker {{subgraph_id}} FAILED: {{e}}", flush=True)
+    traceback.print_exc()
     with open("/tmp/worker_ready.json", "w") as f:
-        json.dump({"status": "error", "error": str(e)}, f)
+        json.dump({{"status": "error", "error": str(e)}}, f)
     sys.exit(1)
 """
 
@@ -206,29 +222,43 @@ def main():
         print("Phase 4: Starting coordinator on rank-0")
         print("=" * 60)
 
-        # Upload and run coordinator script
-        jobs["flow"].ssh_run(
-            f"echo {shlex.quote(COORDINATOR_SCRIPT)} > /tmp/coordinator.py",
-            check=True,
-        )
-
-        edges = json.dumps([{
+        # Generate coordinator script with embedded values (no env vars needed)
+        edges_list = [{
             "source": "flow", "target": "structure",
             "source_field": "pressure", "target_field": "load",
         }, {
             "source": "structure", "target": "flow",
             "source_field": "displacement", "target_field": "wall_bc",
-        }])
+        }]
 
+        coord_script = COORDINATOR_SCRIPT_TEMPLATE.format(
+            expected_json=json.dumps(["flow", "structure"]),
+            edges_json=json.dumps(edges_list),
+            port=5580,
+        )
         jobs["flow"].ssh_run(
-            f'export EXPECTED_WORKERS=\'["flow", "structure"]\''
-            f" INTER_JOB_EDGES='{edges}'"
-            f" COORDINATOR_PORT=5580"
-            f" && nohup python3 /tmp/coordinator.py > /tmp/coordinator.log 2>&1 &",
+            f"cat > /tmp/coordinator.py << 'PYEOF'\n{coord_script}\nPYEOF",
+            check=True,
+        )
+
+        # Start coordinator with PID health check
+        jobs["flow"].ssh_run(
+            "python3 /tmp/coordinator.py > /tmp/coordinator.log 2>&1 &"
+            " COORD_PID=$!; sleep 2;"
+            " if ! kill -0 $COORD_PID 2>/dev/null; then"
+            "   echo 'COORDINATOR CRASHED:'; cat /tmp/coordinator.log; exit 1;"
+            " fi;"
+            " echo COORD_PID=$COORD_PID",
             check=False,
         )
-        print("  Coordinator started")
-        time.sleep(2)
+        # Verify it's alive
+        time.sleep(3)
+        result = jobs["flow"].ssh_run(
+            "cat /tmp/coordinator.log 2>/dev/null | head -10",
+            capture=True, check=False,
+        )
+        print(f"  Coordinator log:\n    " +
+              "\n    ".join((result.stdout or "").strip().split("\n")[:5]))
 
         # --- Phase 5: Start workers ---
         print()
@@ -246,26 +276,42 @@ def main():
             print("  WARNING: Could not find RunPod port mapping for 5580")
         print(f"  Coordinator address: {coordinator_addr}")
 
-        # Start flow worker on rank-0 — uses localhost:5580 (bypass NAT)
+        # Generate and start flow worker on rank-0 (localhost:5580)
+        flow_script = WORKER_SCRIPT_TEMPLATE.format(
+            coordinator_addr="127.0.0.1:5580",
+            subgraph_id="flow",
+        )
         jobs["flow"].ssh_run(
-            f"echo {shlex.quote(WORKER_SCRIPT)} > /tmp/worker.py",
+            f"cat > /tmp/worker.py << 'PYEOF'\n{flow_script}\nPYEOF",
             check=True,
         )
         jobs["flow"].ssh_run(
-            f"export COORDINATOR_ADDR=127.0.0.1:5580 SUBGRAPH_ID=flow"
-            f" && nohup python3 /tmp/worker.py > /tmp/worker.log 2>&1 &",
+            "python3 /tmp/worker.py > /tmp/worker.log 2>&1 &"
+            " W_PID=$!; sleep 2;"
+            " if ! kill -0 $W_PID 2>/dev/null; then"
+            "   echo 'FLOW WORKER CRASHED:'; cat /tmp/worker.log;"
+            " fi;"
+            " echo WORKER_PID=$W_PID",
             check=False,
         )
         print("  flow worker started on rank-0 (localhost:5580)")
 
-        # Start structure worker on VM 1 — uses public mapped address
+        # Generate and start structure worker on VM 1 (public address)
+        struct_script = WORKER_SCRIPT_TEMPLATE.format(
+            coordinator_addr=coordinator_addr,
+            subgraph_id="structure",
+        )
         jobs["structure"].ssh_run(
-            f"echo {shlex.quote(WORKER_SCRIPT)} > /tmp/worker.py",
+            f"cat > /tmp/worker.py << 'PYEOF'\n{struct_script}\nPYEOF",
             check=True,
         )
         jobs["structure"].ssh_run(
-            f"export COORDINATOR_ADDR={coordinator_addr} SUBGRAPH_ID=structure"
-            f" && nohup python3 /tmp/worker.py > /tmp/worker.log 2>&1 &",
+            "python3 /tmp/worker.py > /tmp/worker.log 2>&1 &"
+            " W_PID=$!; sleep 2;"
+            " if ! kill -0 $W_PID 2>/dev/null; then"
+            "   echo 'STRUCTURE WORKER CRASHED:'; cat /tmp/worker.log;"
+            " fi;"
+            " echo WORKER_PID=$W_PID",
             check=False,
         )
         print(f"  structure worker started on VM 1 ({coordinator_addr})")
@@ -294,12 +340,25 @@ def main():
                 print(f"  Waiting... (attempt {attempt})")
         else:
             print("  TIMEOUT waiting for coordinator")
-            # Check logs
+            # Check coordinator logs
             result = jobs["flow"].ssh_run(
-                "cat /tmp/coordinator.log 2>/dev/null | tail -10",
+                "cat /tmp/coordinator.log 2>/dev/null | tail -20",
                 capture=True, check=False,
             )
             print(f"  Coordinator log:\n{result.stdout}")
+            # Check if coordinator process is alive
+            result = jobs["flow"].ssh_run(
+                "ps aux | grep coordinator | grep -v grep",
+                capture=True, check=False,
+            )
+            print(f"  Coordinator processes: {result.stdout.strip() or 'NONE'}")
+            # Check worker logs
+            for name, job in jobs.items():
+                result = job.ssh_run(
+                    "cat /tmp/worker.log 2>/dev/null | tail -10",
+                    capture=True, check=False,
+                )
+                print(f"  Worker {name} log:\n{result.stdout}")
 
         # Check worker status
         for name, job in jobs.items():

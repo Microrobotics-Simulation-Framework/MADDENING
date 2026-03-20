@@ -75,7 +75,15 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Concise error message for spot unavailability (truncates verbose per-region table); other errors preserved in full
 - Multi-GPU Phase 1: `enable_multigpu()` wired into `_build_step_fn()` — Jacobi coupling uses `jax.device_put` for per-node device placement; correctness validated (single step, 100 steps, `lax.scan` all match non-sharded)
 - Multi-job architecture: `Coordinator` (ZMQ ROUTER-based rendezvous with registration, topology broadcast, heartbeat monitoring), `CloudGroup` (provision rank-0 first, inject `COORDINATOR_ADDR` into workers, `teardown_all` / `teardown_one` with `ISOLATE` mode), `SubgraphSpec` + `GroupConfig`
-- Cloud examples organized into subdirectories: `config/`, `launch/`, `server/`, `streaming/`
+- Cloud examples organized into subdirectories: `config/`, `launch/`, `server/`, `streaming/`, `multigpu/`, `multijob/`
+- `requires_halo` abstract property on `SimulationNode` — every node must declare whether it needs halo exchange for sharding
+- `ShardedNode` wrapper for data-parallel distribution of pointwise nodes across device meshes; rejects stencil nodes automatically
+- `WorkerClient` for multi-job rendezvous: `register_and_wait()`, heartbeat, shutdown/peer_dead callbacks
+- Validated 2-VM multi-job rendezvous on RunPod (coordinator + worker across VMs via ZMQ)
+- Real multi-GPU benchmark on 2xRTX4090: correctness validated, JIT fusion behaviour documented
+- Core reorganized into `core/coupling/`, `core/simulation/`, `core/compliance/` subpackages (backward compatible via `core/__init__.py` re-exports)
+- Docker image `ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest` — pre-built with JAX CUDA, GStreamer, ZMQ, FastAPI; set as default `container_image` in `JobConfig`
+- CycloneDX SBOM generation (`sbom.json`) for IEC 62304 SOUP compliance
 
 ### Fixed
 - Subcycling dividers were inverted: fast nodes now correctly take multiple sub-steps while slow nodes take one step

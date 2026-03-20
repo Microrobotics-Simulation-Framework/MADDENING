@@ -26,6 +26,10 @@ class BounceNode(SimulationNode):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+    @property
+    def requires_halo(self) -> bool:
+        return False  # pointwise (no spatial neighbors)
+
     def initial_state(self):
         return {
             "position": jnp.array(5.0),

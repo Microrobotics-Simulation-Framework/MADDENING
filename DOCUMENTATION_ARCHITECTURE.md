@@ -1210,7 +1210,7 @@ Nodes expose `uncertainty_spec() -> Optional[UncertaintySpec]`. UQ wrappers use 
 # maddening/core/stability.py
 
 import functools, warnings
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel
 
 _STABILITY_REGISTRY: dict[str, dict] = {}
 
@@ -2537,7 +2537,7 @@ Usage (from a downstream library like MIME):
 """
 
 # Metadata schemas
-from maddening.core.metadata import (
+from maddening.core.compliance.metadata import (
     NodeMeta, EdgeMeta, ValidatedRegime, Reference,
     StabilityLevel, UQReadiness,
     collect_node_metadata,
@@ -2545,12 +2545,12 @@ from maddening.core.metadata import (
 )
 
 # Anomaly management
-from maddening.core.anomaly import (
+from maddening.core.compliance.anomaly import (
     AnomalyRecord, AnomalySeverity, SafetyRelevance, ResolutionStatus,
 )
 
 # Validation infrastructure
-from maddening.core.validation import (
+from maddening.core.compliance.validation import (
     ValidationBenchmark, BenchmarkType,
     verification_benchmark,
 )
@@ -2562,16 +2562,16 @@ from maddening.core.validation import (
 # This avoids a broken import while still allowing downstream libraries
 # to annotate their API surfaces with `@stability(StabilityLevel.STABLE)`
 # from day one — the annotations are inert until the machinery exists.
-from maddening.core.stability import stability
+from maddening.core.compliance.stability import stability
 
 # Registry validation
 from maddening.compliance._validate import validate_anomaly_registry
 
 # Provenance (available after Phase 3)
-# from maddening.core.provenance import SimulationProvenance
+# from maddening.core.compliance.provenance import SimulationProvenance
 
 # UQ (available after Phase 4)
-# from maddening.core.uq import UncertaintySpec, UncertainParameter
+# from maddening.core.compliance.uq import UncertaintySpec, UncertainParameter
 ```
 
 #### Design Decisions

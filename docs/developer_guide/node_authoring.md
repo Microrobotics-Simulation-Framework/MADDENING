@@ -31,10 +31,10 @@ docs/algorithm_guide/nodes/your_node.md # Algorithm documentation
 import jax.numpy as jnp
 
 from maddening.core.node import SimulationNode
-from maddening.core.metadata import (
+from maddening.core.compliance.metadata import (
     NodeMeta, StabilityLevel, ValidatedRegime, Reference,
 )
-from maddening.core.stability import stability
+from maddening.core.compliance.stability import stability
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -190,7 +190,7 @@ def test_your_analytical_comparison():
 ### 6. Apply the `@stability` Decorator
 
 ```python
-from maddening.core.stability import stability
+from maddening.core.compliance.stability import stability
 
 @stability(StabilityLevel.EXPERIMENTAL)
 class YourNode(SimulationNode):

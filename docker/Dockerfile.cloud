@@ -61,12 +61,12 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 
 # Install JAX with CUDA 12 support + MADDENING[server]
-# --root-user-action=ignore suppresses pip's root user warning
-RUN pip3 install --no-cache-dir --root-user-action=ignore \
+#  suppresses pip's root user warning
+RUN pip3 install --no-cache-dir  \
     "jax[cuda12]>=0.4,<0.6" && \
-    pip3 install --no-cache-dir --root-user-action=ignore \
+    pip3 install --no-cache-dir  \
     -e ".[server]" && \
-    pip3 install --no-cache-dir --root-user-action=ignore \
+    pip3 install --no-cache-dir  \
     PyGObject websockets
 
 # ── Verify installation ─────────────────────────────────────────────

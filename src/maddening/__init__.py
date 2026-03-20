@@ -17,11 +17,11 @@ Install extras for optional features::
 def __getattr__(name: str):
     """Lazy imports so that ``maddening.viz`` can be used without JAX."""
     _lazy = {
-        "AdaptiveConfig": "maddening.core.adaptive",
+        "AdaptiveConfig": "maddening.core.simulation.adaptive",
         "CouplingGroup": "maddening.core.coupling",
         "EdgeSpec": "maddening.core.edge",
         "GraphManager": "maddening.core.graph_manager",
-        "HistoryLogger": "maddening.core.history_logger",
+        "HistoryLogger": "maddening.core.simulation.history_logger",
         "SimulationNode": "maddening.core.node",
         "SurrogateNode": "maddening.surrogates.node",
         "SurrogateArchitecture": "maddening.surrogates.architecture",

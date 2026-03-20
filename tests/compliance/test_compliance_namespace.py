@@ -110,7 +110,7 @@ class TestNoJAXDependency:
             title="Test",
             description="Test",
             severity=AnomalySeverity.MINOR,
-            safety_relevance=__import__("maddening.core.anomaly", fromlist=["SafetyRelevance"]).SafetyRelevance.NOT_SAFETY_RELEVANT,
+            safety_relevance=__import__("maddening.core.compliance.anomaly", fromlist=["SafetyRelevance"]).SafetyRelevance.NOT_SAFETY_RELEVANT,
             safety_relevance_rationale="Test",
         )
         assert ar.anomaly_id == "TEST-001"

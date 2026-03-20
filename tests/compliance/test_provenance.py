@@ -3,7 +3,7 @@
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-from maddening.core.provenance import SimulationProvenance
+from maddening.core.compliance.provenance import SimulationProvenance
 
 
 class TestSimulationProvenance:

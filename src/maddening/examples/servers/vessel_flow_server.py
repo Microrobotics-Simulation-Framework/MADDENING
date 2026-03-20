@@ -422,7 +422,7 @@ def main():
     app, gm, relay, runner = create_app(grid_shape=tuple(args.grid))
 
     if args.profile:
-        from maddening.core.profiler import profile_graph
+        from maddening.core.simulation.profiler import profile_graph
         print("\nProfiling...")
         report = profile_graph(gm, n_steps=50)
         print(report)

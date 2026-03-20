@@ -23,7 +23,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 
 from maddening.core.graph_manager import GraphManager
-from maddening.core.coupling_helpers import (
+from maddening.core.coupling.helpers import (
     add_symmetric_value_coupling,
     check_conservation,
 )

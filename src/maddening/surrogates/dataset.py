@@ -8,8 +8,8 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from maddening.core.metadata import StabilityLevel
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @dataclass

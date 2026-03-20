@@ -16,7 +16,7 @@ import pytest
 
 from maddening.nodes.heat import HeatNode
 from maddening.core.graph_manager import GraphManager
-from maddening.core.interface_mapping import (
+from maddening.core.coupling.interface_mapping import (
     nearest_neighbor_2d,
     rbf_interpolation_2d,
 )

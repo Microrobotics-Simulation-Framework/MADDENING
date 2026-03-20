@@ -10,7 +10,7 @@ import pytest
 
 from maddening.core.edge import EdgeSpec
 from maddening.core.graph_manager import GraphManager
-from maddening.core.coupling_helpers import (
+from maddening.core.coupling.helpers import (
     add_dirichlet_neumann_pair,
     add_flux_coupling,
     add_robin_coupling,

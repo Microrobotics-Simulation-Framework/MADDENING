@@ -10,8 +10,8 @@ used inside concrete implementations.
 from abc import ABC, abstractmethod
 from typing import Any
 
-from maddening.core.metadata import StabilityLevel
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 PyTree = Any
 

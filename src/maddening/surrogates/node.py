@@ -7,9 +7,9 @@ boundary_inputs contract, works with jit/scan/grad/vmap.
 
 import jax.numpy as jnp
 
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
-from maddening.core.stability import stability
+from maddening.core.compliance.stability import stability
 from maddening.surrogates.architecture import SurrogateArchitecture
 
 

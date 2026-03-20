@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from maddening.nodes.heat import HeatNode
-from maddening.core.validation import (
+from maddening.core.compliance.validation import (
     verification_benchmark,
     BenchmarkType,
     _BENCHMARK_REGISTRY,

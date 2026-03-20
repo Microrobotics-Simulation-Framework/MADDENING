@@ -3,7 +3,7 @@
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-from maddening.core.validation import (
+from maddening.core.compliance.validation import (
     verification_benchmark,
     BenchmarkType,
     get_benchmark_registry,

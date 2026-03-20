@@ -7,7 +7,7 @@ per-node update time, coupling overhead, and JIT compilation time.
 
 Usage::
 
-    from maddening.core.profiler import profile_graph
+    from maddening.core.simulation.profiler import profile_graph
 
     report = profile_graph(gm, n_steps=100)
     print(report)

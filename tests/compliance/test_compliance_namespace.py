@@ -98,13 +98,13 @@ class TestNoJAXDependency:
 
     def test_compliance_types_are_pure_python(self):
         """All compliance schema types use only stdlib modules."""
-        from maddening.core.metadata import NodeMeta
+        from maddening.core.compliance.metadata import NodeMeta
         # NodeMeta is a dataclass — no JAX imports needed
         meta = NodeMeta(algorithm_id="test")
         assert meta.algorithm_id == "test"
 
     def test_anomaly_types_are_pure_python(self):
-        from maddening.core.anomaly import AnomalyRecord, AnomalySeverity
+        from maddening.core.compliance.anomaly import AnomalyRecord, AnomalySeverity
         ar = AnomalyRecord(
             anomaly_id="TEST-001",
             title="Test",

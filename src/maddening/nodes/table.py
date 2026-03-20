@@ -7,8 +7,8 @@ The table does not move; its ``update`` returns the state unchanged.
 import jax.numpy as jnp
 
 from maddening.core.node import SimulationNode
-from maddening.core.metadata import NodeMeta, StabilityLevel
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @stability(StabilityLevel.STABLE)

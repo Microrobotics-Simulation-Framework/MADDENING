@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.coupling_acceleration import iqn_ils_update
+from maddening.core.coupling.acceleration import iqn_ils_update
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode

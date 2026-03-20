@@ -57,8 +57,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.node import SimulationNode
-from maddening.core.metadata import NodeMeta, StabilityLevel, ValidatedRegime
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.stability import stability
 
 # ── D3Q19 lattice constants ─────────────────────────────────────────
 # Use numpy (not jnp) so these remain concrete values inside JIT/scan.

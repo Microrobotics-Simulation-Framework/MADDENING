@@ -25,9 +25,9 @@ import jax.numpy as jnp
 
 from maddening.core.coupling import CouplingGroup
 from maddening.core.edge import EdgeSpec
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
-from maddening.core.stability import stability
+from maddening.core.compliance.stability import stability
 from maddening.core.schedule import (
     detect_cycles,
     find_strongly_connected_components,
@@ -177,7 +177,7 @@ def _run_coupled_block_impl(
     This is the shared implementation used by both ``_build_step_fn``
     and ``_build_dt_step_fn``.
     """
-    from maddening.core.coupling_acceleration import (
+    from maddening.core.coupling.acceleration import (
         aitken_relaxation,
         coupling_residual_interface,
         coupling_residual_l2,
@@ -1360,7 +1360,7 @@ class GraphManager:
                     meta[f"coupling_{key}_residual"] = jnp.array(0.0)
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
-                    from maddening.core.coupling_acceleration import (
+                    from maddening.core.coupling.acceleration import (
                         flatten_coupled_state,
                     )
                     group_names = sorted(g.nodes)
@@ -1393,7 +1393,7 @@ class GraphManager:
                     # Pre-populate predictor history with flattened
                     # node states.  Use flatten_coupled_state with
                     # all fields (no acceleration field filtering).
-                    from maddening.core.coupling_acceleration import (
+                    from maddening.core.coupling.acceleration import (
                         flatten_coupled_state as _fcs_pred,
                     )
                     group_names_pred = list(g.nodes)
@@ -2184,7 +2184,7 @@ class GraphManager:
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
 
-        from maddening.core.adaptive import AdaptiveConfig, _tree_error_norm
+        from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
 
         config = AdaptiveConfig(
             dt_initial=dt_initial,
@@ -2324,7 +2324,7 @@ class GraphManager:
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
 
-        from maddening.core.adaptive import AdaptiveConfig, _tree_error_norm
+        from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
 
         config = AdaptiveConfig(
             dt_initial=dt_initial, atol=atol, rtol=rtol,
@@ -2483,7 +2483,7 @@ class GraphManager:
 
         See :func:`maddening.core.checkpoint.save_state` for details.
         """
-        from maddening.core.checkpoint import save_state
+        from maddening.core.simulation.checkpoint import save_state
         return save_state(self, path)
 
     def load_state(self, path) -> None:
@@ -2491,7 +2491,7 @@ class GraphManager:
 
         See :func:`maddening.core.checkpoint.load_state` for details.
         """
-        from maddening.core.checkpoint import load_state
+        from maddening.core.simulation.checkpoint import load_state
         load_state(self, path)
 
     # ------------------------------------------------------------------

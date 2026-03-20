@@ -4,7 +4,7 @@ import pytest
 import jax.numpy as jnp
 
 from maddening.core.graph_manager import GraphManager
-from maddening.core.history_logger import HistoryLogger
+from maddening.core.simulation.history_logger import HistoryLogger
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
 

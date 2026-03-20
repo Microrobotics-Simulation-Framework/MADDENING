@@ -1,9 +1,23 @@
 # MADDENING Cloud Container
 # GPU-enabled container with GStreamer for WebRTC streaming
 #
-# Build:  docker build -f docker/Dockerfile.cloud -t maddening-cloud:latest .
-# Run:    docker run --gpus all -p 8000:8000 -p 8080:8080 -p 5555:5555 -p 5556:5556 \
-#           -e MADDENING_CLOUD_CONFIG='{}' maddening-cloud:latest
+# Incorporates all findings from RunPod cloud testing (2026-03-19/20):
+#   - Uses python3 (3.10) as primary — required for system python3-gi bindings
+#   - Installs jax[cuda12] with compatible versions
+#   - GStreamer plugins including -ugly (for x264enc)
+#   - ZMQ for multi-job coordinator communication
+#   - matplotlib for server-side frame rendering (Agg backend, headless)
+#
+# Build:
+#   docker build -f docker/Dockerfile.cloud -t maddening-cloud:latest .
+#
+# Run (single job):
+#   docker run --gpus all -p 8000:8000 -p 5555:5555 -p 5556:5556 \
+#     -e MADDENING_CLOUD_CONFIG='{}' maddening-cloud:latest
+#
+# Run (multi-job coordinator):
+#   docker run --gpus all -p 8000:8000 -p 5580:5580 -p 5555:5555 -p 5556:5556 \
+#     -e IS_RANK0=1 -e COORDINATOR_PORT=5580 maddening-cloud:latest
 
 FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
@@ -11,43 +25,65 @@ LABEL org.opencontainers.image.title="maddening-cloud" \
       org.opencontainers.image.description="MADDENING simulation server with GPU streaming" \
       org.opencontainers.image.source="https://github.com/Microrobotics-Simulation-Framework/MADDENING"
 
-# Prevent interactive prompts during apt-get
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies: GStreamer + Python
+# ── System dependencies ──────────────────────────────────────────────
+# Python 3.10 (system default on Ubuntu 22.04) + pip
+# GStreamer (all plugins including -ugly for x264enc)
+# PyGObject bindings (python3-gi for system python3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev \
+    python3 \
+    python3-pip \
+    python3-dev \
+    # GStreamer core + plugins
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-nice \
     gstreamer1.0-tools \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
+    # GStreamer GIR bindings (for PyGObject)
     gir1.2-gst-plugins-bad-1.0 \
     gir1.2-gstreamer-1.0 \
+    # PyGObject (must be system python3 version for gi._gi C extension)
     python3-gi \
     python3-gi-cairo \
     libgirepository1.0-dev \
+    # Utilities
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install MADDENING with cloud/streaming/API extras
+# ── Python dependencies ─────────────────────────────────────────────
+# Install MADDENING with server + streaming extras
+# Uses system python3 (3.10) which has the gi bindings
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-RUN pip3 install --no-cache-dir ".[api,network]" && \
-    pip3 install --no-cache-dir PyGObject websockets selkies-gstreamer || true
+# Install JAX with CUDA 12 support + MADDENING[server]
+# --root-user-action=ignore suppresses pip's root user warning
+RUN pip3 install --no-cache-dir --root-user-action=ignore \
+    "jax[cuda12]>=0.4,<0.6" && \
+    pip3 install --no-cache-dir --root-user-action=ignore \
+    -e ".[server]" && \
+    pip3 install --no-cache-dir --root-user-action=ignore \
+    PyGObject websockets
 
-# Expose ports:
-#   8000 — FastAPI HTTP/WS server
-#   8080 — Selkies signaling / stream
-#   5555 — ZMQ state PUB
-#   5556 — ZMQ command SUB
-EXPOSE 8000 8080 5555 5556
+# ── Verify installation ─────────────────────────────────────────────
+RUN python3 -c "import jax; print(f'JAX: {jax.__version__}')" && \
+    python3 -c "from maddening import GraphManager; print('MADDENING: OK')" && \
+    python3 -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; print(f'GStreamer: {Gst.version_string()}')" && \
+    python3 -c "import zmq; print(f'ZMQ: {zmq.zmq_version()}')"
 
-# Entrypoint
+# ── Ports ────────────────────────────────────────────────────────────
+#   8000  — FastAPI HTTP/WS server
+#   8443  — Selkies signaling / WebRTC
+#   5555  — ZMQ state PUB
+#   5556  — ZMQ command SUB
+#   5580  — Multi-job coordinator (ROUTER socket)
+EXPOSE 8000 8443 5555 5556 5580
+
+# ── Entrypoint ───────────────────────────────────────────────────────
 ENV MADDENING_HOST=0.0.0.0
 ENV MADDENING_PORT=8000
 CMD ["python3", "-m", "maddening.cloud.entrypoint"]

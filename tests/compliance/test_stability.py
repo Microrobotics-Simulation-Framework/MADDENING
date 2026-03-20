@@ -3,8 +3,8 @@
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-from maddening.core.metadata import StabilityLevel
-from maddening.core.stability import (
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import (
     stability,
     generate_stability_report,
     _STABILITY_REGISTRY,

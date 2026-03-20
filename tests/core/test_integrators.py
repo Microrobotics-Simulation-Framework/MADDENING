@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.integrators import (
+from maddening.core.simulation.integrators import (
     euler_step,
     heun_step,
     integrate_node,

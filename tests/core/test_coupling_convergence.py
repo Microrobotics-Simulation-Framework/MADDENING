@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.core.coupling import CouplingGroup
-from maddening.core.coupling_acceleration import (
+from maddening.core.coupling.acceleration import (
     aitken_relaxation,
     coupling_residual_l2,
     coupling_residual_mixed,

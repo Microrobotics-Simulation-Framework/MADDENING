@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.core.graph_manager import GraphManager
-from maddening.core.hybrid_node import (
+from maddening.core.simulation.hybrid_node import (
     HybridNode,
     generate_correction_data,
 )

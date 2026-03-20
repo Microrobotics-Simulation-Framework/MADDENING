@@ -3,7 +3,7 @@
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-from maddening.core.uq import (
+from maddening.core.compliance.uq import (
     UncertaintySpec,
     UncertainParameter,
     DistributionType,

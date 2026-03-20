@@ -509,4 +509,4 @@ class TestNodeMeta:
         assert len(meta.validated_regimes) > 0
 
 
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel

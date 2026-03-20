@@ -6,7 +6,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
 
-from maddening.core.audit import AuditLogger, NullSink, JSONFileSink
+from maddening.core.compliance.audit import AuditLogger, NullSink, JSONFileSink
 
 
 class TestNullSink:

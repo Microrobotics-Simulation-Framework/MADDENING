@@ -10,7 +10,7 @@ Verifies that tune_coupling_params:
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.calibration import TuneResult, tune_coupling_params
+from maddening.core.simulation.calibration import TuneResult, tune_coupling_params
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
 

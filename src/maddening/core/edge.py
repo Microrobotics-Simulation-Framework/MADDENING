@@ -11,8 +11,8 @@ optionally applying *transform* first."
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from maddening.core.metadata import StabilityLevel
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @stability(StabilityLevel.STABLE)

@@ -27,7 +27,7 @@ No JAX dependency — everything here is pure Python.
 """
 
 # Metadata schemas
-from maddening.core.metadata import (
+from maddening.core.compliance.metadata import (
     NodeMeta,
     EdgeMeta,
     ValidatedRegime,
@@ -39,7 +39,7 @@ from maddening.core.metadata import (
 )
 
 # Anomaly management
-from maddening.core.anomaly import (
+from maddening.core.compliance.anomaly import (
     AnomalyRecord,
     AnomalySeverity,
     SafetyRelevance,
@@ -47,7 +47,7 @@ from maddening.core.anomaly import (
 )
 
 # Validation infrastructure
-from maddening.core.validation import (
+from maddening.core.compliance.validation import (
     ValidationBenchmark,
     BenchmarkType,
     verification_benchmark,
@@ -56,7 +56,7 @@ from maddening.core.validation import (
 
 # Stability — identity decorator in Phase 0-3, functional in Phase 4.
 # See DOCUMENTATION_ARCHITECTURE.md Section 9.5 and Appendix B item 30.
-from maddening.core.stability import stability, generate_stability_report
+from maddening.core.compliance.stability import stability, generate_stability_report
 
 # Registry validation
 from maddening.compliance._validate import validate_anomaly_registry

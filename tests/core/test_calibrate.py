@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.calibration import CalibrateResult, calibrate
-from maddening.core.integrators import rk4_step
+from maddening.core.simulation.calibration import CalibrateResult, calibrate
+from maddening.core.simulation.integrators import rk4_step
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 

@@ -5,7 +5,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
 
-from maddening.core.metadata import (
+from maddening.core.compliance.metadata import (
     NodeMeta, EdgeMeta, ValidatedRegime, Reference,
     StabilityLevel, UQReadiness,
     collect_node_metadata, collect_hazard_hints,

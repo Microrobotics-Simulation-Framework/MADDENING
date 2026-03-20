@@ -45,8 +45,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.metadata import NodeMeta, StabilityLevel, ValidatedRegime
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.stability import stability
 
 
 # ═══════════════════════════════════════════════════════════════════════

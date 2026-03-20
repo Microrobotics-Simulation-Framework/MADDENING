@@ -11,7 +11,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from maddening.core.adaptive import AdaptiveConfig, _tree_error_norm, build_adaptive_step
+from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm, build_adaptive_step
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode, GRAVITY
 from maddening.nodes.table import TableNode

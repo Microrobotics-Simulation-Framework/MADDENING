@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from maddening.core.implicit import implicit_euler_step
-from maddening.core.integrators import euler_step, rk4_step
+from maddening.core.simulation.implicit import implicit_euler_step
+from maddening.core.simulation.integrators import euler_step, rk4_step
 from maddening.core.node import SimulationNode
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode

@@ -15,8 +15,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
-from maddening.core.metadata import StabilityLevel
-from maddening.core.stability import stability
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @dataclass(frozen=True)

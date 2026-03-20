@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.core.graph_manager import GraphManager
-from maddening.core.checkpoint import save_state, load_state
+from maddening.core.simulation.checkpoint import save_state, load_state
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
 

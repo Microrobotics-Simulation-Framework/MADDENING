@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Callable, Optional, TypeVar
 import functools
 
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel
 
 T = TypeVar("T")
 
@@ -29,8 +29,8 @@ def stability(level: StabilityLevel) -> Callable[[T], T]:
 
     Usage::
 
-        from maddening.core.metadata import StabilityLevel
-        from maddening.core.stability import stability
+        from maddening.core.compliance.metadata import StabilityLevel
+        from maddening.core.compliance.stability import stability
 
         @stability(StabilityLevel.STABLE)
         class GraphManager:

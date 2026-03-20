@@ -10,7 +10,7 @@ import pytest
 
 from maddening.core.edge import EdgeSpec
 from maddening.core.graph_manager import GraphManager
-from maddening.core.interface_mapping import (
+from maddening.core.coupling.interface_mapping import (
     conservative_projection_1d,
     linear_interpolation_1d,
     nearest_neighbor_1d,

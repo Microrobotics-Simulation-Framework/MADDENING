@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.nodes.health_check import HealthCheckNode
-from maddening.core.metadata import StabilityLevel
+from maddening.core.compliance.metadata import StabilityLevel
 
 
 class TestHealthCheckNodeMeta:

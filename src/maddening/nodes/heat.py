@@ -18,7 +18,7 @@ Supports:
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
 
@@ -411,13 +411,28 @@ class HeatNode(SimulationNode):
         return {
             "left_temperature": BoundaryInputSpec(
                 shape=(), description="Dirichlet BC at left end",
+                expected_units="K",
             ),
             "right_temperature": BoundaryInputSpec(
                 shape=(), description="Dirichlet BC at right end",
+                expected_units="K",
             ),
             "heat_source": BoundaryInputSpec(
                 shape=(n,), description="Volumetric heat source",
                 coupling_type="additive",
+                expected_units="K/s",
+            ),
+        }
+
+    def boundary_flux_spec(self):
+        return {
+            "left_heat_flux": BoundaryFluxSpec(
+                shape=(), description="Heat flux at left boundary",
+                output_units="W/m^2",
+            ),
+            "right_heat_flux": BoundaryFluxSpec(
+                shape=(), description="Heat flux at right boundary",
+                output_units="W/m^2",
             ),
         }
 

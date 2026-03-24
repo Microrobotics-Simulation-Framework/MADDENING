@@ -201,9 +201,11 @@ class RigidBody2DNode(SimulationNode):
             "force": BoundaryInputSpec(
                 shape=(2,), description="External force [Fx, Fy]",
                 coupling_type="additive",
+                expected_units="N",
             ),
             "torque": BoundaryInputSpec(
                 shape=(), description="External torque",
                 coupling_type="additive",
+                expected_units="N*m",
             ),
         }

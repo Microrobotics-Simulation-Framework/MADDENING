@@ -571,3 +571,100 @@ class TestConvenience:
         gm.compile()
         r = repr(gm)
         assert "multi-rate" in r
+
+
+class TestUnitValidation:
+    """Tests for unit mismatch warnings in validate()."""
+
+    def test_unit_mismatch_target_units_vs_expected(self):
+        """Edge target_units differs from node expected_units -> warning."""
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("a", 0.001, n_cells=5, initial_temperature=100.0))
+        gm.add_node(HeatNode("b", 0.001, n_cells=5, initial_temperature=0.0))
+        # Edge declares target_units="Pa" but HeatNode expects "K"
+        gm.add_edge("a", "b", "temperature", "left_temperature",
+                     transform=lambda T: T[-1],
+                     target_units="Pa")
+        issues = gm.validate()
+        unit_warnings = [i for i in issues if "unit mismatch" in i.lower()]
+        assert len(unit_warnings) == 1
+        assert "Pa" in unit_warnings[0]
+        assert "K" in unit_warnings[0]
+
+    def test_no_warning_when_units_match(self):
+        """No warning when edge target_units matches expected_units."""
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("a", 0.001, n_cells=5, initial_temperature=100.0))
+        gm.add_node(HeatNode("b", 0.001, n_cells=5, initial_temperature=0.0))
+        gm.add_edge("a", "b", "temperature", "left_temperature",
+                     transform=lambda T: T[-1],
+                     target_units="K")
+        issues = gm.validate()
+        unit_warnings = [i for i in issues if "unit mismatch" in i.lower()]
+        assert len(unit_warnings) == 0
+
+    def test_no_warning_when_units_not_declared(self):
+        """No warning when neither edge nor node declares units."""
+        gm = GraphManager()
+        gm.add_node(BallNode("ball", 0.01))
+        gm.add_node(TableNode("table", 0.01))
+        gm.add_edge("table", "ball", "position", "table_position")
+        issues = gm.validate()
+        unit_warnings = [i for i in issues if "unit mismatch" in i.lower()]
+        assert len(unit_warnings) == 0
+
+    def test_missing_transform_warning(self):
+        """Warning when source_units != expected_units and no transform."""
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("a", 0.001, n_cells=5, initial_temperature=100.0))
+        gm.add_node(HeatNode("b", 0.001, n_cells=5, initial_temperature=0.0))
+        gm.add_edge("a", "b", "temperature", "left_temperature",
+                     source_units="lattice")
+        issues = gm.validate()
+        missing_warnings = [i for i in issues
+                            if "no transform is set" in i.lower()]
+        assert len(missing_warnings) == 1
+
+    def test_no_missing_transform_warning_with_transform(self):
+        """No missing-transform warning when transform is provided."""
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("a", 0.001, n_cells=5, initial_temperature=100.0))
+        gm.add_node(HeatNode("b", 0.001, n_cells=5, initial_temperature=0.0))
+        gm.add_edge("a", "b", "temperature", "left_temperature",
+                     transform=lambda T: T[-1],
+                     source_units="lattice")
+        issues = gm.validate()
+        missing_warnings = [i for i in issues
+                            if "no transform is set" in i.lower()]
+        assert len(missing_warnings) == 0
+
+    def test_unit_warnings_do_not_block_compile(self):
+        """Unit warnings are WARNING-level, not ERROR — compile succeeds."""
+        import warnings as w_mod
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("a", 0.001, n_cells=5, initial_temperature=100.0))
+        gm.add_node(HeatNode("b", 0.001, n_cells=5, initial_temperature=0.0))
+        gm.add_edge("a", "b", "temperature", "left_temperature",
+                     transform=lambda T: T[-1],
+                     target_units="Pa")
+        with w_mod.catch_warnings(record=True):
+            w_mod.simplefilter("always")
+            gm.compile()  # Should not raise
+        state = gm.step()
+        assert "a" in state
+
+    def test_add_edge_passes_units_through(self):
+        """add_edge source_units/target_units are stored on the EdgeSpec."""
+        gm = GraphManager()
+        gm.add_node(BallNode("ball", 0.01))
+        gm.add_node(TableNode("table", 0.01))
+        gm.add_edge("table", "ball", "position", "table_position",
+                     source_units="m", target_units="m")
+        edge = gm._edges[-1]
+        assert edge.source_units == "m"
+        assert edge.target_units == "m"

@@ -41,6 +41,29 @@ class BoundaryInputSpec:
     default: Any = None
     coupling_type: str = "replacive"
     description: str = ""
+    expected_units: str | None = None
+
+
+@dataclass(frozen=True)
+class BoundaryFluxSpec:
+    """Descriptor for a declared boundary flux output.
+
+    Parameters
+    ----------
+    shape : tuple
+        Array shape (empty tuple for scalar).
+    dtype : any
+        JAX dtype.
+    description : str
+        Human-readable description.
+    output_units : str or None
+        Physical units of this flux output (e.g. ``"N"``, ``"W/m^2"``).
+        Informational -- used for documentation and unit mismatch warnings.
+    """
+    shape: tuple = ()
+    dtype: Any = None
+    description: str = ""
+    output_units: str | None = None
 
 
 @stability(StabilityLevel.STABLE)
@@ -130,6 +153,15 @@ class SimulationNode(ABC):
         Returns a dict mapping input names to BoundaryInputSpec
         descriptors.  Default: empty dict (backward compatible).
         Override to enable validation and documentation.
+        """
+        return {}
+
+    def boundary_flux_spec(self) -> dict[str, "BoundaryFluxSpec"]:
+        """Declare flux outputs from ``compute_boundary_fluxes``.
+
+        Returns a dict mapping flux field names to BoundaryFluxSpec
+        descriptors.  Default: empty dict (backward compatible).
+        Override to enable validation and documentation of flux outputs.
         """
         return {}
 

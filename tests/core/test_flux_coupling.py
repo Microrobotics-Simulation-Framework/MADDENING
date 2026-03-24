@@ -343,3 +343,59 @@ class TestFluxCouplingJAX:
         assert history["rod_b"]["temperature"].shape == (100, 5)
         assert jnp.all(jnp.isfinite(final["rod_a"]["temperature"]))
         assert jnp.all(jnp.isfinite(final["rod_b"]["temperature"]))
+
+
+class TestBoundaryFluxSpec:
+    """Tests for BoundaryFluxSpec and boundary_flux_spec()."""
+
+    def test_default_returns_empty(self):
+        from maddening.nodes.ball import BallNode
+        node = BallNode("b", 0.01)
+        assert node.boundary_flux_spec() == {}
+
+    def test_spring_has_flux_spec(self):
+        from maddening.nodes.spring import SpringDamperNode
+        from maddening.core.node import BoundaryFluxSpec
+        node = SpringDamperNode("s", 0.01)
+        spec = node.boundary_flux_spec()
+        assert "spring_force" in spec
+        assert isinstance(spec["spring_force"], BoundaryFluxSpec)
+        assert spec["spring_force"].output_units == "N"
+
+    def test_heat_has_flux_spec(self):
+        from maddening.nodes.heat import HeatNode
+        from maddening.core.node import BoundaryFluxSpec
+        node = HeatNode("h", 0.001, n_cells=5)
+        spec = node.boundary_flux_spec()
+        assert "left_heat_flux" in spec
+        assert "right_heat_flux" in spec
+        assert spec["left_heat_flux"].output_units == "W/m^2"
+
+    def test_heart_pump_has_flux_spec(self):
+        from maddening.nodes.heart_pump import HeartPumpNode
+        from maddening.core.node import BoundaryFluxSpec
+        node = HeartPumpNode("hp", 0.001)
+        spec = node.boundary_flux_spec()
+        assert "inlet_pressure" in spec
+        assert spec["inlet_pressure"].output_units == "Pa"
+
+    def test_flux_spec_is_frozen(self):
+        from maddening.core.node import BoundaryFluxSpec
+        import pytest
+        spec = BoundaryFluxSpec(shape=(), output_units="N")
+        with pytest.raises(AttributeError):
+            spec.output_units = "Pa"
+
+    def test_expected_units_on_boundary_input_spec(self):
+        from maddening.nodes.heat import HeatNode
+        node = HeatNode("h", 0.001, n_cells=5)
+        spec = node.boundary_input_spec()
+        assert spec["left_temperature"].expected_units == "K"
+        assert spec["right_temperature"].expected_units == "K"
+
+    def test_expected_units_on_rigid_body(self):
+        from maddening.nodes.rigid_body import RigidBodyNode
+        node = RigidBodyNode("rb", 0.01)
+        spec = node.boundary_input_spec()
+        assert spec["force"].expected_units == "N"
+        assert spec["torque"].expected_units == "N*m"

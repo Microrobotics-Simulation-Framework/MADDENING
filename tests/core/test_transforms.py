@@ -184,3 +184,92 @@ class TestGraphManagerIntegration:
         with pytest.raises(KeyError, match="not found"):
             gm.add_edge("a", "b", "position", "anchor_position",
                          transform="this_does_not_exist")
+
+
+class TestUnitConversionFactories:
+    """Tests for LBM <-> SI unit conversion factories."""
+
+    def test_lbm_to_si_force_value(self):
+        from maddening.core.transforms_unit import lbm_to_si_force
+        # F_SI = F_LBM * rho * dx^4 / dt^2
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1000.0)
+        f_lbm = jnp.array(1.0)
+        expected = 1000.0 * 0.001**4 / (1e-6)**2
+        assert jnp.allclose(fwd(f_lbm), expected)
+
+    def test_si_to_lbm_force_value(self):
+        from maddening.core.transforms_unit import si_to_lbm_force
+        inv = si_to_lbm_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1000.0)
+        f_si = jnp.array(1000.0 * 0.001**4 / (1e-6)**2)
+        assert jnp.allclose(inv(f_si), jnp.array(1.0), rtol=1e-5)
+
+    def test_roundtrip(self):
+        from maddening.core.transforms_unit import lbm_to_si_force, si_to_lbm_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        inv = si_to_lbm_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        f_lbm = jnp.array(0.1)
+        assert jnp.allclose(inv(fwd(f_lbm)), f_lbm, rtol=1e-6)
+
+    def test_lbm_to_si_torque(self):
+        from maddening.core.transforms_unit import lbm_to_si_torque
+        fwd = lbm_to_si_torque(dx_physical=0.001, dt_physical=1e-6, rho_physical=1000.0)
+        expected = 1000.0 * 0.001**5 / (1e-6)**2
+        assert jnp.allclose(fwd(jnp.array(1.0)), expected)
+
+    def test_lbm_to_si_velocity(self):
+        from maddening.core.transforms_unit import lbm_to_si_velocity
+        fwd = lbm_to_si_velocity(dx_physical=0.001, dt_physical=1e-6)
+        expected = 0.001 / 1e-6  # 1000.0
+        assert jnp.allclose(fwd(jnp.array(1.0)), expected)
+
+    def test_lbm_to_si_pressure(self):
+        from maddening.core.transforms_unit import lbm_to_si_pressure
+        fwd = lbm_to_si_pressure(dx_physical=0.001, dt_physical=1e-6, rho_physical=1000.0)
+        expected = 1000.0 * (0.001 / 1e-6)**2
+        assert jnp.allclose(fwd(jnp.array(1.0)), expected)
+
+    def test_lbm_to_si_length(self):
+        from maddening.core.transforms_unit import lbm_to_si_length
+        fwd = lbm_to_si_length(dx_physical=0.001)
+        assert jnp.allclose(fwd(jnp.array(10.0)), jnp.array(0.01))
+
+    def test_jit_compatible(self):
+        import jax
+        from maddening.core.transforms_unit import lbm_to_si_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        jitted = jax.jit(fwd)
+        x = jnp.array(0.5)
+        assert jnp.allclose(jitted(x), fwd(x))
+
+    def test_differentiable(self):
+        import jax
+        from maddening.core.transforms_unit import lbm_to_si_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        grad_fn = jax.grad(lambda x: jnp.sum(fwd(x)))
+        g = grad_fn(jnp.array(1.0))
+        assert jnp.isfinite(g)
+        # Gradient of a linear function is the constant factor
+        assert g > 0
+
+    def test_vmap_compatible(self):
+        import jax
+        from maddening.core.transforms_unit import lbm_to_si_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        batch = jnp.array([0.1, 0.2, 0.3])
+        result = jax.vmap(fwd)(batch)
+        assert result.shape == (3,)
+        assert jnp.allclose(result[0], fwd(jnp.array(0.1)))
+
+    def test_qualname_set(self):
+        from maddening.core.transforms_unit import lbm_to_si_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1060.0)
+        assert "lbm_to_si_force" in fwd.__qualname__
+
+    def test_vector_input(self):
+        from maddening.core.transforms_unit import lbm_to_si_force
+        fwd = lbm_to_si_force(dx_physical=0.001, dt_physical=1e-6, rho_physical=1000.0)
+        f_lbm = jnp.array([1.0, 2.0, 3.0])
+        result = fwd(f_lbm)
+        assert result.shape == (3,)
+        factor = 1000.0 * 0.001**4 / (1e-6)**2
+        assert jnp.allclose(result, f_lbm * factor)

@@ -999,6 +999,46 @@ This enables automated generation of capability matrices, V&V status reports, ch
 
 ---
 
+### 9.1.1 Unit Awareness and Edge Transforms
+
+#### Problem
+
+When nodes use different physical unit systems (e.g. LBM lattice units vs SI), the unit conversion applied on a coupling edge is invisible to inspection -- it is an opaque callable. A regulator reviewing the simulation graph cannot determine whether the conversion is correct, what units are expected on each side, or whether a conversion was accidentally omitted.
+
+#### Design
+
+Edges now support optional unit annotations alongside the existing ``transform`` callable:
+
+- ``EdgeSpec.source_units: str | None`` -- physical units of the source field (e.g. ``"lattice"``, ``"Pa"``).
+- ``EdgeSpec.target_units: str | None`` -- physical units after the transform is applied (e.g. ``"N"``).
+
+Nodes declare expected units on their boundary inputs and flux outputs:
+
+- ``BoundaryInputSpec.expected_units: str | None`` -- what units this input expects.
+- ``BoundaryFluxSpec.output_units: str | None`` -- what units this flux output produces.
+
+At ``compile()`` time, ``GraphManager.validate()`` checks for two classes of mismatch:
+
+1. **Explicit mismatch**: edge declares ``target_units`` that differs from the target node's ``expected_units``.
+2. **Missing transform**: edge has ``source_units`` different from ``expected_units`` but no ``transform`` is set.
+
+Both produce ``WARNING``-level messages that surface via ``warnings.warn()`` without blocking compilation.
+
+Standard LBM-to-SI conversion factories are provided in ``maddening.core.transforms_unit`` for common physical quantity conversions (force, torque, velocity, pressure, length). Each factory returns a JAX-traceable pure function suitable for ``EdgeSpec.transform``.
+
+#### IEC 62304 Relevance
+
+This directly supports **IEC 62304 Clause 5.4** (detailed design) traceability. A regulator reviewing a MADDENING simulation graph can now:
+
+- See, at the edge level, what unit conversion is being applied.
+- Verify that the declared units match the source node's output and the target node's expectation.
+- Trace the conversion formula to the factory function in ``transforms_unit.py``.
+- Detect missing or incorrect conversions via the compile-time validation warnings.
+
+This creates a machine-readable audit trail of all unit conversions in a coupled simulation, which is essential for Class C SOUP assessment of multi-physics graphs that span different unit systems.
+
+---
+
 ### 9.2 Provenance and Reproducibility Hooks
 
 #### Problem

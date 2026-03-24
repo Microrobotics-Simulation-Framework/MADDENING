@@ -20,7 +20,7 @@ each heartbeat at a rate of ``heart_rate / 60``.
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
 
@@ -254,6 +254,14 @@ class HeartPumpNode(SimulationNode):
             for k in derivs
         }
 
+    def boundary_flux_spec(self):
+        return {
+            "inlet_pressure": BoundaryFluxSpec(
+                shape=(), description="Arterial pressure for downstream coupling",
+                output_units="Pa",
+            ),
+        }
+
     def compute_boundary_fluxes(self, state, boundary_inputs, dt):
         """Expose arterial pressure as inlet_pressure for downstream coupling."""
         return {
@@ -265,5 +273,6 @@ class HeartPumpNode(SimulationNode):
             "backpressure": BoundaryInputSpec(
                 shape=(),
                 description="Downstream pressure feedback",
+                expected_units="Pa",
             ),
         }

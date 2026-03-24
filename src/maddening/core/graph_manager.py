@@ -982,6 +982,8 @@ class GraphManager:
         target_field: str,
         transform: Optional[Callable] = None,
         additive: bool = False,
+        source_units: Optional[str] = None,
+        target_units: Optional[str] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
 
@@ -989,12 +991,21 @@ class GraphManager:
         string name registered via ``@register_transform``.  String
         names are resolved immediately; a ``KeyError`` is raised if
         the name is not in the registry.
+
+        Parameters
+        ----------
+        source_units : str or None
+            Physical units of the source field (e.g. ``"lattice"``).
+            Informational -- used for documentation and validation.
+        target_units : str or None
+            Physical units after transform (e.g. ``"N"``).
+            Checked against the target node's ``expected_units``.
         """
         if isinstance(transform, str):
             from maddening.core.transforms import resolve_transform
             transform = resolve_transform(transform)
         edge = EdgeSpec(source, target, source_field, target_field,
-                        transform, additive)
+                        transform, additive, source_units, target_units)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
@@ -1204,6 +1215,35 @@ class GraphManager:
                         issues.append(
                             f"ERROR: source field '{e.source_field}' not in state of node '{e.source_node}'. "
                             f"Available: {list(self._state[e.source_node].keys())}"
+                        )
+
+        # Unit compatibility warnings
+        for e in self._edges:
+            if e.target_node in self._nodes:
+                bi_spec = self._nodes[e.target_node].node.boundary_input_spec()
+                if e.target_field in bi_spec:
+                    spec = bi_spec[e.target_field]
+                    if (e.target_units is not None
+                            and spec.expected_units is not None
+                            and e.target_units != spec.expected_units):
+                        issues.append(
+                            f"WARNING: unit mismatch on edge "
+                            f"{e.source_node}.{e.source_field} -> "
+                            f"{e.target_node}.{e.target_field}: "
+                            f"edge declares target_units='{e.target_units}' "
+                            f"but node expects '{spec.expected_units}'"
+                        )
+                    if (e.source_units is not None
+                            and spec.expected_units is not None
+                            and e.source_units != spec.expected_units
+                            and e.transform is None):
+                        issues.append(
+                            f"WARNING: edge "
+                            f"{e.source_node}.{e.source_field} -> "
+                            f"{e.target_node}.{e.target_field} has "
+                            f"source_units='{e.source_units}' but target "
+                            f"expects '{spec.expected_units}' and no "
+                            f"transform is set"
                         )
 
         # External input endpoint checks

@@ -121,5 +121,6 @@ class BallNode(SimulationNode):
         return {
             "table_position": BoundaryInputSpec(
                 shape=(), description="Surface position for collision",
+                expected_units="m",
             ),
         }

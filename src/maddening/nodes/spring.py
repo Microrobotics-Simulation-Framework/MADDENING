@@ -11,7 +11,7 @@ JAX-traceable and JIT-compilable.
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
 
@@ -165,6 +165,15 @@ class SpringDamperNode(SimulationNode):
         return {
             "anchor_position": BoundaryInputSpec(
                 shape=(), description="Position of the other end of the spring",
+                expected_units="m",
+            ),
+        }
+
+    def boundary_flux_spec(self):
+        return {
+            "spring_force": BoundaryFluxSpec(
+                shape=(), description="Spring-damper force",
+                output_units="N",
             ),
         }
 

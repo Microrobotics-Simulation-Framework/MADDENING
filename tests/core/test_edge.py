@@ -61,3 +61,40 @@ class TestEdgeSpec:
         assert hash(e1) == hash(e2)
         s = {e1, e2}
         assert len(s) == 1
+
+    def test_unit_annotations(self):
+        e = EdgeSpec("a", "b", "x", "y",
+                     source_units="lattice", target_units="N")
+        assert e.source_units == "lattice"
+        assert e.target_units == "N"
+
+    def test_unit_annotations_default_none(self):
+        e = EdgeSpec("a", "b", "x", "y")
+        assert e.source_units is None
+        assert e.target_units is None
+
+    def test_to_dict_with_units(self):
+        e = EdgeSpec("a", "b", "x", "y",
+                     source_units="lattice", target_units="N")
+        d = e.to_dict()
+        assert d["source_units"] == "lattice"
+        assert d["target_units"] == "N"
+
+    def test_to_dict_without_units(self):
+        e = EdgeSpec("a", "b", "x", "y")
+        d = e.to_dict()
+        assert "source_units" not in d
+        assert "target_units" not in d
+
+    def test_repr_with_units(self):
+        e = EdgeSpec("a", "b", "x", "y",
+                     source_units="lattice", target_units="N")
+        r = repr(e)
+        assert "lattice" in r
+        assert "N" in r
+
+    def test_frozen_units(self):
+        import pytest
+        e = EdgeSpec("a", "b", "x", "y", source_units="m")
+        with pytest.raises(AttributeError):
+            e.source_units = "kg"

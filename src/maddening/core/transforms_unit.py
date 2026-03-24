@@ -6,12 +6,16 @@ a JAX-traceable pure function suitable for ``EdgeSpec.transform``.  The
 returned callable is a scalar multiplication -- fully differentiable,
 JIT-compatible, and usable inside ``jax.lax.scan`` / ``fori_loop``.
 
+All factories are re-exported from ``maddening.core.transforms`` for
+discoverability::
+
+    from maddening.core.transforms import lbm_to_si_force
+
 The factories do **not** register transforms automatically.  If you need
 a named, serializable transform for USD round-tripping, register the
 returned callable yourself::
 
-    from maddening.core.transforms import register_transform
-    from maddening.core.transforms_unit import lbm_to_si_force
+    from maddening.core.transforms import register_transform, lbm_to_si_force
 
     my_transform = lbm_to_si_force(dx=0.001, dt=1e-6, rho=1060.0)
     register_transform("my_lbm_force_to_si")(my_transform)

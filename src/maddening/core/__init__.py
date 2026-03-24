@@ -18,7 +18,7 @@ from maddening.core.coupling import CouplingGroup
 from maddening.core.edge import EdgeSpec
 from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.history_logger import HistoryLogger
-from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.transforms import register_transform, resolve_transform
 from maddening.core.schedule import (
     detect_cycles,
@@ -28,6 +28,7 @@ from maddening.core.schedule import (
 
 __all__ = [
     "AdaptiveConfig",
+    "BoundaryFluxSpec",
     "BoundaryInputSpec",
     "CouplingGroup",
     "EdgeSpec",

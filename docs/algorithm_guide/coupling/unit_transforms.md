@@ -85,7 +85,7 @@ Physical conversion requires three parameters:
 ### Usage
 
 ```python
-from maddening.core.transforms_unit import lbm_to_si_force, lbm_to_si_torque
+from maddening.core.transforms import lbm_to_si_force, lbm_to_si_torque
 
 # Parameters for a specific LBM setup
 dx = 10e-6     # 10 um lattice spacing

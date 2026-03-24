@@ -1003,39 +1003,114 @@ This enables automated generation of capability matrices, V&V status reports, ch
 
 #### Problem
 
-When nodes use different physical unit systems (e.g. LBM lattice units vs SI), the unit conversion applied on a coupling edge is invisible to inspection -- it is an opaque callable. A regulator reviewing the simulation graph cannot determine whether the conversion is correct, what units are expected on each side, or whether a conversion was accidentally omitted.
+In multi-physics simulations, different physics engines commonly use incompatible unit systems. Lattice Boltzmann methods operate in lattice units (dimensionless, with dx = dt = 1); rigid body solvers use SI (Newtons, metres, seconds); heat solvers may use Kelvin and Watts. When these engines are coupled via edges in a MADDENING graph, the unit conversion between them is an opaque callable on the ``EdgeSpec.transform`` field. A regulator reviewing the simulation graph cannot determine what conversion is being applied, what units are expected on each side of the edge, or whether a conversion was accidentally omitted.
+
+Silent unit mismatches are a well-documented source of catastrophic numerical errors in multi-physics simulations. In a regulated medical device context (IEC 62304 Class C SOUP), every quantity flowing between physics nodes must be traceable to a known unit system. The unit-aware edge system addresses this by making unit conversions explicit, machine-readable, and validated at compile time.
 
 #### Design
 
-Edges now support optional unit annotations alongside the existing ``transform`` callable:
+The unit awareness system adds optional string annotations to three existing data structures, and introduces one new data structure. All new fields default to ``None``, preserving existing behaviour exactly — no existing code is affected.
 
-- ``EdgeSpec.source_units: str | None`` -- physical units of the source field (e.g. ``"lattice"``, ``"Pa"``).
-- ``EdgeSpec.target_units: str | None`` -- physical units after the transform is applied (e.g. ``"N"``).
+**EdgeSpec** gains two optional fields:
 
-Nodes declare expected units on their boundary inputs and flux outputs:
+```python
+@dataclass(frozen=True)
+class EdgeSpec:
+    source_node: str
+    target_node: str
+    source_field: str
+    target_field: str
+    transform: Optional[Callable] = None
+    additive: bool = False
+    source_units: Optional[str] = None   # e.g. "lattice", "Pa"
+    target_units: Optional[str] = None   # e.g. "N", "K"
+```
 
-- ``BoundaryInputSpec.expected_units: str | None`` -- what units this input expects.
-- ``BoundaryFluxSpec.output_units: str | None`` -- what units this flux output produces.
+``source_units`` documents what unit system the source field is in *before* the transform is applied. ``target_units`` documents what unit system the value is in *after* the transform, i.e. what the target node will receive. These are informational strings — they do not affect execution.
 
-At ``compile()`` time, ``GraphManager.validate()`` checks for two classes of mismatch:
+**BoundaryInputSpec** gains one optional field:
 
-1. **Explicit mismatch**: edge declares ``target_units`` that differs from the target node's ``expected_units``.
-2. **Missing transform**: edge has ``source_units`` different from ``expected_units`` but no ``transform`` is set.
+```python
+@dataclass(frozen=True)
+class BoundaryInputSpec:
+    shape: tuple = ()
+    dtype: Any = None
+    default: Any = None
+    coupling_type: str = "replacive"
+    description: str = ""
+    expected_units: str | None = None   # e.g. "N", "K"
+```
 
-Both produce ``WARNING``-level messages that surface via ``warnings.warn()`` without blocking compilation.
+``expected_units`` declares what unit system this boundary input expects to receive. When a node author writes ``expected_units="N"`` on a force input, they are documenting that their ``update()`` function interprets that input as Newtons.
 
-Standard LBM-to-SI conversion factories are provided in ``maddening.core.transforms_unit`` for common physical quantity conversions (force, torque, velocity, pressure, length). Each factory returns a JAX-traceable pure function suitable for ``EdgeSpec.transform``.
+**BoundaryFluxSpec** is a new frozen dataclass for declaring flux outputs:
+
+```python
+@dataclass(frozen=True)
+class BoundaryFluxSpec:
+    shape: tuple = ()
+    dtype: Any = None
+    description: str = ""
+    output_units: str | None = None   # e.g. "lattice", "W/m^2"
+```
+
+Nodes that override ``compute_boundary_fluxes()`` can now also override ``boundary_flux_spec()`` to return a dict of ``BoundaryFluxSpec`` descriptors, providing machine-readable documentation of their flux outputs and units.
+
+**Compile-time validation** in ``GraphManager.validate()`` checks two conditions at compile time:
+
+1. **Explicit mismatch**: if an edge declares ``target_units`` and the target node declares ``expected_units``, and they differ, a ``WARNING``-level message is emitted.
+2. **Missing transform**: if an edge declares ``source_units`` that differs from the target node's ``expected_units`` and no ``transform`` is set, a ``WARNING``-level message is emitted.
+
+Both produce ``WARNING``-prefixed strings in the ``validate()`` issues list, which ``compile()`` surfaces via ``warnings.warn()`` without blocking compilation. This is deliberately non-breaking — unit annotations are informational, and a warning about a missing transform may be intentional (the node author may handle the conversion internally).
+
+**Standard conversion factories** in ``maddening.core.transforms_unit`` provide pre-built LBM-to-SI conversion functions for common physical quantities (force, torque, velocity, pressure, length). Each factory takes simulation-specific parameters (lattice spacing, timestep, reference density) at Python level and returns a JAX-traceable pure function suitable for ``EdgeSpec.transform``:
+
+```python
+from maddening.core.transforms_unit import lbm_to_si_force
+
+force_transform = lbm_to_si_force(
+    dx_physical=10e-6,    # 10 um lattice spacing
+    dt_physical=1e-7,     # 100 ns per LBM step
+    rho_physical=1060.0,  # blood density kg/m^3
+)
+
+gm.add_edge("fluid", "body", "drag_force", "force",
+            transform=force_transform,
+            source_units="lattice", target_units="N")
+```
+
+The factories do not register transforms automatically. If named, serializable transforms are needed for USD round-tripping, the caller registers the returned callable themselves via ``@register_transform``.
+
+#### Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| ``str`` type for unit declarations | Flexible and human-readable. Sufficient for a warning system where the primary consumer is a human reviewer or auditor. A full dimensional analysis type system (e.g. ``pint`` integration) is explicitly deferred — the complexity and JAX-traceability constraints make it impractical for the current scope. |
+| Additive defaults (all ``None``) | Every new field defaults to ``None``, which means "not declared." No existing code, node, edge, or test is affected. The unit awareness system is strictly opt-in. |
+| JAX-traceable transforms | Transform callables must be pure functions of JAX arrays, composed entirely of JAX primitives. This ensures they work inside ``jax.jit``, ``jax.lax.scan``, ``jax.lax.fori_loop``, and that ``jax.grad`` flows through them. The standard conversion factories satisfy this by construction — they are scalar multiplications. |
+| Warnings, not errors | Unit mismatches produce ``WARNING``-level messages, not ``ERROR``. A mismatch may be intentional (e.g. a node that handles unit conversion internally). Hard errors would break backward compatibility and create friction for users who do not need unit tracking. |
+| Factory pattern for conversion functions | Matches the existing patterns in ``maddening.core.coupling.interface_mapping`` (spatial interpolation factories) and ``maddening.core.transforms.scale()`` (scaling factory). The simulation-specific parameters are captured in the closure at Python level and become XLA constants during JIT tracing. |
+
+#### Limitations
+
+- Unit declarations are informational ``str`` values, not a full dimensional analysis system. The framework warns on mismatches but does not *enforce* correctness — node authors are responsible for declaring units accurately. A typo in a unit string (e.g. ``"n"`` instead of ``"N"``) will not be caught.
+- There is no automatic conversion lookup. If an edge connects a source with ``source_units="lattice"`` to a target with ``expected_units="N"``, the framework warns that no transform is set, but it does not automatically insert the correct conversion. The node author or graph builder must supply the appropriate transform.
+- The string comparison is exact — ``"N"`` and ``"Newtons"`` are treated as different units. A future extension could add a unit alias registry or integrate with a unit library.
+- ``BoundaryFluxSpec`` is currently used only for documentation. There is no compile-time validation that a node's ``compute_boundary_fluxes()`` output matches its ``boundary_flux_spec()`` declaration. This could be added as a runtime debug check in a future version.
 
 #### IEC 62304 Relevance
 
-This directly supports **IEC 62304 Clause 5.4** (detailed design) traceability. A regulator reviewing a MADDENING simulation graph can now:
+This directly supports **IEC 62304 Clause 5.4** (detailed design) traceability. In a Class C SOUP assessment, a reviewer examining a MADDENING simulation graph can now:
 
-- See, at the edge level, what unit conversion is being applied.
-- Verify that the declared units match the source node's output and the target node's expectation.
-- Trace the conversion formula to the factory function in ``transforms_unit.py``.
-- Detect missing or incorrect conversions via the compile-time validation warnings.
+- See, at the edge level, what unit conversion is being applied and what the source and target unit systems are.
+- Verify that the declared units on the edge match the source node's flux output declaration and the target node's boundary input expectation.
+- Trace the conversion formula to the specific factory function in ``maddening.core.transforms_unit``, where the dimensional analysis derivation is documented in the module docstring.
+- Detect missing or incorrect conversions via the compile-time validation warnings, which are emitted as Python ``warnings.warn()`` calls and can be captured in CI logs.
+- Inspect the ``to_dict()`` serialization of any edge to see ``source_units`` and ``target_units`` in the persisted graph description, providing a permanent record of the unit conversion chain.
 
-This creates a machine-readable audit trail of all unit conversions in a coupled simulation, which is essential for Class C SOUP assessment of multi-physics graphs that span different unit systems.
+This creates a machine-readable audit trail of all unit conversions in a coupled simulation, which is essential for Class C SOUP assessment of multi-physics graphs that span different unit systems. It is particularly relevant for the MIME/MICROBOTICA downstream chain, where LBM fluid solvers in lattice units are coupled to rigid body dynamics in SI — the exact use case that motivated this feature.
+
+**Cross-reference**: See ``docs/algorithm_guide/coupling/unit_transforms.md`` for technical reference documentation on the LBM-to-SI conversion formulas, factory API, and usage examples.
 
 ---
 

@@ -270,3 +270,20 @@ def scale(factor: float) -> Callable:
 def identity(x):
     """Identity transform (pass through unchanged)."""
     return x
+
+
+# ------------------------------------------------------------------
+# Re-export unit conversion factories for discoverability
+# ------------------------------------------------------------------
+# The canonical import path for unit transforms is:
+#     from maddening.core.transforms import lbm_to_si_force
+# The implementation lives in transforms_unit.py.
+
+from maddening.core.transforms_unit import (  # noqa: E402, F401
+    lbm_to_si_force,
+    lbm_to_si_length,
+    lbm_to_si_pressure,
+    lbm_to_si_torque,
+    lbm_to_si_velocity,
+    si_to_lbm_force,
+)

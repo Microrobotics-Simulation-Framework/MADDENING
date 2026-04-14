@@ -92,4 +92,4 @@ jobs:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          python -m pytest tests/compliance/ tests/verification/ -v --tb=short
+          python -m pytest tests/compliance/ tests/verification/ -v --tb=short 

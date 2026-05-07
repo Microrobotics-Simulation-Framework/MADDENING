@@ -1,6 +1,6 @@
 # MADDENING v1 Design Document
 
-**Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph**
+**Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph**
 
 ## Overview
 

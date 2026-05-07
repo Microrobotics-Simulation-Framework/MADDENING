@@ -1,8 +1,8 @@
 # MADDENING
 
-**Modular Acausal Dataflow Differential Equation Node Network** — a pure-JAX,
-autodifferentiable framework for composing physical models from typed nodes
-connected by unit-aware edges. MADDENING is the base framework on which
+**Modular Automatic Differentiation and Data Enhanced Neural-network INteracting
+Graph** — a pure-JAX, autodifferentiable framework for composing physical models
+from typed nodes connected by unit-aware edges. MADDENING is the base framework on which
 [MIME](https://microrobotica.org/mime/) and the
 [MICROROBOTICA](https://microrobotica.org/) IDE are built.
 

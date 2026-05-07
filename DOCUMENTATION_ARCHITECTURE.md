@@ -2,10 +2,10 @@
 
 ## Executive Summary
 
-**MADDENING** (Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph) is a JAX-based HPC framework for multiphysics simulation. It occupies a dual-purpose position that demands careful documentation architecture from the start:
+**MADDENING** (Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph) is a JAX-based HPC framework for multiphysics simulation. It occupies a dual-purpose position that demands careful documentation architecture from the start:
 
 1. **Research tool** — used directly by scientists and engineers to build, train, and run multiphysics simulations with automatic differentiation and neural surrogates.
-2. **Auditable foundation** — the computational backbone of **MIME** (MIcrorobotics Multiphysics Engine), which in turn powers **MICROBOTICA** (MICROROBOTs Iterative Simulation for Clinical Adoption), an open-source research simulator for microrobot-assisted drug delivery in cerebrospinal fluid and other confined biological geometries. MADDENING, MIME, and MICROBOTICA are all open-source research tools. The regulated clinical product — the thing that actually gets CE-marked and used in a clinical setting — will be built by a downstream commercial entity (spin-out, licensee, or partner company) on top of these open-source tools.
+2. **Auditable foundation** — the computational backbone of **MIME** (MIcrorobotics Multiphysics Engine), which in turn powers **MICROBOTICA** (MICROROBOTics Iterative simulation for Clinical Adoption), an open-source research simulator for microrobot-assisted drug delivery in cerebrospinal fluid and other confined biological geometries. MADDENING, MIME, and MICROBOTICA are all open-source research tools. The regulated clinical product — the thing that actually gets CE-marked and used in a clinical setting — will be built by a downstream commercial entity (spin-out, licensee, or partner company) on top of these open-source tools.
 
 This dual purpose means MADDENING's documentation must serve two audiences simultaneously: researchers who need to understand, extend, and publish with the framework, and downstream commercial manufacturers who need to cite MADDENING's verification record in regulatory submissions — without MADDENING itself making any clinical claims.
 
@@ -770,7 +770,7 @@ Test requirements at three levels:
 ```markdown
 # MADDENING
 
-Modular Automatic Differentiation and Data-Enhanced Neural-network
+Modular Automatic Differentiation and Data Enhanced Neural-network
 INteracting Graph.
 
 [Badges: CI status, test count, coverage, PyPI version, license]
@@ -2045,7 +2045,7 @@ MADDENING should publish a `docs/validation/soup_package.md` with each release, 
 | Field | Value |
 |-------|-------|
 | Name | MADDENING |
-| Full name | Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph |
+| Full name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
 | Version | [X.Y.Z] |
 | Release date | [YYYY-MM-DD] |
 | License | LGPL-3.0-or-later |

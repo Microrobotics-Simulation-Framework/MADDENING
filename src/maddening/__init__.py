@@ -1,5 +1,5 @@
 """
-MADDENING - Modular Automatic Differentiation and Data-Enhanced
+MADDENING - Modular Automatic Differentiation and Data Enhanced
              Neural-network INteracting Graph
 
 A JAX-based modular simulation framework for multi-physics.

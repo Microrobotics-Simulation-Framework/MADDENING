@@ -3,7 +3,8 @@
 **Modular Acausal Dataflow Differential Equation Node Network** — a pure-JAX,
 autodifferentiable framework for composing physical models from typed nodes
 connected by unit-aware edges. MADDENING is the base framework on which
-[MIME](../mime/) and the [MICROROBOTICA](../) IDE are built.
+[MIME](https://microrobotica.org/mime/) and the
+[MICROROBOTICA](https://microrobotica.org/) IDE are built.
 
 ```{toctree}
 :caption: User Guide

@@ -2,7 +2,7 @@
 
 ## Platform Positioning Statement
 
-MADDENING (Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph) is a **general-purpose computational framework** for multi-physics simulation. It provides infrastructure for composing, coupling, and differentiating physics simulations using JAX, with support for neural surrogates and uncertainty quantification.
+MADDENING (Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph) is a **general-purpose computational framework** for multi-physics simulation. It provides infrastructure for composing, coupling, and differentiating physics simulations using JAX, with support for neural surrogates and uncertainty quantification.
 
 **MADDENING is not a medical device** as defined by EU MDR (EU 2017/745) Article 2(1). It does not have a medical purpose, does not make clinical predictions, and does not provide diagnostic, therapeutic, or monitoring functionality. Per MDCG 2019-11 Section 3.2, MADDENING is a general-purpose computing tool comparable to MATLAB, NumPy, or FEniCS — it can be used to build medical device software, but is not itself a medical device.
 

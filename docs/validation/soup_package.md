@@ -8,7 +8,7 @@
 | Field | Value |
 |-------|-------|
 | Name | MADDENING |
-| Full Name | Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph |
+| Full Name | Modular Automatic Differentiation and Data Enhanced Neural-network INteracting Graph |
 | Version | 0.1.0 |
 | Release Date | 2025-03-01 |
 | Licence | LGPL-3.0-or-later |

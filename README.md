@@ -2,7 +2,10 @@
 
 **M**odular **A**utomatic **D**ifferentiation and **D**ata-**E**nhanced **N**eural-network **IN**teracting **G**raph
 
-A JAX-based modular simulation framework for multi-physics. Designed as the computational backbone of [MIME](https://github.com/Microrobotics-Simulation-Framework/MIME) (MIcrorobotics Multiphysics Engine).
+📖 **Documentation: <https://microrobotica.org/maddening/>**
+🧩 Part of the [Microrobotics Simulation Framework](https://microrobotica.org/) (MADDENING · MIME · MICROROBOTICA).
+
+A JAX-based modular simulation framework for multi-physics. Designed as the computational backbone of [MIME](https://microrobotica.org/mime/) (MIcrorobotics Multiphysics Engine).
 
 > **Regulatory disclaimer**: MADDENING is research software. It is not a medical device as defined by EU MDR (EU 2017/745) and is not intended for clinical use. When used in a regulated product, MADDENING is classified as SOUP (Software of Unknown Provenance) under IEC 62304. See `docs/regulatory/` for details.
 

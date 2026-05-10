@@ -139,7 +139,10 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
+Homepage      = "https://microrobotica.org/maddening/"
+Documentation = "https://microrobotica.org/maddening/"
+Repository    = "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
+Issues        = "https://github.com/Microrobotics-Simulation-Framework/MADDENING/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/maddening"]

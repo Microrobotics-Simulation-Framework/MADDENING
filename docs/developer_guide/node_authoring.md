@@ -4,11 +4,11 @@ This guide covers everything required to add a new `SimulationNode` to MADDENING
 
 ## The Contract
 
-A MADDENING node is a **pure function wrapped in a descriptor class**:
+A MADDENING {term}`node <Node>` is a **{term}`pure function <Pure function>` wrapped in a descriptor class**:
 
 - `initial_state(params) -> dict` — returns the initial state arrays
 - `update(state, boundary_inputs, dt) -> new_state` — returns a new state dict
-- `update()` must be **JAX-traceable**: no Python-level side effects, no data-dependent control flow, no print statements. Use `jnp.where` instead of `if/else`.
+- `update()` must be **{term}`JAX-traceable`**: no Python-level side effects, no data-dependent control flow, no print statements. Use `jnp.where` instead of `if/else`.
 - State is **immutable** — return a new dict, don't mutate in place
 - Parameters live in `self.params`, not in state
 
@@ -104,7 +104,7 @@ Every node **must** have a `meta` ClassVar. Required fields:
 | `description` | Yes | One-line description |
 | `assumptions` | Yes | Tuple of strings — every physical/mathematical assumption |
 | `limitations` | Yes | Tuple of strings — every known failure mode |
-| `hazard_hints` | Yes | Tuple of strings — qualitative risks for ISO 14971 input |
+| `hazard_hints` | Yes | Tuple of strings — qualitative risks for {term}`ISO 14971` input |
 
 Recommended fields:
 
@@ -240,7 +240,7 @@ python scripts/check_citations.py
 
 ## Boundary Input Specification
 
-Override `boundary_input_spec()` to declare what boundary inputs your node expects. This enables validation, documentation generation, and correct initialization for additive inputs.
+Override `boundary_input_spec()` to declare what {term}`boundary inputs <Boundary inputs>` your node expects. This enables validation, documentation generation, and correct initialization for additive inputs.
 
 ```python
 from maddening.core.node import BoundaryInputSpec
@@ -267,7 +267,7 @@ Each entry maps a boundary input name to a `BoundaryInputSpec` with:
 
 ## Exposing Flux Quantities
 
-Override `compute_boundary_fluxes()` to expose derived quantities (forces, heat fluxes) that other nodes can consume via edges. Flux fields are NOT part of state — they are computed on-the-fly.
+Override `compute_boundary_fluxes()` to expose derived quantities (forces, heat fluxes) that other nodes can consume via {term}`edges <Edge>`. Flux fields are NOT part of state — they are computed on-the-fly.
 
 ```python
 def compute_boundary_fluxes(self, state, boundary_inputs, dt):

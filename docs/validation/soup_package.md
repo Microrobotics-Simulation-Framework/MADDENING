@@ -24,12 +24,12 @@
 
 - **Graph-based multi-physics simulation**: Compose, couple, and run physics simulations as directed graphs of nodes
 - **Functional state pattern**: Pure functions, no shared mutable state, explicit data flow
-- **JIT compilation**: Full simulation step compiled to XLA via JAX
+- **{term}`JIT compilation`**: Full simulation step compiled to {term}`XLA` via {term}`JAX`
 - **Automatic differentiation**: End-to-end differentiable simulation graphs
 - **Neural surrogates**: Train and deploy neural network replacements for physics nodes
-- **Adaptive timestepping**: Richardson extrapolation with PI controller
+- **Adaptive timestepping**: {term}`Richardson extrapolation` with {term}`PI controller`
 - **Parameter sweeps**: Batched simulation via `jax.vmap`
-- **Coupling**: Gauss-Seidel iterative coupling via `jax.lax.fori_loop`
+- **{term}`Coupling`**: {term}`Gauss-Seidel` iterative coupling via `jax.lax.fori_loop`
 
 ### Capabilities NOT Provided
 
@@ -41,7 +41,7 @@
 
 ### Infrastructure Nodes
 
-- **HealthCheckNode** (`maddening.nodes.health_check`): Base health monitor for execution-layer fault detection (NaN/Inf trapping, physical boundary checks). Downstream libraries instantiate and configure this node. Part of the MADDENING SOUP dependency, not a separate SOUP item.
+- **HealthCheckNode** (`maddening.nodes.health_check`): Base health monitor for execution-layer fault detection (NaN/Inf trapping, physical boundary checks). Downstream libraries instantiate and configure this node. Part of the MADDENING {term}`SOUP` dependency, not a separate SOUP item.
 
 ## 3. Known Anomalies
 
@@ -64,7 +64,7 @@ See `docs/regulatory/iec62304_mapping.md` for the full lifecycle mapping.
 
 - Version control: Git (GitHub)
 - Release tags: semantic versioning (`vX.Y.Z`)
-- SBOM: CycloneDX format (planned, Phase 3)
+- {term}`SBOM`: CycloneDX format (planned, Phase 3)
 - CI: GitHub Actions
 
 ## 7. Anomaly Management Policy

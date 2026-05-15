@@ -17,7 +17,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 | MADDENING | Open-source research tool | None (provides SOUP documentation voluntarily) |
 | MIME | Open-source research tool | None (provides SOUP documentation voluntarily) |
 | MICROBOTICA | Open-source research tool | None (provides SOUP documentation voluntarily) |
-| Commercial Product | Regulated medical device | Full EU MDR manufacturer obligations |
+| Commercial Product | Regulated medical device | Full {term}`EU MDR` manufacturer obligations |
 
 ## Per-Layer Responsibility Details
 
@@ -27,20 +27,20 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 
 **Provides**:
 
-- Core simulation infrastructure: graph management, JIT compilation, multi-rate scheduling, adaptive timestepping
+- Core simulation infrastructure: graph management, {term}`JIT compilation`, {term}`multi-rate <Multi-rate>` scheduling, adaptive timestepping
 - Physics node library: heat diffusion, rigid body dynamics, spring-damper, LBM fluid
 - Neural surrogate framework: training, validation, architecture library
 - Compliance infrastructure: `NodeMeta`, anomaly registry, verification benchmark registry, `@stability` decorator, `HealthCheckNode`
-- SOUP documentation package (`docs/validation/soup_package.md`)
+- {term}`SOUP` documentation package (`docs/validation/soup_package.md`)
 
 **Does NOT provide**:
 
 - Clinical claims or intended clinical use
 - Domain-specific physics for microrobotics (CSF flow, Brownian motion, magnetic actuation)
-- Risk management file (ISO 14971) — only `hazard_hints` for downstream risk analysis
+- Risk management file ({term}`ISO 14971`) — only `hazard_hints` for downstream risk analysis
 - QMS, clinical evaluation, or post-market surveillance
 
-**SOUP classification**: When used in a regulated product, MADDENING is IEC 62304 SOUP. Its safety class is determined by the downstream manufacturer based on the context of use.
+**SOUP classification**: When used in a regulated product, MADDENING is {term}`IEC 62304` SOUP. Its safety class is determined by the downstream manufacturer based on the context of use.
 
 ### Layer 2: MIME (MIcrorobotics Multiphysics Engine)
 
@@ -48,7 +48,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 
 **Provides**:
 
-- CSF flow simulation nodes (wrapping or extending LBMPipeNode)
+- {term}`CSF` flow simulation nodes (wrapping or extending LBMPipeNode)
 - Magnetic field and actuation models
 - Particle dynamics for microrobots (Brownian, drag, contact)
 - Domain-specific `HealthCheckNode` configurations (e.g., CSF density bounds, velocity limits)
@@ -88,7 +88,7 @@ Layer 4: [Commercial Product] (regulated, CE-marked, built by commercial entity)
 
 The Layer 4 commercial entity is the EU MDR manufacturer (Article 2(30)) and is solely responsible for all regulatory obligations, including but not limited to:
 
-- Establishing and maintaining an **ISO 13485 QMS** certified by a Notified Body
+- Establishing and maintaining an **{term}`ISO 13485` QMS** certified by a {term}`Notified Body`
 - Performing the **conformity assessment** procedure appropriate to the device class (Class IIb: Annex IX or Annex X+XI; Class III: Annex IX or Annex X+XI with full technical file review)
 - Engaging and satisfying the **Notified Body** for initial conformity assessment and annual surveillance audits
 - Building and maintaining the **clinical evaluation report** (CER) with sufficient clinical evidence
@@ -123,7 +123,7 @@ The MADDENING documentation architecture is designed to support the most demandi
 5. **Algorithm Guides**: Per-node documentation of governing equations, discretization, assumptions, limitations, and validated regimes — with CI-validated bibliography citations (`docs/bibliography.bib`) and CI-validated implementation-to-code mappings
 6. **HealthCheckNode**: Configurable execution-layer fault detection (NaN/Inf, bounds, moment checks) for use in downstream safety monitoring
 7. **Compliance Schema Types**: Importable Python types (`NodeMeta`, `AnomalyRecord`, etc.) for downstream libraries to use and extend
-8. **SBOM**: CycloneDX-format software bill of materials attached to each release
+8. **{term}`SBOM`**: CycloneDX-format software bill of materials attached to each release
 
 ### What MADDENING does NOT provide
 

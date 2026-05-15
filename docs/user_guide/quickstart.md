@@ -12,7 +12,7 @@ For GPU acceleration, use `maddening[cuda12,viz]` instead.
 
 ## Your First Simulation
 
-MADDENING simulations are graphs. Nodes simulate physics. Edges couple them.
+MADDENING simulations are graphs. {term}`Nodes <Node>` simulate physics. {term}`Edges <Edge>` couple them.
 
 ```python
 import jax.numpy as jnp
@@ -86,7 +86,7 @@ gm.run(n_steps=1000)
 
 ## Differentiable Everything
 
-The entire graph step is JIT-compiled and differentiable:
+The entire {term}`graph step <Graph step>` is JIT-compiled and differentiable:
 
 ```python
 import jax

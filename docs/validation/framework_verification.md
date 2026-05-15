@@ -2,7 +2,7 @@
 
 ## Overview
 
-MADDENING's verification evidence is maintained through automated testing and registered verification benchmarks.
+MADDENING's verification evidence is maintained through automated testing and registered {term}`verification benchmarks <Verification benchmark>`.
 
 ## Test Suite
 
@@ -21,7 +21,7 @@ MADDENING's verification evidence is maintained through automated testing and re
 |-----------|-------|
 | `tests/core/` | Core framework: GraphManager, scheduling, coupling, adaptive, checkpoint, sweep |
 | `tests/nodes/` | Physics node correctness: HeatNode, LBMPipeNode, RigidBody2DNode, SpringDamperNode |
-| `tests/surrogates/` | Neural surrogate training, architectures, dataset generation |
+| `tests/surrogates/` | Neural {term}`surrogate <Surrogate>` training, architectures, dataset generation |
 | `tests/api/` | FastAPI server, WebSocket, binary encoding, server-side rendering |
 | `tests/viz/` | Visualization backends, ZMQ transport, serialization |
 | `tests/compliance/` | Compliance infrastructure: metadata, anomaly validator, stability decorator |

@@ -35,7 +35,7 @@ finite difference/finite element/lattice Boltzmann, order of accuracy.]
 
 [Trace every term in the governing equations and discretization to the
 specific Python/JAX function that implements it. This is mandatory for
-IEC 62304 Class C detailed design traceability (Clause 5.4).]
+{term}`IEC 62304` Class C detailed design traceability (Clause 5.4).]
 
 | Equation Term | Implementation | Notes |
 |---------------|---------------|-------|
@@ -68,7 +68,7 @@ at each release. See `scripts/check_impl_mapping.py` for CI verification.]
 ## Known Limitations and Failure Modes
 
 [Specific conditions where this model is known to produce incorrect or
-unreliable results. This section feeds directly into IEC 62304 SOUP
+unreliable results. This section feeds directly into IEC 62304 {term}`SOUP`
 anomaly assessment.]
 
 1. [e.g., "CFL > 1 causes numerical instability"]

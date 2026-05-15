@@ -5,12 +5,12 @@
 
 ## Overview
 
-When coupling nodes that use different physical unit systems (e.g. an LBM
-fluid solver in lattice units coupled to a rigid body in SI), the edge
+When {term}`coupling <Coupling>` nodes that use different physical unit systems (e.g. an {term}`LBM`
+fluid solver in lattice units coupled to a rigid body in SI), the {term}`edge <Edge>`
 between them must apply a unit conversion.  MADDENING supports this via:
 
 1. **Unit annotations** on edges and boundary specs (documentation/validation).
-2. **Transform factories** that produce JAX-traceable conversion callables.
+2. **Transform factories** that produce {term}`JAX-traceable` conversion callables.
 
 ## Unit Annotations
 
@@ -27,7 +27,7 @@ gm.add_edge(
 
 ### On nodes
 
-Nodes declare expected units on their boundary inputs:
+Nodes declare expected units on their {term}`boundary inputs <Boundary inputs>`:
 
 ```python
 def boundary_input_spec(self):

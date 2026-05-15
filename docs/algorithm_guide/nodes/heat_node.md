@@ -68,7 +68,7 @@ $$
 \Delta t < \frac{\Delta x^2}{2 \alpha d}
 $$
 
-where $d = 1$ is the spatial dimension. For the explicit scheme, the CFL number $\text{CFL} = \frac{\alpha \Delta t}{\Delta x^2}$ must satisfy $\text{CFL} < 0.5$.
+where $d = 1$ is the spatial dimension. For the explicit scheme, the {term}`CFL number` $\text{CFL} = \frac{\alpha \Delta t}{\Delta x^2}$ must satisfy $\text{CFL} < 0.5$.
 
 ## State Variables
 
@@ -95,7 +95,7 @@ where $d = 1$ is the spatial dimension. For the explicit scheme, the CFL number 
 
 ## References
 
-- [@Crank1975] Crank, J. (1975). *The Mathematics of Diffusion*. Oxford University Press. — Analytical solutions for the heat equation used in verification benchmarks.
+- [@Crank1975] Crank, J. (1975). *The Mathematics of Diffusion*. Oxford University Press. — Analytical solutions for the heat equation used in {term}`verification benchmarks <Verification benchmark>`.
 - [@LeVeque2007] LeVeque, R.J. (2007). *Finite Difference Methods for Ordinary and Partial Differential Equations*. SIAM. — Convergence theory and stability analysis for the explicit FD scheme.
 
 ## Verification Evidence

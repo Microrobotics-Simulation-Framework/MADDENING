@@ -1,6 +1,6 @@
 # Documentation Standards
 
-This document defines the documentation standards for MADDENING. These standards support IEC 62304 SOUP traceability and are enforced by CI where possible.
+This document defines the documentation standards for MADDENING. These standards support {term}`IEC 62304` {term}`SOUP` traceability and are enforced by CI where possible.
 
 ## Docstring Format
 
@@ -122,7 +122,7 @@ Follow [Keep a Changelog](https://keepachangelog.com/) with these sections:
 ### Known Anomalies
 ```
 
-The **Verification**, **Security**, and **Known Anomalies** sections are required for EU regulatory workflows (IEC 62304, MDCG 2019-16).
+The **Verification**, **Security**, and **Known Anomalies** sections are required for EU regulatory workflows (IEC 62304, {term}`MDCG 2019-16`).
 
 Update the changelog with every commit that adds, changes, fixes, or deprecates user-visible functionality. Empty sections can be omitted in the commit but must be present in release notes.
 

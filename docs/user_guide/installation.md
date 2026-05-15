@@ -2,7 +2,7 @@
 
 ## Base Install
 
-MADDENING requires Python 3.10+ and installs with CPU-based JAX by default:
+MADDENING requires Python 3.10+ and installs with CPU-based {term}`JAX` by default:
 
 ```bash
 pip install maddening
@@ -45,8 +45,8 @@ Install only what you need. Each extra adds one capability:
 | `surrogates` | Neural surrogate training (equinox + optax) | `pip install maddening[surrogates]` |
 | `viz3d` | PyVista 3D server-side rendering | `pip install maddening[viz3d]` |
 | `gpu-viz` | pygfx GPU-accelerated 3D viewer | `pip install maddening[gpu-viz]` |
-| `usd` | OpenUSD graph serialization | `pip install maddening[usd]` |
-| `streaming` | GStreamer WebRTC streaming | `pip install maddening[streaming]` |
+| `usd` | {term}`OpenUSD` graph serialization | `pip install maddening[usd]` |
+| `streaming` | GStreamer {term}`WebRTC` streaming | `pip install maddening[streaming]` |
 
 Mix and match freely:
 
@@ -57,7 +57,7 @@ pip install maddening[cuda12,api,network]       # GPU server with ZMQ
 
 ## Cloud Deployment
 
-Deploy simulations to cloud GPU providers via SkyPilot. Each provider has its own extra that bundles SkyPilot with the provider's SDK:
+Deploy simulations to cloud GPU providers via {term}`SkyPilot`. Each provider has its own extra that bundles SkyPilot with the provider's SDK:
 
 | Extra | Provider | Install command |
 |-------|----------|-----------------|

@@ -1,6 +1,6 @@
 # Context of Use (COU) Template
 
-This template follows ASME V&V 40-2018 for defining the context of use for a specific application of MADDENING. MADDENING as a general-purpose framework does not itself have a COU — only a specific downstream application can.
+This template follows {term}`ASME V&V 40`-2018 for defining the context of use for a specific application of MADDENING. MADDENING as a general-purpose framework does not itself have a {term}`COU` — only a specific downstream application can.
 
 ## 1. Question of Interest
 

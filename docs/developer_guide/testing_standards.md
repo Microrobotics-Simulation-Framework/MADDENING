@@ -9,7 +9,7 @@ Location: `tests/<module>/test_<name>.py`
 Requirements:
 - Test each public method
 - Test normal operation and edge cases
-- For nodes: verify JAX-traceability (`jax.jit`, `jax.grad`, `jax.vmap`)
+- For nodes: verify {term}`JAX-traceability <JAX-traceable>` (`jax.jit`, `jax.grad`, `jax.vmap`)
 - Test boundary input handling (missing inputs, default values)
 - Test parameter edge cases
 
@@ -73,7 +73,7 @@ def test_your_node_analytical():
     assert jnp.max(error) < tolerance, f"Max error {jnp.max(error)} exceeds {tolerance}"
 ```
 
-Verification benchmarks must:
+{term}`Verification benchmarks <Verification benchmark>` must:
 - Use a registered benchmark ID (`MADD-VER-XXX`)
 - Cite the analytical solution or reference data source
 - State the tolerance and justify it

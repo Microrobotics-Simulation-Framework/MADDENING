@@ -718,43 +718,42 @@ class LBMNode(SimulationNode):
 
         pressure = density * self._cs2
 
+        # wall_mask is part of state so that ShardedStencilNode shards it
+        # per device alongside f / density / velocity / pressure.  Stored
+        # as uint8 (not bool) so coupling/adaptive code paths that take
+        # state differences (state_new - state_old) keep working -- bool
+        # subtraction is rejected by JAX.  Cast to bool at the BC site.
         return {
             "f": f,
             "density": density,
             "velocity": velocity,
             "pressure": pressure,
+            "wall_mask": self._wall_mask.astype(jnp.uint8),
         }
 
     def update_padded(
         self, state_padded: dict, boundary_inputs: dict, dt: float
     ) -> dict:
-        """Halo-aware LBM step (M6 minimal: no walls, no Zou-He BCs).
+        """Halo-aware LBM step.
 
         ``state_padded`` carries halo-padded fields along every spatial
         axis declared in :meth:`halo_width`.  The streaming step reads
-        across the halo via :func:`_stream_padded`; collision and
-        macroscopic recovery run on the interior only.
+        across the halo via :func:`_stream_padded`; collision runs on
+        the entire padded array (cheap and keeps the post-stream values
+        consistent with what the neighbour shard would compute); wall
+        bounce-back and Zou-He pressure BCs apply on the *interior*
+        after streaming.
 
-        Wall bounce-back and Zou-He pressure BCs require shard-aware
-        slicing of ``wall_mask`` and global-edge detection, both of
-        which land with M7 (LBM pencil + Hagen-Poiseuille).  This
-        method raises if ``wall_mask`` is non-empty or pressure
-        inputs are supplied.
+        Wall bounce-back uses ``state_padded["wall_mask"]`` (which has
+        been halo-exchanged the same way as ``f``), so each shard sees
+        its own wall topology.  Zou-He pressure BCs at
+        ``inlet_face`` / ``outlet_face`` operate on the local slice of
+        the face plane and are valid as long as the inlet/outlet axis
+        is *not* sharded in the pencil mesh.  For the canonical
+        Hagen-Poiseuille setup we shard ``(spatial_y, spatial_z)`` and
+        leave ``x`` (streamwise) replicated -- which puts every shard
+        in possession of the full inlet/outlet face.
         """
-        if self._has_walls or "wall_mask_update" in boundary_inputs:
-            raise NotImplementedError(
-                "LBMNode.update_padded does not yet support wall bounce-back "
-                "under sharding (lands with M7)."
-            )
-        if (
-            boundary_inputs.get("inlet_pressure") is not None
-            or boundary_inputs.get("outlet_pressure") is not None
-        ):
-            raise NotImplementedError(
-                "LBMNode.update_padded does not yet support Zou-He pressure "
-                "BCs under sharding (lands with M7)."
-            )
-
         f_pad = state_padded["f"]
         tau = self._tau
         lat = self._lat
@@ -769,6 +768,17 @@ class LBMNode(SimulationNode):
             slice(halo, -halo) if d < ndim else slice(None)
             for d in range(f_pad.ndim)
         )
+        interior_slicer_scalar = interior_slicer[:ndim]
+
+        # Wall mask: prefer the padded one from state, fall back to
+        # boundary_input override, fall back to legacy node attribute.
+        # Stored as uint8 in state -- cast to bool for the BC paths.
+        if "wall_mask_update" in boundary_inputs:
+            wall_pad = boundary_inputs["wall_mask_update"].astype(jnp.bool_)
+        elif "wall_mask" in state_padded:
+            wall_pad = state_padded["wall_mask"].astype(jnp.bool_)
+        else:
+            wall_pad = self._wall_mask
 
         # BGK collision is purely local, so we collide on the *entire*
         # padded array -- halo cells included -- so that the post-stream
@@ -778,15 +788,20 @@ class LBMNode(SimulationNode):
         # algebraically identical to colliding them on the neighbour.
         density_pad, velocity_pad = _compute_macroscopic(f_pad, e)
 
-        # Body force (replicated -- a single scalar per spatial cell).
-        # When provided, it's the unpadded shape; pad with zeros to match
-        # the padded macroscopic shape.
-        force = boundary_inputs.get(
-            "body_force",
-            jnp.zeros(density_pad.shape + (D,), dtype=jnp.float32),
-        )
-        if force.shape != density_pad.shape + (D,):
-            # Caller passed an unpadded force; zero-pad to padded shape.
+        # Body force.  Three input shapes are accepted:
+        #   (D,)                      -- uniform, broadcast across grid
+        #   density_pad.shape + (D,)  -- already padded local field
+        #   density_pad.interior shape (e.g. (nx,ny,nz,D)) -- pad locally
+        # The first form is the right call under sharding: send a
+        # constant vector, broadcast trivially per device.
+        force = boundary_inputs.get("body_force", None)
+        if force is None:
+            force = jnp.zeros(density_pad.shape + (D,), dtype=jnp.float32)
+        elif force.ndim == 1 and force.shape == (D,):
+            force = jnp.broadcast_to(
+                force, density_pad.shape + (D,),
+            ).astype(jnp.float32)
+        elif force.shape != density_pad.shape + (D,):
             pad_widths = [
                 (halo, halo) if d < ndim else (0, 0)
                 for d in range(force.ndim)
@@ -803,23 +818,57 @@ class LBMNode(SimulationNode):
         # has the interior shape.
         f_streamed_interior = _stream_padded(f_post_pad, e, ndim, halo)
 
-        density_new, velocity_new = _compute_macroscopic(f_streamed_interior, e)
+        # Wall bounce-back on the interior using the interior slice of
+        # the wall mask.
+        wall_interior = wall_pad[interior_slicer_scalar]
+        opp = lat.opp
+        f_bounced = f_streamed_interior[..., opp]
+        wall_expanded = wall_interior[..., None]
+        f_bc_interior = jnp.where(wall_expanded, f_bounced, f_streamed_interior)
+
+        # Zou-He pressure BCs on the inlet / outlet face (interior shape).
+        # Valid under sharding provided the inlet/outlet axis is replicated
+        # (not in axis_map); each shard then owns the full face and
+        # applies the BC on its local slice of the face plane.
+        inlet_pressure = boundary_inputs.get("inlet_pressure", None)
+        outlet_pressure = boundary_inputs.get("outlet_pressure", None)
+        if inlet_pressure is not None:
+            inlet_axis, inlet_side = _FACE_MAP[self._inlet_face]
+            inlet_rho = inlet_pressure / cs2
+            f_bc_interior = _zou_he_pressure_face(
+                f_bc_interior, inlet_rho, e, w, cs2,
+                inlet_axis, inlet_side, wall_interior,
+            )
+        if outlet_pressure is not None:
+            outlet_axis, outlet_side = _FACE_MAP[self._outlet_face]
+            outlet_rho = outlet_pressure / cs2
+            f_bc_interior = _zou_he_pressure_face(
+                f_bc_interior, outlet_rho, e, w, cs2,
+                outlet_axis, outlet_side, wall_interior,
+            )
+
+        density_new, velocity_new = _compute_macroscopic(f_bc_interior, e)
+        # Zero velocity in wall cells (cosmetic, for cleaner output).
+        velocity_new = jnp.where(wall_expanded, 0.0, velocity_new)
         pressure_new = density_new * cs2
 
         # Re-pad the outputs so the wrapper can strip uniformly.  Halo
         # entries are placeholders; values inside the interior are the
         # final post-stream result.
-        f_new_pad = f_pad.at[interior_slicer].set(f_streamed_interior)
-        density_pad_out = state_padded["density"].at[interior_slicer[:ndim]].set(density_new)
+        f_new_pad = f_pad.at[interior_slicer].set(f_bc_interior)
+        density_pad_out = state_padded["density"].at[interior_slicer_scalar].set(density_new)
         velocity_pad_out = state_padded["velocity"].at[interior_slicer].set(velocity_new)
-        pressure_pad_out = state_padded["pressure"].at[interior_slicer[:ndim]].set(pressure_new)
+        pressure_pad_out = state_padded["pressure"].at[interior_slicer_scalar].set(pressure_new)
 
-        return {
+        result: dict = {
             "f": f_new_pad,
             "density": density_pad_out,
             "velocity": velocity_pad_out,
             "pressure": pressure_pad_out,
         }
+        if "wall_mask" in state_padded:
+            result["wall_mask"] = state_padded["wall_mask"]
+        return result
 
     def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
         f = state["f"]
@@ -832,21 +881,31 @@ class LBMNode(SimulationNode):
         D = self._D
         ndim = D
 
-        # Runtime wall mask override (e.g. clot injection)
-        wall_mask = self._wall_mask
+        # Runtime wall mask precedence:
+        #   1. boundary_inputs["wall_mask_update"] (explicit override)
+        #   2. state["wall_mask"]                  (stateful path; stored as uint8)
+        #   3. self._wall_mask                     (legacy: pre-state)
         if "wall_mask_update" in boundary_inputs:
             wall_mask = boundary_inputs["wall_mask_update"].astype(jnp.bool_)
+        elif "wall_mask" in state:
+            wall_mask = state["wall_mask"].astype(jnp.bool_)
+        else:
+            wall_mask = self._wall_mask
 
         fluid_mask = ~wall_mask
 
         # 1. Compute macroscopic from current f
         density, velocity = _compute_macroscopic(f, e)
 
-        # 2. Body force (Guo forcing)
-        force = boundary_inputs.get(
-            "body_force",
-            jnp.zeros(self._grid_shape + (D,), dtype=jnp.float32),
-        )
+        # 2. Body force (Guo forcing).  Accept either the full grid shape
+        # or a uniform (D,) vector which we broadcast.
+        force = boundary_inputs.get("body_force", None)
+        if force is None:
+            force = jnp.zeros(self._grid_shape + (D,), dtype=jnp.float32)
+        elif force.ndim == 1 and force.shape == (D,):
+            force = jnp.broadcast_to(
+                force, self._grid_shape + (D,),
+            ).astype(jnp.float32)
 
         # 3. BGK collision with Guo forcing
         f_eq = _equilibrium(density, velocity, e, w, cs2)
@@ -890,12 +949,15 @@ class LBMNode(SimulationNode):
 
         pressure_new = density_new * cs2
 
-        return {
+        result: dict = {
             "f": f_bc,
             "density": density_new,
             "velocity": velocity_new,
             "pressure": pressure_new,
         }
+        if "wall_mask" in state:
+            result["wall_mask"] = state["wall_mask"]
+        return result
 
     def derivatives(self, state: dict, boundary_inputs: dict) -> dict:
         """Not applicable for LBM (discrete update, not an ODE)."""

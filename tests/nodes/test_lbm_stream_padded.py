@@ -121,34 +121,62 @@ def test_lbm_update_padded_no_walls_matches_update():
     )
 
 
-def test_lbm_update_padded_rejects_walls():
-    """Walls land in M7; M6 raises if asked."""
+def test_lbm_update_padded_with_walls_matches_update():
+    """LBMNode.update_padded with walls on the unsharded (single-device)
+    path must match update() bit-close for the cells away from the
+    domain boundary (where periodic-pad vs walls choice differs)."""
     grid = (4, 4, 4)
     wall_mask = np.zeros(grid, dtype=bool)
-    wall_mask[:, 0, :] = True  # one wall face
+    wall_mask[:, 0, :] = True
+    wall_mask[:, -1, :] = True
     node = LBMNode(
         name="lbm", timestep=1.0, grid_shape=grid,
         viscosity=0.1, lattice="D3Q19", wall_mask=wall_mask,
     )
     state = node.initial_state()
-    padded = {
-        f: jnp.pad(arr, [(1, 1)] * 3 + [(0, 0)] * (arr.ndim - 3))
-        for f, arr in state.items()
-    }
-    with pytest.raises(NotImplementedError, match="wall"):
-        node.update_padded(padded, {}, 1.0)
+    rng = np.random.default_rng(0)
+    state["f"] = state["f"] + jnp.asarray(
+        rng.standard_normal(state["f"].shape).astype(np.float32) * 0.01
+    )
+
+    new_unsharded = node.update(state, {}, 1.0)
+    padded = {}
+    for fname, arr in state.items():
+        arr_np = np.asarray(arr)
+        padded[fname] = jnp.asarray(_periodic_pad(arr_np, 1, 3))
+
+    new_padded = node.update_padded(padded, {}, 1.0)
+    sl = (slice(1, -1),) * 3
+    np.testing.assert_allclose(
+        np.asarray(new_padded["f"])[sl],
+        np.asarray(new_unsharded["f"]),
+        rtol=1e-5, atol=1e-6,
+    )
 
 
-def test_lbm_update_padded_rejects_pressure_bcs():
-    grid = (4, 4, 4)
+def test_lbm_update_padded_with_pressure_bcs_matches_update():
+    """Zou-He pressure BCs work in update_padded (single-device, no walls)."""
+    grid = (8, 4, 4)
     node = LBMNode(
         name="lbm", timestep=1.0, grid_shape=grid,
         viscosity=0.1, lattice="D3Q19",
     )
     state = node.initial_state()
-    padded = {
-        f: jnp.pad(arr, [(1, 1)] * 3 + [(0, 0)] * (arr.ndim - 3))
-        for f, arr in state.items()
+
+    bi = {
+        "inlet_pressure": jnp.float32(1.0 / 3.0 + 1e-3),
+        "outlet_pressure": jnp.float32(1.0 / 3.0),
     }
-    with pytest.raises(NotImplementedError, match="Zou-He"):
-        node.update_padded(padded, {"inlet_pressure": jnp.float32(0.1)}, 1.0)
+
+    new_unsharded = node.update(state, bi, 1.0)
+
+    padded = {f: jnp.asarray(_periodic_pad(np.asarray(arr), 1, 3))
+              for f, arr in state.items()}
+    new_padded = node.update_padded(padded, bi, 1.0)
+
+    sl = (slice(1, -1),) * 3
+    np.testing.assert_allclose(
+        np.asarray(new_padded["f"])[sl],
+        np.asarray(new_unsharded["f"]),
+        rtol=1e-4, atol=1e-5,
+    )

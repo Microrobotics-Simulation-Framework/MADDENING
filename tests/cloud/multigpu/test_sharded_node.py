@@ -1,4 +1,4 @@
-"""Tests for ShardedNode data-parallel wrapper."""
+"""Tests for ShardedPointwiseNode data-parallel wrapper."""
 
 import os
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
-from maddening.cloud.multigpu.sharded_node import ShardedNode
+from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
 from maddening.core.node import SimulationNode
 
 _HAS_2_DEVICES = len(jax.devices()) >= 2
@@ -61,40 +61,40 @@ class StencilNode(SimulationNode):
 
 # -- Tests ----------------------------------------------------------------
 
-class TestShardedNodeConstruction:
+class TestShardedPointwiseNodeConstruction:
     def test_rejects_stencil_node(self):
         mesh = create_device_mesh(n_devices=1)
         node = StencilNode(name="stencil", timestep=0.01)
-        with pytest.raises(ValueError, match="requires halo exchange"):
-            ShardedNode(node, mesh)
+        with pytest.raises(ValueError, match="ShardedStencilNode"):
+            ShardedPointwiseNode(node, mesh)
 
     def test_accepts_pointwise_node(self):
         mesh = create_device_mesh(n_devices=1)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
-        sharded = ShardedNode(node, mesh)
+        sharded = ShardedPointwiseNode(node, mesh)
         assert sharded.name == "pw"
         assert sharded.requires_halo is False
 
     def test_shard_axes_int_converted_to_tuple(self):
         mesh = create_device_mesh(n_devices=1)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
-        sharded = ShardedNode(node, mesh, shard_axes=0)
+        sharded = ShardedPointwiseNode(node, mesh, shard_axes=0)
         assert sharded._shard_axes == (0,)
 
     def test_shard_axes_tuple_accepted(self):
         mesh = create_device_mesh(n_devices=1)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
-        sharded = ShardedNode(node, mesh, shard_axes=(0,))
+        sharded = ShardedPointwiseNode(node, mesh, shard_axes=(0,))
         assert sharded._shard_axes == (0,)
 
     def test_multi_axis_raises_not_implemented(self):
         mesh = create_device_mesh(n_devices=1)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
         with pytest.raises(NotImplementedError, match="Multi-axis"):
-            ShardedNode(node, mesh, shard_axes=(0, 1))
+            ShardedPointwiseNode(node, mesh, shard_axes=(0, 1))
 
 
-class TestShardedNodeRequiresHaloOnRealNodes:
+class TestShardedPointwiseNodeRequiresHaloOnRealNodes:
     def test_heat_node_requires_halo(self):
         from maddening.nodes.heat import HeatNode
         node = HeatNode("h", timestep=0.01, n_cells=20)
@@ -112,11 +112,11 @@ class TestShardedNodeRequiresHaloOnRealNodes:
 
 
 @pytest.mark.skipif(not _HAS_2_DEVICES, reason=_SKIP_MSG)
-class TestShardedNodeCorrectness:
+class TestShardedPointwiseNodeCorrectness:
     def test_update_matches_unsharded(self):
         mesh = create_device_mesh(n_devices=2)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
-        sharded = ShardedNode(node, mesh)
+        sharded = ShardedPointwiseNode(node, mesh)
 
         # Unsharded reference
         state = node.initial_state()
@@ -135,7 +135,7 @@ class TestShardedNodeCorrectness:
     def test_initial_state_sharded(self):
         mesh = create_device_mesh(n_devices=2)
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
-        sharded = ShardedNode(node, mesh)
+        sharded = ShardedPointwiseNode(node, mesh)
 
         state = sharded.initial_state()
         assert state["values"].shape == (100,)

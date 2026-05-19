@@ -1,7 +1,16 @@
-"""Sharded Jacobi coupling via ``jax.experimental.shard_map``.
+"""Per-device Jacobi coupling pass.
 
-Replaces ``one_pass_jacobi`` in ``graph_manager.py`` with a version
-that distributes node updates across a device mesh.
+Each node in a Jacobi coupling group is placed on its assigned device
+(via :func:`jax.device_put` upstream) and computed locally on that
+device.  All nodes read from the previous-iteration ``latest_results``
+(the Jacobi invariant), so the work is naturally parallel across
+devices once the placement is in place.
+
+This is *not* a ``shard_map``-based distributed implementation -- it
+relies on JAX's runtime scheduler to run device-placed work in
+parallel.  Stencil-node sharding within a coupling group (where one
+node's state spans multiple devices) is provided by
+:class:`ShardedStencilNode` instead.
 """
 
 from __future__ import annotations
@@ -54,10 +63,11 @@ def build_sharded_jacobi_pass(
         device_nodes[dev].append(name)
 
     def sharded_jacobi_pass(initial_node_states, latest_results):
-        """Execute Jacobi iteration with all-gather + per-device updates.
+        """Execute one Jacobi pass with device-placed per-node updates.
 
-        All nodes read from ``latest_results`` (frozen previous iteration).
-        Updates are computed locally per device, then gathered.
+        Each node reads ``latest_results`` (frozen previous iteration)
+        from wherever those arrays live; JAX collects what's needed and
+        runs the local update on the node's assigned device.
         """
         results = {}
 

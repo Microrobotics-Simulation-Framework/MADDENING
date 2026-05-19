@@ -47,6 +47,7 @@ Install only what you need. Each extra adds one capability:
 | `gpu-viz` | pygfx GPU-accelerated 3D viewer | `pip install maddening[gpu-viz]` |
 | `usd` | {term}`OpenUSD` graph serialization | `pip install maddening[usd]` |
 | `streaming` | GStreamer {term}`WebRTC` streaming | `pip install maddening[streaming]` |
+| `compression` | zstandard for binary-encoder compression (v0.2 #6) | `pip install maddening[compression]` |
 
 Mix and match freely:
 

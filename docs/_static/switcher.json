@@ -1,0 +1,20 @@
+[
+  {
+    "version": "latest",
+    "name": "latest (main)",
+    "url": "https://microrobotica.org/maddening/",
+    "preferred": false
+  },
+  {
+    "version": "v0.2",
+    "name": "v0.2 (stable)",
+    "url": "https://microrobotica.org/maddening/v0.2/",
+    "preferred": true
+  },
+  {
+    "version": "v0.1",
+    "name": "v0.1",
+    "url": "https://microrobotica.org/maddening/v0.1/",
+    "preferred": false
+  }
+]

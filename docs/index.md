@@ -153,6 +153,7 @@ flowchart LR
 
 user_guide/installation
 user_guide/quickstart
+user_guide/cloud_resume
 glossary
 ```
 
@@ -173,6 +174,8 @@ algorithm_guide/uq/*
 developer_guide/node_authoring
 developer_guide/testing_standards
 developer_guide/documentation_standards
+developer_guide/edge_validation_migration
+developer_guide/versioned_docs
 ```
 
 ```{toctree}
@@ -195,4 +198,11 @@ regulatory/iec62304_mapping
 regulatory/eu_mdr_guidelines
 regulatory/mdcg_2019_11
 regulatory/downstream_integration
+```
+
+```{toctree}
+:caption: Release notes
+:maxdepth: 1
+
+release_notes/index
 ```

@@ -84,6 +84,8 @@ def __getattr__(name: str):
         "CloudProvider": "maddening.cloud.providers",
         "RunPodProvider": "maddening.cloud.providers",
         "LambdaLabsProvider": "maddening.cloud.providers",
+        "AWSProvider": "maddening.cloud.providers",
+        "GCPProvider": "maddening.cloud.providers",
         "PROVIDERS": "maddening.cloud.providers",
         # Multi-job (requires pyzmq for coordinator)
         "CloudGroup": "maddening.cloud.group",
@@ -139,5 +141,7 @@ __all__ = [
     "CloudProvider",
     "RunPodProvider",
     "LambdaLabsProvider",
+    "AWSProvider",
+    "GCPProvider",
     "PROVIDERS",
 ]

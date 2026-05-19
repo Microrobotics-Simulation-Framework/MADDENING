@@ -83,6 +83,81 @@ class TestNetworkRelay:
         ctx.term()
 
 
+class TestNetworkRelayFieldFilter:
+    """v0.2 #5: NetworkRelay should publish only subscribed fields when a
+    field selector is supplied at construction."""
+
+    def test_filter_to_single_field(self, bouncing_ball_graph):
+        bind_addr = f"tcp://127.0.0.1:{_STATE_PORT + 10}"
+        relay = NetworkRelay(address=bind_addr, fields={"ball": ["position"]})
+        relay.attach(bouncing_ball_graph)
+        assert relay.subscription == {"ball": ["position"]}
+
+        receiver = NetworkReceiver(address=bind_addr)
+        receiver.start()
+        time.sleep(0.3)
+
+        for _ in range(5):
+            bouncing_ball_graph.step()
+            time.sleep(0.05)
+        time.sleep(0.2)
+        _, snap = receiver.latest_snapshot()
+        receiver.stop()
+        relay.close()
+
+        assert snap is not None
+        assert "ball" in snap
+        # Only position should be in the published frame; velocity dropped.
+        assert set(snap["ball"].keys()) == {"position"}
+
+    def test_filter_unknown_field_silently_dropped(self, bouncing_ball_graph):
+        bind_addr = f"tcp://127.0.0.1:{_STATE_PORT + 11}"
+        relay = NetworkRelay(
+            address=bind_addr,
+            fields={"ball": ["position", "nonexistent"], "ghost_node": ["x"]},
+        )
+        relay.attach(bouncing_ball_graph)
+        receiver = NetworkReceiver(address=bind_addr)
+        receiver.start()
+        time.sleep(0.3)
+
+        for _ in range(3):
+            bouncing_ball_graph.step()
+            time.sleep(0.05)
+        time.sleep(0.2)
+        _, snap = receiver.latest_snapshot()
+        receiver.stop()
+        relay.close()
+
+        assert snap is not None
+        assert set(snap.keys()) == {"ball"}
+        assert set(snap["ball"].keys()) == {"position"}
+
+    def test_default_no_filter_publishes_all(self, bouncing_ball_graph):
+        bind_addr = f"tcp://127.0.0.1:{_STATE_PORT + 12}"
+        relay = NetworkRelay(address=bind_addr)
+        relay.attach(bouncing_ball_graph)
+        assert relay.subscription is None
+
+        receiver = NetworkReceiver(address=bind_addr)
+        receiver.start()
+        time.sleep(0.3)
+
+        for _ in range(3):
+            bouncing_ball_graph.step()
+            time.sleep(0.05)
+        time.sleep(0.2)
+        _, snap = receiver.latest_snapshot()
+        receiver.stop()
+        relay.close()
+
+        assert snap is not None
+        # The bouncing ball fixture has both position and velocity
+        assert "ball" in snap
+        assert "position" in snap["ball"]
+        assert "velocity" in snap["ball"]
+
+
 class TestCommandChannel:
     def test_send_receive(self, cmd_ports):
         bind_addr, connect_addr = cmd_ports

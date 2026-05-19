@@ -61,15 +61,51 @@ class NetworkRelay:
     ----------
     address : str
         ZMQ bind address (default ``"tcp://*:5555"``).
+    fields : dict, optional
+        ``{node_name: [field1, field2, ...]}`` — publish only these
+        node/field combinations.  If ``None`` (default) the full state
+        dict is published.  Nodes or fields not present in the state
+        are silently dropped at publish time.  Use this to cut wire
+        bandwidth when remote clients only care about a subset
+        (e.g. ``fields={"lbm": ["velocity"]}`` to skip the 16-fdist
+        f-distribution arrays in a Lattice-Boltzmann graph).
     """
 
-    def __init__(self, address: str = "tcp://*:5555"):
+    def __init__(
+        self,
+        address: str = "tcp://*:5555",
+        fields: dict[str, list[str]] | None = None,
+    ):
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
         self._socket.bind(address)
         self._step_count = 0
         self._timestep = 0.0
+        self._fields = fields
+
+    @property
+    def subscription(self) -> dict[str, list[str]] | None:
+        """Return the active field filter, or ``None`` if no filter."""
+        return self._fields
+
+    def _filter_state(self, data) -> dict:
+        """Apply the field filter (no-op when ``self._fields`` is None)."""
+        if self._fields is None:
+            return {
+                node: {k: _to_json(v) for k, v in fields.items()}
+                for node, fields in data.items()
+            }
+        out: dict[str, dict] = {}
+        for node, allowed_fields in self._fields.items():
+            node_state = data.get(node)
+            if node_state is None:
+                continue
+            allowed = set(allowed_fields)
+            slot = {k: _to_json(v) for k, v in node_state.items() if k in allowed}
+            if slot:
+                out[node] = slot
+        return out
 
     def attach(self, graph_manager) -> None:
         """Register as an observer on *graph_manager*."""
@@ -82,11 +118,7 @@ class NetworkRelay:
         self._step_count += 1
         sim_time = self._step_count * self._timestep
 
-        # Convert JAX arrays to plain floats for JSON serialization
-        state = {
-            node: {k: float(v) for k, v in fields.items()}
-            for node, fields in data.items()
-        }
+        state = self._filter_state(data)
         payload = json.dumps({"t": sim_time, "state": state}).encode()
         try:
             self._socket.send(payload, zmq.NOBLOCK)
@@ -97,6 +129,15 @@ class NetworkRelay:
         """Shut down the socket and context."""
         self._socket.close()
         self._context.term()
+
+
+def _to_json(v):
+    """Convert a JAX/NumPy scalar or array to a JSON-friendly value."""
+    if hasattr(v, "shape") and getattr(v, "shape", ()) != ():
+        # array — coerce to plain list of floats
+        import numpy as _np
+        return _np.asarray(v).astype(float).tolist()
+    return float(v)
 
 
 class NetworkReceiver:

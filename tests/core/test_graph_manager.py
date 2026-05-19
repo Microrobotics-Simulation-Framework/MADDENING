@@ -624,8 +624,14 @@ class TestUnitValidation:
         gm.add_edge("a", "b", "temperature", "left_temperature",
                      source_units="lattice")
         issues = gm.validate()
-        missing_warnings = [i for i in issues
-                            if "no transform is set" in i.lower()]
+        # Filter specifically to the unit-mismatch warning (v0.2 #4
+        # introduced shape/dtype warnings that also mention "no
+        # transform is set").
+        missing_warnings = [
+            i for i in issues
+            if "no transform is set" in i.lower()
+            and "[units]" in i
+        ]
         assert len(missing_warnings) == 1
 
     def test_no_missing_transform_warning_with_transform(self):

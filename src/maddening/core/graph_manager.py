@@ -1223,34 +1223,75 @@ class GraphManager:
                             f"Available: {list(self._state[e.source_node].keys())}"
                         )
 
-        # Unit compatibility warnings
+        # Edge validation: shape, dtype, units against BoundaryInputSpec
         for e in self._edges:
-            if e.target_node in self._nodes:
-                bi_spec = self._nodes[e.target_node].node.boundary_input_spec()
-                if e.target_field in bi_spec:
-                    spec = bi_spec[e.target_field]
-                    if (e.target_units is not None
-                            and spec.expected_units is not None
-                            and e.target_units != spec.expected_units):
+            if e.target_node not in self._nodes:
+                continue
+            bi_spec = self._nodes[e.target_node].node.boundary_input_spec()
+            if e.target_field not in bi_spec:
+                continue
+            spec = bi_spec[e.target_field]
+
+            # Shape check: compare when both source and spec shapes are
+            # concrete.  ``spec.shape == ()`` means the input is a scalar
+            # — non-scalar sources still get flagged.
+            source_state = self._state.get(e.source_node, {})
+            src_val = source_state.get(e.source_field)
+            if src_val is not None:
+                src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
+                spec_shape = tuple(spec.shape)
+                # Skip when spec leaves any dimension symbolic (negative
+                # convention) or when a transform may reshape on the fly.
+                if (e.transform is None
+                        and all(d >= 0 for d in spec_shape)
+                        and src_shape != spec_shape):
+                    issues.append(
+                        f"WARNING[shape]: edge "
+                        f"{e.source_node}.{e.source_field} -> "
+                        f"{e.target_node}.{e.target_field}: "
+                        f"source shape {src_shape} disagrees with "
+                        f"target BoundaryInputSpec shape {spec_shape} "
+                        f"and no transform is set"
+                    )
+
+            # Dtype check: only when both source and spec dtypes are set.
+            if src_val is not None and spec.dtype is not None:
+                src_dtype = getattr(src_val, "dtype", None)
+                if src_dtype is not None and e.transform is None:
+                    if str(src_dtype) != str(jnp.dtype(spec.dtype)):
                         issues.append(
-                            f"WARNING: unit mismatch on edge "
+                            f"WARNING[dtype]: edge "
                             f"{e.source_node}.{e.source_field} -> "
                             f"{e.target_node}.{e.target_field}: "
-                            f"edge declares target_units='{e.target_units}' "
-                            f"but node expects '{spec.expected_units}'"
+                            f"source dtype {src_dtype} disagrees with "
+                            f"target BoundaryInputSpec dtype "
+                            f"{jnp.dtype(spec.dtype)} "
+                            f"and no transform is set"
                         )
-                    if (e.source_units is not None
-                            and spec.expected_units is not None
-                            and e.source_units != spec.expected_units
-                            and e.transform is None):
-                        issues.append(
-                            f"WARNING: edge "
-                            f"{e.source_node}.{e.source_field} -> "
-                            f"{e.target_node}.{e.target_field} has "
-                            f"source_units='{e.source_units}' but target "
-                            f"expects '{spec.expected_units}' and no "
-                            f"transform is set"
-                        )
+
+            # Unit checks (existing behaviour, retained).
+            if (e.target_units is not None
+                    and spec.expected_units is not None
+                    and e.target_units != spec.expected_units):
+                issues.append(
+                    f"WARNING[units]: unit mismatch on edge "
+                    f"{e.source_node}.{e.source_field} -> "
+                    f"{e.target_node}.{e.target_field}: "
+                    f"edge declares target_units='{e.target_units}' "
+                    f"but node expects '{spec.expected_units}'"
+                )
+            if (e.source_units is not None
+                    and spec.expected_units is not None
+                    and e.source_units != spec.expected_units
+                    and e.transform is None):
+                issues.append(
+                    f"WARNING[units]: edge "
+                    f"{e.source_node}.{e.source_field} -> "
+                    f"{e.target_node}.{e.target_field} has "
+                    f"source_units='{e.source_units}' but target "
+                    f"expects '{spec.expected_units}' and no "
+                    f"transform is set"
+                )
 
         # External input endpoint checks
         for ei in self._external_inputs:
@@ -1342,8 +1383,26 @@ class GraphManager:
             raise RuntimeError(
                 "Cannot compile graph with errors:\n" + "\n".join(errors)
             )
+        # Aggregate warnings so the user sees every problem in a single
+        # pass.  Route shape/dtype/unit warnings through the more
+        # specific subclasses of EdgeValidationWarning (v0.2 #4); plain
+        # WARNINGs continue as UserWarning.
+        from maddening.warnings import (
+            DtypeMismatchWarning,
+            EdgeValidationWarning,
+            ShapeMismatchWarning,
+            UnitMismatchWarning,
+        )
         for issue in issues:
-            if issue.startswith("WARNING"):
+            if not issue.startswith("WARNING"):
+                continue
+            if issue.startswith("WARNING[shape]"):
+                warnings.warn(issue, ShapeMismatchWarning, stacklevel=2)
+            elif issue.startswith("WARNING[dtype]"):
+                warnings.warn(issue, DtypeMismatchWarning, stacklevel=2)
+            elif issue.startswith("WARNING[units]"):
+                warnings.warn(issue, UnitMismatchWarning, stacklevel=2)
+            else:
                 warnings.warn(issue, stacklevel=2)
 
         node_names = list(self._nodes.keys())

@@ -653,10 +653,13 @@ class LBMPipeNode(SimulationNode):
         """Kinematic viscosity in lattice units."""
         return (self.params["tau"] - 0.5) / 3.0
 
-    @property
-    def requires_halo(self) -> bool:
-        """LBM uses streaming (neighbor access) — requires halo exchange."""
-        return True
+    def halo_width(self) -> dict[int, int]:
+        """One ghost cell per side on each of the three spatial axes.
+
+        D3Q19 streaming and the D3Q7 tracer both have unit-step neighbour
+        reads; Shan-Chen multiphase forces also stay within one cell.
+        """
+        return {0: 1, 1: 1, 2: 1}
 
     def initial_state(self) -> dict:
         nx = self.params["nx"]

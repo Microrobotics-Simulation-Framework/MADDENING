@@ -210,10 +210,15 @@ class HeatNode(SimulationNode):
             geometry_source=geometry_source,
         )
 
-    @property
-    def requires_halo(self) -> bool:
-        """HeatNode uses finite difference stencils — requires halo exchange."""
-        return True
+    def halo_width(self) -> dict[int, int]:
+        """One ghost cell per side per FD stencil radius on axis 0.
+
+        2nd-order central difference needs one neighbour (halo=1).
+        4th-order 5-point stencil needs two neighbours (halo=2).
+        """
+        order = int(self.params.get("stencil_order", 2))
+        radius = 1 if order == 2 else 2
+        return {0: radius}
 
     @property
     def _is_nonuniform(self) -> bool:

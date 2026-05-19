@@ -80,10 +80,9 @@ class ShardedNode(SimulationNode):
         self._shard_axes = shard_axes
         self._sharding = NamedSharding(mesh, P("devices"))
 
-    @property
-    def requires_halo(self) -> bool:
-        """ShardedNode only wraps pointwise nodes."""
-        return False
+    def halo_width(self) -> dict[int, int]:
+        """ShardedNode only wraps pointwise nodes (no halo)."""
+        return {}
 
     def initial_state(self) -> dict:
         """Return sharded initial state."""

@@ -52,10 +52,9 @@ class HybridNode(SimulationNode):
         self.physics_node = physics_node
         self.correction_fn = correction_fn
 
-    @property
-    def requires_halo(self) -> bool:
+    def halo_width(self) -> dict[int, int]:
         """Delegates to the wrapped physics node."""
-        return self.physics_node.requires_halo
+        return self.physics_node.halo_width()
 
     def initial_state(self) -> dict:
         return self.physics_node.initial_state()

@@ -11,6 +11,7 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
@@ -82,6 +83,29 @@ class SimulationNode(ABC):
 
     meta: ClassVar[Optional["NodeMeta"]] = None  # type: ignore[name-defined]
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Detect legacy subclasses that override ``requires_halo`` only.
+
+        Until v0.3, ``requires_halo`` is retained as a property derived
+        from :meth:`halo_width`.  Subclasses that override ``requires_halo``
+        directly (without overriding ``halo_width``) still function, but
+        they lose per-axis halo information needed for pencil decomposition.
+        Emit a DeprecationWarning to nudge migration.
+        """
+        super().__init_subclass__(**kwargs)
+        overrides_requires_halo = "requires_halo" in cls.__dict__
+        overrides_halo_width = "halo_width" in cls.__dict__
+        if overrides_requires_halo and not overrides_halo_width:
+            warnings.warn(
+                f"{cls.__qualname__} overrides 'requires_halo' but not "
+                "'halo_width'. 'requires_halo' is deprecated; override "
+                "'halo_width() -> dict[int, int]' instead "
+                "(pointwise nodes return {}, stencil nodes return "
+                "{axis: width, ...}). 'requires_halo' is removed in v0.3.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
     def __init__(self, name: str, timestep: float, **params):
         self.name = name
         self.delta_t = float(timestep)
@@ -128,24 +152,38 @@ class SimulationNode(ABC):
     # Boundary and flux introspection (Phase 6)
     # ------------------------------------------------------------------
 
-    @property
-    @abstractmethod
-    def requires_halo(self) -> bool:
-        """Whether this node's ``update()`` accesses spatial neighbors.
+    def halo_width(self) -> dict[int, int]:
+        """Per-axis halo width required by this node's ``update()``.
 
-        Returns ``True`` for nodes with stencil operations (e.g. finite
-        differences, LBM streaming) where sharding the state along a
-        spatial axis requires halo exchange between shards.
+        Returns a dict mapping spatial axis index to the number of ghost
+        cells the node needs on each side of that axis.  Empty dict means
+        the node is pointwise (no spatial neighbour access).
 
-        Returns ``False`` for pointwise nodes (e.g. ODE-based, rigid
-        body, surrogate models) where each element is independent.
+        Examples
+        --------
+        - Pointwise nodes (Ball, Spring, Surrogate): ``{}``
+        - 1-D Heat with 2nd-order FD: ``{0: 1}``
+        - 1-D Heat with 4th-order FD: ``{0: 2}``
+        - 3-D D3Q19 LBM: ``{0: 1, 1: 1, 2: 1}``
 
-        ``ShardedNode`` checks this property and refuses to shard nodes
-        that require halos until halo exchange is implemented.
+        The dict drives pencil-decomposition halo exchange: each entry
+        ``axis -> width`` means the sharded state needs ``width`` ghost
+        cells on each side of ``axis`` before ``update_padded`` runs.
 
-        Every ``SimulationNode`` subclass **must** override this.
+        Default: ``{}`` (pointwise).  Override in stencil nodes.
         """
-        ...
+        return {}
+
+    @property
+    def requires_halo(self) -> bool:
+        """Whether this node's ``update()`` accesses spatial neighbours.
+
+        Derived from :meth:`halo_width`: ``True`` iff ``halo_width()`` is
+        non-empty.  Retained for backward compatibility; removed in v0.3.
+        New code should query ``halo_width()`` directly to get per-axis
+        widths (pencil decomposition needs this).
+        """
+        return bool(self.halo_width())
 
     def boundary_input_spec(self) -> dict[str, "BoundaryInputSpec"]:
         """Declare expected boundary inputs with shapes and semantics.

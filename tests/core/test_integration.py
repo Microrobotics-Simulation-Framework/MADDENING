@@ -139,9 +139,8 @@ class TestCycleStaggering:
         """Two nodes that depend on each other should still run (staggered)."""
 
         class EchoNode(SimulationNode):
-            @property
-            def requires_halo(self) -> bool:
-                return False
+            def halo_width(self) -> dict[int, int]:
+                return {}
 
             def initial_state(self):
                 return {"val": jnp.array(1.0)}

@@ -45,10 +45,9 @@ class TableNode(SimulationNode):
     def __init__(self, name: str, timestep: float, position: float = 0.0):
         super().__init__(name, timestep, position=position)
 
-    @property
-    def requires_halo(self) -> bool:
-        """Pointwise (no spatial neighbor access)."""
-        return False
+    def halo_width(self) -> dict[int, int]:
+        """Pointwise (no spatial neighbour access)."""
+        return {}
 
     def initial_state(self) -> dict:
         return {

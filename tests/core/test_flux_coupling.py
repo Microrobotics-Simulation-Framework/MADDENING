@@ -71,9 +71,8 @@ class TestBoundaryInputSpec:
         """Base SimulationNode returns empty dict."""
 
         class MinimalNode(SimulationNode):
-            @property
-            def requires_halo(self) -> bool:
-                return False
+            def halo_width(self) -> dict[int, int]:
+                return {}
 
             def initial_state(self):
                 return {"x": jnp.array(0.0)}

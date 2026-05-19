@@ -23,9 +23,8 @@ class PointwiseNode(SimulationNode):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    @property
-    def requires_halo(self) -> bool:
-        return False
+    def halo_width(self) -> dict[int, int]:
+        return {}
 
     def initial_state(self):
         n = self.params.get("n_elements", 100)
@@ -47,9 +46,8 @@ class StencilNode(SimulationNode):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    @property
-    def requires_halo(self) -> bool:
-        return True
+    def halo_width(self) -> dict[int, int]:
+        return {0: 1}
 
     def initial_state(self):
         return {"field": jnp.zeros(50)}

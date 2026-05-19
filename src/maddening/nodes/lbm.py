@@ -648,10 +648,15 @@ class LBMNode(SimulationNode):
     # SimulationNode interface
     # ------------------------------------------------------------------
 
-    @property
-    def requires_halo(self) -> bool:
-        """LBM uses streaming (neighbor access) — requires halo exchange."""
-        return True
+    def halo_width(self) -> dict[int, int]:
+        """One ghost cell per side on every spatial axis.
+
+        D3Q19 and D2Q9 both have unit-step neighbour reads (max ``|e_q|=1``
+        in every component), so a single ghost cell per side is enough for
+        the streaming step.  Axis count tracks the lattice dimension
+        (3 for D3Q19, 2 for D2Q9).
+        """
+        return {axis: 1 for axis in range(self._D)}
 
     def initial_state(self) -> dict:
         shape = self._grid_shape

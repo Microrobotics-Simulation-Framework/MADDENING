@@ -91,9 +91,8 @@ class BallWithForceNode(SimulationNode):
             mass=mass,
         )
 
-    @property
-    def requires_halo(self) -> bool:
-        return False
+    def halo_width(self) -> dict[int, int]:
+        return {}
 
     def initial_state(self) -> dict:
         return {

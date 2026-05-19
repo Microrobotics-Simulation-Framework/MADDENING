@@ -38,9 +38,8 @@ class CounterNode(SimulationNode):
     Useful for verifying *how many times* a node actually ran.
     """
 
-    @property
-    def requires_halo(self) -> bool:
-        return False
+    def halo_width(self) -> dict[int, int]:
+        return {}
 
     def initial_state(self) -> dict:
         return {"count": jnp.array(0, dtype=jnp.int32)}
@@ -55,9 +54,8 @@ class AccumulatorNode(SimulationNode):
     After N actual updates, ``total`` should equal N * node_dt.
     """
 
-    @property
-    def requires_halo(self) -> bool:
-        return False
+    def halo_width(self) -> dict[int, int]:
+        return {}
 
     def initial_state(self) -> dict:
         return {"total": jnp.array(0.0, dtype=jnp.float32)}
@@ -72,9 +70,8 @@ class ReaderNode(SimulationNode):
     Used to verify edge data delivery between multi-rate nodes.
     """
 
-    @property
-    def requires_halo(self) -> bool:
-        return False
+    def halo_width(self) -> dict[int, int]:
+        return {}
 
     def initial_state(self) -> dict:
         return {"value": jnp.array(0.0, dtype=jnp.float32)}
@@ -762,9 +759,8 @@ class TestMultirateWithCycles:
         """Two nodes at different rates with a mutual dependency."""
 
         class EchoNode(SimulationNode):
-            @property
-            def requires_halo(self) -> bool:
-                return False
+            def halo_width(self) -> dict[int, int]:
+                return {}
 
             def initial_state(self):
                 return {"val": jnp.array(1.0)}

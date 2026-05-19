@@ -139,6 +139,20 @@ def test_poiseuille_sharded_profile_is_parabolic():
         u_cross[cy, cz], u_cross[cy, cz + 1], rtol=1e-3,
     )
 
+    # Amplitude: with the Guo body-force half-correction the centerline
+    # velocity matches the textbook u_max = F R^2 / (4 mu) to within the
+    # discretization offset (effective R > nominal R from mid-link
+    # bounce-back placement).  Pre-fix the ratio was ~0.42; post-fix it
+    # lands at ~1.13.  Tolerance: within +/-25% of nominal u_max.
+    mu = 0.1  # nu * rho with rho = 1
+    u_max_analytic = F * R * R / (4.0 * mu)
+    u_center = u_x_cross[cy, cz]
+    ratio = u_center / u_max_analytic
+    assert 0.75 < ratio < 1.30, (
+        f"centerline u={u_center:.4e} vs u_max={u_max_analytic:.4e} "
+        f"(ratio {ratio:.2f}) outside [0.75, 1.30] -- Guo correction broken?"
+    )
+
 
 @pytest.mark.skipif(not _HAS_8, reason="needs >=8 virtual devices")
 def test_poiseuille_sharded_matches_unsharded_step_by_step():

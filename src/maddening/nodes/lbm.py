@@ -206,13 +206,24 @@ def _equilibrium(density, velocity, e, w, cs2):
     return f_eq
 
 
-def _compute_macroscopic(f, e):
+def _compute_macroscopic(f, e, force=None):
     """Extract density and velocity from distribution functions.
+
+    Implements the Guo et al. (2002) body-force scheme: when a body
+    force is present, the recovered velocity carries a ``F/2`` half-step
+    correction (``rho*u = Sum_q f_q e_q + F/2``).  Without this
+    correction the macroscopic velocity is biased low by ``F/(2*rho)``
+    per step under body-force-driven flow, and Hagen-Poiseuille profiles
+    end up scaled by ``1 - 1/(2 tau)`` instead of matching the textbook
+    formula.
 
     Parameters
     ----------
     f : (*grid_shape, Q) float32
     e : (Q, D) numpy int array
+    force : (*grid_shape, D) float32 or None
+        Optional body force per cell (Guo half-correction).  Pass the
+        same force used by the source term in the same step.
 
     Returns
     -------
@@ -222,6 +233,8 @@ def _compute_macroscopic(f, e):
     density = jnp.sum(f, axis=-1)
     e_f = e.astype(np.float64)
     momentum = f @ e_f  # (*grid_shape, D)
+    if force is not None:
+        momentum = momentum + 0.5 * force
     velocity = momentum / jnp.maximum(density[..., None], 1e-10)
     return density, velocity
 
@@ -780,33 +793,35 @@ class LBMNode(SimulationNode):
         else:
             wall_pad = self._wall_mask
 
+        # Body force first (needed for the Guo half-correction below).
+        # Three input shapes are accepted:
+        #   (D,)                      -- uniform, broadcast across grid
+        #   density_pad.shape + (D,)  -- already padded local field
+        #   density_pad.interior shape (e.g. (nx,ny,nz,D)) -- pad locally
+        # The first form is the right call under sharding: send a
+        # constant vector, broadcast trivially per device.
+        target_density_shape = f_pad.shape[:-1]  # padded spatial shape
+        force = boundary_inputs.get("body_force", None)
+        if force is None:
+            force = jnp.zeros(target_density_shape + (D,), dtype=jnp.float32)
+        elif force.ndim == 1 and force.shape == (D,):
+            force = jnp.broadcast_to(
+                force, target_density_shape + (D,),
+            ).astype(jnp.float32)
+        elif force.shape != target_density_shape + (D,):
+            pad_widths = [
+                (halo, halo) if d < ndim else (0, 0)
+                for d in range(force.ndim)
+            ]
+            force = jnp.pad(force, pad_widths)
+
         # BGK collision is purely local, so we collide on the *entire*
         # padded array -- halo cells included -- so that the post-stream
         # values read across the halo match what the neighbour shard
         # would produce.  Halo cells carry the neighbour's pre-collision
         # distribution from halo_exchange; colliding them locally is
         # algebraically identical to colliding them on the neighbour.
-        density_pad, velocity_pad = _compute_macroscopic(f_pad, e)
-
-        # Body force.  Three input shapes are accepted:
-        #   (D,)                      -- uniform, broadcast across grid
-        #   density_pad.shape + (D,)  -- already padded local field
-        #   density_pad.interior shape (e.g. (nx,ny,nz,D)) -- pad locally
-        # The first form is the right call under sharding: send a
-        # constant vector, broadcast trivially per device.
-        force = boundary_inputs.get("body_force", None)
-        if force is None:
-            force = jnp.zeros(density_pad.shape + (D,), dtype=jnp.float32)
-        elif force.ndim == 1 and force.shape == (D,):
-            force = jnp.broadcast_to(
-                force, density_pad.shape + (D,),
-            ).astype(jnp.float32)
-        elif force.shape != density_pad.shape + (D,):
-            pad_widths = [
-                (halo, halo) if d < ndim else (0, 0)
-                for d in range(force.ndim)
-            ]
-            force = jnp.pad(force, pad_widths)
+        density_pad, velocity_pad = _compute_macroscopic(f_pad, e, force=force)
 
         f_eq_pad = _equilibrium(density_pad, velocity_pad, e, w, cs2)
         f_post_pad = f_pad - (f_pad - f_eq_pad) / tau
@@ -847,7 +862,12 @@ class LBMNode(SimulationNode):
                 outlet_axis, outlet_side, wall_interior,
             )
 
-        density_new, velocity_new = _compute_macroscopic(f_bc_interior, e)
+        # Macroscopic output: apply Guo half-correction with the
+        # interior slice of the body force.
+        force_interior = force[interior_slicer]
+        density_new, velocity_new = _compute_macroscopic(
+            f_bc_interior, e, force=force_interior,
+        )
         # Zero velocity in wall cells (cosmetic, for cleaner output).
         velocity_new = jnp.where(wall_expanded, 0.0, velocity_new)
         pressure_new = density_new * cs2
@@ -894,10 +914,7 @@ class LBMNode(SimulationNode):
 
         fluid_mask = ~wall_mask
 
-        # 1. Compute macroscopic from current f
-        density, velocity = _compute_macroscopic(f, e)
-
-        # 2. Body force (Guo forcing).  Accept either the full grid shape
+        # 1. Body force (Guo forcing).  Accept either the full grid shape
         # or a uniform (D,) vector which we broadcast.
         force = boundary_inputs.get("body_force", None)
         if force is None:
@@ -906,6 +923,9 @@ class LBMNode(SimulationNode):
             force = jnp.broadcast_to(
                 force, self._grid_shape + (D,),
             ).astype(jnp.float32)
+
+        # 2. Macroscopic from current f, with Guo F/2 half-correction
+        density, velocity = _compute_macroscopic(f, e, force=force)
 
         # 3. BGK collision with Guo forcing
         f_eq = _equilibrium(density, velocity, e, w, cs2)
@@ -941,8 +961,8 @@ class LBMNode(SimulationNode):
                 outlet_axis, outlet_side, wall_mask,
             )
 
-        # 7. Compute macroscopic for output
-        density_new, velocity_new = _compute_macroscopic(f_bc, e)
+        # 7. Compute macroscopic for output (with Guo half-correction)
+        density_new, velocity_new = _compute_macroscopic(f_bc, e, force=force)
 
         # Zero velocity in wall cells (cosmetic, for cleaner output)
         velocity_new = jnp.where(wall_expanded, 0.0, velocity_new)

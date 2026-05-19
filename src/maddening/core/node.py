@@ -185,6 +185,30 @@ class SimulationNode(ABC):
         """
         return bool(self.halo_width())
 
+    def update_padded(
+        self, state_padded: dict, boundary_inputs: dict, dt: float
+    ) -> dict:
+        """Update from halo-padded state.
+
+        ``ShardedStencilNode`` calls this after exchanging halos: every
+        state field listed in :meth:`halo_width` is padded by the
+        declared width on each side of the relevant spatial axis.  The
+        return value is expected to have the same padded shape; the
+        sharding wrapper strips halos afterwards.
+
+        Default: pointwise nodes (empty ``halo_width()``) fall back to
+        :meth:`update`.  Stencil nodes that have not been ported must
+        override this; calling the default raises
+        :class:`NotImplementedError`.
+        """
+        if self.halo_width():
+            raise NotImplementedError(
+                f"{type(self).__name__} declares halo_width="
+                f"{self.halo_width()} but does not override "
+                "`update_padded`. Required for sharded stencil execution."
+            )
+        return self.update(state_padded, boundary_inputs, dt)
+
     def boundary_input_spec(self) -> dict[str, "BoundaryInputSpec"]:
         """Declare expected boundary inputs with shapes and semantics.
 

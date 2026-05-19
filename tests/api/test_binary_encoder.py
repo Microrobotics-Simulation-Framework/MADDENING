@@ -315,3 +315,89 @@ class TestCompression:
             f"full={len(full_raw)}B; reduction {reduction*100:.2f}% "
             f"(brief target ≥95%)"
         )
+
+
+@pytest.mark.skipif(not HAS_ZSTD, reason="zstandard not installed")
+class TestEncodeLatency:
+    """v0.2 #6 follow-up: latency-budget assertion.
+
+    Each test measures wall-clock encode time over many frames and
+    asserts the median per-frame budget the brief implies (real-time
+    60 fps server → ≤16.6 ms per frame; we set a much tighter bound
+    so the test catches regressions before the budget is actually
+    threatened).  Numbers are deliberately generous so the test is
+    stable across CPU types; the assertion is order-of-magnitude.
+    """
+
+    @staticmethod
+    def _measure(encoder, state, n=200):
+        import time
+        # Warm up so the first JAX-array → numpy conversion isn't
+        # billed against the loop body.
+        encoder.encode(0.0, state)
+        t0 = time.perf_counter()
+        for i in range(n):
+            encoder.encode(i * 0.01, state)
+        elapsed = time.perf_counter() - t0
+        return elapsed / n  # average seconds per frame
+
+    def test_none_encoding_under_budget_on_32cube_lbm(self):
+        # 32³ LBM-like payload: 22 fields total (velocity + 19 fdists +
+        # 2 scalars).  Uncompressed wire size ≈ 2.7 MB per frame.
+        N = 32 * 32 * 32
+        state = {
+            "lbm": {
+                "velocity": jnp.zeros((N, 3)),
+                "rho": jnp.ones(N),
+                "p": jnp.zeros(N),
+                **{f"f{i}": jnp.ones(N) * 0.05 for i in range(19)},
+            }
+        }
+        enc = BinaryStateEncoder(state)
+        per_frame_s = self._measure(enc, state, n=50)
+        # 16.6 ms budget at 60 fps; we want plenty of headroom for the
+        # rest of the server loop.  10 ms is the order-of-magnitude
+        # bar that catches accidental order-N² rewrites.
+        assert per_frame_s < 0.010, (
+            f"uncompressed 32³ encode took {per_frame_s*1000:.2f} ms/frame "
+            f"(>10 ms budget)"
+        )
+
+    def test_zstd_encoding_under_budget_on_subscribed_frame(self):
+        # Just velocity — the typical bandwidth-sensitive subscriber.
+        N = 32 * 32 * 32
+        state = {"lbm": {"velocity": jnp.zeros((N, 3))}}
+        enc = BinaryStateEncoder(
+            state, fields={"lbm": ["velocity"]}, compression="zstd",
+        )
+        per_frame_s = self._measure(enc, state, n=50)
+        # zstd at level 3 should comfortably hit <10 ms even on a
+        # ~400 KB payload.
+        assert per_frame_s < 0.010, (
+            f"zstd-compressed 32³-velocity encode took "
+            f"{per_frame_s*1000:.2f} ms/frame (>10 ms budget)"
+        )
+
+    @pytest.mark.slow
+    def test_zstd_xor_encoding_under_budget_on_slow_dynamics(self):
+        # XOR-delta path: state changes slightly between frames.  We
+        # mark this slow because the 100-frame loop with shifting
+        # state takes ~1 s on CI.
+        N = 32 * 32 * 32
+        base = jnp.ones((N, 3)) * 0.1
+        states = [{"lbm": {"velocity": base + jnp.array([0.0, 0.0, i * 1e-4])}}
+                  for i in range(100)]
+        enc = BinaryStateEncoder(
+            states[0], fields={"lbm": ["velocity"]}, compression="zstd+xor",
+        )
+        # Prime so the XOR path has a previous frame.
+        enc.encode(0.0, states[0])
+        import time
+        t0 = time.perf_counter()
+        for i, s in enumerate(states):
+            enc.encode(i * 0.01, s)
+        avg = (time.perf_counter() - t0) / len(states)
+        # XOR adds a NumPy XOR + compress; should still beat 15 ms.
+        assert avg < 0.015, (
+            f"zstd+xor 32³-velocity encode took {avg*1000:.2f} ms/frame"
+        )

@@ -178,3 +178,14 @@ filterwarnings = [
     # SkyPilot deprecation warnings
     "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
 ]
+# Custom markers — registered so `filterwarnings=["error"]` above
+# doesn't elevate Unknown-Mark warnings to test errors. Mirrors the
+# convention already in MIME's pyproject.toml.
+markers = [
+    "slow: tests >5s wall-clock or that need a beefy machine (latency benchmarks, full-LBM smokes). Run with `pytest -m 'slow or not slow'`. Default suite excludes them.",
+    "gpu: tests that require a CUDA device (auto-skipped on CPU-only hosts).",
+]
+# Default-skip the slow lane in CI; opt in locally with
+#   pytest -m 'slow or not slow'  (full suite)
+#   pytest -m slow                 (slow only)
+addopts = "-m 'not slow'"

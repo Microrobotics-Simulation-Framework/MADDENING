@@ -1462,8 +1462,11 @@ class GraphManager:
         self,
         n_devices: Optional[int] = None,
         partition_strategy: str = "auto",
+        *,
+        mesh_shape: Optional[tuple[int, ...]] = None,
+        mesh_axes: Optional[tuple[str, ...]] = None,
     ) -> None:
-        """Enable multi-GPU Jacobi coupling.
+        """Enable multi-GPU coupling and (in v0.2) stencil sharding.
 
         Requires at least one coupling group with ``iteration_mode="jacobi"``.
         Uses ``jax.experimental.shard_map`` to distribute node updates
@@ -1472,9 +1475,18 @@ class GraphManager:
         Parameters
         ----------
         n_devices : int, optional
-            Number of GPUs to use.  Defaults to all available.
+            Number of devices to use.  Defaults to ``prod(mesh_shape)`` when
+            ``mesh_shape`` is provided, otherwise all available devices.
         partition_strategy : str
             ``"auto"`` (default) assigns coupled nodes to the same device.
+        mesh_shape : tuple[int, ...], optional
+            Mesh shape for N-D (pencil) decomposition, e.g. ``(2, 4)`` for
+            an 8-device 2-D pencil mesh.  When omitted the mesh is 1-D
+            (slab decomposition, v0.1 behaviour).
+        mesh_axes : tuple[str, ...], optional
+            Axis names for the mesh.  Defaults: ``("devices",)`` for 1-D
+            and ``("spatial_y", "spatial_z")`` for 2-D.  Length must match
+            ``len(mesh_shape)``.
         """
         from maddening.cloud.multigpu.device_mesh import create_device_mesh
         from maddening.cloud.multigpu.partition import assign_nodes_to_devices
@@ -1489,8 +1501,10 @@ class GraphManager:
                 "with iteration_mode='jacobi'"
             )
 
-        self._multigpu_mesh = create_device_mesh(n_devices)
-        n = len(self._multigpu_mesh.devices)
+        self._multigpu_mesh = create_device_mesh(
+            n_devices, shape=mesh_shape, axis_names=mesh_axes
+        )
+        n = len(self._multigpu_mesh.devices.reshape(-1))
 
         coupling_sets = [set(g.nodes) for g in self._coupling_groups]
         edges_dicts = [e.to_dict() for e in self._edges]

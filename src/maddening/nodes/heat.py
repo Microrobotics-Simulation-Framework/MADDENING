@@ -219,6 +219,31 @@ class HeatNode(SimulationNode):
             geometry_source=geometry_source,
         )
 
+        # v0.2 #3: build the grid coordinates once and expose via
+        # static_data so JAX bakes them as constants in the JIT'd
+        # step.  Previously ``_grid_x`` rebuilt a fresh JAX array on
+        # every property access, which forced retracing whenever the
+        # closure object identity changed.
+        if gp_list is not None:
+            self._grid_x_array = jnp.array(gp_list, dtype=jnp.float32)
+        else:
+            dx = length / n_cells
+            self._grid_x_array = jnp.linspace(
+                dx / 2, length - dx / 2, n_cells, dtype=jnp.float32,
+            )
+
+    @property
+    def static_data(self) -> dict:
+        """Reconstructable arrays closed over by :meth:`update`.
+
+        ``grid_x`` is built once in ``__init__`` from ``self.params``
+        (specifically ``length``, ``n_cells``, and the optional
+        ``grid_points`` list) so a checkpoint/restore round-trip
+        rebuilds it from the persisted params alone — see DESIGN.md
+        §2 "Static-data channel".
+        """
+        return {"grid_x": self._grid_x_array}
+
     def halo_width(self) -> dict[int, int]:
         """One ghost cell per side per FD stencil radius on axis 0.
 
@@ -235,14 +260,8 @@ class HeatNode(SimulationNode):
 
     @property
     def _grid_x(self):
-        """Return grid point coordinates as a JAX array."""
-        gp = self.params.get("grid_points")
-        if gp is not None:
-            return jnp.array(gp, dtype=jnp.float32)
-        n = self.params["n_cells"]
-        L = self.params["length"]
-        dx = L / n
-        return jnp.linspace(dx / 2, L - dx / 2, n)
+        """Grid point coordinates as a JAX array (alias of static_data['grid_x'])."""
+        return self._grid_x_array
 
     def initial_state(self) -> dict:
         n = self.params["n_cells"]

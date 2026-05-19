@@ -307,3 +307,138 @@ class TestReplaceNodeIntegration:
         assert gm._dirty is True
         gm.compile()
         assert gm._static_data_hashes["x"] != 0
+
+
+# ---------------------------------------------------------------------------
+# HeatNode migration (v0.2 #3 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestHeatNodeStaticData:
+    """HeatNode is the first in-tree consumer of the static_data channel.
+    Migrating ``grid_x`` here pins the API contract the v0.2 brief
+    called out: 'at least one node uses static_data for real'."""
+
+    def test_heatnode_exposes_grid_x_via_static_data(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        sd = node.static_data
+        assert "grid_x" in sd
+        assert sd["grid_x"].shape == (8,)
+
+    def test_heatnode_uniform_grid_matches_linspace(self):
+        from maddening.nodes.heat import HeatNode
+        import numpy as np
+
+        node = HeatNode("rod", timestep=0.01, n_cells=10, length=1.0)
+        x = np.asarray(node.static_data["grid_x"])
+        # Cell centres: dx/2, dx + dx/2, ..., L - dx/2
+        expected = np.linspace(0.05, 0.95, 10, dtype=np.float32)
+        assert np.allclose(x, expected, atol=1e-6)
+
+    def test_heatnode_nonuniform_grid_round_trips(self):
+        from maddening.nodes.heat import HeatNode
+        import numpy as np
+
+        custom = [0.0, 0.1, 0.3, 0.6, 1.0]
+        node = HeatNode(
+            "rod", timestep=0.01, n_cells=5, length=1.0,
+            grid_points=custom,
+        )
+        x = np.asarray(node.static_data["grid_x"])
+        assert np.allclose(x, custom, atol=1e-6)
+
+    def test_static_data_is_stable_across_calls(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        # Same object identity → JAX won't retrace
+        assert node.static_data["grid_x"] is node.static_data["grid_x"]
+
+    def test_grid_x_property_aliases_static_data(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        assert node._grid_x is node.static_data["grid_x"]
+
+    def test_hash_differs_between_uniform_grid_sizes(self):
+        from maddening.nodes.heat import HeatNode
+
+        a = HeatNode("a", timestep=0.01, n_cells=8, length=2.0)
+        b = HeatNode("b", timestep=0.01, n_cells=10, length=2.0)
+        assert a.static_data_hash() != b.static_data_hash()
+
+    def test_hash_same_for_same_shape_and_dtype(self):
+        # Two nodes with the same n_cells + dtype hash identically even
+        # if the actual grid point *values* differ.  This is the
+        # documented contract: shape+dtype only, not contents.
+        from maddening.nodes.heat import HeatNode
+
+        a = HeatNode("a", timestep=0.01, n_cells=5, length=1.0)
+        b = HeatNode("b", timestep=0.01, n_cells=5, length=1.0,
+                     grid_points=[0.0, 0.1, 0.3, 0.6, 1.0])
+        assert a.static_data_hash() == b.static_data_hash()
+
+    def test_checkpoint_roundtrip_with_static_data(self, tmp_path):
+        """The static_data contract says: arrays reconstruct from
+        self.params on load.  HeatNode demonstrates this — saving +
+        loading a graph preserves its grid_x without serialising the
+        array itself."""
+        from maddening.core.simulation.checkpoint import (
+            save_state, load_state,
+        )
+        from maddening.nodes.heat import HeatNode
+        import numpy as np
+
+        # Source graph with a non-uniform grid (so reconstruction is
+        # not trivially the linspace default)
+        gm_src = GraphManager()
+        gm_src.add_node(HeatNode(
+            "rod", timestep=0.01, n_cells=5, length=1.0,
+            grid_points=[0.0, 0.1, 0.3, 0.6, 1.0],
+        ))
+        gm_src.compile()
+        gm_src.step()
+
+        snap = tmp_path / "heat.npz"
+        save_state(gm_src, snap)
+
+        # Reconstruct from params alone (the user's responsibility).
+        gm_dst = GraphManager()
+        gm_dst.add_node(HeatNode(
+            "rod", timestep=0.01, n_cells=5, length=1.0,
+            grid_points=[0.0, 0.1, 0.3, 0.6, 1.0],
+        ))
+        gm_dst.compile()
+        load_state(gm_dst, snap)
+
+        # The state was restored
+        assert np.allclose(
+            np.asarray(gm_dst.get_node_state("rod")["temperature"]),
+            np.asarray(gm_src.get_node_state("rod")["temperature"]),
+        )
+        # The static_data was rebuilt from params (not from the .npz)
+        assert np.allclose(
+            np.asarray(gm_dst._nodes["rod"].node.static_data["grid_x"]),
+            [0.0, 0.1, 0.3, 0.6, 1.0],
+            atol=1e-6,
+        )
+
+    def test_heatnode_step_runs_with_uniform_grid(self):
+        # End-to-end: a graph with a HeatNode actually steps.  This
+        # exercises the static_data → JIT closure path for real.
+        from maddening.nodes.heat import HeatNode
+
+        gm = GraphManager()
+        gm.add_node(HeatNode(
+            "rod", timestep=0.01, n_cells=10, length=1.0,
+            initial_temperature=100.0,
+        ))
+        gm.compile()
+        for _ in range(5):
+            gm.step()
+        # Should not have NaN-ed; temperature still finite
+        import numpy as np
+        T = np.asarray(gm.get_node_state("rod")["temperature"])
+        assert np.all(np.isfinite(T))

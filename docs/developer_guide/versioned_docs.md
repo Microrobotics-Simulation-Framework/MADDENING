@@ -11,6 +11,30 @@ are required to make the switcher live on the published site —
 that work is tracked under [MICROROBOTICA umbrella PR pending](#).
 ```
 
+## Settled design decisions
+
+These are the choices made for the v0.2 rollout.  Captured here so
+that the rationale survives turnover; revisit them when the v0.3
+docs cycle starts.
+
+| # | Decision | Choice | Reason |
+|---|---|---|---|
+| 1 | What does `latest` point at? | **Most recent git tag** (not main tip) | New visitors land on stable; bleeding-edge work moves to `/dev/`. Read-the-Docs convention. |
+| 2 | Where does `switcher.json` live? | **In each project's repo** (`MADDENING/docs/_static/switcher.json`) | Projects progress somewhat independently; each owns its release cadence. |
+| 3 | Version label convention | **`vMAJOR.MINOR`** for releases, **`vMAJOR.MINOR-dev`** for in-flight branches | Pins to semver; the `-dev` suffix marks pre-release without polluting the tag namespace. |
+| 4 | `preferred: true` row | **Always the latest stable tag** | Standard PyData theme convention; what new readers should see by default. |
+| 5 | Does MICROROBOTICA + MIME get versioned too? | **Yes — all three** | MICROROBOTICA ships a C++ API that breaks compatibility on minor bumps; MIME's nodes evolve alongside MADDENING.  Each release tag freezes its own docs. |
+| 6 | CI build strategy | **Cache + only rebuild changed versions** (option C from the brainstorm) | Old tagged builds are immutable artefacts; rebuild only on tag-cut, cache forever. `main` + the latest tag rebuild on every push; older tags reuse a `gh-pages-versions` artefact. |
+| 7 | Old version's incompatible `conf.py` | **For now, build all versions with the current umbrella `conf.py`**; switch to per-version pinned requirements once we have 5+ versions | Cheap until incompatibility actually bites; the pin-file pattern is a known fallback. |
+| 8 | Glossary across versions | **Per-version (frozen at release)** | Each version stays accurate to its source; readers searching old docs see the terms they actually shipped with. |
+| 9 | Switcher fallback when JSON unreachable | **Show a debug banner + console warning** | Hidden silent failures are the worst kind; make broken deploys visible immediately. |
+| 10 | URL shape for older releases | **Subdir** (`/maddening/v0.1/`) — not subdomain | Single TLS cert, single GitHub Pages host, fits the multiproject build pipeline. |
+
+These shape the rollout described below.  The
+[`multiversion_preview.md`](https://github.com/Microrobotics-Simulation-Framework/MICROROBOTICA/blob/feat/versioned-docs-preview/docs/developer_guide/multiversion_preview.md)
+guide in MICROROBOTICA covers the local-iteration workflow that
+implements them.
+
 The three MSF projects (MADDENING, MIME, MICROROBOTICA) are
 published from a single sphinx-multiproject build at
 <https://microrobotica.org/>.  Today that build emits a single

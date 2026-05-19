@@ -839,10 +839,14 @@ class SimulationServer:
 
             Client may send JSON messages:
 
-            * ``{"type": "subscribe", "fields": {"node": ["f1", "f2"]}}``
-              — rebuild encoder for listed fields only.  Server re-sends a
-              new schema before resuming binary frames.  Send ``null``
-              fields to reset to full state.
+            * ``{"type": "subscribe", "fields": {"node": ["f1", "f2"]},
+              "compression": "zstd"}`` — rebuild encoder for listed
+              fields only and (optionally) set a compression mode.
+              ``compression`` ∈ ``{"none", "zstd", "zstd+xor"}``.  Server
+              re-sends a new schema (with the updated ``compression``
+              key) before resuming binary frames.  Send ``null`` fields
+              to reset to full state; omit ``compression`` to keep the
+              current mode.
             * ``{"type": "config", "fps": 30}`` — change poll rate.
             """
             await websocket.accept()
@@ -852,6 +856,8 @@ class SimulationServer:
             # Mutable state shared with receiver task
             target_fps = [60.0]
             current_encoder = [self._get_binary_encoder()]
+            current_compression = ["none"]
+            current_fields: list[dict | None] = [None]
             schema_dirty = asyncio.Event()
 
             await websocket.send_json(current_encoder[0].schema())
@@ -864,15 +870,33 @@ class SimulationServer:
                         try:
                             msg = _json.loads(raw)
                             if msg.get("type") == "subscribe":
-                                from maddening.api.binary_encoder import BinaryStateEncoder
-                                sub = msg.get("fields")
+                                from maddening.api.binary_encoder import (
+                                    BinaryStateEncoder, VALID_COMPRESSIONS,
+                                )
+                                if "fields" in msg:
+                                    current_fields[0] = msg["fields"]
+                                if "compression" in msg:
+                                    comp = msg["compression"]
+                                    if comp in VALID_COMPRESSIONS:
+                                        current_compression[0] = comp
                                 user_state = {
                                     k: v for k, v in self.gm._state.items()
                                     if k != "_meta"
                                 }
-                                current_encoder[0] = BinaryStateEncoder(
-                                    user_state, fields=sub,
-                                )
+                                try:
+                                    current_encoder[0] = BinaryStateEncoder(
+                                        user_state,
+                                        fields=current_fields[0],
+                                        compression=current_compression[0],
+                                    )
+                                except ImportError:
+                                    # zstandard not installed — fall back
+                                    current_compression[0] = "none"
+                                    current_encoder[0] = BinaryStateEncoder(
+                                        user_state,
+                                        fields=current_fields[0],
+                                        compression="none",
+                                    )
                                 schema_dirty.set()
                             elif msg.get("type") == "config":
                                 if "fps" in msg:

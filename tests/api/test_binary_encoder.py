@@ -6,7 +6,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.api.binary_encoder import BinaryStateEncoder
+from maddening.api.binary_encoder import BinaryStateEncoder, decode_frame
+
+try:
+    import zstandard  # noqa: F401
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
 
 
 @pytest.fixture
@@ -195,4 +201,117 @@ class TestFieldSubscription:
         assert reduction > 0.80, (
             f"Subset frame is {subset.frame_bytes} B vs full {full.frame_bytes} B; "
             f"reduction {reduction*100:.1f}% (expected ≥80%)"
+        )
+
+
+@pytest.mark.skipif(not HAS_ZSTD, reason="zstandard not installed")
+class TestCompression:
+    """v0.2 #6: zstd + zstd-xor compression on the encoder."""
+
+    def test_compression_field_in_schema(self, sample_state):
+        enc = BinaryStateEncoder(sample_state, compression="zstd")
+        assert enc.schema()["compression"] == "zstd"
+        assert enc.compression == "zstd"
+
+        enc_xor = BinaryStateEncoder(sample_state, compression="zstd+xor")
+        assert enc_xor.schema()["compression"] == "zstd+xor"
+
+    def test_default_compression_is_none(self, sample_state):
+        enc = BinaryStateEncoder(sample_state)
+        assert enc.compression == "none"
+        assert enc.schema()["compression"] == "none"
+
+    def test_invalid_compression_rejected(self, sample_state):
+        with pytest.raises(ValueError, match="compression"):
+            BinaryStateEncoder(sample_state, compression="lzma")
+
+    def test_zstd_roundtrip(self, sample_state):
+        enc = BinaryStateEncoder(sample_state, compression="zstd")
+        schema = enc.schema()
+        frame = enc.encode(7.5, sample_state)
+        sim_time, values = decode_frame(frame, schema)
+        assert abs(sim_time - 7.5) < 1e-9
+        assert values.shape == (schema["total_floats"],)
+        assert abs(values[schema["fields"][0]["offset"]] - 5.0) < 1e-6  # ball.position
+
+    def test_zstd_frame_smaller_than_raw_on_smooth_fields(self):
+        # A 1024-element heat rod with constant temperature is the
+        # easiest possible compressible payload.
+        state = {"rod": {"T": jnp.ones(1024) * 22.5}}
+        raw = BinaryStateEncoder(state).encode(0.0, state)
+        zstd_frame = BinaryStateEncoder(state, compression="zstd").encode(0.0, state)
+        # zstd should crush the 1024 identical floats to ~tens of bytes.
+        ratio = len(raw) / len(zstd_frame)
+        assert ratio > 10.0, f"zstd ratio {ratio:.1f}× should be >10× on constant fields"
+
+    def test_zstd_xor_better_than_zstd_on_slow_dynamics(self):
+        # 4096-cell field that only slightly changes between frames —
+        # the xor between consecutive frames is mostly zeros which zstd
+        # compresses better than the raw second frame.
+        state0 = {"rod": {"T": jnp.ones(4096) * 22.0}}
+        state1 = {"rod": {"T": jnp.ones(4096) * 22.0 + 0.001}}
+
+        enc_zstd = BinaryStateEncoder(state0, compression="zstd")
+        enc_xor = BinaryStateEncoder(state0, compression="zstd+xor")
+        # Prime the xor encoder with frame 0
+        enc_xor.encode(0.0, state0)
+        enc_zstd.encode(0.0, state0)
+
+        zstd_size = len(enc_zstd.encode(0.01, state1))
+        xor_size = len(enc_xor.encode(0.01, state1))
+        # xor frame should be at most as large as zstd alone, usually smaller
+        # on slowly-varying fields.  Allow 1.05× tolerance (zstd overhead
+        # on tiny payloads can make the comparison noisy).
+        assert xor_size <= int(zstd_size * 1.05), (
+            f"xor-delta {xor_size}B should be ≤ plain zstd {zstd_size}B "
+            f"on slowly-varying field"
+        )
+
+    def test_sim_time_header_is_plaintext_under_compression(self):
+        """The 8-byte sim_time prefix must NOT be compressed so clients
+        can read it without invoking zstd."""
+        state = {"a": {"x": jnp.array(1.0)}}
+        enc = BinaryStateEncoder(state, compression="zstd")
+        frame = enc.encode(3.14, state)
+        # First 8 bytes decode as float64 directly
+        t = struct.unpack_from("d", frame, 0)[0]
+        assert abs(t - 3.14) < 1e-9
+
+    def test_compression_combined_with_field_subscription(self, sample_state):
+        enc = BinaryStateEncoder(
+            sample_state,
+            fields={"heat_rod": ["temperature"]},
+            compression="zstd",
+        )
+        schema = enc.schema()
+        assert schema["compression"] == "zstd"
+        assert schema["total_floats"] == 20
+        frame = enc.encode(0.1, sample_state)
+        sim_time, vals = decode_frame(frame, schema)
+        assert abs(sim_time - 0.1) < 1e-9
+        assert vals.shape == (20,)
+        assert np.allclose(vals, 20.0, atol=1e-5)
+
+    def test_lbm_bandwidth_target(self):
+        """The brief's >95% target on a 32³ LBM payload should be met
+        when field-subscription is combined with zstd compression on
+        the constant initial state."""
+        N = 32 * 32 * 32
+        state = {
+            "lbm": {
+                "velocity": jnp.zeros((N, 3)),
+                **{f"f{i}": jnp.ones(N) * 0.05 for i in range(19)},
+            }
+        }
+        full_raw = BinaryStateEncoder(state).encode(0.0, state)
+        compressed = BinaryStateEncoder(
+            state,
+            fields={"lbm": ["velocity"]},
+            compression="zstd",
+        ).encode(0.0, state)
+        reduction = 1.0 - len(compressed) / len(full_raw)
+        assert reduction > 0.95, (
+            f"compressed+subscribed={len(compressed)}B vs raw "
+            f"full={len(full_raw)}B; reduction {reduction*100:.2f}% "
+            f"(brief target ≥95%)"
         )

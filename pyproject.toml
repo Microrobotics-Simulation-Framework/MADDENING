@@ -78,6 +78,10 @@ streaming = ["PyGObject>=3.42", "websockets>=11.0"]
 # SBOM generation
 sbom = ["cyclonedx-bom>=4.0"]
 
+# zstd compression for the binary state encoder (v0.2 #6).
+# Optional; falls back to uncompressed frames when absent.
+compression = ["zstandard>=0.22"]
+
 # ── Task bundles ───────────────────────────────────────────────────
 # "I'm running a simulation server on a GPU" (Docker image target)
 server = [
@@ -87,6 +91,7 @@ server = [
     "pyzmq>=25.0",
     "rich>=12.0",
     "matplotlib>=3.5",
+    "zstandard>=0.22",
 ]
 
 # "I'm a thin client viewing a remote simulation"
@@ -114,6 +119,7 @@ all = [
     "scikit-image>=0.20",
     "skypilot[runpod,lambda]>=0.11",
     "PyGObject>=3.42",
+    "zstandard>=0.22",
 ]
 
 # CI testing -- headless-safe subset (no display-dependent packages)
@@ -129,6 +135,7 @@ ci = [
     "equinox>=0.11",
     "optax>=0.1",
     "skypilot[runpod]>=0.11",
+    "zstandard>=0.22",
 ]
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)

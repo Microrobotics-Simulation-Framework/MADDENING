@@ -21,8 +21,13 @@ The profiler works by:
 
 from __future__ import annotations
 
+import json
+import os
+import tarfile
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import jax
@@ -247,3 +252,199 @@ def profile_graph(
         )
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# v0.2 #9: Perfetto trace export + jax.profiler integration
+# ---------------------------------------------------------------------------
+
+
+def profile_report_to_perfetto(report: ProfileReport) -> dict:
+    """Convert a :class:`ProfileReport` to Chrome/Perfetto Trace Event format.
+
+    The result is JSON-serialisable; write it to ``profile.json`` and
+    open in https://ui.perfetto.dev (drag-and-drop) for an interactive
+    flame-graph view.  No conversion tooling needed — the schema is
+    documented at
+    https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/
+    and natively understood by Perfetto's "JSON" frontend.
+
+    The trace contains:
+
+    * A ``"step"`` event spanning the entire benchmarked run.
+    * Per-node ``"<node>.update"`` events laid out in series within
+      each step (since we measured them in isolation, the timeline
+      is reconstructed rather than a literal recording).
+    * A meta event with ``args`` capturing throughput, coupling
+      overhead, and the bottleneck summary so the front-matter
+      survives in the trace.
+
+    Notes
+    -----
+    Because the source data is mean-step timings rather than a
+    recorded trace, the per-node bars are an aggregate approximation,
+    not literal sequential timing.  For genuine wall-clock traces
+    use :func:`start_jax_trace` / :func:`stop_jax_trace` which emit
+    XLA-level events from ``jax.profiler``.
+    """
+    events = []
+    pid = 1
+    tid = 1
+
+    # Microsecond-resolution timestamps (Perfetto convention).
+    step_us = report.mean_step_ms * 1000.0
+    total_us = report.total_run_ms * 1000.0
+
+    events.append({
+        "name": f"run x{report.n_steps}",
+        "cat": "graph",
+        "ph": "X",  # complete event (begin+dur)
+        "ts": 0.0,
+        "dur": total_us,
+        "pid": pid,
+        "tid": tid,
+        "args": {
+            "n_steps": report.n_steps,
+            "mean_step_ms": report.mean_step_ms,
+            "steps_per_second": report.steps_per_second,
+            "bottleneck": report.bottleneck or "none",
+        },
+    })
+
+    # Lay out per-node updates inside one representative step.
+    cursor_us = 0.0
+    for name, ms in sorted(report.node_times_ms.items(), key=lambda x: -x[1]):
+        dur_us = ms * 1000.0
+        events.append({
+            "name": f"{name}.update",
+            "cat": "node",
+            "ph": "X",
+            "ts": cursor_us,
+            "dur": dur_us,
+            "pid": pid,
+            "tid": tid + 1,
+            "args": {
+                "node": name,
+                "elements": report.node_sizes.get(name, 0),
+                "share_of_step_pct": (
+                    dur_us / step_us * 100 if step_us > 0 else 0.0
+                ),
+            },
+        })
+        cursor_us += dur_us
+
+    if report.coupling_overhead_ms > 0:
+        events.append({
+            "name": "coupling_overhead",
+            "cat": "coupling",
+            "ph": "X",
+            "ts": cursor_us,
+            "dur": report.coupling_overhead_ms * 1000.0,
+            "pid": pid,
+            "tid": tid + 1,
+            "args": {
+                "n_groups": report.n_coupling_groups,
+                "iterations_per_group": dict(report.coupling_iters),
+            },
+        })
+
+    return {
+        "traceEvents": events,
+        "displayTimeUnit": "us",
+        "otherData": {
+            "source": "maddening.core.simulation.profiler",
+            "n_steps": report.n_steps,
+            "n_nodes": report.n_nodes,
+            "recommendations": list(report.recommendations),
+            "jit_compile_ms": report.jit_compile_ms,
+        },
+    }
+
+
+class JaxProfilerSession:
+    """Context manager wrapper around :mod:`jax.profiler`.
+
+    JAX writes a TensorBoard-style profile under ``log_dir/plugins/profile/
+    <timestamp>/...xplane.pb`` which the TensorBoard "Trace Viewer" plugin
+    visualises with a Perfetto front-end.
+
+    Usage::
+
+        with JaxProfilerSession() as sess:
+            for _ in range(100):
+                gm.step()
+        sess.log_dir   # the captured trace directory
+
+    For one-shot REST use, :func:`start_jax_trace` and
+    :func:`stop_jax_trace` provide a non-blocking begin/end pair.
+    """
+
+    def __init__(self, log_dir: Optional[str] = None):
+        self.log_dir: Optional[str] = log_dir
+        self._owns_dir = log_dir is None
+        self._active = False
+
+    def __enter__(self) -> "JaxProfilerSession":
+        if self.log_dir is None:
+            self.log_dir = tempfile.mkdtemp(prefix="maddening_jaxtrace_")
+        jax.profiler.start_trace(self.log_dir)
+        self._active = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._active:
+            jax.profiler.stop_trace()
+            self._active = False
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+
+# Module-level singleton state for the REST endpoints.
+_active_jax_trace: Optional[JaxProfilerSession] = None
+
+
+def start_jax_trace(log_dir: Optional[str] = None) -> str:
+    """Begin a JAX trace; subsequent step() calls are recorded.
+
+    Returns the directory path the trace will be written to.  Pair
+    with :func:`stop_jax_trace`; starting a second trace while one is
+    active raises ``RuntimeError``.
+    """
+    global _active_jax_trace
+    if _active_jax_trace is not None and _active_jax_trace.active:
+        raise RuntimeError("A JAX trace is already active; stop it first.")
+    sess = JaxProfilerSession(log_dir=log_dir)
+    sess.__enter__()
+    _active_jax_trace = sess
+    return sess.log_dir or ""
+
+
+def stop_jax_trace() -> str:
+    """End the active JAX trace and return the path to its log dir."""
+    global _active_jax_trace
+    if _active_jax_trace is None or not _active_jax_trace.active:
+        raise RuntimeError("No JAX trace is active.")
+    log_dir = _active_jax_trace.log_dir or ""
+    _active_jax_trace.__exit__(None, None, None)
+    _active_jax_trace = None
+    return log_dir
+
+
+def jax_trace_active() -> bool:
+    """Return whether a JAX trace is currently recording."""
+    return _active_jax_trace is not None and _active_jax_trace.active
+
+
+def tar_trace_dir(log_dir: str) -> bytes:
+    """Pack a trace directory into a gzipped tarball (in-memory).
+
+    Useful for shipping JAX traces out of an ephemeral cloud instance
+    via the REST endpoint.
+    """
+    import io
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(log_dir, arcname=Path(log_dir).name)
+    return buf.getvalue()

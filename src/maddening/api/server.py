@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 import uuid
@@ -173,6 +174,9 @@ class SimulationServer:
         self._frame_renderer = frame_renderer
         # Cloud session (set externally or via /cloud/launch)
         self._cloud_session = None
+        # Last JAX trace directory (set by /sim/profile/jax/stop) so
+        # CloudSession teardown can pick it up.
+        self._last_jax_trace_dir: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -690,6 +694,84 @@ class SimulationServer:
 
             return {"status": "deactivated", "node": node_name}
 
+        # -- profile endpoints (v0.2 #9) -----------------------------------
+
+        @app.post("/sim/profile", tags=["sim"])
+        def sim_profile(n_steps: int = 50, n_warmup: int = 3):
+            """Run a step-time profile and return a Perfetto-loadable JSON trace.
+
+            POST with ``?n_steps=N`` to override (default 50, capped at
+            1000 to keep request latency bounded).  The response is a
+            Perfetto-format JSON trace; save the body as ``profile.json``
+            and drag-and-drop into https://ui.perfetto.dev for an
+            interactive flame-graph view of per-node + coupling
+            overhead.
+            """
+            from maddening.core.simulation.profiler import (
+                profile_graph, profile_report_to_perfetto,
+            )
+            n_steps = max(1, min(1000, int(n_steps)))
+            n_warmup = max(0, min(50, int(n_warmup)))
+            try:
+                if self._runner_started:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cannot profile while the runner is started. "
+                               "POST /sim/stop first.",
+                    )
+                report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
+            except HTTPException:
+                raise
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            return profile_report_to_perfetto(report)
+
+        @app.post("/sim/profile/jax/start", tags=["sim"])
+        def sim_profile_jax_start():
+            """Begin a JAX-level XLA trace.
+
+            All subsequent ``/sim/step`` and ``/sim/run`` calls (and
+            any runner steps) are recorded.  POST
+            ``/sim/profile/jax/stop`` to end the trace.  The trace
+            directory is returned in the stop response and can be loaded
+            via TensorBoard's "Trace Viewer" plugin (which uses a
+            Perfetto frontend).
+            """
+            from maddening.core.simulation.profiler import (
+                start_jax_trace, jax_trace_active,
+            )
+            if jax_trace_active():
+                raise HTTPException(
+                    status_code=409, detail="A JAX trace is already active.",
+                )
+            try:
+                log_dir = start_jax_trace()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            return {"status": "tracing", "log_dir": log_dir}
+
+        @app.post("/sim/profile/jax/stop", tags=["sim"])
+        def sim_profile_jax_stop():
+            """End the active JAX trace and return the log directory."""
+            from maddening.core.simulation.profiler import (
+                stop_jax_trace, jax_trace_active,
+            )
+            if not jax_trace_active():
+                raise HTTPException(
+                    status_code=409, detail="No JAX trace is active.",
+                )
+            log_dir = stop_jax_trace()
+            self._last_jax_trace_dir = log_dir
+            return {"status": "stopped", "log_dir": log_dir}
+
+        @app.get("/sim/profile/jax/status", tags=["sim"])
+        def sim_profile_jax_status():
+            from maddening.core.simulation.profiler import jax_trace_active
+            return {
+                "active": jax_trace_active(),
+                "last_trace_dir": getattr(self, "_last_jax_trace_dir", None),
+            }
+
         # -- cloud endpoints ------------------------------------------------
 
         @app.post("/cloud/launch", tags=["cloud"])
@@ -737,17 +819,39 @@ class SimulationServer:
 
         @app.post("/cloud/teardown", tags=["cloud"])
         def cloud_teardown():
-            """Tear down the cloud session."""
+            """Tear down the cloud session.
+
+            If a JAX trace was captured during this session (see
+            ``/sim/profile/jax/start``), snapshot the trace directory
+            into the response so the user can recover the .pb files
+            after the VM is gone.  This implements the v0.2 #9
+            "CloudSession teardown auto-snapshot" requirement.
+            """
             if self._cloud_session is None:
                 raise HTTPException(
                     status_code=501,
                     detail="No cloud session configured.",
                 )
+            trace_snapshot = None
+            if self._last_jax_trace_dir is not None and os.path.isdir(
+                self._last_jax_trace_dir
+            ):
+                from maddening.core.simulation.profiler import tar_trace_dir
+                import base64
+                tar_bytes = tar_trace_dir(self._last_jax_trace_dir)
+                trace_snapshot = {
+                    "source_dir": self._last_jax_trace_dir,
+                    "size_bytes": len(tar_bytes),
+                    "tar_gz_b64": base64.b64encode(tar_bytes).decode("ascii"),
+                }
             try:
                 self._cloud_session.teardown()
             finally:
                 self._cloud_session = None
-            return {"status": "torn_down"}
+            return {
+                "status": "torn_down",
+                "jax_trace_snapshot": trace_snapshot,
+            }
 
         def _cloud_deps_available() -> bool:
             """Check if cloud dependencies are installed."""

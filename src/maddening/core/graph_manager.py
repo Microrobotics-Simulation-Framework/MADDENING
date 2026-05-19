@@ -949,6 +949,12 @@ class GraphManager:
         self._back_edges: list[EdgeSpec] = []
         self._external_inputs: list[ExternalInputSpec] = []
         self._is_multirate: bool = False
+        # v0.2 #3: snapshot of per-node static_data hashes captured at
+        # ``compile()`` time.  Used by ``_check_static_data_dirty`` so a
+        # node whose ``static_data`` changes after compile (typical
+        # case: ``replace_node`` brings a different mesh) forces a
+        # recompile on the next ``step()``.
+        self._static_data_hashes: dict[str, int] = {}
         self._rate_dividers: dict[str, int] = {}
         self._coupling_groups: list[CouplingGroup] = []
         # Multi-GPU state (set by enable_multigpu)
@@ -1451,8 +1457,29 @@ class GraphManager:
         step_fn = self._build_step_fn()
         self._compiled_step = jax.jit(step_fn)
 
+        # Snapshot static_data hashes so we can detect drift.
+        self._static_data_hashes = {
+            name: spec.node.static_data_hash()
+            for name, spec in self._nodes.items()
+        }
+
         self._dirty = False
         self._notify(EVENT_COMPILED, self._schedule)
+
+    def _check_static_data_dirty(self) -> bool:
+        """Return True (and set ``self._dirty=True``) if any node's
+        :attr:`static_data` has changed shape/dtype since the last
+        ``compile()``.
+
+        Called from each public entry-point (``step``, ``run``, etc.)
+        before the standard dirty-check so a stale JIT cache is caught
+        without requiring the caller to mark the graph dirty manually.
+        """
+        for name, spec in self._nodes.items():
+            if spec.node.static_data_hash() != self._static_data_hashes.get(name, 0):
+                self._dirty = True
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Multi-GPU
@@ -1849,6 +1876,7 @@ class GraphManager:
         Returns the full state dict after the step (excluding internal
         metadata).
         """
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -1880,6 +1908,7 @@ class GraphManager:
             inputs that change each step, use :meth:`step` in a loop
             or use a ``CommandReceiver`` with ``RealtimeRunner``.
         """
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -1926,6 +1955,7 @@ class GraphManager:
             The final state of the graph after *n_steps* (excluding
             internal metadata).
         """
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -1980,6 +2010,7 @@ class GraphManager:
             ``(n_steps,)`` (or ``(n_steps, *field_shape)`` for
             non-scalar fields) holding the value **after** each step.
         """
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -2040,6 +2071,7 @@ class GraphManager:
             Only if ``return_history=True``.  Batched histories with
             shape ``(batch, n_steps, ...)`` on each leaf.
         """
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -2232,6 +2264,7 @@ class GraphManager:
                 "Adaptive timestepping is incompatible with multi-rate "
                 "graphs.  All nodes must share the same timestep."
             )
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
@@ -2372,6 +2405,7 @@ class GraphManager:
             raise RuntimeError(
                 "Adaptive timestepping is incompatible with multi-rate graphs."
             )
+        self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 

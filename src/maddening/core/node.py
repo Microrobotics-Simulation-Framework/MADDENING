@@ -138,6 +138,74 @@ class SimulationNode(ABC):
         return list(self.initial_state().keys())
 
     # ------------------------------------------------------------------
+    # Static-data channel (v0.2 #3)
+    # ------------------------------------------------------------------
+
+    @property
+    def static_data(self) -> dict:
+        """Non-state arrays/values closed over by :meth:`update`.
+
+        Default: ``{}``.  Override in subclasses that need to carry
+        mesh structures, lookup tables, wall masks, basis functions,
+        or any other tensor that participates in ``update()`` but
+        does not evolve in time.
+
+        Contract
+        --------
+        * **Keys** must be strings.
+        * **Values** are either Python scalars / strings / tuples (which
+          are hashed by value) or JAX/NumPy arrays (which are hashed by
+          ``(shape, dtype)`` — the contents themselves are *not* hashed
+          because static_data is expected to be much larger than the
+          state).
+        * Returned dict should be **stable across calls** for a given
+          node instance.  Build it once in ``__init__`` and stash on
+          ``self``; do not reconstruct per-call.
+        * Static data is **not checkpointed**.  See the
+          ``static_data_provider`` pattern in ``DESIGN.md`` — store the
+          provider config in ``self.params`` so it survives a
+          checkpoint/restore round-trip and the static data can be
+          reconstructed on ``load_state``.
+
+        Why a separate channel
+        ----------------------
+        Putting large arrays in :meth:`initial_state` makes them part of
+        the JAX state pytree — they get carried through every
+        ``fori_loop``, multi-rate step, and gradient pass even though
+        they never change.  ``static_data`` lets the node hold them
+        outside the state, closing over them in ``update()``.  JAX bakes
+        them into the JIT-compiled HLO as constants, which is exactly
+        what we want for a 1 GB FVM mesh.
+        """
+        return {}
+
+    def static_data_hash(self) -> int:
+        """Stable hash over :attr:`static_data` for JIT cache invalidation.
+
+        Returns ``hash(((k, shape, dtype), ...))`` for array values and
+        ``hash(((k, repr(v)), ...))`` for scalars.  Used by
+        :class:`GraphManager` to detect when a recompile is needed
+        because a node's static_data changed (typical case: a
+        :func:`replace_node` swap brings a different-shape mesh).
+
+        Returns
+        -------
+        int
+            ``0`` if ``static_data`` is empty.
+        """
+        sd = self.static_data
+        if not sd:
+            return 0
+        items = []
+        for k in sorted(sd):
+            v = sd[k]
+            if hasattr(v, "shape") and hasattr(v, "dtype"):
+                items.append((str(k), tuple(int(d) for d in v.shape), str(v.dtype)))
+            else:
+                items.append((str(k), repr(v)))
+        return hash(tuple(items))
+
+    # ------------------------------------------------------------------
     # UQ interface (Section 9.4)
     # ------------------------------------------------------------------
 

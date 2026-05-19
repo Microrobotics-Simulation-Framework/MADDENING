@@ -82,7 +82,7 @@ hit = position < table_pos
 position = jnp.where(hit, table_pos, position)
 ```
 
-### Parameters vs State
+### Parameters vs State vs Static Data
 
 - **Parameters** (elasticity, mass, etc.) are set at construction time via
   `__init__(**params)` and stored in `self.params`.  They are constants
@@ -90,6 +90,65 @@ position = jnp.where(hit, table_pos, position)
   because JAX treats Python-level constants as literals.
 - **State** (position, velocity, etc.) flows through the function signature.
   It must be a flat dict of JAX arrays.
+- **Static data** (lookup tables, meshes, wall masks, basis vectors) is
+  large array-valued data that participates in `update()` but does not
+  evolve in time.  Expose it via the optional ``static_data`` property
+  (default ``{}``) — see *Static-data channel* below.
+
+### Static-data channel  *(v0.2 #3)*
+
+Some nodes need to close over large arrays that don't change in time:
+FVM meshes, LBM wall masks, FNO basis vectors, lookup tables for
+nonlinear materials.  Putting them in ``initial_state`` is wrong — they
+get carried through every ``fori_loop`` iteration as part of the state
+pytree even though they never change.  Put them in ``self.params`` and
+JAX has to retrace the closure every time you pass a different mesh.
+
+The ``static_data`` channel solves both:
+
+```python
+class FVMFluidNode(SimulationNode):
+    def __init__(self, name, timestep, mesh):
+        super().__init__(name, timestep, mesh_id=mesh.id)
+        self._mesh = mesh                              # build once
+        self._mesh_arrays = {                          # cache as JAX
+            "x": jnp.asarray(mesh.x),
+            "Sf": jnp.asarray(mesh.Sf),
+        }
+
+    @property
+    def static_data(self) -> dict:
+        return self._mesh_arrays                       # exposed to GM
+
+    def update(self, state, boundary_inputs, dt):
+        x = self._mesh_arrays["x"]                     # closed-over;
+        Sf = self._mesh_arrays["Sf"]                   # baked into HLO
+        ...
+```
+
+**Contract** (see ``SimulationNode.static_data`` docstring):
+- Keys are strings.  Values are scalars, strings, tuples, or
+  JAX/NumPy arrays.
+- The dict must be **stable across calls** for a given node instance
+  (build once in ``__init__``, do not reconstruct per-call).
+- Static data is **not checkpointed**.  Make it reconstructable from
+  ``self.params`` so a checkpoint/restore round-trip can rebuild it.
+
+**Hash for JIT cache invalidation**.  ``static_data_hash()`` returns a
+``hash((key, shape, dtype), ...)`` — arrays hash by shape+dtype, not
+contents.  ``GraphManager`` snapshots these hashes at ``compile()``
+and re-checks them at every step entry.  Drift → automatic recompile.
+The typical drift case is ``replace_node`` swapping in a different
+mesh size; the user does not need to call ``gm._dirty = True``
+manually.
+
+**Reconstructable, not checkpointed** is a deliberate decision.  FVM
+meshes loaded from USD don't round-trip cleanly through NPZ, and
+large mesh arrays would blow up checkpoint size for negligible gain.
+Store the *provider* configuration (a path, a generator function
+name, parameters) in ``self.params``; the static_data is rebuilt at
+``__init__`` time on load.  This is the "static_data_provider"
+pattern referenced by ``CHECKPOINT_DECISIONS.md``.
 
 ### Boundary Inputs
 

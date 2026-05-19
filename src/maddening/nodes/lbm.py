@@ -41,6 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -228,6 +229,9 @@ def _compute_macroscopic(f, e):
 def _stream(f, e, ndim):
     """Streaming step: shift each f_q by its lattice velocity via jnp.roll.
 
+    Periodic wrap on every axis -- used by the unsharded :meth:`LBMNode.update`
+    path.  For halo-aware sharded streaming see :func:`_stream_padded`.
+
     Parameters
     ----------
     f : (*grid_shape, Q) float32
@@ -246,6 +250,43 @@ def _stream(f, e, ndim):
             shift = int(e[q, d])
             if shift != 0:
                 fq = jnp.roll(fq, shift, axis=d)
+        slices.append(fq)
+    return jnp.stack(slices, axis=-1)
+
+
+def _stream_padded(f_pad, e, ndim, halo):
+    """Halo-aware streaming step on a padded distribution.
+
+    Replaces the ``jnp.roll`` wrap with explicit indexed slicing.  Each
+    direction ``q`` reads from neighbour cells that live in the halo
+    region for boundary cells; the halo cells came from either neighbour
+    shards (:func:`halo_exchange`) or a local periodic-pad fallback.
+
+    Parameters
+    ----------
+    f_pad : (*grid_padded, Q) float32
+        Halo-padded distribution.  Each spatial axis ``d`` has size
+        ``grid_local[d] + 2*halo``.
+    e : (Q, D) numpy int array
+    ndim : int
+        Number of spatial dimensions (2 or 3).
+    halo : int
+        Halo width on each side of every spatial axis (1 for D3Q19 / D2Q9).
+
+    Returns
+    -------
+    f_streamed : (*grid_local, Q) float32
+        Streamed distributions on the interior cells (halo stripped).
+    """
+    Q = e.shape[0]
+    slices = []
+    for q in range(Q):
+        fq = f_pad[..., q]
+        for d in range(ndim):
+            shift = int(e[q, d])
+            n_d = fq.shape[d] - 2 * halo
+            start = halo - shift
+            fq = jax.lax.slice_in_dim(fq, start, start + n_d, axis=d)
         slices.append(fq)
     return jnp.stack(slices, axis=-1)
 
@@ -618,15 +659,19 @@ class LBMNode(SimulationNode):
         self._inlet_face = inlet_face
         self._outlet_face = outlet_face
 
-        # Wall mask: convert to JAX array for JIT compatibility
+        # Wall mask: convert to JAX array for JIT compatibility.
+        # Track at Python level whether any walls are present so the
+        # sharded `update_padded` can guard cheaply outside of tracing.
         if wall_mask is not None:
             if wall_mask.shape != tuple(grid_shape):
                 raise ValueError(
                     f"wall_mask shape {wall_mask.shape} != grid_shape "
                     f"{tuple(grid_shape)}"
                 )
+            self._has_walls = bool(np.any(np.asarray(wall_mask)))
             self._wall_mask = jnp.asarray(wall_mask, dtype=jnp.bool_)
         else:
+            self._has_walls = False
             self._wall_mask = jnp.zeros(grid_shape, dtype=jnp.bool_)
 
     @property
@@ -678,6 +723,102 @@ class LBMNode(SimulationNode):
             "density": density,
             "velocity": velocity,
             "pressure": pressure,
+        }
+
+    def update_padded(
+        self, state_padded: dict, boundary_inputs: dict, dt: float
+    ) -> dict:
+        """Halo-aware LBM step (M6 minimal: no walls, no Zou-He BCs).
+
+        ``state_padded`` carries halo-padded fields along every spatial
+        axis declared in :meth:`halo_width`.  The streaming step reads
+        across the halo via :func:`_stream_padded`; collision and
+        macroscopic recovery run on the interior only.
+
+        Wall bounce-back and Zou-He pressure BCs require shard-aware
+        slicing of ``wall_mask`` and global-edge detection, both of
+        which land with M7 (LBM pencil + Hagen-Poiseuille).  This
+        method raises if ``wall_mask`` is non-empty or pressure
+        inputs are supplied.
+        """
+        if self._has_walls or "wall_mask_update" in boundary_inputs:
+            raise NotImplementedError(
+                "LBMNode.update_padded does not yet support wall bounce-back "
+                "under sharding (lands with M7)."
+            )
+        if (
+            boundary_inputs.get("inlet_pressure") is not None
+            or boundary_inputs.get("outlet_pressure") is not None
+        ):
+            raise NotImplementedError(
+                "LBMNode.update_padded does not yet support Zou-He pressure "
+                "BCs under sharding (lands with M7)."
+            )
+
+        f_pad = state_padded["f"]
+        tau = self._tau
+        lat = self._lat
+        e = lat.e
+        w = lat.w
+        cs2 = lat.cs2
+        D = self._D
+        ndim = D
+        halo = 1  # D3Q19/D2Q9 unit-step neighbours
+
+        interior_slicer = tuple(
+            slice(halo, -halo) if d < ndim else slice(None)
+            for d in range(f_pad.ndim)
+        )
+
+        # BGK collision is purely local, so we collide on the *entire*
+        # padded array -- halo cells included -- so that the post-stream
+        # values read across the halo match what the neighbour shard
+        # would produce.  Halo cells carry the neighbour's pre-collision
+        # distribution from halo_exchange; colliding them locally is
+        # algebraically identical to colliding them on the neighbour.
+        density_pad, velocity_pad = _compute_macroscopic(f_pad, e)
+
+        # Body force (replicated -- a single scalar per spatial cell).
+        # When provided, it's the unpadded shape; pad with zeros to match
+        # the padded macroscopic shape.
+        force = boundary_inputs.get(
+            "body_force",
+            jnp.zeros(density_pad.shape + (D,), dtype=jnp.float32),
+        )
+        if force.shape != density_pad.shape + (D,):
+            # Caller passed an unpadded force; zero-pad to padded shape.
+            pad_widths = [
+                (halo, halo) if d < ndim else (0, 0)
+                for d in range(force.ndim)
+            ]
+            force = jnp.pad(force, pad_widths)
+
+        f_eq_pad = _equilibrium(density_pad, velocity_pad, e, w, cs2)
+        f_post_pad = f_pad - (f_pad - f_eq_pad) / tau
+        f_post_pad = f_post_pad + _guo_forcing(
+            density_pad, velocity_pad, force, tau, e, w, cs2,
+        )
+
+        # Streaming reads post-collision values from the halo; output
+        # has the interior shape.
+        f_streamed_interior = _stream_padded(f_post_pad, e, ndim, halo)
+
+        density_new, velocity_new = _compute_macroscopic(f_streamed_interior, e)
+        pressure_new = density_new * cs2
+
+        # Re-pad the outputs so the wrapper can strip uniformly.  Halo
+        # entries are placeholders; values inside the interior are the
+        # final post-stream result.
+        f_new_pad = f_pad.at[interior_slicer].set(f_streamed_interior)
+        density_pad_out = state_padded["density"].at[interior_slicer[:ndim]].set(density_new)
+        velocity_pad_out = state_padded["velocity"].at[interior_slicer].set(velocity_new)
+        pressure_pad_out = state_padded["pressure"].at[interior_slicer[:ndim]].set(pressure_new)
+
+        return {
+            "f": f_new_pad,
+            "density": density_pad_out,
+            "velocity": velocity_pad_out,
+            "pressure": pressure_pad_out,
         }
 
     def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:

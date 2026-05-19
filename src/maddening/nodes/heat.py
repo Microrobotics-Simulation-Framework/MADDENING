@@ -28,6 +28,23 @@ def _laplacian_2nd_order_uniform(T_padded, dx):
     return (T_padded[2:] - 2.0 * T_padded[1:-1] + T_padded[:-2]) / (dx * dx)
 
 
+def _laplacian_4th_order_pure(T_padded, dx):
+    """4th-order central-difference Laplacian, no boundary fallback.
+
+    Suitable when ``T_padded`` has *real* ghost cells on each side
+    (e.g. coming from a halo exchange), so no cell needs a lower-order
+    fallback near the edge.
+    """
+    dx2 = dx * dx
+    return (
+        -T_padded[:-4]
+        + 16.0 * T_padded[1:-3]
+        - 30.0 * T_padded[2:-2]
+        + 16.0 * T_padded[3:-1]
+        - T_padded[4:]
+    ) / (12.0 * dx2)
+
+
 def _laplacian_4th_order_uniform(T_padded, dx):
     """4th-order central difference Laplacian on a uniform grid.
 
@@ -39,14 +56,7 @@ def _laplacian_4th_order_uniform(T_padded, dx):
     n = T_padded.shape[0] - 4  # original cell count
     dx2 = dx * dx
 
-    # 4th-order for all cells (using the 5-point stencil over T_padded)
-    lap_4th = (
-        -T_padded[:-4]
-        + 16.0 * T_padded[1:-3]
-        - 30.0 * T_padded[2:-2]
-        + 16.0 * T_padded[3:-1]
-        - T_padded[4:]
-    ) / (12.0 * dx2)
+    lap_4th = _laplacian_4th_order_pure(T_padded, dx)
 
     # 2nd-order for fallback (centred on the same cells)
     lap_2nd = (
@@ -54,7 +64,6 @@ def _laplacian_4th_order_uniform(T_padded, dx):
     ) / dx2
 
     # Use 2nd-order for the first and last cells, 4th-order elsewhere
-    # Build a mask: 1 for interior (4th-order), 0 for boundary (2nd-order)
     idx = jnp.arange(n)
     use_4th = (idx >= 1) & (idx <= n - 2)
     lap = jnp.where(use_4th, lap_4th, lap_2nd)
@@ -309,6 +318,66 @@ class HeatNode(SimulationNode):
                 jnp.array([T_right], dtype=jnp.float32),
             ])  # shape (n+2,)
             return _laplacian_2nd_order_uniform(T_padded, dx)
+
+    def update_padded(
+        self, state_padded: dict, boundary_inputs: dict, dt: float
+    ) -> dict:
+        """Sharded update from a halo-padded temperature field.
+
+        ``state_padded["temperature"]`` is expected to be the local
+        shard's interior with ``halo_width()[0]`` ghost cells prepended
+        and appended on axis 0 (filled by
+        :class:`ShardedStencilNode`).  The Laplacian is computed on
+        the interior; ghost cells are passed through unchanged so the
+        wrapper can strip them.
+
+        The boundary mode used by the wrapper drives Dirichlet/Neumann
+        semantics at the *global* boundary:
+        ``boundary="zero"`` ↔ Dirichlet T=0,
+        ``boundary="edge"`` ↔ zero-gradient (Neumann).
+        For non-zero Dirichlet temperatures or per-shard BC overrides,
+        plug into the coupling system (M8) rather than this primitive.
+        Non-uniform grids are not yet supported under sharding.
+        """
+        if self._is_nonuniform:
+            raise NotImplementedError(
+                "HeatNode.update_padded does not yet support non-uniform "
+                "grids under sharding.  Use the unsharded path."
+            )
+
+        T_pad = state_padded["temperature"]
+        halo = int(self.halo_width()[0])
+        if halo == 0:
+            return self.update(state_padded, boundary_inputs, dt)
+
+        alpha = self.params["thermal_diffusivity"]
+        L = self.params["length"]
+        n_global = self.params["n_cells"]
+        dx = L / n_global
+        stencil_order = self.params.get("stencil_order", 2)
+
+        if stencil_order == 4:
+            assert halo == 2, "4th-order stencil expects halo=2"
+            lap = _laplacian_4th_order_pure(T_pad, dx)
+        else:
+            assert halo == 1, "2nd-order stencil expects halo=1"
+            lap = _laplacian_2nd_order_uniform(T_pad, dx)
+
+        T_interior = T_pad[halo:-halo]
+        n_local = T_interior.shape[0]
+
+        source = boundary_inputs.get(
+            "heat_source", jnp.zeros(n_local, dtype=jnp.float32)
+        )
+        source = jnp.broadcast_to(
+            jnp.asarray(source, dtype=jnp.float32), (n_local,)
+        )
+
+        T_new_interior = T_interior + alpha * dt * lap + source * dt
+
+        return {"temperature": jnp.concatenate(
+            [T_pad[:halo], T_new_interior, T_pad[-halo:]], axis=0
+        )}
 
     def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
         """Explicit finite-difference update for the 1D heat equation.

@@ -178,6 +178,16 @@ class ShardedStencilNode(SimulationNode):
             (ma, sa, halo[sa]) for ma, sa in self._axis_map.items()
         ]
 
+        # Cache for shard_map-wrapped update functions, keyed by state
+        # shape signature.  Built once per shape, then reused so the JAX
+        # trace cache hits on every subsequent step.
+        sharded_spatial = set(self._axis_map.values())
+        self._replicated_halo_axes = {
+            sa: h for sa, h in halo.items() if sa not in sharded_spatial
+        }
+        self._local_update_fn = self._build_local_update()
+        self._sharded_cache: dict[tuple, Any] = {}
+
     def halo_width(self) -> dict[int, int]:
         """Same as the wrapped node -- sharding does not change the stencil."""
         return self._inner.halo_width()
@@ -198,29 +208,26 @@ class ShardedStencilNode(SimulationNode):
     def update_padded(self, state_padded, boundary_inputs, dt):
         return self._inner.update_padded(state_padded, boundary_inputs, dt)
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
-        """Halo-pad every state field, call ``update_padded``, strip halos.
+    # ------------------------------------------------------------------
+    # update path
+    # ------------------------------------------------------------------
 
-        Sharded spatial axes get halo cells from neighbour shards via
-        :func:`halo_exchange`.  Spatial axes with halo but no sharding
-        (replicated axes) get their halos filled locally according to
-        ``boundary``.  This lets a node with halo on every axis run
-        under a partial-pencil mesh without the stencil needing to
-        know which axes are sharded.
+    def _build_local_update(self):
+        """Build the stable inner update function (closure on static data).
+
+        The returned function takes ``(local_state, boundary_inputs, dt)``
+        and is reused across every step -- only its in/out specs depend
+        on the input shapes, so the shard_map trace caches cleanly.
         """
-        in_state_specs = {f: self._spec_for_field(arr) for f, arr in state.items()}
-
         inner = self._inner
         mesh = self._mesh
-        halo_widths = inner.halo_width()
-        sharded_spatial = set(self._axis_map.values())
-        replicated_halo_axes = {
-            sa: h for sa, h in halo_widths.items() if sa not in sharded_spatial
-        }
         exchange_axes = self._exchange_axes
         boundary = self._boundary
+        replicated_halo_axes = self._replicated_halo_axes
+        strip_fn = self._strip_halos
+        field_needs_halo = self._field_needs_halo
 
-        def _pad_replicated(arr: jax.Array) -> jax.Array:
+        def _pad_replicated(arr):
             out = arr
             for sa in sorted(replicated_halo_axes):
                 h = int(replicated_halo_axes[sa])
@@ -239,27 +246,73 @@ class ShardedStencilNode(SimulationNode):
                 out = jnp.concatenate([left_halo, out, right_halo], axis=sa)
             return out
 
-        def _local_update(local_state):
+        def _local_update(local_state, local_bi, local_dt):
             padded = {}
             for f, arr in local_state.items():
                 arr2 = _pad_replicated(arr)
-                if exchange_axes and self._field_needs_halo(arr):
+                if exchange_axes and field_needs_halo(arr):
                     arr2 = halo_exchange(
                         arr2, mesh=mesh, axes=exchange_axes, boundary=boundary,
                     )
                 padded[f] = arr2
-            new_padded = inner.update_padded(padded, boundary_inputs, dt)
-            return {f: self._strip_halos(arr, original=local_state[f])
+            new_padded = inner.update_padded(padded, local_bi, local_dt)
+            return {f: strip_fn(arr, original=local_state[f])
                     for f, arr in new_padded.items()}
 
-        sharded_fn = shard_map(
-            _local_update,
+        return _local_update
+
+    def _state_signature(self, state: dict) -> tuple:
+        return tuple(sorted(
+            (f, tuple(arr.shape), str(arr.dtype)) for f, arr in state.items()
+        ))
+
+    def _bi_signature(self, boundary_inputs: dict) -> tuple:
+        return tuple(sorted(
+            (k, tuple(jnp.asarray(v).shape), str(jnp.asarray(v).dtype))
+            for k, v in boundary_inputs.items()
+        ))
+
+    def _get_sharded_fn(self, state: dict, boundary_inputs: dict):
+        key = (self._state_signature(state), self._bi_signature(boundary_inputs))
+        fn = self._sharded_cache.get(key)
+        if fn is not None:
+            return fn
+
+        state_specs = {f: self._spec_for_field(arr) for f, arr in state.items()}
+        bi_specs = {k: P() for k in boundary_inputs}
+        out_specs = state_specs
+
+        sm = shard_map(
+            self._local_update_fn,
             mesh=self._mesh,
-            in_specs=(in_state_specs,),
-            out_specs=in_state_specs,
+            in_specs=(state_specs, bi_specs, P()),
+            out_specs=out_specs,
             check_rep=False,
         )
-        return sharded_fn(state)
+        # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
+        # overhead on CPU; wrapping it in jit reduces that to microseconds.
+        # When ShardedStencilNode is used inside GraphManager's jitted step
+        # function the outer jit would absorb this anyway, but the eager
+        # path (standalone .update calls in tests) needs the explicit jit.
+        fn = jax.jit(sm)
+        self._sharded_cache[key] = fn
+        return fn
+
+    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+        """Halo-pad every state field, call ``update_padded``, strip halos.
+
+        Sharded spatial axes get halo cells from neighbour shards via
+        :func:`halo_exchange`.  Spatial axes with halo but no sharding
+        (replicated axes) get their halos filled locally according to
+        ``boundary``.  This lets a node with halo on every axis run
+        under a partial-pencil mesh without the stencil needing to
+        know which axes are sharded.
+
+        The shard_map wrapper is built once per ``(state_shape, bi_shape)``
+        signature and cached so repeated steps hit JAX's compile cache.
+        """
+        fn = self._get_sharded_fn(state, boundary_inputs)
+        return fn(state, boundary_inputs, jnp.asarray(dt, dtype=jnp.float32))
 
     # ------------------------------------------------------------------
     # helpers

@@ -21,14 +21,7 @@ from maddening import GraphManager, SimulationNode
 
 # 1. Define a node
 class BounceNode(SimulationNode):
-    """Ball bouncing under gravity."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    @property
-    def requires_halo(self) -> bool:
-        return False  # pointwise (no spatial neighbors)
+    """A ball bouncing under gravity, optionally pushed by a force."""
 
     def initial_state(self):
         return {
@@ -38,7 +31,10 @@ class BounceNode(SimulationNode):
 
     def update(self, state, boundary_inputs, dt):
         gravity = -9.81
-        new_vel = state["velocity"] + gravity * dt
+        # `external_force` arrives over an edge when the ball is coupled
+        # (see "Coupled Simulation" below); standalone it defaults to 0.
+        external_force = boundary_inputs.get("external_force", 0.0)
+        new_vel = state["velocity"] + (gravity + external_force) * dt
         new_pos = state["position"] + new_vel * dt
         # Bounce off the floor
         new_vel = jnp.where(new_pos < 0, jnp.abs(new_vel) * 0.8, new_vel)
@@ -65,23 +61,56 @@ plt.savefig("bounce.png")
 print(f"Final height: {float(final_state['ball']['position']):.3f}")
 ```
 
+```{note}
+`gm.compile()` prints advisory notices about graph wiring — a lone node
+reports as "disconnected", and a feedback loop reports a detected cycle
+(back-edges are staggered to the previous timestep).  They are advisory,
+not errors: a standalone single-node graph and an intentional coupling
+loop both run correctly.
+```
+
 ## Coupled Simulation
 
-Connect nodes with edges to exchange data each timestep:
+Connect nodes with {term}`edges <Edge>` to exchange data every timestep.
+Here a spring reacts to the ball's height and pushes back on it — the
+ball drives the spring, and the spring's force feeds into the ball:
 
 ```python
-from maddening import GraphManager, EdgeSpec
+import jax.numpy as jnp
+from maddening import GraphManager, SimulationNode
 
+
+# A second node: a spring that pulls the ball toward a rest height.
+class SpringNode(SimulationNode):
+    """Restoring force toward a fixed rest height."""
+
+    def __init__(self, stiffness=12.0, rest_height=2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.stiffness = stiffness
+        self.rest_height = rest_height
+
+    def initial_state(self):
+        return {"force": jnp.array(0.0)}
+
+    def update(self, state, boundary_inputs, dt):
+        anchor = boundary_inputs.get("anchor_position", self.rest_height)
+        return {"force": -self.stiffness * (anchor - self.rest_height)}
+
+
+# BounceNode is the node defined in the first example above.
 gm = GraphManager()
-gm.add_node(ball_node)       # produces "position"
-gm.add_node(spring_node)     # consumes "anchor_position", produces "force"
+gm.add_node(BounceNode(name="ball", timestep=0.01))    # produces "position"
+gm.add_node(SpringNode(name="spring", timestep=0.01))  # produces "force"
 
-# Ball position feeds into spring, spring force feeds back
-gm.add_edge("ball", "spring", source_field="position", target_field="anchor_position")
-gm.add_edge("spring", "ball", source_field="force", target_field="external_force")
+# Ball position feeds the spring; spring force feeds back into the ball.
+gm.add_edge("ball", "spring", source_field="position",
+            target_field="anchor_position")
+gm.add_edge("spring", "ball", source_field="force",
+            target_field="external_force")
 
 gm.compile()
-gm.run(n_steps=1000)
+final_state, history = gm.run_scan_with_history(n_steps=1000)
+print(f"Final ball height: {float(final_state['ball']['position']):.2f}")
 ```
 
 ## Differentiable Everything

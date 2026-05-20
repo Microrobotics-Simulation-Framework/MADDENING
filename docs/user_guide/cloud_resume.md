@@ -2,7 +2,7 @@
 orphan: false
 ---
 
-# Surviving spot-preemption: checkpoint, resume, integrity
+# Surviving spot preemption
 
 ```{versionadded} v0.2
 The preempt-snapshot hook, the `RESUME_FROM_URL` entry-point, and

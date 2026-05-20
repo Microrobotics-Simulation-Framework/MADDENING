@@ -30,9 +30,40 @@ if TYPE_CHECKING:
 # Key used by GraphManager for internal multi-rate bookkeeping.
 _META_KEY = "_meta"
 
-# Schema version for the integrity manifest.  Bump when the on-disk
-# format changes in a way that older readers can't handle.
+# Schema version for the integrity manifest.
+#
+# Bump policy (settled v0.2.0)
+# ----------------------------
+# A release running schema version ``N`` can read checkpoints saved
+# at version ``N`` or ``N-1``.  Reading any older version raises
+# :class:`CheckpointVersionError` naming the intermediate release the
+# user should load with first.
+#
+# *Bump-worthy* changes (require ``N`` → ``N+1``):
+#   - a key is renamed, removed, or its semantics change
+#   - a new MANDATORY key is added (one with no sensible default)
+#
+# *Non-bump* changes:
+#   - a new optional key with a supplied default
+#   - additions to the ``extra`` block (free-form caller dict)
+#
+# Migration helpers live in ``MIGRATIONS`` below, keyed by
+# ``(from_version, to_version)``.  A helper becomes unreachable —
+# and is removed — one release after its source version stops being
+# loadable.  Concretely: the v1→v2 helper is removed in v3 (because
+# v3 supports v2+v3 only).
+#
+# Enforce in code review:
+#   - Every bump comes with a migration helper in MIGRATIONS.
+#   - Every release that crosses a bump removes the now-unreachable
+#     helpers from the previous bump.
 CHECKPOINT_SCHEMA_VERSION = 1
+
+# Migration helpers: (from_version, to_version) -> callable.  Each
+# callable takes a manifest+data pair and returns the same shape
+# upgraded to the target version.  Empty today; populated when the
+# first bump (v1 → v2) lands.
+MIGRATIONS: dict[tuple[int, int], Any] = {}
 
 
 def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
@@ -171,9 +202,71 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
 
 
 class CheckpointIntegrityError(ValueError):
-    """Raised when a checkpoint fails its manifest integrity check."""
+    """Raised when a checkpoint fails its manifest integrity check.
+
+    Use the subclasses for specific kinds of failure (version drift,
+    SHA mismatch, malformed manifest).  Catch this class to handle
+    any integrity failure uniformly.
+    """
 
     pass
+
+
+class CheckpointVersionError(CheckpointIntegrityError):
+    """Schema version on disk is outside the readable window.
+
+    The error message names the intermediate release the user should
+    load the checkpoint with first.  Example::
+
+        Checkpoint at /tmp/snap.npz is schema v1, but this release
+        reads v3 and v4 only.  Load with maddening>=0.3,<0.4 first
+        and re-save to upgrade to v2, then with the current release
+        to upgrade to v4.
+    """
+
+    def __init__(
+        self,
+        path: "Path | str",
+        file_version: int,
+        readable_min: int,
+        readable_max: int,
+    ):
+        self.path = path
+        self.file_version = file_version
+        self.readable_min = readable_min
+        self.readable_max = readable_max
+        if file_version < readable_min:
+            hint_release = _hint_release_for_version(file_version + 1)
+            msg = (
+                f"Checkpoint at {path} is schema v{file_version}, but this "
+                f"release reads v{readable_min}+ only.  Load it with "
+                f"{hint_release} first and re-save to upgrade."
+            )
+        else:
+            msg = (
+                f"Checkpoint at {path} is schema v{file_version} — newer "
+                f"than this release's readable range (v{readable_min}-v{readable_max}). "
+                f"Upgrade the runtime to read this checkpoint."
+            )
+        super().__init__(msg)
+
+
+def _hint_release_for_version(target_version: int) -> str:
+    """Best-effort guess at which release tag introduced *target_version*.
+
+    Today (v1 only) this returns a placeholder string.  When v2
+    lands the table grows.  The hint is used in the error message
+    above; if the table doesn't know the answer, we just say "the
+    release that introduced schema vN".
+    """
+    _RELEASE_FOR_VERSION = {
+        1: "maddening>=0.2",
+        # 2: "maddening>=0.3", -- add when v2 lands
+    }
+    return _RELEASE_FOR_VERSION.get(
+        target_version,
+        f"the release that introduced schema v{target_version}",
+    )
 
 
 def compute_checkpoint_hash(path: str | Path) -> str:
@@ -227,16 +320,31 @@ def verify_manifest(npz_path: str | Path, manifest: Optional[dict] = None) -> No
     Checks both schema_version and SHA-256 hash.  Pass ``manifest`` to
     use an in-memory copy (e.g. a manifest downloaded separately from
     the .npz); otherwise the function reads the sidecar.
+
+    Version policy: the current release reads schema version
+    ``CHECKPOINT_SCHEMA_VERSION`` and ``CHECKPOINT_SCHEMA_VERSION - 1``
+    (when applicable).  Older versions raise
+    :class:`CheckpointVersionError` pointing at the intermediate
+    release.  Future versions raise the same exception in the
+    "newer than runtime" direction.
     """
     npz_path = Path(npz_path)
     if manifest is None:
         manifest = read_manifest(npz_path)
 
     sv = manifest.get("schema_version")
-    if sv != CHECKPOINT_SCHEMA_VERSION:
+    if not isinstance(sv, int):
         raise CheckpointIntegrityError(
-            f"Schema version mismatch: checkpoint at {npz_path} declares "
-            f"version {sv!r}, runtime expects {CHECKPOINT_SCHEMA_VERSION}."
+            f"Manifest at {npz_path} has no integer 'schema_version' "
+            f"(found {sv!r}).",
+        )
+    # Readable window: current and previous version (when >1).
+    readable_min = max(1, CHECKPOINT_SCHEMA_VERSION - 1)
+    readable_max = CHECKPOINT_SCHEMA_VERSION
+    if sv < readable_min or sv > readable_max:
+        raise CheckpointVersionError(
+            path=npz_path, file_version=sv,
+            readable_min=readable_min, readable_max=readable_max,
         )
 
     expected = manifest.get("sha256")

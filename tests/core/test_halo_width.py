@@ -125,8 +125,14 @@ def test_new_style_subclass_property_derives_correctly():
     assert node.requires_halo is True
 
 
-def test_legacy_subclass_emits_deprecation_warning():
-    """Subclasses overriding only ``requires_halo`` warn at class creation."""
+def test_legacy_subclass_emits_future_warning():
+    """Subclasses overriding only ``requires_halo`` warn at class creation.
+
+    v0.2 escalates this from ``DeprecationWarning`` to
+    :class:`FutureWarning` so it surfaces in notebooks where
+    DeprecationWarning is silenced by default.  In v0.3 the warning
+    becomes a :class:`maddening.warnings.MigrationError`.
+    """
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
 
@@ -141,19 +147,20 @@ def test_legacy_subclass_emits_deprecation_warning():
             def update(self, state, boundary_inputs, dt):
                 return state
 
-        deprecation_warnings = [
-            w for w in caught if issubclass(w.category, DeprecationWarning)
+        future_warnings = [
+            w for w in caught if issubclass(w.category, FutureWarning)
         ]
-        assert deprecation_warnings, "expected a DeprecationWarning at class creation"
-        msg = str(deprecation_warnings[0].message)
+        assert future_warnings, "expected a FutureWarning at class creation"
+        msg = str(future_warnings[0].message)
         assert "_Legacy" in msg
         assert "halo_width" in msg
+        assert "MigrationError" in msg  # forward-link to v0.3 behaviour
 
 
 def test_legacy_subclass_requires_halo_still_works():
     """The compat shim leaves legacy subclasses functional under v0.2."""
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
+        warnings.simplefilter("ignore", FutureWarning)
 
         class _Legacy(SimulationNode):
             @property
@@ -172,4 +179,25 @@ def test_legacy_subclass_requires_halo_still_works():
     # The legacy subclass did NOT override halo_width, so it returns the
     # base default (empty). M4 will decide whether to refuse to shard such
     # nodes or imply a default halo from the bool.
-    assert node.halo_width() == {}
+
+
+def test_future_warning_message_names_replacement_and_removal_release():
+    """FutureWarning message must give the user enough to migrate
+    without grepping the source."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+
+        class _Legacy(SimulationNode):
+            @property
+            def requires_halo(self) -> bool:
+                return True
+
+            def initial_state(self):
+                return {"x": jnp.zeros(1)}
+
+            def update(self, state, boundary_inputs, dt):
+                return state
+
+        msg = str([w for w in caught if issubclass(w.category, FutureWarning)][0].message)
+    assert "halo_width" in msg          # the replacement API
+    assert "v0.3" in msg                # the removal release

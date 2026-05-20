@@ -8,6 +8,7 @@ import pytest
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
+from maddening.core.static_data import StaticArray
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ class _StaticDataNode(SimulationNode):
 
     @property
     def static_data(self) -> dict:
-        return {"lookup": self._lut}
+        return {"lookup": StaticArray(self._lut)}
 
     def initial_state(self):
         return {"y": jnp.array(0.0)}
@@ -101,6 +102,7 @@ class TestOverrideStaticData:
         n = _StaticDataNode("s", timestep=0.01, n=8)
         sd = n.static_data
         assert "lookup" in sd
+        assert isinstance(sd["lookup"], StaticArray)
         assert sd["lookup"].shape == (8,)
 
     def test_can_carry_scalar_values(self):
@@ -160,7 +162,11 @@ class TestStaticDataHash:
             def update(self, s, b, dt): return s
             @property
             def static_data(self):
-                return {"arr": jnp.zeros(3), "tag": "v1", "n": 7}
+                return {
+                    "arr": StaticArray(jnp.zeros(3)),
+                    "tag": "v1",
+                    "n": 7,
+                }
 
         n = Mixed("m", timestep=0.01)
         # Just verify it doesn't crash and yields a stable int
@@ -275,7 +281,7 @@ class TestStaticDataInUpdate:
                 self._big = jnp.arange(1_000_000, dtype=jnp.float32)
 
             @property
-            def static_data(self): return {"big": self._big}
+            def static_data(self): return {"big": StaticArray(self._big)}
 
             def initial_state(self): return {"y": jnp.array(0.0)}
 
@@ -325,14 +331,24 @@ class TestHeatNodeStaticData:
         node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
         sd = node.static_data
         assert "grid_x" in sd
+        assert isinstance(sd["grid_x"], StaticArray)
         assert sd["grid_x"].shape == (8,)
+
+    def test_heatnode_grid_x_declares_shard_along_axis_0(self):
+        """v0.2 #3 follow-up: HeatNode opts into per-shard slicing
+        along the cell axis."""
+        from maddening.nodes.heat import HeatNode
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        sd_arr = node.static_data["grid_x"]
+        assert sd_arr.replication == "shard"
+        assert sd_arr.shard_axis == 0
 
     def test_heatnode_uniform_grid_matches_linspace(self):
         from maddening.nodes.heat import HeatNode
         import numpy as np
 
         node = HeatNode("rod", timestep=0.01, n_cells=10, length=1.0)
-        x = np.asarray(node.static_data["grid_x"])
+        x = np.asarray(node.static_data["grid_x"].value)
         # Cell centres: dx/2, dx + dx/2, ..., L - dx/2
         expected = np.linspace(0.05, 0.95, 10, dtype=np.float32)
         assert np.allclose(x, expected, atol=1e-6)
@@ -346,21 +362,22 @@ class TestHeatNodeStaticData:
             "rod", timestep=0.01, n_cells=5, length=1.0,
             grid_points=custom,
         )
-        x = np.asarray(node.static_data["grid_x"])
+        x = np.asarray(node.static_data["grid_x"].value)
         assert np.allclose(x, custom, atol=1e-6)
 
     def test_static_data_is_stable_across_calls(self):
         from maddening.nodes.heat import HeatNode
 
         node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
-        # Same object identity → JAX won't retrace
-        assert node.static_data["grid_x"] is node.static_data["grid_x"]
+        # Underlying array is the same object on repeat access (so JAX
+        # won't retrace), even though the StaticArray wrapper is rebuilt.
+        assert node.static_data["grid_x"].value is node.static_data["grid_x"].value
 
     def test_grid_x_property_aliases_static_data(self):
         from maddening.nodes.heat import HeatNode
 
         node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
-        assert node._grid_x is node.static_data["grid_x"]
+        assert node._grid_x is node.static_data["grid_x"].value
 
     def test_hash_differs_between_uniform_grid_sizes(self):
         from maddening.nodes.heat import HeatNode
@@ -420,7 +437,7 @@ class TestHeatNodeStaticData:
         )
         # The static_data was rebuilt from params (not from the .npz)
         assert np.allclose(
-            np.asarray(gm_dst._nodes["rod"].node.static_data["grid_x"]),
+            np.asarray(gm_dst._nodes["rod"].node.static_data["grid_x"].value),
             [0.0, 0.1, 0.3, 0.6, 1.0],
             atol=1e-6,
         )

@@ -344,6 +344,11 @@ class TestEncodeLatency:
     def test_none_encoding_under_budget_on_32cube_lbm(self):
         # 32³ LBM-like payload: 22 fields total (velocity + 19 fdists +
         # 2 scalars).  Uncompressed wire size ≈ 2.7 MB per frame.
+        #
+        # The 30 ms bound is order-of-magnitude (the real 60-fps budget
+        # is 16.6 ms; quiescent box hits ~6 ms).  We keep it loose so a
+        # noisy CI runner doesn't false-flag; the assertion's job is to
+        # catch O(N²) rewrites, not pin a clock.
         N = 32 * 32 * 32
         state = {
             "lbm": {
@@ -355,27 +360,23 @@ class TestEncodeLatency:
         }
         enc = BinaryStateEncoder(state)
         per_frame_s = self._measure(enc, state, n=50)
-        # 16.6 ms budget at 60 fps; we want plenty of headroom for the
-        # rest of the server loop.  10 ms is the order-of-magnitude
-        # bar that catches accidental order-N² rewrites.
-        assert per_frame_s < 0.010, (
+        assert per_frame_s < 0.030, (
             f"uncompressed 32³ encode took {per_frame_s*1000:.2f} ms/frame "
-            f"(>10 ms budget)"
+            f"(>30 ms order-of-magnitude budget)"
         )
 
     def test_zstd_encoding_under_budget_on_subscribed_frame(self):
         # Just velocity — the typical bandwidth-sensitive subscriber.
+        # Same generous order-of-magnitude bound.
         N = 32 * 32 * 32
         state = {"lbm": {"velocity": jnp.zeros((N, 3))}}
         enc = BinaryStateEncoder(
             state, fields={"lbm": ["velocity"]}, compression="zstd",
         )
         per_frame_s = self._measure(enc, state, n=50)
-        # zstd at level 3 should comfortably hit <10 ms even on a
-        # ~400 KB payload.
-        assert per_frame_s < 0.010, (
+        assert per_frame_s < 0.030, (
             f"zstd-compressed 32³-velocity encode took "
-            f"{per_frame_s*1000:.2f} ms/frame (>10 ms budget)"
+            f"{per_frame_s*1000:.2f} ms/frame (>30 ms order-of-magnitude budget)"
         )
 
     @pytest.mark.slow
@@ -397,7 +398,7 @@ class TestEncodeLatency:
         for i, s in enumerate(states):
             enc.encode(i * 0.01, s)
         avg = (time.perf_counter() - t0) / len(states)
-        # XOR adds a NumPy XOR + compress; should still beat 15 ms.
-        assert avg < 0.015, (
+        # Same order-of-magnitude bound; XOR adds a NumPy XOR + compress.
+        assert avg < 0.040, (
             f"zstd+xor 32³-velocity encode took {avg*1000:.2f} ms/frame"
         )

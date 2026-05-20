@@ -49,6 +49,19 @@ class _NodeSpec:
 
 
 @dataclass(frozen=True)
+class ShardingIssue:
+    """A single issue found by :meth:`GraphManager.validate_sharding`.
+
+    ``severity`` is ``"error"`` (raise-worthy) or ``"warning"``
+    (advisory).  ``code`` is a short slug callers can switch on.
+    """
+    severity: str   # "error" | "warning"
+    code: str       # short stable slug, e.g. "sharded_node_mesh_axes_mismatch"
+    message: str    # human-readable explanation
+    affected_nodes: list[str]
+
+
+@dataclass(frozen=True)
 class ExternalInputSpec:
     """Declares an external input that flows into a node's boundary_inputs.
 
@@ -1539,6 +1552,81 @@ class GraphManager:
                 self._dirty = True
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Sharding validation (v0.2 #3 follow-up)
+    # ------------------------------------------------------------------
+
+    def validate_sharding(self) -> list["ShardingIssue"]:
+        """Structural checks for the sharding spec across the graph.
+
+        Today: sharding spec consistency only.
+
+        Returns a list of :class:`ShardingIssue` instances (each typed
+        with a ``severity`` and a ``code``); the empty list means
+        healthy.  Callers decide severity — turn into a raising call
+        by filtering for ``severity == "error"`` and calling ``raise``.
+
+        Scope (deliberately tight to avoid a god-method):
+
+        * A sharded node exists, but the graph has no device mesh
+          configured.
+        * A sharded node's mesh disagrees with the graph's device mesh.
+
+        NOT in scope here:
+
+        * Edge-validation (compile-time; see
+          :meth:`validate`).
+        * Multi-rate divisibility.
+        * Cycle detection.
+
+        If you find yourself wanting to extend this method past
+        sharding-spec consistency, consider a sibling
+        ``validate_<topic>()`` instead.
+        """
+        issues: list[ShardingIssue] = []
+        # Identify sharded nodes by either explicit class or by carrying
+        # a `_mesh` attribute (the Sharded*Node convention).
+        sharded_nodes = [
+            (name, spec.node) for name, spec in self._nodes.items()
+            if hasattr(spec.node, "_mesh") and getattr(spec.node, "_mesh", None) is not None
+        ]
+
+        if not sharded_nodes:
+            return issues  # nothing to validate
+
+        if self._multigpu_mesh is None:
+            issues.append(ShardingIssue(
+                severity="warning",
+                code="sharded_node_without_graph_mesh",
+                message=(
+                    f"{len(sharded_nodes)} sharded node(s) present but the "
+                    f"GraphManager has no device mesh configured.  "
+                    f"Call gm.enable_multigpu(...) or remove the sharding "
+                    f"from the affected nodes."
+                ),
+                affected_nodes=[name for name, _ in sharded_nodes],
+            ))
+            return issues
+
+        # All sharded nodes must agree with the graph's mesh.
+        graph_axis_names = tuple(self._multigpu_mesh.axis_names)
+        for name, node in sharded_nodes:
+            node_mesh = getattr(node, "_mesh", None)
+            node_axes = tuple(node_mesh.axis_names)
+            if node_axes != graph_axis_names:
+                issues.append(ShardingIssue(
+                    severity="error",
+                    code="sharded_node_mesh_axes_mismatch",
+                    message=(
+                        f"Sharded node {name!r} uses mesh axes {node_axes!r} "
+                        f"but the graph's mesh is {graph_axis_names!r}.  "
+                        f"Re-create the node with the graph's mesh, or "
+                        f"call enable_multigpu with matching axes."
+                    ),
+                    affected_nodes=[name],
+                ))
+        return issues
 
     # ------------------------------------------------------------------
     # Multi-GPU

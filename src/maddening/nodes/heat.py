@@ -241,8 +241,21 @@ class HeatNode(SimulationNode):
         ``grid_points`` list) so a checkpoint/restore round-trip
         rebuilds it from the persisted params alone — see DESIGN.md
         §2 "Static-data channel".
+
+        Sharding policy: ``replication="shard"`` along axis 0 (the
+        cell axis), so when the heat rod is sharded across a device
+        mesh each shard gets only its slice of the grid coordinates.
+        v0.2 #3 follow-up — the GraphManager materialises the per-shard
+        slice before the JIT closure captures it.
         """
-        return {"grid_x": self._grid_x_array}
+        from maddening.core.static_data import StaticArray
+        return {
+            "grid_x": StaticArray(
+                value=self._grid_x_array,
+                replication="shard",
+                shard_axis=0,
+            ),
+        }
 
     def halo_width(self) -> dict[int, int]:
         """One ghost cell per side per FD stencil radius on axis 0.

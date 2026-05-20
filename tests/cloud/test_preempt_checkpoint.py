@@ -26,6 +26,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     CheckpointIntegrityError,
+    CheckpointVersionError,
     compute_checkpoint_hash,
     download_and_load_state,
     load_state_with_manifest,
@@ -124,7 +125,7 @@ class TestManifest:
         manifest = json.loads(manifest_path.read_text())
         manifest["schema_version"] = CHECKPOINT_SCHEMA_VERSION + 99
         manifest_path.write_text(json.dumps(manifest))
-        with pytest.raises(CheckpointIntegrityError, match="version"):
+        with pytest.raises(CheckpointVersionError):
             verify_manifest(npz_path)
 
     def test_verify_manifest_accepts_inmemory_manifest(self, bouncing_ball_graph, tmp_path):
@@ -136,6 +137,90 @@ class TestManifest:
             "extra": {},
         }
         verify_manifest(npz_path, manifest=manifest)
+
+
+class TestSchemaVersionPolicy:
+    """v0.2 #8 follow-up: explicit version-window policy.
+
+    A release running schema version N reads N and N-1; older or newer
+    raises CheckpointVersionError naming the intermediate release.
+    """
+
+    def _make_manifest(self, version: int, sha: str, size: int = 100) -> dict:
+        return {
+            "schema_version": version,
+            "sha256": sha,
+            "size_bytes": size,
+            "extra": {},
+        }
+
+    def test_current_version_passes(self, bouncing_ball_graph, tmp_path):
+        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
+        verify_manifest(
+            npz_path,
+            manifest=self._make_manifest(
+                CHECKPOINT_SCHEMA_VERSION,
+                compute_checkpoint_hash(npz_path),
+                npz_path.stat().st_size,
+            ),
+        )  # no exception
+
+    def test_too_new_raises_version_error(self, bouncing_ball_graph, tmp_path):
+        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
+        future = CHECKPOINT_SCHEMA_VERSION + 5
+        with pytest.raises(CheckpointVersionError) as ei:
+            verify_manifest(
+                npz_path,
+                manifest=self._make_manifest(future, "x" * 64),
+            )
+        assert ei.value.file_version == future
+        assert "newer than this release" in str(ei.value)
+
+    def test_too_old_raises_version_error_with_hint(self, bouncing_ball_graph, tmp_path):
+        # When CHECKPOINT_SCHEMA_VERSION ≥ 2, a v(N-2) checkpoint is
+        # out-of-window and the error message names the intermediate
+        # release.  v1 today → no "too old" case exists; we exercise
+        # the code path by simulating a future bump.
+        if CHECKPOINT_SCHEMA_VERSION < 3:
+            pytest.skip("requires schema_version ≥ 3 to be out-of-window in the past")
+        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
+        ancient = CHECKPOINT_SCHEMA_VERSION - 2
+        with pytest.raises(CheckpointVersionError) as ei:
+            verify_manifest(
+                npz_path,
+                manifest=self._make_manifest(ancient, "x" * 64),
+            )
+        assert ei.value.file_version == ancient
+        assert "Load it with" in str(ei.value)
+
+    def test_non_int_schema_version_raises_integrity_error(
+        self, bouncing_ball_graph, tmp_path,
+    ):
+        npz_path = save_state(bouncing_ball_graph, tmp_path / "snap.npz")
+        bad_manifest = {
+            "schema_version": "v1",  # string, not int
+            "sha256": "x" * 64,
+            "size_bytes": 0,
+            "extra": {},
+        }
+        with pytest.raises(CheckpointIntegrityError, match="schema_version"):
+            verify_manifest(npz_path, manifest=bad_manifest)
+
+    def test_version_error_is_integrity_error_subclass(self):
+        # Callers that catch the parent class still see version errors.
+        assert issubclass(CheckpointVersionError, CheckpointIntegrityError)
+
+    def test_version_error_carries_structured_fields(self):
+        err = CheckpointVersionError(
+            path="/tmp/x.npz",
+            file_version=0,
+            readable_min=1,
+            readable_max=2,
+        )
+        assert err.file_version == 0
+        assert err.readable_min == 1
+        assert err.readable_max == 2
+        assert err.path == "/tmp/x.npz"
 
 
 # ---------------------------------------------------------------------------

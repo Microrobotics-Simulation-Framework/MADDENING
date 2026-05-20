@@ -96,13 +96,20 @@ class SimulationNode(ABC):
         overrides_requires_halo = "requires_halo" in cls.__dict__
         overrides_halo_width = "halo_width" in cls.__dict__
         if overrides_requires_halo and not overrides_halo_width:
+            # FutureWarning (not DeprecationWarning) so the message
+            # surfaces in notebooks where DeprecationWarning is
+            # silenced by default.  v0.3 will replace this with a
+            # MigrationError (see maddening.warnings.MigrationError;
+            # the v0.3 release notes will name this site as the
+            # removal point).
             warnings.warn(
                 f"{cls.__qualname__} overrides 'requires_halo' but not "
                 "'halo_width'. 'requires_halo' is deprecated; override "
                 "'halo_width() -> dict[int, int]' instead "
                 "(pointwise nodes return {}, stencil nodes return "
-                "{axis: width, ...}). 'requires_halo' is removed in v0.3.",
-                DeprecationWarning,
+                "{axis: width, ...}). 'requires_halo' is removed in v0.3 "
+                "and will raise MigrationError on import.",
+                FutureWarning,
                 stacklevel=2,
             )
 
@@ -182,25 +189,36 @@ class SimulationNode(ABC):
     def static_data_hash(self) -> int:
         """Stable hash over :attr:`static_data` for JIT cache invalidation.
 
-        Returns ``hash(((k, shape, dtype), ...))`` for array values and
-        ``hash(((k, repr(v)), ...))`` for scalars.  Used by
-        :class:`GraphManager` to detect when a recompile is needed
-        because a node's static_data changed (typical case: a
-        :func:`replace_node` swap brings a different-shape mesh).
+        For each array value (whether wrapped in
+        :class:`~maddening.core.static_data.StaticArray` or a bare
+        array), the hash includes ``(key, shape, dtype, replication,
+        shard_axis)`` — sharding policy is part of the cache key, so
+        a node that switches from replicated to sharded is
+        recognised as a recompile-worthy change.
+
+        Non-array scalars hash by ``repr(value)``.
 
         Returns
         -------
         int
             ``0`` if ``static_data`` is empty.
         """
+        # Local import to avoid a circular at module load.
+        from maddening.core.static_data import (
+            StaticArray, coerce_static_data_value,
+        )
         sd = self.static_data
         if not sd:
             return 0
         items = []
         for k in sorted(sd):
-            v = sd[k]
-            if hasattr(v, "shape") and hasattr(v, "dtype"):
-                items.append((str(k), tuple(int(d) for d in v.shape), str(v.dtype)))
+            v = coerce_static_data_value(sd[k], node_name=self.name, key=k)
+            if isinstance(v, StaticArray):
+                items.append((
+                    str(k),
+                    v.shape, str(v.dtype),
+                    v.replication, v.shard_axis,
+                ))
             else:
                 items.append((str(k), repr(v)))
         return hash(tuple(items))

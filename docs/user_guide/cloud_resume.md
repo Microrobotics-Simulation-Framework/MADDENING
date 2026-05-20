@@ -175,8 +175,9 @@ Following the v0.2 #3 contract, {attr}`static_data
 * {meth}`~maddening.core.node.SimulationNode.initial_state` outputs
   (state, meta) → restored from the snapshot.
 * `static_data` (meshes, lookup tables) → rebuilt from `self.params`
-  during your code's graph reconstruction.  See {ref}`design-static-data`
-  in DESIGN.md.
+  during your code's graph reconstruction.  See the "Static-data
+  channel" section of
+  [DESIGN.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DESIGN.md).
 
 If you rebuild the graph in code identical to the pre-preemption
 process and call `load_state`, both pieces match.  If you change

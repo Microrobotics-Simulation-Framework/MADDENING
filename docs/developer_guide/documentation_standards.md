@@ -128,7 +128,7 @@ Update the changelog with every commit that adds, changes, fixes, or deprecates 
 
 ## Anomaly Registry
 
-Known bugs, limitations, and failure modes go in `docs/validation/known_anomalies.yaml`. See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the three-phase anomaly lifecycle and release gate model.
+Known bugs, limitations, and failure modes go in `docs/validation/known_anomalies.yaml`. See [CONTRIBUTING.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/CONTRIBUTING.md) for the three-phase anomaly lifecycle and release gate model.
 
 ## Versioning
 

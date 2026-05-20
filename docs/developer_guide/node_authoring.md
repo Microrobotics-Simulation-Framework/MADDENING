@@ -1,6 +1,6 @@
 # Node Authoring Guide
 
-This guide covers everything required to add a new `SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](../../DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
+This guide covers everything required to add a new `SimulationNode` to MADDENING. Every requirement here is derived from the [Documentation Architecture](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DOCUMENTATION_ARCHITECTURE.md) and enforced by CI.
 
 ## The Contract
 

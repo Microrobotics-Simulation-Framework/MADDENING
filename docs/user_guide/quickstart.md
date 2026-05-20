@@ -164,5 +164,5 @@ See `src/maddening/examples/cloud/` for complete examples and config templates.
 ## Next Steps
 
 - **[Installation Guide](installation.md)** — all extras, GPU setup, cloud providers
-- **[DESIGN.md](../../DESIGN.md)** — architecture decisions, node authoring contract
+- **[DESIGN.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/DESIGN.md)** — architecture decisions, node authoring contract
 - **`examples/`** — coupling, adaptive timestepping, surrogates, servers

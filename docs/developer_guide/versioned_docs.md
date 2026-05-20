@@ -8,7 +8,7 @@ orphan: false
 The per-version `switcher.json` scaffolding lands with v0.2.  The
 companion changes to MICROROBOTICA's umbrella `conf.py` + docs CI
 are required to make the switcher live on the published site —
-that work is tracked under [MICROROBOTICA umbrella PR pending](#).
+that work has since landed in MICROROBOTICA's umbrella docs.
 ```
 
 ## Settled design decisions

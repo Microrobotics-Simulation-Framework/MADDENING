@@ -181,12 +181,10 @@ developer_guide/versioned_docs
 ```{toctree}
 :caption: Validation
 :maxdepth: 2
-:glob:
 
 validation/cou_template
 validation/framework_verification
 validation/soup_package
-validation/node_verification/*
 ```
 
 ```{toctree}

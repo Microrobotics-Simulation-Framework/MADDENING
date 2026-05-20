@@ -13,6 +13,13 @@ Install extras for optional features::
     pip install maddening[client]    # viz-only (no JAX needed)
 """
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    __version__ = _pkg_version("maddening")
+except PackageNotFoundError:  # source tree without install metadata
+    __version__ = "0.2.0"
+
 
 def __getattr__(name: str):
     """Lazy imports so that ``maddening.viz`` can be used without JAX."""

@@ -889,17 +889,41 @@ def _run_coupled_block_impl(
                 # assertion).  jax.closure_convert hoists any tracers
                 # ``one_pass`` captures into an explicit ``consts``
                 # pytree we then pass through ``_ift_solve``.
+                #
+                # **Embedded coupling groups** (group members read state
+                # from non-group nodes): ``_unflatten`` only emits the
+                # coupling subset, but ``one_pass`` needs the full state
+                # dict so its boundary-resolution can look up the
+                # outside nodes.  We embed the unflattened group state
+                # into ``template_state`` (which is ``state_after_first``
+                # and already carries every node), then pass the full
+                # dict to ``one_pass``.  The outside-node entries in
+                # ``template_state`` are tracers from the surrounding
+                # jit trace — ``jax.closure_convert`` will hoist them
+                # into ``consts`` automatically, so the IFT adjoint
+                # propagates gradients back through them.
                 template_state = state_after_first
 
                 def _F_one_pass_flat(x_flat):
-                    s = _unflatten(x_flat, template_state)
+                    group_part = _unflatten(x_flat, template_state)
+                    # Embed group_part into a copy of the full state.
+                    # Non-group nodes come from template_state (frozen
+                    # during the inner solve, but tracer-bearing so
+                    # closure_convert hoists them and the IFT bwd flows
+                    # cotangents back into them).
+                    s = {k: v for k, v in template_state.items()}
+                    for nn in group_node_names:
+                        s[nn] = group_part[nn]
                     s_new = one_pass(s)
                     s_merged = _merge(template_state, s_new, jnp.array(False))
                     return _flatten(s_merged)
 
                 x0_flat = _flatten(state_after_first)
                 # closure_convert returns (pure_fn, consts) such that
-                # ``_F_one_pass_flat(x) == pure_fn(x, *consts)``.
+                # ``_F_one_pass_flat(x) == pure_fn(x, *consts)``.  The
+                # ``consts`` list will include leaves from the outside
+                # (non-group) portion of ``template_state`` that
+                # ``one_pass`` reads through boundary edges.
                 F_pure, consts_list = jax.closure_convert(
                     _F_one_pass_flat, x0_flat
                 )

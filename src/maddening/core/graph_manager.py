@@ -78,6 +78,103 @@ class ExternalInputSpec:
 
 
 # ------------------------------------------------------------------
+# Implicit-function-theorem fixed-point solver
+# ------------------------------------------------------------------
+#
+# The functions below implement the "deep equilibrium" / IFT
+# differentiation pattern for coupling-group fixed points.  They are
+# defined at module scope so neither the forward nor the backward path
+# closes over any JAX tracer — this is the key constraint that lets
+# ``jax.grad(jax.jit(gm.step))`` flow correctly through the custom_vjp
+# rule (see optimistix's ``_implicit_impl`` / its ``_is_global_function``
+# assertion for the same pattern, and JAX issue #2912 for the
+# DynamicJaxprTracer-as-constant failure mode when this rule is
+# violated).
+#
+# ``_F_dispatch`` is *the* one-iteration function; it is invoked from
+# a top-level signature ``(x, consts)`` where ``consts`` is a pytree
+# of tracers extracted by ``jax.closure_convert`` at the call site.
+
+
+def _F_dispatch(F_pure, x, consts):
+    # Trampoline: forwards to a closure-converted pure function.
+    # Kept top-level so the custom_vjp residual sees ``F_pure`` as a
+    # plain Python global, not a captured closure.
+    return F_pure(x, *consts)
+
+
+def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter):
+    """While-loop fixed-point iteration of ``x = F_pure(x, *consts)``.
+
+    Returns ``(x_star, n_iters)``.  No autodiff machinery here — that
+    is layered on by ``_ift_solve``'s custom_vjp.
+    """
+
+    def cond(carry):
+        x, x_prev, i = carry
+        not_converged = jnp.linalg.norm(x - x_prev) > tol
+        not_maxed = i < max_iter
+        first = i == jnp.int32(0)
+        return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
+
+    def body(carry):
+        x, _x_prev, i = carry
+        x_new = _F_dispatch(F_pure, x, consts)
+        return (x_new, x, i + jnp.int32(1))
+
+    x_star, _, n_iters = jax.lax.while_loop(
+        cond,
+        body,
+        (x0, x0 + jnp.array(1.0, dtype=x0.dtype), jnp.int32(0)),
+    )
+    return x_star, n_iters
+
+
+def _ift_solve_impl(F_pure, x0, consts, tol, max_iter):
+    """Returns ``x_star`` such that ``x_star = F_pure(x_star, *consts)``.
+
+    Differentiates via the implicit function theorem:
+        ``dx*/d(consts) = (I - dF/dx)^{-1} dF/d(consts)``
+    evaluated at the fixed point.  ``x0`` itself receives a zero
+    cotangent (the fixed point is invariant under the initial guess
+    in the converged limit).
+    """
+    x_star, _ = _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter)
+    return x_star
+
+
+def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter):
+    # fwd has the SAME signature as the original function under
+    # jax.custom_vjp's nondiff_argnums convention.  Only bwd is
+    # rearranged (nondiff first, then residual, then output cotangent).
+    x_star, _ = _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter)
+    return x_star, (x_star, consts)
+
+
+def _ift_solve_bwd(F_pure, tol, max_iter, residual, g):
+    del tol, max_iter
+    x_star, consts = residual
+    # Linear system: (I - dF/dx)^T u = g.  Build J = dF/dx with jacrev.
+    # For the dense small-state regime this is exact; an iterative
+    # variant can be substituted later for large group state vectors.
+    J = jax.jacrev(lambda xx: _F_dispatch(F_pure, xx, consts))(x_star)
+    n = x_star.shape[0]
+    A = jnp.eye(n, dtype=x_star.dtype) - J
+    u = jnp.linalg.solve(A.T, g)
+    # consts cotangent: dF/d(consts)^T @ u, via vjp wrt consts only.
+    _, vjp_fn = jax.vjp(lambda cc: _F_dispatch(F_pure, x_star, cc), consts)
+    (consts_bar,) = vjp_fn(u)
+    # x0 receives zero cotangent.
+    x0_bar = jnp.zeros_like(x_star)
+    return (x0_bar, consts_bar)
+
+
+# nondiff_argnums: 0=F_pure (callable), 3=tol (static float), 4=max_iter (static int)
+_ift_solve = jax.custom_vjp(_ift_solve_impl, nondiff_argnums=(0, 3, 4))
+_ift_solve.defvjp(_ift_solve_fwd, _ift_solve_bwd)
+
+
+# ------------------------------------------------------------------
 # Observer event names
 # ------------------------------------------------------------------
 EVENT_NODE_ADDED = "node_added"
@@ -777,7 +874,47 @@ def _run_coupled_block_impl(
 
         else:
             # No acceleration ("none")
-            if track_diag:
+            use_ift = (
+                getattr(group, "solver", "fori") == "ift"
+                and not use_jacobi
+                and not track_diag
+            )
+
+            if use_ift:
+                # ----- IFT path: while_loop forward + custom_vjp backward.
+                # Operate on the flattened group-state vector ``x``.  We
+                # need a top-level ``F_pure(x, *consts)`` so the
+                # custom_vjp rule does not close over any tracer
+                # (see JAX issue #2912 / optimistix's _is_global_function
+                # assertion).  jax.closure_convert hoists any tracers
+                # ``one_pass`` captures into an explicit ``consts``
+                # pytree we then pass through ``_ift_solve``.
+                template_state = state_after_first
+
+                def _F_one_pass_flat(x_flat):
+                    s = _unflatten(x_flat, template_state)
+                    s_new = one_pass(s)
+                    s_merged = _merge(template_state, s_new, jnp.array(False))
+                    return _flatten(s_merged)
+
+                x0_flat = _flatten(state_after_first)
+                # closure_convert returns (pure_fn, consts) such that
+                # ``_F_one_pass_flat(x) == pure_fn(x, *consts)``.
+                F_pure, consts_list = jax.closure_convert(
+                    _F_one_pass_flat, x0_flat
+                )
+                consts = tuple(consts_list)
+
+                x_star_flat = _ift_solve(
+                    F_pure, x0_flat, consts,
+                    float(group.tolerance),
+                    int(max_iters),
+                )
+                final_state = _unflatten(x_star_flat, state_after_first)
+                final_state = _merge(
+                    state_after_first, final_state, jnp.array(False)
+                )
+            elif track_diag:
                 def body_fn(i, carry):
                     s_cur, converged, icount, fres = carry
                     s_new = one_pass(s_cur)

@@ -92,6 +92,18 @@ class CouplingGroup:
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
         for smoothly varying problems.
+    solver : str
+        How the fixed-point iteration is solved.  ``"fori"`` (default)
+        runs a static ``jax.lax.fori_loop`` for ``max_iterations`` and
+        differentiates straight through the iterates.  ``"ift"`` runs
+        a ``jax.lax.while_loop`` that terminates early on convergence
+        and uses implicit-function-theorem differentiation in the
+        backward pass (more accurate gradients in the
+        partially-converged regime, plus a meaningful forward speed-up
+        when convergence is reached before ``max_iterations``).
+        Currently only supported when ``acceleration="none"`` and
+        ``iteration_mode="gauss-seidel"``; other combinations silently
+        fall back to ``"fori"``.
     """
     nodes: frozenset[str]
     max_iterations: int = 10
@@ -109,3 +121,4 @@ class CouplingGroup:
     jacobian_reuse: int = 0
     waveform_iterations: int = 1
     predictor: str = "none"
+    solver: str = "fori"

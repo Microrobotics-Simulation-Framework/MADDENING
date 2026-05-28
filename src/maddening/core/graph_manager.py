@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -25,6 +26,11 @@ import jax
 import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
+
+# ``lineax`` is imported lazily inside ``_ift_solve_bwd`` — it pulls in
+# equinox + optax transitively, which we do NOT want to make a hard
+# module-load-time dependency.  Only users who opt into ``solver='ift'``
+# trigger the lineax import path.
 
 from maddening.core.coupling import CouplingGroup
 from maddening.core.edge import EdgeSpec
@@ -154,16 +160,67 @@ def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter):
 def _ift_solve_bwd(F_pure, tol, max_iter, residual, g):
     del tol, max_iter
     x_star, consts = residual
-    # Linear system: (I - dF/dx)^T u = g.  Build J = dF/dx with jacrev.
-    # For the dense small-state regime this is exact; an iterative
-    # variant can be substituted later for large group state vectors.
-    J = jax.jacrev(lambda xx: _F_dispatch(F_pure, xx, consts))(x_star)
-    n = x_star.shape[0]
-    A = jnp.eye(n, dtype=x_star.dtype) - J
-    u = jnp.linalg.solve(A.T, g)
+    # Linear system to solve:  (I - dF/dx)^T u = g.
+    #
+    # The matrix-vector product v -> (I - dF/dx)^T v is exactly
+    # ``v - J^T v``, where ``J^T v`` is the vjp of the one-iteration
+    # function ``F`` at ``x_star`` applied to ``v``.  This is matrix
+    # free — no jacobian is ever materialized — so memory is O(N) and
+    # compute per matvec is one F-vjp.  We hand the matvec to lineax
+    # as a ``FunctionLinearOperator`` and let its GMRES iterate.
+    #
+    # The operand of the optional dense fallback is the historical
+    # ``jacrev + jnp.linalg.solve`` path, kept behind an env var so
+    # the swap can be reverted in place without code edits if a future
+    # bug surfaces.  Default is the matrix-free path.
+    _, vjp_fn = jax.vjp(lambda xx: _F_dispatch(F_pure, xx, consts), x_star)
+
+    if os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1":
+        J = jax.jacrev(lambda xx: _F_dispatch(F_pure, xx, consts))(x_star)
+        n = x_star.shape[0]
+        A = jnp.eye(n, dtype=x_star.dtype) - J
+        u = jnp.linalg.solve(A.T, g)
+    else:
+        # Lazy import — keeps lineax (and its equinox/optax transitive
+        # deps) out of module load time.  Only callers who opt into
+        # ``solver='ift'`` pay this import cost.
+        import lineax as lx  # noqa: PLC0415  (lazy by design)
+
+        def _matvec(v):
+            (Jt_v,) = vjp_fn(v)
+            return v - Jt_v
+
+        op = lx.FunctionLinearOperator(
+            _matvec, jax.eval_shape(lambda: g)
+        )
+        # (I - dF/dx)^T is in general non-symmetric; GMRES is the safe
+        # default.  rtol/atol are matched to the float32 regime the
+        # surrounding code uses.
+        #
+        # ``restart`` directly bounds the dim of the Krylov subspace
+        # GMRES builds; lineax's default 20 is too small for coupling
+        # groups whose flat state is larger than 20 floats (a
+        # 50-spring chain has state size 100, etc.).  We set restart =
+        # min(N, 50) so small problems stay cheap while N>=50 problems
+        # still see a meaningful subspace.  Likewise we bump
+        # ``max_steps`` so the algorithm has headroom for several
+        # restart cycles.
+        n = x_star.shape[0]
+        restart = min(n, 50)
+        max_steps = max(4 * restart, 100)
+        result = lx.linear_solve(
+            op, g,
+            solver=lx.GMRES(
+                rtol=1e-6,
+                atol=1e-8,
+                restart=restart,
+                max_steps=max_steps,
+            ),
+        )
+        u = result.value
     # consts cotangent: dF/d(consts)^T @ u, via vjp wrt consts only.
-    _, vjp_fn = jax.vjp(lambda cc: _F_dispatch(F_pure, x_star, cc), consts)
-    (consts_bar,) = vjp_fn(u)
+    _, vjp_fn_c = jax.vjp(lambda cc: _F_dispatch(F_pure, x_star, cc), consts)
+    (consts_bar,) = vjp_fn_c(u)
     # x0 receives zero cotangent.
     x0_bar = jnp.zeros_like(x_star)
     return (x0_bar, consts_bar)

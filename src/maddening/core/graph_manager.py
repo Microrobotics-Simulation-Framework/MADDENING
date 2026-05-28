@@ -109,34 +109,99 @@ def _F_dispatch(F_pure, x, consts):
     return F_pure(x, *consts)
 
 
-def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter):
+def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     """While-loop fixed-point iteration of ``x = F_pure(x, *consts)``.
 
     Returns ``(x_star, n_iters)``.  No autodiff machinery here — that
     is layered on by ``_ift_solve``'s custom_vjp.
+
+    ``acceleration`` is a static Python string selecting the forward
+    iterator wrapper.  Supported values:
+
+    - ``"none"``  : bare Gauss-Seidel, ``x_{k+1} = F(x_k)``.
+    - ``"aitken"``: Aitken delta-squared relaxation around ``F``.
+
+    The backward (IFT adjoint) is **acceleration-agnostic**: it
+    differentiates the bare contraction ``F`` at the fixed point
+    ``x*``, since acceleration is just a forward-pass technique for
+    *getting to* ``x*`` faster — at the fixed point ``x* = F(x*)``
+    regardless of what wrapper was used to reach it.  This is why the
+    bwd rule below does not need an ``acceleration`` argument.
     """
+    if acceleration == "none":
 
-    def cond(carry):
-        x, x_prev, i = carry
-        not_converged = jnp.linalg.norm(x - x_prev) > tol
-        not_maxed = i < max_iter
-        first = i == jnp.int32(0)
-        return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
+        def cond(carry):
+            x, x_prev, i = carry
+            not_converged = jnp.linalg.norm(x - x_prev) > tol
+            not_maxed = i < max_iter
+            first = i == jnp.int32(0)
+            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
 
-    def body(carry):
-        x, _x_prev, i = carry
-        x_new = _F_dispatch(F_pure, x, consts)
-        return (x_new, x, i + jnp.int32(1))
+        def body(carry):
+            x, _x_prev, i = carry
+            x_new = _F_dispatch(F_pure, x, consts)
+            return (x_new, x, i + jnp.int32(1))
 
-    x_star, _, n_iters = jax.lax.while_loop(
-        cond,
-        body,
-        (x0, x0 + jnp.array(1.0, dtype=x0.dtype), jnp.int32(0)),
+        x_star, _, n_iters = jax.lax.while_loop(
+            cond,
+            body,
+            (x0, x0 + jnp.array(1.0, dtype=x0.dtype), jnp.int32(0)),
+        )
+        return x_star, n_iters
+
+    if acceleration == "aitken":
+        # Lazy import to keep this module's load cheap.
+        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+            aitken_relaxation,
+        )
+
+        n_dof = x0.shape[0]
+        dtype = x0.dtype
+
+        # Carry: (x_cur, x_prev, i, omega, prev_r).  ``x_prev`` lets
+        # the cond_fun check ||F(x_cur) - x_cur|| via the raw residual
+        # bookkeeping each iter rather than re-evaluating F just to
+        # decide on termination.  We use the same "first iter always
+        # runs" guard as the no-accel path so a single F-evaluation
+        # always happens (matches fori-Aitken semantics).
+        def cond(carry):
+            x, x_prev, i, _omega, _prev_r = carry
+            not_converged = jnp.linalg.norm(x - x_prev) > tol
+            not_maxed = i < max_iter
+            first = i == jnp.int32(0)
+            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
+
+        def body(carry):
+            x_cur, _x_prev, i, omega, prev_r = carry
+            # One raw Gauss-Seidel pass.
+            x_raw = _F_dispatch(F_pure, x_cur, consts)
+            # Aitken-relaxed update: x_rel = x_cur + new_omega * (x_raw - x_cur)
+            x_rel, new_omega, cur_r = aitken_relaxation(
+                x_cur, x_raw, prev_r, omega,
+            )
+            return (x_rel, x_cur, i + jnp.int32(1), new_omega, cur_r)
+
+        init_omega = jnp.array(1.0, dtype=dtype)
+        init_prev_r = jnp.zeros(n_dof, dtype=dtype)
+        # Seed x_prev as x0 + 1 so the first cond evaluation lets the
+        # loop body run at least once (matches the no-accel path).
+        init_carry = (
+            x0,
+            x0 + jnp.array(1.0, dtype=dtype),
+            jnp.int32(0),
+            init_omega,
+            init_prev_r,
+        )
+        x_star, _, n_iters, _, _ = jax.lax.while_loop(cond, body, init_carry)
+        return x_star, n_iters
+
+    raise ValueError(
+        f"_ift_fixed_point_fwd_impl: unsupported acceleration={acceleration!r}; "
+        "supported values are 'none' and 'aitken'."
     )
-    return x_star, n_iters
 
 
-def _ift_solve_impl(F_pure, x0, consts, tol, max_iter):
+def _ift_solve_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     """Returns ``x_star`` such that ``x_star = F_pure(x_star, *consts)``.
 
     Differentiates via the implicit function theorem:
@@ -144,21 +209,31 @@ def _ift_solve_impl(F_pure, x0, consts, tol, max_iter):
     evaluated at the fixed point.  ``x0`` itself receives a zero
     cotangent (the fixed point is invariant under the initial guess
     in the converged limit).
+
+    ``acceleration`` is a static Python string — see
+    ``_ift_fixed_point_fwd_impl`` for supported values.  It controls
+    only the forward iterator; the backward is identical for all
+    values because the IFT adjoint depends on ``F`` at ``x*``, not on
+    the path taken to reach ``x*``.
     """
-    x_star, _ = _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter)
+    x_star, _ = _ift_fixed_point_fwd_impl(
+        F_pure, x0, consts, tol, max_iter, acceleration
+    )
     return x_star
 
 
-def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter):
+def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter, acceleration):
     # fwd has the SAME signature as the original function under
     # jax.custom_vjp's nondiff_argnums convention.  Only bwd is
     # rearranged (nondiff first, then residual, then output cotangent).
-    x_star, _ = _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter)
+    x_star, _ = _ift_fixed_point_fwd_impl(
+        F_pure, x0, consts, tol, max_iter, acceleration
+    )
     return x_star, (x_star, consts)
 
 
-def _ift_solve_bwd(F_pure, tol, max_iter, residual, g):
-    del tol, max_iter
+def _ift_solve_bwd(F_pure, tol, max_iter, acceleration, residual, g):
+    del tol, max_iter, acceleration  # backward is acceleration-agnostic
     x_star, consts = residual
     # Linear system to solve:  (I - dF/dx)^T u = g.
     #
@@ -226,8 +301,9 @@ def _ift_solve_bwd(F_pure, tol, max_iter, residual, g):
     return (x0_bar, consts_bar)
 
 
-# nondiff_argnums: 0=F_pure (callable), 3=tol (static float), 4=max_iter (static int)
-_ift_solve = jax.custom_vjp(_ift_solve_impl, nondiff_argnums=(0, 3, 4))
+# nondiff_argnums: 0=F_pure (callable), 3=tol (static float),
+#                  4=max_iter (static int), 5=acceleration (static str).
+_ift_solve = jax.custom_vjp(_ift_solve_impl, nondiff_argnums=(0, 3, 4, 5))
 _ift_solve.defvjp(_ift_solve_fwd, _ift_solve_bwd)
 
 
@@ -730,6 +806,61 @@ def _run_coupled_block_impl(
                     s_merged[k_s] = s_cur[k_s]
             return s_merged
 
+        def _run_ift_forward(template_state, acceleration):
+            """Run the IFT forward (while_loop) and return the full state.
+
+            ``template_state`` is the post-first-pass full state dict
+            (``state_after_first``); the IFT solver operates on its
+            flattened coupling subset while preserving the embedding
+            into the full state for ``one_pass``.  ``acceleration`` is
+            ``"none"`` or ``"aitken"`` and selects the while_loop body
+            wrapper; the IFT backward is unchanged across acceleration
+            modes (it is intrinsic to ``F`` at ``x*``).
+            """
+            # Operate on the flattened group-state vector ``x``.  We
+            # need a top-level ``F_pure(x, *consts)`` so the
+            # custom_vjp rule does not close over any tracer
+            # (see JAX issue #2912 / optimistix's _is_global_function
+            # assertion).  jax.closure_convert hoists any tracers
+            # ``one_pass`` captures into an explicit ``consts``
+            # pytree we then pass through ``_ift_solve``.
+            #
+            # **Embedded coupling groups** (group members read state
+            # from non-group nodes): ``_unflatten`` only emits the
+            # coupling subset, but ``one_pass`` needs the full state
+            # dict so its boundary-resolution can look up the
+            # outside nodes.  We embed the unflattened group state
+            # into ``template_state`` (which is ``state_after_first``
+            # and already carries every node), then pass the full
+            # dict to ``one_pass``.  The outside-node entries in
+            # ``template_state`` are tracers from the surrounding
+            # jit trace — ``jax.closure_convert`` will hoist them
+            # into ``consts`` automatically, so the IFT adjoint
+            # propagates gradients back through them.
+            def _F_one_pass_flat(x_flat):
+                group_part = _unflatten(x_flat, template_state)
+                s = {k: v for k, v in template_state.items()}
+                for nn in group_node_names:
+                    s[nn] = group_part[nn]
+                s_new = one_pass(s)
+                s_merged = _merge(template_state, s_new, jnp.array(False))
+                return _flatten(s_merged)
+
+            x0_flat = _flatten(template_state)
+            F_pure, consts_list = jax.closure_convert(
+                _F_one_pass_flat, x0_flat
+            )
+            consts = tuple(consts_list)
+
+            x_star_flat = _ift_solve(
+                F_pure, x0_flat, consts,
+                float(group.tolerance),
+                int(max_iters),
+                acceleration,
+            )
+            final = _unflatten(x_star_flat, template_state)
+            return _merge(template_state, final, jnp.array(False))
+
         # ---- Build fori_loop body based on acceleration + diagnostics ----
 
         if group.acceleration == "aitken":
@@ -762,29 +893,43 @@ def _run_coupled_block_impl(
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[2], final_carry[3]
             else:
-                def body_fn(i, carry):
-                    s_cur, converged, omega, prev_r = carry
-                    s_raw = one_pass(s_cur)
-                    residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
-                    x_rel, new_omega, cur_r = aitken_relaxation(
-                        x_old, x_raw, prev_r, omega
+                use_ift_aitken = (
+                    getattr(group, "solver", "fori") == "ift"
+                    and not use_jacobi
+                )
+                if use_ift_aitken:
+                    # ----- IFT + Aitken path.  See _run_ift_forward for
+                    # the shared plumbing.  The forward while_loop wraps
+                    # each ``F(x)`` call in Aitken delta-squared
+                    # relaxation; the backward IFT adjoint uses the bare
+                    # ``F`` (acceleration-agnostic at the fixed point).
+                    final_state = _run_ift_forward(
+                        state_after_first, "aitken",
                     )
-                    s_partial = _unflatten(x_rel, s_cur)
-                    s_accel = _build_accel_state(s_raw, s_partial)
-                    s_merged = _merge(s_cur, s_accel, new_converged)
-                    return s_merged, new_converged, new_omega, cur_r
+                else:
+                    def body_fn(i, carry):
+                        s_cur, converged, omega, prev_r = carry
+                        s_raw = one_pass(s_cur)
+                        residual = _compute_residual(s_raw, s_cur)
+                        new_converged = converged | (residual <= conv_threshold)
+                        x_old = _flatten(s_cur)
+                        x_raw = _flatten(s_raw)
+                        x_rel, new_omega, cur_r = aitken_relaxation(
+                            x_old, x_raw, prev_r, omega
+                        )
+                        s_partial = _unflatten(x_rel, s_cur)
+                        s_accel = _build_accel_state(s_raw, s_partial)
+                        s_merged = _merge(s_cur, s_accel, new_converged)
+                        return s_merged, new_converged, new_omega, cur_r
 
-                init_carry = (
-                    state_after_first, jnp.array(False),
-                    jnp.array(1.0), jnp.zeros(n_dof),
-                )
-                final_carry = jax.lax.fori_loop(
-                    1, max_iters, body_fn, init_carry
-                )
-                final_state = final_carry[0]
+                    init_carry = (
+                        state_after_first, jnp.array(False),
+                        jnp.array(1.0), jnp.zeros(n_dof),
+                    )
+                    final_carry = jax.lax.fori_loop(
+                        1, max_iters, body_fn, init_carry
+                    )
+                    final_state = final_carry[0]
 
         elif group.acceleration in ("iqn-ils", "iqn-imvj"):
             max_cols = max(max_iters - 1, 1)
@@ -939,61 +1084,12 @@ def _run_coupled_block_impl(
 
             if use_ift:
                 # ----- IFT path: while_loop forward + custom_vjp backward.
-                # Operate on the flattened group-state vector ``x``.  We
-                # need a top-level ``F_pure(x, *consts)`` so the
-                # custom_vjp rule does not close over any tracer
-                # (see JAX issue #2912 / optimistix's _is_global_function
-                # assertion).  jax.closure_convert hoists any tracers
-                # ``one_pass`` captures into an explicit ``consts``
-                # pytree we then pass through ``_ift_solve``.
-                #
-                # **Embedded coupling groups** (group members read state
-                # from non-group nodes): ``_unflatten`` only emits the
-                # coupling subset, but ``one_pass`` needs the full state
-                # dict so its boundary-resolution can look up the
-                # outside nodes.  We embed the unflattened group state
-                # into ``template_state`` (which is ``state_after_first``
-                # and already carries every node), then pass the full
-                # dict to ``one_pass``.  The outside-node entries in
-                # ``template_state`` are tracers from the surrounding
-                # jit trace — ``jax.closure_convert`` will hoist them
-                # into ``consts`` automatically, so the IFT adjoint
-                # propagates gradients back through them.
-                template_state = state_after_first
-
-                def _F_one_pass_flat(x_flat):
-                    group_part = _unflatten(x_flat, template_state)
-                    # Embed group_part into a copy of the full state.
-                    # Non-group nodes come from template_state (frozen
-                    # during the inner solve, but tracer-bearing so
-                    # closure_convert hoists them and the IFT bwd flows
-                    # cotangents back into them).
-                    s = {k: v for k, v in template_state.items()}
-                    for nn in group_node_names:
-                        s[nn] = group_part[nn]
-                    s_new = one_pass(s)
-                    s_merged = _merge(template_state, s_new, jnp.array(False))
-                    return _flatten(s_merged)
-
-                x0_flat = _flatten(state_after_first)
-                # closure_convert returns (pure_fn, consts) such that
-                # ``_F_one_pass_flat(x) == pure_fn(x, *consts)``.  The
-                # ``consts`` list will include leaves from the outside
-                # (non-group) portion of ``template_state`` that
-                # ``one_pass`` reads through boundary edges.
-                F_pure, consts_list = jax.closure_convert(
-                    _F_one_pass_flat, x0_flat
-                )
-                consts = tuple(consts_list)
-
-                x_star_flat = _ift_solve(
-                    F_pure, x0_flat, consts,
-                    float(group.tolerance),
-                    int(max_iters),
-                )
-                final_state = _unflatten(x_star_flat, state_after_first)
-                final_state = _merge(
-                    state_after_first, final_state, jnp.array(False)
+                # See ``_run_ift_forward`` below for the shared
+                # closure_convert + ``_ift_solve`` plumbing; this
+                # acceleration='none' branch is just the most common
+                # entry point.
+                final_state = _run_ift_forward(
+                    state_after_first, "none",
                 )
             elif track_diag:
                 def body_fn(i, carry):

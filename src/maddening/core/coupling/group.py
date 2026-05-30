@@ -17,8 +17,8 @@ subcycling for mixed-timestep coupling groups.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, fields
+from typing import Literal, Optional, Union, get_args, get_origin, get_type_hints
 
 
 @dataclass(frozen=True)
@@ -147,3 +147,56 @@ class CouplingGroup:
     predictor: Literal["none", "linear", "quadratic"] = "none"
     solver: Literal["fori", "ift"] = "fori"
     linear_solver: Literal["gmres", "dense"] = "gmres"
+
+    def __post_init__(self) -> None:
+        """Validate that ``Literal``-typed string fields hold permitted values.
+
+        Without this check a typo like ``acceleration="aitkin"`` silently
+        sets the field to that string; runtime dispatch (``if group.acceleration
+        == "aitken": ...``) simply fails to match and the group quietly falls
+        back to whatever the default branch is.  The Literal annotation is
+        purely a type-checker hint at runtime, so we re-derive the valid sets
+        from ``typing.get_args`` on the annotation and raise ``ValueError`` on
+        anything outside the permitted set.  Adding a new option to a Literal
+        automatically extends the validator.
+        """
+        # ``from __future__ import annotations`` is active at module top, so
+        # annotations are stringified.  ``get_type_hints`` resolves them
+        # against this module's globals.
+        hints = get_type_hints(type(self))
+        for f in fields(self):
+            ann = hints.get(f.name)
+            valid = _literal_options(ann)
+            if valid is None:
+                continue  # not a Literal (or Optional[Literal]) — skip
+            value = getattr(self, f.name)
+            # Optional[Literal[...]] allows None as a valid sentinel.
+            if value is None and _is_optional(ann):
+                continue
+            if value not in valid:
+                raise ValueError(
+                    f"CouplingGroup.{f.name}={value!r} is not a valid "
+                    f"option; expected one of {valid!r}"
+                )
+
+
+def _literal_options(ann: object) -> Optional[tuple]:
+    """Return the ``Literal`` options of ``ann``, or ``None`` if not a Literal.
+
+    Handles both bare ``Literal[...]`` and ``Optional[Literal[...]]``
+    (which normalises to ``Union[Literal[...], None]``).
+    """
+    if ann is None:
+        return None
+    if get_origin(ann) is Literal:
+        return get_args(ann)
+    if get_origin(ann) is Union:
+        for arg in get_args(ann):
+            if get_origin(arg) is Literal:
+                return get_args(arg)
+    return None
+
+
+def _is_optional(ann: object) -> bool:
+    """True iff ``ann`` is ``Union[..., None]`` (i.e. ``Optional[...]``)."""
+    return get_origin(ann) is Union and type(None) in get_args(ann)

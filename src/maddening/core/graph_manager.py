@@ -1396,27 +1396,37 @@ class GraphManager:
             raise RuntimeError(
                 "Cannot compile graph with errors:\n" + "\n".join(errors)
             )
-        # Aggregate warnings so the user sees every problem in a single
-        # pass.  Route shape/dtype/unit warnings through the more
-        # specific subclasses of EdgeValidationWarning (v0.2 #4); plain
-        # WARNINGs continue as UserWarning.
+        # Aggregate every problem so the user sees them all in a single
+        # pass.  Since v0.2.1, shape and dtype mismatches are hard
+        # errors (pre-announced in v0.2.0 release notes; semver
+        # carve-out documented in docs/developer_guide/
+        # edge_validation_migration.md).  They are collected here and
+        # raised together as an ExceptionGroup.  Unit mismatches stay
+        # as warnings; plain advisory "WARNING:" issues stay as
+        # UserWarning.
         from maddening.warnings import (
-            DtypeMismatchWarning,
-            EdgeValidationWarning,
-            ShapeMismatchWarning,
+            DtypeMismatchError,
+            EdgeValidationError,  # noqa: F401 — exported for callers
+            ExceptionGroup,
+            ShapeMismatchError,
             UnitMismatchWarning,
         )
+        validation_errors: list[EdgeValidationError] = []
         for issue in issues:
             if not issue.startswith("WARNING"):
                 continue
             if issue.startswith("WARNING[shape]"):
-                warnings.warn(issue, ShapeMismatchWarning, stacklevel=2)
+                validation_errors.append(ShapeMismatchError(issue))
             elif issue.startswith("WARNING[dtype]"):
-                warnings.warn(issue, DtypeMismatchWarning, stacklevel=2)
+                validation_errors.append(DtypeMismatchError(issue))
             elif issue.startswith("WARNING[units]"):
                 warnings.warn(issue, UnitMismatchWarning, stacklevel=2)
             else:
                 warnings.warn(issue, stacklevel=2)
+        if validation_errors:
+            raise ExceptionGroup(
+                "edge validation failed", validation_errors
+            )
 
         node_names = list(self._nodes.keys())
         self._schedule = topological_sort(node_names, self._edges)

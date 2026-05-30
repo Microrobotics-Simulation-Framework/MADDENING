@@ -6,14 +6,30 @@ orphan: false
 
 ```{versionadded} v0.2
 Shape, dtype, and unit checks at {meth}`GraphManager.compile() <maddening.core.graph_manager.GraphManager.compile>`,
-emitted as four warning subclasses of {class}`~maddening.warnings.EdgeValidationWarning`.
+emitted as warning subclasses of {class}`~maddening.warnings.EdgeValidationWarning`.
 ```
 
 ```{versionchanged} v0.2.1
-The {class}`~maddening.warnings.ShapeMismatchWarning` and
-{class}`~maddening.warnings.DtypeMismatchWarning` will be **promoted to
-hard `EdgeValidationError`** exceptions in v0.2.1.  Unit warnings stay
-as warnings (units are advisory, not load-bearing).
+Shape and dtype mismatches were **promoted to hard errors** —
+{meth}`~maddening.core.graph_manager.GraphManager.compile` now raises
+an :class:`ExceptionGroup` of
+{class}`~maddening.warnings.ShapeMismatchError` /
+{class}`~maddening.warnings.DtypeMismatchError`.  Unit mismatches
+stay as warnings (units are documentation, not contract).
+```
+
+```{warning}
+**Semver carve-out.**  v0.2.1 includes one breaking change under
+strict semver — the edge-validation warning→error flip described
+here.  We pre-announced this in v0.2.0 release notes and held the
+deprecation calendar; the carve-out is the deliberate decision to
+ship the flip as a PATCH release rather than bumping to 0.3.0,
+because: (a) the change was published in advance, (b) the migration
+path is documented on this page, and (c) the deprecated
+``*Warning`` aliases stay importable through v0.2.x for one release
+cycle.  If your CI pins ``maddening<0.3``, expect this change; if
+you depend on the old warning behaviour, see "Backwards-compat
+escape hatch" below.
 ```
 
 In v0.2 we added compile-time validation that walks every
@@ -25,19 +41,23 @@ lab newcomer wiring a 20-edge graph gets *every* mistake flagged in one
 of debugging one failure at a time at runtime.
 
 This page is for users with existing graphs that started seeing
-warnings after upgrading to v0.2.
+warnings after upgrading to v0.2 and want to migrate to v0.2.1's
+error-on-mismatch behaviour.
 
-## The four warning kinds
+## The validation surface (current — v0.2.1)
 
-All four are subclasses of {class}`maddening.warnings.EdgeValidationWarning`
-so callers can catch them in one `with warnings.catch_warnings()` block.
+| Issue | Behaviour |
+|---|---|
+| Edge references a non-existent node | `RuntimeError` from `compile()` |
+| Source field not in source node's state | `RuntimeError` |
+| Shape mismatch (no transform) | `ShapeMismatchError` raised inside an `ExceptionGroup` |
+| Dtype mismatch (no transform) | `DtypeMismatchError` raised inside an `ExceptionGroup` |
+| Unit mismatch | `UnitMismatchWarning` (advisory; never raises) |
+| Disconnected node | `UserWarning` (suppressed in single-node graphs) |
 
-| Warning | Trigger | Common fix |
-|---|---|---|
-| `ShapeMismatchWarning` | Source field has shape `(5,)` but target spec declares `(3,)`. | Add a `transform=lambda x: x[:3]` on the edge, or fix one of the two shapes. |
-| `DtypeMismatchWarning` | Source emits `int32`, target spec expects `float32`. | Add a `transform=lambda x: x.astype(jnp.float32)` on the edge, or pick a consistent dtype at the producer. |
-| `UnitMismatchWarning` | Edge declares `source_units="kN"`, target spec says `expected_units="N"`. | Add `target_units="N"` or wrap with a units-converting transform. |
-| `EdgeValidationWarning` (bare) | Future overflow category for warnings that don't fit the three above. | None currently emitted. |
+All shape/dtype errors detected during a single `compile()` call are
+aggregated and raised together — the lab-newcomer "see every problem
+at once" property is preserved by the `ExceptionGroup` shape.
 
 ## The escape hatch: any `transform=` on the edge suppresses the check
 
@@ -56,18 +76,49 @@ gm.add_edge(
 )
 ```
 
-No shape warning fires because the transform is doing the reshape.
+No `ShapeMismatchError` is raised because the transform is doing the
+reshape.
 
-## How `compile()` decides what's an error vs a warning
+## Catching the errors
 
-| Issue | v0.2 behaviour | v0.2.1 behaviour |
-|---|---|---|
-| Edge references a non-existent node | `RuntimeError` from `compile()` | (unchanged) |
-| Source field not in source node's state | `RuntimeError` | (unchanged) |
-| Shape mismatch (no transform) | `ShapeMismatchWarning` | `ShapeMismatchError` (raised) |
-| Dtype mismatch (no transform) | `DtypeMismatchWarning` | `DtypeMismatchError` (raised) |
-| Unit mismatch | `UnitMismatchWarning` | (unchanged — units stay advisory) |
-| Disconnected node | `UserWarning` | (unchanged) |
+`ExceptionGroup` is a builtin on Python 3.11+; MADDENING declares
+`exceptiongroup` as a backport dependency on 3.10.  Two equivalent
+ways to handle the group:
+
+### Python 3.11+ — `except*`
+
+```python
+from maddening.warnings import ShapeMismatchError, DtypeMismatchError
+
+try:
+    gm.compile()
+except* ShapeMismatchError as eg:
+    for err in eg.exceptions:
+        print("shape:", err)
+except* DtypeMismatchError as eg:
+    for err in eg.exceptions:
+        print("dtype:", err)
+```
+
+### Python 3.10 (or version-agnostic) — explicit iteration
+
+```python
+from maddening.warnings import (
+    EdgeValidationError, ExceptionGroup,
+    ShapeMismatchError, DtypeMismatchError,
+)
+
+try:
+    gm.compile()
+except ExceptionGroup as eg:
+    for err in eg.exceptions:
+        if isinstance(err, ShapeMismatchError):
+            print("shape:", err)
+        elif isinstance(err, DtypeMismatchError):
+            print("dtype:", err)
+        elif isinstance(err, EdgeValidationError):
+            print("other validation error:", err)
+```
 
 ## Common patterns
 
@@ -77,8 +128,8 @@ No shape warning fires because the transform is doing the reshape.
 # Before v0.2: silent at compile, surprise at runtime
 gm.add_edge("heat", "neighbor", "temperature", "wall_T")  # shape (N,) vs ()
 
-# After v0.2: ShapeMismatchWarning
-# Fix: add the transform that was implicit
+# v0.2+: ShapeMismatchError on compile() — fix by adding the
+# transform that was previously implicit
 gm.add_edge(
     "heat", "neighbor", "temperature", "wall_T",
     transform=lambda T: T[-1],
@@ -96,86 +147,81 @@ gm.add_edge(
 )
 ```
 
-The transform suppresses the shape/dtype warnings; the explicit
-`target_units` declaration matches the target spec so no unit
-warning fires either.
+The transform suppresses the shape/dtype checks; the explicit
+`target_units` declaration matches the target spec so no
+`UnitMismatchWarning` fires either.
 
-### "I want my edge to keep working even after v0.2.1"
-
-Fix the mismatch.  The compile-time-error path is intentional: it
-catches a class of bug (passing the wrong field by name) that
-currently fails at the first `step()` with a runtime shape error
-deep in the traced JIT.
-
-### "I have a synthetic test that *needs* the warning"
+### "I have a synthetic test that needs the error"
 
 ```python
 import pytest
-import warnings
-from maddening.warnings import ShapeMismatchWarning
+from maddening.warnings import ShapeMismatchError, ExceptionGroup
 
-with pytest.warns(ShapeMismatchWarning):
+with pytest.raises(ExceptionGroup) as exc_info:
     gm.compile()
+assert any(isinstance(e, ShapeMismatchError) for e in exc_info.value.exceptions)
 ```
 
-In v0.2.1, swap the warning class for the corresponding error
-class and the `pytest.warns` for `pytest.raises`.
+### "I had `pytest.warns(ShapeMismatchWarning)` in my test suite"
 
-### "I'm running MIME experiments and don't want CI to fail on warnings"
+The `ShapeMismatchWarning` and `DtypeMismatchWarning` classes remain
+importable in v0.2.1 as deprecated aliases — but MADDENING no longer
+emits them.  Update to the error form above; the alias is removed in
+v0.3.
 
-MADDENING ships `filterwarnings = ["error", ...]` in
-`pyproject.toml` for the *internal* test suite — downstream
-projects don't inherit that setting.  If you have your own
-`filterwarnings = ["error"]` and want to grandfather edge
-validation:
+### "I'm running MIME experiments and don't want CI to fail"
+
+MADDENING ships `filterwarnings = ["error", ...]` in `pyproject.toml`
+for the *internal* test suite — downstream projects don't inherit
+that setting.  In v0.2, the typical downstream override was:
 
 ```toml
 [tool.pytest.ini_options]
 filterwarnings = [
     "error",
-    "ignore::maddening.warnings.ShapeMismatchWarning",   # remove for v0.2.1
-    "ignore::maddening.warnings.DtypeMismatchWarning",   # remove for v0.2.1
+    "ignore::maddening.warnings.ShapeMismatchWarning",   # remove in v0.2.1
+    "ignore::maddening.warnings.DtypeMismatchWarning",   # remove in v0.2.1
     "ignore::maddening.warnings.UnitMismatchWarning",
 ]
 ```
 
-Remove the shape/dtype lines before v0.2.1 lands.
+In v0.2.1 the first two lines are no-ops (no warning is emitted to
+ignore) — remove them.  The `UnitMismatchWarning` line stays.
 
 ## Aggregation: all problems in one pass
 
-`compile()` walks the full `validate()` issue list and emits one
-warning per problem.  A 20-edge graph with three different mismatch
-classes produces three warnings, not one — by design.
+`compile()` walks the full `validate()` issue list and accumulates
+every shape/dtype mismatch into a single `ExceptionGroup`.  Unit
+mismatches still emit as warnings *before* the raise, so they show
+up in `caught` records too.
 
 ```python
 import warnings
-from maddening.warnings import EdgeValidationWarning
+import pytest
+from maddening.warnings import (
+    EdgeValidationWarning, ExceptionGroup,
+    ShapeMismatchError, DtypeMismatchError, UnitMismatchWarning,
+)
 
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always", EdgeValidationWarning)
-    gm.compile()
+    with pytest.raises(ExceptionGroup) as exc_info:
+        gm.compile()
 
-for w in caught:
-    print(type(w.message).__name__, ":", w.message)
+errors = exc_info.value.exceptions
+unit_warns = [w for w in caught
+              if issubclass(w.category, UnitMismatchWarning)]
 ```
 
-## Tracking issue for the v0.2.1 flip
+A 20-edge graph with three different shape mismatches, two different
+dtype mismatches, and one unit mismatch produces six items total
+(five errors in the group + one warning) — by design.
 
-When v0.2.1 lands the `ShapeMismatchWarning` and
-`DtypeMismatchWarning` flips, the change set will:
+## Backwards-compat escape hatch
 
-1. Add `ShapeMismatchError(EdgeValidationError)` and
-   `DtypeMismatchError(EdgeValidationError)` to
-   `maddening.warnings`.
-2. Replace the `warnings.warn(issue, ShapeMismatchWarning)` calls
-   in `GraphManager.compile()` with `raise
-   ShapeMismatchError(issue)`.
-3. Aggregate errors in a single `ExceptionGroup` so the lab-newcomer
-   "see every problem at once" property is preserved.
-4. Update this page's first admonition to `versionchanged` and move
-   the "v0.2 → v0.2.1" caveat to "fixed in v0.2.1".
-
-Track the cut on the GitHub `v0.2.1` milestone — see also the
-`compile_time_edge_validation` test file at
-`tests/core/test_edge_validation.py` which doubles as the migration
-test bed.
+The deprecated `*Warning` classes (`ShapeMismatchWarning`,
+`DtypeMismatchWarning`, `EdgeValidationWarning`) stay importable
+through v0.2.x.  Nothing in MADDENING emits them in v0.2.1, but they
+are not removed — downstream `pytest.warns` references resolve and
+just never fire.  In v0.3 the aliases are removed (see the v0.3.0
+plan's compat-hygiene bucket).

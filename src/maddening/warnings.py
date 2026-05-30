@@ -1,4 +1,19 @@
-"""MADDENING-specific warning categories."""
+"""MADDENING-specific warning categories and edge-validation exceptions."""
+
+import sys
+
+# ExceptionGroup is a builtin on 3.11+; the ``exceptiongroup`` backport
+# package supplies it on 3.10.  GraphManager.compile() raises
+# ExceptionGroup so callers can ``except*`` over Shape/Dtype mismatches
+# independently while still seeing every problem in a single pass.
+if sys.version_info >= (3, 11):
+    BaseExceptionGroup = BaseExceptionGroup  # noqa: F821 — 3.11+ builtin
+    ExceptionGroup = ExceptionGroup  # noqa: F821 — 3.11+ builtin
+else:  # pragma: no cover — 3.10 fallback
+    from exceptiongroup import (  # type: ignore[import-not-found]
+        BaseExceptionGroup,
+        ExceptionGroup,
+    )
 
 
 class PerformanceWarning(UserWarning):
@@ -8,48 +23,84 @@ class PerformanceWarning(UserWarning):
 
 
 # ---------------------------------------------------------------------------
-# v0.2 #4: compile-time edge validation
+# v0.2.1: compile-time edge validation — Shape / Dtype mismatches are now
+# hard errors (pre-announced in v0.2.0 release notes; see semver carve-out
+# in CHANGELOG and docs/developer_guide/edge_validation_migration.md).
+# Unit mismatches stay as warnings (UnitMismatchWarning below).
+# ---------------------------------------------------------------------------
+
+
+class EdgeValidationError(Exception):
+    """Base class for edge-validation errors raised at ``compile()`` time.
+
+    :meth:`maddening.core.graph_manager.GraphManager.compile` aggregates
+    every detected problem and raises a single
+    :class:`ExceptionGroup` whose ``.exceptions`` contains one
+    :class:`ShapeMismatchError` or :class:`DtypeMismatchError` per
+    problem.  Catch :class:`EdgeValidationError` (or the more specific
+    subclasses) inside an ``except*`` to handle them uniformly::
+
+        try:
+            gm.compile()
+        except* ShapeMismatchError as eg:
+            for err in eg.exceptions:
+                ...  # report or auto-fix shape mismatches
+        except* DtypeMismatchError as eg:
+            ...
+    """
+
+
+class ShapeMismatchError(EdgeValidationError):
+    """Edge brings a field whose runtime shape disagrees with the
+    target node's :attr:`BoundaryInputSpec.shape`."""
+
+
+class DtypeMismatchError(EdgeValidationError):
+    """Edge brings a field whose dtype disagrees with the target node's
+    :attr:`BoundaryInputSpec.dtype`."""
+
+
+# ---------------------------------------------------------------------------
+# Deprecated *Warning aliases — kept for one release cycle (v0.2.1 only)
+# so downstream code with ``pytest.warns(ShapeMismatchWarning)`` still
+# imports cleanly.  Removed in v0.3.
 # ---------------------------------------------------------------------------
 
 
 class EdgeValidationWarning(UserWarning):
-    """Base class for edge-validation warnings raised at ``compile()`` time.
+    """**Deprecated** in v0.2.1; superseded by :class:`EdgeValidationError`.
 
-    In v0.2 these are warnings; the v0.2.1 plan flips them to
-    ``EdgeValidationError`` (a hard exception).  Catch this class to
-    handle all edge-validation warnings uniformly, or catch one of the
-    more specific subclasses below.
+    Kept as a deprecated alias so downstream code that imports the name
+    (typically ``pytest.warns(EdgeValidationWarning)`` in legacy tests)
+    still resolves.  No code path inside MADDENING emits this class as
+    of v0.2.1 — the shape/dtype paths raise instead.  Removed in v0.3.
     """
-
-    pass
 
 
 class ShapeMismatchWarning(EdgeValidationWarning):
-    """Edge brings a field whose runtime shape disagrees with the
-    target node's :attr:`BoundaryInputSpec.shape`."""
+    """**Deprecated** in v0.2.1; use :class:`ShapeMismatchError`.
 
-    pass
+    Kept as a deprecated alias for one release cycle.  Removed in v0.3.
+    """
 
 
 class DtypeMismatchWarning(EdgeValidationWarning):
-    """Edge brings a field whose dtype disagrees with the target node's
-    :attr:`BoundaryInputSpec.dtype`."""
+    """**Deprecated** in v0.2.1; use :class:`DtypeMismatchError`.
 
-    pass
+    Kept as a deprecated alias for one release cycle.  Removed in v0.3.
+    """
 
 
 class UnitMismatchWarning(EdgeValidationWarning):
     """Edge declares units that don't match the target node's
     :attr:`BoundaryInputSpec.expected_units`.
 
-    Permanently advisory.  Unlike :class:`ShapeMismatchWarning` and
-    :class:`DtypeMismatchWarning` (which flip to errors in v0.2.1),
-    unit mismatches stay as warnings forever — units are
-    documentation, not contract.  MADDENING does not second-guess
-    physics decisions that are the user's domain.
+    **Permanently advisory.**  Unlike the (now-removed)
+    ``ShapeMismatchWarning`` / ``DtypeMismatchWarning`` paths, unit
+    mismatches stay as warnings forever — units are documentation,
+    not contract.  MADDENING does not second-guess physics decisions
+    that are the user's domain.
     """
-
-    pass
 
 
 # ---------------------------------------------------------------------------

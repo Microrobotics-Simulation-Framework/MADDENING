@@ -1,14 +1,18 @@
-"""Tests for v0.2 #4 compile-time edge validation.
+"""Tests for compile-time edge validation.
 
-These exercise the shape/dtype/units checks added to
-:meth:`GraphManager.validate` and the routing of warnings through
-:class:`maddening.warnings.EdgeValidationWarning` subclasses in
-:meth:`GraphManager.compile`.
+Originally landed as warnings in v0.2 (#4); shape and dtype mismatches
+were promoted to :class:`ExceptionGroup` of
+:class:`~maddening.warnings.EdgeValidationError` subclasses in v0.2.1
+(pre-announced in v0.2.0 release notes, semver carve-out documented in
+`docs/developer_guide/edge_validation_migration.md`).  Unit mismatches
+stay as :class:`UnitMismatchWarning`.
 """
 
 from __future__ import annotations
 
+import re
 import warnings as _w
+from typing import Type
 
 import jax.numpy as jnp
 import pytest
@@ -16,11 +20,34 @@ import pytest
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.warnings import (
-    DtypeMismatchWarning,
+    DtypeMismatchError,
+    EdgeValidationError,
     EdgeValidationWarning,
-    ShapeMismatchWarning,
+    ExceptionGroup,
+    ShapeMismatchError,
     UnitMismatchWarning,
 )
+
+
+def _assert_group_has(
+    eg: ExceptionGroup,
+    exc_type: Type[EdgeValidationError],
+    *,
+    match: str | None = None,
+) -> None:
+    """Assert that the ExceptionGroup contains at least one ``exc_type``
+    whose message matches ``match`` (if given)."""
+    found = [e for e in eg.exceptions if isinstance(e, exc_type)]
+    assert found, (
+        f"ExceptionGroup has no {exc_type.__name__}; got "
+        f"{[type(e).__name__ for e in eg.exceptions]}"
+    )
+    if match is not None:
+        pattern = re.compile(match)
+        assert any(pattern.search(str(e)) for e in found), (
+            f"No {exc_type.__name__} in group matched {match!r}; "
+            f"messages were {[str(e) for e in found]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -118,25 +145,29 @@ class TestCleanGraphSilent:
 
 
 class TestShapeMismatch:
-    def test_vector_into_scalar_warns(self):
+    def test_vector_into_scalar_raises(self):
         gm = GraphManager()
         gm.add_node(_VectorSourceNode("src", timestep=0.01, length=3))
         gm.add_node(_ScalarSinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "in")
-        with pytest.warns(ShapeMismatchWarning, match="shape"):
+        with pytest.raises(ExceptionGroup) as exc_info:
             gm.compile()
+        _assert_group_has(exc_info.value, ShapeMismatchError, match="shape")
 
-    def test_wrong_vector_length_warns(self):
+    def test_wrong_vector_length_raises(self):
         gm = GraphManager()
         gm.add_node(_VectorSourceNode("src", timestep=0.01, length=5))
         gm.add_node(_Vec3SinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "vec")
-        with pytest.warns(ShapeMismatchWarning, match=r"\(5,\).*\(3,\)"):
+        with pytest.raises(ExceptionGroup) as exc_info:
             gm.compile()
+        _assert_group_has(
+            exc_info.value, ShapeMismatchError, match=r"\(5,\).*\(3,\)",
+        )
 
-    def test_transform_suppresses_shape_warning(self):
+    def test_transform_suppresses_shape_error(self):
         # When a transform is provided we can't validate shape at
-        # compile time (transform may reshape), so no warning.
+        # compile time (transform may reshape), so no error.
         gm = GraphManager()
         gm.add_node(_VectorSourceNode("src", timestep=0.01, length=5))
         gm.add_node(_Vec3SinkNode("sink", timestep=0.01))
@@ -144,17 +175,17 @@ class TestShapeMismatch:
             "src", "sink", "out", "vec",
             transform=lambda x: x[:3],   # trim to 3
         )
-        with _w.catch_warnings():
-            _w.simplefilter("error", ShapeMismatchWarning)
-            gm.compile()  # would raise if a ShapeMismatchWarning fired
+        gm.compile()  # no ExceptionGroup raised
 
-    def test_warning_is_subclass_of_edge_validation(self):
+    def test_error_is_subclass_of_edge_validation(self):
         gm = GraphManager()
         gm.add_node(_VectorSourceNode("src", timestep=0.01, length=3))
         gm.add_node(_ScalarSinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "in")
-        with pytest.warns(EdgeValidationWarning):  # via the parent class
+        with pytest.raises(ExceptionGroup) as exc_info:
             gm.compile()
+        # The error in the group is catchable as EdgeValidationError.
+        _assert_group_has(exc_info.value, EdgeValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +194,7 @@ class TestShapeMismatch:
 
 
 class TestDtypeMismatch:
-    def test_int_into_float32_warns(self):
+    def test_int_into_float32_raises(self):
         # Source emits int32, sink expects float32
         class _IntSource(SimulationNode):
             def initial_state(self):
@@ -174,10 +205,11 @@ class TestDtypeMismatch:
         gm.add_node(_IntSource("src", timestep=0.01))
         gm.add_node(_ScalarSinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "in")
-        with pytest.warns(DtypeMismatchWarning, match="dtype"):
+        with pytest.raises(ExceptionGroup) as exc_info:
             gm.compile()
+        _assert_group_has(exc_info.value, DtypeMismatchError, match="dtype")
 
-    def test_transform_suppresses_dtype_warning(self):
+    def test_transform_suppresses_dtype_error(self):
         class _IntSource(SimulationNode):
             def initial_state(self):
                 return {"out": jnp.array(0, dtype=jnp.int32)}
@@ -190,9 +222,7 @@ class TestDtypeMismatch:
             "src", "sink", "out", "in",
             transform=lambda x: x.astype(jnp.float32),
         )
-        with _w.catch_warnings():
-            _w.simplefilter("error", DtypeMismatchWarning)
-            gm.compile()
+        gm.compile()  # no ExceptionGroup raised
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +247,10 @@ class TestUnitMismatch:
 
 class TestAggregation:
     def test_all_edge_problems_emitted_in_one_pass(self):
-        """A graph with shape, dtype, and unit problems all on different
-        edges should emit one warning per problem, not stop at the first."""
+        """A graph with shape, dtype, and unit problems on different edges
+        produces one ExceptionGroup (containing ShapeMismatchError +
+        DtypeMismatchError) AND emits a UnitMismatchWarning before the
+        raise — every problem is surfaced in one compile() pass."""
         class _BadSource(SimulationNode):
             def initial_state(self):
                 return {"out": jnp.array(0, dtype=jnp.int32)}  # wrong dtype
@@ -238,13 +270,16 @@ class TestAggregation:
 
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always", EdgeValidationWarning)
-            gm.compile()
+            with pytest.raises(ExceptionGroup) as exc_info:
+                gm.compile()
 
-        kinds = {type(w.message).__name__ for w in caught
-                 if issubclass(w.category, EdgeValidationWarning)}
-        assert "ShapeMismatchWarning" in kinds
-        assert "DtypeMismatchWarning" in kinds
-        assert "UnitMismatchWarning" in kinds
+        # Shape + dtype come out as errors in the same group.
+        _assert_group_has(exc_info.value, ShapeMismatchError)
+        _assert_group_has(exc_info.value, DtypeMismatchError)
+        # Unit mismatch is still a warning, emitted before the raise.
+        unit_warns = [w for w in caught
+                      if issubclass(w.category, UnitMismatchWarning)]
+        assert unit_warns, "expected a UnitMismatchWarning alongside the group"
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +310,7 @@ class TestHardErrors:
 
 
 class TestSpecDtypeNone:
-    def test_no_dtype_warning_when_spec_dtype_none(self):
+    def test_no_dtype_error_when_spec_dtype_none(self):
         class _Sink(SimulationNode):
             def initial_state(self):
                 return {"x": jnp.array(0.0)}
@@ -292,9 +327,7 @@ class TestSpecDtypeNone:
         gm.add_node(_IntSource("src", timestep=0.01))
         gm.add_node(_Sink("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "in")
-        with _w.catch_warnings():
-            _w.simplefilter("error", DtypeMismatchWarning)
-            gm.compile()  # would raise if dtype warning fired
+        gm.compile()  # no ExceptionGroup raised — dtype check skipped
 
 
 # ---------------------------------------------------------------------------
@@ -316,9 +349,7 @@ class TestSymbolicShape:
         gm.add_node(_VectorSourceNode("src", timestep=0.01, length=7))
         gm.add_node(_SymSink("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "vec")
-        with _w.catch_warnings():
-            _w.simplefilter("error", ShapeMismatchWarning)
-            gm.compile()  # symbolic dim shouldn't warn
+        gm.compile()  # symbolic dim shouldn't raise
 
 
 # ---------------------------------------------------------------------------

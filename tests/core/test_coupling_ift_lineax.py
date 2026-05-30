@@ -49,6 +49,7 @@ def _make_chain_gm(
     max_iters: int = 30,
     tol: float = 1e-8,
     init_positions: list[float] | None = None,
+    linear_solver: str = "gmres",
 ) -> GraphManager:
     """Build a coupling group of ``n_nodes`` chained spring-dampers.
 
@@ -83,6 +84,7 @@ def _make_chain_gm(
         tolerance=tol,
         acceleration="none",
         solver=solver,
+        linear_solver=linear_solver,
     )
     return gm
 
@@ -233,6 +235,189 @@ def test_large_chain_backward_finite_diff():
         # expected float32 truncation error.
         assert jnp.allclose(g_an, g_fd, atol=5e-3, rtol=5e-2), (
             f"gradient mismatch at s{i}: analytic={g_an}, fd={g_fd}"
+        )
+
+
+# ----------------------------------------------------------------------
+# 3. linear_solver dispatch — gmres / bicgstab / dense parity
+# ----------------------------------------------------------------------
+
+
+def test_bicgstab_known_breakdown_with_function_operator():
+    """Pins the lineax 0.0.7 BiCGStab limitation that motivated
+    keeping ``"bicgstab"`` out of the CouplingGroup ``linear_solver``
+    Literal.
+
+    Investigation (2026-05-30): the BiCGStab dispatch arm in
+    ``_ift_solve_bwd`` is wired correctly, but the underlying
+    ``lineax.BiCGStab`` returns NaN whenever it drives a
+    ``FunctionLinearOperator`` (the matrix-free shape MADDENING's
+    IFT backward uses) — including on a well-conditioned ``0.5*I``
+    operator.  This is a lineax 0.0.7 bug, not a property of the
+    coupling Jacobian.  ``MatrixLinearOperator`` works.
+
+    This test asserts the failure mode directly: BiCGStab via the
+    same FunctionLinearOperator shape used in the backward returns
+    a non-finite solution.  When a future lineax version fixes this
+    (FunctionLinearOperator-driven BiCGStab returns finite values),
+    the assertion will flip, and that is the signal to widen the
+    ``linear_solver`` Literal on CouplingGroup to include
+    ``"bicgstab"`` as a supported config value.
+    """
+    import lineax as lx  # noqa: PLC0415
+
+    def _matvec(v):
+        return 0.5 * v
+
+    g = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    op = lx.FunctionLinearOperator(_matvec, jax.eval_shape(lambda: g))
+    try:
+        result = lx.linear_solve(
+            op, g,
+            solver=lx.BiCGStab(rtol=1e-6, atol=1e-8, max_steps=200),
+        )
+    except Exception:
+        # The current behaviour: lineax raises an EquinoxRuntimeError
+        # about non-finite output from the solver, before returning.
+        return
+    # If lineax 0.0.7 stops raising and returns a value, it should
+    # still be NaN (the underlying bug).  The expected value is 2*g.
+    expected = 2.0 * g
+    if jnp.all(jnp.isfinite(result.value)) and jnp.allclose(
+        result.value, expected, atol=1e-4, rtol=1e-4
+    ):
+        pytest.fail(
+            "lineax BiCGStab now solves the FunctionLinearOperator "
+            "case correctly — widen CouplingGroup.linear_solver "
+            "Literal to include 'bicgstab' and add a parity test "
+            "against GMRES."
+        )
+
+
+def test_dense_matches_gmres_gradient_small_chain():
+    """``linear_solver='dense'`` agrees with ``'gmres'`` on a small chain.
+
+    The dense path builds the full ``(I - dF/dx)`` Jacobian via jacrev
+    and solves with ``jnp.linalg.solve``.  It is O(N^2) memory and is
+    promoted from the env-var-gated fallback to a first-class config
+    option here; this test keeps both paths in sync.
+    """
+    n = 20
+    perturbed = f"s{n // 2}"
+    gm_gmres = _make_chain_gm(n, "ift", linear_solver="gmres")
+    gm_dense = _make_chain_gm(n, "ift", linear_solver="dense")
+    g_gmres = _grad_through_compiled_step(gm_gmres, perturbed)
+    g_dense = _grad_through_compiled_step(gm_dense, perturbed)
+    assert jnp.allclose(g_gmres, g_dense, atol=1e-3, rtol=1e-3), (
+        f"dense vs gmres gradient mismatch: "
+        f"gmres={g_gmres}, dense={g_dense}"
+    )
+
+
+# ----------------------------------------------------------------------
+# 4. GMRES-restart-too-small silent-corruption regression guard
+# ----------------------------------------------------------------------
+#
+# Background: lineax.GMRES defaults ``restart`` to 20 (the dim of the
+# Krylov subspace it builds).  When the adjoint system has N >> 20,
+# the default-20 GMRES can converge to a low-rank approximation that
+# satisfies the projected-subspace residual but lives in a 20-D
+# subspace of the N-D problem.  ``result.value`` looks correct
+# (no NaN, no error, ``result.stats`` reports success) but the
+# returned ``u`` is structurally wrong, producing structurally
+# wrong gradients.  This silent-corruption mode was hit during the
+# initial lineax migration at N=250 and motivated the explicit
+# ``restart=min(N, 50)`` in ``_ift_solve_bwd``.
+#
+# Reproducing the silent-corruption gradient empirically is finicky:
+# whether the 20-D Krylov subspace happens to contain (a projection
+# of) the true adjoint depends on the spectrum of ``(I - dF/dx)^T``
+# and on the right-hand side ``g``.  For the spring-chain fixture at
+# N<=100, restart=20 happens to be enough; the corruption regime
+# kicks in for harder problems (denser coupling Jacobians, smaller
+# damping, larger N).
+#
+# So instead of chasing a fixture that exhibits the corruption (and
+# being at the mercy of float32 noise), this test pins the *structural*
+# invariant that prevents the regression: the production code must
+# call ``lx.GMRES`` with ``restart`` of at least ``min(N, 50)``, not
+# the lineax default of 20.  We spy on the GMRES constructor's
+# kwargs at trace time and assert the override is in place.
+#
+# A programmer who "simplifies" the GMRES call by dropping the
+# explicit ``restart=`` argument trips this immediately — even on
+# small fixtures where the empirical bug wouldn't be detectable.
+
+
+def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
+    """Production IFT backward must call ``lx.GMRES`` with
+    ``restart >= min(N, 50)``, not the lineax default of 20.
+
+    This is the regression guard against silent gradient corruption
+    described in the comment block above.  See also the long-form
+    comment in ``_ift_solve_bwd`` (search for "GMRES restart
+    gotcha").
+    """
+    import lineax as lx  # noqa: PLC0415
+
+    real_gmres = lx.GMRES
+    seen_kwargs: list[dict] = []
+
+    def _spy_gmres(*args, **kwargs):
+        seen_kwargs.append(dict(kwargs))
+        return real_gmres(*args, **kwargs)
+
+    monkeypatch.setattr(lx, "GMRES", _spy_gmres)
+
+    # N=60 chain ⇒ group state size 120 floats, well above the
+    # lineax default restart of 20.  We expect the production code
+    # to pass restart=50 (= min(120, 50)).
+    n = 60
+    gm = _make_chain_gm(n, "ift")
+    _ = gm.step()
+    compiled = gm._compiled_step
+    initial_state = gm._state
+    names = [k for k in initial_state.keys() if k != "_meta"]
+
+    # Force the backward to be traced by computing a gradient.
+    def loss_fn(pos):
+        state = {
+            k: dict(v) if isinstance(v, dict) else v
+            for k, v in initial_state.items()
+        }
+        state["s0"] = dict(state["s0"])
+        state["s0"]["position"] = pos
+        new_state = compiled(state, {})
+        return _loss_chain(new_state, names)
+
+    _ = jax.grad(loss_fn)(initial_state["s0"]["position"])
+
+    assert seen_kwargs, (
+        "lx.GMRES was never called during the IFT backward — the spy "
+        "is not reaching the production solver."
+    )
+    # All calls (there may be more than one if the bwd is re-traced)
+    # must use restart >= min(2*N, 50) = 50.
+    expected_min_restart = min(2 * n, 50)
+    for kw in seen_kwargs:
+        restart = kw.get("restart")
+        assert restart is not None, (
+            "lx.GMRES called without an explicit restart= kwarg.  This "
+            "means the lineax default-20 restart is in effect, which "
+            "silently corrupts gradients for N>20 (see comment in "
+            "_ift_solve_bwd).  Restore the explicit restart=min(N,50)."
+        )
+        assert restart >= expected_min_restart, (
+            f"lx.GMRES called with restart={restart}, but the production "
+            f"floor is {expected_min_restart}.  See the GMRES restart "
+            f"gotcha comment in _ift_solve_bwd."
+        )
+        # Likewise, ``max_steps`` must be at least 4*restart so the
+        # algorithm has headroom for several restart cycles.
+        max_steps = kw.get("max_steps")
+        assert max_steps is not None and max_steps >= 4 * restart, (
+            f"lx.GMRES called with max_steps={max_steps}, but the "
+            f"production floor is 4*restart={4*restart}."
         )
 
 

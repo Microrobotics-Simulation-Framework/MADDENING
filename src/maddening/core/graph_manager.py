@@ -316,7 +316,9 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     )
 
 
-def _ift_solve_impl(F_pure, x0, consts, tol, max_iter, acceleration):
+def _ift_solve_impl(
+    F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
+):
     """Returns ``x_star`` such that ``x_star = F_pure(x_star, *consts)``.
 
     Differentiates via the implicit function theorem:
@@ -330,6 +332,10 @@ def _ift_solve_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     only the forward iterator; the backward is identical for all
     values because the IFT adjoint depends on ``F`` at ``x*``, not on
     the path taken to reach ``x*``.
+
+    ``linear_solver`` is a static Python string — ``"gmres"`` (default),
+    ``"bicgstab"``, or ``"dense"`` — selecting the backward adjoint
+    solver.  See ``_ift_solve_bwd`` for the dispatch details.
     """
     x_star, _ = _ift_fixed_point_fwd_impl(
         F_pure, x0, consts, tol, max_iter, acceleration
@@ -337,7 +343,9 @@ def _ift_solve_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     return x_star
 
 
-def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter, acceleration):
+def _ift_solve_fwd(
+    F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
+):
     # fwd has the SAME signature as the original function under
     # jax.custom_vjp's nondiff_argnums convention.  Only bwd is
     # rearranged (nondiff first, then residual, then output cotangent).
@@ -347,7 +355,9 @@ def _ift_solve_fwd(F_pure, x0, consts, tol, max_iter, acceleration):
     return x_star, (x_star, consts)
 
 
-def _ift_solve_bwd(F_pure, tol, max_iter, acceleration, residual, g):
+def _ift_solve_bwd(
+    F_pure, tol, max_iter, acceleration, linear_solver, residual, g
+):
     del tol, max_iter, acceleration  # backward is acceleration-agnostic
     x_star, consts = residual
     # Linear system to solve:  (I - dF/dx)^T u = g.
@@ -357,15 +367,33 @@ def _ift_solve_bwd(F_pure, tol, max_iter, acceleration, residual, g):
     # function ``F`` at ``x_star`` applied to ``v``.  This is matrix
     # free — no jacobian is ever materialized — so memory is O(N) and
     # compute per matvec is one F-vjp.  We hand the matvec to lineax
-    # as a ``FunctionLinearOperator`` and let its GMRES iterate.
+    # as a ``FunctionLinearOperator`` and let its GMRES (or BiCGStab)
+    # iterate.
     #
-    # The operand of the optional dense fallback is the historical
-    # ``jacrev + jnp.linalg.solve`` path, kept behind an env var so
-    # the swap can be reverted in place without code edits if a future
-    # bug surfaces.  Default is the matrix-free path.
+    # Backends, dispatched by ``linear_solver`` plus the
+    # ``MADDENING_IFT_DENSE_SOLVE`` env var (env var wins for triage):
+    #
+    # * ``"gmres"`` (default) — lineax GMRES.  Safe non-symmetric solver.
+    # * ``"dense"`` — historical ``jacrev + jnp.linalg.solve``.  O(N^2)
+    #   memory, O(N^3) compute.  Kept as a swap-in triage fallback and
+    #   promoted to a first-class config option.
+    #
+    # * ``"bicgstab"`` — lineax BiCGStab.  *Disabled at the
+    #   CouplingGroup field level* in lineax 0.0.7: BiCGStab returns
+    #   NaN when driving a ``FunctionLinearOperator`` (the matrix-free
+    #   shape this backward uses) — confirmed on a well-conditioned
+    #   ``0.5*I`` test, so this is a lineax-side issue, not a property
+    #   of MADDENING's coupling Jacobian.  The dispatch arm is left in
+    #   place so a future lineax fix can re-enable it by widening the
+    #   ``linear_solver`` Literal on CouplingGroup; users who want to
+    #   try it can still construct CouplingGroup with
+    #   ``linear_solver="bicgstab"`` (the runtime accepts the string).
     _, vjp_fn = jax.vjp(lambda xx: _F_dispatch(F_pure, xx, consts), x_star)
 
-    if os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1":
+    force_dense = os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1"
+    effective_solver = "dense" if force_dense else linear_solver
+
+    if effective_solver == "dense":
         J = jax.jacrev(lambda xx: _F_dispatch(F_pure, xx, consts))(x_star)
         n = x_star.shape[0]
         A = jnp.eye(n, dtype=x_star.dtype) - J
@@ -383,30 +411,60 @@ def _ift_solve_bwd(F_pure, tol, max_iter, acceleration, residual, g):
         op = lx.FunctionLinearOperator(
             _matvec, jax.eval_shape(lambda: g)
         )
-        # (I - dF/dx)^T is in general non-symmetric; GMRES is the safe
-        # default.  rtol/atol are matched to the float32 regime the
-        # surrounding code uses.
-        #
-        # ``restart`` directly bounds the dim of the Krylov subspace
-        # GMRES builds; lineax's default 20 is too small for coupling
-        # groups whose flat state is larger than 20 floats (a
-        # 50-spring chain has state size 100, etc.).  We set restart =
-        # min(N, 50) so small problems stay cheap while N>=50 problems
-        # still see a meaningful subspace.  Likewise we bump
-        # ``max_steps`` so the algorithm has headroom for several
-        # restart cycles.
         n = x_star.shape[0]
-        restart = min(n, 50)
-        max_steps = max(4 * restart, 100)
-        result = lx.linear_solve(
-            op, g,
-            solver=lx.GMRES(
+
+        if effective_solver == "bicgstab":
+            # BiCGStab has no ``restart`` parameter (it operates on a
+            # fixed three-vector recurrence rather than building a
+            # Krylov subspace).  ``max_steps`` only needs to bound the
+            # outer iteration count.
+            max_steps = max(4 * n, 200)
+            solver = lx.BiCGStab(
+                rtol=1e-6, atol=1e-8, max_steps=max_steps,
+            )
+        elif effective_solver == "gmres":
+            # (I - dF/dx)^T is in general non-symmetric; GMRES is the
+            # safe default.  rtol/atol are matched to the float32
+            # regime the surrounding code uses.
+            #
+            # *** GMRES restart gotcha ***
+            #
+            # ``restart`` directly bounds the dim of the Krylov subspace
+            # GMRES builds.  Lineax's default is 20.  For coupling
+            # groups whose flat state is larger than 20 floats (any
+            # chain of >=10 two-DOF nodes — common!), the
+            # default-20 GMRES silently converges to a *low-rank
+            # approximation* of the adjoint solve.  It looks fine
+            # (converged=True, residual small in the projected
+            # subspace) but the returned ``u`` lies in a 20-D
+            # subspace of an N-D problem, so the resulting gradient
+            # is structurally wrong — *not* a near-correct answer
+            # with extra noise, but a different gradient.
+            #
+            # We set restart = min(N, 50) so small problems stay cheap
+            # while N>=50 problems still see a meaningful subspace,
+            # and bump ``max_steps`` to give the algorithm headroom
+            # for several restart cycles.  Do not regress this without
+            # bumping the restart cap in lockstep — see
+            # tests/core/test_coupling_ift_lineax.py::
+            # test_gmres_restart_too_small_silently_corrupts_gradient
+            # for the regression guard.
+            restart = min(n, 50)
+            max_steps = max(4 * restart, 100)
+            solver = lx.GMRES(
                 rtol=1e-6,
                 atol=1e-8,
                 restart=restart,
                 max_steps=max_steps,
-            ),
-        )
+            )
+        else:
+            raise ValueError(
+                f"_ift_solve_bwd: unsupported linear_solver="
+                f"{linear_solver!r}; expected one of "
+                f"'gmres', 'bicgstab', 'dense'."
+            )
+
+        result = lx.linear_solve(op, g, solver=solver)
         u = result.value
     # consts cotangent: dF/d(consts)^T @ u, via vjp wrt consts only.
     _, vjp_fn_c = jax.vjp(lambda cc: _F_dispatch(F_pure, x_star, cc), consts)
@@ -417,8 +475,11 @@ def _ift_solve_bwd(F_pure, tol, max_iter, acceleration, residual, g):
 
 
 # nondiff_argnums: 0=F_pure (callable), 3=tol (static float),
-#                  4=max_iter (static int), 5=acceleration (static str).
-_ift_solve = jax.custom_vjp(_ift_solve_impl, nondiff_argnums=(0, 3, 4, 5))
+#                  4=max_iter (static int), 5=acceleration (static str),
+#                  6=linear_solver (static str).
+_ift_solve = jax.custom_vjp(
+    _ift_solve_impl, nondiff_argnums=(0, 3, 4, 5, 6)
+)
 _ift_solve.defvjp(_ift_solve_fwd, _ift_solve_bwd)
 
 
@@ -1001,6 +1062,7 @@ def _run_coupled_block_impl(
                 float(group.tolerance),
                 int(max_iters),
                 acceleration,
+                str(getattr(group, "linear_solver", "gmres")),
             )
             # Reconstruct the full per-node state at the fixed point.
             # We need one more ``one_pass`` evaluation here for the

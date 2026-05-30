@@ -104,17 +104,26 @@ class CouplingGroup:
         Supported with ``acceleration`` in ``{"none", "aitken",
         "iqn-imvj"}`` and ``iteration_mode="gauss-seidel"``; other
         combinations silently fall back to ``"fori"``.
-    linear_solver : {"gmres", "bicgstab", "dense"}
+    linear_solver : {"gmres", "dense"}
         Backend used by the ``"ift"`` backward to solve the adjoint
         system ``(I - dF/dx)^T u = g``.  ``"gmres"`` (default) is the
         matrix-free GMRES path via lineax — the safe default for the
         non-symmetric coupling Jacobians MADDENING produces.
-        ``"bicgstab"`` is a matrix-free alternative that can be more
-        robust on some non-symmetric systems.  ``"dense"`` is the
-        legacy ``jacrev + jnp.linalg.solve`` path, kept as a triage
-        fallback (O(N^2) memory, O(N^3) compute).  The
-        ``MADDENING_IFT_DENSE_SOLVE=1`` env var forces ``"dense"``
-        regardless of this setting and overrides for triage.
+        ``"dense"`` is the legacy ``jacrev + jnp.linalg.solve`` path,
+        promoted from an env-var-gated fallback to a first-class
+        config option (O(N^2) memory, O(N^3) compute — only viable
+        for small groups).  The ``MADDENING_IFT_DENSE_SOLVE=1`` env
+        var forces ``"dense"`` regardless of this setting and
+        overrides for triage.
+
+        Note on BiCGStab: lineax 0.0.7 ships ``lineax.BiCGStab``, but
+        it returns NaN when driving a ``FunctionLinearOperator`` (the
+        matrix-free shape our backward uses) — including on
+        well-conditioned operators like ``0.5*I``.  The
+        ``"bicgstab"`` option is therefore *not* exposed here.  See
+        ``_ift_solve_bwd`` and
+        ``tests/core/test_coupling_ift_lineax.py`` for the
+        investigation notes.
     """
     nodes: frozenset[str]
     max_iterations: int = 10
@@ -137,4 +146,4 @@ class CouplingGroup:
     waveform_iterations: int = 1
     predictor: Literal["none", "linear", "quadratic"] = "none"
     solver: Literal["fori", "ift"] = "fori"
-    linear_solver: Literal["gmres", "bicgstab", "dense"] = "gmres"
+    linear_solver: Literal["gmres", "dense"] = "gmres"

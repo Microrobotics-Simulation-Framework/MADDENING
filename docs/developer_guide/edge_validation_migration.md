@@ -179,14 +179,14 @@ that setting.  In v0.2, the typical downstream override was:
 [tool.pytest.ini_options]
 filterwarnings = [
     "error",
-    "ignore::maddening.warnings.ShapeMismatchWarning",   # remove in v0.2.1
-    "ignore::maddening.warnings.DtypeMismatchWarning",   # remove in v0.2.1
+    "ignore::maddening.warnings.ShapeMismatchWarning",   # no-op since v0.2.1
+    "ignore::maddening.warnings.DtypeMismatchWarning",   # no-op since v0.2.1
     "ignore::maddening.warnings.UnitMismatchWarning",
 ]
 ```
 
-In v0.2.1 the first two lines are no-ops (no warning is emitted to
-ignore) — remove them.  The `UnitMismatchWarning` line stays.
+The first two lines are no-ops as of v0.2.1 (no warning is emitted to
+ignore) — safe to remove.  The `UnitMismatchWarning` line stays.
 
 ## Aggregation: all problems in one pass
 

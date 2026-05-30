@@ -302,6 +302,56 @@ gm.add_edge("spring2", "body", "spring_force", "force", additive=True)
 
 The first additive edge sets the initial value; subsequent additive edges accumulate via addition.
 
+## Non-state arrays and sharded execution
+
+```{versionadded} v0.2
+The {attr}`static_data <maddening.core.node.SimulationNode.static_data>`
+channel; v0.2.1 added per-device materialisation under
+{class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`.
+```
+
+Three optional surfaces, only needed by nodes that carry large
+non-state arrays (meshes, wall masks, lookup tables) or that run
+under multi-GPU sharding:
+
+* {attr}`static_data <maddening.core.node.SimulationNode.static_data>` —
+  return non-state arrays here instead of in `initial_state`.  JAX
+  bakes them into the JIT'd HLO as constants.  Wrap each array in
+  {class}`~maddening.core.static_data.StaticArray` to declare a
+  sharding policy (`replication="replicate"` is the default;
+  `replication="shard", shard_axis=K` slices per-device when the
+  node is wrapped in `ShardedStencilNode`).
+
+* {meth}`update_padded <maddening.core.node.SimulationNode.update_padded>` —
+  the entry point `ShardedStencilNode` calls instead of `update()`.
+  Receives halo-padded state plus, when the node declares sharded
+  statics, a `static_padded` dict and a `shard_info` map of
+  `{spatial_axis: (global_offset, local_extent)}` (the offset is a
+  traced JAX scalar — `lax.dynamic_slice` works, Python integer
+  slicing does not).  Signature:
+
+  ```python
+  def update_padded(
+      self, state_padded, boundary_inputs, dt,
+      *, static_padded=None, shard_info=None,
+  ): ...
+  ```
+
+* {meth}`domain_integral_fields <maddening.core.node.SimulationNode.domain_integral_fields>` —
+  declares output keys that are `jnp.sum`-over-lattice integrals
+  (e.g. total drag force on an immersed body).  The wrapper applies
+  `lax.psum` across every mesh axis after `update_padded` returns,
+  so the host sees the correct global sum instead of per-shard
+  partials.  Default returns `set()`.
+
+Pointwise nodes ignore all three and keep using `update()`.  Stencil
+nodes that don't shard can still declare `static_data` for cache
+hygiene without touching `update_padded`.  See the
+{class}`HeatNode <maddening.nodes.heat.HeatNode>` source for an
+in-tree consumer of `StaticArray(replication="shard")` and
+{class}`ShardedStencilNode <maddening.cloud.multigpu.sharded_node.ShardedStencilNode>`'s
+docstring for the validation contract.
+
 ## Coupling Patterns
 
 ### Value coupling (most common)

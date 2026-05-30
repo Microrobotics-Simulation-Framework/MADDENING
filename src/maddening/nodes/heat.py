@@ -352,7 +352,13 @@ class HeatNode(SimulationNode):
             return _laplacian_2nd_order_uniform(T_padded, dx)
 
     def update_padded(
-        self, state_padded: dict, boundary_inputs: dict, dt: float
+        self,
+        state_padded: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        static_padded: dict | None = None,
+        shard_info: dict | None = None,
     ) -> dict:
         """Sharded update from a halo-padded temperature field.
 

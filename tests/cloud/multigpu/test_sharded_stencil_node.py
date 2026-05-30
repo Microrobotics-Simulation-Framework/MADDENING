@@ -45,7 +45,10 @@ class ToyLaplacian1D(SimulationNode):
         lap = jnp.roll(f, 1) - 2 * f + jnp.roll(f, -1)
         return {"field": f + 0.1 * lap * dt}
 
-    def update_padded(self, state_padded, boundary_inputs, dt):
+    def update_padded(
+        self, state_padded, boundary_inputs, dt, *,
+        static_padded=None, shard_info=None,
+    ):
         """Padded update: read ``f[h-1 .. -h-1]`` for interior, return same shape."""
         f_pad = state_padded["field"]
         # Interior view: drop one cell on each side, since halo=1
@@ -83,7 +86,10 @@ class ToyLaplacian3D(SimulationNode):
         )
         return {"field": f + 0.1 * lap * dt}
 
-    def update_padded(self, state_padded, boundary_inputs, dt):
+    def update_padded(
+        self, state_padded, boundary_inputs, dt, *,
+        static_padded=None, shard_info=None,
+    ):
         f = state_padded["field"]
         lap = (
             f[2:, 1:-1, 1:-1] + f[:-2, 1:-1, 1:-1]

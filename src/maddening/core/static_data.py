@@ -9,9 +9,14 @@ sharding — replicate it across every device, or slice it along a
 specific axis.
 
 ``StaticArray`` carries that declaration alongside the array
-itself.  GraphManager reads ``replication`` and ``shard_axis``
-at sharding time and materialises the appropriate per-device
-view before the JIT closure captures it.
+itself.  :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+materialises the per-device slice (via ``jax.device_put`` +
+``NamedSharding``) and halo-exchanges it before calling
+:meth:`~maddening.core.node.SimulationNode.update_padded`.  The
+sliced + padded slab arrives as ``static_padded[<key>]`` inside
+``update_padded``.  ``shard_axis`` is the array's own axis (not
+a mesh axis), and must match one of the spatial axes the wrapping
+``ShardedStencilNode`` shards via its ``axis_map.values()``.
 
 Design contract (settled v0.2.0):
 

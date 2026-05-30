@@ -272,7 +272,13 @@ class SimulationNode(ABC):
         return bool(self.halo_width())
 
     def update_padded(
-        self, state_padded: dict, boundary_inputs: dict, dt: float
+        self,
+        state_padded: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        static_padded: dict | None = None,
+        shard_info: dict[int, tuple[Any, int]] | None = None,
     ) -> dict:
         """Update from halo-padded state.
 
@@ -286,6 +292,41 @@ class SimulationNode(ABC):
         :meth:`update`.  Stencil nodes that have not been ported must
         override this; calling the default raises
         :class:`NotImplementedError`.
+
+        Parameters
+        ----------
+        state_padded : dict
+            Halo-padded state arrays.
+        boundary_inputs : dict
+            Boundary inputs (replicated across all shards).
+        dt : float
+            Timestep.
+        static_padded : dict, optional
+            ``{static_data_key: halo_padded_slab}`` for each
+            :class:`~maddening.core.static_data.StaticArray` declared with
+            ``replication="shard"`` on this node.  The wrapper has
+            materialised the per-device slice and halo-exchanged it
+            (``boundary="edge"`` — statics don't evolve, so periodic
+            wrap would be wrong even when state uses periodic).  ``None``
+            in the unsharded path and when the node carries no sharded
+            statics.
+        shard_info : dict[int, tuple[Any, int]], optional
+            ``{spatial_axis: (global_offset, local_extent)}`` for every
+            spatial axis the wrapping :class:`ShardedStencilNode` shards.
+            ``global_offset`` is a **traced JAX scalar**
+            (``lax.axis_index * local_extent``) — usable in
+            ``jax.lax.dynamic_slice`` but **not** in Python integer
+            slicing.  ``None`` in the unsharded path.
+
+        Sharded outputs
+        ---------------
+        Output keys must be either:
+
+        * a member of :meth:`state_fields` — the wrapper strips halos, or
+        * a member of :meth:`domain_integral_fields` — the wrapper
+          ``lax.psum``\\ s the value across the device mesh.
+
+        Any other key is a contract violation and the wrapper raises.
         """
         if self.halo_width():
             raise NotImplementedError(
@@ -294,6 +335,25 @@ class SimulationNode(ABC):
                 "`update_padded`. Required for sharded stencil execution."
             )
         return self.update(state_padded, boundary_inputs, dt)
+
+    def domain_integral_fields(self) -> set[str]:
+        """Output keys that are domain integrals (cross-shard reductions).
+
+        A sharded stencil node may emit small non-spatial outputs that
+        are ``jnp.sum``-over-lattice integrals — e.g. drag force /
+        torque from an immersed-boundary method.  Each device sees only
+        its partial sum; the correct result needs an all-reduce across
+        every mesh axis.
+
+        Declaring a key here tells :class:`ShardedStencilNode` to apply
+        ``jax.lax.psum`` across the full mesh after
+        :meth:`update_padded` returns.  Values must be floating-point
+        (``psum`` on integer dtypes risks wrap).
+
+        Default: empty set.  Override in stencil nodes that emit such
+        outputs.
+        """
+        return set()
 
     def boundary_input_spec(self) -> dict[str, "BoundaryInputSpec"]:
         """Declare expected boundary inputs with shapes and semantics.

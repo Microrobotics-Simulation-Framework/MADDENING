@@ -203,13 +203,26 @@ class TestCouplingValidation:
             for i in cycle_issues
         )
 
-    def test_uncovered_cycle_warning(self):
-        """Cycle without coupling group shows WARNING."""
+    def test_uncovered_cycle_advisory(self):
+        """v0.2.1: an uncovered cycle is reported as INFO (not WARNING),
+        and the same message goes through ``logging.info``."""
         gm = _make_bidirectional_springs()
         issues = gm.validate()
+        cycle_infos = [i for i in issues
+                       if i.startswith("INFO") and "cycle" in i.lower()
+                       and "staggering" in i]
+        assert len(cycle_infos) >= 1, (
+            "expected at least one INFO-prefixed cycle advisory; "
+            f"issues were: {issues}"
+        )
+        # No WARNING about the cycle either — that would re-trigger
+        # downstream filterwarnings=["error"] configs.
         cycle_warnings = [i for i in issues
                           if i.startswith("WARNING") and "cycle" in i.lower()]
-        assert len(cycle_warnings) >= 1
+        assert not cycle_warnings, (
+            "v0.2.1 demoted the uncovered-cycle WARNING to INFO; "
+            f"unexpected warnings: {cycle_warnings}"
+        )
 
 
 # ==================================================================

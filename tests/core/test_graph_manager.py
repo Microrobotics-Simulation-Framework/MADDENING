@@ -112,11 +112,23 @@ class TestValidation:
         issues = gm.validate()
         assert any("nonexistent_field" in i for i in issues)
 
-    def test_disconnected_node_warning(self):
+    def test_disconnected_node_warning_in_multi_node_graph(self):
+        """v0.2.1: a genuinely-disconnected node in a multi-node graph
+        still produces a WARNING.  Single-node graphs are silent now
+        (see test_single_node_graph_no_disconnected_advisory below)."""
+        gm = GraphManager()
+        gm.add_node(BallNode(name="lonely", timestep=0.01))
+        gm.add_node(BallNode(name="lonely2", timestep=0.01))
+        issues = gm.validate()
+        assert any("disconnected" in i.lower() for i in issues)
+
+    def test_single_node_graph_no_disconnected_advisory(self):
+        """v0.2.1 silences the disconnected advisory on single-node
+        graphs (the quickstart shape)."""
         gm = GraphManager()
         gm.add_node(BallNode(name="lonely", timestep=0.01))
         issues = gm.validate()
-        assert any("disconnected" in i.lower() for i in issues)
+        assert not any("disconnected" in i.lower() for i in issues)
 
     def test_mixed_timesteps_info(self):
         gm = GraphManager()
@@ -130,7 +142,9 @@ class TestValidation:
         timestep_errors = [e for e in errors if "timestep" in e.lower()]
         assert len(timestep_errors) == 0
 
-    def test_cycle_detected_as_warning(self):
+    def test_cycle_detected_as_advisory(self):
+        """v0.2.1: an uncovered cycle is an INFO advisory, not an
+        ERROR.  Back-edges use previous-timestep values (staggering)."""
         gm = GraphManager()
         gm.add_node(BallNode(name="a", timestep=0.01))
         gm.add_node(BallNode(name="b", timestep=0.01))
@@ -138,7 +152,6 @@ class TestValidation:
         gm.add_edge("b", "a", "position", "table_position")
         issues = gm.validate()
         assert any("cycle" in i.lower() for i in issues)
-        # Should be warning, not error
         errors = [i for i in issues if i.startswith("ERROR")]
         cycle_errors = [e for e in errors if "cycle" in e.lower()]
         assert len(cycle_errors) == 0

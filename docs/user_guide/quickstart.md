@@ -62,11 +62,14 @@ print(f"Final height: {float(final_state['ball']['position']):.3f}")
 ```
 
 ```{note}
-`gm.compile()` prints advisory notices about graph wiring — a lone node
-reports as "disconnected", and a feedback loop reports a detected cycle
-(back-edges are staggered to the previous timestep).  They are advisory,
-not errors: a standalone single-node graph and an intentional coupling
-loop both run correctly.
+`gm.compile()` is quiet on a clean single-node graph as of v0.2.1.  In
+multi-node graphs, a genuinely-disconnected node (no edges or external
+inputs into the rest of the graph) still emits a `UserWarning`, and a
+feedback loop logs an INFO-level "cycle detected" advisory through
+`logging.getLogger("maddening.core.graph_manager")` (back-edges are
+staggered to the previous timestep).  Both are advisory, not errors:
+disconnected-but-intentional nodes and intentional coupling loops
+run correctly.
 ```
 
 ## Coupled Simulation

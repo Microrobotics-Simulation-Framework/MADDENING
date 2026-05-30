@@ -358,12 +358,32 @@ class TestSymbolicShape:
 
 
 class TestGenericWarning:
-    def test_disconnected_node_still_emits_userwarning(self):
+    def test_disconnected_node_in_multi_node_graph_emits_userwarning(self):
+        """A genuinely-disconnected node in a multi-node graph still
+        emits a UserWarning.  Single-node graphs are silenced in v0.2.1
+        (see test_single_node_no_disconnected_warning)."""
         class _Standalone(SimulationNode):
             def initial_state(self): return {"x": jnp.array(0.0)}
             def update(self, s, b, dt): return s
 
         gm = GraphManager()
         gm.add_node(_Standalone("alone", timestep=0.01))
+        # Add a second, independent node so the "len > 1" gate engages
+        # and ``alone`` is actually disconnected from the (now multi-node)
+        # graph.
+        gm.add_node(_Standalone("alone2", timestep=0.01))
         with pytest.warns(UserWarning, match="disconnected"):
+            gm.compile()
+
+    def test_single_node_no_disconnected_warning(self):
+        """v0.2.1: single-node graphs (the quickstart shape) no longer
+        emit a disconnected warning."""
+        class _Standalone(SimulationNode):
+            def initial_state(self): return {"x": jnp.array(0.0)}
+            def update(self, s, b, dt): return s
+
+        gm = GraphManager()
+        gm.add_node(_Standalone("alone", timestep=0.01))
+        with _w.catch_warnings():
+            _w.simplefilter("error")  # any warning would now fail
             gm.compile()

@@ -14,6 +14,7 @@ the update is always computed but conditionally applied via
 
 from __future__ import annotations
 
+import logging
 import math
 import warnings
 from collections import defaultdict
@@ -22,6 +23,8 @@ from typing import Any, Callable, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 from maddening.core.coupling import CouplingGroup
 from maddening.core.edge import EdgeSpec
@@ -1313,16 +1316,23 @@ class GraphManager:
                     f"ERROR: external input references non-existent node '{ei.target_node}'"
                 )
 
-        # Disconnected-node warning (edges + external inputs count as connections)
-        connected = set()
-        for e in self._edges:
-            connected.add(e.source_node)
-            connected.add(e.target_node)
-        for ei in self._external_inputs:
-            connected.add(ei.target_node)
-        for n in node_names:
-            if n not in connected:
-                issues.append(f"WARNING: node '{n}' is disconnected (no edges or external inputs)")
+        # Disconnected-node warning.  Only meaningful when the graph
+        # has multiple nodes -- a single-node graph is trivially
+        # "disconnected" but the warning is just noise (the quickstart
+        # shape).  v0.2.1 gates this behind ``len(node_names) > 1``.
+        if len(node_names) > 1:
+            connected = set()
+            for e in self._edges:
+                connected.add(e.source_node)
+                connected.add(e.target_node)
+            for ei in self._external_inputs:
+                connected.add(ei.target_node)
+            for n in node_names:
+                if n not in connected:
+                    issues.append(
+                        f"WARNING: node '{n}' is disconnected "
+                        "(no edges or external inputs)"
+                    )
 
         # Multi-rate timestep informational message
         timesteps = {spec.timestep for spec in self._nodes.values()}
@@ -1377,10 +1387,21 @@ class GraphManager:
                     f"coupling (Gauss-Seidel)."
                 )
             else:
-                issues.append(
-                    f"WARNING: cycle detected: {' -> '.join(cyc)}. "
-                    f"Back-edges will use previous-timestep values (staggering)."
+                # Uncovered cycles are handled by staggering (back-edges
+                # read previous-timestep values) -- not an error and not
+                # something the user can usually act on at compile time.
+                # v0.2.1 demotes this from a UserWarning to a
+                # ``logging.info`` record so it stops bubbling up through
+                # downstream ``filterwarnings=["error"]`` configs.  The
+                # prefix flip from ``WARNING:`` to ``INFO:`` also takes
+                # the message out of compile()'s warning-emission loop.
+                msg = (
+                    f"cycle detected: {' -> '.join(cyc)}. "
+                    "Back-edges will use previous-timestep values "
+                    "(staggering)."
                 )
+                logger.info(msg)
+                issues.append(f"INFO: {msg}")
 
         return issues
 

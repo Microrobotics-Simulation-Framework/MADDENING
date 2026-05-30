@@ -201,6 +201,15 @@ filterwarnings = [
     "ignore::maddening.warnings.PerformanceWarning",
     # SkyPilot deprecation warnings
     "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
+    # starlette is mid-migration from httpx to httpx2.  Recent versions
+    # emit StarletteDeprecationWarning on testclient import when httpx2
+    # isn't installed; httpx still works as the fallback.  Match by
+    # message against the base Warning class (the StarletteDeprecationWarning
+    # class doesn't exist in older starlette installs, so a class-name
+    # filter would AttributeError at pytest config-parse time).
+    # Adopt httpx2 properly during the v0.3.0 dep review
+    # (plans/MADDENING_v0.3.0_PLAN.md §C5).
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:Warning",
 ]
 # Custom markers — registered so `filterwarnings=["error"]` above
 # doesn't elevate Unknown-Mark warnings to test errors. Mirrors the

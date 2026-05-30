@@ -118,8 +118,15 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     ``acceleration`` is a static Python string selecting the forward
     iterator wrapper.  Supported values:
 
-    - ``"none"``  : bare Gauss-Seidel, ``x_{k+1} = F(x_k)``.
-    - ``"aitken"``: Aitken delta-squared relaxation around ``F``.
+    - ``"none"``    : bare Gauss-Seidel, ``x_{k+1} = F(x_k)``.
+    - ``"aitken"``  : Aitken delta-squared relaxation around ``F``.
+    - ``"iqn-imvj"``: Interface quasi-Newton with inverse multi-vector
+      Jacobian.  Builds ``V`` (input differences) and ``W`` (residual
+      differences) matrices within the while_loop carry, solves a
+      rank-deficient least-squares each iteration to get a coefficient
+      vector ``c``, and applies ``dx_qn = V c - r_cur``.  Per-step only
+      — V/W reset to zeros at the start of each timestep; cross-timestep
+      warm-start is a deferred follow-up.
 
     The backward (IFT adjoint) is **acceleration-agnostic**: it
     differentiates the bare contraction ``F`` at the fixed point
@@ -195,9 +202,117 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
         x_star, _, n_iters, _, _ = jax.lax.while_loop(cond, body, init_carry)
         return x_star, n_iters
 
+    if acceleration == "iqn-imvj":
+        # Interface quasi-Newton with inverse multi-vector Jacobian.
+        # Carry: (x_cur, x_prev, i, V, W, prev_r).
+        #
+        # The math (per iteration i >= 1):
+        #   r_cur  = F(x_cur) - x_cur                 # current residual
+        #   V[:, i-1] = x_cur - x_prev                # input diff column
+        #   W[:, i-1] = r_cur - prev_r                # residual diff column
+        #   solve  W c ≈ r_cur                        # secant LS:
+        #                                              c = (W^T W)^{-1} W^T r_cur
+        #   dx_qn = -V c                              # Δx_QN ≈ -J_R^{-1} r_cur
+        #                                              where J_R^{-1} ≈ V c / r_cur
+        #   x_new = x_cur + dx_qn = x_cur - V c
+        # At i == 0 there are no columns yet: do a bare Gauss-Seidel step.
+        #
+        # V/W are preallocated to ``(n_dof, max_cols)`` zeros at iter 0;
+        # while_loop requires fixed shapes, so columns past ``i-1`` stay
+        # zero.  jnp.linalg.lstsq is robust to the resulting rank deficit.
+        #
+        # **Per-step only.**  V/W reset to zeros each timestep — no
+        # cross-timestep warm-start (deferred follow-up; the per-step
+        # variant captures within-step convergence benefit and the
+        # warm-start machinery is mutable-state coupled to CouplingGroup
+        # which is JAX-trace-incompatible without special care).
+        n_dof = x0.shape[0]
+        dtype = x0.dtype
+        max_cols = max(max_iter - 1, 1)
+
+        def cond(carry):
+            # Convergence uses the *residual* ``prev_r = F(x_prev) - x_prev``
+            # rather than the step size ``||x - x_prev||``.  For Gauss-Seidel
+            # / Aitken the two are equivalent (the step is the residual), but
+            # for IMVJ the quasi-Newton step can be tiny even when the residual
+            # is still large (e.g. ill-conditioned early-iter LS solve), which
+            # would otherwise produce a spurious "converged" exit.  We force
+            # at least one iter via the ``first`` flag, so the iter-0 zero
+            # ``prev_r`` does not abort the loop.
+            _x, _x_prev, i, _V, _W, prev_r = carry
+            not_converged = jnp.linalg.norm(prev_r) > tol
+            not_maxed = i < max_iter
+            first = i == jnp.int32(0)
+            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
+
+        def _gs_step(args):
+            # First iter (i==0): pure Gauss-Seidel.  Just return F(x_cur).
+            x_cur, _x_prev, _i, V, W, _prev_r, x_new, r_cur = args
+            return x_new, V, W, r_cur
+
+        def _imvj_step(args):
+            # i >= 1: write column (i-1) into V/W, lstsq, apply dx_qn.
+            x_cur, x_prev, i, V, W, prev_r, _x_new, r_cur = args
+            delta_x = x_cur - x_prev
+            delta_r = r_cur - prev_r
+            # Masked write: column index = i-1.  ``.at[:, i-1].set`` is a
+            # dynamic-index slice update, fine inside while_loop.
+            col_idx = i - jnp.int32(1)
+            V_new = V.at[:, col_idx].set(delta_x)
+            W_new = W.at[:, col_idx].set(delta_r)
+            # Zero out columns >= i (active count = i).  Cleaner than
+            # trusting lstsq to handle the leftover zeros — explicit mask
+            # makes the rank deficit visible in W_masked.
+            col_mask = jnp.arange(max_cols) < i
+            V_masked = V_new * col_mask[None, :]
+            W_masked = W_new * col_mask[None, :]
+            # Solve  W^T W c = W^T r_cur  via lstsq.  rcond keeps the
+            # solve well-defined when W still has only a handful of
+            # populated columns and the rest are zero (rank-deficient).
+            c, _resid, _rank, _sv = jnp.linalg.lstsq(
+                W_masked, r_cur, rcond=1e-10,
+            )
+            # Standard IMVJ update (Degroote 2008):  x_{k+1} = x_k - V c
+            # where c solves the secant LS  W c ≈ r_cur.  This implies
+            # J_R^{-1} r_cur ≈ V c, so Δx_QN = -V c is the QN step.
+            dx_qn = -(V_masked @ c)
+            x_qn = x_cur + dx_qn
+            # Guard against blow-up: if the QN step produced NaN/inf,
+            # fall back to a Gauss-Seidel step.  Cheap insurance against
+            # ill-conditioned early-iter lstsq edge cases.
+            qn_finite = jnp.all(jnp.isfinite(x_qn))
+            x_out = jnp.where(qn_finite, x_qn, x_cur + r_cur)
+            return x_out, V_new, W_new, r_cur
+
+        def body(carry):
+            x_cur, _x_prev, i, V, W, prev_r = carry
+            x_new = _F_dispatch(F_pure, x_cur, consts)
+            r_cur = x_new - x_cur
+            args = (x_cur, _x_prev, i, V, W, prev_r, x_new, r_cur)
+            x_out, V_out, W_out, r_out = jax.lax.cond(
+                i == jnp.int32(0), _gs_step, _imvj_step, args,
+            )
+            return (x_out, x_cur, i + jnp.int32(1), V_out, W_out, r_out)
+
+        init_V = jnp.zeros((n_dof, max_cols), dtype=dtype)
+        init_W = jnp.zeros((n_dof, max_cols), dtype=dtype)
+        init_prev_r = jnp.zeros(n_dof, dtype=dtype)
+        init_carry = (
+            x0,
+            x0 + jnp.array(1.0, dtype=dtype),
+            jnp.int32(0),
+            init_V,
+            init_W,
+            init_prev_r,
+        )
+        x_star, _, n_iters, _, _, _ = jax.lax.while_loop(
+            cond, body, init_carry,
+        )
+        return x_star, n_iters
+
     raise ValueError(
         f"_ift_fixed_point_fwd_impl: unsupported acceleration={acceleration!r}; "
-        "supported values are 'none' and 'aitken'."
+        "supported values are 'none', 'aitken', and 'iqn-imvj'."
     )
 
 
@@ -837,14 +952,43 @@ def _run_coupled_block_impl(
             # jit trace — ``jax.closure_convert`` will hoist them
             # into ``consts`` automatically, so the IFT adjoint
             # propagates gradients back through them.
+            # When ``accel_fields`` is non-None (IQN modes), ``_flatten``
+            # / ``_unflatten`` operate on the *interface-field subset*
+            # rather than the full per-node state.  We need to splice
+            # those interface fields back into the full node dict before
+            # calling ``one_pass`` (which expects every node to carry
+            # all of its state), and again on the way out so ``_merge``
+            # sees a result with the same pytree shape as
+            # ``template_state``.
+            def _splice_group(s_full, group_part):
+                """Merge accelerated interface fields from ``group_part``
+                into the corresponding nodes of ``s_full``; non-accel
+                fields stay as they were in ``s_full``.
+                """
+                if accel_fields is None:
+                    # Whole-node replacement (e.g. acceleration='none').
+                    s_out = {k: v for k, v in s_full.items()}
+                    for nn in group_node_names:
+                        s_out[nn] = group_part[nn]
+                    return s_out
+                s_out = {k: v for k, v in s_full.items()}
+                for nn in group_node_names:
+                    merged = {fld: val for fld, val in s_full[nn].items()}
+                    af = accel_fields.get(nn, ())
+                    for fld in af:
+                        if fld in group_part.get(nn, {}):
+                            merged[fld] = group_part[nn][fld]
+                    s_out[nn] = merged
+                return s_out
+
             def _F_one_pass_flat(x_flat):
                 group_part = _unflatten(x_flat, template_state)
-                s = {k: v for k, v in template_state.items()}
-                for nn in group_node_names:
-                    s[nn] = group_part[nn]
+                s = _splice_group(template_state, group_part)
                 s_new = one_pass(s)
-                s_merged = _merge(template_state, s_new, jnp.array(False))
-                return _flatten(s_merged)
+                # ``_flatten`` only emits the accelerated-field subset
+                # (when accel_fields is set), so the round-trip is
+                # well-defined regardless of the splicing above.
+                return _flatten(s_new)
 
             x0_flat = _flatten(template_state)
             F_pure, consts_list = jax.closure_convert(
@@ -858,8 +1002,20 @@ def _run_coupled_block_impl(
                 int(max_iters),
                 acceleration,
             )
-            final = _unflatten(x_star_flat, template_state)
-            return _merge(template_state, final, jnp.array(False))
+            # Reconstruct the full per-node state at the fixed point.
+            # We need one more ``one_pass`` evaluation here for the
+            # non-accelerated fields (e.g. velocity), because the IFT
+            # solver only carries the accelerated-field subset through
+            # its while_loop carry.  At ``x*`` the position is fixed, so
+            # this final pass produces velocity consistent with the
+            # converged position.
+            group_part_final = _unflatten(x_star_flat, template_state)
+            spliced = _splice_group(template_state, group_part_final)
+            if accel_fields is not None:
+                final_full = one_pass(spliced)
+            else:
+                final_full = spliced
+            return _merge(template_state, final_full, jnp.array(False))
 
         # ---- Build fori_loop body based on acceleration + diagnostics ----
 
@@ -932,99 +1088,130 @@ def _run_coupled_block_impl(
                     final_state = final_carry[0]
 
         elif group.acceleration in ("iqn-ils", "iqn-imvj"):
-            max_cols = max(max_iters - 1, 1)
-
-            # IQN-IMVJ: warm-start V/W from previous timestep
-            if group.acceleration == "iqn-imvj":
-                group_key = "+".join(sorted(group.nodes))
-                meta = new_state_inner.get(_META_KEY, {})
-                stored_V = meta.get(
-                    f"coupling_{group_key}_V",
-                    jnp.zeros((n_dof, max_cols)),
+            # ----- IFT + IQN-IMVJ short-circuit -----
+            #
+            # When the user opts into ``solver='ift'`` with
+            # ``acceleration='iqn-imvj'``, route into ``_run_ift_forward``
+            # so the QN updates happen inside the IFT while_loop and the
+            # backward goes through the acceleration-agnostic custom_vjp
+            # rule (matrix-free lineax GMRES at the fixed point).
+            #
+            # **Per-step only** for this prototype.  The fori-loop branch
+            # below still owns cross-timestep warm-start (V/W persisted
+            # in ``_META_KEY``); the IFT path re-zeros V/W each step.
+            # Cross-timestep warm-start for IFT-IMVJ is a deferred
+            # follow-up: the warm-start state is mutable per-CouplingGroup
+            # and would need to be threaded through the custom_vjp closure
+            # without leaking tracers (non-trivial).  See task notes.
+            use_ift_iqn_imvj = (
+                group.acceleration == "iqn-imvj"
+                and getattr(group, "solver", "fori") == "ift"
+                and not use_jacobi
+                and not track_diag
+            )
+            if use_ift_iqn_imvj:
+                final_state = _run_ift_forward(
+                    state_after_first, "iqn-imvj",
                 )
-                stored_W = meta.get(
-                    f"coupling_{group_key}_W",
-                    jnp.zeros((n_dof, max_cols)),
-                )
-                n_reuse = min(group.jacobian_reuse, max_cols)
-                # Keep first n_reuse columns from previous timestep
-                reuse_mask = jnp.arange(max_cols) < n_reuse
-                init_V = stored_V * reuse_mask[None, :]
-                init_W = stored_W * reuse_mask[None, :]
-                init_ncols = jnp.int32(n_reuse)
+                # No cross-timestep V/W persistence for the IFT variant.
+                # The vw_data block below checks for the IFT short-circuit
+                # and skips the META write in that case.
+                final_V = None
+                final_W = None
             else:
-                init_V = jnp.zeros((n_dof, max_cols))
-                init_W = jnp.zeros((n_dof, max_cols))
-                init_ncols = jnp.int32(0)
+                max_cols = max(max_iters - 1, 1)
 
-            init_flat = _flatten(state_after_first)
-
-            if track_diag:
-                def body_fn(i, carry):
-                    (s_cur, converged, icount, fres,
-                     V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
-                    s_raw = one_pass(s_cur)
-                    residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
-                    (x_new, nV, nW, nnc,
-                     cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
-                        x_raw, x_old, prev_r, prev_s,
-                        V, W, nc, omega, prev_ra,
+                # IQN-IMVJ: warm-start V/W from previous timestep
+                if group.acceleration == "iqn-imvj":
+                    group_key = "+".join(sorted(group.nodes))
+                    meta = new_state_inner.get(_META_KEY, {})
+                    stored_V = meta.get(
+                        f"coupling_{group_key}_V",
+                        jnp.zeros((n_dof, max_cols)),
                     )
-                    s_partial = _unflatten(x_new, s_cur)
-                    s_accel = _build_accel_state(s_raw, s_partial)
-                    s_merged = _merge(s_cur, s_accel, new_converged)
-                    new_count = icount + jnp.where(new_converged, 0.0, 1.0)
-                    new_res = jnp.where(new_converged, fres, residual)
-                    return (s_merged, new_converged, new_count, new_res,
-                            nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
-
-                init_carry = (
-                    state_after_first, jnp.array(False),
-                    jnp.array(1.0), first_r,
-                    init_V, init_W, init_ncols,
-                    jnp.zeros(n_dof), init_flat,
-                    jnp.array(1.0), jnp.zeros(n_dof),
-                )
-                final_carry = jax.lax.fori_loop(
-                    1, max_iters, body_fn, init_carry
-                )
-                final_state = final_carry[0]
-                iter_count, final_res = final_carry[2], final_carry[3]
-                final_V, final_W = final_carry[4], final_carry[5]
-            else:
-                def body_fn(i, carry):
-                    (s_cur, converged,
-                     V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
-                    s_raw = one_pass(s_cur)
-                    residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
-                    (x_new, nV, nW, nnc,
-                     cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
-                        x_raw, x_old, prev_r, prev_s,
-                        V, W, nc, omega, prev_ra,
+                    stored_W = meta.get(
+                        f"coupling_{group_key}_W",
+                        jnp.zeros((n_dof, max_cols)),
                     )
-                    s_partial = _unflatten(x_new, s_cur)
-                    s_accel = _build_accel_state(s_raw, s_partial)
-                    s_merged = _merge(s_cur, s_accel, new_converged)
-                    return (s_merged, new_converged,
-                            nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+                    n_reuse = min(group.jacobian_reuse, max_cols)
+                    # Keep first n_reuse columns from previous timestep
+                    reuse_mask = jnp.arange(max_cols) < n_reuse
+                    init_V = stored_V * reuse_mask[None, :]
+                    init_W = stored_W * reuse_mask[None, :]
+                    init_ncols = jnp.int32(n_reuse)
+                else:
+                    init_V = jnp.zeros((n_dof, max_cols))
+                    init_W = jnp.zeros((n_dof, max_cols))
+                    init_ncols = jnp.int32(0)
 
-                init_carry = (
-                    state_after_first, jnp.array(False),
-                    init_V, init_W, init_ncols,
-                    jnp.zeros(n_dof), init_flat,
-                    jnp.array(1.0), jnp.zeros(n_dof),
-                )
-                final_carry = jax.lax.fori_loop(
-                    1, max_iters, body_fn, init_carry
-                )
-                final_state = final_carry[0]
-                final_V, final_W = final_carry[2], final_carry[3]
+                init_flat = _flatten(state_after_first)
+
+                if track_diag:
+                    def body_fn(i, carry):
+                        (s_cur, converged, icount, fres,
+                         V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                        s_raw = one_pass(s_cur)
+                        residual = _compute_residual(s_raw, s_cur)
+                        new_converged = converged | (residual <= conv_threshold)
+                        x_old = _flatten(s_cur)
+                        x_raw = _flatten(s_raw)
+                        (x_new, nV, nW, nnc,
+                         cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                            x_raw, x_old, prev_r, prev_s,
+                            V, W, nc, omega, prev_ra,
+                        )
+                        s_partial = _unflatten(x_new, s_cur)
+                        s_accel = _build_accel_state(s_raw, s_partial)
+                        s_merged = _merge(s_cur, s_accel, new_converged)
+                        new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                        new_res = jnp.where(new_converged, fres, residual)
+                        return (s_merged, new_converged, new_count, new_res,
+                                nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+
+                    init_carry = (
+                        state_after_first, jnp.array(False),
+                        jnp.array(1.0), first_r,
+                        init_V, init_W, init_ncols,
+                        jnp.zeros(n_dof), init_flat,
+                        jnp.array(1.0), jnp.zeros(n_dof),
+                    )
+                    final_carry = jax.lax.fori_loop(
+                        1, max_iters, body_fn, init_carry
+                    )
+                    final_state = final_carry[0]
+                    iter_count, final_res = final_carry[2], final_carry[3]
+                    final_V, final_W = final_carry[4], final_carry[5]
+                else:
+                    def body_fn(i, carry):
+                        (s_cur, converged,
+                         V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                        s_raw = one_pass(s_cur)
+                        residual = _compute_residual(s_raw, s_cur)
+                        new_converged = converged | (residual <= conv_threshold)
+                        x_old = _flatten(s_cur)
+                        x_raw = _flatten(s_raw)
+                        (x_new, nV, nW, nnc,
+                         cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                            x_raw, x_old, prev_r, prev_s,
+                            V, W, nc, omega, prev_ra,
+                        )
+                        s_partial = _unflatten(x_new, s_cur)
+                        s_accel = _build_accel_state(s_raw, s_partial)
+                        s_merged = _merge(s_cur, s_accel, new_converged)
+                        return (s_merged, new_converged,
+                                nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+
+                    init_carry = (
+                        state_after_first, jnp.array(False),
+                        init_V, init_W, init_ncols,
+                        jnp.zeros(n_dof), init_flat,
+                        jnp.array(1.0), jnp.zeros(n_dof),
+                    )
+                    final_carry = jax.lax.fori_loop(
+                        1, max_iters, body_fn, init_carry
+                    )
+                    final_state = final_carry[0]
+                    final_V, final_W = final_carry[2], final_carry[3]
 
         elif group.acceleration == "fixed":
             omega_val = group.relaxation
@@ -1136,10 +1323,13 @@ def _run_coupled_block_impl(
         if track_diag:
             diag_data = (iter_count, final_res)
 
-        # Store V/W for IQN-IMVJ
+        # Store V/W for IQN-IMVJ.  ``final_V`` / ``final_W`` are None
+        # when the IFT-IMVJ short-circuit fired (per-step variant — no
+        # cross-timestep warm-start, see comments at the IMVJ branch).
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
-            vw_data = (final_V, final_W)
+            if final_V is not None and final_W is not None:
+                vw_data = (final_V, final_W)
 
         return r, diag_data, vw_data
 

@@ -1161,10 +1161,38 @@ def _run_coupled_block_impl(
             # **Per-step only** for this prototype.  The fori-loop branch
             # below still owns cross-timestep warm-start (V/W persisted
             # in ``_META_KEY``); the IFT path re-zeros V/W each step.
-            # Cross-timestep warm-start for IFT-IMVJ is a deferred
-            # follow-up: the warm-start state is mutable per-CouplingGroup
-            # and would need to be threaded through the custom_vjp closure
-            # without leaking tracers (non-trivial).  See task notes.
+            #
+            # Why not cross-timestep warm-start here yet?  Three coupled
+            # changes are required and each has a sharp edge:
+            #
+            # 1. ``_ift_solve``'s custom_vjp must return ``(x_star, V, W)``
+            #    rather than just ``x_star``, with zero cotangents on V/W
+            #    in the backward (V/W are forward-only state).  Mechanical
+            #    but touches the autodiff signature.
+            # 2. ``_ift_fixed_point_fwd_impl`` for ``iqn-imvj`` must accept
+            #    ``init_V``, ``init_W``, ``init_ncols`` as dynamic args
+            #    and return the final V/W from the while_loop carry.
+            # 3. The column-write logic in ``_imvj_step`` currently writes
+            #    at column ``i - 1`` (zero-based, starting from the first
+            #    body iter).  Warm-start means iteration 0 must write at
+            #    column ``init_ncols`` and (when ``init_ncols + max_iter``
+            #    exceeds ``max_cols``) cycle older columns out — the same
+            #    shift-or-modulo convention the fori path's
+            #    ``iqn_ils_update`` already implements.  This is a real
+            #    change to the IMVJ math, not just plumbing.
+            #
+            # The blocking item is (3): the per-step IMVJ math here uses
+            # a "write at column i-1" convention that is structurally
+            # incompatible with warm-start.  Adopting the fori path's
+            # shift-and-insert convention (insert at column 0, shift the
+            # rest right) inside a while_loop body is doable but needs
+            # its own correctness test against the fori-loop IMVJ output
+            # before being trusted — and the IFT-IMVJ adjoint at the
+            # fixed point is mathematically unaffected, so the gradient
+            # parity test alone doesn't catch a column-write bug.
+            #
+            # Deferred to 0.4.x along with the IQN-ILS IFT extension.
+            # The 0.3.x polish does not regress the per-step variant.
             use_ift_iqn_imvj = (
                 group.acceleration == "iqn-imvj"
                 and getattr(group, "solver", "fori") == "ift"

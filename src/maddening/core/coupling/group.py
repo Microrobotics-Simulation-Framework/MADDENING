@@ -11,14 +11,14 @@ tolerance (or ``max_iterations`` is reached).  All edges within the group
 become *forward* edges during iteration, giving Gauss-Seidel convergence.
 
 Supports multiple convergence norms, acceleration methods (Aitken,
-fixed relaxation, IQN-ILS), Jacobi iteration mode, and subcycling
-for mixed-timestep coupling groups.
+fixed relaxation, IQN-ILS, IQN-IMVJ), Jacobi iteration mode, and
+subcycling for mixed-timestep coupling groups.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,7 @@ class CouplingGroup:
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
         for smoothly varying problems.
-    solver : str
+    solver : {"fori", "ift"}
         How the fixed-point iteration is solved.  ``"fori"`` (default)
         runs a static ``jax.lax.fori_loop`` for ``max_iterations`` and
         differentiates straight through the iterates.  ``"ift"`` runs
@@ -101,9 +101,20 @@ class CouplingGroup:
         backward pass (more accurate gradients in the
         partially-converged regime, plus a meaningful forward speed-up
         when convergence is reached before ``max_iterations``).
-        Currently only supported when ``acceleration="none"`` and
-        ``iteration_mode="gauss-seidel"``; other combinations silently
-        fall back to ``"fori"``.
+        Supported with ``acceleration`` in ``{"none", "aitken",
+        "iqn-imvj"}`` and ``iteration_mode="gauss-seidel"``; other
+        combinations silently fall back to ``"fori"``.
+    linear_solver : {"gmres", "bicgstab", "dense"}
+        Backend used by the ``"ift"`` backward to solve the adjoint
+        system ``(I - dF/dx)^T u = g``.  ``"gmres"`` (default) is the
+        matrix-free GMRES path via lineax — the safe default for the
+        non-symmetric coupling Jacobians MADDENING produces.
+        ``"bicgstab"`` is a matrix-free alternative that can be more
+        robust on some non-symmetric systems.  ``"dense"`` is the
+        legacy ``jacrev + jnp.linalg.solve`` path, kept as a triage
+        fallback (O(N^2) memory, O(N^3) compute).  The
+        ``MADDENING_IFT_DENSE_SOLVE=1`` env var forces ``"dense"``
+        regardless of this setting and overrides for triage.
     """
     nodes: frozenset[str]
     max_iterations: int = 10
@@ -112,13 +123,18 @@ class CouplingGroup:
     atol: float = 1e-8
     rtol: float = 1e-6
     diagnostics: bool = False
-    acceleration: str = "none"
+    acceleration: Literal[
+        "none", "aitken", "fixed", "iqn-ils", "iqn-imvj"
+    ] = "none"
     relaxation: float = 1.0
-    iteration_mode: str = "gauss-seidel"
+    iteration_mode: Literal["gauss-seidel", "jacobi"] = "gauss-seidel"
     accelerated_fields: Optional[dict[str, tuple[str, ...]]] = None
     subcycling: bool = False
-    boundary_interpolation: str = "linear"
+    boundary_interpolation: Literal[
+        "constant", "linear", "quadratic"
+    ] = "linear"
     jacobian_reuse: int = 0
     waveform_iterations: int = 1
-    predictor: str = "none"
-    solver: str = "fori"
+    predictor: Literal["none", "linear", "quadratic"] = "none"
+    solver: Literal["fori", "ift"] = "fori"
+    linear_solver: Literal["gmres", "bicgstab", "dense"] = "gmres"

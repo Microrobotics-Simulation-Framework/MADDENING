@@ -1,0 +1,104 @@
+name: Slow tests (scheduled)
+
+# Runs the @slow-marked tests three times a week.  The default CI lane
+# excludes them (per pyproject.toml's ``addopts = "-m 'not slow'"``);
+# this workflow opts in with ``-m 'slow or not slow'``.
+#
+# Notification model:
+#   * GitHub emails the workflow author on any scheduled-run failure
+#     -- including timeouts (a timed-out job is a failed job).  Silent
+#     on success.
+#   * On timeout specifically, we ALSO open a tracking issue via the
+#     built-in GITHUB_TOKEN.  GitHub then emails repo watchers with a
+#     body that explicitly suggests "investigate which slow test ran
+#     long, or bump the timeout."  This is the only way to get a
+#     timeout-specific email body (the default failure email is just
+#     "Run failed").
+
+on:
+  schedule:
+    # Mon / Wed / Fri at 16:00 UTC  (~18:00 CEST / 17:00 CET).
+    # Cron is UTC only, no DST adjustment.
+    - cron: '0 16 * * 1,3,5'
+  workflow_dispatch:       # also runnable on demand from the Actions tab
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: write        # required for the timeout-issue creation step
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Match the CI lane's pinned JAX.
+          pip install "jax==0.5.1" "jaxlib==0.5.1"
+          pip install -e ".[ci]"
+
+      - name: Run full suite (slow lane)
+        id: pytest
+        continue-on-error: true
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          # Wrap pytest with GNU ``timeout`` so we exit with code 124
+          # on time-out (instead of GitHub killing the job with a
+          # generic SIGTERM).  175m gives 5 minutes of headroom under
+          # the job-level ``timeout-minutes: 180``, leaving room for
+          # the follow-up issue-creation step to finish.
+          set +e
+          timeout 175m python -m pytest tests/ -m 'slow or not slow' \
+              -v --tb=short --ignore=tests/viz
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Open tracking issue on timeout
+        if: steps.pytest.outputs.exit_code == '124'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const py = '${{ matrix.python-version }}';
+            const sha = context.sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `slow-tests: timeout on Python ${py} @ ${sha}`,
+              body: [
+                `The scheduled slow-tests workflow hit the 175-minute wrapper timeout`,
+                `(the job-level \`timeout-minutes\` is 180; the inner \`timeout 175m\`,`,
+                `wrapping pytest, fires first so we can distinguish timeout from other`,
+                `failures).`,
+                ``,
+                `Action — either:`,
+                ``,
+                `1. **Investigate which slow test is running long.** The run log shows`,
+                `   the last test pytest reported before the timeout fired.`,
+                `2. **Bump the timeout.** Edit \`.github/workflows/slow-tests.yml\` and`,
+                `   raise both \`timeout-minutes\` (currently 180) and the inner`,
+                `   \`timeout 175m\` (keep ~5 min headroom between them).`,
+                ``,
+                `Workflow run: ${runUrl}`,
+              ].join('\n'),
+            });
+
+      - name: Re-raise pytest failure
+        if: steps.pytest.outputs.exit_code != '0'
+        run: |
+          echo "pytest exited with code ${{ steps.pytest.outputs.exit_code }}"
+          exit 1

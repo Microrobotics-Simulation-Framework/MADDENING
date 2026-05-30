@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
-version = "0.2.0"
+version = "0.2.1"
 description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -40,6 +40,10 @@ dependencies = [
     "jaxlib>=0.4,<0.6",
     "numpy>=1.24",
     "pyyaml>=6.0",
+    # ExceptionGroup is a builtin on 3.11+; backport the 3.10 path.
+    # GraphManager.compile() raises ExceptionGroup of EdgeValidationError
+    # subclasses on shape/dtype mismatches (v0.2.1 — see CHANGELOG).
+    "exceptiongroup; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]

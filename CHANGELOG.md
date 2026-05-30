@@ -9,6 +9,102 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-30
+
+A patch release that closes the three v0.2 deferred items
+(`V0.2_PROGRESS.md` "Deferred" block): sharded `StaticArray` runtime
+slicing, the pre-announced edge-validation warning→error flip, and
+the `compile()` advisory-noise cleanup.  The first item unblocks
+MIME's multi-GPU `IBLBMFluidNode` sharding (load-bearing for the
+de Boer step-out replication, MIME M1).
+
+```{warning}
+**Semver carve-out.**  v0.2.1 includes one breaking change under
+strict semver — the edge-validation warning→error flip described
+below.  This was pre-announced in v0.2.0 release notes and held
+on the deprecation calendar; we ship the flip as a PATCH because
+(a) the change was published in advance, (b) the migration path
+is documented in
+[`docs/developer_guide/edge_validation_migration.md`](docs/developer_guide/edge_validation_migration.md),
+and (c) the deprecated ``*Warning`` aliases stay importable
+through v0.2.x.  If your CI pins ``maddening<0.3``, expect this
+change; the aliases are removed in v0.3.
+```
+
+### Added
+- `domain_integral_fields()` method on `SimulationNode`: declares
+  output keys that should be `lax.psum`-reduced across the device
+  mesh after `update_padded` (e.g. drag force, drag torque on a
+  sharded immersed-boundary node).  Default returns an empty set —
+  pure additive, no behavioural change for existing nodes.
+- `static_padded` and `shard_info` keyword-only optional parameters
+  on `SimulationNode.update_padded`.  The wrapper passes the
+  per-device + halo-padded slab of each sharded `StaticArray` via
+  `static_padded`, and per-axis `(global_offset, local_extent)` via
+  `shard_info` (the offset is a traced JAX scalar, usable in
+  `dynamic_slice` but not in Python integer slicing).
+- Runtime slicing for `StaticArray(replication="shard", shard_axis=K)`
+  under `ShardedStencilNode`.  v0.2.0 stored `shard_axis` as
+  metadata only; v0.2.1 actually materialises the per-device slice
+  via `jax.device_put` + `NamedSharding`, halo-exchanges it with
+  `boundary="edge"`, and delivers it as `static_padded` to
+  `update_padded`.  Acceptance test in
+  `tests/cloud/multigpu/test_sharded_static_data.py`.
+- `EdgeValidationError`, `ShapeMismatchError(EdgeValidationError)`,
+  `DtypeMismatchError(EdgeValidationError)` in
+  `maddening.warnings` — the new error path for the validation flip.
+- `BaseExceptionGroup` / `ExceptionGroup` re-export in
+  `maddening.warnings` (builtin on 3.11+; `exceptiongroup` backport
+  on 3.10).
+
+### Changed (breaking — see semver carve-out above)
+- `GraphManager.compile()` raises `ExceptionGroup("edge validation failed", [...])`
+  on shape/dtype mismatches that previously emitted
+  `ShapeMismatchWarning` / `DtypeMismatchWarning`.  All mismatches
+  detected in a single `compile()` are aggregated into one group so
+  callers can see every problem at once.  Catch `EdgeValidationError`
+  (or the subclasses) via `except*` on 3.11+, or via explicit
+  isinstance iteration on 3.10.  `UnitMismatchWarning` is
+  **unchanged** — units are advisory by contract.
+
+### Deprecated (kept as aliases for one release cycle, removed in v0.3)
+- `ShapeMismatchWarning`, `DtypeMismatchWarning`, `EdgeValidationWarning`
+  classes remain importable from `maddening.warnings` so downstream
+  `pytest.warns(...)` references still resolve; nothing in MADDENING
+  emits them in v0.2.1.  The v0.3 plan's compat-hygiene bucket
+  removes these aliases.
+
+### Fixed
+- Single-node graphs (the quickstart shape) no longer emit a
+  `"node 'X' is disconnected"` `UserWarning` from
+  `GraphManager.compile()`.  The disconnected advisory now requires
+  `len(node_names) > 1`.
+- The uncovered "cycle detected" advisory moved from
+  `warnings.warn(UserWarning)` to `logging.getLogger(__name__).info(...)`
+  + an `INFO:`-prefixed entry in `validate()`'s issue list.  Cycles
+  are handled correctly via back-edge staggering — surfacing them
+  through the warning system was noise for downstream
+  `filterwarnings=["error"]` configs.
+
+### Dependencies
+- Added `"exceptiongroup; python_version < '3.11'"` to base
+  dependencies.  Provides the `BaseExceptionGroup` / `ExceptionGroup`
+  builtins on Python 3.10.
+
+### Verification
+- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
+  via `-m "not slow"`).  Slow-marked tests deferred to a longer
+  pre-release pass.
+- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
+  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
+  on the `lax.psum` integral), 50-step multi-step convergence,
+  construction-time validation (`shard_axis` must match the wrapper's
+  spatial axes; nodes with sharded statics must accept `static_padded`
+  on `update_padded`), `shard_info` delivery.
+- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
+  green; aggregation test confirms shape + dtype errors raise in one
+  `ExceptionGroup` alongside a `UnitMismatchWarning`.
+
 ## [0.2.0] - 2026-05-20
 
 See [`docs/release_notes/v0.2.md`](docs/release_notes/v0.2.md) for the

@@ -6,10 +6,16 @@
     "preferred": false
   },
   {
-    "version": "v0.2",
-    "name": "v0.2 (stable)",
-    "url": "https://microrobotica.org/maddening/v0.2/",
+    "version": "v0.2.1",
+    "name": "v0.2.1 (stable)",
+    "url": "https://microrobotica.org/maddening/v0.2.1/",
     "preferred": true
+  },
+  {
+    "version": "v0.2",
+    "name": "v0.2",
+    "url": "https://microrobotica.org/maddening/v0.2/",
+    "preferred": false
   },
   {
     "version": "v0.1",

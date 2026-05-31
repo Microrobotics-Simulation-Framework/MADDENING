@@ -10,8 +10,9 @@ Two flavours:
   :meth:`SimulationNode.update_padded`, and strips halos from the
   result.
 
-``ShardedNode`` is retained as a deprecated alias for
-``ShardedPointwiseNode`` (v0.1 compatibility).
+The legacy ``ShardedNode`` alias was removed in v0.3.0 (per the v0.2.x
+deprecation cycle).  Use :class:`ShardedPointwiseNode` for pointwise
+sharding or :class:`ShardedStencilNode` for stencil sharding.
 """
 
 from __future__ import annotations
@@ -581,22 +582,3 @@ class ShardedStencilNode(SimulationNode):
         d["axis_map"] = self._axis_map
         d["boundary"] = self._boundary
         return d
-
-
-# ---------------------------------------------------------------------------
-# Deprecated alias
-# ---------------------------------------------------------------------------
-
-
-class ShardedNode(ShardedPointwiseNode):
-    """Deprecated alias for :class:`ShardedPointwiseNode`."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        warnings.warn(
-            "ShardedNode is deprecated; use ShardedPointwiseNode for "
-            "pointwise sharding or ShardedStencilNode for stencil "
-            "(halo-aware) sharding.  Removed in v0.3.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        super().__init__(*args, **kwargs)

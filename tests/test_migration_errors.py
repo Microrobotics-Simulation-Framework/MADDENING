@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from maddening.warnings import (
-    EdgeValidationWarning,
     MigrationError,
     UnitMismatchWarning,
 )
@@ -68,15 +67,19 @@ class TestMigrationError:
 class TestUnitMismatchPermanentlyAdvisory:
     """v0.2 #4 follow-up: UnitMismatchWarning's docstring closes the
     'do units flip to errors' question.  This test pins the contract
-    in code so future-you can't accidentally promote it."""
+    in code so future-you can't accidentally promote it.
+
+    Updated in v0.3.0: the EdgeValidationWarning intermediate alias was
+    removed (per B4); UnitMismatchWarning now roots directly at
+    UserWarning, but is still a Warning subclass.
+    """
 
     def test_docstring_calls_out_permanently_advisory(self):
         assert "Permanently advisory" in UnitMismatchWarning.__doc__
 
     def test_inheritance_unchanged(self):
-        # If unit mismatches stay warnings, they stay rooted at
-        # EdgeValidationWarning, NOT at any future error hierarchy.
-        assert issubclass(UnitMismatchWarning, EdgeValidationWarning)
+        # UnitMismatchWarning stays a Warning (advisory only) — it
+        # must NOT become an exception subclass without violating the
+        # "units are documentation, not contract" rule.
+        assert issubclass(UnitMismatchWarning, UserWarning)
         assert issubclass(UnitMismatchWarning, Warning)
-        assert not issubclass(UnitMismatchWarning, Exception) or \
-            issubclass(Warning, Exception)

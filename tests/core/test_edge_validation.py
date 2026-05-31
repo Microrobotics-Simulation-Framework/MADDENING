@@ -22,7 +22,6 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.warnings import (
     DtypeMismatchError,
     EdgeValidationError,
-    EdgeValidationWarning,
     ExceptionGroup,
     ShapeMismatchError,
     UnitMismatchWarning,
@@ -126,8 +125,8 @@ class TestCleanGraphSilent:
         gm.add_node(_ScalarSinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "in")
         with _w.catch_warnings():
-            _w.simplefilter("error", EdgeValidationWarning)
-            gm.compile()  # would raise if any EdgeValidationWarning fired
+            _w.simplefilter("error", UnitMismatchWarning)
+            gm.compile()  # would raise if any UnitMismatchWarning fired
 
     def test_matching_vector_shape(self):
         gm = GraphManager()
@@ -135,7 +134,7 @@ class TestCleanGraphSilent:
         gm.add_node(_Vec3SinkNode("sink", timestep=0.01))
         gm.add_edge("src", "sink", "out", "vec")
         with _w.catch_warnings():
-            _w.simplefilter("error", EdgeValidationWarning)
+            _w.simplefilter("error", UnitMismatchWarning)
             gm.compile()
 
 
@@ -269,7 +268,7 @@ class TestAggregation:
         gm.add_edge("src3", "sink3", "out", "in", source_units="kN")  # units
 
         with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter("always", EdgeValidationWarning)
+            _w.simplefilter("always", UnitMismatchWarning)
             with pytest.raises(ExceptionGroup) as exc_info:
                 gm.compile()
 

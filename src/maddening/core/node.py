@@ -84,33 +84,31 @@ class SimulationNode(ABC):
     meta: ClassVar[Optional["NodeMeta"]] = None  # type: ignore[name-defined]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Detect legacy subclasses that override ``requires_halo`` only.
+        """Reject legacy subclasses that override ``requires_halo``.
 
-        Until v0.3, ``requires_halo`` is retained as a property derived
-        from :meth:`halo_width`.  Subclasses that override ``requires_halo``
-        directly (without overriding ``halo_width``) still function, but
-        they lose per-axis halo information needed for pencil decomposition.
-        Emit a DeprecationWarning to nudge migration.
+        Pre-v0.3 ``requires_halo`` was a property derived from
+        :meth:`halo_width`.  v0.3.0 removes the property and the
+        compat shim; subclasses that override ``requires_halo``
+        directly (without overriding ``halo_width``) raise
+        :class:`maddening.warnings.MigrationError` at class-definition
+        time, naming the migration target.
+
+        See the migration guide at
+        ``docs/developer_guide/halo_width_migration.md``.
         """
         super().__init_subclass__(**kwargs)
         overrides_requires_halo = "requires_halo" in cls.__dict__
         overrides_halo_width = "halo_width" in cls.__dict__
         if overrides_requires_halo and not overrides_halo_width:
-            # FutureWarning (not DeprecationWarning) so the message
-            # surfaces in notebooks where DeprecationWarning is
-            # silenced by default.  v0.3 will replace this with a
-            # MigrationError (see maddening.warnings.MigrationError;
-            # the v0.3 release notes will name this site as the
-            # removal point).
-            warnings.warn(
-                f"{cls.__qualname__} overrides 'requires_halo' but not "
-                "'halo_width'. 'requires_halo' is deprecated; override "
-                "'halo_width() -> dict[int, int]' instead "
-                "(pointwise nodes return {}, stencil nodes return "
-                "{axis: width, ...}). 'requires_halo' is removed in v0.3 "
-                "and will raise MigrationError on import.",
-                FutureWarning,
-                stacklevel=2,
+            from maddening.warnings import MigrationError  # noqa: PLC0415
+            raise MigrationError(
+                api_name="SimulationNode.requires_halo",
+                affected_class=cls,
+                replacement="halo_width() -> dict[int, int]",
+                migration_guide=(
+                    "https://microrobotica.org/maddening/developer_guide/"
+                    "halo_width_migration.html"
+                ),
             )
 
     def __init__(self, name: str, timestep: float, **params):
@@ -259,17 +257,6 @@ class SimulationNode(ABC):
         Default: ``{}`` (pointwise).  Override in stencil nodes.
         """
         return {}
-
-    @property
-    def requires_halo(self) -> bool:
-        """Whether this node's ``update()`` accesses spatial neighbours.
-
-        Derived from :meth:`halo_width`: ``True`` iff ``halo_width()`` is
-        non-empty.  Retained for backward compatibility; removed in v0.3.
-        New code should query ``halo_width()`` directly to get per-axis
-        widths (pencil decomposition needs this).
-        """
-        return bool(self.halo_width())
 
     def update_padded(
         self,

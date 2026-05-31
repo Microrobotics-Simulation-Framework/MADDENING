@@ -194,28 +194,28 @@ class TestStaticArrayProxies:
 
 
 class TestCoercion:
-    def test_bare_array_warns_and_coerces(self):
-        with pytest.warns(FutureWarning, match="StaticArray"):
-            out = coerce_static_data_value(
+    def test_bare_array_raises_migration_error(self):
+        """v0.3.0 hard-removes the FutureWarning-coerce path; bare arrays
+        in static_data now raise MigrationError immediately."""
+        from maddening.warnings import MigrationError
+        with pytest.raises(MigrationError) as exc:
+            coerce_static_data_value(
                 jnp.zeros(3), node_name="x", key="k",
             )
-        assert isinstance(out, StaticArray)
-        assert out.replication == "replicate"
+        assert "static_data" in exc.value.api_name
+        assert exc.value.replacement is not None
+        assert "StaticArray" in exc.value.replacement
 
     def test_already_wrapped_passes_through(self):
         wrapped = StaticArray(jnp.zeros(3))
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", FutureWarning)
-            out = coerce_static_data_value(
-                wrapped, node_name="x", key="k",
-            )
+        out = coerce_static_data_value(
+            wrapped, node_name="x", key="k",
+        )
         assert out is wrapped
 
     def test_scalars_pass_through_unchanged(self):
         for v in (42, 3.14, "hello", (1, 2, 3)):
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", FutureWarning)
-                out = coerce_static_data_value(v, node_name="x", key="k")
+            out = coerce_static_data_value(v, node_name="x", key="k")
             assert out == v
 
 
@@ -264,16 +264,11 @@ class TestHashIncludesShardingPolicy:
                    sd={"k": StaticArray(jnp.ones(4))})
         assert n1.static_data_hash() == n2.static_data_hash()
 
-    def test_bare_array_hash_matches_replicate_wrapping(self):
-        # The coercion path treats a bare array as
-        # StaticArray(value=arr, replication="replicate"), so the
-        # hashes match — but the bare path emits FutureWarning.
+    def test_bare_array_hash_raises_migration_error(self):
+        """v0.3.0 removed the bare-array coercion path; computing the
+        hash on a bare-array static_data dict now raises MigrationError.
+        """
+        from maddening.warnings import MigrationError
         bare_node = _Node("a", timestep=0.01, sd={"k": jnp.zeros(4)})
-        wrapped_node = _Node(
-            "b", timestep=0.01,
-            sd={"k": StaticArray(jnp.zeros(4), replication="replicate")},
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)
-            h_bare = bare_node.static_data_hash()
-        assert h_bare == wrapped_node.static_data_hash()
+        with pytest.raises(MigrationError):
+            bare_node.static_data_hash()

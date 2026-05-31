@@ -73,7 +73,8 @@ class TestShardedPointwiseNodeConstruction:
         node = PointwiseNode(name="pw", timestep=0.01, n_elements=100)
         sharded = ShardedPointwiseNode(node, mesh)
         assert sharded.name == "pw"
-        assert sharded.requires_halo is False
+        # Pointwise nodes report empty halo_width().
+        assert sharded.halo_width() == {}
 
     def test_shard_axes_int_converted_to_tuple(self):
         mesh = create_device_mesh(n_devices=1)
@@ -94,21 +95,21 @@ class TestShardedPointwiseNodeConstruction:
             ShardedPointwiseNode(node, mesh, shard_axes=(0, 1))
 
 
-class TestShardedPointwiseNodeRequiresHaloOnRealNodes:
-    def test_heat_node_requires_halo(self):
+class TestShardedPointwiseNodeHaloWidthOnRealNodes:
+    def test_heat_node_has_halo(self):
         from maddening.nodes.heat import HeatNode
         node = HeatNode("h", timestep=0.01, n_cells=20)
-        assert node.requires_halo is True
+        assert node.halo_width() == {0: 1}
 
     def test_ball_node_no_halo(self):
         from maddening.nodes.ball import BallNode
         node = BallNode("b", timestep=0.01)
-        assert node.requires_halo is False
+        assert node.halo_width() == {}
 
     def test_spring_node_no_halo(self):
         from maddening.nodes.spring import SpringDamperNode
         node = SpringDamperNode("s", timestep=0.01, stiffness=100.0)
-        assert node.requires_halo is False
+        assert node.halo_width() == {}
 
 
 @pytest.mark.skipif(not _HAS_2_DEVICES, reason=_SKIP_MSG)

@@ -61,37 +61,16 @@ class DtypeMismatchError(EdgeValidationError):
 
 
 # ---------------------------------------------------------------------------
-# Deprecated *Warning aliases — kept for one release cycle (v0.2.1 only)
-# so downstream code with ``pytest.warns(ShapeMismatchWarning)`` still
-# imports cleanly.  Removed in v0.3.
+# Permanently advisory warnings (units only — shape / dtype are errors).
 # ---------------------------------------------------------------------------
+#
+# The v0.2.1 deprecation aliases EdgeValidationWarning,
+# ShapeMismatchWarning, and DtypeMismatchWarning were removed in v0.3.0
+# per the v0.2.x release notes.  Use EdgeValidationError /
+# ShapeMismatchError / DtypeMismatchError above.
 
 
-class EdgeValidationWarning(UserWarning):
-    """**Deprecated** in v0.2.1; superseded by :class:`EdgeValidationError`.
-
-    Kept as a deprecated alias so downstream code that imports the name
-    (typically ``pytest.warns(EdgeValidationWarning)`` in legacy tests)
-    still resolves.  No code path inside MADDENING emits this class as
-    of v0.2.1 — the shape/dtype paths raise instead.  Removed in v0.3.
-    """
-
-
-class ShapeMismatchWarning(EdgeValidationWarning):
-    """**Deprecated** in v0.2.1; use :class:`ShapeMismatchError`.
-
-    Kept as a deprecated alias for one release cycle.  Removed in v0.3.
-    """
-
-
-class DtypeMismatchWarning(EdgeValidationWarning):
-    """**Deprecated** in v0.2.1; use :class:`DtypeMismatchError`.
-
-    Kept as a deprecated alias for one release cycle.  Removed in v0.3.
-    """
-
-
-class UnitMismatchWarning(EdgeValidationWarning):
+class UnitMismatchWarning(UserWarning):
     """Edge declares units that don't match the target node's
     :attr:`BoundaryInputSpec.expected_units`.
 

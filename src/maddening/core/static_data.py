@@ -201,26 +201,30 @@ class StaticArray:
 
 
 def coerce_static_data_value(value: Any, *, node_name: str, key: str) -> Any:
-    """Wrap a bare array in ``StaticArray`` with a FutureWarning.
+    """Validate that a static_data value is a ``StaticArray`` or scalar.
 
     Called from :func:`maddening.core.node._iter_static_data_for_hash`
     on every static_data access.  Scalars, strings, and tuples pass
-    through unchanged.  Bare arrays emit a one-time FutureWarning
-    (per node × key combination) and get coerced to
-    ``StaticArray(value=arr)``.
+    through unchanged.  Bare arrays (anything with ``shape``/``dtype``
+    that isn't a ``StaticArray``) raise :class:`MigrationError`
+    naming the migration target.
 
-    Removed in v0.3 — bare arrays in static_data will raise then.
+    The v0.2.x FutureWarning-coercion behaviour was removed in v0.3.0
+    per the v0.2.x deprecation cycle.
     """
     if isinstance(value, StaticArray):
         return value
     if hasattr(value, "shape") and hasattr(value, "dtype"):
-        warnings.warn(
-            f"Bare array in {node_name!r}.static_data[{key!r}] is "
-            f"deprecated; wrap with StaticArray(value=..., "
-            f"replication='replicate' or 'shard', shard_axis=...).  "
-            f"Bare arrays will raise in v0.3.",
-            FutureWarning,
-            stacklevel=3,
+        from maddening.warnings import MigrationError  # noqa: PLC0415
+        raise MigrationError(
+            api_name=f"bare-array-in-static_data ({node_name}.{key})",
+            replacement=(
+                "StaticArray(value=..., replication='replicate' | 'shard' "
+                "| 'partition', shard_axis=...)"
+            ),
+            migration_guide=(
+                "https://microrobotica.org/maddening/developer_guide/"
+                "static_array_migration.html"
+            ),
         )
-        return StaticArray(value=value)
     return value

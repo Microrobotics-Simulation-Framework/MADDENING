@@ -223,27 +223,8 @@ def test_rejects_axis_without_halo():
         ShardedStencilNode(node, mesh, axis_map={"devices": 5})
 
 
-def test_deprecated_sharded_node_alias_warns():
-    """Importing and using ShardedNode emits DeprecationWarning."""
-    import warnings
-
-    from maddening.cloud.multigpu.sharded_node import ShardedNode
-
-    class Pointwise(SimulationNode):
-        def halo_width(self):
-            return {}
-
-        def initial_state(self):
-            return {"x": jnp.zeros(4)}
-
-        def update(self, state, boundary_inputs, dt):
-            return state
-
-    mesh = create_device_mesh(shape=(1,))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        ShardedNode(Pointwise(name="p", timestep=0.1), mesh)
-
-    deps = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert deps, "expected DeprecationWarning"
-    assert "ShardedPointwiseNode" in str(deps[0].message)
+def test_sharded_node_alias_removed_in_v030():
+    """ShardedNode was removed in v0.3.0 (had been a DeprecationWarning
+    alias in v0.2.x).  Importing it must now fail with ImportError."""
+    with pytest.raises(ImportError):
+        from maddening.cloud.multigpu.sharded_node import ShardedNode  # noqa: F401

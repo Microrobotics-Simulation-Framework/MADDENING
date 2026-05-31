@@ -7,7 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Additional sections per release: **Verification**, **Security**, and **Known Anomalies**.
 
-## [Unreleased]
+## [Unreleased] — v0.3.0 work-in-progress on `feat/v0.3`
+
+v0.3.0 is the M2 "redesigns" milestone (STACK_V1 §3).  See
+`plans/MADDENING_v0.3.0_PLAN.md` for the working scope document and
+`docs/developer_guide/stability_report.md` for the up-to-date
+`@stability` audit table.
+
+### Added
+
+- **`maddening.fmi`** subpackage — FMI 3.0 substrate (§A1).
+  `ModelDescription`/`build_model_description()` emit FMI 3.0
+  `modelDescription.xml` from a compiled `GraphManager` +
+  the `@stability` registry; `get_directional_derivative()` wraps
+  `jax.jvp` / `jax.vjp` behind a `fmi3GetDirectionalDerivative`-
+  shaped API; `serialize_fmu_state`/`deserialize_fmu_state` round-
+  trip graph state through a schema-token-validated handle;
+  `FmuSidecar` is a Python reference implementation of the ZMQ
+  sidecar protocol the FMU's C wrapper (v0.4.0 deliverable) will
+  marshal into.  All tagged `@stability(EVOLVING)`.
+- **`maddening.cloud.multigpu.iterative_solver`** — `sharded_cg` /
+  `sharded_gmres` (§A5).  Wrap user-supplied sharded matvecs;
+  lineax-backed default with a hand-rolled `lax.while_loop` /
+  `lax.fori_loop` fallback for when lineax misbehaves with
+  `shard_map`.  Both tagged `@stability(STABLE)` — these are
+  the surface MIME's v0.5.0 FVM PISO pressure correction calls.
+- **`maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`**
+  + **`maddening.cloud.multigpu.halo_unstructured`** (§A6).
+  Graph-partitioned sharded execution; sparse halo exchange via
+  `lax.all_to_all`; new `StaticArray(replication="partition")`
+  variant with `partition_assignment` plumbing.  Toy 16-cell test
+  + 1024-cell smoke + cross-cutting `sharded_cg` + Poisson test +
+  `_MockFVMFluidNode` contract-stress-test (the v0.4.0 commitment
+  gate).  Tagged `@stability(STABLE)`.
+- **`maddening.usd.live_stage.LiveStage`** — generic per-timestep
+  USD writer pulled out of MIME (§A3).  Domain-neutral stage
+  creation, dynamic-prim registry, batched `Sdf.ChangeBlock`
+  update loop, materials / dome lights / ground planes.
+  `make_translate_updater` / `make_translate_orient_updater`
+  cover the common cases without subclassing.  New non-MIME
+  `live_stage_bouncing_ball_demo` example exports a time-sampled
+  `.usda` runnable in MICROROBOTICA.  Tagged
+  `@stability(EVOLVING)`.
+- **IFT coupling-solver redesign merged** (§A4).  `solver="ift"` on
+  `CouplingGroup`, matrix-free lineax GMRES backward, `acceleration`
+  values including `aitken` and `iqn-imvj`, per-step IFT × IQN-IMVJ,
+  embedded coupling groups, Literal-typed field validation.
+- **`@stability` decorator + registry** (§A2).  `StabilityLevel`
+  gains `EVOLVING` and `INTERNAL` (plus existing `STABLE`,
+  `EXPERIMENTAL`, `PROVISIONAL`, `DEPRECATED`).  First-wave audit
+  applied to the v0.3.0 plan's named surfaces.  Auto-generated
+  `docs/developer_guide/stability_report.md` is now part of the
+  docs build.
+- **Choice-criteria developer-guide page** —
+  `docs/developer_guide/sharding_topology.md` covers
+  structured-vs-unstructured choice + partition-assignment handoff
+  pattern + performance trade-offs + v0.4.0 commitment.
+
+### Changed (breaking)
+
+- **`SimulationNode.requires_halo`** (property + compat shim)
+  removed (§B1).  Subclasses overriding `requires_halo` instead of
+  `halo_width()` raise `MigrationError` at class-definition time
+  (was `FutureWarning` in v0.2).
+- **`ShardedNode`** (deprecated alias for `ShardedPointwiseNode`)
+  removed (§B2).  Use `ShardedPointwiseNode` for pointwise
+  sharding or `ShardedStencilNode` for stencil sharding.
+- **Bare arrays in `static_data`** now raise `MigrationError`
+  immediately (§B3); the v0.2.1 `FutureWarning`-coerce path is
+  gone.  Wrap explicitly in `StaticArray(value=..., replication=...)`.
+- **`EdgeValidationWarning` / `ShapeMismatchWarning` /
+  `DtypeMismatchWarning`** deprecated aliases removed from
+  `maddening.warnings` (§B4).  `UnitMismatchWarning` now roots at
+  `UserWarning` directly.
+- **`maddening.surrogates.{checkpoint,trainer,callbacks,physics_losses}`**
+  legacy top-level paths removed (§B5).  The source files
+  physically moved to `surrogates/weights/checkpoint.py` and
+  `surrogates/training/{trainer,callbacks,physics_losses}.py`.
+  Importing from the legacy paths raises `ModuleNotFoundError`.
+
+### Stability audit
+
+- 29 public surfaces tagged via `@stability` (13 stable, 7
+  evolving, 9 experimental).  See
+  `docs/developer_guide/stability_report.md` for the current
+  table.  The v0.3.0 §A6 contract is `@stability(STABLE)`-ready
+  per the hard v0.4.0 commitment ("sharded FVM in MIME v0.5.0").
 
 ## [0.2.1] - 2026-05-30
 

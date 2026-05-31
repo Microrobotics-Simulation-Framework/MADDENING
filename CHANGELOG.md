@@ -94,6 +94,14 @@ v0.3.0 is the M2 "redesigns" milestone (STACK_V1 §3).  See
   table.  The v0.3.0 §A6 contract is `@stability(STABLE)`-ready
   per the hard v0.4.0 commitment ("sharded FVM in MIME v0.5.0").
 
+### Dependencies
+
+- Added `httpx2>=2.0` to the `[ci]` and `[dev]` extras (§C5).
+  Starlette's testclient auto-detects httpx2 and uses it
+  preferentially, closing the v0.2.1
+  `StarletteDeprecationWarning`-ignore loop.  The corresponding
+  filterwarning is removed from `pyproject.toml`.
+
 ## [0.2.1] - 2026-05-30
 
 A patch release that closes the three v0.2 deferred items

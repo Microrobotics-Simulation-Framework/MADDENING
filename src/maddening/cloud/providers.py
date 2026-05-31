@@ -15,7 +15,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
+
+@stability(StabilityLevel.EVOLVING)
 class CloudProvider(ABC):
     """Base class for cloud provider credential and identity handling."""
 

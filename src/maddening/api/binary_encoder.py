@@ -25,6 +25,9 @@ from typing import Any
 
 import numpy as np
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 try:
     import zstandard as _zstd
     _HAS_ZSTD = True
@@ -35,6 +38,7 @@ except ImportError:
 VALID_COMPRESSIONS = {"none", "zstd", "zstd+xor"}
 
 
+@stability(StabilityLevel.EVOLVING)
 class BinaryStateEncoder:
     """Builds a fixed schema from an example state dict, then packs
     subsequent states into flat binary buffers.

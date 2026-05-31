@@ -42,7 +42,11 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
+
+@stability(StabilityLevel.STABLE)
 @dataclass(frozen=True)
 class StaticArray:
     """A static (non-state) array with an explicit sharding policy.

@@ -27,10 +27,13 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maddening.cloud.multigpu.halo import halo_exchange
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 from maddening.core.node import SimulationNode
 from maddening.core.static_data import StaticArray, coerce_static_data_value
 
 
+@stability(StabilityLevel.STABLE)
 class ShardedPointwiseNode(SimulationNode):
     """Data-parallel wrapper for a pointwise :class:`SimulationNode`.
 
@@ -108,6 +111,7 @@ class ShardedPointwiseNode(SimulationNode):
         return d
 
 
+@stability(StabilityLevel.STABLE)
 class ShardedStencilNode(SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 

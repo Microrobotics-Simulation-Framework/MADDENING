@@ -14,10 +14,25 @@ from typing import Optional
 
 
 class StabilityLevel(Enum):
-    """API stability classification for nodes and public surfaces."""
+    """API stability classification for nodes and public surfaces.
+
+    Levels (per ``plans/MADDENING_v0.3.0_PLAN.md`` §A2):
+
+    - ``STABLE``: locked at v1.0.0; backwards-incompatible changes require
+      a major version bump.
+    - ``EVOLVING``: settled wire format / signature, but additions are
+      possible without breaking existing callers.
+    - ``PROVISIONAL``: synonym for ``EVOLVING`` retained for back-compat
+      with pre-v0.3.0 tagged surfaces.
+    - ``EXPERIMENTAL``: may break in any minor release. Opt-in only.
+    - ``INTERNAL``: not part of the public API. Implementation detail.
+    - ``DEPRECATED``: scheduled for removal in a future release.
+    """
     EXPERIMENTAL = "experimental"
     PROVISIONAL = "provisional"
+    EVOLVING = "evolving"
     STABLE = "stable"
+    INTERNAL = "internal"
     DEPRECATED = "deprecated"
 
 

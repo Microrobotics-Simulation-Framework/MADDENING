@@ -16,11 +16,16 @@ class TestStabilityLevel:
     def test_values(self):
         assert StabilityLevel.EXPERIMENTAL.value == "experimental"
         assert StabilityLevel.PROVISIONAL.value == "provisional"
+        assert StabilityLevel.EVOLVING.value == "evolving"
         assert StabilityLevel.STABLE.value == "stable"
+        assert StabilityLevel.INTERNAL.value == "internal"
         assert StabilityLevel.DEPRECATED.value == "deprecated"
 
-    def test_all_four_exist(self):
-        assert len(StabilityLevel) == 4
+    def test_all_six_exist(self):
+        # v0.3.0 added EVOLVING + INTERNAL on top of the original four
+        # (EXPERIMENTAL, PROVISIONAL, STABLE, DEPRECATED).  See
+        # plans/MADDENING_v0.3.0_PLAN.md §A2.
+        assert len(StabilityLevel) == 6
 
 
 class TestUQReadiness:

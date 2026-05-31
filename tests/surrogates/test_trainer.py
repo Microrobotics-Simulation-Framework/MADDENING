@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.surrogates.dataset import DatasetGenerator
-from maddening.surrogates.trainer import SurrogateTrainer, TrainResult, mse_loss
+from maddening.surrogates.training.trainer import SurrogateTrainer, TrainResult, mse_loss
 from maddening.surrogates.architectures.mlp import MLPDirect, MLPDerivative
 
 

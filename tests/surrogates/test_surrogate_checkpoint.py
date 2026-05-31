@@ -11,9 +11,9 @@ import pytest
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.surrogates.architectures.mlp import MLPDirect, MLPDerivative
-from maddening.surrogates.checkpoint import save_weights, load_weights, load_train_result
+from maddening.surrogates.weights.checkpoint import save_weights, load_weights, load_train_result
 from maddening.surrogates.dataset import DatasetGenerator
-from maddening.surrogates.trainer import SurrogateTrainer, TrainResult
+from maddening.surrogates.training.trainer import SurrogateTrainer, TrainResult
 
 
 @pytest.fixture

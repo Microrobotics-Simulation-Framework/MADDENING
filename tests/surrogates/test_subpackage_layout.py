@@ -1,10 +1,13 @@
-"""Tests for v0.2 #2 surrogates subpackage restructure.
+"""Tests for the surrogates subpackage restructure.
 
 The restructure splits ``maddening.surrogates`` into thematic
-subpackages — ``primitives/``, ``weights/``, ``training/``, ``replace/``
-— while preserving every legacy import path for at least one minor
-version.  These tests pin both the new paths and the legacy paths so
-neither regresses.
+subpackages — ``primitives/``, ``weights/``, ``training/``, ``replace/``.
+
+v0.3.0 completed the physical-move + drop-shims step (B5 in
+plans/MADDENING_v0.3.0_PLAN.md): the legacy
+``maddening.surrogates.{checkpoint,trainer,callbacks,physics_losses}``
+import paths were removed; users must import from the subpackage
+paths directly.
 """
 
 from __future__ import annotations
@@ -55,10 +58,11 @@ class TestWeightsSubpackage:
         from maddening.surrogates.weights import load_train_result
         assert callable(load_train_result)
 
-    def test_new_path_yields_same_object_as_old_path(self):
-        from maddening.surrogates.weights import save_weights as new_save
-        from maddening.surrogates.checkpoint import save_weights as old_save
-        assert new_save is old_save
+    def test_old_path_removed_in_v030(self):
+        # v0.3.0 hard-removed the legacy module path.  Users must
+        # migrate to maddening.surrogates.weights / .weights.checkpoint.
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("maddening.surrogates.checkpoint")
 
     def test_dunder_all(self):
         from maddening.surrogates import weights
@@ -73,18 +77,33 @@ class TestWeightsSubpackage:
 class TestTrainingSubpackage:
     def test_trainer_lazy_import(self):
         from maddening.surrogates.training import SurrogateTrainer
-        from maddening.surrogates.trainer import SurrogateTrainer as direct
+        from maddening.surrogates.training.trainer import (
+            SurrogateTrainer as direct,
+        )
         assert SurrogateTrainer is direct
 
     def test_callbacks_lazy_import(self):
         from maddening.surrogates.training import EarlyStopping, ModelCheckpoint
-        from maddening.surrogates.callbacks import EarlyStopping as direct_es
+        from maddening.surrogates.training.callbacks import (
+            EarlyStopping as direct_es,
+        )
         assert EarlyStopping is direct_es
 
     def test_physics_losses_lazy_import(self):
         from maddening.surrogates.training import residual_loss, smoothness_loss
-        from maddening.surrogates.physics_losses import residual_loss as direct
+        from maddening.surrogates.training.physics_losses import (
+            residual_loss as direct,
+        )
         assert residual_loss is direct
+
+    def test_legacy_module_paths_removed_in_v030(self):
+        for old in (
+            "maddening.surrogates.trainer",
+            "maddening.surrogates.callbacks",
+            "maddening.surrogates.physics_losses",
+        ):
+            with pytest.raises(ModuleNotFoundError):
+                importlib.import_module(old)
 
     def test_unknown_attribute_raises_attributeerror(self):
         from maddening.surrogates import training
@@ -137,7 +156,9 @@ class TestReplaceSubpackage:
 # ---------------------------------------------------------------------------
 
 
-class TestBackwardsCompat:
+class TestNewPaths:
+    """The v0.3.0 canonical paths after the physical move (B5)."""
+
     @pytest.mark.parametrize("path,attr", [
         ("maddening.surrogates.architecture", "SurrogateArchitecture"),
         ("maddening.surrogates.node", "SurrogateNode"),
@@ -146,16 +167,16 @@ class TestBackwardsCompat:
         ("maddening.surrogates.dataset", "SurrogateDataset"),
         ("maddening.surrogates.dataset", "DatasetGenerator"),
         ("maddening.surrogates.replace", "replace_node"),
-        ("maddening.surrogates.checkpoint", "save_weights"),
-        ("maddening.surrogates.checkpoint", "load_weights"),
-        ("maddening.surrogates.trainer", "SurrogateTrainer"),
-        ("maddening.surrogates.trainer", "TrainResult"),
-        ("maddening.surrogates.callbacks", "TrainingCallback"),
-        ("maddening.surrogates.callbacks", "EarlyStopping"),
-        ("maddening.surrogates.physics_losses", "residual_loss"),
-        ("maddening.surrogates.physics_losses", "composite_loss"),
+        ("maddening.surrogates.weights.checkpoint", "save_weights"),
+        ("maddening.surrogates.weights.checkpoint", "load_weights"),
+        ("maddening.surrogates.training.trainer", "SurrogateTrainer"),
+        ("maddening.surrogates.training.trainer", "TrainResult"),
+        ("maddening.surrogates.training.callbacks", "TrainingCallback"),
+        ("maddening.surrogates.training.callbacks", "EarlyStopping"),
+        ("maddening.surrogates.training.physics_losses", "residual_loss"),
+        ("maddening.surrogates.training.physics_losses", "composite_loss"),
     ])
-    def test_v01_path_still_works(self, path, attr):
+    def test_canonical_path_works(self, path, attr):
         mod = importlib.import_module(path)
         assert hasattr(mod, attr), f"{path}.{attr} missing"
 

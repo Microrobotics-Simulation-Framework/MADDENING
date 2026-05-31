@@ -144,7 +144,7 @@ class ModelCheckpoint(TrainingCallback):
         if not self.save_best_only or current < self.best_value:
             self.best_value = current
             path = self.path.replace("{epoch}", str(epoch))
-            from maddening.surrogates.checkpoint import save_weights
+            from maddening.surrogates.weights.checkpoint import save_weights
             save_weights(
                 path, state["weights"],
                 architecture=self._architecture,

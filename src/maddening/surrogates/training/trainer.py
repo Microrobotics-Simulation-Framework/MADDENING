@@ -74,7 +74,7 @@ class TrainResult:
         metadata : dict, optional
             Extra metadata to include.
         """
-        from maddening.surrogates.checkpoint import save_weights
+        from maddening.surrogates.weights.checkpoint import save_weights
         meta = metadata or {}
         meta.setdefault("train_losses", self.train_losses[-5:])
         meta.setdefault("val_losses", self.val_losses[-5:])
@@ -103,7 +103,7 @@ class TrainResult:
         -------
         TrainResult
         """
-        from maddening.surrogates.checkpoint import load_train_result
+        from maddening.surrogates.weights.checkpoint import load_train_result
         return load_train_result(path, architecture, rng_key)
 
 
@@ -218,7 +218,7 @@ class SurrogateTrainer:
         arrays, static = weights
 
         # Check for LR schedule callbacks
-        from maddening.surrogates.callbacks import LRSchedule
+        from maddening.surrogates.training.callbacks import LRSchedule
         lr_schedule_cbs = [cb for cb in cbs if isinstance(cb, LRSchedule)]
 
         # `static` is closed over (not passed through JIT) because it

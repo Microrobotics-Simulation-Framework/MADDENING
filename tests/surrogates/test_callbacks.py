@@ -9,14 +9,14 @@ import pytest
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
-from maddening.surrogates.callbacks import (
+from maddening.surrogates.training.callbacks import (
     TrainingCallback,
     EarlyStopping,
     ModelCheckpoint,
     LRSchedule,
 )
 from maddening.surrogates.dataset import DatasetGenerator
-from maddening.surrogates.trainer import SurrogateTrainer
+from maddening.surrogates.training.trainer import SurrogateTrainer
 from maddening.surrogates.architectures.mlp import MLPDirect
 
 

@@ -39,26 +39,28 @@ def __getattr__(name: str):
     """Lazy imports for components that need equinox/optax."""
     _lazy = {
         # Trainer & validation
-        "SurrogateTrainer": "maddening.surrogates.trainer",
-        "TrainResult": "maddening.surrogates.trainer",
-        "mse_loss": "maddening.surrogates.trainer",
+        "SurrogateTrainer": "maddening.surrogates.training.trainer",
+        "TrainResult": "maddening.surrogates.training.trainer",
+        "mse_loss": "maddening.surrogates.training.trainer",
         "SurrogateValidator": "maddening.surrogates.validator",
         "ValidationReport": "maddening.surrogates.validator",
         # Callbacks
-        "TrainingCallback": "maddening.surrogates.callbacks",
-        "EarlyStopping": "maddening.surrogates.callbacks",
-        "ModelCheckpoint": "maddening.surrogates.callbacks",
-        "LRSchedule": "maddening.surrogates.callbacks",
+        "TrainingCallback": "maddening.surrogates.training.callbacks",
+        "EarlyStopping": "maddening.surrogates.training.callbacks",
+        "ModelCheckpoint": "maddening.surrogates.training.callbacks",
+        "LRSchedule": "maddening.surrogates.training.callbacks",
         # Physics losses
-        "residual_loss": "maddening.surrogates.physics_losses",
-        "energy_conservation_loss": "maddening.surrogates.physics_losses",
-        "momentum_conservation_loss": "maddening.surrogates.physics_losses",
-        "smoothness_loss": "maddening.surrogates.physics_losses",
-        "composite_loss": "maddening.surrogates.physics_losses",
+        "residual_loss": "maddening.surrogates.training.physics_losses",
+        "energy_conservation_loss":
+            "maddening.surrogates.training.physics_losses",
+        "momentum_conservation_loss":
+            "maddening.surrogates.training.physics_losses",
+        "smoothness_loss": "maddening.surrogates.training.physics_losses",
+        "composite_loss": "maddening.surrogates.training.physics_losses",
         # Checkpoint
-        "save_weights": "maddening.surrogates.checkpoint",
-        "load_weights": "maddening.surrogates.checkpoint",
-        "load_train_result": "maddening.surrogates.checkpoint",
+        "save_weights": "maddening.surrogates.weights.checkpoint",
+        "load_weights": "maddening.surrogates.weights.checkpoint",
+        "load_train_result": "maddening.surrogates.weights.checkpoint",
         # Architectures
         "MLPDirect": "maddening.surrogates.architectures.mlp",
         "MLPDerivative": "maddening.surrogates.architectures.mlp",

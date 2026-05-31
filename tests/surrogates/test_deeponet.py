@@ -8,7 +8,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.surrogates.node import SurrogateNode, euler_integrator, rk4_integrator
 from maddening.surrogates.dataset import DatasetGenerator
-from maddening.surrogates.trainer import SurrogateTrainer
+from maddening.surrogates.training.trainer import SurrogateTrainer
 from maddening.surrogates.architectures.deeponet import (
     DeepONetDirect,
     DeepONetDerivative,

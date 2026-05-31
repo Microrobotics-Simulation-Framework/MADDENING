@@ -8,14 +8,14 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.surrogates.architectures.mlp import MLPDirect
 from maddening.surrogates.dataset import DatasetGenerator
-from maddening.surrogates.physics_losses import (
+from maddening.surrogates.training.physics_losses import (
     residual_loss,
     energy_conservation_loss,
     momentum_conservation_loss,
     smoothness_loss,
     composite_loss,
 )
-from maddening.surrogates.trainer import SurrogateTrainer
+from maddening.surrogates.training.trainer import SurrogateTrainer
 
 
 class TestResidualLoss:

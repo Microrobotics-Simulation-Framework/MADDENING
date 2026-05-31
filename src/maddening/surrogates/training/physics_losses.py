@@ -11,7 +11,7 @@ Usage
 Pass as ``physics_loss_fn`` and ``physics_loss_weight`` to
 ``SurrogateTrainer``::
 
-    from maddening.surrogates.physics_losses import residual_loss
+    from maddening.surrogates.training.physics_losses import residual_loss
 
     trainer = SurrogateTrainer(
         arch, dataset,

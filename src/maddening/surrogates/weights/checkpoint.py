@@ -153,7 +153,7 @@ def load_train_result(
     -------
     TrainResult
     """
-    from maddening.surrogates.trainer import TrainResult
+    from maddening.surrogates.training.trainer import TrainResult
 
     weights, meta = load_weights(path, architecture, rng_key)
     state_spec = {k: tuple(v) for k, v in meta["state_spec"].items()}

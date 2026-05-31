@@ -481,7 +481,7 @@ class SimulationServer:
             """Start training a surrogate in a background thread."""
             try:
                 from maddening.surrogates.dataset import DatasetGenerator
-                from maddening.surrogates.trainer import SurrogateTrainer
+                from maddening.surrogates.training.trainer import SurrogateTrainer
                 from maddening.surrogates.architectures.mlp import MLPDirect
             except ImportError:
                 raise HTTPException(

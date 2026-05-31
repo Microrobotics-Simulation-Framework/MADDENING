@@ -45,7 +45,10 @@ class TestStaticArrayConstruction:
             StaticArray(jnp.zeros(4), replication="replicate", shard_axis=0)
 
     def test_unknown_replication_rejected(self):
-        with pytest.raises(ValueError, match="must be 'replicate' or 'shard'"):
+        with pytest.raises(
+            ValueError,
+            match="must be 'replicate', 'shard', or 'partition'",
+        ):
             StaticArray(jnp.zeros(4), replication="broadcast")  # type: ignore
 
     def test_shard_axis_out_of_range(self):
@@ -56,6 +59,81 @@ class TestStaticArrayConstruction:
         # Negative axis is also out-of-range; we don't support reverse indexing.
         with pytest.raises(ValueError, match="out of range"):
             StaticArray(jnp.zeros((4, 5)), replication="shard", shard_axis=-1)
+
+
+class TestStaticArrayPartitionVariant:
+    """The replication='partition' variant added in v0.3.0 (§A6)."""
+
+    def test_partition_requires_assignment(self):
+        with pytest.raises(
+            ValueError, match="requires partition_assignment",
+        ):
+            StaticArray(jnp.zeros(4), replication="partition")
+
+    def test_partition_assignment_must_be_array_like(self):
+        with pytest.raises(TypeError, match="array-like"):
+            StaticArray(
+                jnp.zeros(4), replication="partition",
+                partition_assignment="not-an-array",  # type: ignore[arg-type]
+            )
+
+    def test_partition_assignment_must_be_1d(self):
+        with pytest.raises(ValueError, match="must be 1-D"):
+            StaticArray(
+                jnp.zeros((4, 2)), replication="partition",
+                partition_assignment=jnp.zeros((4, 2), dtype=jnp.int32),
+            )
+
+    def test_partition_assignment_must_be_integer(self):
+        with pytest.raises(TypeError, match="integer dtype"):
+            StaticArray(
+                jnp.zeros(4), replication="partition",
+                partition_assignment=jnp.zeros(4, dtype=jnp.float32),
+            )
+
+    def test_partition_assignment_length_must_match_value(self):
+        with pytest.raises(ValueError, match="must equal value.shape"):
+            StaticArray(
+                jnp.zeros(4), replication="partition",
+                partition_assignment=jnp.zeros(8, dtype=jnp.int32),
+            )
+
+    def test_partition_with_shard_axis_nonzero_rejected(self):
+        with pytest.raises(ValueError, match="shard_axis must be None or 0"):
+            StaticArray(
+                jnp.zeros((4, 5)),
+                replication="partition",
+                partition_assignment=jnp.zeros(4, dtype=jnp.int32),
+                shard_axis=1,
+            )
+
+    def test_replicate_with_assignment_rejected(self):
+        with pytest.raises(
+            ValueError, match="partition_assignment must be None",
+        ):
+            StaticArray(
+                jnp.zeros(4),
+                partition_assignment=jnp.zeros(4, dtype=jnp.int32),
+            )
+
+    def test_shard_with_assignment_rejected(self):
+        with pytest.raises(
+            ValueError, match="partition_assignment must be None",
+        ):
+            StaticArray(
+                jnp.zeros((4, 5)), replication="shard", shard_axis=0,
+                partition_assignment=jnp.zeros(4, dtype=jnp.int32),
+            )
+
+    def test_valid_partition_construction(self):
+        sa = StaticArray(
+            jnp.arange(12, dtype=jnp.float32),
+            replication="partition",
+            partition_assignment=jnp.arange(12, dtype=jnp.int32) % 4,
+        )
+        assert sa.replication == "partition"
+        assert sa.partition_assignment is not None
+        assert sa.partition_assignment.shape == (12,)
 
 
 # ---------------------------------------------------------------------------

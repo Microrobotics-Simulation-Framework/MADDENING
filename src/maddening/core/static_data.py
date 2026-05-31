@@ -94,8 +94,9 @@ class StaticArray:
     """
 
     value: Any
-    replication: Literal["replicate", "shard"] = "replicate"
+    replication: Literal["replicate", "shard", "partition"] = "replicate"
     shard_axis: Optional[int] = None
+    partition_assignment: Optional[Any] = None
 
     def __post_init__(self) -> None:
         if not hasattr(self.value, "shape") or not hasattr(self.value, "dtype"):
@@ -113,10 +114,10 @@ class StaticArray:
                 f"unfold into multiple keys in static_data."
             )
 
-        if self.replication not in ("replicate", "shard"):
+        if self.replication not in ("replicate", "shard", "partition"):
             raise ValueError(
-                f"StaticArray.replication must be 'replicate' or 'shard' "
-                f"(got {self.replication!r})."
+                f"StaticArray.replication must be 'replicate', 'shard', or "
+                f"'partition' (got {self.replication!r})."
             )
 
         if self.replication == "shard":
@@ -130,10 +131,61 @@ class StaticArray:
                     f"StaticArray.shard_axis={self.shard_axis} is out of "
                     f"range for an array with shape {tuple(self.value.shape)}.",
                 )
+            if self.partition_assignment is not None:
+                raise ValueError(
+                    "StaticArray.partition_assignment must be None when "
+                    "replication='shard' (use replication='partition' for "
+                    "graph-partitioned sharding).",
+                )
+        elif self.replication == "partition":
+            # v0.3.0 §A6 — unstructured sharding contract.  By convention
+            # the partitioned axis is axis 0 (the "global cell" axis).
+            if self.partition_assignment is None:
+                raise ValueError(
+                    "StaticArray with replication='partition' requires "
+                    "partition_assignment (an int array, length = "
+                    "global cell count, value = destination device index).",
+                )
+            pa = self.partition_assignment
+            if not hasattr(pa, "shape") or not hasattr(pa, "dtype"):
+                raise TypeError(
+                    "StaticArray.partition_assignment must be array-like "
+                    f"with shape and dtype (got {type(pa).__name__}).",
+                )
+            if len(pa.shape) != 1:
+                raise ValueError(
+                    "StaticArray.partition_assignment must be 1-D "
+                    f"(got shape {tuple(pa.shape)}).",
+                )
+            # The dtype check: integer kinds only.
+            kind = getattr(pa.dtype, "kind", None)
+            if kind not in ("i", "u"):
+                raise TypeError(
+                    "StaticArray.partition_assignment must have integer "
+                    f"dtype (got {pa.dtype}).",
+                )
+            if pa.shape[0] != self.value.shape[0]:
+                raise ValueError(
+                    f"StaticArray.partition_assignment length "
+                    f"({pa.shape[0]}) must equal value.shape[0] "
+                    f"({self.value.shape[0]}).  By convention the "
+                    "partitioned axis is the first axis of `value`."
+                )
+            if self.shard_axis is not None and self.shard_axis != 0:
+                raise ValueError(
+                    "StaticArray.shard_axis must be None or 0 when "
+                    "replication='partition' (the partitioned axis is "
+                    "fixed at axis 0 by convention).",
+                )
         else:  # replicate
             if self.shard_axis is not None:
                 raise ValueError(
                     "StaticArray.shard_axis must be None when "
+                    "replication='replicate'.",
+                )
+            if self.partition_assignment is not None:
+                raise ValueError(
+                    "StaticArray.partition_assignment must be None when "
                     "replication='replicate'.",
                 )
 

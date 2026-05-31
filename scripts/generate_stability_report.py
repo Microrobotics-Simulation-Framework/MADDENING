@@ -31,10 +31,14 @@ import maddening.core.edge  # noqa: F401
 import maddening.core.static_data  # noqa: F401
 import maddening.core.coupling  # noqa: F401
 import maddening.cloud.multigpu.sharded_node  # noqa: F401
+import maddening.cloud.multigpu.sharded_unstructured  # noqa: F401
+import maddening.cloud.multigpu.iterative_solver  # noqa: F401
 import maddening.cloud.providers  # noqa: F401
 import maddening.api.binary_encoder  # noqa: F401
 import maddening.nodes  # noqa: F401
 import maddening.surrogates  # noqa: F401
+import maddening.usd.live_stage  # noqa: F401
+import maddening.fmi  # noqa: F401
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import (

@@ -19,13 +19,20 @@ import time.  Levels:
 | API Surface | Stability Level |
 |---|---|
 | `maddening.api.binary_encoder.BinaryStateEncoder` | evolving |
+| `maddening.cloud.multigpu.iterative_solver.sharded_cg` | stable |
+| `maddening.cloud.multigpu.iterative_solver.sharded_gmres` | stable |
 | `maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode` | stable |
 | `maddening.cloud.multigpu.sharded_node.ShardedStencilNode` | stable |
+| `maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode` | stable |
 | `maddening.cloud.providers.CloudProvider` | evolving |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
 | `maddening.core.node.SimulationNode` | stable |
 | `maddening.core.static_data.StaticArray` | stable |
+| `maddening.fmi.directional_derivatives.get_directional_derivative` | evolving |
+| `maddening.fmi.fmu_state.deserialize_fmu_state` | evolving |
+| `maddening.fmi.fmu_state.serialize_fmu_state` | evolving |
+| `maddening.fmi.model_description.build_model_description` | evolving |
 | `maddening.nodes.ball.BallNode` | stable |
 | `maddening.nodes.health_check.HealthCheckNode` | experimental |
 | `maddening.nodes.heart_pump.HeartPumpNode` | experimental |
@@ -39,5 +46,6 @@ import time.  Levels:
 | `maddening.surrogates.architecture.SurrogateArchitecture` | experimental |
 | `maddening.surrogates.dataset.DatasetGenerator` | experimental |
 | `maddening.surrogates.node.SurrogateNode` | experimental |
+| `maddening.usd.live_stage.LiveStage` | evolving |
 
-*21 API surfaces registered.*
+*29 API surfaces registered.*

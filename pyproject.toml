@@ -147,9 +147,15 @@ all = [
 ]
 
 # CI testing -- headless-safe subset (no display-dependent packages)
+#
+# httpx2 is pulled alongside httpx because starlette's testclient
+# auto-detects httpx2 when present and uses it preferentially.  This
+# closes the v0.2.1 StarletteDeprecationWarning loop (see C5 in
+# plans/MADDENING_v0.3.0_PLAN.md).
 ci = [
     "pytest>=7.0",
     "httpx>=0.24",
+    "httpx2>=2.0",
     "matplotlib>=3.5",
     "rich>=12.0",
     "pyzmq>=25.0",
@@ -166,6 +172,7 @@ ci = [
 dev = [
     "pytest>=7.0",
     "httpx>=0.24",
+    "httpx2>=2.0",
     "maddening[all]",
 ]
 
@@ -201,15 +208,6 @@ filterwarnings = [
     "ignore::maddening.warnings.PerformanceWarning",
     # SkyPilot deprecation warnings
     "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
-    # starlette is mid-migration from httpx to httpx2.  Recent versions
-    # emit StarletteDeprecationWarning on testclient import when httpx2
-    # isn't installed; httpx still works as the fallback.  Match by
-    # message against the base Warning class (the StarletteDeprecationWarning
-    # class doesn't exist in older starlette installs, so a class-name
-    # filter would AttributeError at pytest config-parse time).
-    # Adopt httpx2 properly during the v0.3.0 dep review
-    # (plans/MADDENING_v0.3.0_PLAN.md §C5).
-    "ignore:Using `httpx` with `starlette.testclient` is deprecated:Warning",
 ]
 # Custom markers — registered so `filterwarnings=["error"]` above
 # doesn't elevate Unknown-Mark warnings to test errors. Mirrors the

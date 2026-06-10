@@ -166,6 +166,9 @@ ci = [
     "optax>=0.1",
     "skypilot[runpod]>=0.11",
     "zstandard>=0.22",
+    # FMI 3.0 round-trip validation (v0.3.0 A1).  Test-only -- not a
+    # runtime dep of maddening.fmi.
+    "fmpy>=0.3",
 ]
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)
@@ -173,6 +176,7 @@ dev = [
     "pytest>=7.0",
     "httpx>=0.24",
     "httpx2>=2.0",
+    "fmpy>=0.3",
     "maddening[all]",
 ]
 

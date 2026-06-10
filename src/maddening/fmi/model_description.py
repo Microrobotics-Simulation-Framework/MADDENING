@@ -61,7 +61,10 @@ _DTYPE_TO_FMI_TYPE = {
     "bool_": "Boolean",
 }
 
-_CAUSALITIES = {"input", "output", "parameter", "local", "calculatedParameter"}
+_CAUSALITIES = {
+    "input", "output", "parameter", "local",
+    "calculatedParameter", "independent",
+}
 _VARIABILITIES = {"constant", "fixed", "tunable", "discrete", "continuous"}
 
 
@@ -173,6 +176,15 @@ class ModelDescription:
             "generationTool": self.generation_tool,
         })
 
+        # <UnitDefinitions> — FMI 3.0 requires every referenced unit to
+        # appear here.  Emit one <Unit> per distinct unit string used
+        # by any variable.  Empty units are skipped.
+        used_units = {v.unit for v in self.variables if v.unit}
+        if used_units:
+            ud = ET.SubElement(root, "UnitDefinitions")
+            for u in sorted(used_units):
+                ET.SubElement(ud, "Unit", attrib={"name": u})
+
         # <DefaultExperiment>
         ET.SubElement(root, "DefaultExperiment", attrib={
             "startTime": repr(self.default_start_time),
@@ -201,13 +213,17 @@ class ModelDescription:
                 for dim in var.shape:
                     ET.SubElement(v_el, "Dimension", attrib={"start": str(dim)})
 
-        # <ModelStructure>
+        # <ModelStructure> — FMI 3.0 schema requires child order:
+        # Output*, ContinuousStateDerivative*, ClockedState*,
+        # InitialUnknown*, EventIndicator*.  Emit Outputs first, then
+        # InitialUnknowns.
         ms = ET.SubElement(root, "ModelStructure")
         for var in self.variables:
             if var.causality == "output":
                 ET.SubElement(ms, "Output", attrib={
                     "valueReference": str(var.value_reference),
                 })
+        for var in self.variables:
             if var.variability in ("continuous", "discrete") and \
                     var.causality in ("output", "local"):
                 ET.SubElement(ms, "InitialUnknown", attrib={
@@ -319,6 +335,21 @@ def build_model_description(
 
     variables: list[FMIVariable] = []
     next_vr = 1  # FMI uses 1-based valueReference
+
+    # ----- Independent variable (FMI 3.0 §2.2.7 mandates exactly one) -----
+    # Time is the universal independent variable for fixed-step / continuous
+    # simulation.  FMU loaders (e.g. FMPy) refuse a modelDescription.xml
+    # missing it.
+    variables.append(FMIVariable(
+        name="time",
+        value_reference=next_vr,
+        dtype="float64",
+        causality="independent",
+        variability="continuous",
+        description="Simulation time (independent variable).",
+        unit="s",
+    ))
+    next_vr += 1
 
     # ----- Inputs -----
     for ext_key, ext_spec in ext_specs.items():

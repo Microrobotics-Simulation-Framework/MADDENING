@@ -175,6 +175,8 @@ developer_guide/node_authoring
 developer_guide/testing_standards
 developer_guide/documentation_standards
 developer_guide/edge_validation_migration
+developer_guide/halo_width_migration
+developer_guide/static_array_migration
 developer_guide/sharding_topology
 developer_guide/stability_report
 developer_guide/versioned_docs

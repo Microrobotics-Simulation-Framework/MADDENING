@@ -169,6 +169,13 @@ ci = [
     # FMI 3.0 round-trip validation (v0.3.0 A1).  Test-only -- not a
     # runtime dep of maddening.fmi.
     "fmpy>=0.3",
+    # IFT coupling solver tests (v0.3.0 A4) and the sharded sparse
+    # iterative solver lineax-backed path (v0.3.0 A5).  Both are
+    # lazy-imported at runtime, so lineax stays out of base
+    # dependencies; CI / dev installs need it explicitly.  Promoting
+    # this to a user-facing [ift] extra + a friendlier import error
+    # is scheduled for v0.4.0 -- see plans/MADDENING_v0.4.0_PLAN.md.
+    "lineax>=0.0.7",
 ]
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)
@@ -177,6 +184,7 @@ dev = [
     "httpx>=0.24",
     "httpx2>=2.0",
     "fmpy>=0.3",
+    "lineax>=0.0.7",
     "maddening[all]",
 ]
 

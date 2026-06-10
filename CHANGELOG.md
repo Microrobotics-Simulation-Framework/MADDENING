@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Additional sections per release: **Verification**, **Security**, and **Known Anomalies**.
 
-## [Unreleased] — v0.3.0 work-in-progress on `feat/v0.3`
+## [Unreleased]
+
+## [0.3.0] - 2026-06-10
 
 v0.3.0 is the M2 "redesigns" milestone (STACK_V1 §3).  See
-`plans/MADDENING_v0.3.0_PLAN.md` for the working scope document and
+`docs/release_notes/v0.3.0.md` for the narrative summary,
 `docs/developer_guide/stability_report.md` for the up-to-date
 `@stability` audit table.
 

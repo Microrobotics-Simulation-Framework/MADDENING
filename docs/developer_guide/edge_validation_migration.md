@@ -2,11 +2,11 @@
 orphan: false
 ---
 
-# Edge validation: migration guide (v0.2 → v0.2.1)
+# Edge validation: migration guide (v0.2 → v0.3.0)
 
 ```{versionadded} v0.2
 Shape, dtype, and unit checks at {meth}`GraphManager.compile() <maddening.core.graph_manager.GraphManager.compile>`,
-emitted as warning subclasses of {class}`~maddening.warnings.EdgeValidationWarning`.
+emitted as warning subclasses of (the then-named) `EdgeValidationWarning`.
 ```
 
 ```{versionchanged} v0.2.1
@@ -18,18 +18,11 @@ an :class:`ExceptionGroup` of
 stay as warnings (units are documentation, not contract).
 ```
 
-```{warning}
-**Semver carve-out.**  v0.2.1 includes one breaking change under
-strict semver — the edge-validation warning→error flip described
-here.  We pre-announced this in v0.2.0 release notes and held the
-deprecation calendar; the carve-out is the deliberate decision to
-ship the flip as a PATCH release rather than bumping to 0.3.0,
-because: (a) the change was published in advance, (b) the migration
-path is documented on this page, and (c) the deprecated
-``*Warning`` aliases stay importable through v0.2.x for one release
-cycle.  If your CI pins ``maddening<0.3``, expect this change; if
-you depend on the old warning behaviour, see "Backwards-compat
-escape hatch" below.
+```{versionchanged} v0.3.0
+The deprecated `EdgeValidationWarning`, `ShapeMismatchWarning`, and
+`DtypeMismatchWarning` aliases were **removed** per the v0.2.1
+deprecation cycle.  `UnitMismatchWarning` now roots at
+{class}`UserWarning` directly.
 ```
 
 In v0.2 we added compile-time validation that walks every
@@ -164,10 +157,15 @@ assert any(isinstance(e, ShapeMismatchError) for e in exc_info.value.exceptions)
 
 ### "I had `pytest.warns(ShapeMismatchWarning)` in my test suite"
 
-The `ShapeMismatchWarning` and `DtypeMismatchWarning` classes remain
-importable in v0.2.1 as deprecated aliases — but MADDENING no longer
-emits them.  Update to the error form above; the alias is removed in
-v0.3.
+```{versionchanged} v0.3.0
+The deprecated `ShapeMismatchWarning` / `DtypeMismatchWarning` /
+`EdgeValidationWarning` aliases were **removed** in v0.3.0 per
+the v0.2.1 deprecation cycle.  ``UnitMismatchWarning`` now roots at
+:class:`UserWarning` directly.
+```
+
+Update to the error form above.  Importing any of the removed
+aliases raises `ImportError`.
 
 ### "I'm running MIME experiments and don't want CI to fail"
 
@@ -179,14 +177,16 @@ that setting.  In v0.2, the typical downstream override was:
 [tool.pytest.ini_options]
 filterwarnings = [
     "error",
-    "ignore::maddening.warnings.ShapeMismatchWarning",   # no-op since v0.2.1
-    "ignore::maddening.warnings.DtypeMismatchWarning",   # no-op since v0.2.1
+    # The two lines below were ``ignore::maddening.warnings.{Shape,Dtype}MismatchWarning``
+    # before v0.3.0; remove them entirely -- those classes are gone.
     "ignore::maddening.warnings.UnitMismatchWarning",
 ]
 ```
 
-The first two lines are no-ops as of v0.2.1 (no warning is emitted to
-ignore) — safe to remove.  The `UnitMismatchWarning` line stays.
+In v0.3.0+ the only filter you need is the `UnitMismatchWarning`
+ignore (units stay advisory by contract).  Any `*MismatchWarning`
+ignores left over from v0.2.x cause `pytest` to fail to parse the
+config, so delete them.
 
 ## Aggregation: all problems in one pass
 
@@ -199,12 +199,12 @@ up in `caught` records too.
 import warnings
 import pytest
 from maddening.warnings import (
-    EdgeValidationWarning, ExceptionGroup,
+    ExceptionGroup,
     ShapeMismatchError, DtypeMismatchError, UnitMismatchWarning,
 )
 
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", EdgeValidationWarning)
+    warnings.simplefilter("always", UnitMismatchWarning)
     with pytest.raises(ExceptionGroup) as exc_info:
         gm.compile()
 

@@ -52,9 +52,11 @@ the rest of the simulation never notices.
 MADDENING is split into a small **core** ({term}`node <SimulationNode>` ABC,
 typed edges, {term}`graph manager <GraphManager>`), a **scheduler** that
 resolves coupling and multi-rate timing, an **{term}`XLA`-compilation** path,
-a **surrogate** training subsystem, and a **cloud** layer for distributing
-all of it. MIME plugs in at the node level — same runtime,
-microrobotics-specific physics + metadata.
+a **surrogate** training subsystem, a **multi-GPU** layer (Cartesian and
+graph-partitioned sharding plus sharded sparse Krylov solvers), an
+**FMI 3.0 export** path, and a **cloud** layer for distributing all of it.
+MIME plugs in at the node level — same runtime, microrobotics-specific
+physics + metadata.
 
 ```{mermaid-tips}
 nodes:
@@ -177,6 +179,7 @@ developer_guide/documentation_standards
 developer_guide/edge_validation_migration
 developer_guide/halo_width_migration
 developer_guide/static_array_migration
+developer_guide/sharded_static_data
 developer_guide/sharding_topology
 developer_guide/stability_report
 developer_guide/versioned_docs

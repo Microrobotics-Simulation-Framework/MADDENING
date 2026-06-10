@@ -118,9 +118,10 @@ The MADDENING layer deliberately stops at "write the local file" and
   all support short-lived URLs; pass that as `RESUME_FROM_URL` on
   the relaunch.
 
-When MADDENING grows native `s3://` / `gs://` support (planned for
-v0.3, blocked on the cloud-storage abstraction in #8 follow-up),
-this whole layer collapses to one `RESUME_FROM_URL` and the
+When MADDENING grows native `s3://` / `gs://` support (evaluated and
+deferred for v0.3.0 — slipped to v0.4 unless MICROROBOTICA Light
+needs it sooner; see `plans/MADDENING_v0.3.0_PLAN.md` §C3), this
+whole layer collapses to one `RESUME_FROM_URL` and the
 orchestrator's CLI calls go away.
 
 ## The full preempt-resume contract
@@ -201,4 +202,4 @@ For the first two, the trade-off is: until you wire them, your
 orchestrator does the upload step explicitly with a CLI call.  The
 MADDENING contract is "write local file → orchestrator handles
 transport → entrypoint reads URL"; everything else is a
-nice-to-have for v0.3.
+nice-to-have (slipped to v0.4+ per the v0.3.0 plan §C3).

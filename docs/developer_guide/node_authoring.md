@@ -310,6 +310,15 @@ channel; v0.2.1 added per-device materialisation under
 {class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`.
 ```
 
+```{versionchanged} v0.3.0
+Added the `replication="partition"` variant of
+{class}`~maddening.core.static_data.StaticArray`, paired with
+{class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+for graph-partitioned (non-Cartesian) sharding.  See
+[{doc}`sharding_topology`](sharding_topology.md) for the choice
+criteria and the partition-assignment handoff contract.
+```
+
 Three optional surfaces, only needed by nodes that carry large
 non-state arrays (meshes, wall masks, lookup tables) or that run
 under multi-GPU sharding:
@@ -318,9 +327,15 @@ under multi-GPU sharding:
   return non-state arrays here instead of in `initial_state`.  JAX
   bakes them into the JIT'd HLO as constants.  Wrap each array in
   {class}`~maddening.core.static_data.StaticArray` to declare a
-  sharding policy (`replication="replicate"` is the default;
-  `replication="shard", shard_axis=K` slices per-device when the
-  node is wrapped in `ShardedStencilNode`).
+  sharding policy.  Choose one of:
+  - `replication="replicate"` (default) — every device gets the
+    full array.
+  - `replication="shard", shard_axis=K` — Cartesian per-device
+    slice along axis `K`.  Paired with `ShardedStencilNode`.
+  - `replication="partition", partition_assignment=pa` (v0.3.0) —
+    graph-partitioned per-device slice.  Paired with
+    `ShardedUnstructuredNode`.  See
+    [{doc}`static_array_migration`](static_array_migration.md).
 
 * {meth}`update_padded <maddening.core.node.SimulationNode.update_padded>` —
   the entry point `ShardedStencilNode` calls instead of `update()`.

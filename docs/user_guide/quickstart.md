@@ -61,16 +61,9 @@ plt.savefig("bounce.png")
 print(f"Final height: {float(final_state['ball']['position']):.3f}")
 ```
 
-```{note}
-`gm.compile()` is quiet on a clean single-node graph as of v0.2.1.  In
-multi-node graphs, a genuinely-disconnected node (no edges or external
-inputs into the rest of the graph) still emits a `UserWarning`, and a
-feedback loop logs an INFO-level "cycle detected" advisory through
-`logging.getLogger("maddening.core.graph_manager")` (back-edges are
-staggered to the previous timestep).  Both are advisory, not errors:
-disconnected-but-intentional nodes and intentional coupling loops
-run correctly.
-```
+`gm.compile()` is quiet on a clean single-node graph.  The multi-node
+advisories (disconnected nodes, cycle detection) are described under
+{ref}`quickstart:Coupled Simulation` below.
 
 ## Coupled Simulation
 
@@ -114,6 +107,22 @@ gm.add_edge("spring", "ball", source_field="force",
 gm.compile()
 final_state, history = gm.run_scan_with_history(n_steps=1000)
 print(f"Final ball height: {float(final_state['ball']['position']):.2f}")
+```
+
+```{note}
+**Advisories on multi-node graphs.**
+
+* A *disconnected* node (no edges or external inputs into the rest
+  of the graph) emits a `UserWarning` from `gm.compile()`.
+  Disconnected-but-intentional nodes run correctly — the warning is
+  advisory, not an error.
+* A *feedback loop* is logged at `INFO` level through
+  ``logging.getLogger("maddening.core.graph_manager")`` (no
+  warning).  Back-edges are staggered to the previous timestep, so
+  intentional coupling loops also run correctly.
+
+Both messages are designed to surface unintentional graph mistakes
+without breaking deliberate constructions.
 ```
 
 ## Differentiable Everything

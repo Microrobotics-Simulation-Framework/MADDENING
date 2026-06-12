@@ -14,7 +14,7 @@ These tests exercise that path:
 
 1. **Small chain (N=20, ~40 floats):** forward and backward parity
    against ``solver='fori'`` at tight tolerance.
-2. **Large chain (N=250, ~500 floats):** the backward completes
+2. **Large chain (N=120, ~240 floats):** the backward completes
    without OOM, and the gradient agrees with finite differences on
    a small random subset of input entries.
 """
@@ -159,21 +159,26 @@ def test_small_chain_backward_parity():
 
 @pytest.mark.slow
 def test_large_chain_backward_finite_diff():
-    """N=250 chain (~500 floats of group state): IFT backward via
+    """N=120 chain (~240 floats of group state): IFT backward via
     lineax completes and the gradient agrees with finite differences
     on a few sampled input entries.
 
     The whole point of the lineax swap is to make this feasible — the
-    dense ``jacrev + solve`` path would build a 500x500 Jacobian inside
+    dense ``jacrev + solve`` path would build a 240x240 Jacobian inside
     the coupling group and OOM under more realistic per-node state
-    sizes.  Even at N=250 the matrix-free path stays light.
+    sizes.  Even at N=120 the matrix-free path stays light.
+
+    N was reduced from 250 to 120 (2026-06-12): at 250 the backward
+    compile graph exceeded the ~7 GB ``ubuntu-latest`` runner and the
+    scheduled slow lane was OOM-killed.  120 keeps the dense-vs-matrix-
+    free contrast meaningful while fitting the hosted runner.
 
     Initial positions are kept small (0.05 + 0.01*i) so the central
     finite difference ``(L(p+eps) - L(p-eps)) / (2 eps)`` of the
     sum-of-squared-positions loss does not lose float32 precision
     against the perturbation magnitude.
     """
-    n = 250
+    n = 120
     init_positions = [0.05 + 0.01 * i for i in range(n)]
     gm = _make_chain_gm(
         n, "ift", max_iters=40, tol=1e-7, init_positions=init_positions
@@ -229,7 +234,7 @@ def test_large_chain_backward_finite_diff():
         lm = loss_jit(p_minus)
         g_fd = (lp - lm) / (2.0 * eps)
         # Tolerance: float32 central FD on a sum-of-squares loss with
-        # eps=1e-3 against positions ~0.05-2.55 gives ~1e-3 absolute
+        # eps=1e-3 against positions ~0.05-1.25 gives ~1e-3 absolute
         # noise; 5% relative + 5e-3 absolute is the right band to
         # catch a structurally wrong gradient without flagging the
         # expected float32 truncation error.

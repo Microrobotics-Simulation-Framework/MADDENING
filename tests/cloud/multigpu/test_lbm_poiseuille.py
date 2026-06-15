@@ -115,7 +115,15 @@ def test_poiseuille_sharded_profile_is_parabolic():
     # Profile must be positive everywhere and peak at the centre.
     assert u_fluid.min() > 0
     cy, cz = (ny - 1) // 2, (nz - 1) // 2
-    assert u_x_cross[cy, cz] == u_fluid.max()
+    # Even-sized cross-section: four cells at indices (cy, cz),
+    # (cy+1, cz), (cy, cz+1), (cy+1, cz+1) are equally central
+    # and physics-tied for the peak.  Which one wins .max() in
+    # float32 is reduction-order-dependent (varies across
+    # jaxlib builds / Python versions), so we assert the centre
+    # cell equals the peak within float roundoff rather than
+    # bit-exactly -- the physics check ("centre is the peak")
+    # is preserved.
+    np.testing.assert_allclose(u_x_cross[cy, cz], u_fluid.max(), rtol=1e-5)
 
     # Fit u = a (R_eff^2 - r^2) on fluid cells; expect r^2-coefficient
     # negative and close to -a*1 with a > 0.

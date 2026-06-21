@@ -318,18 +318,55 @@ class AdaptiveNode(SimulationNode):
         return self.solve_frozen(state, mask)
 
     # ---- initial_state ----
-    # M2 stub: returns the subclass's raw initial state.  The
-    # cold-start blindness gate is added in M4.
     def initial_state(self) -> dict:
-        """Return the initial state.
+        """Return the initial state, guarded by the cold-start blindness gate.
 
-        M2 placeholder: returns ``_initial_state_impl()`` directly.
-        The cold-start blindness gate (full diagnostic + one
-        ``symmetry_break`` perturbation if blind, raising
-        :exc:`AdaptiveNodeBlindnessError` on persistent trap) lands in
-        M4.
+        Protocol (round-3/round-4/round-7 finalised):
+
+        1. Call :meth:`_initial_state_impl` to obtain the subclass's
+           raw initial state.
+        2. Compute :meth:`blindness_ratio`.
+        3. If ``ratio >= self.blindness_threshold``, return the state.
+        4. Otherwise apply one :meth:`symmetry_break` perturbation of
+           magnitude ``self.blindness_break_delta``, recompute the
+           active set + solve at the perturbed state, and re-check
+           blindness.
+        5. If the second check still fails, raise
+           :exc:`AdaptiveNodeBlindnessError` with a message naming
+           the Palais fixed point as the structural cause.
+
+        The cost is at most two ``blindness_ratio`` evaluations + one
+        ``symmetry_break`` call -- bounded.  Round-4 Investigation 2
+        established no cheap substitute for the full diagnostic at
+        cold-start; round-7 Investigation 2 confirmed one perturbation
+        suffices for both 1D and 2D test cases.
+
+        Raises
+        ------
+        AdaptiveNodeBlindnessError
+            If after one perturbation the blindness ratio is still
+            below the threshold.  Recover by perturbing the
+            constructor's ``theta_init`` (or equivalent) and retrying.
         """
-        return self._initial_state_impl()
+        s = self._initial_state_impl()
+        ratio = self.blindness_ratio(s)
+        if ratio >= self.blindness_threshold:
+            return s
+        # Apply one symmetry_break, then re-establish a consistent state
+        # by recomputing the active set + inner solve at the new theta.
+        s = self.symmetry_break(s, self.blindness_break_delta)
+        new_mask = self.compute_active_set(s, prev=s, is_cold_start=True)
+        s = self.solve_frozen({**s, "mask": new_mask}, new_mask)
+        ratio2 = self.blindness_ratio(s)
+        if ratio2 >= self.blindness_threshold:
+            return s
+        raise AdaptiveNodeBlindnessError(
+            f"State has blindness ratio {ratio2:.3f} below threshold "
+            f"{self.blindness_threshold:.3f} even after one symmetry_break "
+            f"perturbation of delta={self.blindness_break_delta}.  The "
+            f"optimizer appears to be at a persistent Palais fixed point; "
+            f"perturb your initial theta and retry."
+        )
 
     # ---- diagnostic / mitigation surface (M3) ----
 

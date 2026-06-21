@@ -331,36 +331,176 @@ class AdaptiveNode(SimulationNode):
         """
         return self._initial_state_impl()
 
-    # ---- diagnostic / mitigation surface ----
-    # M2 stubs: methods declared so the API surface is visible; full
-    # implementations land in M3.
+    # ---- diagnostic / mitigation surface (M3) ----
+
+    def _compute_frozen_gradient(self, state: dict) -> jax.Array:
+        """Compute ``∇_θ J_frozen`` at the current state.
+
+        Default implementation: build a closure
+        ``J(theta) = sensor(solve_frozen(set_theta(state, theta)))``
+        and call ``jax.grad`` on it.  Subclasses with cheaper
+        path (e.g., a precomputed adjoint) can override.
+
+        Returns
+        -------
+        jax.Array
+            Same shape as ``theta``.
+        """
+        # Default frozen-gradient: jax.grad through one frozen solve at
+        # the CURRENT active mask.  Subclasses may override if they have
+        # a cheaper closed-form path.
+        mask = state["mask"]
+
+        def frozen_J(theta: jax.Array) -> jax.Array:
+            s = self._set_theta(state, theta)
+            out = self.solve_frozen(s, mask)
+            return self._sensor(out)
+
+        return jax.grad(frozen_J)(self._get_theta(state))
+
+    def _sensor(self, state: dict) -> jax.Array:
+        """Scalar sensor functional of the state.  Subclasses override.
+
+        Default: returns the first entry of ``c`` -- a placeholder so
+        the framework is testable without forcing a non-trivial
+        subclass.  Concrete subclasses (M5, M6) override.
+        """
+        return state["c"][0]
 
     def blindness_ratio(self, state: dict) -> float:
-        """Full blindness diagnostic.
+        """``|∇_θ J_frozen(state)| / |∇_θ J_full(state)|``.
 
-        M2 placeholder.  Full implementation in M3:
-        ``|∇_θ J_frozen(state)| / |∇_θ J_full(state)|``.
+        Cost: two gradient evaluations (one frozen, one full).  The
+        full-basis evaluation is "the expensive solve adaptivity
+        exists to avoid"; this diagnostic is invoked at cold start
+        and at runtime restarts, not per-update.
+
+        Returns
+        -------
+        float
+            ``0.0`` at exact Palais fixed points where the active set
+            is structurally blind to the gradient direction.  ``1.0``
+            (or near) when the frozen-set adjoint matches the
+            full-basis gradient.  Values above ``1.0`` indicate the
+            frozen-set gradient is over-amplified (still direction-
+            accurate in 1D; round-7 Inv 3 confirms generally).
+
+            When the full-basis gradient itself is below
+            ``1e-12 * ||theta||`` (an interior extremum of J or a
+            zero-source problem), returns ``1.0`` as a sentinel to
+            avoid the 0 / 0 ambiguity.
         """
-        raise NotImplementedError(
-            "blindness_ratio is implemented in M3"
-        )
+        g_frozen = self._compute_frozen_gradient(state)
+        g_full = self.compute_full_basis_gradient(state)
+        n_frozen = jnp.linalg.norm(g_frozen)
+        n_full = jnp.linalg.norm(g_full)
+        # Sentinel: at an interior extremum of J both numerator and
+        # denominator are near-zero; the ratio is undefined.  Return
+        # 1.0 (treated as "well-behaved") rather than dividing by zero.
+        theta = self._get_theta(state)
+        theta_scale = jnp.linalg.norm(jnp.atleast_1d(theta)) + 1.0
+        if float(n_full) < 1e-12 * float(theta_scale):
+            return 1.0
+        return float(n_frozen / n_full)
 
-    def is_trapped_at(self, state: dict, *, rng_key: Any = None) -> bool:
-        """Cheap binary trap check.
+    def is_trapped_at(
+        self,
+        state: dict,
+        *,
+        eps: float = 1e-3,
+        rng_key: Any = None,
+    ) -> bool:
+        """Cheap binary trap check (round-5/round-7 re-thresholded FD).
 
-        M2 placeholder.  Full implementation in M3: re-thresholded
-        FD estimator at ``r=1, eps=1e-3``.
+        Re-thresholds the mask at a perturbed θ and compares the frozen
+        gradient there to the gradient at the original θ.  If both are
+        near-zero (the Palais signature), the proxy
+        ``|g_frozen| / |Δg_frozen|/eps`` drops to ~0 and the check fires.
+
+        Round-7 Investigation 1: this is reliable for **exact-trap
+        detection** (proxy = 0 across all (r, ε) at the trap) but
+        unreliable for partial-blindness classification (~46% best
+        across the round-5 sweep).  Use as a binary check only.
+
+        Parameters
+        ----------
+        eps : float, default 1e-3
+            Perturbation magnitude.  Larger values catch broader
+            partial-blindness zones at the cost of more false positives.
+        rng_key : optional
+            Reserved; the current implementation uses a deterministic
+            ``+1`` perturbation direction.  Multi-direction variants
+            would consume this.
+
+        Returns
+        -------
+        bool
+            ``True`` if the proxy ratio is below ``1e-2``: a strong
+            signature of a Palais fixed point.
         """
-        raise NotImplementedError(
-            "is_trapped_at is implemented in M3"
-        )
+        theta = self._get_theta(state)
+        # Frozen gradient at theta.
+        g0 = self._compute_frozen_gradient(state)
+        # Perturb theta in a deterministic direction (sign(g_full) so
+        # the perturbation is anisotropic transverse to Fix(G); falls
+        # back to +1 if g_full is also blind).
+        g_full = self.compute_full_basis_gradient(state)
+        n_full = jnp.linalg.norm(g_full)
+        if float(n_full) > 1e-12:
+            direction = g_full / n_full
+        else:
+            direction = jnp.ones_like(theta) / jnp.sqrt(theta.size)
+        theta_p = theta + eps * direction
+        state_p = self._set_theta(state, theta_p)
+        # Re-compute mask at the perturbed theta (the "re-thresholded"
+        # piece) so any selection-blindness manifests in the perturbed
+        # frozen gradient too.
+        mask_p = self.compute_active_set(state_p, prev=state, is_cold_start=False)
+        state_p = {**state_p, "mask": mask_p}
+        g_p = self._compute_frozen_gradient(state_p)
+        # est = |Δg_frozen| / eps -- the variation rate of g_frozen.
+        est = jnp.linalg.norm(g_p - g0) / eps
+        n_g0 = jnp.linalg.norm(g0)
+        proxy = float(n_g0 / (est + 1e-30))
+        return proxy < 1e-2
 
     def symmetry_break(self, state: dict, delta: float) -> dict:
         """Anisotropic perturbation transverse to ``Fix(G)``.
 
-        M2 placeholder.  Full implementation in M3:
-        ``θ ← θ + delta * g_full / ||g_full||``.
+        Sets ``θ ← θ + delta * g_full / ||g_full||``.  By the
+        Selection-Equivariance Theorem (module docstring), at
+        ``θ ∈ Fix(G)`` the full-basis gradient lies in ``T_θ Fix(G)``
+        and is therefore tangent to the trap manifold.  Perturbing in
+        the unit gradient direction moves transversely to the trap by
+        ``delta``.
+
+        Chen-Ziyin 2023: this is the **only** valid escape direction
+        — isotropic noise cannot escape Type-II saddles like the
+        Palais fixed points the framework treats here.
+
+        Parameters
+        ----------
+        state : dict
+        delta : float
+            Perturbation magnitude.  ``0.0`` returns the state
+            unchanged.  Round-7 Inv 2: a single perturbation of
+            ``blindness_break_delta = 0.05`` suffices in 1D and 2D
+            test cases.
+
+        Returns
+        -------
+        dict
+            New state dict with ``θ`` replaced.
         """
-        raise NotImplementedError(
-            "symmetry_break is implemented in M3"
-        )
+        theta = self._get_theta(state)
+        g_full = self.compute_full_basis_gradient(state)
+        n_full = jnp.linalg.norm(g_full)
+        # Guard against zero g_full (both J_frozen and J_full are flat):
+        # fall back to a uniform direction.  In practice this case is
+        # already a "persistent trap" and initial_state will raise.
+        if float(n_full) < 1e-12:
+            direction = jnp.ones_like(theta) / jnp.sqrt(theta.size)
+        else:
+            direction = g_full / n_full
+        theta_new = theta + delta * direction
+        return self._set_theta(state, theta_new)

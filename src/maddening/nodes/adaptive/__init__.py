@@ -33,8 +33,10 @@ from maddening.nodes.adaptive.base import (
     AdaptiveNode,
     AdaptiveNodeBlindnessError,
 )
+from maddening.nodes.adaptive.topk import TopKAdaptiveNode
 
 __all__ = [
     "AdaptiveNode",
     "AdaptiveNodeBlindnessError",
+    "TopKAdaptiveNode",
 ]

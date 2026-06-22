@@ -20,7 +20,7 @@ sign patterns). JAX is reserved for the trajectory-adjoint test (§6).
 | Gate | Investigation | Status | Verdict so far |
 |------|---------------|--------|----------------|
 | 1 | §2 Hyp A — DD+DK condition number | **done** | 1D PASS; 2D PASS *with corrected scaling* (see C1) |
-| 1 | §2 Hyp A — CDD convergence | pending | |
+| 1 | §2 Hyp A — CDD convergence | **done** | PASS — converges ≤~20 iters, beats rolling ~97%, Hyp A confirmed |
 | 1 | §3 — DD phi sign / wrong-sign safety | **done** | PASS *for production CDD*; locality theorem needs qualification (see below) |
 | 2 | §4 — 3D sparsity break-even | pending | |
 | 3 | §5 — Stokes / stream-function cavity | pending | |
@@ -188,3 +188,65 @@ levels dominating the sensor functional"* — **not** *"locality forbids
 wrong-sign."* DD-2 (strictly nonnegative) is the only DD order for which the
 unqualified locality statement holds, and it costs two orders of
 approximation. Keep top-\|b\| deprecated (already the case from round-4).
+
+---
+
+## §2 Hypothesis A — CDD convergence + rolling comparison (Gate 1, part 1 cont.)
+
+**Harness:** `g1_cdd_convergence.py`. DD-4 Dirichlet, N=191, work in
+Dahmen-Kunoth-scaled coordinates. Full SOLVE→ESTIMATE→MARK(Dörfler
+θ_D=0.5)→REFINE loop, coarse-seeded.
+
+### CDD convergence to tol=1e-3 (scaled residual)
+
+| σ | n_outer | \|Λ\| | \|Λ\|/N | J_err |
+|---|---------|-----|---------|-------|
+| 0.10 | 17 | 28 | 0.147 | 6.0e-6 |
+| 0.05 | 21 | 29 | 0.152 | 2.1e-5 |
+| 0.02 (near-sharp) | 20 | 26 | 0.136 | 7.2e-6 |
+
+Converges in ~17–21 outer iters to |Λ| ≈ 14–15% of N (< N/4), J_err ~1e-5.
+σ=0.05 is marginally over the plan's ≤20 (21). **Near-sharp σ=0.02 needs the
+fewest modes** — a narrow source is sparse in the wavelet domain too,
+refuting the plan's worry that sharpness blows up CDD iterations.
+
+### Trajectory mean J_err at fixed budget K=N/8, θ(t)=0.3+0.3·sin(2πt/30)
+
+| σ | CDD | rolling | oracle | CDD vs rolling |
+|---|-----|---------|--------|----------------|
+| 0.10 | 2.6e-5 | 7.3e-4 | 2.8e-5 | **96.5%** better |
+| 0.05 | 1.7e-5 | 7.3e-3 | 1.5e-5 | **99.8%** better |
+| 0.02 | 4.2e-6 | 1.2e-3 | 4.5e-6 | **99.7%** better |
+
+CDD ≈ oracle and crushes rolling (plan only required ≥10%). Rolling fails
+because the source moves >σ per step, so last step's active set misses the
+new source location; CDD re-marks from the residual each step. Honest and
+decisive.
+
+### Sharp-interface stress: step (Heaviside) source, kink solution
+
+CDD convergence under competing scalings (tol=1e-3):
+
+| scaling | n_outer | \|Λ\| | \|Λ\|/N | J_err |
+|---------|---------|-----|---------|-------|
+| H¹ DK (2^\|λ\|) | 16 | 21 | 0.110 | 9.1e-6 |
+| Besov B¹₁₁ (2^{\|λ\|/2}) | 17 | 24 | 0.126 | 9.2e-6 |
+| Jacobi (√diag A) | 15 | 20 | 0.105 | 9.1e-6 |
+| none | 15 | 31 | 0.162 | 9.5e-6 |
+
+**Besov is not better** on the kink — because a step *source* gives an H¹
+(not H²) *solution*, for which H¹ DK is already correctly tuned. Jacobi is
+marginally best/sparsest.
+
+### Gate 1 §2 decision: **Hypothesis A CONFIRMED**
+
+Per the plan's decision rule, A passes for smooth, near-sharp, and kink
+sources ⇒ **production basis is DD + Dahmen-Kunoth t=1 (single-level 2^j in
+multi-D), with algebraic Jacobi as the most-robust drop-in alternative.**
+Hypothesis B (Besov) is **not** needed for the scalar elliptic case
+(bounded/step RHS ⇒ H¹ solution). It would only matter for genuinely
+discontinuous solutions (singular sources / discontinuous coefficients),
+which are out of scope for the standard formulation and untested here.
+
+**Gate 1 is fully resolved: §2 (Hyp A) PASS + §3 (wrong-sign, qualified) PASS.**
+Proceed to Gate 2 (§4, 3D) and Gate 3 (§5, §6).

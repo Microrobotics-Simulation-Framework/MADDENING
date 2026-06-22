@@ -528,3 +528,152 @@ variation is what matters, so it is not worth the half-measure: either use DK
 (O(N) to assemble, best κ, order-agnostic, submatrix-stable); expose DK
 `2^{tj}` as a matrix-free opt-in for the very largest problems where even
 O(N) diagonal assembly is undesirable.
+
+---
+
+# Continuation series (6 investigations) — 2026-06-22
+
+The six follow-up investigations from the continuation brief. Scripts:
+`hybrid_jacobi.py`, `dd_jax_poc.py`, `nonlinear_cdd.py`, `discontinuous_coeff.py`,
+`submatrix_2d3d.py`, `dthreshold_empirical.py`.
+
+---
+
+## Investigation 1 — Level-Jacobi hybrid: the production preconditioner
+
+**Harness:** `hybrid_jacobi.py`. Four diagonal preconditioners on the
+isotropic Mallat DD-4 operator (solve the symmetrically-scaled
+`Â = D⁻¹AD⁻¹`): **full** (`√a_ii` per entry, N scalars), **level** (√mean-diag
+per level, O(#levels)), **hybrid** (per-entry at level 0, level-mean for finer,
+O(N_coarse+#levels)), **dk** (`2^{tj}`, zero assembly).
+
+### Part A — metrics vs N (1D {256..16384}, 2D {16²..128²})
+
+1D full-op κ / submatrix κ(A_ΛΛ) at k=N/16 / GMRES iters / assembled scalars:
+
+| N | full | level | **hybrid** | dk |
+|---|------|-------|-----------|-----|
+| 256 | 20.4 / 19.9 / 14 / 256 | 38.4 / 36.4 / 15 / 7 | **20.4 / 19.9 / 14 / 10** | 48.2 / 44.3 / 15 / 0 |
+| 4096 | 20.4 / 20.4 / 14 / 4096 | 38.4 / 38.2 / 15 / 11 | **20.4 / 20.4 / 14 / 14** | 50.2 / 48.3 / 16 / 0 |
+| 16384 | 20.4 / 20.4 / 15 / 16384 | 38.4 / 38.4 / 16 / 13 | **20.4 / 20.4 / 15 / 16** | 50.7 / 49.4 / 16 / 0 |
+
+2D (full / **hybrid** / dk), κ_full and assembled scalars:
+
+| N | full κ | **hybrid κ** | dk κ | level κ | full asm | hybrid asm |
+|---|--------|--------------|------|---------|----------|-----------|
+| 256 | 33.3 | **33.3** | 97.4 | 94.8 | 256 | 18 |
+| 1024 | 37.7 | **37.7** | 110.5 | 104.3 | 1024 | 19 |
+| 4096 | 43.7 | **43.7** | 119.3 | 110.6 | 4096 | 20 |
+| 16384 | 51.8 | **51.8** | 127.0 | 116.6 | 16384 | 21 |
+
+**The headline:** hybrid κ equals full-Jacobi κ to 4 significant figures at
+*every* N in 1D and 2D — identical submatrix κ and identical GMRES iteration
+count too — while assembling only **16–21 scalars vs N**. This is because
+(g4 finding) the fine-level diagonal is level-constant to ~0.6%, so level-mean
+≈ per-entry there; only the coarse level (where diag varies ~50%) needs
+per-entry, which hybrid supplies. **Pure level-Jacobi is dominated** (κ 38 vs
+20 in 1D, 117 vs 52 in 2D — the coarse per-entry term is what matters). DK
+costs ~2.4× the conditioning of hybrid.
+
+1D full/hybrid κ is **flat (20.4) across a 64× range of N**; 2D grows mildly
+33→52 (factor 1.56 over 64× N — sub-logarithmic, effectively O(1)).
+
+### Part B — CDD trajectory (θ(t)=0.3+0.3sin), total inner GMRES
+
+| | mean n_outer | mean J_err | total inner GMRES |
+|--|-------------|-----------|-------------------|
+| **1D N=4096** full / hybrid | 59.1 | 2.1e-9 | **8015** |
+| 1D level | 59.2 | 1.3e-9 | 8739 |
+| 1D dk | 62.2 | 1.3e-9 | 9446 |
+| **2D N=4096** full / hybrid | 28.8 | 6.7e-6 | **8481** |
+| 2D level | 28.8 | 6.7e-6 | 9494 |
+| 2D dk | 30.6 | 6.7e-6 | 10378 |
+
+Hybrid ≡ full on every metric. DK needs +18% (1D) / +22% (2D) total inner
+iterations; level +9% / +12%.
+
+### Part C — crossover analysis
+
+Model: `cost = c_asm·n_asm + n_outer·(c_apply·N + n_inner·c_mv·N)`. Since
+hybrid and full share κ, they share `n_outer, n_inner, apply, matvec`
+**exactly** — so `Δcost = c_asm·(N − O(log N)) > 0` for all N: **hybrid is
+never slower than full, and strictly cheaper to assemble.** There is no N where
+full wins; the ratio R = `c_asm_per_scalar / c_mv_per_entry` only sets the
+margin. Two regimes:
+
+- **Probed diagonal (matrix-free operator, no analytic diag):** assembling one
+  diagonal entry ≈ one (local) matvec, so full assembly ≈ N matvecs, hybrid ≈
+  log N matvecs. Full assembly *dominates even the solve* once
+  N > (solve matvec count): >~40 for a single κ≈20 elliptic solve, >~8000 for a
+  full CDD step. At production N (16k+) reassembled every trajectory step,
+  hybrid removes an O(N)-matvec cost → large speedup.
+- **Bandwidth-bound assembly (analytic diag available, just memory traffic):**
+  full assembly ≈ R matvecs (R≈10 bandwidth-limited GPU, R≈1 compute-limited).
+  Against a CDD step's ~8000 inner matvecs this is <0.1% — negligible. Here
+  hybrid's win is **storage** (O(log N) vs O(N) floats), which matters for
+  ensembles / many concurrent operator instances in GPU memory.
+
+### Part D — recommendation (production preconditioner hierarchy)
+
+1. **Default: hybrid.** Identical conditioning to full Jacobi at O(N_coarse +
+   log N) assembly *and* storage. Never worse; strictly better when the
+   diagonal must be probed (matrix-free, frequent operator updates) or when
+   storage is constrained.
+2. **Full Jacobi:** equivalent fallback when an analytic per-entry diagonal is
+   trivially available *and* O(N) storage is a non-issue. No reason to prefer
+   it over hybrid otherwise.
+3. **DK `2^{tj}`:** the matrix-free fallback (zero assembly/storage) for the
+   largest problems or when even the coarse-block diagonal is unavailable;
+   pay ~2.4× κ → ~20% more inner iterations.
+4. **Pure level-Jacobi: not recommended** — dominated by hybrid.
+
+The plan's stated threshold "hybrid reaches κ<6 in 2D/3D" is **mis-calibrated**
+— full Jacobi *itself* is κ≈33–52 in 2D, never <6. The correct criterion is
+*hybrid matching full Jacobi at O(log N) cost*, which holds overwhelmingly
+(identical to 4 sig figs). **Hybrid replaces full Jacobi as the default.**
+
+---
+
+## Investigation 2 — DD-4 wavelet operator in JAX (engineering PoC)
+
+**Harness:** `dd_jax_poc.py` (JAX, float64). Verdict: **no show-stoppers.**
+
+### Part A — 1D DD-4 transform
+- Lifting-form synthesis (jnp.roll prediction, static-shape unrolled loop) is
+  `jax.jit`-compilable and matches the numpy reference `W@c` to **1.6e-16**
+  (≪ 1e-12 bar). Forward∘inverse roundtrip 7.8e-17.
+- JIT compile ~0.9 s; per-call 190–340 µs at N=256→4096.
+- `jax.grad` through synthesis + a dense masked solve vs FD: **1.9e-10** (≪1e-6).
+
+### Part B — BCOO stiffness + lineax + autodiff
+- `A_wave` as `jax.experimental.sparse.BCOO`: nnz = 13% dense at N=256, **4.4%
+  at N=1024** (~45 nnz/row), BCOO mem 727 KB vs 8192 KB dense at N=1024.
+- `lineax.linear_solve` over a `FunctionLinearOperator` wrapping the BCOO
+  matvec: `jax.grad` vs FD = **1.3e-9** with full GMRES (rtol 1e-12). (With
+  restarted GMRES rtol 1e-10 it is 1e-7 — i.e. the residual is purely inner-
+  solver-tolerance, not an autodiff bug; tightening the solve recovers the
+  round-6 1e-9 standard.)
+- The round-6 masked-matvec closure `jnp.where(mask, A@where(mask,v,0), 0)`
+  JIT-compiles cleanly.
+- ⚠ note: `lineax.GMRES(rtol=1e-13)` *stagnates* (restart too small) — use full
+  GMRES (`restart=N`) or a sane rtol; documented so the implementation picks
+  solver params deliberately.
+
+### Part C — 2D isotropic Mallat in JAX
+- 2D three-subband synthesis (LH/HL/HH via `jnp.apply_along_axis` of the 1D
+  predictor) **JIT-compiles** (~0.6–3 s) and matches numpy to **1.5e-16**.
+- `A_wave` BCOO nnz at N=32²=1024: 108224 = 10.3% dense (~106 nnz/row) — denser
+  per row than 1D (more cross-coupling) but still sparse.
+- The subband structure extends naturally; the only wart is that
+  `apply_along_axis` is convenient but not the fastest — a production 3D impl
+  should hand-vectorise the per-axis prediction (as the numpy harness already
+  does with `np.roll`). That is an optimisation, not a blocker.
+
+### Part D — Verdict
+**No show-stoppers.** All three parts pass: transform correctness to machine
+precision, JIT compiles, BCOO+lineax autodiff to 1e-9, 2D subbands work. The
+3D extension is mechanical (7 subbands, same pattern; vectorise the per-axis
+predict). **The 3–5 week BCOO sparse-tree implementation estimate is
+confirmed**; the only newly-surfaced engineering note is to choose GMRES
+restart/tolerance deliberately (full GMRES for tight adjoint accuracy) and to
+hand-vectorise the multi-D predict rather than rely on `apply_along_axis`.

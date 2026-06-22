@@ -292,16 +292,14 @@ def _refine2d_periodic(coarse: np.ndarray, order: int) -> np.ndarray:
     s = coarse.shape[0]
     fine = np.zeros((2 * s, 2 * s), dtype=float)
     fine[0::2, 0::2] = coarse
-    # predict along axis 1 (y) for even rows
-    pred_y = np.apply_along_axis(lambda c: _refine_periodic(c, order)[1::2], 1, coarse)
+    # predict along axis 1 (y) for even rows (vectorised roll-based)
+    pred_y = _midpoints_along(coarse, 1, order)
     fine[0::2, 1::2] = pred_y
     # predict along axis 0 (x) for even cols
-    pred_x = np.apply_along_axis(lambda c: _refine_periodic(c, order)[1::2], 0, coarse)
+    pred_x = _midpoints_along(coarse, 0, order)
     fine[1::2, 0::2] = pred_x
     # odd/odd: predict along x of the already-y-predicted columns
-    pred_xy = np.apply_along_axis(
-        lambda c: _refine_periodic(c, order)[1::2], 0, pred_y
-    )
+    pred_xy = _midpoints_along(pred_y, 0, order)
     fine[1::2, 1::2] = pred_xy
     return fine
 

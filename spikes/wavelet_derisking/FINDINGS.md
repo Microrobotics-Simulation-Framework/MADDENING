@@ -22,9 +22,68 @@ sign patterns). JAX is reserved for the trajectory-adjoint test (§6).
 | 1 | §2 Hyp A — DD+DK condition number | **done** | 1D PASS; 2D PASS *with corrected scaling* (see C1) |
 | 1 | §2 Hyp A — CDD convergence | **done** | PASS — converges ≤~20 iters, beats rolling ~97%, Hyp A confirmed |
 | 1 | §3 — DD phi sign / wrong-sign safety | **done** | PASS *for production CDD*; locality theorem needs qualification (see below) |
-| 2 | §4 — 3D sparsity break-even | pending | |
-| 3 | §5 — Stokes / stream-function cavity | pending | |
-| 3 | §6 — trajectory adjoint under lax.scan | pending | |
+| 2 | §4 — 3D sparsity break-even | **done** | PASS — J_err 0.1% at k=N/16; trap risk ~zero (non-local only) |
+| 3 | §5 — Stokes / stream-function cavity | **done** | PASS on conditioning (Jacobi); NS-Ghia match → implementation |
+| 3 | §6 — trajectory adjoint under lax.scan | **done** | PASS — grad=FD to 1e-10, no T-degradation, no mitigation needed |
+
+**ALL FOUR GATES POSITIVE → derisking criterion met (see Executive Summary).**
+
+---
+
+## Executive Summary
+
+The derisking spike resolved all four gates from
+`plans/WAVELET_ADAPTIVE_NODE_DERISKING_SPIKE.md §7`. Per the plan's overall
+criterion, **`WaveletAdaptiveNode` implementation can proceed.** Highlights
+and the corrections the spike forces on the plan:
+
+1. **Preconditioning works — but use algebraic Jacobi, not theory-`2^{tj}`,
+   as the default.** DD + Dahmen-Kunoth gives O(1) κ in 1D/2D/3D for the
+   Laplacian and the biharmonic, *but only with the right scaling*. The
+   plan's multi-D `2^{|λx|+|λy|+|λz|}` is the **anisotropic** scaling and
+   fails (κ ∝ N) on the isotropic operator (**Correction C1**). The
+   isotropic Mallat basis with single-level `2^j` works; **algebraic Jacobi
+   (`√diag A`) is consistently the best and most robust** — it auto-adapts
+   to the elliptic order t (t=1 Laplacian *and* t=2 biharmonic) without it
+   being hard-coded. Recommend Jacobi default, `2^{tj}` opt-in.
+
+2. **CDD is the selection criterion; it converges and beats rolling
+   decisively.** ~17–21 outer iters to J_err~1e-5 at |Λ|≈14% of N; beats
+   rolling top-|c_prev| by ~97%; matches the oracle. Near-sharp σ=0.02 is
+   *easier* (sparser), not harder.
+
+3. **Wrong-sign safety is real but via coarse-inclusion, not pure locality.**
+   DD-4 has ±7% negative side-lobes and is *not* strictly single-signed, so
+   top-|b| can wrong-sign just like the sine basis. CDD (which always keeps
+   the coarse levels dominating the sensor functional) is wrong-sign-safe
+   across the whole boundary sweep at K=N/16. **The locality theorem must be
+   stated as "CDD/coarse-inclusion is wrong-sign-safe," not "locality forbids
+   wrong-sign."** Keep top-|b| deprecated.
+
+4. **3D is worth it.** CDD reaches J_err~0.1% with only N/16 = 6.25% of the
+   3D basis — well past the "worth building" threshold.
+
+5. **The blindness/symmetry-trap machinery is non-local-basis insurance.**
+   The selection-induced blindness trap (which drove much of the base-class
+   design: `blindness_ratio`, `symmetry_break`, the cold-start gate) is a
+   **property of non-local bases (sine)**. The local wavelet basis is immune:
+   in 1D the sine ratio → 0.000 at θ=0.5 (BLIND) while DD stays ≈1; in 3D the
+   wavelet shows no trap (ratio ≥ 0.91) even with top-|b|. For
+   `WaveletAdaptiveNode` this machinery is a cheap, near-inert safety net — do
+   not over-invest in trap mitigation (no 3D-specific δ needed). It remains
+   correct and necessary for `TopKAdaptiveNode`.
+
+6. **Trajectory adjoint through `lax.scan` is exact** (grad=FD to 1e-10, no
+   T-degradation). The feared c_prev contamination doesn't occur; no
+   `stop_gradient`/`custom_vjp` mitigation needed.
+
+7. **Stream-function (biharmonic) cavity is viable on conditioning grounds**
+   (Jacobi-preconditioned). The full Navier–Stokes Ghia accuracy match is
+   scoped to implementation, not derisking.
+
+**Net:** the wavelet path is de-risked. The main plan edits are: adopt the
+isotropic basis + Jacobi preconditioner (C1), qualify the locality theorem
+(§3), and downgrade trap-mitigation effort for the wavelet node (§4).
 
 ---
 
@@ -372,3 +431,40 @@ symmetric mode set regardless of sensor — hence g_frozen=0 while g_full≠0.
   3D-specific δ is needed (plan §4's `blindness_break_delta_3d` is moot for
   the wavelet node). This should be documented so the implementation doesn't
   over-invest in trap mitigation for the wavelet path.
+
+---
+
+## §6 — time-dependent trajectory adjoint under lax.scan (Gate 3, part 2)
+
+**Harness:** `g3_trajectory.py` (JAX, float64). DD-4 Dirichlet, N=95. Source
+moves in time θ(t)=θ₀+0.1t; per-step CDD-style selection seeded by the
+residual r=b−A·c_prev (so c_prev genuinely drives selection — the plan's
+exact concern). Mask is non-differentiable (argsort) and stop_gradient'd.
+Static-shape masked solve via the A_eff trick (inactive rows → identity).
+Objective J=Σ_t u_t(x_sensor)². `lax.scan` over the trajectory.
+
+### jax.grad vs FD, sweeping T
+
+| T | rel_err |
+|---|---------|
+| 1 | 8.3e-11 |
+| 2 | 4.1e-11 |
+| 5 | 1.1e-10 |
+| 10 | 2.9e-11 |
+
+Robustness over θ₀ ∈ {0.20…0.41} at T=10: **worst rel_err 1.05e-10.**
+
+### Verdict — PASS, contamination concern refuted
+
+`jax.grad` through the `lax.scan` trajectory matches FD to ~1e-10 with **no
+degradation in T**. The plan's worry — that c_prev flowing into the residual
+contaminates the trajectory gradient — does **not** materialise: the discrete
+selection (argsort → integer indices) carries zero gradient, so c_prev's
+influence on the *mask* is naturally blocked, while the fresh per-step solve
+carries the correct gradient through b(θ). **No `stop_gradient` mitigation and
+no trajectory-level `custom_vjp` are required.** Confirms the plan's positive
+path: the trajectory adjoint is the exact sum of per-step frozen-set adjoints.
+
+(Tested at non-kink θ, per the plan's scope; at a mask-flip kink the FD/grad
+relationship is the expected Clarke-subgradient one, already characterised in
+round-7 for the single step.)

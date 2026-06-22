@@ -19,9 +19,9 @@ sign patterns). JAX is reserved for the trajectory-adjoint test (§6).
 
 | Gate | Investigation | Status | Verdict so far |
 |------|---------------|--------|----------------|
-| 1 | §2 Hyp A — DD+DK condition number | **partial done** | 1D PASS; 2D PASS *with corrected scaling* (see C1) |
+| 1 | §2 Hyp A — DD+DK condition number | **done** | 1D PASS; 2D PASS *with corrected scaling* (see C1) |
 | 1 | §2 Hyp A — CDD convergence | pending | |
-| 1 | §3 — DD phi sign / wrong-sign safety | pending | |
+| 1 | §3 — DD phi sign / wrong-sign safety | **done** | PASS *for production CDD*; locality theorem needs qualification (see below) |
 | 2 | §4 — 3D sparsity break-even | pending | |
 | 3 | §5 — Stokes / stream-function cavity | pending | |
 | 3 | §6 — trajectory adjoint under lax.scan | pending | |
@@ -129,3 +129,62 @@ a strong candidate for the production default.
   converge in ≤20 outer iterations and beat rolling by ≥10%.
 - 3D condition number (Gate 2 / §4) — pending; will use the corrected
   isotropic 3D basis with `D=2^j`.
+
+---
+
+## §3 — DD phi sign property and wrong-sign safety (Gate 1, part 2)
+
+**Harness:** `g1_wrong_sign.py`. Moving Gaussian source (σ=0.04) on (0,1)
+Dirichlet, sensor at a generic fine-only node x≈0.30. For each θ we compare
+the sign of `J_frozen` (active set size K) against `J_full` under five
+selection rules. A **sine basis is a positive control** and must reproduce
+the non-local wrong-sign failure.
+
+> **Test-design catch:** the obvious sensor x=1/3 is, with n_coarse=2
+> Dirichlet, *exactly a coarse node*. By the interpolation property all
+> detail wavelets vanish there, so J_frozen==J_full trivially and the test
+> is vacuous. Moving the sensor to a generic fine node (x≈0.30) is required
+> for a meaningful test. Logged so the implementation test suite avoids it.
+
+### phi/psi sign structure at the sensor
+
+| basis | neg-lobe depth (of peak) | signs at sensor |
+|-------|--------------------------|-----------------|
+| DD-2 (hat) | 0.000 (strictly ≥0) | all positive, every level |
+| DD-4 | 0.073 | **alternating** (e.g. level 0: 2 pos / 2 neg) |
+
+Answers plan §3 sub-questions: **(a) yes**, DD-4 wavelets covering the sensor
+alternate in sign; **(b)** the coarse scaling functions are *not* single-signed
+at a generic sensor for DD-4 (the cubic predictor overshoots into ±7% lobes).
+
+### wrong-sign across the boundary sweep θ ∈ {0.02,…,0.98}
+
+| basis | top-\|b\| | top-\|c\| | **CDD (coarse-guaranteed)** | CDD (no coarse) |
+|-------|---------|---------|------------------------------|-----------------|
+| SINE (control) | WRONG @0.06,0.98 | ok | ok | WRONG @0.06,0.98 |
+| DD-2 | ok everywhere | ok | **ok** | ok |
+| DD-4 (K=N/16) | **WRONG @0.02,0.04** | ok | **ok everywhere** | **WRONG @0.94–0.98** |
+| DD-4 (K=N/8) | WRONG @0.94–0.98 | ok | **ok everywhere** | ok |
+
+### Verdict and the required theorem qualification
+
+- **The production selection (CDD with coarse inclusion) is wrong-sign-safe**
+  on DD across the entire boundary sweep at K as small as N/16. §3 **PASSES**
+  for the production path. So is top-\|c\|.
+- **The unqualified claim "locality forbids wrong-sign for any selection" is
+  FALSE for DD-4.** DD-4 is not strictly single-signed (7% negative lobes,
+  sign-alternating at the sensor), and top-\|b\| produces genuine wrong-sign
+  solutions — same failure mode as the non-local sine basis.
+- **Mechanism, confirmed by the no-coarse probe:** the protection is
+  *coarse-level inclusion*, not strict locality. Stripping the coarse
+  guarantee from CDD makes it wrong-sign on DD-4. This is exactly the plan's
+  anticipated resolution **(i)**: the active set must always include the
+  coarse level that dominates u(x_sensor). The cold-start coarse-then-fine
+  protocol and CDD's coarse seeding both enforce this.
+
+**Action for the v1.1+ plan / paper methods:** state the locality theorem as
+*"CDD selection is wrong-sign-safe on DD because it always retains the coarse
+levels dominating the sensor functional"* — **not** *"locality forbids
+wrong-sign."* DD-2 (strictly nonnegative) is the only DD order for which the
+unqualified locality statement holds, and it costs two orders of
+approximation. Keep top-\|b\| deprecated (already the case from round-4).

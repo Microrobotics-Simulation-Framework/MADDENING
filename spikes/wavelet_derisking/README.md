@@ -29,9 +29,17 @@ trap machinery is non-local-basis insurance).
 | `discontinuous_coeff.py` | Inv 4 — discontinuous-coefficient (Brinkman) 1D jump (A) + 2D moving inclusion (B). |
 | `submatrix_2d3d.py` | Inv 5 — submatrix conditioning across active-set configs in 2D/3D. |
 | `dthreshold_empirical.py` | Inv 6 — D_threshold=5 empirical trap-rate validation. |
+| `closeout_3d.py` | Closeout Inv 1 — 3D battery (A–E). `argv`: A/B/C/E together, or `D` (JAX) alone. Caches to `/tmp/closeout_3d_env.npz`. |
+| `limitation_probes.py` | Closeout Inv 2 — Dirichlet BC / non-separable traps / complex geometry / 3D BCOO footprint / iteration distribution. `argv`: A/B/C/D/E/all. |
 
 The 6-investigation continuation series (2026-06-22) is complete; all resolved.
 See `FINDINGS.md` "Continuation series" + "Cross-cutting statement".
+
+**SPIKE CLOSED 2026-06-22.** Handoff package: `KNOWN_LIMITATIONS.md` (17-entry
+limitations doc) + the `## Spike closed` section of `FINDINGS.md` (consolidated
+plan edits, first-milestone validations, confidence statement). The closeout
+round added the 3D completeness battery, limitation probes, and a sharding
+design note (`FINDINGS.md` "Closeout Investigation 4").
 
 ## Running
 

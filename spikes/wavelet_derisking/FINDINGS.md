@@ -42,6 +42,18 @@ sign patterns). JAX is reserved for the trajectory-adjoint test (§6).
 **All resolved → spike series complete; WaveletAdaptiveNode implementation can
 begin (see Cross-cutting statement at end).**
 
+### Closeout round (3D battery + limitation probes + handoff docs, 2026-06-22)
+
+| # | Investigation | Status | Verdict |
+|---|---------------|--------|---------|
+| 1 | 3D completeness battery (A–E) | **done** | all 1D/2D conclusions extend to 3D |
+| 2 | Limitation probes (A–E) | **done** | no blockers; Dirichlet/non-sep/geometry/memory/iters all OK |
+| 3 | `KNOWN_LIMITATIONS.md` | **done** | 17-entry handoff doc (standalone) |
+| 4 | Sharding design note | **done** | shardable via two-tier; `halo_width_at_level` API |
+
+**SPIKE CLOSED 2026-06-22** — see `## Spike closed` at the very end. Open items
+are implementation-scoped, not derisking.
+
 ---
 
 ## Executive Summary
@@ -1149,3 +1161,238 @@ pathological tail observed.
 (build isotropic-Dirichlet basis in impl); non-separable traps are rarer than
 modelled; complex geometry converges; 32³ BCOO fits memory; iteration counts are
 tightly bounded (MAX_OUTER=30).
+
+---
+
+## Closeout Investigation 3 — known-limitations document
+
+Produced as the standalone `spikes/wavelet_derisking/KNOWN_LIMITATIONS.md`
+(17 entries: the 13 mandated + 4 surfaced by closeout Inv 1/2 — dense 3D adjoint
+kinks, ~30% higher 3D iteration count, sharding-unvalidated, and the
+analytical-only hybrid assembly cost model). Self-contained handoff for the
+implementation team. No code.
+
+---
+
+## Closeout Investigation 4 — sharding (multi-GPU) design note
+
+**Design document only — no experiments.** Why adaptive-wavelet sharding is
+harder than uniform-grid sharding, and a concrete API proposal. None of this
+blocks single-device `WaveletAdaptiveNode`; it must be designed before a
+`ShardedWaveletAdaptiveNode`.
+
+### Why uniform-grid sharding assumptions break
+
+Uniform-grid sharding is clean because (1) halo width is fixed by the stencil,
+(2) the partition is statically load-balanced (equal DOF per shard), and (3) the
+operator is domain-local (banded). Adaptive wavelets break **all three**:
+
+1. **Halo width is level-dependent, not fixed.** A DD-4 wavelet at level ℓ has
+   physical support ∝ filter-length × 2^{−ℓ} on the fine grid; expressed in
+   coarse-shard terms its support spans ~filter-length fine cells at the finest
+   level but grows by 2^ℓ at coarser levels. The coarsest-level wavelets have
+   near-global support → their "halo" is the whole domain.
+2. **The active set is not load-balanced.** CDD concentrates DOF near the
+   swimmer/wall (closeout 1E: ~49% of active modes within 1.5h of the interface).
+   One shard can hold the bulk of the active set while a neighbour holds almost
+   none. Static domain decomposition → severe imbalance; dynamic rebalancing →
+   communication every CDD outer iteration.
+3. **A_wave is not domain-local.** A_phys (FD) is banded, but
+   A_wave = Wᵀ A_phys W couples any two wavelets whose physical supports overlap
+   — and coarse wavelets overlap globally. Off-diagonal A_wave entries couple
+   distant shards through the coarse levels (consistent with closeout 2D's
+   249 nnz/row in 3D, denser than the FD stencil).
+
+### The two-tier resolution (standard in parallel adaptive-wavelet literature)
+
+Split coefficients by level (Kevlahan–Vasilyev-style):
+
+- **Fine levels** (local support): `requires_halo = True`, halo width =
+  DD-4 filter half-length at that level. Standard halo exchange before each
+  level's transform/matvec — same structure as parallel FEM.
+- **Coarse levels** (global support): **replicate across all shards.** The
+  coarsest levels have very few coefficients, so replication is cheap and avoids
+  all-to-all. For a 3D DD-4 basis the coarsest level has
+  O(2^{3(log₂N − L)}) coefficients — for N=64³, L=5 → 8 coeffs; N=256³, L=8 →
+  512 coeffs. **Coarse-level replication is essentially free for any realistic
+  grid and any shard count** — so coarse replication never becomes the
+  bottleneck (answers the "max feasible shard count" question: replication cost
+  is negligible; shard count is bounded by fine-level halo/comm, not coarse
+  replication).
+
+### Concrete API proposal
+
+The earlier `ShardedNode.requires_halo: bool` is **insufficient** — it must be
+level-indexed:
+
+```python
+class ShardedWaveletAdaptiveNode(WaveletAdaptiveNode):
+    # replaces requires_halo: bool
+    def halo_width_at_level(self, level: int) -> int:
+        """Fine levels: filter_halflen (constant in fine-grid cells).
+        Coarse levels (level < self.coarse_cutoff): return -1 sentinel
+        meaning 'replicated, no halo exchange'."""
+
+    coarse_cutoff: int   # levels < cutoff are replicated; >= cutoff are haloed
+
+    def is_replicated_level(self, level: int) -> bool:
+        return level < self.coarse_cutoff
+```
+
+`coarse_cutoff` is chosen so the replicated block is small (e.g. ≤ a few hundred
+coeffs) — for production grids that is the coarsest 2–3 levels.
+
+### CDD GROW step under sharding
+
+GROW computes Σ_{inactive} r_i² and Dörfler-marks. Sharded: each shard holds the
+residual for its local (fine) modes plus the (replicated) coarse residual.
+**One all-reduce per CDD outer iteration** is required to sum Σ r_i² across
+shards before the threshold is applied; marking is then local (each shard marks
+its own modes against the global threshold). This all-reduce is **not currently
+in the CDD design** and must be added — it is cheap (one scalar reduction +ranked
+partial sums) but it is a real synchronisation point. The vectorised
+`argsort+cumsum+searchsorted` GROW must be made level-aware so coarse (replicated)
+and fine (sharded) modes are marked consistently (no double-marking of the
+replicated coarse modes).
+
+### Frozen-set adjoint under sharding
+
+The IFT adjoint solves A_ΛΛ^T y = ∂J/∂c, structurally identical to the forward
+distributed solve: fine modes → distributed sparse solve with halo exchange at
+each GMRES matvec (standard parallel FEM); coarse replicated modes → the adjoint
+runs locally on each shard and the **coarse-mode gradient contributions are
+reduced (summed) once at the end**, with care to avoid double-counting the
+replicated coarse block (divide by shard count, or designate one owner shard).
+The `stop_gradient` on mask construction **still holds under sharding**: the mask
+is assembled from the all-reduced global residual and the argsort/searchsorted is
+non-differentiable regardless of how the residual was reduced — the all-reduce is
+a forward-only operation feeding a stop_gradient'd discrete selection, so it does
+not open a gradient path. (The Cauchy-interlacing submatrix-safety result, Inv 5,
+is shard-count-independent — it is a property of the SPD operator, not the
+partition.)
+
+### Verdict
+
+**`WaveletAdaptiveNode` is shardable** with the two-tier fine/coarse treatment,
+but it requires: (a) `halo_width_at_level(level)->int` replacing the boolean
+`requires_halo`; (b) coarse-level replication (free at any realistic scale);
+(c) one all-reduce per CDD outer iteration in a level-aware GROW; (d) careful
+coarse-mode gradient reduction in the adjoint. **None is a blocker; all need
+explicit design before `ShardedWaveletAdaptiveNode`.** Single-device
+`WaveletAdaptiveNode` proceeds without any of this. Recommended sequencing:
+ship single-device first; design sharding as a follow-on once the single-device
+node and the BCOO operator are validated.
+
+---
+
+# Spike closed
+
+**Declared closed: 2026-06-22.** Remaining open items are scoped to
+implementation (see `KNOWN_LIMITATIONS.md` and the first-milestone list below),
+not to derisking. No further spike rounds.
+
+### One-paragraph summary (for the v1.1+ plan preamble)
+
+The wavelet derisking spike established, through a standalone numpy/JAX harness
+(no `src/` code, ~20 throwaway scripts), that a Deslauriers–Dubuc (DD-4) adaptive
+wavelet PDE solver is viable for the MADDENING `WaveletAdaptiveNode`. Across 1D,
+2D and 3D it is well-conditioned (O(1) condition number with the isotropic Mallat
+basis and a hybrid-Jacobi preconditioner; κ ≈ 20/38/158 in 1D/2D/3D), sparse
+(sensor-functional error <0.2% using only N/16 = 6.25% of the basis in 3D),
+wrong-sign-safe (guaranteed by coarse-level inclusion in the Cohen–Dahmen–DeVore
+selection, not by locality alone), differentiable (autodiff matches finite
+differences to ~1e-9 at smooth points and yields the correct Clarke subgradient
+at active-set kinks, including through a `lax.scan` trajectory), and
+trap-resistant (the selection-induced blindness traps that shaped the base-class
+design are a non-local-basis phenomenon to which the local wavelet basis is
+immune). The frozen-active-set inner solve is provably as well-conditioned as the
+full operator (Cauchy interlacing). Algebraic Jacobi — refined to a hybrid
+per-entry-coarse / level-mean-fine form at O(log N) cost — is the recommended
+preconditioner and automatically handles discontinuous Brinkman coefficients.
+The JAX/BCOO engineering carries no show-stoppers and the 32³ production operator
+fits in 8 GB of GPU memory (~131 MB). The wavelet path is de-risked;
+implementation can begin.
+
+### Consolidated plan edits (all rounds, in one place)
+
+1. **Basis & preconditioner (C1, Inv 1):** use the **isotropic Mallat** 2D/3D
+   basis and the **hybrid-Jacobi** preconditioner (per-entry at the coarse
+   level, level-mean at fine levels) as the default. Delete the anisotropic
+   `D=2^{|λx|+|λy|+|λz|}` scaling (it gives κ∝N); expose matrix-free DK `2^{tj}`
+   and full Jacobi as opt-ins. Hybrid ≡ full-Jacobi κ at O(log N) assembly.
+2. **Wrong-sign theorem (§3):** state as *"CDD is wrong-sign-safe because it
+   always retains the coarse levels dominating the sensor functional,"* NOT
+   *"locality forbids wrong-sign"* (DD-4 has ±7% negative lobes). Keep top-|b|
+   deprecated.
+3. **Trap machinery (Gate 2, Inv 6, 2B):** document `blindness_ratio` /
+   `symmetry_break` / cold-start gate as **non-local-basis insurance** — near-
+   inert for the wavelet node (do not build a 3D-specific δ). For a future
+   spectral `TopKAdaptiveNode`, monitor at **D≥2** (not D>5); note real coupled
+   PDEs have a low trap rate (0.1–0.3/trajectory), so this is cheap insurance.
+4. **CDD parameters (Inv 1B/E, 2E):** keep **θ_D=0.5** (16.6 outer iters in 3D);
+   annotate `θ_D<κ^{-1/2}` as an approximation-optimality bound, not an
+   iteration-count requirement. Set **MAX_OUTER=30** (1D/2D p99=15/max=19; 3D
+   mean ~17). Budget 3D solves at ~1.5–2× the 2D cost (higher κ).
+5. **Adjoint (§6, Inv 1D):** the trajectory adjoint is exact between active-set
+   changes and Clarke at kinks — **no `custom_vjp`/`stop_gradient` mitigation
+   needed**. In 3D the objective is densely kinked (K=256 ties); use the autodiff
+   Clarke subgradient and consider mild smoothing/trust-region if an optimiser
+   chatters.
+6. **Coefficients (Inv 4, 4-2D/3D):** Jacobi handles discontinuous Brinkman
+   coefficients automatically (a third advantage over theory-DK). Besov scaling
+   is unnecessary for H¹ solutions; keep it as a DK opt-in for any future non-H¹
+   case.
+7. **Inner solve (Inv 5):** no active-set/subband-completeness constraint needed
+   — κ(A_ΛΛ)≤κ_full for any Λ by Cauchy interlacing.
+8. **Sharding (closeout Inv 4):** replace `ShardedNode.requires_halo: bool` with
+   `halo_width_at_level(level)->int`; two-tier fine-halo / coarse-replicated
+   scheme; add one all-reduce per CDD outer iteration in a level-aware GROW;
+   reduce coarse-mode adjoint contributions carefully. Single-device first.
+9. **Memory (closeout 2D):** 32³ BCOO ~131 MB (fits 8 GB); switch to a
+   matrix-free matvec beyond ~64³.
+
+### First-implementation-milestone validations (deferred → check FIRST)
+
+In rough priority order — these are the things the spike could not establish and
+that most affect viability/timeline:
+
+1. **3D Mallat BCOO construction + autodiff** (Limitation 11) — the largest
+   timeline assumption; if it exceeds ~1 week, flag. Do this first.
+2. **Cross-validation against MIME FVM/BEM** on one shared problem (Limitation 7)
+   — guards against a systematic error invisible to autodiff-vs-FD self-checks.
+3. **Isotropic-Dirichlet Mallat basis** + re-run κ / CDD / wrong-sign
+   (Limitation 1) — production BCs.
+4. **CDD on the biharmonic residual** in the stream-function cavity
+   (Limitation 12) — selection on a 4th-order residual is untested.
+5. **Quantitative Ghia cavity at ≥64²** + steady-state integration (Limitation 6).
+6. **Trajectory adjoint at T=100** with gradient checkpointing (Limitation 8).
+7. **GPU benchmark** — assembly-vs-solve split, JIT overhead, hybrid-Jacobi
+   crossover on the RTX A2000 (Limitations 5, 17).
+8. **Optimiser convergence** (not just gradient accuracy) under the dense 3D
+   adjoint kinks (Limitation 14).
+
+### Statement of confidence (honest)
+
+**Confident** (validated across 1D/2D/3D with consistent, mechanism-backed
+results): the conditioning story (O(1) κ, hybrid Jacobi, Cauchy-interlacing
+submatrix safety); the sparsity/accuracy story (J_err <0.2% at N/16 in 3D, CDD ≫
+rolling, near-sharp easier); wrong-sign safety via CDD coarse-inclusion; adjoint
+correctness (Clarke subgradient, no contamination); the wavelet basis's immunity
+to selection-induced traps; that Jacobi auto-handles discontinuous coefficients;
+that the JAX/BCOO path has no show-stoppers and fits GPU memory at 32³.
+
+**Not confident / explicitly unvalidated** (→ first-milestone list): GPU
+wall-clock performance (all timing is CPU/numpy); quantitative cavity accuracy
+(only qualitative at 47²); 2D/3D *isotropic-Dirichlet* conditioning (expected
+fine — 1D Dirichlet was κ=3.8 — but the isotropic-Dirichlet basis was not built);
+the effort to construct the 3D JAX BCOO operator (asserted mechanical, not
+executed); long-trajectory (T~1000) adjoint stability; sharded/multi-GPU
+execution (designed, not tested); and optimiser behaviour under dense 3D kinks
+(gradient is correct, but convergence dynamics are untested). None of these is a
+known blocker; all are validate-during-implementation. The spike is **not** a
+proof the production solver will hit any particular speed or accuracy target —
+it is evidence that the approach is sound and that the remaining risks are
+implementation risks, not derisking risks.
+
+**The wavelet derisking spike is closed. `WaveletAdaptiveNode` implementation
+can begin, starting with the first-milestone validations above.**

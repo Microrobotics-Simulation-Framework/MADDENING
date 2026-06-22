@@ -109,7 +109,7 @@ from typing import Any, ClassVar, Optional
 import jax
 import jax.numpy as jnp
 
-from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import SimulationNode
 
@@ -163,6 +163,36 @@ class AdaptiveNode(SimulationNode):
     D_threshold : int, optional
         Override the class-level default of ``5``.
     """
+
+    meta: ClassVar[NodeMeta] = NodeMeta(
+        algorithm_id="MADD-NODE-ADAPTIVE",
+        algorithm_version="0.4.0",
+        stability=StabilityLevel.STABLE,
+        description=(
+            "Basis-agnostic adaptive PDE framework with frozen-active-set "
+            "adjoint and Palais-aware trap mitigation"
+        ),
+        governing_equations=(
+            "A(theta) c(theta) = b(theta); J = sensor(c); active set "
+            "Lambda determined by subclass-supplied selection criterion"
+        ),
+        discretization="Subclass-defined basis; framework is basis-agnostic",
+        assumptions=(
+            "Subclass provides ift_linear_solve-compatible operator_fn "
+            "for the masked solve",
+            "Subclass provides compute_full_basis_gradient for the "
+            "blindness diagnostic",
+        ),
+        limitations=(
+            "Concrete subclass required; AdaptiveNode itself is abstract",
+            "Blindness diagnostic costs ~2 full solves; intended for "
+            "cold-start use, not per-update routine monitoring "
+            "(except at D > D_threshold)",
+            "Symmetry-break recovery requires anisotropic perturbation "
+            "in the unit g_full direction; isotropic noise cannot escape "
+            "Palais fixed-point sets (Chen-Ziyin 2023)",
+        ),
+    )
 
     # ---- finalised configuration constants ----
     blindness_threshold: ClassVar[float] = 0.7

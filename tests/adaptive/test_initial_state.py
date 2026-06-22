@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-jax.config.update("jax_enable_x64", True)
 
 from maddening.nodes.adaptive import AdaptiveNode, AdaptiveNodeBlindnessError
 from tests.adaptive._mock_poisson_sine import (

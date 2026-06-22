@@ -27,7 +27,6 @@ import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
 import pytest
 
-jax.config.update("jax_enable_x64", True)
 
 from maddening.nodes.adaptive import HierarchicalHatAdaptiveNode
 from maddening.nodes.adaptive import hierarchical_hat as hat_module

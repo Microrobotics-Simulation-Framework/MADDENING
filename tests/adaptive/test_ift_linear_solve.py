@@ -23,7 +23,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
 
 from maddening.core.solver_utils import ift_linear_solve
 

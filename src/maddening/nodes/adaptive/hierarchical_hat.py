@@ -63,13 +63,13 @@ True
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import ClassVar, Optional
 
 import jax
 import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
 
-from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.solver_utils import ift_linear_solve
 from maddening.nodes.adaptive.base import AdaptiveNode
@@ -138,6 +138,36 @@ class HierarchicalHatAdaptiveNode(AdaptiveNode):
     theta_init : float, default 0.42
         Initial parameter.
     """
+
+    meta: ClassVar[NodeMeta] = NodeMeta(
+        algorithm_id="MADD-NODE-ADAPTIVE-HHAT",
+        algorithm_version="0.4.0",
+        stability=StabilityLevel.STABLE,
+        description=(
+            "1D Galerkin-projected Poisson on a hierarchical dyadic hat "
+            "basis; demonstrates the locality theorem and BCOO + lineax "
+            "sparse-operator path"
+        ),
+        governing_equations=(
+            "(-d^2/dx^2 + 1) u(x) = exp(-((x - theta) / sigma)^2) on (0, 1) "
+            "with Dirichlet BCs; Galerkin projection to dyadic hat basis"
+        ),
+        discretization=(
+            "Dyadic hierarchical hat basis with N_levels + 1 levels; "
+            "level-0 root always active; Galerkin matrix M = Phi^T A_phys Phi"
+        ),
+        assumptions=(
+            "1D domain, Dirichlet boundary conditions",
+            "FD Laplacian + I as the physical-space operator",
+        ),
+        limitations=(
+            "Toy: not intended as a production solver; demonstrates the "
+            "AdaptiveNode framework in a local basis",
+            "BCOO conversion of the masked operator is O(N^2) at "
+            "construction time (acceptable for the small toy sizes; "
+            "WaveletAdaptiveNode will use a more efficient path)",
+        ),
+    )
 
     def __init__(
         self,

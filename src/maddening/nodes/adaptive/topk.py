@@ -69,12 +69,12 @@ True
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import ClassVar, Literal, Optional
 
 import jax
 import jax.numpy as jnp
 
-from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.solver_utils import ift_linear_solve
 from maddening.nodes.adaptive.base import AdaptiveNode
@@ -101,6 +101,34 @@ class TopKAdaptiveNode(AdaptiveNode):
         Initial parameter.  ``0.42`` is a known good point (no Palais
         trap, blindness ratio ≈ 0.86).
     """
+
+    meta: ClassVar[NodeMeta] = NodeMeta(
+        algorithm_id="MADD-NODE-ADAPTIVE-TOPK",
+        algorithm_version="0.4.0",
+        stability=StabilityLevel.STABLE,
+        description=(
+            "1D Poisson + Gaussian source on the sine eigenbasis with "
+            "top-K active-set selection"
+        ),
+        governing_equations=(
+            "(-d^2/dx^2 + 1) u(x) = exp(-((x - theta) / sigma)^2) on (0, 1) "
+            "with Dirichlet BCs"
+        ),
+        discretization=(
+            "Sine eigenbasis phi_k(x) = sqrt(2) sin(k pi x) with eigenvalues "
+            "lambda_k = (k pi)^2 + 1; A is diagonal"
+        ),
+        assumptions=(
+            "1D domain, Dirichlet boundary conditions",
+            "Sine basis is complete and orthonormal on (0, 1)",
+        ),
+        limitations=(
+            "selection_quantity='b' reproduces the round-4 wrong-sign "
+            "boundary failure mode (sine basis is non-local)",
+            "Toy: not intended as a production solver; demonstrates the "
+            "AdaptiveNode framework in a non-local basis",
+        ),
+    )
 
     def __init__(
         self,

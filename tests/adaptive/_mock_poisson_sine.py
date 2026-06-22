@@ -15,6 +15,11 @@ This is the same problem the spike's ``q2_frozen_set_gradient.py``,
 ``trap_characterisation.py`` etc. used.  Numerical expectations at
 known theta values are documented in the spike findings memo
 (round-3 prevalence sweep, round-6 threshold calibration).
+
+The basis arrays are materialised LAZILY (inside the first node
+constructor call) so that this module can be imported without
+forcing ``jax_enable_x64`` to be set at import time -- the conftest
+toggle scopes x64 only over the test execution phase.
 """
 
 from __future__ import annotations
@@ -34,17 +39,24 @@ SIGMA = 0.04
 K_ACTIVE = 16
 
 
-def _build_static():
-    ks = jnp.arange(1, N_BASIS + 1, dtype=jnp.float64)
-    lambdas = (ks * jnp.pi) ** 2 + 1.0
-    x_grid = jnp.linspace(0.0, 1.0, N_GRID, dtype=jnp.float64)
-    phi = jnp.sin(jnp.pi * jnp.outer(x_grid, ks))
-    return ks, lambdas, x_grid, phi
+_STATIC: Optional[dict] = None
 
 
-_KS, _LAMBDAS, _X_GRID, _PHI = _build_static()
-_DX = float(_X_GRID[1] - _X_GRID[0])
-_SENSOR_IDX = N_GRID // 3   # x_sensor ~ 0.333, matches spike toys
+def _get_static():
+    """Lazily build and cache the basis arrays."""
+    global _STATIC
+    if _STATIC is None:
+        ks = jnp.arange(1, N_BASIS + 1, dtype=jnp.float64)
+        lambdas = (ks * jnp.pi) ** 2 + 1.0
+        x_grid = jnp.linspace(0.0, 1.0, N_GRID, dtype=jnp.float64)
+        phi = jnp.sin(jnp.pi * jnp.outer(x_grid, ks))
+        dx = float(x_grid[1] - x_grid[0])
+        sensor_idx = N_GRID // 3   # x_sensor ~ 0.333, matches spike toys
+        _STATIC = dict(
+            ks=ks, lambdas=lambdas, x_grid=x_grid, phi=phi,
+            dx=dx, sensor_idx=sensor_idx,
+        )
+    return _STATIC
 
 
 class MockPoissonSineNode(AdaptiveNode):
@@ -59,6 +71,7 @@ class MockPoissonSineNode(AdaptiveNode):
     def __init__(self, theta_init: float = 0.42, **kw):
         super().__init__(N_max=N_BASIS, **kw)
         self._theta_init = float(theta_init)
+        _get_static()  # materialise basis arrays now (x64 already on)
 
     # ---- theta accessors ----
     def _get_theta(self, state):
@@ -70,9 +83,10 @@ class MockPoissonSineNode(AdaptiveNode):
     # ---- selection ----
     def _rhs_coeffs(self, theta) -> jax.Array:
         """Project the Gaussian source onto the sine basis."""
+        st = _get_static()
         theta_s = jnp.squeeze(theta)
-        f = jnp.exp(-((_X_GRID - theta_s) / SIGMA) ** 2)
-        return 2.0 * _DX * (_PHI.T @ f)
+        f = jnp.exp(-((st["x_grid"] - theta_s) / SIGMA) ** 2)
+        return 2.0 * st["dx"] * (st["phi"].T @ f)
 
     def compute_active_set(self, state, *, prev=None, is_cold_start=False):
         del prev, is_cold_start
@@ -84,32 +98,30 @@ class MockPoissonSineNode(AdaptiveNode):
 
     # ---- inner solve ----
     def solve_frozen(self, state, mask):
+        st = _get_static()
         theta = self._get_theta(state)
         b = self._rhs_coeffs(theta)
-        # A is diagonal in this basis -- no need to call
-        # ift_linear_solve here; the masked solve is c = b / lambda on
-        # the mask.  ift_linear_solve is exercised in M5 (TopK toy).
-        c = jnp.where(mask, b / _LAMBDAS, 0.0)
+        c = jnp.where(mask, b / st["lambdas"], 0.0)
         return {**state, "c": c, "mask": mask}
 
     # ---- sensor objective ----
     def _sensor(self, state) -> jax.Array:
+        st = _get_static()
         c = state["c"]
-        # u(x_sensor) = phi_sensor . c
-        return _PHI[_SENSOR_IDX] @ c
+        return st["phi"][st["sensor_idx"]] @ c
 
     # ---- full-basis gradient ----
     def compute_full_basis_gradient(self, state) -> jax.Array:
-        """∇_θ J_full: the gradient under no masking.
+        """∇_θ J_full: the gradient under no masking."""
+        st = _get_static()
+        sensor_idx = st["sensor_idx"]
+        lambdas = st["lambdas"]
+        phi = st["phi"]
 
-        For this 1D scalar-theta problem the gradient is a scalar
-        (returned as shape ``(1,)`` for consistency with multi-D
-        subclasses).
-        """
         def J_full(theta):
             b = self._rhs_coeffs(theta)
-            c = b / _LAMBDAS
-            return _PHI[_SENSOR_IDX] @ c
+            c = b / lambdas
+            return phi[sensor_idx] @ c
 
         return jax.grad(lambda t: jnp.squeeze(J_full(t)))(self._get_theta(state))
 
@@ -121,20 +133,16 @@ class MockPoissonSineNode(AdaptiveNode):
             "mask": jnp.zeros(N_BASIS, dtype=bool),
             "theta": theta,
         }
-        # Materialise a real state via one solve so blindness checks
-        # have a meaningful mask to read.
         mask = self.compute_active_set(state, prev=None, is_cold_start=True)
         return self.solve_frozen({**state, "mask": mask}, mask)
 
 
 def make_node(theta: float = 0.42, **kw) -> MockPoissonSineNode:
     """Convenience factory used by M3/M4 tests."""
-    node = MockPoissonSineNode(theta_init=theta, **kw)
-    return node
+    return MockPoissonSineNode(theta_init=theta, **kw)
 
 
 def state_at(theta: float, **kw) -> dict:
     """Build the ready-to-test state at the given theta."""
     node = make_node(theta=theta, **kw)
-    # Skip the cold-start blindness gate -- M3 tests want the raw state.
     return node._initial_state_impl()

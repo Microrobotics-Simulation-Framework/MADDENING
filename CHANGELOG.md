@@ -9,6 +9,71 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+### Added
+
+- **`maddening.core.solver_utils.ift_linear_solve`** — public,
+  `@stability(STABLE)`, thin wrapper over `lineax.linear_solve`.  Any
+  node solving a linear system in `update()` gains a clean
+  differentiable path; lineax's native autodiff propagates the
+  linear-solve adjoint, so no MADDENING-level `custom_vjp` is
+  installed.  The GMRES restart is clamped to `min(N, 50)` per the
+  silent-low-rank-adjoint guard from
+  `graph_manager._ift_solve_bwd:430-451`.  Backends: `'gmres'`
+  (default), `'cg'` (SPD), `'dense'` (small / triage).  Optional
+  `preconditioner` kwarg passes through to lineax's options dict
+  with the array portion `stop_gradient`'d (preconditioner is
+  gradient-irrelevant at convergence per the seven-round AdaptiveNode
+  spike).  Verified against
+  `jax.experimental.sparse.BCOO`-backed operators.
+- **`maddening.nodes.adaptive` subpackage** — basis-agnostic adaptive
+  PDE framework.
+  - `AdaptiveNode` (`@stability(STABLE)`) — base class extending
+    `SimulationNode`.  Provides the frozen-active-set adjoint
+    infrastructure (pad-to-max-DOF buffer + active mask in state),
+    the blindness diagnostic (full + cheap binary), the anisotropic
+    `symmetry_break` protocol, and the cold-start blindness gate in
+    `initial_state()`.  Configuration constants finalised per the
+    spike: `blindness_threshold = 0.7`,
+    `blindness_break_delta = 0.05`, `D_threshold = 5`.  The
+    Selection-Equivariance Theorem (extending Palais 1979 to
+    `J_frozen`) is stated in the module docstring with citations to
+    Chen-Ziyin 2023 for the anisotropic-perturbation requirement.
+  - `AdaptiveNodeBlindnessError` (`@stability(STABLE)`) — raised by
+    `initial_state` on a persistent Palais fixed point.
+  - `TopKAdaptiveNode` (`@stability(STABLE)`) — toy 1, 1D Poisson
+    on the sine eigenbasis, top-K selection on `|b|` or `|c|`.
+    Reproduces the round-4 wrong-sign boundary failure with
+    `selection_quantity='b'`; avoids it with the default
+    `selection_quantity='c'`.
+  - `HierarchicalHatAdaptiveNode` (`@stability(STABLE)`) — toy 2, 1D
+    Galerkin-projected Poisson on a dyadic hat basis with the
+    level-0 root always included.  Demonstrates the round-4
+    locality theorem (no wrong-sign failure at any tested
+    boundary-θ) and exercises the BCOO + lineax sparse-operator
+    path through `ift_linear_solve`.
+
+- **`docs/developer_guide/adaptive_node.md`** — public developer
+  guide covering when to subclass `AdaptiveNode`, the
+  Selection-Equivariance Theorem, the API surface, worked examples,
+  and common failure modes.
+
+### Verification
+
+- **AdaptiveNode framework** validated by 72 tests under
+  `tests/adaptive/` covering: the `ift_linear_solve` primitive
+  (correctness against dense, autodiff against FD, GMRES
+  restart-clamp regression guard, BCOO compatibility); the
+  `AdaptiveNode` abstract-method contract; the blindness diagnostic
+  against round-3 spike numerical signatures
+  (theta=0.42 ~ 0.857; theta=0.5 ~ 0; theta=0.48 ~ 0.171); the
+  cold-start blindness gate (pass-through, perturb-and-pass,
+  raise-on-persistent-trap); both toy subclasses end-to-end
+  including jax.grad-vs-FD adjoint correctness and (for the
+  hierarchical hat toy) the BCOO operator path.
+- Spike design source of truth:
+  `plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md` (seven rounds,
+  Selection-Equivariance Theorem in round 6).
+
 ## [0.3.0] - 2026-06-10
 
 v0.3.0 is the M2 "redesigns" milestone (STACK_V1 §3).  See

@@ -732,3 +732,95 @@ match can proceed at implementation time** (quantitative match needs higher
 resolution + longer integration than this feasibility run). One small note: the
 cavity ψ-solve needs ~22 outer iters at N/8 (vs the ≤20 elliptic guideline) —
 not a concern, but the implementation should not assume ≤20 universally.
+
+---
+
+## Investigation 4 — discontinuous coefficients (swimmer-body / Brinkman)
+
+**Harness:** `discontinuous_coeff.py`. Production MIME's immersed-boundary /
+Brinkman penalisation gives a jumping coefficient a(x); solutions are H¹ but
+with a gradient jump at the interface. Does CDD/Jacobi cope, and does Jacobi's
+auto-adaptation beat theory-DK?
+
+### Part A — 1D, −(a u')'=f, a=1+9·1_{x>0.5} (10× jump), f=sin(πx)
+
+| scaling | κ | CDD outer | % modes near x=0.5 | J_err @N/16 |
+|---------|---|-----------|--------------------|--------------|
+| DK 2^j | 54.7 | 6 | 0.64 | 8.3e-3 |
+| Besov 2^{j/2} | **948** | 6 | 0.64 | 8.3e-3 |
+| **Jacobi** | **13.1** | 6 | 0.64 | **5.6e-3** |
+
+Jacobi κ=13 ≪ DK 55 ≪ Besov 948 (Besov is wrong here — the kink solution is
+H¹, not a Besov regime). The jump raises Jacobi κ only 3.3× vs smooth-coeff
+(4.0→13.1). CDD concentrates **64% of active modes at the jump** and reaches
+J_err 0.56% at N/16.
+
+### Part B — 2D circular inclusion, a=1+99·1_{|x−xc|<r} (100× penalisation)
+
+Moving inclusion swept around a circle, CDD+Jacobi, Nside=32 (periodic, +mass):
+
+| θ | xc | CDD outer | % active @ boundary (N/8) | J_err @N/16 |
+|---|-----|-----------|---------------------------|--------------|
+| 0 | (0.70,0.50) | 7 | 47% | 3.6e-3 |
+| π/4 | (0.64,0.64) | 7 | 45% | 2.7e-3 |
+| π/2 | (0.50,0.70) | 7 | 47% | 3.6e-3 |
+| 3π/4 | (0.36,0.64) | 7 | 48% | 2.8e-3 |
+| π | (0.30,0.50) | 6 | 44% | 4.5e-3 |
+
+CDD+Jacobi **tracks the moving 100× inclusion** at every position: ~46% of
+active modes within 1.5h of the circle boundary, J_err 0.3–0.5% at N/16
+(≪5%), 6–7 outer iters.
+
+### Part C — recommendation
+
+**The discontinuous-coefficient case requires NO production design change
+beyond using Jacobi** (already the recommended default, Inv 1). Jacobi adapts
+to the coefficient field automatically (its diagonal includes the jump
+contribution), giving κ=13 where theory-DK gives 55 and Besov 948. CDD
+concentrates at the interface and tracks a moving inclusion with <0.5% J_err at
+N/16. **Add to the v1.1+ plan's preconditioner justification:** Jacobi's
+operator-adaptation is a *third* advantage over theory-DK (after order-agnostic
+t-adaptation and the hybrid storage saving) — it is coefficient-field-adaptive,
+which the constant-coefficient DK scaling is not. Besov scaling is confirmed
+unnecessary (and actively worse) for the elliptic swimmer-body case.
+
+---
+
+## Investigation 5 — submatrix conditioning in 2D and 3D
+
+**Harness:** `submatrix_2d3d.py`. Does cross-subband coupling blow up
+κ(A_ΛΛ) for active sets that include some subbands/levels but not others?
+Three configs at k=N/16: balanced (natural CDD), subband-biased (one subband),
+level-biased (finest level only).
+
+### Part A — 2D (Nside=32, N=1024, k=64)
+
+| config | full | hybrid | dk |  (ratio κ_AΛΛ / κ_full) |
+|--------|------|--------|-----|--------------------------|
+| balanced | 29.2 (0.77) | 29.2 (0.77) | 85.4 (0.77) | |
+| subband-biased | 26.9 (0.71) | 26.9 (0.71) | 67.7 (0.61) | |
+| level-biased | 26.3 (0.70) | 26.3 (0.70) | 66.3 (0.60) | |
+
+### Part B — 3D (Nside=16, N=4096, k=256)
+
+| config | full | hybrid | dk | (ratio) |
+|--------|------|--------|-----|---------|
+| balanced | 28.0 (0.18) | 28.0 (0.18) | 171.8 (0.36) | |
+| subband-biased | 10.5 (0.07) | 10.5 (0.07) | 74.6 (0.16) | |
+| level-biased | 10.2 (0.06) | 10.2 (0.06) | 73.5 (0.16) | |
+
+**κ(A_ΛΛ) ≤ κ(A_full) for EVERY config, in both 2D and 3D** — including the
+pathological subband-biased and level-biased sets. In 3D the submatrix is
+*dramatically* better (ratio 0.06–0.18). hybrid ≡ full again.
+
+### Part C — recommendation
+
+The 1D result generalises to 2D/3D, and there is a **theorem behind it**: for
+the symmetrically-scaled SPD operator `Â`, the frozen `A_ΛΛ` is a *principal
+submatrix*, so **Cauchy eigenvalue interlacing guarantees
+κ(A_ΛΛ) ≤ κ(Â) for any active set Λ.** The empirics (ratio ≤ 1 everywhere,
+≪1 in 3D) confirm it. **There are no pathological active-set configurations**;
+cross-subband coupling never degrades the inner solve below the full-operator
+conditioning. **No subband-completeness constraint on the active set is needed**
+— the inner `ift_linear_solve` is provably safe across all CDD outputs. (This
+holds for any SPD-preserving preconditioner; full/hybrid/DK all satisfy it.)

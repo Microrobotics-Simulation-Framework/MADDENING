@@ -966,3 +966,186 @@ the implementation should carry in:
 - Inner solve is **provably safe** across all active sets (Cauchy interlacing).
   (Inv 5)
 - JAX/BCOO engineering risk is **bounded**; 3–5 week estimate holds. (Inv 2)
+
+---
+
+# Closeout round (3 investigations) — 2026-06-22
+
+Closeout: 3D completeness, limitation probes, and a standalone
+`KNOWN_LIMITATIONS.md` + sharding design note. After this round the spike is
+**declared closed** regardless of outcome (see `## Spike closed` at end).
+Scripts: `closeout_3d.py`, `limitation_probes.py`.
+
+## Closeout Investigation 1 — 3D completeness battery
+
+**Harness:** `closeout_3d.py`. Isotropic Mallat DD-4, N=16³=4096, hybrid Jacobi.
+**BCs: PERIODIC** (flagged) — the isotropic 3D *Dirichlet* wavelet basis was not
+built in the spike (boundary-adapted 3D wavelets are disproportionate for a
+closeout); Dirichlet sensitivity is probed in 1D/2D in Investigation 2A.
+
+### Part A — CDD trajectory in 3D (the key missing validation)
+
+θ(t)=0.3+0.3sin(2πt/30), T=30, k=N/16=256, sensor (0.7,0.6,0.55):
+
+| σ | CDD mean / peak J_err | rolling | oracle | CDD total inner GMRES |
+|---|----------------------|---------|--------|-----------------------|
+| 0.10 | 1.33e-3 / 3.26e-3 | 1.09e-2 / 2.06e-2 | 1.72e-3 / 4.02e-3 | 10080 |
+| 0.02 | 1.06e-3 / 2.15e-3 | 2.44e-2 / 8.01e-2 | 1.17e-3 / 1.81e-3 | 16265 |
+
+**PASS.** CDD ≈ oracle, beats rolling ~8× (σ=0.10) to ~20× (σ=0.02). **The
+"near-sharp is easier" result holds in 3D** — σ=0.02 J_err (1.06e-3) < σ=0.10
+(1.33e-3). (More inner GMRES for σ=0.02 — finer modes per outer — but lower
+J_err.)
+
+### Part B — θ_D sensitivity in 3D (κ=158)
+
+Theory bound θ_D < κ^{-1/2} = 0.079. Mean/peak outer iters + J_err over the
+smooth trajectory:
+
+| θ_D | mean outer | peak outer | mean J_err |
+|-----|-----------|-----------|------------|
+| 0.08 | 244.6 | 248 | 8.6e-4 |
+| 0.10 | 204.1 | 220 | 8.6e-4 |
+| 0.30 | 47.2 | 53 | 9.2e-4 |
+| **0.50** | **16.6** | **18** | 9.0e-4 |
+| 0.70 | 7.2 | 8 | 6.3e-4 |
+
+**θ_D=0.5 converges in 16.6 outer iters in 3D (≤30 ✓), no 3D-specific caveat
+needed.** The theory bound θ_D<0.079 governs the *approximation-optimality*
+guarantee, NOT iteration count — empirically *small* θ_D is far *worse* for
+iteration count (245 iters at 0.08, tiny bulk per step) with identical J_err.
+θ_D=0.5 is fine; 0.7 is even faster with no accuracy loss. Recommend keeping
+θ_D=0.5 default; the "θ_D<κ^{-1/2}" line in the plan should be annotated as an
+optimality-theory bound, not an iteration-count requirement.
+
+### Part C — wrong-sign safety in 3D
+
+Source θ_x ∈ {0.05..0.95} (boundary-approaching in x), sensor (0.3,0.4,0.6):
+**zero wrong-sign solutions under CDD, top-|b|, OR top-|c| at any θ.** CDD safe
+everywhere (the production claim). Note top-|b| is *also* safe here (3D periodic,
+this source/sensor) whereas 1D-Dirichlet boundary showed top-|b| wrong-sign —
+the difference is BC/geometry; **CDD is the robust choice regardless of both.**
+
+### Part D — trajectory adjoint under lax.scan in 3D (JAX)
+
+5-step loop, CDD selection residual-seeded by c_prev, J=Σ_t u_t(sensor)². At
+**Richardson-classified smooth points**, grad vs FD median rel_err:
+
+| T | % points smooth | median rel_err @ smooth |
+|---|-----------------|--------------------------|
+| 1 | 60% | 2.4e-9 |
+| 3 | 24% | 7.7e-10 |
+| 5 | 16% | 2.0e-10 |
+
+**No T-degradation in adjoint accuracy** (≤1e-9 wherever smooth). Clarke probe:
+at a 2-mode mask flip, grad (8.61e-6) lies between one-sided FDs (8.61e-6,
+1.18e-4) — **correct Clarke subgradient, confirmed in 3D under lax.scan.**
+
+**New 3D observation (→ limitation):** the active set K=256 sits near many
+top-K ties, so kinks are *dense* along any trajectory — the fraction of smooth
+points drops 60%→16% as T grows. This does NOT affect gradient correctness
+(Clarke everywhere) but means (a) FD validation is harder in 3D, (b) optimisers
+see a piecewise-smooth objective with frequent small kinks; the autodiff Clarke
+subgradient is correct but kink-chattering may warrant mild smoothing if it
+impedes convergence. (The brief's exact trajectory 0.3+0.05t additionally ends
+at the full-symmetry kink (0.5,0.5,0.5) at T=5, where central-FD is invalid.)
+
+### Part E — discontinuous coefficient in 3D (moving sphere)
+
+Spherical inclusion a=1+99·1_{|x−xc|<0.15}, xc swept (0.35,0.35,0.35)→(0.65³):
+
+| xc | CDD outer | % active @ boundary | J_err |
+|----|-----------|---------------------|-------|
+| (0.35,0.35,0.35) | 13 | 49% | 1.5e-3 |
+| (0.50,0.50,0.50) | 14 | 49% | 1.2e-3 |
+| (0.65,0.65,0.65) | 13 | 49% | 1.5e-3 |
+
+**PASS.** ~49% of active modes at the sphere boundary (matches 2D's ~46%),
+J_err <0.2% at N/16, tracks the moving inclusion. CDD outer iters 12-14 vs 2D's
+6-7 — ~2× more due to the higher 3D κ (158 vs ~38), but well within ≤25.
+
+**Investigation 1 verdict: all spike conclusions extend to 3D.** CDD trajectory,
+θ_D=0.5, wrong-sign safety, trajectory adjoint, and discontinuous-coefficient
+tracking all hold. The only new 3D notes are dense adjoint kinks (Part D) and
+~2× more CDD iters from higher 3D κ (Parts B/E) — neither a blocker.
+
+---
+
+## Closeout Investigation 2 — limitation probes
+
+**Harness:** `limitation_probes.py`.
+
+### Part A — periodic vs Dirichlet BC sensitivity
+
+| | κ (hybrid Jacobi) | mean CDD outer | wrong-sign? |
+|---|-------------------|----------------|-------------|
+| 1D periodic | 20.4 | 11.5 | no |
+| 1D Dirichlet | **3.8** | 5.6 | no |
+| 2D periodic (isotropic Mallat) | 37.7 | 11.1 | no |
+| 2D Dirichlet (tensor basis) | 145.7 | 11.8 | no |
+
+**Dirichlet BCs do not break anything.** 1D Dirichlet is *better* conditioned
+(κ=3.8 — the +I mass + boundary removes the near-null constant mode periodic
+carries). 2D Dirichlet κ=146 is higher, but that is the **anisotropic tensor
+basis** used as a stand-in (no isotropic-Dirichlet Mallat basis was built) — per
+Correction C1 the tensor basis is less well-conditioned; an isotropic Dirichlet
+basis would recover ~38. Jacobi keeps even the tensor case workable (146). CDD
+iteration counts are comparable to periodic, and **wrong-sign safety holds under
+Dirichlet** in all cases. Mitigation: build a proper isotropic Dirichlet Mallat
+basis at implementation; not a blocker.
+
+### Part B — non-separable D_threshold
+
+Genuinely coupled sine-basis Poisson (λ couples axes), top-|b|, 20 trajectories:
+
+| D | mean blindness encounters | separable-model ref (Inv 6) |
+|---|---------------------------|------------------------------|
+| 2 | 0.30 | ~1.5 |
+| 3 | 0.10 | ~1.3 |
+
+**Non-separable coupling gives FEWER encounters (0.1–0.3), not more.** The
+separable model (Inv 6) *over-estimated* the trap rate: in a coupled problem the
+global blindness_ratio rarely drops below 0.7 because top-|b| selects more
+sensor-relevant modes when axes couple. So "monitor at D≥2" (Inv 6) is
+conservative-safe but the real coupled-PDE trap rate is low. Monitoring remains
+cheap insurance (~3 solves) but is rarely triggered. Moot for the trap-immune
+wavelet node; low-stakes for TopKAdaptiveNode.
+
+### Part C — complex source geometry (figure-eight source + crescent coeff)
+
+2D Ns=64, k=N/16=256: **CDD outer iters=14 (≤25 ✓), J_err(rel L2)=1.05e-3.**
+Active modes: 19% near the left lobe, 4% near the right lobe. The asymmetry is
+*correct adaptivity*, not a failure: the crescent coefficient jump (high-a on
+the left) drives the wavelet content (coefficient-jump boundary on the left),
+while the right lobe is a smooth bump needing few modes — and J_err stays 1e-3.
+CDD handles the combined source+coefficient structure accurately. (The naive
+"both lobes equally covered" check fails only because the coefficient field
+genuinely makes the two lobes need different mode counts.)
+
+### Part D — 3D BCOO footprint (16³ measured, 32³ extrapolated)
+
+| grid | nnz | % dense | nnz/row | BCOO mem |
+|------|-----|---------|---------|----------|
+| 16³=4096 (measured) | 1,020,272 | 6.1% | 249 | 16.3 MB |
+| 32³=32768 (extrapolated) | ~8.2e6 | — | ~249 | **~131 MB** |
+
+**The 32³ production BCOO operator is ~131 MB — fits comfortably on the 8 GB
+RTX A2000.** nnz/row grows with dimension (45 in 1D → 106 in 2D → 249 in 3D) but
+remains bounded. The round-6 ~120 KB estimate referred to *state* (c/mask
+vectors, 0.26 MB/vector at 32³), separate from the operator. Beyond ~64³
+(~1 GB operator) a matrix-free matvec (apply W, A_phys, Wᵀ in sequence without
+materialising A_wave) would be preferable; flagged for very large grids.
+
+### Part E — CDD outer-iteration distribution
+
+102 runs (1D+2D, σ∈{0.02,0.05,0.10}, θ swept): **p50=12, p90=12, p99=15,
+max=19. Zero runs >40.** Worst cases are all σ=0.02 (sharpest source), peaking at
+θ=0.5 (mid-domain, not boundary). The ≤20 guideline holds at p99. 3D shifts the
+mean up ~30% (Part B θ_D=0.5 → 16.6; Part E discontinuous → 12–14). **Recommend
+MAX_OUTER=30** — covers the 1D/2D max (19) and 3D mean (~17) with margin; no
+pathological tail observed.
+
+**Investigation 2 verdict:** no probe surfaced a blocker. Dirichlet is fine
+(build isotropic-Dirichlet basis in impl); non-separable traps are rarer than
+modelled; complex geometry converges; 32³ BCOO fits memory; iteration counts are
+tightly bounded (MAX_OUTER=30).

@@ -677,3 +677,58 @@ predict). **The 3–5 week BCOO sparse-tree implementation estimate is
 confirmed**; the only newly-surfaced engineering note is to choose GMRES
 restart/tolerance deliberately (full GMRES for tight adjoint accuracy) and to
 hand-vectorise the multi-D predict rather than rely on `apply_along_axis`.
+
+---
+
+## Investigation 3 — CDD feasibility on a nonlinear residual
+
+**Harness:** `nonlinear_cdd.py`. Does CDD's residual criterion (validated only
+on linear elliptic problems) survive a nonlinear convective term?
+
+### Part A — 1D viscous Burgers (ν=0.01), CDD on the nonlinear residual
+
+Implicit-Euler + Newton, DD-4 N=256 periodic, IC sin(2πx) (the periodic
+shock-forming analogue of the brief's non-periodic sin(πx)). At each step CDD
+selects active wavelet modes from the **full nonlinear residual** (Jacobi-
+scaled), compared to the oracle (top-|c| of the converged solution).
+
+| t | max\|u_x\| | Newton | CDD outer | \|Λ\| | oracle∩ | %near shock | J_err |
+|---|-----------|--------|-----------|------|---------|-------------|-------|
+| 0.004 | 6.4 | 3 | 11 | 32 | 0.94 | 0.22 | 4e-7 |
+| 0.064 | 9.9 | 3 | 12 | 32 | 0.81 | 0.38 | 8e-7 |
+| 0.112 | 15.4 | 3 | 12 | 33 | 0.84 | 0.52 | 1.4e-6 |
+| 0.160 | 24.3 | 3 | 11 | 32 | 0.72 | 0.47 | 1.3e-6 |
+
+As the shock steepens (max\|u_x\| 6→24), **the fraction of active modes near the
+shock rises 0.22→~0.5** — CDD adaptively concentrates DOF at the steep
+gradient. Newton converges in 3 iters; CDD in ≤13 outer iters/step (≤20 ✓);
+\|Λ\| stays at the N/8 budget; oracle overlap 72–94%; functional J_err ~1e-6.
+**The nonlinear convective term does not break CDD's residual criterion.**
+
+### Part B — 2D stream-function/vorticity cavity, Re=100 (feasibility)
+
+ψ-ω formulation (Poisson ψ-solve ∇²ψ=-ω each step; the brief's "∆²ψ" reads as
+the Laplacian — the §5 biharmonic is the pure-ψ alternative). Physical-space FD
+transport on 47², 3000 steps to t=12 (near-steady), then CDD tested on the
+ψ-Poisson solve in the DD-4 wavelet basis (Jacobi).
+
+- **Qualitative flow:** primary vortex ψ_min=-0.072 in the upper-central region
+  (x≈0.50, y≈0.85; Ghia Re=100 reference (0.62, 0.74) — shifted toward the lid,
+  consistent with t=12 transient at 47²; *qualitative not quantitative*, as the
+  brief scopes). Counter-rotating bottom-corner vortices **visible** (opposite
+  sign to the primary).
+- **CDD on the ψ-solve:** k=N/16 (138/2209) → 15 outer iters, rel L2 err
+  **1.3e-3**; k=N/8 → 22 outer, **1.6e-4** — both ≪ 5%. **55–59% of active
+  modes concentrate near the lid/walls** where ψ has its fine structure.
+
+### Part C — recommendation
+
+**CDD on nonlinear problems is viable.** Burgers (Part A) shows the residual
+criterion correctly tracks a forming shock; the cavity (Part B) shows it
+concentrates near the lid/corner boundary layers and gives a qualitatively
+correct flow at N/16 with rel err 1.3e-3 and ≤22 outer iters. No new failure
+mode. **The nonlinear-cavity benchmark risk is resolved; the Ghia accuracy
+match can proceed at implementation time** (quantitative match needs higher
+resolution + longer integration than this feasibility run). One small note: the
+cavity ψ-solve needs ~22 outer iters at N/8 (vs the ≤20 elliptic guideline) —
+not a concern, but the implementation should not assume ≤20 universally.

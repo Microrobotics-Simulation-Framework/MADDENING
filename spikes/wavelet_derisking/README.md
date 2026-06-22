@@ -23,6 +23,15 @@ trap machinery is non-local-basis insurance).
 | `g3_biharmonic.py` | §5 — stream-function biharmonic preconditioning (t=2). |
 | `g3_trajectory.py` | §6 — trajectory adjoint through `lax.scan` (JAX, float64). |
 | `g4_improvements.py` | post-gate — submatrix conditioning + cheap-diagonal verification. |
+| `hybrid_jacobi.py` | Inv 1 — hybrid vs full/level/DK preconditioners (Parts A–C). `argv`: A1/A2/B1/B2/all, `--big` for N=16384. |
+| `dd_jax_poc.py` | Inv 2 — DD-4 in JAX: transform, BCOO+lineax autodiff, 2D Mallat (JAX, float64). |
+| `nonlinear_cdd.py` | Inv 3 — CDD on nonlinear residual: Burgers (A) + stream-function cavity (B). |
+| `discontinuous_coeff.py` | Inv 4 — discontinuous-coefficient (Brinkman) 1D jump (A) + 2D moving inclusion (B). |
+| `submatrix_2d3d.py` | Inv 5 — submatrix conditioning across active-set configs in 2D/3D. |
+| `dthreshold_empirical.py` | Inv 6 — D_threshold=5 empirical trap-rate validation. |
+
+The 6-investigation continuation series (2026-06-22) is complete; all resolved.
+See `FINDINGS.md` "Continuation series" + "Cross-cutting statement".
 
 ## Running
 

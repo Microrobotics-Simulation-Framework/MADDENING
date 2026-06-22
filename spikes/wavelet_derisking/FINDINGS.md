@@ -28,6 +28,20 @@ sign patterns). JAX is reserved for the trajectory-adjoint test (§6).
 
 **ALL FOUR GATES POSITIVE → derisking criterion met (see Executive Summary).**
 
+### Continuation series (6 follow-up investigations, 2026-06-22)
+
+| # | Investigation | Status | Verdict |
+|---|---------------|--------|---------|
+| 1 | Level-Jacobi hybrid preconditioner | **done** | hybrid ≡ full Jacobi at O(log N) cost → new default |
+| 2 | DD-4 operator in JAX (BCOO PoC) | **done** | no show-stoppers; 3–5 wk estimate confirmed |
+| 3 | CDD on nonlinear residual (Burgers + cavity) | **done** | PASS — CDD survives nonlinearity |
+| 4 | Discontinuous coefficients (Brinkman) | **done** | PASS — Jacobi adapts automatically, no design change |
+| 5 | Submatrix conditioning 2D/3D | **done** | PASS — κ(A_ΛΛ)≤κ_full by Cauchy interlacing |
+| 6 | D_threshold=5 empirical | **done** | NOT confirmed → lower to D≥2 (TopK node only) |
+
+**All resolved → spike series complete; WaveletAdaptiveNode implementation can
+begin (see Cross-cutting statement at end).**
+
 ---
 
 ## Executive Summary
@@ -824,3 +838,131 @@ cross-subband coupling never degrades the inner solve below the full-operator
 conditioning. **No subband-completeness constraint on the active set is needed**
 — the inner `ift_linear_solve` is provably safe across all CDD outputs. (This
 holds for any SPD-preserving preconditioner; full/hybrid/DK all satisfy it.)
+
+---
+
+## Investigation 6 — D_threshold = 5 empirical validation
+
+**Harness:** `dthreshold_empirical.py`. (Affects only the NON-wavelet
+`TopKAdaptiveNode` — the wavelet basis is trap-immune, Gate 2.) Separable D-dim
+sine-Poisson model, J=Σ_i J_1d(θ_i), exact per-axis 1D full/frozen (top-|b|)
+gradients, sensor at x=1/3. 20 trajectories, lr=0.04, 100 steps. Trap encounter
+= ≥5 consecutive steps with global blindness_ratio < 0.7.
+
+### Part A — encounters vs D
+
+| D | global enc | 0.2·D | enc/(0.2D) | per-axis blind/step |
+|---|-----------|-------|------------|---------------------|
+| 2 | 1.55 | 0.4 | 3.87 | 1.19 |
+| 3 | 1.30 | 0.6 | 2.17 | 1.67 |
+| 5 | 1.10 | 1.0 | 1.10 | 3.46 |
+| 7 | 1.50 | 1.4 | 1.07 | 4.79 |
+| 10 | 1.15 | 2.0 | 0.57 | 7.05 |
+| 15 | 1.45 | 3.0 | 0.48 | 9.91 |
+| 20 | 1.50 | 4.0 | 0.37 | 13.09 |
+
+**The analytic 0.2·D estimate does not match the metric the base class uses.**
+*Per-axis* blind events scale ~linearly with D (1.2→13.1, slope ≈0.65) — that
+is what 0.2·D was implicitly modelling. But the **global** `blindness_ratio`
+(a normalised norm ratio, which is what the diagnostic computes) trips at a
+**roughly D-independent rate ~1.1–1.5/trajectory**, because one blind axis
+among many sighted ones doesn't pull the global ratio below 0.7. The 0.2·D
+curve only crosses the empirical near D=5 by coincidence.
+
+### Part B — monitoring cost vs missed-trap cost
+
+| D | E[enc] | monitor (3·enc) | no-monitor (50·enc) | favours |
+|---|--------|-----------------|---------------------|---------|
+| 2 | 1.55 | 4.7 | 77.5 | **monitor** |
+| 5 | 1.10 | 3.3 | 55.0 | **monitor** |
+| 10 | 1.15 | 3.4 | 57.5 | **monitor** |
+| 20 | 1.50 | 4.5 | 75.0 | **monitor** |
+
+Monitoring is ~15× cheaper than eating the traps **at every D**, because
+encounters occur at all D (including D=2) and each undetected trap wastes ~50
+steps vs 3 to detect+break.
+
+### Part C — recommendation
+
+**D_threshold = 5 is NOT empirically confirmed.** Global-ratio trap encounters
+are D-independent (~1–1.5/trajectory) and occur well below D=5 (D=2: 1.55), so
+the threshold leaves D∈{2,3,4} needlessly unmonitored where traps still happen.
+Monitoring is cost-favourable (~15×) at every tested D. **Recommendation:
+lower the threshold — monitor whenever D≥2 (effectively always-on for any
+multi-parameter non-local node)** rather than gating at D>5. Update the
+base-class doc: replace the `E[traps]≈0.2·D` justification with "global
+blindness_ratio trips at a ~D-independent rate; monitoring is ~15× cheaper than
+the traps it catches at all D≥2." (Caveat: separable model, fixed lr/steps;
+absolute counts scale with trajectory length, but the D-independence of the
+global metric and the cost asymmetry are robust.) Again, moot for
+`WaveletAdaptiveNode` (trap-immune); relevant only if a spectral
+`TopKAdaptiveNode` is built for multi-parameter problems.
+
+---
+
+# Cross-cutting statement — continuation series
+
+Addressing the six questions from the continuation brief:
+
+1. **Is the production preconditioner hierarchy settled?** **YES.** Default =
+   **hybrid** (per-entry coarse + level-mean fine): it equals full-Jacobi κ to
+   4 sig figs at every N in 1D/2D (and the 1D result is flat in N), at
+   O(N_coarse+log N) assembly/storage. Order: hybrid (default) → full Jacobi
+   (equivalent when an analytic diagonal is free and storage is no issue) → DK
+   `2^{tj}` (matrix-free fallback, ~2.4× κ, ~20% more iters) → pure
+   level-Jacobi (dominated, not recommended). Hybrid is never slower than full
+   and wins decisively in the probed-diagonal / matrix-free / frequent-reassembly
+   regime and on storage. The plan's "κ<6" hybrid threshold was mis-calibrated.
+
+2. **Does DD-4 in JAX surface show-stoppers?** **NO.** Transform matches numpy
+   to 1e-16 and JIT-compiles (1D and 2D Mallat); BCOO+lineax autodiff reaches
+   the round-6 1e-9 standard with full GMRES; masked-matvec closure works. The
+   **3–5 week BCOO implementation estimate is confirmed**; only engineering
+   notes are deliberate GMRES restart/tolerance choice and hand-vectorising the
+   multi-D predict.
+
+3. **Is the nonlinear cavity benchmark viable?** **YES.** CDD's residual
+   criterion survives the nonlinear convective term: on Burgers it tracks a
+   forming shock (near-shock active fraction rises with steepening, ≤13 outer
+   iters/Newton step, 72–94% oracle overlap); on the Re=100 cavity it
+   concentrates at the lid/corner layers, rel err 1.3e-3 at N/16, qualitatively
+   correct vortex structure. Ghia quantitative match → implementation phase.
+
+4. **Does the discontinuous-coefficient case need design changes?** **NO** —
+   beyond using Jacobi (already the default). Jacobi adapts to the coefficient
+   field automatically (κ=13 vs DK 55 vs Besov 948 for a 10× 1D jump); CDD
+   concentrates at the interface and tracks a moving 100× 2D inclusion with
+   <0.5% J_err at N/16. This is a *third* Jacobi advantage over theory-DK.
+
+5. **Is submatrix conditioning confirmed in 2D/3D?** **YES**, with a theorem.
+   κ(A_ΛΛ) ≤ κ(A_full) for *every* active-set config (balanced, subband-biased,
+   level-biased) in 2D and 3D, because the scaled operator is SPD and A_ΛΛ is a
+   principal submatrix → **Cauchy interlacing**. No pathological configs; no
+   subband-completeness constraint needed; the inner solve is provably safe.
+
+6. **Is D_threshold = 5 empirically confirmed?** **NO.** The global
+   `blindness_ratio` trips at a ~D-independent rate (~1–1.5/trajectory),
+   occurring even at D=2 — the `0.2·D` estimate was implicitly a per-axis count
+   (per-axis blind *does* scale ~0.65·D). Monitoring is ~15× cheaper than the
+   traps at all D. **Lower the threshold to monitor whenever D≥2** (always-on
+   for multi-parameter non-local nodes). Affects only `TopKAdaptiveNode`; moot
+   for the trap-immune `WaveletAdaptiveNode`.
+
+## Conclusion
+
+**Five of six are clean positives; the sixth (D_threshold) is a resolved
+base-class default tweak for the non-wavelet node, not a blocker.** Combined
+with the original four gates, **the wavelet derisking spike series is complete
+and `WaveletAdaptiveNode` implementation can begin.** Consolidated plan edits
+the implementation should carry in:
+
+- Preconditioner: **hybrid Jacobi default** (isotropic Mallat basis,
+  single-level scaling); DK `2^{tj}` matrix-free opt-in. (Inv 1 + C1)
+- Wrong-sign safety stated via **coarse-inclusion**, not pure locality. (§3)
+- Trap mitigation is **non-local-basis insurance**; for the wavelet node it is
+  near-inert. For `TopKAdaptiveNode`, **monitor at D≥2**, not D>5. (Gate 2 + Inv 6)
+- Discontinuous coefficients and the nonlinear cavity need **no new design** —
+  Jacobi + CDD handle both. (Inv 3, Inv 4)
+- Inner solve is **provably safe** across all active sets (Cauchy interlacing).
+  (Inv 5)
+- JAX/BCOO engineering risk is **bounded**; 3–5 week estimate holds. (Inv 2)

@@ -468,3 +468,63 @@ path: the trajectory adjoint is the exact sum of per-step frozen-set adjoints.
 (Tested at non-kink θ, per the plan's scope; at a mask-flip kink the FD/grad
 relationship is the expected Clarke-subgradient one, already characterised in
 round-7 for the single step.)
+
+---
+
+## Post-gate improvements / clever-workaround exploration
+
+**Harness:** `g4_improvements.py`. After the gates closed, two design-relevant
+questions the plan did not pose.
+
+### (1) Submatrix conditioning — the inner-solve de-risk (NEW)
+
+The gates measured *full-operator* κ, but CDD only ever inverts the frozen
+K×K submatrix `A_{Λ,Λ}` (via `ift_linear_solve`). Does it stay conditioned as
+Λ adapts? 1D DD-4 Dirichlet (full-op κ: DK 11.3, Jacobi 3.8):
+
+| K | κ(A_ΛΛ) DK | κ(A_ΛΛ) Jacobi | κ(A_ΛΛ) unscaled |
+|---|------------|----------------|------------------|
+| N/16 | 10.0 | 3.3 | 4.8e2 |
+| N/8 | 10.6 | 3.4 | 1.8e3 |
+| N/4 | 10.9 | 3.5 | 5.8e3 |
+| N/2 | 11.2 | 3.7 | 5.9e3 |
+
+**The frozen submatrix is as well-conditioned as the full operator** under
+DK/Jacobi (diagonal scaling restricts cleanly to the submatrix), and bounded
+as Λ grows. Unscaled it blows up. **De-risks the inner GMRES/CG: it won't
+degrade as the active set adapts** — a property the plan assumed but never
+checked.
+
+### (2) The "cheap diagonal" claim (Hyp C) — confirmed
+
+Jacobi is the best preconditioner but needs `diag(A_wave)`. Per-level
+statistics of the exact diagonal:
+
+| level | mean diag | std/mean | ratio to 2^{2j} |
+|-------|-----------|----------|-----------------|
+| 0 (coarse) | 7.2e1 | 0.517 | 1.00 |
+| 1 | 4.0e2 | 0.008 | 1.40 |
+| 2 | 1.6e3 | 0.006 | 1.39 |
+| 3 | 6.2e3 | 0.005 | 1.35 |
+| 4 | 2.3e4 | 0.006 | 1.26 |
+| 5 (fine) | 7.4e4 | 0.000 | 1.00 |
+
+The diagonal is **level-constant to ~0.6% on interior levels** — but the
+ratio to `2^{2j}` is *not* constant (1.0–1.4), which is exactly why full
+Jacobi (κ 3.8) beats DK `2^j` (11.3). The remaining benefit comes from the
+**coarse level and boundary entries** (std/mean 0.5 at level 0), which need
+per-entry scaling. For a banded FD operator the full diagonal is
+O(N)-computable from compact wavelet supports (no N matvecs), so **Hyp C's
+cheap-diagonal claim holds and full Jacobi is affordable.**
+
+### (3) Cheap level-constant Jacobi as a middle ground
+
+`level-Jacobi` (one √mean-diagonal per level, O(#levels)) gives κ 9.4 vs DK
+11.3 vs full Jacobi 3.8. Marginal over DK — the coarse/boundary per-entry
+variation is what matters, so it is not worth the half-measure: either use DK
+`2^{tj}` (matrix-free) or full Jacobi (O(N), best). No useful middle ground.
+
+**Production recommendation (refined):** default to **full algebraic Jacobi**
+(O(N) to assemble, best κ, order-agnostic, submatrix-stable); expose DK
+`2^{tj}` as a matrix-free opt-in for the very largest problems where even
+O(N) diagonal assembly is undesirable.

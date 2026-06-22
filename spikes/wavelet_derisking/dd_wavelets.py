@@ -361,6 +361,89 @@ def synthesis_matrix_2d_isotropic(n_levels: int, n_coarse: int = 2, order: int =
 
 
 # ----------------------------------------------------------------------
+# Isotropic 3D interpolating-wavelet synthesis (periodic).
+# 7 detail subbands per level (all L/H parities except LLL), all level j.
+# ----------------------------------------------------------------------
+
+def _midpoints_along(arr: np.ndarray, axis: int, order: int) -> np.ndarray:
+    """Vectorised periodic midpoint prediction along one axis (np.roll)."""
+    offsets, weights = dd_filter(order)
+    out = np.zeros_like(arr)
+    for off, w in zip(offsets, weights):
+        out += w * np.roll(arr, -off, axis=axis)
+    return out
+
+
+def _refine3d_periodic(coarse: np.ndarray, order: int):
+    """Return dict parity->predicted block (each s x s x s) for the 8
+    parities of a 2s cube. Caller adds details to the 7 non-(0,0,0)."""
+    blocks = {}
+    for px in (0, 1):
+        for py in (0, 1):
+            for pz in (0, 1):
+                cur = coarse
+                if px:
+                    cur = _midpoints_along(cur, 0, order)
+                if py:
+                    cur = _midpoints_along(cur, 1, order)
+                if pz:
+                    cur = _midpoints_along(cur, 2, order)
+                blocks[(px, py, pz)] = cur
+    return blocks
+
+
+_PARITIES7 = [(0, 0, 1), (0, 1, 0), (0, 1, 1),
+              (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]
+
+
+def synthesis_matrix_3d_isotropic(n_levels: int, n_coarse: int = 1, order: int = 4):
+    """Isotropic 3D periodic DD synthesis matrix and level labels.
+
+    N_side = n_coarse * 2^n_levels; returns W3 ((N^3, N^3)), levels (N^3,),
+    N_side. Memory: for N_side=16, W3 is 4096x4096 (~134 MB) -- OK.
+    """
+    Nside = n_coarse * (2 ** n_levels)
+    M = Nside ** 3
+
+    # level labels in Mallat layout: coarse cube then 7 detail cubes per level
+    levels = []
+    levels.extend([0] * (n_coarse ** 3))
+    cur = n_coarse
+    for lvl in range(n_levels):
+        for _ in _PARITIES7:
+            levels.extend([lvl] * (cur ** 3))
+        cur *= 2
+    levels = np.array(levels, dtype=int)
+    assert levels.shape[0] == M, (levels.shape[0], M)
+
+    def synth3d(flat: np.ndarray) -> np.ndarray:
+        idx = 0
+        sz = n_coarse
+        img = flat[idx: idx + sz ** 3].reshape(sz, sz, sz).astype(float).copy()
+        idx += sz ** 3
+        cur = n_coarse
+        for lvl in range(n_levels):
+            blocks = _refine3d_periodic(img, order)
+            fine = np.zeros((2 * cur, 2 * cur, 2 * cur))
+            fine[0::2, 0::2, 0::2] = blocks[(0, 0, 0)]
+            for (px, py, pz) in _PARITIES7:
+                d = flat[idx: idx + cur ** 3].reshape(cur, cur, cur)
+                idx += cur ** 3
+                fine[px::2, py::2, pz::2] = blocks[(px, py, pz)] + d
+            img = fine
+            cur *= 2
+        return img.reshape(-1)
+
+    W3 = np.zeros((M, M), dtype=float)
+    e = np.zeros(M, dtype=float)
+    for j in range(M):
+        e[:] = 0.0
+        e[j] = 1.0
+        W3[:, j] = synth3d(e)
+    return W3, levels, Nside
+
+
+# ----------------------------------------------------------------------
 # Physical-space operators.
 # ----------------------------------------------------------------------
 

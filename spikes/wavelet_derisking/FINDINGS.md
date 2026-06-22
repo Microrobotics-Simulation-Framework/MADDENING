@@ -250,3 +250,44 @@ which are out of scope for the standard formulation and untested here.
 
 **Gate 1 is fully resolved: §2 (Hyp A) PASS + §3 (wrong-sign, qualified) PASS.**
 Proceed to Gate 2 (§4, 3D) and Gate 3 (§5, §6).
+
+---
+
+## §5 — Stream-function (biharmonic) preconditioning (Gate 3, part 1)
+
+**Harness:** `g3_biharmonic.py`. The plan's Option-1 recasts the 2D cavity as a
+scalar biharmonic Δ²ψ=−ω (H²-elliptic, t=2). The derisking-relevant question
+is the conditioning claim; the full Ghia–Ghia–Shin **Navier-Stokes** cavity
+match is a multi-week nonlinear solve, explicitly **deferred to implementation
+phase** (consistent with the plan §8 philosophy). 1D periodic biharmonic
+bilinear form ∫(u″)²+u².
+
+Scaled κ:
+
+| basis | scaling | N=16 | N=256 | trend |
+|-------|---------|------|-------|-------|
+| DD-2 | t=2 (2^{2j}) | 8.4e3 | 1.5e5 | **∝ N — FAILS** |
+| DD-4 | t=1 (2^j) | 2.4e4 | 6.0e6 | ∝ N — wrong t |
+| DD-4 | **t=2 (2^{2j})** | 5.1e3 | 8.6e3 | O(1), const ~8.6e3 |
+| DD-4 | **jacobi** | 8.9e2 | 1.2e3 | **flat O(1), best** |
+| DD-6 | jacobi | 7.5e2 | 7.9e2 | flattest ~780 |
+
+**Findings:**
+- **DD-2 fails** the biharmonic (t=2 κ ∝ N) — confirms H² requires
+  approximation order ≥ 4 (piecewise-linear's 2nd derivative is deltas).
+  Biharmonic ⇒ DD-4 minimum.
+- **t=2 DK works** but with a high constant (~8.6e3), which would force the
+  CDD bulk θ_D < κ^{-1/2} ≈ 0.011 — uncomfortably tight.
+- **Algebraic Jacobi is 7× better** (~1.1e3 DD-4, ~780 DD-6) and flat. It
+  auto-adapts to the operator's elliptic order without the order being
+  hard-coded.
+
+**Cross-cutting conclusion (reinforces C1):** algebraic Jacobi is the single
+most robust preconditioner across *both* the Laplacian (t=1) and the
+biharmonic (t=2), in 1D/2D/3D. Recommend it as the production default, with
+theory-derived `2^{tj}` exposed as an opt-in.
+
+**§5 verdict:** the stream-function formulation is **viable from a
+conditioning standpoint** (Jacobi-preconditioned biharmonic is well-behaved).
+The nonlinear-cavity Ghia accuracy match is scoped to implementation. Gate 3
+§5 **PASS** on the derisking-relevant question.

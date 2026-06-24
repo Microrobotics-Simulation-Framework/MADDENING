@@ -35,10 +35,12 @@ from maddening.nodes.adaptive.base import (
 )
 from maddening.nodes.adaptive.hierarchical_hat import HierarchicalHatAdaptiveNode
 from maddening.nodes.adaptive.topk import TopKAdaptiveNode
+from maddening.nodes.adaptive.wavelet import WaveletAdaptiveNode
 
 __all__ = [
     "AdaptiveNode",
     "AdaptiveNodeBlindnessError",
     "HierarchicalHatAdaptiveNode",
     "TopKAdaptiveNode",
+    "WaveletAdaptiveNode",
 ]

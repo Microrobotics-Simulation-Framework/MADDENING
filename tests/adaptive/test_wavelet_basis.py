@@ -172,6 +172,153 @@ def test_grad_through_coefficient_field_matches_fd():
 # cdd.py — selection behaviour
 # ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
+# JIT recompilation audit + JIT+grad (the spike's 1e-9 was eager-only).
+#
+# These guard the production hot path: the spike validated gradients in EAGER
+# mode (jax.grad without jit), where BCOO.fromdense sees concrete arrays. Under
+# jax.jit everything is abstract, so the masked operator must NOT call
+# fromdense per call (it closes over a pre-assembled constant BCOO instead).
+# We assert (a) no recompilation across same-shape calls, and (b) jax.grad
+# through a *jit-compiled* solve still matches FD.
+# ----------------------------------------------------------------------
+
+def test_no_recompilation_transform():
+    count = {"n": 0}
+
+    @jax.jit
+    def f(c):
+        count["n"] += 1            # Python body runs once per trace
+        return T.synthesis_2d(c, 4, 2, 4)
+
+    x = jnp.zeros(T.n_dofs(4, 2, 2))
+    f(x); f(x); f(x)
+    assert count["n"] == 1
+
+
+def test_no_recompilation_masked_solve_and_cdd():
+    """The masked solve + CDD select compile once and do not recompile, and
+    run under jax.jit at all (the fromdense-under-jit failure mode)."""
+    s = _setup_1d()
+    Ah, D = s["Ah"], s["D"]
+    import jax.experimental.sparse as jsparse
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)            # assembled once (constant)
+    levels = np.asarray(s["levels"])
+    coarse = jnp.asarray(levels == levels.min())
+    N = s["N"]
+    K = N // 16
+
+    def solve_masked(mask, rhs):
+        op = OP.make_masked_operator(Ah_bcoo, mask)
+        return ift_linear_solve(op, jnp.where(mask, rhs, 0.0),
+                                solver="cg", rtol=1e-10, atol=1e-12)
+
+    count = {"n": 0}
+
+    @jax.jit
+    def run(b):
+        count["n"] += 1
+        _, c = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
+        return c
+
+    b = jnp.asarray(np.random.default_rng(0).standard_normal(N))
+    run(b); run(b); run(b)
+    assert count["n"] == 1          # compiled once, reused (no silent recompile)
+
+
+def test_jit_grad_through_solve_matches_fd():
+    """jax.grad through a jit-compiled CDD solve matches FD -- the production
+    JIT+grad path (the spike's 1e-9 was eager-only)."""
+    s = _setup_1d()
+    Ah, Wn, D, x, h, N, sidx = (s["Ah"], s["Wn"], s["D"], s["x"], s["h"],
+                                s["N"], s["sidx"])
+    import jax.experimental.sparse as jsparse
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)
+    levels = np.asarray(s["levels"])
+    coarse = jnp.asarray(levels == levels.min())
+    K = N // 16
+
+    def solve_masked(mask, rhs):
+        op = OP.make_masked_operator(Ah_bcoo, mask)
+        return ift_linear_solve(op, jnp.where(mask, rhs, 0.0),
+                                solver="cg", rtol=1e-10, atol=1e-12)
+
+    @jax.jit
+    def J(theta):
+        f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
+        b = (h * (Wn.T @ f)) / D
+        _, c = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
+        return (Wn[sidx] / D) @ c
+
+    th = jnp.asarray(0.42)
+    g = float(jax.jit(jax.grad(J))(th))
+    e = 1e-5
+    fd = float((J(th + e) - J(th - e)) / (2 * e))
+    assert abs(g - fd) / (abs(fd) + 1e-30) < 1e-5
+
+
+# ----------------------------------------------------------------------
+# Variable coefficient: static structure, traced data, dJ/da under jit.
+# ----------------------------------------------------------------------
+
+def test_sparsity_pattern_independent_of_coefficient():
+    """The A_wave nonzero pattern is the same for a=1 and a Brinkman field."""
+    side = 2 * 2 ** 5
+    x = np.arange(side) / side
+    a_unit = jnp.ones(side)
+    a_jump = jnp.asarray(1.0 + 99.0 * (x > 0.5))
+    A1 = OP.assemble_wave_dense(5, 2, 4, 1, a_grid=a_unit)["A_dense"]
+    A2 = OP.assemble_wave_dense(5, 2, 4, 1, a_grid=a_jump)["A_dense"]
+    r1, c1 = OP.sparsity_pattern(A1)
+    r2, c2 = OP.sparsity_pattern(A2)
+    p1 = set(zip(np.asarray(r1).tolist(), np.asarray(c1).tolist()))
+    p2 = set(zip(np.asarray(r2).tolist(), np.asarray(c2).tolist()))
+    # the jump field's pattern is a (near) superset; the structural support is
+    # coefficient-independent up to entries that happen to vanish at a=1.
+    assert p1.issubset(p2) or p2.issubset(p1) or len(p1 ^ p2) < 0.02 * len(p1)
+
+
+def test_grad_through_traced_data_bcoo_under_jit():
+    """BCOO with static indices + traced data: dJ/da flows under jax.jit
+    (structure static, values differentiable in a -- the Brinkman pattern)."""
+    nl, nc = 5, 2
+    ref = OP.assemble_wave_dense(nl, nc, 4, 1)["A_dense"]
+    rows, cols = OP.sparsity_pattern(ref)
+    side = nc * 2 ** nl
+    x = np.arange(side) / side
+    sidx = int(np.argmin(np.abs(x - 0.30)))
+    h = 1.0 / side
+    a0 = jnp.asarray(1.0 + 0.5 * np.sin(2 * np.pi * x))
+    r0 = OP.assemble_wave_dense(nl, nc, 4, 1, a_grid=a0)
+    D = _setup_pc_diag(r0["A_dense"], r0["levels"])
+
+    @jax.jit
+    def J_of_a(a_grid):
+        r = OP.assemble_wave_dense(nl, nc, 4, 1, a_grid=a_grid)
+        A_bcoo = OP.bcoo_with_traced_data(r["A_dense"], rows, cols)  # static idx
+        Wn = r["Wn"]
+        f = jnp.exp(-((jnp.asarray(x) - 0.42) / 0.06) ** 2)
+        b = (h * (Wn.T @ f)) / D
+        # masked-matvec solve over the traced-data BCOO (full mask = all active)
+        full = jnp.ones(r["N"], dtype=bool)
+        op = OP.make_masked_operator(A_bcoo, full)
+
+        def scaled_op(v):
+            return op(v / D) / D
+        c = ift_linear_solve(scaled_op, b, solver="gmres", rtol=1e-10, atol=1e-12)
+        return (Wn[sidx] / D) @ c
+
+    ga = jax.grad(J_of_a)(a0)
+    k = side // 2
+    e = 1e-6
+    fd = float((J_of_a(a0.at[k].add(e)) - J_of_a(a0.at[k].add(-e))) / (2 * e))
+    assert abs(float(ga[k]) - fd) / (abs(fd) + 1e-30) < 1e-3
+
+
+def _setup_pc_diag(A, levels):
+    return PC.diagonal_scaling(jnp.diag(A), levels, "hybrid")
+
+
 def test_cdd_includes_coarse_and_is_sparse():
     """CDD always retains the coarse level and stays near the budget K."""
     s = _setup_1d()

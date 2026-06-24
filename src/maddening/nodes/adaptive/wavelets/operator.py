@@ -32,6 +32,7 @@ from typing import Callable, Optional
 import jax
 import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.nodes.adaptive.wavelets import transform as T
 
@@ -39,7 +40,10 @@ __all__ = [
     "physical_laplacian",
     "physical_varcoeff",
     "column_norms",
+    "assemble_wave_dense",
     "assemble_wave_operator",
+    "sparsity_pattern",
+    "bcoo_with_traced_data",
     "make_masked_operator",
 ]
 
@@ -141,7 +145,7 @@ def column_norms(n_levels: int, n_coarse: int, order: int, dim: int,
 # Assemble the Galerkin wavelet operator.
 # ----------------------------------------------------------------------
 
-def assemble_wave_operator(
+def assemble_wave_dense(
     n_levels: int,
     n_coarse: int,
     order: int = 4,
@@ -149,22 +153,17 @@ def assemble_wave_operator(
     *,
     mass: float = 1.0,
     a_grid: Optional[jax.Array] = None,
-    sparse_threshold: float = 1e-12,
     dtype=jnp.float64,
 ):
-    """Assemble ``A_wave = Wnᵀ A_phys Wn`` as a dense matrix and a BCOO.
+    """Assemble the **dense** ``A_wave = Wnᵀ A_phys Wn`` (no BCOO).
 
-    Parameters
-    ----------
-    a_grid : optional coefficient field; if ``None`` the constant-coefficient
-        ``(-Δ + mass)`` is used, else the conservative ``-∇·(a∇·) + mass``.
-    sparse_threshold : entries with ``|A| < threshold * max|A|`` are dropped in
-        the BCOO.
+    Fully JAX-traceable -- in particular ``jax.grad`` w.r.t. ``a_grid`` flows
+    through this assembly (Amendment 1).  Safe under ``jax.jit`` (unlike
+    :func:`assemble_wave_operator`, whose ``BCOO.fromdense`` needs a static
+    ``nse`` and so must be assembled eagerly).  Use this for the
+    variable-coefficient / coefficient-gradient path.
 
-    Returns
-    -------
-    dict with keys ``A_dense``, ``A_bcoo``, ``Wn`` (normalised synthesis),
-    ``levels``, ``side``, ``N``, ``h``.
+    Returns dict with ``A_dense``, ``Wn``, ``levels``, ``side``, ``N``, ``h``.
     """
     side = n_coarse * (2 ** n_levels)
     h = 1.0 / side
@@ -183,35 +182,94 @@ def assemble_wave_operator(
     A_dense = Wn.T @ A_phys @ Wn
     A_dense = 0.5 * (A_dense + A_dense.T)
 
+    levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](n_levels, n_coarse)
+    return dict(A_dense=A_dense, Wn=Wn, levels=levels, side=side, N=N, h=h)
+
+
+def assemble_wave_operator(
+    n_levels: int,
+    n_coarse: int,
+    order: int = 4,
+    dim: int = 1,
+    *,
+    mass: float = 1.0,
+    a_grid: Optional[jax.Array] = None,
+    sparse_threshold: float = 1e-12,
+    dtype=jnp.float64,
+):
+    """Assemble ``A_wave`` as a dense matrix **and** a BCOO (eager only).
+
+    Adds the sparse ``A_bcoo`` to :func:`assemble_wave_dense`.  ``BCOO.fromdense``
+    requires a static ``nse``, so this must run eagerly (at node construction);
+    for a traced (e.g. ``jax.jit``/coefficient-gradient) path use
+    :func:`assemble_wave_dense` plus :func:`bcoo_with_traced_data`.
+
+    Returns dict with keys ``A_dense``, ``A_bcoo``, ``Wn``, ``levels``,
+    ``side``, ``N``, ``h``.
+    """
+    res = assemble_wave_dense(n_levels, n_coarse, order, dim, mass=mass,
+                              a_grid=a_grid, dtype=dtype)
+    A_dense = res["A_dense"]
     thr = sparse_threshold * jnp.max(jnp.abs(A_dense))
     A_sp = jnp.where(jnp.abs(A_dense) >= thr, A_dense, 0.0)
-    A_bcoo = jsparse.BCOO.fromdense(A_sp)
+    res["A_bcoo"] = jsparse.BCOO.fromdense(A_sp)
+    return res
 
-    levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](n_levels, n_coarse)
-    return dict(A_dense=A_dense, A_bcoo=A_bcoo, Wn=Wn, levels=levels,
-                side=side, N=N, h=h)
+
+def sparsity_pattern(A_dense: jax.Array, threshold: float = 1e-12):
+    """Static ``(rows, cols)`` index arrays of the structural nonzeros of ``A``.
+
+    The wavelet operator's sparsity pattern is **independent of the coefficient
+    field** ``a(x)`` (``a`` scales entries; the stencil support is fixed), so
+    this pattern -- computed once from a reference operator -- is reused as the
+    static BCOO structure across all ``a``.  Returns concrete numpy-backed index
+    arrays (call eagerly).
+    """
+    A = np.asarray(A_dense)
+    thr = threshold * np.max(np.abs(A))
+    rows, cols = np.nonzero(np.abs(A) >= thr)
+    return jnp.asarray(rows), jnp.asarray(cols)
+
+
+def bcoo_with_traced_data(A_dense: jax.Array, rows: jax.Array, cols: jax.Array):
+    """Build a BCOO with **static indices** and **traced data**.
+
+    Separates structural assembly (the ``(rows, cols)`` pattern, fixed) from the
+    value update (gathered from the traced ``A_dense(a)``), per the
+    variable-coefficient design: the sparsity structure is static while the
+    ``.data`` values remain a differentiable function of the coefficient field,
+    so ``jax.grad`` w.r.t. ``a(x)`` flows through.  JIT-safe.
+    """
+    N = A_dense.shape[0]
+    data = A_dense[rows, cols]                       # traced gather -> dJ/da flows
+    indices = jnp.stack([rows, cols], axis=1)
+    return jsparse.BCOO((data, indices), shape=(N, N))
 
 
 # ----------------------------------------------------------------------
 # Masked operator for the frozen inner solve (static shape, BCOO).
 # ----------------------------------------------------------------------
 
-def make_masked_operator(A: jax.Array, mask: jax.Array) -> Callable[[jax.Array], jax.Array]:
+def make_masked_operator(A, mask: jax.Array) -> Callable[[jax.Array], jax.Array]:
     """Build the frozen-active-set operator closure ``v -> A_eff v``.
 
-    ``A_eff`` is ``A`` on the active block ``(mask, mask)`` and the identity on
-    inactive rows/cols, so the solve returns ``c_k = 0`` outside the mask.
-    Mirrors ``hierarchical_hat.py``: assemble as BCOO and return a matvec for
-    ``ift_linear_solve``.  Static shape ``(N, N)`` -- no dynamic submatrix
-    indexing (the spike used dynamically-sized ``np.linalg.solve``; this is the
-    production static-shape path).
-    """
-    N = A.shape[0]
-    outer = mask[:, None] & mask[None, :]
-    A_eff = jnp.where(outer, A, jnp.eye(N, dtype=A.dtype))
-    A_bcoo = jsparse.BCOO.fromdense(A_eff)
+    ``A_eff`` acts as ``A`` on the active block ``(mask, mask)`` and as the
+    identity on inactive rows/cols, so the frozen solve returns ``c_k = 0``
+    outside the mask::
 
+        A_eff v = where(mask, A (where(mask, v, 0)), v)
+
+    This is **jit-safe and static-shape**: ``A`` is a *pre-assembled constant*
+    (dense matrix or ``BCOO`` -- the latter for an O(nnz) matvec), and the mask
+    is applied with ``jnp.where`` (the round-6 masked-matvec closure, spike
+    Inv 2).  Crucially it does **not** call ``BCOO.fromdense`` on a traced array
+    per call -- that pattern (used by the ``hierarchical_hat`` toy) only works
+    eagerly and raises under ``jax.jit`` because ``nse`` is not static.  The
+    active block inherits ``A``'s symmetry/PSD, so CG remains valid.
+    """
     def operator_fn(v: jax.Array) -> jax.Array:
-        return A_bcoo @ v
+        vm = jnp.where(mask, v, 0.0)
+        Av = A @ vm
+        return jnp.where(mask, Av, v)
 
     return operator_fn

@@ -30,12 +30,15 @@ MAX_OUTER: int = 30          # FINDINGS Inv 1E/2E: 1D/2D p99=15, 3D mean ~17
 THETA_D: float = 0.5         # Doerfler bulk; FINDINGS Inv 1B confirms in 3D
 
 
-def _doerfler_grow(mask: jax.Array, resid: jax.Array, theta_D: float) -> jax.Array:
+def _doerfler_grow(mask: jax.Array, resid: jax.Array, theta_D: float,
+                   cap: int) -> jax.Array:
     """Return ``mask`` enlarged by the smallest Doerfler bulk of inactive DOFs.
 
     Marks the smallest set of currently-inactive indices whose summed squared
     residual reaches ``theta_D**2`` of the total -- via sort + cumsum + the
-    first-crossing index (static-shape boolean, no dynamic slice).
+    first-crossing index (static-shape boolean, no dynamic slice).  The number
+    added is capped so ``|mask| <= cap`` (the gather-solve buffer size), so the
+    active set never exceeds the budget.
     """
     N = resid.shape[0]
     r = jnp.where(mask, 0.0, jnp.abs(resid))     # only inactive can be marked
@@ -47,6 +50,10 @@ def _doerfler_grow(mask: jax.Array, resid: jax.Array, theta_D: float) -> jax.Arr
     # include the first position that crosses the threshold
     first_cross = jnp.argmin(below.astype(jnp.int32))  # first False
     take_sorted = below.at[first_cross].set(True)
+    # cap the number added so |mask| never exceeds `cap`
+    n_room = cap - jnp.sum(mask)
+    rank = jnp.cumsum(take_sorted.astype(jnp.int32))   # 1..count over taken
+    take_sorted = take_sorted & (rank <= n_room)
     add = jnp.zeros(N, dtype=bool).at[order].set(take_sorted)
     # never mark where the residual is exactly zero (e.g. zero-source DOFs)
     add = add & (r > 0)
@@ -82,7 +89,7 @@ def cdd_select(
     for _ in range(max_outer):
         converged = jnp.sum(mask) >= K
         resid = b - apply_operator(c)
-        grown = _doerfler_grow(mask, resid, theta_D)
+        grown = _doerfler_grow(mask, resid, theta_D, K)
         new_mask = jnp.where(converged, mask, grown)
         new_c = solve_masked(new_mask, b)
         # short-circuit: once converged, freeze mask and solution

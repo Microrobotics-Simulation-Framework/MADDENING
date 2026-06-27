@@ -45,6 +45,7 @@ __all__ = [
     "sparsity_pattern",
     "bcoo_with_traced_data",
     "make_masked_operator",
+    "gather_solve",
 ]
 
 
@@ -295,6 +296,34 @@ def bcoo_with_traced_data(A_dense: jax.Array, rows: jax.Array, cols: jax.Array):
 # ----------------------------------------------------------------------
 # Masked operator for the frozen inner solve (static shape, BCOO).
 # ----------------------------------------------------------------------
+
+def gather_solve(A: jax.Array, mask: jax.Array, rhs: jax.Array,
+                 buf: int) -> jax.Array:
+    """Frozen active-set solve via gather to a fixed-size buffer + dense K×K.
+
+    Instead of an O(N) iterative solve on the full masked operator, gather the
+    ``buf`` highest-priority active DOFs into a ``buf×buf`` dense system, solve
+    it directly, and scatter the result back to the full ``(N,)`` vector.  This
+    realises the adaptivity speedup (O(buf³) ≪ O(N·iters)) while staying
+    static-shape / JIT-safe and differentiable (gather, dense solve, scatter are
+    all differentiable; the discrete index selection is non-differentiable, like
+    the mask).  Requires ``|mask| ≤ buf``.
+
+    ``A`` is the (scaled) dense operator; ``rhs`` the (scaled) right-hand side.
+    Inactive buffer slots are set to identity rows so they return 0.
+    """
+    N = A.shape[0]
+    # active DOFs first (argsort puts mask=True before False), take a fixed buf
+    ix = jnp.argsort(jnp.logical_not(mask))[:buf]
+    active = mask[ix]                                  # (buf,) real-vs-pad
+    Asub = A[jnp.ix_(ix, ix)]                          # (buf, buf)
+    keep = active[:, None] & active[None, :]
+    Asub = jnp.where(keep, Asub, jnp.eye(buf, dtype=A.dtype))
+    bsub = jnp.where(active, rhs[ix], 0.0)
+    csub = jnp.linalg.solve(Asub, bsub)
+    csub = jnp.where(active, csub, 0.0)
+    return jnp.zeros(N, dtype=A.dtype).at[ix].set(csub)
+
 
 def make_masked_operator(A, mask: jax.Array) -> Callable[[jax.Array], jax.Array]:
     """Build the frozen-active-set operator closure ``v -> A_eff v``.

@@ -226,11 +226,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     # ---- selection: CDD residual marking (returns a frozen mask) ----
     def _solve_masked(self, mask, rhs_scaled):
-        op = _op.make_masked_operator(self._Ah_bcoo, mask)
-        return ift_linear_solve(
-            op, jnp.where(mask, rhs_scaled, 0.0),
-            solver="cg", rtol=1e-10, atol=1e-12,
-        )
+        # Gather the K active DOFs into a fixed-size buffer and solve the dense
+        # K×K system directly (O(K^3), realises the adaptivity speedup) instead
+        # of an O(N) iterative solve on the full masked operator.  CDD caps the
+        # active set at K, so buf=K suffices.
+        return _op.gather_solve(self._Ah, mask, rhs_scaled, self.K)
 
     def compute_active_set(self, state, *, prev=None, is_cold_start=False):
         del prev, is_cold_start

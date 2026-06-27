@@ -85,6 +85,34 @@ def physical_laplacian(side: int, dim: int, h: float, mass: float = 1.0,
     raise ValueError(f"dim must be 1, 2, or 3; got {dim}")
 
 
+def _lap1d_dirichlet(side: int, h: float, dtype) -> jax.Array:
+    """Non-periodic 1D stiffness (-d²/dx²) on ``side`` interior nodes."""
+    idx = jnp.arange(side)
+    S = jnp.zeros((side, side), dtype=dtype)
+    S = S.at[idx, idx].set(2.0 / h)
+    S = S.at[idx[:-1], idx[:-1] + 1].set(-1.0 / h)
+    S = S.at[idx[1:], idx[1:] - 1].set(-1.0 / h)
+    return S
+
+
+def physical_laplacian_dirichlet(side: int, dim: int, h: float,
+                                 mass: float = 1.0, dtype=jnp.float64) -> jax.Array:
+    """Constant-coefficient (-Δ + mass·I) with homogeneous Dirichlet BCs, dense.
+
+    Tensor sum of the 1D Dirichlet stiffness and lumped mass ``M = h·I``.
+    """
+    S = _lap1d_dirichlet(side, h, dtype)
+    M = h * jnp.eye(side, dtype=dtype)
+    if dim == 1:
+        return S + mass * M
+    if dim == 2:
+        return jnp.kron(S, M) + jnp.kron(M, S) + mass * jnp.kron(M, M)
+    if dim == 3:
+        return (jnp.kron(jnp.kron(S, M), M) + jnp.kron(jnp.kron(M, S), M)
+                + jnp.kron(jnp.kron(M, M), S) + mass * jnp.kron(jnp.kron(M, M), M))
+    raise ValueError(f"dim must be 1, 2, or 3; got {dim}")
+
+
 def physical_varcoeff(a_grid: jax.Array, dim: int, h: float,
                       mass: float = 1.0) -> jax.Array:
     """Conservative variable-coefficient operator -∇·(a∇·) + mass, periodic.
@@ -153,6 +181,7 @@ def assemble_wave_dense(
     *,
     mass: float = 1.0,
     a_grid: Optional[jax.Array] = None,
+    boundary: str = "periodic",
     dtype=jnp.float64,
 ):
     """Assemble the **dense** ``A_wave = Wnᵀ A_phys Wn`` (no BCOO).
@@ -163,26 +192,42 @@ def assemble_wave_dense(
     ``nse`` and so must be assembled eagerly).  Use this for the
     variable-coefficient / coefficient-gradient path.
 
+    ``boundary`` is ``"periodic"`` (matrix-free isotropic Mallat basis) or
+    ``"dirichlet"`` (boundary-adapted DD basis, dense; tensor product in
+    multi-D -- see :mod:`.dirichlet`).
+
     Returns dict with ``A_dense``, ``Wn``, ``levels``, ``side``, ``N``, ``h``.
     """
-    side = n_coarse * (2 ** n_levels)
-    h = 1.0 / side
-    N = side ** dim
+    if boundary == "periodic":
+        side = n_coarse * (2 ** n_levels)
+        h = 1.0 / side
+        W = T.synthesis_matrix(n_levels, n_coarse, order, dim=dim)
+        levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](
+            n_levels, n_coarse)
+        if a_grid is None:
+            A_phys = physical_laplacian(side, dim, h, mass=mass, dtype=dtype)
+        else:
+            A_phys = physical_varcoeff(a_grid, dim, h, mass=mass)
+    elif boundary == "dirichlet":
+        from maddening.nodes.adaptive.wavelets import dirichlet as _dir
+        if a_grid is not None:
+            raise NotImplementedError(
+                "variable-coefficient Dirichlet assembly is not yet supported; "
+                "use periodic for coefficient-gradient work")
+        side = _dir.dirichlet_side(n_levels, n_coarse)
+        h = 1.0 / (side + 1)
+        W, levels, _ = _dir.synthesis_matrix_dirichlet(n_levels, n_coarse,
+                                                       order, dim)
+        A_phys = physical_laplacian_dirichlet(side, dim, h, mass=mass, dtype=dtype)
+    else:
+        raise ValueError(f"boundary must be 'periodic' or 'dirichlet'; got {boundary!r}")
 
-    W = T.synthesis_matrix(n_levels, n_coarse, order, dim=dim)
+    N = side ** dim
     norms = jnp.sqrt((h ** dim) * jnp.sum(W ** 2, axis=0))
     norms = jnp.where(norms > 0, norms, 1.0)
     Wn = W / norms[None, :]
-
-    if a_grid is None:
-        A_phys = physical_laplacian(side, dim, h, mass=mass, dtype=dtype)
-    else:
-        A_phys = physical_varcoeff(a_grid, dim, h, mass=mass)
-
     A_dense = Wn.T @ A_phys @ Wn
     A_dense = 0.5 * (A_dense + A_dense.T)
-
-    levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](n_levels, n_coarse)
     return dict(A_dense=A_dense, Wn=Wn, levels=levels, side=side, N=N, h=h)
 
 
@@ -194,6 +239,7 @@ def assemble_wave_operator(
     *,
     mass: float = 1.0,
     a_grid: Optional[jax.Array] = None,
+    boundary: str = "periodic",
     sparse_threshold: float = 1e-12,
     dtype=jnp.float64,
 ):
@@ -208,7 +254,7 @@ def assemble_wave_operator(
     ``side``, ``N``, ``h``.
     """
     res = assemble_wave_dense(n_levels, n_coarse, order, dim, mass=mass,
-                              a_grid=a_grid, dtype=dtype)
+                              a_grid=a_grid, boundary=boundary, dtype=dtype)
     A_dense = res["A_dense"]
     thr = sparse_threshold * jnp.max(jnp.abs(A_dense))
     A_sp = jnp.where(jnp.abs(A_dense) >= thr, A_dense, 0.0)

@@ -138,11 +138,18 @@ class WaveletAdaptiveNode(AdaptiveNode):
         theta_init: float = 0.42,
         mass: float = 1.0,
         preconditioner: str = "hybrid",
+        boundary: str = "periodic",
         **kw,
     ):
         if dim not in (1, 2, 3):
             raise ValueError(f"dim must be 1, 2, or 3; got {dim}")
-        side = n_coarse * (2 ** n_levels)
+        if boundary not in ("periodic", "dirichlet"):
+            raise ValueError(f"boundary must be 'periodic' or 'dirichlet'; got {boundary!r}")
+        if boundary == "dirichlet":
+            from maddening.nodes.adaptive.wavelets.dirichlet import dirichlet_side
+            side = dirichlet_side(n_levels, n_coarse)
+        else:
+            side = n_coarse * (2 ** n_levels)
         N_max = side ** dim
         super().__init__(name=name, timestep=timestep, N_max=N_max, **kw)
 
@@ -150,6 +157,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self.n_levels = int(n_levels)
         self.n_coarse = int(n_coarse)
         self.order = int(order)
+        self.boundary = str(boundary)
         self.side = int(side)
         self.N_max = int(N_max)
         self.K = int(K) if K is not None else max(8, N_max // 16)
@@ -164,7 +172,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         # Assemble the Galerkin operator (constant-coefficient) once.
         res = _op.assemble_wave_operator(
             self.n_levels, self.n_coarse, order=self.order, dim=self.dim,
-            mass=self.mass,
+            mass=self.mass, boundary=self.boundary,
         )
         self._A = res["A_dense"]          # unscaled (for full-basis gradient)
         self._Wn = res["Wn"]              # L2-normalised synthesis
@@ -183,7 +191,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._coarse = jnp.asarray(lev_np == lev_np.min())
 
         # Grid coordinates and sensor index (flattened, row-major).
-        coords1d = np.arange(self.side) / self.side
+        # Periodic: x_i = i/side.  Dirichlet: interior nodes x_i = i/(side+1).
+        if self.boundary == "dirichlet":
+            coords1d = np.arange(1, self.side + 1) / (self.side + 1)
+        else:
+            coords1d = np.arange(self.side) / self.side
         mesh = np.meshgrid(*([coords1d] * self.dim), indexing="ij")
         self._grid = [jnp.asarray(m.reshape(-1)) for m in mesh]
         sidx = 0

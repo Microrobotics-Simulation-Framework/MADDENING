@@ -114,6 +114,41 @@ def physical_laplacian_dirichlet(side: int, dim: int, h: float,
     raise ValueError(f"dim must be 1, 2, or 3; got {dim}")
 
 
+def _d2_1d_periodic(side: int, h: float, dtype) -> jax.Array:
+    """Periodic 1D second difference (~1/h²), circulant [1, -2, 1]/h²."""
+    idx = jnp.arange(side)
+    D2 = jnp.zeros((side, side), dtype=dtype)
+    D2 = D2.at[idx, idx].set(-2.0 / h ** 2)
+    D2 = D2.at[idx, (idx + 1) % side].add(1.0 / h ** 2)
+    D2 = D2.at[idx, (idx - 1) % side].add(1.0 / h ** 2)
+    return D2
+
+
+def physical_biharmonic(side: int, dim: int, h: float, mass: float = 1.0,
+                        dtype=jnp.float64) -> jax.Array:
+    """H²-elliptic biharmonic form ``∫(Δu)² + mass·u²``, periodic, dense.
+
+    ``B = Lapᵀ M Lap + mass·M`` with ``Lap`` the dim-D periodic 2nd-difference
+    Laplacian and ``M = h^dim·I`` (lumped mass) -- the stream-function operator
+    (t=2).  Needs DD order ≥ 4 (H² Riesz basis); FINDINGS §5: DD-4 t=2 κ≈8.6e3,
+    Jacobi ≈1.1e3.
+    """
+    D2 = _d2_1d_periodic(side, h, dtype)
+    I = jnp.eye(side, dtype=dtype)
+    if dim == 1:
+        Lap = D2
+    elif dim == 2:
+        Lap = jnp.kron(D2, I) + jnp.kron(I, D2)
+    elif dim == 3:
+        Lap = (jnp.kron(jnp.kron(D2, I), I) + jnp.kron(jnp.kron(I, D2), I)
+               + jnp.kron(jnp.kron(I, I), D2))
+    else:
+        raise ValueError(f"dim must be 1, 2, or 3; got {dim}")
+    M = (h ** dim) * jnp.eye(side ** dim, dtype=dtype)
+    B = Lap.T @ M @ Lap + mass * M
+    return 0.5 * (B + B.T)
+
+
 def physical_varcoeff(a_grid: jax.Array, dim: int, h: float,
                       mass: float = 1.0) -> jax.Array:
     """Conservative variable-coefficient operator -∇·(a∇·) + mass, periodic.
@@ -183,6 +218,7 @@ def assemble_wave_dense(
     mass: float = 1.0,
     a_grid: Optional[jax.Array] = None,
     boundary: str = "periodic",
+    kind: str = "laplacian",
     dtype=jnp.float64,
 ):
     """Assemble the **dense** ``A_wave = Wnᵀ A_phys Wn`` (no BCOO).
@@ -205,7 +241,11 @@ def assemble_wave_dense(
         W = T.synthesis_matrix(n_levels, n_coarse, order, dim=dim)
         levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](
             n_levels, n_coarse)
-        if a_grid is None:
+        if kind == "biharmonic":
+            if a_grid is not None:
+                raise NotImplementedError("variable-coefficient biharmonic not supported")
+            A_phys = physical_biharmonic(side, dim, h, mass=mass, dtype=dtype)
+        elif a_grid is None:
             A_phys = physical_laplacian(side, dim, h, mass=mass, dtype=dtype)
         else:
             A_phys = physical_varcoeff(a_grid, dim, h, mass=mass)
@@ -241,6 +281,7 @@ def assemble_wave_operator(
     mass: float = 1.0,
     a_grid: Optional[jax.Array] = None,
     boundary: str = "periodic",
+    kind: str = "laplacian",
     sparse_threshold: float = 1e-12,
     dtype=jnp.float64,
 ):
@@ -255,7 +296,8 @@ def assemble_wave_operator(
     ``side``, ``N``, ``h``.
     """
     res = assemble_wave_dense(n_levels, n_coarse, order, dim, mass=mass,
-                              a_grid=a_grid, boundary=boundary, dtype=dtype)
+                              a_grid=a_grid, boundary=boundary, kind=kind,
+                              dtype=dtype)
     A_dense = res["A_dense"]
     thr = sparse_threshold * jnp.max(jnp.abs(A_dense))
     A_sp = jnp.where(jnp.abs(A_dense) >= thr, A_dense, 0.0)

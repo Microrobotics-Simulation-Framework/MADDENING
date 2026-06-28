@@ -57,6 +57,24 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   Selection-Equivariance Theorem, the API surface, worked examples,
   and common failure modes.
 
+- **`WaveletAdaptiveNode`** (`@stability(EXPERIMENTAL)`) and the
+  `maddening.nodes.adaptive.wavelets` engine — the production
+  adaptive Deslauriers–Dubuc wavelet PDE solver (1D/2D/3D), the
+  implementation outcome of the wavelet derisking spike.  Isotropic
+  Mallat DD-4 basis, Cohen–Dahmen–DeVore residual selection,
+  hybrid-Jacobi preconditioner (the anisotropic `2^{|λx|+|λy|+|λz|}`
+  scaling is *not* used — it gives κ∝N on an isotropic operator), and
+  a gather-to-K frozen solve (O(K³), ~45 ms/step 2D / ~57 ms 3D).
+  Engine modules: `wavelets/transform.py` (matrix-free lifting
+  transforms), `operator.py` (BCOO Galerkin + variable-coefficient,
+  `jax.grad` w.r.t. `a(x)` through assembly; biharmonic / stream-
+  function operator), `precond.py`, `cdd.py`, `dirichlet.py`
+  (boundary-adapted basis).  Periodic and homogeneous-Dirichlet BCs;
+  wrong-sign-safe via CDD coarse-inclusion; the inherited
+  blindness/`symmetry_break` machinery is near-inert (the local
+  wavelet basis is trap-immune).  Guide:
+  `docs/developer_guide/wavelet_adaptive_node.md`.
+
 ### Verification
 
 - **AdaptiveNode framework** validated by 72 tests under
@@ -73,6 +91,20 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Spike design source of truth:
   `plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md` (seven rounds,
   Selection-Equivariance Theorem in round 6).
+- **WaveletAdaptiveNode** validated by the `tests/adaptive/test_wavelet_*`
+  suites (engine roundtrip/κ/CDD/recompilation-audit; node 1D/2D/3D
+  cold-start + grad-vs-FD eager *and* under `jax.jit`; Dirichlet BCs;
+  biharmonic + CDD-on-biharmonic-residual; trajectory adjoint to T=100
+  with no degradation; end-to-end optimisation) and
+  `tests/verification/test_wavelet_*` (manufactured-solution + MIME
+  FFT-Helmholtz cross-code in 1D/2D/3D; lid-driven cavity vs
+  Ghia–Ghia–Shin Re=100, centreline u within <1%, primary vortex within
+  one cell, wavelet ψ-solve reproducing the FD ψ to machine precision).
+  3D BCOO autodiff matches FD; κ matches the spike (1D≈20, 2D≈38,
+  3D≈158; Dirichlet 1D≈3.8; biharmonic t=2≈8.6e3 / Jacobi≈1.2e3).
+  Cavity and trajectory benchmarks are in the `slow` lane.
+  Spike source of truth: `spikes/wavelet_derisking/FINDINGS.md` and
+  `KNOWN_LIMITATIONS.md`.
 
 ## [0.3.0] - 2026-06-10
 

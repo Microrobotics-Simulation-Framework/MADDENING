@@ -18,7 +18,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 try:
     __version__ = _pkg_version("maddening")
 except PackageNotFoundError:  # source tree without install metadata
-    __version__ = "0.3.0"
+    __version__ = "0.3.1"
 
 
 def __getattr__(name: str):

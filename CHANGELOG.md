@@ -9,6 +9,39 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-22
+
+An **experimental-pilot** point release: it ships one small, self-contained,
+additive primitive — `ift_linear_solve` — early, for a downstream project
+building on MADDENING that needs a `pip install`-able differentiable linear
+solve now rather than waiting for the 0.4/M3 `AdaptiveNode` milestone.
+
+```{note}
+**Experimental pilot.**  `ift_linear_solve` is tagged
+`@stability(EXPERIMENTAL)` in v0.3.1 — validated but not frozen.  It is
+promoted to `@stability(STABLE)` when the `AdaptiveNode` framework lands in
+0.4 (STACK_V1 §M3).  Pin against it only for short-lived / pilot work.
+```
+
+### Added
+
+- **`maddening.core.solver_utils.ift_linear_solve`** (`@stability(EXPERIMENTAL)`)
+  — a thin wrapper over `lineax.linear_solve`: any node solving a linear system
+  in `update()` gains a clean differentiable path (lineax's native autodiff
+  propagates the linear-solve adjoint, so no MADDENING-level `custom_vjp`).
+  Backends `'gmres'` (default, restart clamped to `min(N, 50)`), `'cg'` (SPD),
+  `'dense'`.  Optional `preconditioner` kwarg passes through to lineax with the
+  array portion `stop_gradient`'d.  Verified against `BCOO`-backed operators.
+  Purely additive; no change to any existing surface.
+
+### Dependencies
+
+- New **`[ift]` extra** (`lineax>=0.0.7`).  `lineax` is lazy-imported, so the
+  base install is unchanged; `ift_linear_solve` callers install
+  `maddening[ift]`.  (`lineax` was already a `[dev]`/`[ci]` dependency for the
+  in-tree coupling-solver path; this promotes it to a user-facing extra, an item
+  previously scheduled for 0.4.)
+
 ## [0.3.0] - 2026-06-10
 
 v0.3.0 is the M2 "redesigns" milestone (STACK_V1 §3).  See

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maddening"
-version = "0.3.0"
+version = "0.3.1"
 description = "Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -53,6 +53,11 @@ dependencies = [
 # Combine with any other extra:  pip install maddening[cuda12,server]
 cuda12 = ["jax[cuda12]>=0.4,<0.6"]
 tpu = ["jax[tpu]>=0.4,<0.6"]
+
+# ── Differentiable linear solve (experimental pilot, v0.3.1) ────────
+# `maddening.core.solver_utils.ift_linear_solve` lazy-imports lineax.
+# Install this extra to use it:  pip install maddening[ift]
+ift = ["lineax>=0.0.7"]
 
 # ── Cloud providers ────────────────────────────────────────────────
 # One extra per provider.  Installs SkyPilot WITH the provider SDK.

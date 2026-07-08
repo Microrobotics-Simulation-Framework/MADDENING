@@ -1,11 +1,19 @@
 """Public solver utilities.
 
 This module exposes the :func:`ift_linear_solve` primitive — a thin,
-``@stability(STABLE)`` wrapper over :func:`lineax.linear_solve` that
+``@stability(EXPERIMENTAL)`` wrapper over :func:`lineax.linear_solve` that
 any node solving a linear system in ``update()`` can use to obtain a
 clean differentiable path.  Lineax's native autodiff propagates the
 linear-solve adjoint correctly; this wrapper does **not** install a
 MADDENING-level ``custom_vjp``.
+
+.. note::
+   **Experimental pilot (v0.3.1).**  ``ift_linear_solve`` is shipped early —
+   ahead of its roadmapped 0.4/M3 home — as an ``@stability(EXPERIMENTAL)``
+   pilot for downstream projects building on MADDENING.  The signature and
+   behaviour are validated but not yet frozen; it is promoted to
+   ``@stability(STABLE)`` when the ``AdaptiveNode`` framework lands in 0.4.
+   Requires the ``lineax`` optional dependency: ``pip install maddening[ift]``.
 
 Background
 ----------
@@ -55,7 +63,7 @@ from maddening.core.compliance.stability import stability
 _ALLOWED_SOLVERS = ("gmres", "cg", "dense")
 
 
-@stability(StabilityLevel.STABLE)
+@stability(StabilityLevel.EXPERIMENTAL)
 def ift_linear_solve(
     operator_fn: Callable[[jax.Array], jax.Array],
     rhs: jax.Array,

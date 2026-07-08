@@ -23,7 +23,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
+# NB: float64 is provided per-test by the autouse fixture in
+# ``tests/adaptive/conftest.py``.  Do NOT enable ``jax_enable_x64`` at module
+# level here -- that runs at import/collection time and leaks the setting
+# process-wide, breaking the many downstream tests that assume float32.
 
 from maddening.core.solver_utils import ift_linear_solve
 

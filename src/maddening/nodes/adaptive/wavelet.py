@@ -108,18 +108,31 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "hybrid-Jacobi diagonal scaling; CG inner solve via ift_linear_solve"
         ),
         assumptions=(
-            "Periodic boundary conditions (Dirichlet support is a later milestone)",
+            "Steady scalar elliptic problem: the node solves a single "
+            "boundary-value problem per update() and has no time integration",
+            "Periodic or homogeneous-Dirichlet boundary conditions "
+            "(variable-coefficient assembly is periodic-only)",
             "H^1 solution regularity (bounded/step RHS); Besov regime untested",
             "Source localised along axis 0 (theta); other axes centred",
         ),
         limitations=(
-            "EXPERIMENTAL: numerics validated by the derisking spike but the "
-            "node has not been cross-validated against an independent solver "
-            "(see spikes/wavelet_derisking/KNOWN_LIMITATIONS.md)",
-            "Periodic BCs only; quantitative cavity benchmark and 3D BCOO at "
-            "production scale are subsequent milestones",
+            "SCOPE: this is a steady scalar elliptic solver. It has no "
+            "convection, no velocity, no pressure and no time integration, and "
+            "is therefore NOT a fluid/Navier-Stokes solver. The lid-driven "
+            "cavity under benchmarks/ is a NumPy/SciPy finite-difference "
+            "reference solver; this node does not participate in it "
+            "(MADD-VER-CAVITY-FD-100 is registered against that FD reference, "
+            "not against this node)",
+            "Cross-validated as an elliptic solver only: manufactured solutions "
+            "in 1D/2D/3D and cross-code vs MIME's FFT-spectral Helmholtz solver "
+            "in 2D/3D (MADD-VER-WAVELET-001..005). No validation exists against "
+            "a flow solver or on any time-dependent problem",
+            "Operator assembly is dense O(N^2) in memory with N = side**dim; the "
+            "designed matrix-free matvec is not implemented. Validated sizes are "
+            "~64^2 in 2D and 8^3-16^3 in 3D; the node does not scale past them",
             "CDD outer loop is unrolled to MAX_OUTER=30 (round-6 decision); "
             "no multi-GPU sharding (single-device only)",
+            "EXPERIMENTAL: see spikes/wavelet_derisking/KNOWN_LIMITATIONS.md",
         ),
     )
 

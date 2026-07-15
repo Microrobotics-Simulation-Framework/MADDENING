@@ -91,18 +91,29 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Spike design source of truth:
   `plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md` (seven rounds,
   Selection-Equivariance Theorem in round 6).
-- **WaveletAdaptiveNode** validated by the `tests/adaptive/test_wavelet_*`
-  suites (engine roundtrip/κ/CDD/recompilation-audit; node 1D/2D/3D
-  cold-start + grad-vs-FD eager *and* under `jax.jit`; Dirichlet BCs;
-  biharmonic + CDD-on-biharmonic-residual; trajectory adjoint to T=100
-  with no degradation; end-to-end optimisation) and
-  `tests/verification/test_wavelet_*` (manufactured-solution + MIME
-  FFT-Helmholtz cross-code in 1D/2D/3D; lid-driven cavity vs
-  Ghia–Ghia–Shin Re=100, centreline u within <1%, primary vortex within
-  one cell, wavelet ψ-solve reproducing the FD ψ to machine precision).
-  3D BCOO autodiff matches FD; κ matches the spike (1D≈20, 2D≈38,
-  3D≈158; Dirichlet 1D≈3.8; biharmonic t=2≈8.6e3 / Jacobi≈1.2e3).
-  Cavity and trajectory benchmarks are in the `slow` lane.
+- **WaveletAdaptiveNode** validated **as a steady scalar elliptic solver**
+  by the `tests/adaptive/test_wavelet_*` suites (engine
+  roundtrip/κ/CDD/recompilation-audit; node 1D/2D/3D cold-start +
+  grad-vs-FD eager *and* under `jax.jit`; Dirichlet BCs; biharmonic +
+  CDD-on-biharmonic-residual; trajectory adjoint to T=100 with no
+  degradation; end-to-end optimisation) and by its verification
+  benchmarks `MADD-VER-WAVELET-001..005` in
+  `tests/verification/test_wavelet_cross_validation.py`
+  (manufactured-solution convergence in 1D/2D/3D; cross-code agreement
+  with MIME's independent FFT-Helmholtz solver in 2D/3D).  3D BCOO
+  autodiff matches FD; κ matches the spike (1D≈20, 2D≈38, 3D≈158;
+  Dirichlet 1D≈3.8; biharmonic t=2≈8.6e3 / Jacobi≈1.2e3).  There is **no**
+  validation of the node against a flow solver or on a time-dependent
+  problem; it has no convection, velocity, pressure or time integration.
+- **`MADD-VER-CAVITY-FD-100`** — lid-driven cavity vs Ghia–Ghia–Shin
+  Re=100 (centreline u within <1%, primary vortex within one cell).  This
+  benchmark validates the **NumPy/SciPy finite-difference reference
+  solver** in `benchmarks/wavelet_cavity.py` and is registered against it;
+  `WaveletAdaptiveNode` is not in the time loop and takes no part in it.
+  The companion check that the wavelet Dirichlet ψ-solve reproduces the FD
+  ψ to machine precision is an exact change of basis — a regression guard
+  on the basis construction, not a validation — and is intentionally not a
+  registered benchmark.  Cavity and trajectory tests are in the `slow` lane.
   Spike source of truth: `spikes/wavelet_derisking/FINDINGS.md` and
   `KNOWN_LIMITATIONS.md`.
 

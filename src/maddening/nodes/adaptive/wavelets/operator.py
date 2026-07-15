@@ -1,21 +1,32 @@
-"""Galerkin wavelet operators ``A_wave = Wᵀ A_phys W`` (BCOO + matrix-free).
+"""Galerkin wavelet operators ``A_wave = Wᵀ A_phys W`` (dense assembly + BCOO).
 
 Production reimplementation of the spike operator construction
 (``dd_jax_poc.py`` BCOO assembly, ``discontinuous_coeff.py`` variable
-coefficient).  Two paths:
+coefficient).
 
-* **Assembled BCOO** (default, validated sizes): materialise the L²-normalised
-  synthesis matrix ``Wn`` and the physical FD operator ``A_phys`` (constant- or
-  variable-coefficient), form ``A_wave = Wnᵀ A_phys Wn``, sparsify to
-  ``jax.experimental.sparse.BCOO``.  The whole assembly is JAX-traceable, so
-  ``jax.grad`` of a solve objective flows through ``A_phys(a)`` w.r.t. the
-  coefficient field ``a(x)`` (Amendment 1 -- differentiability *through operator
-  assembly*, not merely a stencil parameterised by ``a``).
+**Assembled BCOO** (the only path): materialise the L²-normalised synthesis
+matrix ``Wn`` and the physical FD operator ``A_phys`` (constant- or
+variable-coefficient), form ``A_wave = Wnᵀ A_phys Wn``, sparsify to
+``jax.experimental.sparse.BCOO``.  The whole assembly is JAX-traceable, so
+``jax.grad`` of a solve objective flows through ``A_phys(a)`` w.r.t. the
+coefficient field ``a(x)`` (Amendment 1 -- differentiability *through operator
+assembly*, not merely a stencil parameterised by ``a``).
 
-* **Matrix-free matvec** (large-N option): ``A_wave v = Wnᵀ A_phys (Wn v)``
-  evaluated via the matrix-free synthesis and its ``jax.linear_transpose``,
-  never materialising ``Wn`` or ``A_wave``.  Column L² norms are computed per
-  ``(level, subband)`` representative (translation invariance), O(log N).
+.. warning::
+   **Assembly is dense and this is what bounds the problem size.**  Both
+   ``Wn`` and ``A_phys`` are materialised as ``(N, N)`` arrays with
+   ``N = side**dim`` before the BCOO sparsification, so peak memory is
+   O(N²) regardless of how sparse ``A_wave`` ends up.  In practice this caps
+   3D at the 8³-16³ the test suite exercises (16³ = 4096 ⇒ a 4096² dense
+   operator) and 2D at ~64².  Only the *solve* is sparse/adaptive
+   (:func:`gather_solve` is O(K³) in the active-set size K).
+
+   A genuinely matrix-free matvec — ``A_wave v = Wnᵀ A_phys (Wn v)`` via the
+   matrix-free synthesis in :mod:`~maddening.nodes.adaptive.wavelets.transform`
+   and its ``jax.linear_transpose``, with column L² norms taken per
+   ``(level, subband)`` representative in O(log N) — is the designed route past
+   those sizes.  **It is not implemented.**  Do not size a problem on the
+   assumption that it exists.
 
 Channel convention (Amendment 4, optional/forward-compat): the *solution* and
 *coefficient* arrays may carry a trailing channel axis ``C`` (C=1 scalar).  The
@@ -197,8 +208,11 @@ def column_norms(n_levels: int, n_coarse: int, order: int, dim: int,
                  h: float) -> jax.Array:
     """L²(grid) norms of the synthesis columns, ``sqrt(h**dim * Σ W[:,j]²)``.
 
-    Computed exactly from the dense ``W`` (cheap at validated sizes).  The
-    matrix-free path uses a per-(level, subband) representative instead.
+    Computed exactly from the dense ``W``, which is materialised here — cheap
+    at the validated sizes, O(N²) in memory beyond them (see the module
+    docstring).  A per-(level, subband) representative would give the same
+    norms in O(log N) by translation invariance, but that path is not
+    implemented.
     """
     W = T.synthesis_matrix(n_levels, n_coarse, order, dim=dim)
     norms = jnp.sqrt((h ** dim) * jnp.sum(W ** 2, axis=0))

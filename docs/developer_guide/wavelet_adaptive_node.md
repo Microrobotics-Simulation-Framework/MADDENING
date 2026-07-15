@@ -103,20 +103,45 @@ boundary-adapted Dirichlet size; `N_max = side**dim`.
   **not** call `BCOO.fromdense` on a traced array (fails under `jit`).
 - Known perf headroom (tracked): early-exit CDD (`while_loop`) would shave the
   fixed 30-iteration cost; a matrix-free Dirichlet transform would speed up the
-  dense-Wn Dirichlet path; matrix-free matvec is preferred beyond ~64³.
+  dense-Wn Dirichlet path. A matrix-free *matvec* is the designed route to
+  larger grids and is **not implemented** — dense O(N²) assembly is what
+  currently bounds the node at ~64² / 8³–16³ (see Limitations).
 
 ## Limitations
 
-See `spikes/wavelet_derisking/KNOWN_LIMITATIONS.md` for the full list. Headline
-items: variable-coefficient Dirichlet assembly is not yet supported (periodic
-only); the Dirichlet basis is dense (matrix-free is future); multi-GPU sharding
-is designed but not implemented (single-device only); the node is
+**Scope first: this is a steady scalar elliptic solver.** It has no convection,
+no velocity, no pressure and no time integration — it is *not* a fluid solver
+and cannot stand in for one. Each `update()` solves one boundary-value problem.
+
+**It does not scale past the validated sizes.** Operator assembly materialises
+both `Wn` and `A_phys` as dense `(N, N)` arrays with `N = side**dim`, so peak
+memory is O(N²) even though `A_wave` is sparsified to BCOO afterwards. That caps
+2D at ~64² and 3D at 8³–16³. Only the *solve* is sparse (`gather_solve`, O(K³)).
+A matrix-free matvec is designed but **not implemented**.
+
+See `spikes/wavelet_derisking/KNOWN_LIMITATIONS.md` for the full list. Other
+headline items: variable-coefficient Dirichlet assembly is not yet supported
+(periodic only); the Dirichlet basis is dense (matrix-free is future); multi-GPU
+sharding is designed but not implemented (single-device only); the node is
 `@stability(EXPERIMENTAL)` pending validation against the full production
 swimmer geometry.
 
 ## Validation
 
-`tests/adaptive/test_wavelet_*` (engine, node 1D/2D/3D, Dirichlet, biharmonic,
-trajectory) and `tests/verification/test_wavelet_*` (MMS + MIME cross-code in
-1D/2D/3D, lid-driven cavity vs Ghia). The cavity and trajectory tests are in the
-`slow` lane.
+The node and its numerical core are validated **as an elliptic solver only**:
+
+- `tests/adaptive/test_wavelet_*` — engine, node 1D/2D/3D, Dirichlet,
+  biharmonic, trajectory (the trajectory test is in the `slow` lane).
+- `tests/verification/test_wavelet_cross_validation.py` —
+  `MADD-VER-WAVELET-001..005`: manufactured solutions in 1D/2D/3D and cross-code
+  agreement with MIME's independent FFT-spectral Helmholtz solver in 2D/3D.
+  **These are the node's verification benchmarks.**
+
+There is **no validation of this node against a flow solver, or on any
+time-dependent problem.** In particular, `MADD-VER-CAVITY-FD-100` (lid-driven
+cavity vs Ghia, `slow` lane) is *not* one of this node's benchmarks: it is
+registered against the NumPy/SciPy finite-difference reference solver in
+`benchmarks/wavelet_cavity.py`, which runs the cavity without involving the
+node at all. The companion wavelet ψ-solve check on the converged vorticity is
+an exact change of basis — a regression guard on the Dirichlet basis, not a
+validation — and is deliberately left out of the benchmark registry.

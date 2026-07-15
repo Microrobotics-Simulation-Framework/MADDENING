@@ -1,31 +1,38 @@
-"""M5 part 2 — lid-driven cavity benchmark with a wavelet ψ-solve.
+"""M5 part 2 — lid-driven cavity reference solver, plus a wavelet ψ-solve check.
 
-Validates that the production DD-wavelet Dirichlet Poisson solver produces a
-quantitatively correct incompressible flow: the classic lid-driven cavity at
-Re=100, compared to the Ghia-Ghia-Shin (1982) tabulated centreline velocities.
+A **pure NumPy/SciPy finite-difference** lid-driven cavity at Re=100, compared to
+the Ghia-Ghia-Shin (1982) tabulated centreline velocities.
 
 Formulation: stream-function/vorticity (ψ-ω).  Vorticity transport is 2nd-order
 finite-difference in physical space with Thom wall-vorticity BCs; the
-ψ-Poisson ``-∇²ψ = ω`` (homogeneous Dirichlet) is solved each step.
+ψ-Poisson ``-∇²ψ = ω`` (homogeneous Dirichlet) is solved each step by a
+pre-factorised ``scipy.linalg.lu_solve``.
 
-Two validations, decoupled for speed:
+.. important::
+   **``WaveletAdaptiveNode`` is not part of this benchmark.**  It is not in the
+   time loop and is never constructed; it has no convection, no velocity, no
+   pressure and no time integration.  This module's only MADDENING dependency
+   is :func:`~maddening.nodes.adaptive.wavelets.dirichlet.dirichlet_side`,
+   which is integer grid arithmetic.  Nothing here validates the node against
+   Navier-Stokes.  The node's actual verification benchmarks are the MMS and
+   MIME FFT cross-code tests in ``tests/verification/test_wavelet_cross_validation.py``.
 
-1. **Flow vs Ghia** -- the time loop uses the fast factorised FD Poisson solve
-   (``run_cavity``), and the steady-state centreline velocity is compared to the
-   Ghia tabulation.  This validates the scheme reaches the reference flow.
+Two functions, doing two different jobs:
 
-2. **Wavelet solver in context** -- at the converged vorticity, the ψ-Poisson is
-   re-solved in the **DD-wavelet Dirichlet basis** (``wavelet_psi_consistency``)
-   and checked against the FD ψ.  The wavelet Poisson operator is the FD Poisson
-   represented in the (L²-normalised, boundary-adapted) wavelet basis
-   ``A = Wnᵀ (-L_fd) Wn`` (SPD) -- an exact change of basis, so it reproduces the
-   FD ψ to machine precision while genuinely exercising the wavelet operator
-   (hybrid-Jacobi-conditionable, CDD-truncatable).
+1. ``run_cavity`` + ``ghia_comparison`` -- **the validation.**  The FD scheme is
+   run to steady state and its centreline velocity compared to the Ghia
+   tabulation.  This validates the FD reference solver, and establishes that the
+   converged vorticity field is physically correct.
 
-   (Running the dense-Wn wavelet solve *every* step is correct but slow at these
-   sizes -- the Dirichlet basis is dense; a matrix-free Dirichlet transform is a
-   later optimisation.  Decoupling keeps the benchmark fast without losing the
-   in-context validation.)
+2. ``wavelet_psi_consistency`` -- **a basis identity, not a validation.**  At the
+   converged vorticity the ψ-Poisson is re-solved in the (L²-normalised,
+   boundary-adapted) DD-wavelet Dirichlet basis, ``A = Wnᵀ (-L_fd) Wn`` (SPD),
+   and compared to the FD ψ.  This is the *same* FD operator in a different
+   basis, solved densely and un-truncated, so agreement to machine precision is
+   an exact change of basis and cannot fail for a correct ``Wn``.  It is a
+   regression guard on the Dirichlet basis construction and the L²
+   normalisation -- nothing more.  It does not exercise CDD truncation, the
+   hybrid-Jacobi preconditioner, or the node.
 
 Run directly::
 
@@ -132,8 +139,13 @@ def run_cavity(nl=4, nc=2, Re=100.0, dt=0.002, nsteps=30000, tol=1e-6,
 
 def wavelet_psi_consistency(res, order=4):
     """Re-solve the converged ψ-Poisson in the DD-wavelet Dirichlet basis and
-    return the relative error vs the FD ψ (validates the wavelet solver in the
-    cavity context).  Exact change of basis ⇒ ~machine precision."""
+    return the relative error vs the FD ψ.
+
+    This is an **exact change of basis** (``A = Wnᵀ L Wn``, dense, un-truncated),
+    so ~machine precision is an algebraic identity, not a validation of the
+    wavelet solver or of the flow.  Use it as a regression guard on the
+    Dirichlet basis and its L² normalisation.  See the module docstring.
+    """
     n, h = res["n"], res["h"]
     W1, _, _ = DIR.synthesis_matrix_dirichlet(res["nl"], res["nc"], order, dim=1)
     W1n = _l2_normalise(np.asarray(W1), h)
@@ -171,4 +183,5 @@ if __name__ == "__main__":
     print(f"vortex centre    = ({vortex[0]:.3f}, {vortex[1]:.3f})  "
           f"(Ghia {GHIA_RE100_VORTEX})")
     print(f"wavelet ψ-solve vs FD ψ (converged) = "
-          f"{wavelet_psi_consistency(res):.2e}")
+          f"{wavelet_psi_consistency(res):.2e}  "
+          f"(basis identity, not a validation)")

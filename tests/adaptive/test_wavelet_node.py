@@ -259,3 +259,65 @@ def test_node_update_warns_on_nonconvergence():
 def test_doctest_in_module_docstring():
     results = doctest.testmod(wavelet_module, verbose=False)
     assert results.failed == 0, f"doctest failed: {results}"
+
+
+# ----------------------------------------------------------------------
+# 10c. M6 — sensor/objective protocol
+# ----------------------------------------------------------------------
+
+def test_default_sensor_is_point_value_unchanged():
+    """The default sensor reproduces the original _srow @ c exactly."""
+    node = WaveletAdaptiveNode(dim=2, n_levels=4)
+    s = node.initial_state()
+    got = float(node._sensor(s))
+    ref = float(node._srow @ s["c"])
+    assert got == ref
+    assert jnp.ndim(node._sensor(s)) == 0            # scalar contract preserved
+
+
+def test_multipoint_and_field_sensors():
+    """Opt-in sensors: a probe array returns a vector; a field functional
+    returns a differentiable scalar. Both are linear in c."""
+    from maddening.nodes.adaptive.wavelets import sensors as SEN
+    node = WaveletAdaptiveNode(dim=2, n_levels=4)
+    s = node.initial_state()
+    Wn = node._Wn
+
+    idxs = [10, 200, 555]
+    mp = SEN.multipoint_sensor(Wn, idxs)
+    y = mp.observe(s["c"])
+    assert y.shape == (3,)
+    assert np.allclose(np.asarray(y),
+                       [float(Wn[i] @ s["c"]) for i in idxs], atol=1e-12)
+
+    # field functional: +1 over a target box, -1 over another (differential dose)
+    N_grid = Wn.shape[0]
+    w = np.zeros(N_grid); w[:N_grid // 2] = 1.0; w[N_grid // 2:] = -1.0
+    ff = SEN.field_functional(Wn, jnp.asarray(w))
+    val = ff.observe(s["c"])
+    assert jnp.ndim(val) == 0
+    # equals the explicit weighted sum of point values
+    assert abs(float(val) - float(jnp.asarray(w) @ (Wn @ s["c"]))) < 1e-10
+
+
+def test_node_accepts_custom_sensor_op():
+    """A node built with a field-functional objective differentiates through it."""
+    from maddening.nodes.adaptive.wavelets import sensors as SEN
+    base = WaveletAdaptiveNode(dim=1, n_levels=6)
+    N_grid = base._Wn.shape[0]
+    w = jnp.asarray(np.cos(2 * np.pi * np.arange(N_grid) / N_grid))
+    node = WaveletAdaptiveNode(dim=1, n_levels=6,
+                               sensor_op=SEN.field_functional(base._Wn, w))
+
+    def J(theta):
+        empty = {"c": jnp.zeros(node.N_max), "mask": jnp.zeros(node.N_max, bool),
+                 "theta": jnp.atleast_1d(theta)}
+        mask = node.compute_active_set(empty, is_cold_start=True)
+        st = node.solve_frozen({**empty, "mask": mask}, mask)
+        return jnp.squeeze(node._sensor(st))
+
+    th = jnp.asarray(0.42)
+    g = float(jax.grad(J)(th))
+    e = 1e-5
+    fd = float((J(th + e) - J(th - e)) / (2 * e))
+    assert abs(g - fd) / (abs(fd) + 1e-30) < 1e-4

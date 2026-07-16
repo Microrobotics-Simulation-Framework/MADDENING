@@ -59,6 +59,7 @@ from maddening.nodes.adaptive.wavelets import cdd as _cdd
 from maddening.nodes.adaptive.wavelets import operator as _op
 from maddening.nodes.adaptive.wavelets import precond as _pc
 from maddening.nodes.adaptive.wavelets import preconditioners as _pre
+from maddening.nodes.adaptive.wavelets import sensors as _sen
 from maddening.warnings import ConvergenceWarning
 
 
@@ -175,6 +176,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         preconditioner: str = "hybrid",
         boundary: str = "periodic",
         max_outer: int | None = None,
+        sensor_op: "_sen.Sensor | None" = None,
         **kw,
     ):
         if dim not in (1, 2, 3):
@@ -245,6 +247,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
             sidx = sidx * self.side + i
         self._sensor_idx = int(sidx)
         self._srow = self._Wn[self._sensor_idx]
+        # Sensor/objective seam (M6): default is the scalar point value
+        # φ(x_sensor) — identical to the original _srow @ c.  Multi-point, field
+        # functional, or (M21) gradient sensors drop in via `sensor_op`.
+        self._sensor_op = sensor_op if sensor_op is not None else \
+            _sen.LinearSensor(self._srow[None, :], scalar=True)
 
     # ---- theta accessors ----
     def _get_theta(self, state):
@@ -315,7 +322,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     # ---- sensor functional J = u(x_sensor) ----
     def _sensor(self, state) -> jax.Array:
-        return self._srow @ state["c"]
+        return self._sensor_op.observe(state["c"])
 
     # ---- full-basis gradient (no mask) for the blindness diagnostic ----
     def compute_full_basis_gradient(self, state) -> jax.Array:

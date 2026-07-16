@@ -98,6 +98,7 @@ class WaveletVarcoeffNode(WaveletAdaptiveNode):
         chi_init: jax.Array | float = 0.0,
         a_ref: jax.Array | float = 1.0,
         source: jax.Array | None = None,
+        h0: tuple[float, ...] | None = None,
         mass: float = 1.0,
         preconditioner: str = "hybrid",
         max_outer: int | None = None,
@@ -168,13 +169,22 @@ class WaveletVarcoeffNode(WaveletAdaptiveNode):
         self._sensor_op = sensor_op if sensor_op is not None else \
             _sen.LinearSensor(self._srow[None, :], scalar=True)
 
-        # Fixed source field (M19); M20 replaces with the χ-dependent RHS.
-        if source is None:
-            r2 = (self._grid[0] - 0.42) ** 2
-            for d in range(1, dim):
-                r2 = r2 + (self._grid[d] - 0.5) ** 2
-            source = jnp.exp(-r2 / 0.10 ** 2)
-        self._source = jnp.asarray(source)
+        # RHS mode.  h0 given → the magnetostatic source -∇·(χ H₀) (M20), which
+        # depends on χ, so χ enters through BOTH A(χ) and b(χ).  Otherwise a fixed
+        # source field (M19).
+        if h0 is not None:
+            if len(h0) != dim:
+                raise ValueError(f"h0 must have length dim={dim}; got {len(h0)}")
+            self._h0 = tuple(float(v) for v in h0)
+            self._source = None
+        else:
+            self._h0 = None
+            if source is None:
+                r2 = (self._grid[0] - 0.42) ** 2
+                for d in range(1, dim):
+                    r2 = r2 + (self._grid[d] - 0.5) ** 2
+                source = jnp.exp(-r2 / 0.10 ** 2)
+            self._source = jnp.asarray(source)
 
         # θ is the χ field.
         self._chi_init = jnp.broadcast_to(
@@ -187,10 +197,24 @@ class WaveletVarcoeffNode(WaveletAdaptiveNode):
     def _set_theta(self, state, theta_new):
         return {**state, "theta": jnp.asarray(theta_new)}
 
-    # ---- RHS: fixed source projected to the wavelet basis (M19) ----
+    # ---- RHS: fixed source (M19) or the magnetostatic -∇·(χH₀) (M20) ----
+    def _magnetic_source(self, chi) -> jax.Array:
+        """Physical-space ``-∇·(χ H₀) = -Σ_d H₀_d ∂_d χ`` (H₀ constant), periodic
+        central differences.  Depends on χ, so ``dJ/dχ`` also flows through the RHS."""
+        c = chi.reshape((self.side,) * self.dim)
+        f = jnp.zeros_like(c)
+        for d in range(self.dim):
+            dchi = (jnp.roll(c, -1, axis=d) - jnp.roll(c, 1, axis=d)) / (2 * self._h)
+            f = f - self._h0[d] * dchi
+        return f.reshape(-1)
+
     def _rhs_coeffs(self, theta) -> jax.Array:
-        del theta                       # M19: source is independent of χ
-        return (self._h ** self.dim) * self._wn_transpose(self._source)
+        if self._h0 is None:
+            del theta                   # M19: source independent of χ
+            f = self._source
+        else:
+            f = self._magnetic_source(theta)   # M20: source = -∇·(χ H₀)
+        return (self._h ** self.dim) * self._wn_transpose(f)
 
     # ---- θ→A: assemble the matrix-free varcoeff operator in-trace ----
     def _build_operator(self, state) -> "_OperatorContext":

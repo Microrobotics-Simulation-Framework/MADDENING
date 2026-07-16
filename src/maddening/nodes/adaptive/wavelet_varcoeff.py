@@ -214,7 +214,12 @@ class WaveletVarcoeffNode(WaveletAdaptiveNode):
             f = self._source
         else:
             f = self._magnetic_source(theta)   # M20: source = -∇·(χ H₀)
-        return (self._h ** self.dim) * self._wn_transpose(f)
+        # physical_varcoeff / make_varcoeff_apply is the STRONG-form operator
+        # (stiffness a/h², mass ·1), so the Galerkin RHS is Wnᵀf with NO h^dim
+        # factor.  (The base node's physical_laplacian is the weak form with a
+        # lumped mass M = h·I and does carry h^dim — a different operator.)  The
+        # MMS in test_wavelet_varcoeff converges O(h²) only with this scaling.
+        return self._wn_transpose(f)
 
     # ---- θ→A: assemble the matrix-free varcoeff operator in-trace ----
     def _build_operator(self, state) -> "_OperatorContext":

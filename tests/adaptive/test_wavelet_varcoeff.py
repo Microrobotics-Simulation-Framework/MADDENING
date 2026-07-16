@@ -129,9 +129,10 @@ def test_magnetics_full_basis_matches_dense_fd():
     f = node._magnetic_source(chi)
     res = OP.assemble_wave_operator(nl, nc, 4, dim, mass=m, a_grid=a)
     Awave, Wn = res["A_dense"], res["Wn"]
-    phi_wav = np.asarray(Wn @ jnp.linalg.solve(Awave, (h ** dim) * (Wn.T @ f)))
+    # strong-form varcoeff: RHS is Wnᵀf (no h^dim) — the corrected node scaling
+    phi_wav = np.asarray(Wn @ jnp.linalg.solve(Awave, Wn.T @ f))
     A_phys = np.asarray(OP.physical_varcoeff(a, dim, h, mass=m))
-    phi_fd = np.linalg.solve(A_phys, (h ** dim) * np.asarray(f))
+    phi_fd = np.linalg.solve(A_phys, np.asarray(f))
     assert np.linalg.norm(phi_wav - phi_fd) / np.linalg.norm(phi_fd) < 1e-10
 
 

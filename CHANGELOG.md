@@ -74,6 +74,42 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   blindness/`symmetry_break` machinery is near-inert (the local
   wavelet basis is trap-immune).  Guide:
   `docs/developer_guide/wavelet_adaptive_node.md`.
+- **Matrix-free wavelet operator path** (`wavelets/matrixfree.py`) —
+  lifts the dense-assembly O(N²) ceiling by applying
+  `A_wave = Wnᵀ A_phys Wn` without materialising anything (O(N) memory):
+  matrix-free normalised synthesis `Wn·v` and its **exact** transpose
+  `Wnᵀ·u` via `jax.linear_transpose` (NOT `analysis`, which is the
+  inverse — the two differ by order unity for non-orthogonal DD
+  wavelets); O(log N) column norms and preconditioner diagonal via
+  structural-block representatives; `jnp.roll` stencils for the
+  Laplacian and variable-coefficient operators; a `grid_gradient`
+  operator; and `masked_cg_solve` (replaces the dense-only
+  `gather_solve`, routing the frozen active-set solve through
+  `ift_linear_solve` CG + the swappable preconditioner protocol).
+  Verified as a transparent drop-in (matches the dense path to
+  1e-10–1e-12) and demonstrated at **64³** on an 8 GB GPU
+  (~717 MB peak; dense would be ~2.2 TB).
+- **Swappable seams on the wavelet node** — a preconditioner protocol
+  (`wavelets/preconditioners.py`; the preconditioner owns the coordinate
+  system, so a contrast-robust BPX/AMG drops into the `inner_precond`
+  slot for χ ≥ 10³), a sensor/objective protocol
+  (`wavelets/sensors.py`; point / multi-point / field-functional /
+  ∇φ Hall-probe), and a θ→A operator provider (`_build_operator`) — each
+  a no-op for the constant-coefficient node.
+- **`WaveletVarcoeffNode`** (`@stability(EXPERIMENTAL)`) — the
+  variable-coefficient / inverse forward model (application: magnetic
+  susceptibility inference).  The coefficient field χ is the
+  differentiable parameter; the operator `A(χ)` is assembled
+  **matrix-free in-trace** via the θ→A hook, so `jax.grad` flows w.r.t.
+  χ through operator assembly (validated `dJ/dχ` grad-vs-FD in 2D/3D,
+  jit(grad) = eager grad to 1e-14).  Magnetostatic source `-∇·(χH₀)`
+  (χ enters through both `A(χ)` and `b(χ)`); ∇φ Hall-probe sensor for
+  `B = -∇φ`; preconditioner diagonal **lagged at a reference `a₀`**
+  (saturating ~2.2× cost, the accepted design).  **Scope: χ ≤ 10²
+  near-term** — hybrid-Jacobi CG iteration count scales with contrast
+  (~500 iters at χ=10² in 3D); the contrast-robust preconditioner for
+  χ ≥ 10³ is research track R1.  Forward model only; χ-inversion +
+  regularisation is R3.
 
 ### Verification
 
@@ -116,6 +152,23 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   registered benchmark.  Cavity and trajectory tests are in the `slow` lane.
   Spike source of truth: `spikes/wavelet_derisking/FINDINGS.md` and
   `KNOWN_LIMITATIONS.md`.
+- **`WaveletVarcoeffNode`** validated **as a variable-coefficient
+  elliptic solver** by `tests/adaptive/test_wavelet_varcoeff.py`
+  (matrix-free θ→A cold-start/update; `dJ/dχ` grad-vs-FD in 2D/3D through
+  both `A(χ)` and `b(χ)` with jit(grad)=eager to 1e-14; ∇φ Hall sensor +
+  inverse Hall objective) and by the verification benchmark
+  `MADD-VER-WAVELET-VARCOEFF-MMS`
+  (`tests/verification/test_wavelet_varcoeff_mms.py`): manufactured-solution
+  convergence of `-∇·((1+χ)∇φ)+mφ=f` with the source derived from the
+  **continuum** PDE (independent ground truth), O(h²) at contrast χ ∈
+  {0, 10, 100} in 1D and χ=10 in 2D.  The matrix-free path is validated as
+  a transparent drop-in against the dense path
+  (`tests/adaptive/test_wavelet_matrixfree.py`, 1e-10–1e-12) and the 64³
+  scale gate runs within 8 GB.  Validated as a forward elliptic solver
+  only — no χ-inversion, no independent flow/experimental reference; χ ≤ 10².
+- **Derisking source of truth:** `spikes/wavelet_apps/FINDINGS_D1..D5.md`
+  (drug BC, `dJ/da` 2D/3D, matrix-free transpose, column norms, CG
+  iteration counts) and `FINDINGS_M18.md` (64³ memory + GPU confirmation).
 
 ## [0.3.0] - 2026-06-10
 

@@ -34,7 +34,42 @@ from maddening.nodes.adaptive.wavelets import transform as T
 
 __all__ = ["make_wn_ops", "make_wave_apply",
            "make_laplacian_apply", "make_varcoeff_apply",
-           "make_masked_operator_fn", "masked_cg_solve"]
+           "make_masked_operator_fn", "masked_cg_solve",
+           "wave_diagonal_fast"]
+
+
+def wave_diagonal_fast(n_levels: int, n_coarse: int, order: int, dim: int,
+                       norms: jax.Array,
+                       a_phys_apply: Callable[[jax.Array], jax.Array]
+                       ) -> jax.Array:
+    """``diag(A_wave)`` in **O(N log N)** — the preconditioner diagonal without
+    assembling ``A_wave``.
+
+    ``diag(A_wave)_j = ⟨Wn·e_j, A_phys Wn·e_j⟩ = ⟨s_j, A_phys s_j⟩ / norms_j²``
+    with ``s_j = synthesis(e_j)``.  For a **translation-invariant (constant-
+    coefficient)** ``A_phys`` this is constant within each structural block
+    (derisk D4), so one representative per block suffices — the same O(log N)
+    trick as :func:`operator.column_norms_fast`.
+
+    .. warning::
+       Block-invariance holds only for constant-coefficient ``A_phys``.  For a
+       variable coefficient the true diagonal is not block-constant; the lagged
+       preconditioner (M19) evaluates this at a **reference** ``a₀`` and freezes
+       ``D`` (measured: a saturating ~2.2× conditioning cost, FINDINGS_D5 /
+       measurement 1), which is why lagging is the design.
+    """
+    synth = T._SYNTH[dim]
+    N = T.n_dofs(n_levels, n_coarse, dim)
+    block_ids_np, reps_np = T.structural_blocks(n_levels, n_coarse, dim)
+    reps = jnp.asarray(reps_np)
+
+    def rep_num(j):
+        s = synth(jax.nn.one_hot(j, N, dtype=jnp.float64), n_levels, n_coarse, order)
+        return jnp.sum(s * a_phys_apply(s))          # ⟨s_j, A_phys s_j⟩
+
+    block_num = jax.vmap(rep_num)(reps)
+    block_diag = block_num / (norms[reps] ** 2)
+    return block_diag[jnp.asarray(block_ids_np)]
 
 
 def make_laplacian_apply(side: int, dim: int, h: float, mass: float = 1.0

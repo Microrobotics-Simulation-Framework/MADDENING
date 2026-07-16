@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.nodes.adaptive.wavelets import cdd as CDD
 from maddening.nodes.adaptive.wavelets import matrixfree as MF
 from maddening.nodes.adaptive.wavelets import operator as OP
 from maddening.nodes.adaptive.wavelets import transform as T
@@ -180,3 +181,145 @@ def test_masked_cg_matches_gather_solve(dim, nl, nc):
     c_cg = MF.masked_cg_solve(s["wave_apply"], mask, rhs, rtol=1e-12, atol=1e-14)
     assert float(jnp.linalg.norm(c_cg - c_gather)) / \
         (float(jnp.linalg.norm(c_gather)) + 1e-30) < 1e-8
+
+
+# ----------------------------------------------------------------------
+# M17 — matrix-free adjoint re-validation (grad-vs-FD, eager AND under jit)
+# ----------------------------------------------------------------------
+
+def _matrixfree_J_builder(nl, nc, dim):
+    """Build (J, mask_at, theta0) for the full matrix-free forward+solve, so the
+    source position θ enters via the RHS and the frozen-set adjoint flows through
+    masked CG (lineax) — the production gradient path, not the dense solve."""
+    from maddening.nodes.adaptive.wavelets import precond as PC
+    import jax.experimental.sparse as jsparse
+    side = nc * 2 ** nl
+    h = 1.0 / side
+    N = side ** dim
+    res = OP.assemble_wave_operator(nl, nc, 4, dim, mass=1.0)
+    A_wave, levels = res["A_dense"], res["levels"]
+    D = PC.diagonal_scaling(jnp.diag(A_wave), levels, "hybrid")
+    Ah = (A_wave / D[:, None]) / D[None, :]
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)
+    norms = OP.column_norms_fast(nl, nc, 4, dim, h)
+    a_phys = MF.make_laplacian_apply(side, dim, h, mass=1.0)
+    wave_apply = MF.make_wave_apply(nl, nc, 4, dim, norms, a_phys, D)
+    wn_apply, wn_transpose = MF.make_wn_ops(nl, nc, 4, dim, norms)
+    c1 = np.arange(side) / side
+    grid = [jnp.asarray(m.reshape(-1)) for m in np.meshgrid(*([c1] * dim), indexing="ij")]
+    sidx = int(np.argmin(np.abs(c1 - 0.30))) * (side ** (dim - 1))
+    lev = np.asarray(levels); coarse = jnp.asarray(lev == lev.min()); K = N // 4
+
+    def _rhs(theta):
+        r2 = (grid[0] - jnp.squeeze(theta)) ** 2
+        for d in range(1, dim):
+            r2 = r2 + (grid[d] - 0.5) ** 2
+        f = jnp.exp(-r2 / 0.10 ** 2)
+        return (h ** dim) * wn_transpose(f)
+
+    def mask_at(theta):
+        b = _rhs(theta) / D
+        m, _, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v,
+                                 lambda mm, rr: OP.gather_solve(Ah, mm, rr, K),
+                                 b, coarse, K)
+        return jax.lax.stop_gradient(m)
+
+    def J(theta, mask):
+        bh = _rhs(theta) / D
+        chat = MF.masked_cg_solve(wave_apply, mask, bh, rtol=1e-12, atol=1e-14)
+        return wn_apply(chat / D)[sidx]
+
+    return J, mask_at
+
+
+@pytest.mark.parametrize("dim,nl,nc,tol", [(1, 6, 2, 1e-8), (2, 4, 2, 1e-6)])
+def test_matrixfree_adjoint_grad_vs_fd(dim, nl, nc, tol):
+    """The matrix-free frozen-set adjoint (through lineax CG) matches FD, EAGER."""
+    J, mask_at = _matrixfree_J_builder(nl, nc, dim)
+    th = jnp.asarray(0.42)
+    mask = mask_at(th)
+    g = float(jax.grad(lambda t: J(t, mask))(th))
+    e = 1e-5
+    fd = float((J(th + e, mask) - J(th - e, mask)) / (2 * e))
+    assert abs(g - fd) / (abs(fd) + 1e-30) < tol, f"dim={dim} rel={abs(g-fd)/abs(fd)}"
+
+
+def test_matrixfree_adjoint_jit_matches_eager():
+    """jit(grad(.)) equals eager grad to machine precision — the adjoint is
+    jit-stable (the spike's 1e-9 was eager-only; this is the production path)."""
+    J, mask_at = _matrixfree_J_builder(1, 6, 2)
+    th = jnp.asarray(0.42)
+    mask = mask_at(th)
+    g = float(jax.grad(lambda t: J(t, mask))(th))
+    gj = float(jax.jit(jax.grad(lambda t: J(t, mask)))(th))
+    assert abs(g - gj) / (abs(g) + 1e-30) < 1e-11
+
+
+# ----------------------------------------------------------------------
+# M18 — scale gate: the matrix-free path runs where dense cannot
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("dim,nl,nc", [(1, 6, 2), (2, 4, 2), (3, 3, 1)])
+def test_wave_diagonal_fast_matches_dense(dim, nl, nc):
+    """diag(A_wave) via block representatives (constant-coeff) matches the dense
+    diagonal — the O(log N) preconditioner diagonal without assembling A_wave."""
+    side = nc * 2 ** nl
+    h = 1.0 / side
+    res = OP.assemble_wave_operator(nl, nc, 4, dim, mass=1.3)
+    dense_diag = jnp.diag(res["A_dense"])
+    norms = OP.column_norms_fast(nl, nc, 4, dim, h)
+    a_phys = MF.make_laplacian_apply(side, dim, h, mass=1.3)
+    fast = MF.wave_diagonal_fast(nl, nc, 4, dim, norms, a_phys)
+    assert float(jnp.max(jnp.abs(fast - dense_diag))) < 1e-10
+
+
+def _matrixfree_scale_solve(nl, nc, dim, mass=1.0):
+    """Fully matrix-free forward+solve — no dense operator ever assembled."""
+    from maddening.nodes.adaptive.wavelets import precond as PC
+    side = nc * 2 ** nl
+    h = 1.0 / side
+    N = side ** dim
+    norms = OP.column_norms_fast(nl, nc, 4, dim, h)
+    a_phys = MF.make_laplacian_apply(side, dim, h, mass=mass)
+    diagA = MF.wave_diagonal_fast(nl, nc, 4, dim, norms, a_phys)
+    levels = {1: T.levels_1d, 2: T.levels_2d, 3: T.levels_3d}[dim](nl, nc)
+    D = PC.diagonal_scaling(diagA, levels, "hybrid")
+    wave_apply = MF.make_wave_apply(nl, nc, 4, dim, norms, a_phys, D)
+    _, wn_transpose = MF.make_wn_ops(nl, nc, 4, dim, norms)
+    c1 = np.arange(side) / side
+    grid = [jnp.asarray(m.reshape(-1))
+            for m in np.meshgrid(*([c1] * dim), indexing="ij")]
+    r2 = sum((grid[d] - (0.42 if d == 0 else 0.5)) ** 2 for d in range(dim))
+    f = jnp.exp(-r2 / 0.12 ** 2)
+    bh = ((h ** dim) * wn_transpose(f)) / D
+    lev = np.asarray(levels)
+    coarse = jnp.asarray(lev == lev.min())
+    mask = coarse | (jnp.arange(N) < N // 16)         # a fixed, budget-sized mask
+    chat = MF.masked_cg_solve(wave_apply, mask, bh, rtol=1e-8, atol=1e-10)
+    return chat
+
+
+def test_matrixfree_solve_at_32cubed():
+    """A 32³ matrix-free solve completes.  Dense assembly here is ~34 GB (dead on
+    the A2000); matrix-free is O(N).  This is the transparent-drop-in claim at a
+    size the dense path cannot reach."""
+    c = _matrixfree_scale_solve(5, 1, 3)              # side = 32, N = 32768
+    assert c.shape == (32768,)
+    assert bool(jnp.all(jnp.isfinite(c)))
+    assert float(jnp.linalg.norm(c)) > 0
+
+
+@pytest.mark.slow
+def test_matrixfree_scale_gate_64cubed():
+    """64³ (262 144 DOFs) runs to completion matrix-free.  Dense would be ~2.2 TB
+    (impossible).  Peak working set is O(N) — a few GB — well within the A2000's
+    8 GB (measured ~2.1 GB above baseline on CPU; see FINDINGS_M18)."""
+    import resource
+    m0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    c = _matrixfree_scale_solve(6, 1, 3)              # side = 64, N = 262144
+    c.block_until_ready()
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 - m0
+    assert c.shape == (262144,)
+    assert bool(jnp.all(jnp.isfinite(c)))
+    # O(N) memory: a handful of GB, not the ~2.2 TB dense would need
+    assert peak < 6000, f"matrix-free 64³ peak {peak:.0f} MB exceeded 6 GB"

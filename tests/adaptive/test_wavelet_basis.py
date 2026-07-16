@@ -515,3 +515,50 @@ def test_diagonal_scaling_is_traceable_and_differentiable():
     assert jnp.all(jnp.isfinite(g))
     # non-trivial dependence (D genuinely varies with a)
     assert float(jnp.linalg.norm(g)) > 0
+
+
+# ----------------------------------------------------------------------
+# M5 — preconditioner protocol (DiagonalScaling reproduces the old path)
+# ----------------------------------------------------------------------
+
+def test_diagonal_scaling_preconditioner_roundtrip_and_ops():
+    """DiagonalScaling implements the coordinate seam consistently: to/from are
+    inverses, and scale_operator/scale_rhs reproduce the hand-rolled D scaling."""
+    from maddening.nodes.adaptive.wavelets import preconditioners as PRE
+    res = OP.assemble_wave_operator(5, 2, order=4, dim=1, mass=1.0)
+    A, levels = res["A_dense"], res["levels"]
+    pc = PRE.DiagonalScaling.from_operator(jnp.diag(A), levels, "hybrid")
+    D = pc.D
+    rng = np.random.default_rng(0)
+    c = jnp.asarray(rng.standard_normal(A.shape[0]))
+    b = jnp.asarray(rng.standard_normal(A.shape[0]))
+    # coordinate maps are inverses
+    assert float(jnp.linalg.norm(pc.from_scaled(pc.to_scaled(c)) - c)) < 1e-12
+    # operator/rhs scaling equal the explicit two-sided D scaling
+    assert float(jnp.linalg.norm(
+        pc.scale_operator_dense(A) - (A / D[:, None]) / D[None, :])) < 1e-12
+    assert float(jnp.linalg.norm(pc.scale_rhs(b) - b / D)) < 1e-12
+    # diagonal mode marks on |r| and has no inner (Krylov) preconditioner
+    assert float(jnp.linalg.norm(pc.indicator(b) - jnp.abs(b))) == 0.0
+    assert pc.inner_precond is None
+    # satisfies the runtime-checkable Protocol
+    assert isinstance(pc, PRE.Preconditioner)
+
+
+def test_cdd_indicator_default_matches_abs():
+    """Passing indicator=abs is identical to the default (no indicator)."""
+    s = _setup_1d()
+    Ah, Wn, D, x, h, N = (s["Ah"], s["Wn"], s["D"], s["x"], s["h"], s["N"])
+    import jax.experimental.sparse as jsparse
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)
+    lev = np.asarray(s["levels"]); coarse = jnp.asarray(lev == lev.min()); K = N // 16
+    b = (h * (Wn.T @ jnp.exp(-((jnp.asarray(x) - 0.42) / 0.06) ** 2))) / D
+
+    def sm(mask, rhs):
+        return OP.gather_solve(Ah, mask, rhs, K)
+
+    m0, c0, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, sm, b, coarse, K)
+    m1, c1, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, sm, b, coarse, K,
+                               indicator=jnp.abs)
+    assert bool(jnp.all(m0 == m1))
+    assert float(jnp.linalg.norm(c0 - c1)) == 0.0

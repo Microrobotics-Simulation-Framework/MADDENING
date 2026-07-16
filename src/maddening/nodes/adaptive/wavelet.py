@@ -58,6 +58,7 @@ from maddening.nodes.adaptive.base import AdaptiveNode
 from maddening.nodes.adaptive.wavelets import cdd as _cdd
 from maddening.nodes.adaptive.wavelets import operator as _op
 from maddening.nodes.adaptive.wavelets import precond as _pc
+from maddening.nodes.adaptive.wavelets import preconditioners as _pre
 from maddening.warnings import ConvergenceWarning
 
 
@@ -215,10 +216,14 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._levels = res["levels"]
         self._h = res["h"]
 
-        # Hybrid-Jacobi scaling (computed once, eager) and scaled operator.
-        self._D = _pc.diagonal_scaling(jnp.diag(self._A), self._levels,
-                                       preconditioner)
-        self._Ah = (self._A / self._D[:, None]) / self._D[None, :]
+        # Preconditioner seam (M5): the preconditioner owns the coordinate
+        # system.  DiagonalScaling reproduces the original hybrid-Jacobi path
+        # exactly; a contrast-robust operator preconditioner (R1) drops into the
+        # same protocol.  Computed once, eager.
+        self._precond = _pre.DiagonalScaling.from_operator(
+            jnp.diag(self._A), self._levels, preconditioner)
+        self._D = self._precond.D                       # kept for compatibility
+        self._Ah = self._precond.scale_operator_dense(self._A)
         # Scaled operator as a constant BCOO (assembled once, static nse) for an
         # O(nnz) jit-safe matvec on the masked-solve / CDD hot path.
         self._Ah_bcoo = jsparse.BCOO.fromdense(self._Ah)
@@ -258,7 +263,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         return (self._h ** self.dim) * (self._Wn.T @ f)
 
     def _scaled_rhs(self, theta) -> jax.Array:
-        return self._rhs_coeffs(theta) / self._D
+        return self._precond.scale_rhs(self._rhs_coeffs(theta))
 
     # ---- selection: CDD residual marking (returns a frozen mask) ----
     def _solve_masked(self, mask, rhs_scaled):
@@ -274,6 +279,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         mask, _, _conv = _cdd.cdd_select(
             lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
             self._coarse, self.K, max_outer=self.max_outer,
+            indicator=self._precond.indicator,
         )
         return jax.lax.stop_gradient(mask)
 
@@ -294,6 +300,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         mask, _, converged = _cdd.cdd_select(
             lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
             self._coarse, self.K, max_outer=self.max_outer,
+            indicator=self._precond.indicator,
         )
         _warn_if_not_converged(converged)
         mask = jax.lax.stop_gradient(mask)
@@ -303,7 +310,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
     def solve_frozen(self, state, mask):
         bh = self._scaled_rhs(self._get_theta(state))
         c_hat = self._solve_masked(mask, bh)
-        c = c_hat / self._D          # physical wavelet coefficients
+        c = self._precond.from_scaled(c_hat)   # physical wavelet coefficients
         return {**state, "c": c, "mask": mask}
 
     # ---- sensor functional J = u(x_sensor) ----

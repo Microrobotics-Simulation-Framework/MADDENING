@@ -77,6 +77,7 @@ def cdd_select(
     theta_D: float = THETA_D,
     max_outer: int = MAX_OUTER,
     rtol: float = 1e-6,
+    indicator: Callable[[jax.Array], jax.Array] | None = None,
 ) -> Tuple[jax.Array, jax.Array, jax.Array]:
     """Run CDD to an active-set budget ``K``; return ``(mask, c, converged)``.
 
@@ -102,6 +103,12 @@ def cdd_select(
     coarse_mask : boolean ``(N,)`` of always-included coarse DOFs.
     K : active-set budget; growth stops once ``|mask| >= K``.
     rtol : relative-residual tolerance for the early exit.
+    indicator : optional ``r_scaled -> per-DOF marking score`` (non-negative).
+        The error indicator Doerfler marks on.  Defaults to ``|r|`` -- the
+        correct choice under diagonal scaling, where the basis is (near-)Riesz
+        stable.  A preconditioner that changes coordinates supplies its own
+        (e.g. ``|M⁻¹ r|`` for an operator preconditioner); see
+        :class:`maddening.nodes.adaptive.wavelets.preconditioners`.
 
     Returns
     -------
@@ -146,7 +153,8 @@ def cdd_select(
 
     def body(state):
         it, mask, _c, resid, _rel_prev = state
-        grown = _doerfler_grow(mask, resid, theta_D, K)
+        score = resid if indicator is None else indicator(resid)
+        grown = _doerfler_grow(mask, score, theta_D, K)
         new_c = solve_masked(grown, b)
         new_resid = b - apply_operator(new_c)
         new_rel = jnp.linalg.norm(new_resid) / b_norm

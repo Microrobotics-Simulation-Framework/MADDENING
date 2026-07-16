@@ -39,12 +39,12 @@ __all__ = ["make_wn_ops", "make_wave_apply",
 
 
 def grid_gradient(u_flat: jax.Array, side: int, dim: int, h: float):
-    """Central-difference gradient on the periodic grid.
+    """Central-difference gradient on the periodic grid, for any scalar field.
 
     Returns a list ``[∂₀u, …, ∂_{dim-1}u]`` of flat length-``side**dim`` arrays.
-    This is the derivative operator the ∇φ / Hall-probe sensor (M21) needs — no
-    gradient operator existed in ``transform.py``.  Linear in ``u``, so it
-    composes with the (linear) synthesis to give a differentiable ``B = -∇φ``.
+    A general derivative operator (``transform.py`` had none).  Linear in ``u``,
+    so it composes with the (linear) synthesis to give a differentiable ``∇u`` —
+    e.g. for a gradient-at-points sensor.
     """
     u = u_flat.reshape((side,) * dim)
     return [((jnp.roll(u, -1, axis=d) - jnp.roll(u, 1, axis=d)) / (2 * h)).reshape(-1)
@@ -217,7 +217,7 @@ def masked_cg_solve(apply: Callable[[jax.Array], jax.Array], mask: jax.Array,
        At high coefficient contrast the active-block system is ill-conditioned
        (κ ∝ contrast); CG then needs many iterations and, at inadequate budget,
        a small residual does not bound the solution error (D5 / FINDINGS_D5).
-       That regime is out of near-term scope (χ ≤ 10²) and is R1's concern.
+       That high-contrast regime is R1's concern (a contrast-robust preconditioner).
     """
     from maddening.core.solver_utils import ift_linear_solve  # lazy: lineax dep
 

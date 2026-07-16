@@ -92,24 +92,31 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - **Swappable seams on the wavelet node** — a preconditioner protocol
   (`wavelets/preconditioners.py`; the preconditioner owns the coordinate
   system, so a contrast-robust BPX/AMG drops into the `inner_precond`
-  slot for χ ≥ 10³), a sensor/objective protocol
+  slot for high-contrast coefficients), a sensor/objective protocol
   (`wavelets/sensors.py`; point / multi-point / field-functional /
-  ∇φ Hall-probe), and a θ→A operator provider (`_build_operator`) — each
-  a no-op for the constant-coefficient node.
-- **`WaveletVarcoeffNode`** (`@stability(EXPERIMENTAL)`) — the
-  variable-coefficient / inverse forward model (application: magnetic
-  susceptibility inference).  The coefficient field χ is the
-  differentiable parameter; the operator `A(χ)` is assembled
-  **matrix-free in-trace** via the θ→A hook, so `jax.grad` flows w.r.t.
-  χ through operator assembly (validated `dJ/dχ` grad-vs-FD in 2D/3D,
-  jit(grad) = eager grad to 1e-14).  Magnetostatic source `-∇·(χH₀)`
-  (χ enters through both `A(χ)` and `b(χ)`); ∇φ Hall-probe sensor for
-  `B = -∇φ`; preconditioner diagonal **lagged at a reference `a₀`**
-  (saturating ~2.2× cost, the accepted design).  **Scope: χ ≤ 10²
-  near-term** — hybrid-Jacobi CG iteration count scales with contrast
-  (~500 iters at χ=10² in 3D); the contrast-robust preconditioner for
-  χ ≥ 10³ is research track R1.  Forward model only; χ-inversion +
-  regularisation is R3.
+  gradient-at-points), and a θ→A operator provider (`_build_operator`) —
+  each a no-op for the constant-coefficient node.  All three are general
+  and carry no physics domain.
+- **`WaveletEllipticNode`** (`@stability(EXPERIMENTAL)`) — a **general**
+  matrix-free adaptive elliptic solver for `-∇·(a(x)∇u) + m u = f`.  The
+  coefficient field `a` and the source `f` are **caller-supplied**
+  functions of the differentiable parameter θ (`coeff_fn`, `source_fn`,
+  or fixed fields), so the node is a domain-agnostic differentiable
+  forward solver: `jax.grad` flows w.r.t. θ through the solve, and
+  through operator assembly when `a` depends on θ (validated `dJ/da`
+  grad-vs-FD in 1D/2D/3D, jit(grad) = eager grad to 1e-14; `dJ/df` for
+  the source-parameterised path).  The operator is assembled matrix-free
+  in-trace via the θ→A hook; the preconditioner diagonal is lagged at a
+  constant reference `a_ref` (saturating ~2.2× cost, the accepted
+  design).  Sensor and preconditioner are configured via the M5/M6
+  protocols.  The `boundary` argument names periodic (implemented; also
+  models an open domain via zero-padding), `dirichlet` and `neumann`
+  (explicit, documented slots that raise `NotImplementedError`).
+  Hybrid-Jacobi CG iteration count scales with coefficient contrast; a
+  contrast-robust preconditioner for high contrast drops into the M5
+  `inner_precond` slot but is not implemented.  Forward solver only —
+  specific physics (coefficient/source mappings, measurement models,
+  objectives) is supplied from outside MADDENING.
 
 ### Verification
 
@@ -152,23 +159,27 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   registered benchmark.  Cavity and trajectory tests are in the `slow` lane.
   Spike source of truth: `spikes/wavelet_derisking/FINDINGS.md` and
   `KNOWN_LIMITATIONS.md`.
-- **`WaveletVarcoeffNode`** validated **as a variable-coefficient
-  elliptic solver** by `tests/adaptive/test_wavelet_varcoeff.py`
-  (matrix-free θ→A cold-start/update; `dJ/dχ` grad-vs-FD in 2D/3D through
-  both `A(χ)` and `b(χ)` with jit(grad)=eager to 1e-14; ∇φ Hall sensor +
-  inverse Hall objective) and by the verification benchmark
-  `MADD-VER-WAVELET-VARCOEFF-MMS`
-  (`tests/verification/test_wavelet_varcoeff_mms.py`): manufactured-solution
-  convergence of `-∇·((1+χ)∇φ)+mφ=f` with the source derived from the
-  **continuum** PDE (independent ground truth), O(h²) at contrast χ ∈
-  {0, 10, 100} in 1D and χ=10 in 2D.  The matrix-free path is validated as
-  a transparent drop-in against the dense path
-  (`tests/adaptive/test_wavelet_matrixfree.py`, 1e-10–1e-12) and the 64³
-  scale gate runs within 8 GB.  Validated as a forward elliptic solver
-  only — no χ-inversion, no independent flow/experimental reference; χ ≤ 10².
+- **`WaveletEllipticNode`** validated **as a general variable-coefficient
+  elliptic solver** by `tests/adaptive/test_wavelet_elliptic.py`
+  (matrix-free θ→A cold-start/update; `dJ/da` grad-vs-FD in 1D/2D/3D with
+  jit(grad)=eager to 1e-14; `coeff_fn`/`source_fn` configuration paths;
+  gradient-at-points and field-functional sensors; boundary-slot
+  behaviour; domain-neutral NodeMeta) and by the verification benchmark
+  `MADD-VER-WAVELET-ELLIPTIC-MMS`
+  (`tests/verification/test_wavelet_elliptic_mms.py`): manufactured-solution
+  convergence of `-∇·(a(x)∇u)+mu=f` for a generic varying coefficient with
+  the source derived from the **continuum** PDE (independent ground truth),
+  O(h²) at coefficient contrast {0, 10, 100} in 1D and 10 in 2D.  The
+  matrix-free path is validated as a transparent drop-in against the dense
+  path (`tests/adaptive/test_wavelet_matrixfree.py`, 1e-10–1e-12) and the
+  64³ scale gate runs within 8 GB.  Forward elliptic solver only.
 - **Derisking source of truth:** `spikes/wavelet_apps/FINDINGS_D1..D5.md`
-  (drug BC, `dJ/da` 2D/3D, matrix-free transpose, column norms, CG
-  iteration counts) and `FINDINGS_M18.md` (64³ memory + GPU confirmation).
+  (BC padding vs no-flux, coefficient-gradient 2D/3D, matrix-free
+  transpose, column norms, CG iteration counts) and `FINDINGS_M18.md`
+  (64³ memory + GPU confirmation).  A worked application layer built on
+  this node (magnetic-susceptibility inference: `coeff_fn`, source, and
+  gradient objective) is preserved on the `spike/wavelet-apps-m19-m23`
+  branch as a reference and belongs in MIME, not MADDENING.
 
 ## [0.3.0] - 2026-06-10
 

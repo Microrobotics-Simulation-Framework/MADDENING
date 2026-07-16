@@ -49,6 +49,8 @@ import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
 import numpy as np
 
+import warnings
+
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.solver_utils import ift_linear_solve
@@ -56,6 +58,25 @@ from maddening.nodes.adaptive.base import AdaptiveNode
 from maddening.nodes.adaptive.wavelets import cdd as _cdd
 from maddening.nodes.adaptive.wavelets import operator as _op
 from maddening.nodes.adaptive.wavelets import precond as _pc
+from maddening.warnings import ConvergenceWarning
+
+
+def _warn_if_not_converged(converged: jax.Array) -> None:
+    """Emit a ConvergenceWarning (host-side, JIT-safe) when ``converged`` is
+    false.  ``jax.debug.callback`` runs on the host at execution time, so the
+    warning fires under ``jax.jit`` and ``lax.scan`` alike; it is
+    autodiff-transparent, so it does not perturb any gradient."""
+    def _cb(conv) -> None:
+        if not bool(conv):
+            warnings.warn(
+                "WaveletAdaptiveNode: CDD active-set selection did not reach "
+                "tolerance (budget K or MAX_OUTER exhausted first). The returned "
+                "solution may be inaccurate; at high coefficient contrast it can "
+                "be worse than zero. Increase K, raise MAX_OUTER, or use a "
+                "contrast-robust preconditioner.",
+                ConvergenceWarning, stacklevel=2,
+            )
+    jax.debug.callback(_cb, converged)
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -152,6 +173,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         mass: float = 1.0,
         preconditioner: str = "hybrid",
         boundary: str = "periodic",
+        max_outer: int | None = None,
         **kw,
     ):
         if dim not in (1, 2, 3):
@@ -174,6 +196,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self.side = int(side)
         self.N_max = int(N_max)
         self.K = int(K) if K is not None else max(8, N_max // 16)
+        self.max_outer = int(max_outer) if max_outer is not None else _cdd.MAX_OUTER
         self.sigma = float(sigma)
         self.mass = float(mass)
         self._theta_init = float(theta_init)
@@ -248,11 +271,33 @@ class WaveletAdaptiveNode(AdaptiveNode):
     def compute_active_set(self, state, *, prev=None, is_cold_start=False):
         del prev, is_cold_start
         bh = self._scaled_rhs(self._get_theta(state))
-        mask, _ = _cdd.cdd_select(
+        mask, _, _conv = _cdd.cdd_select(
             lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
-            self._coarse, self.K,
+            self._coarse, self.K, max_outer=self.max_outer,
         )
         return jax.lax.stop_gradient(mask)
+
+    def update(self, state, boundary_inputs, dt):
+        """One adaptive step, surfacing CDD non-convergence.
+
+        Identical to the base ``compute_active_set`` → ``solve_frozen`` flow,
+        but captures CDD's ``converged`` flag and emits a
+        :class:`~maddening.warnings.ConvergenceWarning` (JIT-safe, via
+        ``jax.debug.callback``) when the active-set solve exhausted its budget
+        or iteration ceiling before reaching tolerance.  This is what stops a
+        high-contrast solve from silently returning a worse-than-zero result
+        (see ``spikes/wavelet_apps/FINDINGS_D5``).  The frozen re-solve in
+        :meth:`solve_frozen` is unchanged, so the gradient path is unaffected.
+        """
+        del boundary_inputs, dt
+        bh = self._scaled_rhs(self._get_theta(state))
+        mask, _, converged = _cdd.cdd_select(
+            lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
+            self._coarse, self.K, max_outer=self.max_outer,
+        )
+        _warn_if_not_converged(converged)
+        mask = jax.lax.stop_gradient(mask)
+        return self.solve_frozen(state, mask)
 
     # ---- frozen inner solve (the adjoint flows through here) ----
     def solve_frozen(self, state, mask):

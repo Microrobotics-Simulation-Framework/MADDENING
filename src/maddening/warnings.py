@@ -22,6 +22,20 @@ class PerformanceWarning(UserWarning):
     pass
 
 
+class ConvergenceWarning(UserWarning):
+    """Issued when an iterative solve returns without reaching its tolerance.
+
+    Unlike :class:`PerformanceWarning` this is **not** ignored by the test
+    suite's warning filter: a solve that silently returns an inaccurate
+    result is a correctness problem, not a speed one, and should surface.
+    ``WaveletAdaptiveNode`` raises this when the CDD active-set selection
+    exhausts its budget or iteration ceiling before the residual falls below
+    tolerance (e.g. a high-contrast coefficient field on the iterative path).
+    """
+
+    pass
+
+
 # ---------------------------------------------------------------------------
 # v0.2.1: compile-time edge validation — Shape / Dtype mismatches are now
 # hard errors (pre-announced in v0.2.0 release notes; see semver carve-out

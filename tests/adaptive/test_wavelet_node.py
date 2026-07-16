@@ -200,6 +200,59 @@ def test_stability_tag_present():
 
 
 # ----------------------------------------------------------------------
+# 10b. M2 — CDD convergence flag + non-convergence surfacing
+# ----------------------------------------------------------------------
+
+def test_cdd_select_returns_converged_flag():
+    """cdd_select reports a healthy stop (budget filled / tol reached) vs an
+    iteration-starved one (max_outer exhausted before either)."""
+    from maddening.nodes.adaptive.wavelets import cdd as CDD, operator as OP, precond as PC
+    import jax.experimental.sparse as jsparse
+    res = OP.assemble_wave_operator(6, 2, order=4, dim=1, mass=1.0)
+    A, Wn, lev = res["A_dense"], res["Wn"], res["levels"]
+    side, h, N = res["side"], res["h"], res["N"]
+    D = PC.diagonal_scaling(jnp.diag(A), lev, "hybrid")
+    Ah = (A / D[:, None]) / D[None, :]
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)
+    x = np.arange(side) / side
+    b = (h * (Wn.T @ jnp.exp(-((jnp.asarray(x) - 0.42) / 0.06) ** 2))) / D
+    lev_np = np.asarray(lev)
+    coarse = jnp.asarray(lev_np == lev_np.min())
+    K = max(8, N // 16)
+
+    def solve_masked(mask, rhs):
+        return OP.gather_solve(Ah, mask, rhs, K)
+
+    # healthy: budget fills within the iteration ceiling
+    _, _, conv_ok = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b,
+                                   coarse, K, max_outer=200)
+    assert bool(conv_ok) is True
+    # iteration-starved: one outer step cannot fill the budget or hit tol
+    _, _, conv_bad = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b,
+                                    coarse, K, max_outer=1)
+    assert bool(conv_bad) is False
+
+
+def test_node_update_warns_on_nonconvergence():
+    """node.update surfaces CDD iteration-starvation as a ConvergenceWarning
+    (JIT-safe host callback), and stays silent on a healthy solve."""
+    from maddening.warnings import ConvergenceWarning
+    node = WaveletAdaptiveNode(dim=1, n_levels=6)
+    s = node.initial_state()
+
+    # healthy: default max_outer, budget fills -> no warning
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")            # any ConvergenceWarning -> failure
+        node.update(s, {}, 1.0)
+
+    # starve the outer loop -> the flag flips and update must warn
+    node.max_outer = 1
+    with pytest.warns(ConvergenceWarning):
+        node.update(s, {}, 1.0)
+
+
+# ----------------------------------------------------------------------
 # 11. doctest
 # ----------------------------------------------------------------------
 

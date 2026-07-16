@@ -70,8 +70,8 @@ def cdd_select(
     theta_D: float = THETA_D,
     max_outer: int = MAX_OUTER,
     rtol: float = 1e-6,
-) -> Tuple[jax.Array, jax.Array]:
-    """Run CDD to an active-set budget ``K``; return ``(mask, c)``.
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    """Run CDD to an active-set budget ``K``; return ``(mask, c, converged)``.
 
     Works in whatever coordinates the caller supplies (the node passes the
     symmetrically-scaled operator and RHS).
@@ -95,6 +95,20 @@ def cdd_select(
     coarse_mask : boolean ``(N,)`` of always-included coarse DOFs.
     K : active-set budget; growth stops once ``|mask| >= K``.
     rtol : relative-residual tolerance for the early exit.
+
+    Returns
+    -------
+    mask, c : the frozen active set and its coefficients.
+    converged : bool scalar -- ``True`` iff the loop stopped on the residual
+        criterion (``rel < rtol``) **or** on the active-set budget ``K``.
+        Reaching ``K`` is a *controlled sparse approximation*, the normal
+        adaptive outcome (the active set is deliberately truncated), so it is
+        healthy.  ``converged`` is ``False`` only when ``max_outer`` was
+        exhausted *before* either -- i.e. the Doerfler marking was still
+        growing the active set when it ran out of iterations.  That is the
+        genuine failure the flag exists to surface: the returned ``c`` can be
+        far from the best ``K``-term solution, at high contrast worse than
+        zero (see ``spikes/wavelet_apps/FINDINGS_D5`` and the M1/M3 history).
     """
     b_norm = jnp.linalg.norm(b) + 1e-30
 
@@ -119,5 +133,8 @@ def cdd_select(
         new_rel = jnp.linalg.norm(new_resid) / b_norm
         return (it + 1, grown, new_c, new_resid, new_rel)
 
-    _it, mask, c, _resid, _rel_final = jax.lax.while_loop(cond, body, state0)
-    return mask, c
+    _it, mask, c, _resid, rel_final = jax.lax.while_loop(cond, body, state0)
+    # Healthy stop = residual tolerance reached OR budget K filled (a controlled
+    # sparse approximation). Only max_outer-exhaustion-before-either is a failure.
+    converged = (rel_final < rtol) | (jnp.sum(mask) >= K)
+    return mask, c, converged

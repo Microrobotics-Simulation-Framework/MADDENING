@@ -1,0 +1,182 @@
+"""Matrix-free wavelet operator apply — the route past the dense-assembly ceiling.
+
+Dense assembly (``operator.assemble_wave_dense``) materialises ``Wn`` and
+``A_phys`` as ``(N, N)`` arrays, so peak memory is O(N²) and 3D dies at ~16³
+(see ``operator.py`` module docstring).  This module applies the same operator
+``A_wave = Wnᵀ A_phys Wn`` **without materialising anything**, so memory is O(N)
+and the reachable grid is bounded by the solve, not the assembly.
+
+Building blocks:
+
+* ``make_wn_ops`` — the L²-normalised synthesis ``Wn v`` and its exact transpose
+  ``Wnᵀ u``.  ``Wn = W diag(1/norms)``, so ``Wn v = synthesis(v / norms)`` and
+  ``Wnᵀ u = synthesis_transpose(u) / norms``.  The transpose is
+  ``jax.linear_transpose`` of synthesis — **never ``analysis``** (D3: DD wavelets
+  are non-orthogonal, ``W⁻¹ ≠ Wᵀ``; ``analysis`` is the inverse and is wrong by
+  order unity in the adjoint path).
+
+* ``make_wave_apply`` — the full scaled matvec ``v → Â v`` used by CDD selection
+  and the masked CG solve (M16): ``Â = D⁻¹ Wnᵀ A_phys Wn D⁻¹``.
+
+The ``norms`` vector is a fixed O(N) array computed once at construction.  M14
+supplies it in O(log N) via structural-block representatives; this module only
+consumes it.
+"""
+
+from __future__ import annotations
+
+from typing import Callable, Tuple
+
+import jax
+import jax.numpy as jnp
+
+from maddening.nodes.adaptive.wavelets import transform as T
+
+__all__ = ["make_wn_ops", "make_wave_apply",
+           "make_laplacian_apply", "make_varcoeff_apply",
+           "make_masked_operator_fn", "masked_cg_solve"]
+
+
+def make_laplacian_apply(side: int, dim: int, h: float, mass: float = 1.0
+                         ) -> Callable[[jax.Array], jax.Array]:
+    """Matrix-free ``(-Δ + mass·I)`` matching :func:`operator.physical_laplacian`.
+
+    That dense operator is the Galerkin tensor form ``Σ_d S⊗M…`` with 1D
+    stiffness ``S`` and lumped mass ``M = h·I``, so the matvec is a ``jnp.roll``
+    stencil: ``Σ_d h^{dim-2}(2u − u₊ − u₋) + mass·h^dim·u``.  Never materialises
+    ``(N, N)``.  Input/output are flat length-``side**dim`` vectors.
+    """
+    shape = (side,) * dim
+    stiff_scale = h ** (dim - 2)
+    mass_scale = mass * (h ** dim)
+
+    def apply(u_flat: jax.Array) -> jax.Array:
+        u = u_flat.reshape(shape)
+        out = mass_scale * u
+        for d in range(dim):
+            out = out + stiff_scale * (
+                2.0 * u - jnp.roll(u, -1, axis=d) - jnp.roll(u, 1, axis=d))
+        return out.reshape(-1)
+
+    return apply
+
+
+def make_varcoeff_apply(a_grid: jax.Array, side: int, dim: int, h: float,
+                        mass: float = 1.0) -> Callable[[jax.Array], jax.Array]:
+    """Matrix-free ``(-∇·(a∇·) + mass·I)`` matching :func:`operator.physical_varcoeff`.
+
+    Conservative, face-averaged, periodic.  For each axis the face coefficient is
+    the mean of adjacent cell values; the matvec is
+    ``mass·u + Σ_{d,±} a_face(u − u_neighbour)``.  Fully traceable in ``a_grid``,
+    so ``dJ/da`` flows (the θ→A / application-1 path).  ``a_grid`` may be flat
+    (``side**dim``) or shaped ``(side,)*dim`` -- the node stores it flat in state.
+    Never materialises ``(N, N)``.
+    """
+    a = jnp.asarray(a_grid).reshape((side,) * dim)
+    inv_h2 = 1.0 / h ** 2
+
+    def apply(u_flat: jax.Array) -> jax.Array:
+        u = u_flat.reshape((side,) * dim)
+        out = mass * u
+        for d in range(dim):
+            a_plus = 0.5 * (a + jnp.roll(a, -1, axis=d)) * inv_h2   # face to +1
+            a_minus = 0.5 * (a + jnp.roll(a, 1, axis=d)) * inv_h2   # face to -1
+            out = out + a_plus * (u - jnp.roll(u, -1, axis=d))
+            out = out + a_minus * (u - jnp.roll(u, 1, axis=d))
+        return out.reshape(-1)
+
+    return apply
+
+
+def make_wn_ops(n_levels: int, n_coarse: int, order: int, dim: int,
+                norms: jax.Array
+                ) -> Tuple[Callable[[jax.Array], jax.Array],
+                           Callable[[jax.Array], jax.Array]]:
+    """Return ``(wn_apply, wn_transpose)`` for the L²-normalised synthesis.
+
+    ``wn_apply(v) = Wn v`` (wavelet coeffs → grid values);
+    ``wn_transpose(u) = Wnᵀ u`` (grid values → wavelet coeffs).
+    """
+    synth = T._SYNTH[dim]
+
+    def wn_apply(v: jax.Array) -> jax.Array:
+        return synth(v / norms, n_levels, n_coarse, order)
+
+    def wn_transpose(u: jax.Array) -> jax.Array:
+        return T.synthesis_transpose(u, n_levels, n_coarse, order, dim) / norms
+
+    return wn_apply, wn_transpose
+
+
+def make_wave_apply(n_levels: int, n_coarse: int, order: int, dim: int,
+                    norms: jax.Array, a_phys_apply: Callable[[jax.Array], jax.Array],
+                    D: jax.Array) -> Callable[[jax.Array], jax.Array]:
+    """Return the scaled matvec ``v → Â v`` with ``Â = D⁻¹ Wnᵀ A_phys Wn D⁻¹``.
+
+    ``a_phys_apply`` is the matrix-free physical operator (grid → grid; M15).
+    ``D`` is the preconditioner's diagonal scaling.  Nothing is materialised.
+    """
+    wn_apply, wn_transpose = make_wn_ops(n_levels, n_coarse, order, dim, norms)
+
+    def apply(v: jax.Array) -> jax.Array:
+        w = v / D                      # D⁻¹ v
+        grid = wn_apply(w)             # Wn D⁻¹ v  (coeffs → grid)
+        grid = a_phys_apply(grid)      # A_phys Wn D⁻¹ v
+        coeff = wn_transpose(grid)     # Wnᵀ A_phys Wn D⁻¹ v
+        return coeff / D               # D⁻¹ (…)
+
+    return apply
+
+
+def make_masked_operator_fn(apply: Callable[[jax.Array], jax.Array],
+                            mask: jax.Array) -> Callable[[jax.Array], jax.Array]:
+    """Matrix-free frozen-active-set operator ``v → A_eff v``.
+
+    The fn-based analogue of :func:`operator.make_masked_operator` (which needs a
+    dense/BCOO ``A``): acts as ``apply`` on the active block and as the identity
+    on inactive rows/cols, so the frozen solve returns ``0`` outside the mask::
+
+        A_eff v = where(mask, apply(where(mask, v, 0)), v)
+
+    ``apply`` is any matrix-free matvec (e.g. :func:`make_wave_apply`).  The
+    active block inherits ``apply``'s symmetry/PSD, so CG is valid.
+    """
+    def operator_fn(v: jax.Array) -> jax.Array:
+        vm = jnp.where(mask, v, 0.0)
+        Av = apply(vm)
+        return jnp.where(mask, Av, v)
+
+    return operator_fn
+
+
+def masked_cg_solve(apply: Callable[[jax.Array], jax.Array], mask: jax.Array,
+                    rhs_scaled: jax.Array, *,
+                    inner_precond: Callable[[jax.Array], jax.Array] | None = None,
+                    rtol: float = 1e-10, atol: float = 1e-12) -> jax.Array:
+    """Frozen active-set solve by masked CG — the matrix-free replacement for
+    :func:`operator.gather_solve`.
+
+    ``gather_solve`` does ``A[jnp.ix_(ix, ix)]``, which requires a dense ``A`` and
+    is structurally incompatible with a matrix-free operator; this solves the same
+    active-block system ``A_ΛΛ c_Λ = b_Λ`` iteratively via
+    :func:`~maddening.core.solver_utils.ift_linear_solve` (CG) on the masked
+    matvec, so it never materialises anything.  ``apply`` is the scaled matvec
+    ``v → Â v``; under diagonal scaling ``Â`` is well-conditioned and
+    ``inner_precond`` is ``None`` (the M5 diagonal-mode slot).  A contrast-robust
+    preconditioner (R1) passes a masked ``v → M⁻¹v`` here.
+
+    .. note::
+       At high coefficient contrast the active-block system is ill-conditioned
+       (κ ∝ contrast); CG then needs many iterations and, at inadequate budget,
+       a small residual does not bound the solution error (D5 / FINDINGS_D5).
+       That regime is out of near-term scope (χ ≤ 10²) and is R1's concern.
+    """
+    from maddening.core.solver_utils import ift_linear_solve  # lazy: lineax dep
+
+    op = make_masked_operator_fn(apply, mask)
+    b = jnp.where(mask, rhs_scaled, 0.0)
+    precond = None
+    if inner_precond is not None:
+        precond = make_masked_operator_fn(inner_precond, mask)
+    return ift_linear_solve(op, b, solver="cg", preconditioner=precond,
+                            rtol=rtol, atol=atol)

@@ -51,6 +51,7 @@ __all__ = [
     "physical_laplacian",
     "physical_varcoeff",
     "column_norms",
+    "column_norms_fast",
     "assemble_wave_dense",
     "assemble_wave_operator",
     "sparsity_pattern",
@@ -216,6 +217,33 @@ def column_norms(n_levels: int, n_coarse: int, order: int, dim: int,
     """
     W = T.synthesis_matrix(n_levels, n_coarse, order, dim=dim)
     norms = jnp.sqrt((h ** dim) * jnp.sum(W ** 2, axis=0))
+    return jnp.where(norms > 0, norms, 1.0)
+
+
+def column_norms_fast(n_levels: int, n_coarse: int, order: int, dim: int,
+                      h: float) -> jax.Array:
+    """L²(grid) column norms in **O(N log N)** — no dense ``W``.
+
+    By periodic translation invariance every synthesis column within one
+    structural block shares its norm, so evaluating one representative column per
+    block (``1 + n_levels·n_subband`` of them — O(log N)) and scattering by block
+    id reproduces :func:`column_norms` exactly.  Keyed on
+    :func:`~maddening.nodes.adaptive.wavelets.transform.structural_blocks`, **not**
+    ``levels_*()`` (derisk D4: that key conflates the coarse block with the first
+    detail level and is wrong by O(0.15)).
+
+    This is the matrix-free replacement for :func:`column_norms`; it removes the
+    only remaining ``O(N²)`` dependence on the normalisation path.
+    """
+    synth = T._SYNTH[dim]
+    N = T.n_dofs(n_levels, n_coarse, dim)
+    block_ids_np, reps_np = T.structural_blocks(n_levels, n_coarse, dim)
+    reps = jnp.asarray(reps_np)
+    # one basis vector per block representative; synthesise each (O(log N) × O(N))
+    eye_reps = jax.nn.one_hot(reps, N, dtype=jnp.float64)
+    cols = jax.vmap(lambda e: synth(e, n_levels, n_coarse, order))(eye_reps)
+    block_norms = jnp.sqrt((h ** dim) * jnp.sum(cols ** 2, axis=1))
+    norms = block_norms[jnp.asarray(block_ids_np)]
     return jnp.where(norms > 0, norms, 1.0)
 
 

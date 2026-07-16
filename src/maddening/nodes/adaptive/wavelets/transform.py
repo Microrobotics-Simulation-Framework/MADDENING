@@ -36,6 +36,7 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 __all__ = [
     "DD_ORDERS",
@@ -45,6 +46,8 @@ __all__ = [
     "analysis_2d",
     "synthesis_3d",
     "analysis_3d",
+    "synthesis_transpose",
+    "structural_blocks",
     "synthesis_matrix",
     "levels_1d",
     "levels_2d",
@@ -301,6 +304,68 @@ def levels_3d(n_levels: int, n_coarse: int) -> jax.Array:
 # ----------------------------------------------------------------------
 
 _SYNTH = {1: synthesis_1d, 2: synthesis_2d, 3: synthesis_3d}
+
+
+def structural_blocks(n_levels: int, n_coarse: int, dim: int):
+    """Per-DOF structural block id and the first index of each block.
+
+    The synthesis coefficient layout is: one **coarse** block (``n_coarse**dim``
+    DOFs), then per level ``n_subband`` blocks (1 in 1D, 3 in 2D, 7 in 3D) of
+    size ``cur**dim`` with ``cur`` doubling each level.  By periodic translation
+    invariance, every column *within one block* has the **same** ``L²`` norm, so
+    one representative per block reconstructs all N norms exactly (derisk D4,
+    validated to machine zero).
+
+    **This is the correct key — NOT ``levels_*()``.**  ``levels_*()`` labels the
+    coarse block and the first detail level both ``0`` and carries no subband
+    distinction, so a level-only representative is wrong by O(0.15) (D4).
+
+    Returns
+    -------
+    ids : ``(N,)`` int -- block id per DOF (``0 .. 1 + n_levels*n_subband - 1``).
+    reps : ``(n_blocks,)`` int -- the first DOF index of each block.
+    """
+    n_sub = {1: 1, 2: 3, 3: 7}[dim]
+    ids: list[int] = []
+    reps: list[int] = []
+    bid = 0
+    pos = 0
+    csz = n_coarse ** dim
+    reps.append(pos)
+    ids += [bid] * csz
+    pos += csz
+    cur = n_coarse
+    for _ in range(n_levels):
+        block = cur ** dim
+        for _s in range(n_sub):
+            bid += 1
+            reps.append(pos)
+            ids += [bid] * block
+            pos += block
+        cur *= 2
+    return np.asarray(ids, dtype=np.int64), np.asarray(reps, dtype=np.int64)
+
+
+def synthesis_transpose(u: jax.Array, n_levels: int, n_coarse: int,
+                        order: int = 4, dim: int = 1) -> jax.Array:
+    """Apply ``Wᵀ`` (the exact adjoint of synthesis) matrix-free.
+
+    **This is NOT ``analysis``.**  DD interpolating wavelets are non-orthogonal,
+    so ``W⁻¹ ≠ Wᵀ``: ``analysis_*`` is the *inverse*, and substituting it for the
+    transpose gives an order-unity wrong answer with no error and no shape
+    mismatch (derisk D3 measured the mismatch at ~0.9, and
+    ``jax.linear_transpose`` matching the dense ``Wᵀ`` to machine zero).  The
+    transpose is what appears throughout the *adjoint* path — the RHS projection
+    ``Wᵀ f``, the sensor row, ``dJ/da`` — so it must be exact.
+
+    Implemented as ``jax.linear_transpose`` of the (linear) synthesis, which is
+    the transpose by construction; no matrix is materialised.
+    """
+    synth = _SYNTH[dim]
+    z = jnp.zeros_like(u)
+    (out,) = jax.linear_transpose(
+        lambda c: synth(c, n_levels, n_coarse, order), z)(u)
+    return out
 
 
 def synthesis_matrix(n_levels: int, n_coarse: int, order: int = 4,

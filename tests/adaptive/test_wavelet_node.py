@@ -321,3 +321,47 @@ def test_node_accepts_custom_sensor_op():
     e = 1e-5
     fd = float((J(th + e) - J(th - e)) / (2 * e))
     assert abs(g - fd) / (abs(fd) + 1e-30) < 1e-4
+
+
+# ----------------------------------------------------------------------
+# 10d. M7 — θ→A operator provider seam
+# ----------------------------------------------------------------------
+
+def test_build_operator_default_is_constant_cached():
+    """The constant node returns the same cached context regardless of state —
+    the operator does not depend on θ."""
+    node = WaveletAdaptiveNode(dim=1, n_levels=6)
+    s = node.initial_state()
+    ctx_a = node._build_operator(s)
+    ctx_b = node._build_operator({**s, "theta": jnp.atleast_1d(0.7)})
+    assert ctx_a is node._op_ctx and ctx_b is node._op_ctx
+
+
+def test_operator_provider_override_is_used():
+    """A subclass overriding _build_operator drives the whole solve through the
+    provided context — proving the seam is a real override point (the θ→A hook
+    M19 will use), not decoration.  Here the override rebuilds an identical
+    context from `state`, so results must match the constant node exactly.
+    """
+    class _RebuildEachStep(WaveletAdaptiveNode):
+        def _build_operator(self, state):
+            # ignore the cache; construct a fresh (identical) context in-line,
+            # as the varcoeff path will, but from the constant operator.
+            from maddening.nodes.adaptive.wavelet import _OperatorContext
+            self._built = self._built + 1 if hasattr(self, "_built") else 1
+            return _OperatorContext(
+                apply=lambda v: self._Ah_bcoo @ v,
+                solve_masked=self._solve_masked,
+                scale_rhs=self._precond.scale_rhs,
+                from_scaled=self._precond.from_scaled,
+                indicator=self._precond.indicator,
+                coarse=self._coarse,
+            )
+
+    base = WaveletAdaptiveNode(dim=1, n_levels=6, theta_init=0.42)
+    sub = _RebuildEachStep(dim=1, n_levels=6, theta_init=0.42)
+    sb = base.update(base.initial_state(), {}, 1.0)
+    ss = sub.update(sub.initial_state(), {}, 1.0)
+    assert float(jnp.linalg.norm(sb["c"] - ss["c"])) < 1e-12
+    assert bool(jnp.all(sb["mask"] == ss["mask"]))
+    assert getattr(sub, "_built", 0) >= 1        # the override actually ran

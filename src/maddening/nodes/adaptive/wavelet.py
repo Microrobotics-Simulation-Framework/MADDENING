@@ -63,6 +63,31 @@ from maddening.nodes.adaptive.wavelets import sensors as _sen
 from maddening.warnings import ConvergenceWarning
 
 
+class _OperatorContext:
+    """Everything CDD selection and the frozen solve need from the (scaled)
+    operator, bundled so the θ→A seam can supply either a cached *constant*
+    context or one assembled *in-trace* from state.
+
+    Fields are callables/arrays valid in the preconditioner's scaled
+    coordinates: ``apply`` is the scaled matvec ``v → Â v``; ``solve_masked`` is
+    the frozen inner solve ``(mask, b̂) → ĉ``; ``scale_rhs`` / ``from_scaled``
+    move a physical RHS in and a scaled solution out; ``indicator`` is CDD's
+    marking score; ``coarse`` is the always-included coarse mask.
+    """
+
+    __slots__ = ("apply", "solve_masked", "scale_rhs", "from_scaled",
+                 "indicator", "coarse")
+
+    def __init__(self, *, apply, solve_masked, scale_rhs, from_scaled,
+                 indicator, coarse):
+        self.apply = apply
+        self.solve_masked = solve_masked
+        self.scale_rhs = scale_rhs
+        self.from_scaled = from_scaled
+        self.indicator = indicator
+        self.coarse = coarse
+
+
 def _warn_if_not_converged(converged: jax.Array) -> None:
     """Emit a ConvergenceWarning (host-side, JIT-safe) when ``converged`` is
     false.  ``jax.debug.callback`` runs on the host at execution time, so the
@@ -233,6 +258,20 @@ class WaveletAdaptiveNode(AdaptiveNode):
         lev_np = np.asarray(self._levels)
         self._coarse = jnp.asarray(lev_np == lev_np.min())
 
+        # Operator seam (M7): bundle the constant scaled operator, its masked
+        # solve, and the preconditioner's coordinate maps into one context.
+        # _build_operator returns this unchanged for the constant-coefficient
+        # node; the θ→A path (M19) overrides _build_operator to assemble an
+        # equivalent context in-trace from the coefficient field in `state`.
+        self._op_ctx = _OperatorContext(
+            apply=lambda v: self._Ah_bcoo @ v,
+            solve_masked=self._solve_masked,
+            scale_rhs=self._precond.scale_rhs,
+            from_scaled=self._precond.from_scaled,
+            indicator=self._precond.indicator,
+            coarse=self._coarse,
+        )
+
         # Grid coordinates and sensor index (flattened, row-major).
         # Periodic: x_i = i/side.  Dirichlet: interior nodes x_i = i/(side+1).
         if self.boundary == "dirichlet":
@@ -269,8 +308,23 @@ class WaveletAdaptiveNode(AdaptiveNode):
         f = jnp.exp(-r2 / self.sigma ** 2)
         return (self._h ** self.dim) * (self._Wn.T @ f)
 
-    def _scaled_rhs(self, theta) -> jax.Array:
-        return self._precond.scale_rhs(self._rhs_coeffs(theta))
+    # ---- operator seam (θ→A) ----
+    def _build_operator(self, state) -> "_OperatorContext":
+        """Return the operator context for this step.
+
+        Constant-coefficient default: the operator does not depend on ``state``,
+        so the cached context (assembled once in ``__init__``) is returned and
+        ``state`` is ignored.  The θ→A path (variable coefficient, application 1)
+        overrides this to assemble the scaled operator, preconditioner and masked
+        solve *in-trace* from the coefficient field carried in ``state``.  The
+        signature takes the whole ``state`` and makes no assumption about θ's
+        shape or role (scalar, R^k inclusion, or R^N voxel field).
+        """
+        del state
+        return self._op_ctx
+
+    def _rhs_scaled(self, theta, ctx) -> jax.Array:
+        return ctx.scale_rhs(self._rhs_coeffs(theta))
 
     # ---- selection: CDD residual marking (returns a frozen mask) ----
     def _solve_masked(self, mask, rhs_scaled):
@@ -282,11 +336,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     def compute_active_set(self, state, *, prev=None, is_cold_start=False):
         del prev, is_cold_start
-        bh = self._scaled_rhs(self._get_theta(state))
+        ctx = self._build_operator(state)
+        bh = self._rhs_scaled(self._get_theta(state), ctx)
         mask, _, _conv = _cdd.cdd_select(
-            lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
-            self._coarse, self.K, max_outer=self.max_outer,
-            indicator=self._precond.indicator,
+            ctx.apply, ctx.solve_masked, bh, ctx.coarse, self.K,
+            max_outer=self.max_outer, indicator=ctx.indicator,
         )
         return jax.lax.stop_gradient(mask)
 
@@ -303,11 +357,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         :meth:`solve_frozen` is unchanged, so the gradient path is unaffected.
         """
         del boundary_inputs, dt
-        bh = self._scaled_rhs(self._get_theta(state))
+        ctx = self._build_operator(state)
+        bh = self._rhs_scaled(self._get_theta(state), ctx)
         mask, _, converged = _cdd.cdd_select(
-            lambda v: self._Ah_bcoo @ v, self._solve_masked, bh,
-            self._coarse, self.K, max_outer=self.max_outer,
-            indicator=self._precond.indicator,
+            ctx.apply, ctx.solve_masked, bh, ctx.coarse, self.K,
+            max_outer=self.max_outer, indicator=ctx.indicator,
         )
         _warn_if_not_converged(converged)
         mask = jax.lax.stop_gradient(mask)
@@ -315,9 +369,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     # ---- frozen inner solve (the adjoint flows through here) ----
     def solve_frozen(self, state, mask):
-        bh = self._scaled_rhs(self._get_theta(state))
-        c_hat = self._solve_masked(mask, bh)
-        c = self._precond.from_scaled(c_hat)   # physical wavelet coefficients
+        ctx = self._build_operator(state)
+        bh = self._rhs_scaled(self._get_theta(state), ctx)
+        c_hat = ctx.solve_masked(mask, bh)
+        c = ctx.from_scaled(c_hat)             # physical wavelet coefficients
         return {**state, "c": c, "mask": mask}
 
     # ---- sensor functional J = u(x_sensor) ----

@@ -51,3 +51,36 @@ memory**, which was impossible with dense assembly. What remains for app 1 is no
 scale but the θ→A wiring (M19), the RHS/sensor (M20/M21), and — for χ ≥ ~10² — the
 R1 contrast-robust preconditioner (D5), since matrix-free CG iteration count still
 scales with contrast.
+
+---
+
+## GPU confirmation — 64³ varcoeff, real A2000 device (pre-M19 gate)
+
+Run on the RTX A2000 8GB (`XLA_PYTHON_CLIENT_PREALLOCATE=false` for true
+allocation), varcoeff `a = 1 + χ` with a smooth contrast-100 inclusion, `D`
+**lagged at the reference `a₀=1`** (the M19 design).
+
+**1. Device memory — confirmed, and better than the estimate.** Peak
+**717 MB** on device (21 MB steady in-use), vs the 2.1 GB CPU-RSS estimate. The
+CPU RSS over-counted; actual GPU allocation is ~3× smaller. Trivial for 8 GB —
+huge headroom, no concern.
+
+**2. Wall-clock — acceptable.** One frozen solve (masked CG to 1e-8) at 64³
+varcoeff contrast-100: **1.6 s / 497 CG iterations** (one matvec ~1 ms).
+Contrast-10 is 170 iters / 0.9 s; constant-coeff is 75 iters / 0.76 s.
+
+**3. fp64 iteration cost — tolerable for M19–M23, flags R1 for inverse work.**
+The 3D contrast-100 count (497) is higher than D5's 2D "225" — expected, not a
+surprise: D5 was 2D, full-operator, *sharp* step inclusion; this is 3D, masked
+(K=N/16), *smooth* inclusion. 3D base conditioning is ~4× worse (const-coeff 75
+iters, consistent with κ≈158), and contrast multiplies it. Iterations scale
+sub-√(contrast): 75 → 170 → 497 across χ = 0 → 10 → 100.
+
+**Verdict: proceed to M19.** Both gate criteria are met — memory fits with wide
+margin, and 1.6 s/solve is fine for forward-model validation (M19–M23 needs a
+handful of solves + a few gradient evaluations, not a long optimization loop).
+The flag for later: **inverse optimization at 64³ (R3, deferred) will want R1**,
+because ~40 CDD solves × ~500 iters × many gradient steps ≈ minutes/step. That
+reinforces the existing R1 rationale (contrast-robust preconditioner) — it now
+bites at χ=10² in 3D for *iterative* inverse use, not only at χ≥10³. It does
+**not** block the M19–M23 forward model.

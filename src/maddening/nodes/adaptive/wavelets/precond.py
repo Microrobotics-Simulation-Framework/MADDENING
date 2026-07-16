@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -24,35 +25,52 @@ __all__ = ["diagonal_scaling", "Kind"]
 Kind = Literal["hybrid", "full", "level", "dk"]
 
 
-def diagonal_scaling(diag: np.ndarray, levels: np.ndarray, kind: Kind = "hybrid",
+def diagonal_scaling(diag, levels, kind: Kind = "hybrid",
                      *, t: float = 1.0) -> jnp.ndarray:
     """Return the symmetric diagonal scaling ``D`` (so ``Â = D⁻¹ A D⁻¹``).
+
+    Fully **JAX-traceable in ``diag``**: the level labels fix a static
+    segmentation of the DOFs (computed with NumPy), while every ``diag``-dependent
+    reduction uses :func:`jax.ops.segment_sum`, so ``jax.grad`` / ``jax.jit`` flow
+    through when ``diag`` comes from an operator assembled in-trace from a
+    coefficient field ``a(x)`` (required by the θ→A path).  Called eagerly at node
+    construction it returns the same values as the previous NumPy implementation
+    (to floating-point round-off; the per-level mean now sums via ``segment_sum``
+    rather than a Python loop).
 
     Parameters
     ----------
     diag : the diagonal of the (unscaled) wavelet operator ``A_wave``.
-    levels : per-DOF level label (from ``transform.levels_*``).
+    levels : per-DOF level label (from ``transform.levels_*``); treated as static.
     kind : ``"hybrid"`` (default) | ``"full"`` | ``"level"`` | ``"dk"``.
     t : elliptic order for ``"dk"`` (1 for Laplacian, 2 for biharmonic).
     """
-    d = np.abs(np.asarray(diag, dtype=np.float64))
-    lev = np.asarray(levels).astype(int)
-    uniq = sorted(set(lev.tolist()))
+    d = jnp.abs(jnp.asarray(diag))
+    lev_np = np.asarray(levels).astype(int)          # static structure
 
     if kind == "full":
-        D = np.sqrt(d)
+        D = jnp.sqrt(d)
     elif kind == "dk":
-        D = 2.0 ** (t * lev)
+        # Purely structural (no diag dependence): 2^{t·level}.
+        D = jnp.asarray(2.0 ** (t * lev_np.astype(np.float64)))
     elif kind in ("level", "hybrid"):
-        D = np.zeros_like(d)
-        for i, l in enumerate(uniq):
-            m = lev == l
-            if kind == "hybrid" and i == 0:
-                D[m] = np.sqrt(d[m])            # per-entry at the coarse level
-            else:
-                D[m] = np.sqrt(d[m].mean())     # level-mean at fine levels
+        uniq = sorted(set(lev_np.tolist()))
+        # Static segment id per DOF (0..L-1), ascending level order.
+        seg_np = np.searchsorted(np.asarray(uniq), lev_np).astype(np.int32)
+        seg = jnp.asarray(seg_np)
+        n_seg = len(uniq)
+        counts = jnp.asarray(np.bincount(seg_np, minlength=n_seg)
+                             .astype(np.float64))
+        sums = jax.ops.segment_sum(d, seg, num_segments=n_seg)
+        level_mean = sums / counts                   # per-segment mean of d
+        level_mean_D = jnp.sqrt(level_mean[seg])     # broadcast back per DOF
+        if kind == "hybrid":
+            # per-entry at the coarse level (min label), level-mean elsewhere
+            is_coarse = jnp.asarray(lev_np == uniq[0])
+            D = jnp.where(is_coarse, jnp.sqrt(d), level_mean_D)
+        else:  # "level"
+            D = level_mean_D
     else:
         raise ValueError(f"unknown preconditioner kind {kind!r}")
 
-    D = np.where(D > 0, D, 1.0)
-    return jnp.asarray(D)
+    return jnp.where(D > 0, D, 1.0)

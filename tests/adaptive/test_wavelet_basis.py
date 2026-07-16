@@ -459,3 +459,59 @@ def test_high_contrast_small_budget_is_a_documented_limitation():
     assert rel_resid < 1e-2
     # ... yet the solution error is large: the flag cannot catch this regime.
     assert sol_err > 0.5
+
+
+# ----------------------------------------------------------------------
+# M4 — traceable diagonal_scaling (JAX segment_sum), equivalence + grad
+# ----------------------------------------------------------------------
+
+def _ref_diagonal_scaling(diag, levels, kind="hybrid", t=1.0):
+    """The pre-M4 NumPy implementation, kept here as the equivalence oracle."""
+    d = np.abs(np.asarray(diag, dtype=np.float64))
+    lev = np.asarray(levels).astype(int)
+    uniq = sorted(set(lev.tolist()))
+    if kind == "full":
+        D = np.sqrt(d)
+    elif kind == "dk":
+        D = 2.0 ** (t * lev)
+    else:
+        D = np.zeros_like(d)
+        for i, l in enumerate(uniq):
+            m = lev == l
+            if kind == "hybrid" and i == 0:
+                D[m] = np.sqrt(d[m])
+            else:
+                D[m] = np.sqrt(d[m].mean())
+    return np.where(D > 0, D, 1.0)
+
+
+@pytest.mark.parametrize("kind", ["hybrid", "full", "level", "dk"])
+def test_diagonal_scaling_matches_numpy_reference(kind):
+    """JAX diagonal_scaling reproduces the old NumPy loop to round-off."""
+    res = OP.assemble_wave_operator(5, 2, order=4, dim=2, mass=1.0)
+    diag = jnp.diag(res["A_dense"])
+    levels = res["levels"]
+    got = np.asarray(PC.diagonal_scaling(diag, levels, kind))
+    ref = _ref_diagonal_scaling(diag, levels, kind)
+    assert np.allclose(got, ref, rtol=0, atol=1e-12), \
+        f"{kind}: max|Δ|={np.max(np.abs(got - ref))}"
+
+
+def test_diagonal_scaling_is_traceable_and_differentiable():
+    """diag depends on a(x); D flows a gradient through segment_sum (the θ→A
+    prerequisite -- the old NumPy version raised under jax.grad)."""
+    nl, nc, side = 5, 2, 2 * 2 ** 5
+    a0 = jnp.asarray(1.0 + 0.3 * np.sin(2 * np.pi * np.arange(side) / side))
+    res0 = OP.assemble_wave_dense(nl, nc, 4, 1, a_grid=a0, mass=1.0)
+    levels = res0["levels"]
+
+    def scalar_of_a(a_grid):
+        r = OP.assemble_wave_dense(nl, nc, 4, 1, a_grid=a_grid, mass=1.0)
+        D = PC.diagonal_scaling(jnp.diag(r["A_dense"]), levels, "hybrid")
+        return jnp.sum(D)                      # any differentiable reduction
+
+    g = jax.grad(scalar_of_a)(a0)              # must not raise
+    assert g.shape == a0.shape
+    assert jnp.all(jnp.isfinite(g))
+    # non-trivial dependence (D genuinely varies with a)
+    assert float(jnp.linalg.norm(g)) > 0

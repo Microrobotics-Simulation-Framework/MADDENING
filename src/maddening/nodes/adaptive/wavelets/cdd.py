@@ -69,11 +69,22 @@ def cdd_select(
     *,
     theta_D: float = THETA_D,
     max_outer: int = MAX_OUTER,
+    rtol: float = 1e-6,
 ) -> Tuple[jax.Array, jax.Array]:
     """Run CDD to an active-set budget ``K``; return ``(mask, c)``.
 
     Works in whatever coordinates the caller supplies (the node passes the
     symmetrically-scaled operator and RHS).
+
+    The outer SOLVE→ESTIMATE→MARK→REFINE loop is a :func:`jax.lax.while_loop`
+    with a **real early exit** (round-6 rejected ``lax.fori_loop`` for failing to
+    short-circuit; ``while_loop`` short-circuits natively, and the loop is safe
+    because the caller ``stop_gradient``s the returned mask — no gradient flows
+    through it).  It terminates on the first of: relative residual below
+    ``rtol``, active set reaching the budget ``K``, or ``max_outer`` iterations.
+    Cost is therefore the *actual* iteration count, not a fixed ``max_outer`` —
+    and trace time is O(1) in ``max_outer`` (the old Python unroll paid both in
+    full; see ``spikes/wavelet_apps`` and the module history).
 
     Parameters
     ----------
@@ -83,16 +94,30 @@ def cdd_select(
     b : right-hand side (scaled).
     coarse_mask : boolean ``(N,)`` of always-included coarse DOFs.
     K : active-set budget; growth stops once ``|mask| >= K``.
+    rtol : relative-residual tolerance for the early exit.
     """
-    mask = coarse_mask
-    c = solve_masked(mask, b)
-    for _ in range(max_outer):
-        converged = jnp.sum(mask) >= K
-        resid = b - apply_operator(c)
+    b_norm = jnp.linalg.norm(b) + 1e-30
+
+    def _rel(c):
+        return jnp.linalg.norm(b - apply_operator(c)) / b_norm
+
+    mask0 = coarse_mask
+    c0 = solve_masked(mask0, b)
+    resid0 = b - apply_operator(c0)
+    state0 = (jnp.int32(0), mask0, c0, resid0, _rel(c0))
+
+    def cond(state):
+        it, mask, _c, _resid, rel = state
+        budget_left = jnp.sum(mask) < K
+        return (it < max_outer) & (rel >= rtol) & budget_left
+
+    def body(state):
+        it, mask, _c, resid, _rel_prev = state
         grown = _doerfler_grow(mask, resid, theta_D, K)
-        new_mask = jnp.where(converged, mask, grown)
-        new_c = solve_masked(new_mask, b)
-        # short-circuit: once converged, freeze mask and solution
-        mask = jnp.where(converged, mask, new_mask)
-        c = jnp.where(converged, c, new_c)
+        new_c = solve_masked(grown, b)
+        new_resid = b - apply_operator(new_c)
+        new_rel = jnp.linalg.norm(new_resid) / b_norm
+        return (it + 1, grown, new_c, new_resid, new_rel)
+
+    _it, mask, c, _resid, _rel_final = jax.lax.while_loop(cond, body, state0)
     return mask, c

@@ -126,16 +126,29 @@ def test_grad_through_cdd_solve_matches_fd():
         return ift_linear_solve(op, jnp.where(mask, rhs, 0.0),
                                 solver="cg", rtol=1e-10, atol=1e-12)
 
-    def J(theta):
+    # The node's actual gradient path: CDD selects the mask (a discrete,
+    # non-differentiable step, stop_gradient'd), then the sensor is
+    # differentiated through the FROZEN re-solve.  At a non-kink theta the mask
+    # is locally constant, so this equals differentiating through the whole
+    # selection -- the frozen-active-set adjoint.  (cdd_select's inner loop is a
+    # lax.while_loop and is not reverse-differentiable; the node never asks it
+    # to be, because it stop_gradients the mask.)
+    def _mask_at(theta):
         f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
         b = (h * (Wn.T @ f)) / D
-        _, c = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
-        return (Wn[sidx] / D) @ c
+        mask, _ = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
+        return jax.lax.stop_gradient(mask)
+
+    def J(theta, mask):
+        f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
+        b = (h * (Wn.T @ f)) / D
+        return (Wn[sidx] / D) @ solve_masked(mask, b)
 
     th = jnp.asarray(0.42)
-    g = float(jax.grad(J)(th))
+    mask = _mask_at(th)
+    g = float(jax.grad(lambda t: J(t, mask))(th))
     e = 1e-5
-    fd = float((J(th + e) - J(th - e)) / (2 * e))
+    fd = float((J(th + e, mask) - J(th - e, mask)) / (2 * e))
     assert abs(g - fd) / (abs(fd) + 1e-30) < 1e-5
 
 
@@ -243,17 +256,26 @@ def test_jit_grad_through_solve_matches_fd():
         return ift_linear_solve(op, jnp.where(mask, rhs, 0.0),
                                 solver="cg", rtol=1e-10, atol=1e-12)
 
-    @jax.jit
-    def J(theta):
+    # Frozen-active-set adjoint under jit (the production path): select+freeze
+    # the mask, then jit(grad(.)) through the frozen re-solve.  cdd_select's
+    # while_loop is forward-only; the node stop_gradients its mask.
+    def _mask_at(theta):
         f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
         b = (h * (Wn.T @ f)) / D
-        _, c = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
-        return (Wn[sidx] / D) @ c
+        mask, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
+        return jax.lax.stop_gradient(mask)
+
+    @jax.jit
+    def J(theta, mask):
+        f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
+        b = (h * (Wn.T @ f)) / D
+        return (Wn[sidx] / D) @ solve_masked(mask, b)
 
     th = jnp.asarray(0.42)
-    g = float(jax.jit(jax.grad(J))(th))
+    mask = _mask_at(th)
+    g = float(jax.jit(jax.grad(J))(th, mask))
     e = 1e-5
-    fd = float((J(th + e) - J(th - e)) / (2 * e))
+    fd = float((J(th + e, mask) - J(th - e, mask)) / (2 * e))
     assert abs(g - fd) / (abs(fd) + 1e-30) < 1e-5
 
 

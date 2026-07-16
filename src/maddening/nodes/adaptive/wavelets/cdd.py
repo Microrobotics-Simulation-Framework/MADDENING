@@ -26,7 +26,14 @@ import jax.numpy as jnp
 
 __all__ = ["cdd_select", "MAX_OUTER", "THETA_D"]
 
-MAX_OUTER: int = 30          # FINDINGS Inv 1E/2E: 1D/2D p99=15, 3D mean ~17
+# Iteration ceiling for the outer CDD loop.  The derisking spike measured
+# 1D/2D p99=15, 3D mean ~17 on CONSTANT-coefficient problems and set 30.  That
+# is unsafe at high coefficient contrast: the active set needs ~3x more Doerfler
+# rounds to grow (spikes/wavelet_apps/FINDINGS_D5 — χ=1e5 needs ~90), and at 30
+# the loop returned a worse-than-zero solution silently.  With M1's lax.while_loop
+# early exit, a larger ceiling is free — healthy low-contrast solves still stop in
+# ~15 iterations; only hard cases use the headroom, and trace time is O(1) in it.
+MAX_OUTER: int = 200
 THETA_D: float = 0.5         # Doerfler bulk; FINDINGS Inv 1B confirms in 3D
 
 
@@ -109,6 +116,18 @@ def cdd_select(
         genuine failure the flag exists to surface: the returned ``c`` can be
         far from the best ``K``-term solution, at high contrast worse than
         zero (see ``spikes/wavelet_apps/FINDINGS_D5`` and the M1/M3 history).
+
+        **Limitation (important).** The flag detects iteration starvation, not
+        *inadequate budget at high contrast*.  If ``K`` is too small for a
+        high-contrast coefficient field, the budget fills (flag ``True``) and
+        the scaled residual can even be small, yet the solution error is large:
+        at κ ~ contrast the restricted solve is ill-conditioned, so a small
+        residual does not bound the error (measured: χ=1e5 at K=N/16 gives
+        residual ~2e-3 but solution error ~1.5, worse than zero, with the flag
+        reading ``True``).  No cheap local signal separates that from a healthy
+        truncation.  The remedies are adequate budget (``K`` scaling with
+        contrast) or a contrast-robust preconditioner (roadmap R1); this is the
+        reason app-1 near-term scope caps at χ ≤ 10².
     """
     b_norm = jnp.linalg.norm(b) + 1e-30
 

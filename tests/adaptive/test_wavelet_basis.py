@@ -136,7 +136,7 @@ def test_grad_through_cdd_solve_matches_fd():
     def _mask_at(theta):
         f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
         b = (h * (Wn.T @ f)) / D
-        mask, _ = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
+        mask, _, _ = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
         return jax.lax.stop_gradient(mask)
 
     def J(theta, mask):
@@ -231,7 +231,7 @@ def test_no_recompilation_masked_solve_and_cdd():
     @jax.jit
     def run(b):
         count["n"] += 1
-        _, c = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
+        _, c, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
         return c
 
     b = jnp.asarray(np.random.default_rng(0).standard_normal(N))
@@ -262,7 +262,7 @@ def test_jit_grad_through_solve_matches_fd():
     def _mask_at(theta):
         f = jnp.exp(-((jnp.asarray(x) - theta) / 0.06) ** 2)
         b = (h * (Wn.T @ f)) / D
-        mask, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
+        mask, _, _ = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, b, coarse, K)
         return jax.lax.stop_gradient(mask)
 
     @jax.jit
@@ -356,7 +356,7 @@ def test_cdd_includes_coarse_and_is_sparse():
 
     f = jnp.exp(-((jnp.asarray(x) - 0.42) / 0.06) ** 2)
     b = (h * (Wn.T @ f)) / D
-    mask, c = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
+    mask, c, _ = CDD.cdd_select(lambda v: Ah @ v, solve_masked, b, coarse, K)
     # coarse fully retained
     assert bool(jnp.all(mask[jnp.asarray(coarse)]))
     # sparse: active set well below full N
@@ -367,3 +367,95 @@ def test_cdd_includes_coarse_and_is_sparse():
     J_full = float((Wn[sidx] / D) @ c_full)
     J_cdd = float((Wn[sidx] / D) @ c)
     assert abs(J_cdd - J_full) / (abs(J_full) + 1e-30) < 1e-2
+
+
+# ----------------------------------------------------------------------
+# M3 — high-contrast regression guard + MAX_OUTER recalibration
+# ----------------------------------------------------------------------
+
+def _chi_inclusion_2d(nl=4, nc=2, contrast=1e5):
+    """2D χ inclusion problem: (-∇·((1+χ)∇) + m)φ = -∇·(χ H₀), H₀=(0,1)."""
+    side = nc * 2 ** nl
+    N = side * side
+    h = 1.0 / side
+    c1 = np.arange(side) / side
+    X, Y = np.meshgrid(c1, c1, indexing="ij")
+    chi = np.where((X - 0.5) ** 2 + (Y - 0.5) ** 2 < 0.15 ** 2, contrast, 0.0)
+    a = jnp.asarray(1.0 + chi)
+    f = jnp.asarray((-(np.roll(chi, -1, axis=1) - np.roll(chi, 1, axis=1))
+                     / (2 * h)).reshape(-1))
+    r = OP.assemble_wave_dense(nl, nc, 4, 2, a_grid=a, mass=1.0)
+    A, Wn, lev = r["A_dense"], r["Wn"], r["levels"]
+    D = PC.diagonal_scaling(jnp.diag(A), lev, "hybrid")
+    Ah = (A / D[:, None]) / D[None, :]
+    import jax.experimental.sparse as jsparse
+    Ah_bcoo = jsparse.BCOO.fromdense(Ah)
+    bh = ((h ** 2) * (Wn.T @ f)) / D
+    lev_np = np.asarray(lev)
+    coarse = jnp.asarray(lev_np == lev_np.min())
+    c_full = jnp.linalg.solve(Ah, bh)
+    phi_full = Wn @ (c_full / D)
+    return dict(Ah=Ah, Ah_bcoo=Ah_bcoo, Wn=Wn, D=D, bh=bh, coarse=coarse,
+                phi_full=phi_full, N=N)
+
+
+def test_high_contrast_regression_max_outer():
+    """At χ=1e5 with an ADEQUATE budget, the recalibrated MAX_OUTER=200 gives an
+    accurate direct solve, and the old ceiling (30) reproduces the silent
+    worse-than-zero defect the flag now catches.
+
+    This is the M3 regression guard: it FAILS on the pre-M1/M3 behaviour.
+    """
+    s = _chi_inclusion_2d(contrast=1e5)
+    Ah, Ah_bcoo, Wn, D, bh, coarse, phi_full, N = (
+        s["Ah"], s["Ah_bcoo"], s["Wn"], s["D"], s["bh"], s["coarse"],
+        s["phi_full"], s["N"])
+    K = N // 4                       # budget scaled to the contrast (see caveat)
+    nrm = float(jnp.linalg.norm(phi_full)) + 1e-30
+
+    def solve_masked(mask, rhs):
+        return OP.gather_solve(Ah, mask, rhs, K)
+
+    def relerr(c):
+        return float(jnp.linalg.norm(Wn @ (c / D) - phi_full)) / nrm
+
+    # Recalibrated ceiling: accurate, and reported converged.
+    mask, c, conv = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, bh,
+                                   coarse, K, max_outer=200)
+    assert relerr(c) < 1e-2, f"χ=1e5 relerr={relerr(c)}"
+    assert bool(conv) is True
+
+    # Old ceiling: worse-than-zero, and CORRECTLY flagged not-converged
+    # (iteration starvation — the marking hadn't finished growing the set).
+    mask30, c30, conv30 = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked,
+                                         bh, coarse, K, max_outer=30)
+    assert relerr(c30) > 0.5, "expected the max_outer=30 defect to reproduce"
+    assert bool(conv30) is False
+
+
+def test_high_contrast_small_budget_is_a_documented_limitation():
+    """Budget too small for the contrast: the solve is inaccurate even though the
+    active set fills and the scaled residual is small (κ~contrast means small
+    residual does not bound the error).  This guards the honest scope boundary —
+    adequate budget or a contrast-robust preconditioner (R1) is required — so
+    nobody mistakes the small residual / converged=True for success.
+    """
+    s = _chi_inclusion_2d(contrast=1e5)
+    Ah, Ah_bcoo, Wn, D, bh, coarse, phi_full, N = (
+        s["Ah"], s["Ah_bcoo"], s["Wn"], s["D"], s["bh"], s["coarse"],
+        s["phi_full"], s["N"])
+    K = N // 16                      # too small for χ=1e5
+    nrm = float(jnp.linalg.norm(phi_full)) + 1e-30
+
+    def solve_masked(mask, rhs):
+        return OP.gather_solve(Ah, mask, rhs, K)
+
+    mask, c, conv = CDD.cdd_select(lambda v: Ah_bcoo @ v, solve_masked, bh,
+                                   coarse, K, max_outer=200)
+    rel_resid = float(jnp.linalg.norm(bh - Ah @ c) / (jnp.linalg.norm(bh) + 1e-30))
+    sol_err = float(jnp.linalg.norm(Wn @ (c / D) - phi_full)) / nrm
+    # budget filled, flag reads healthy, residual is small ...
+    assert bool(conv) is True
+    assert rel_resid < 1e-2
+    # ... yet the solution error is large: the flag cannot catch this regime.
+    assert sol_err > 0.5

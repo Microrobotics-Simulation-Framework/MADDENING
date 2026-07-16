@@ -153,3 +153,60 @@ def test_djdchi_through_A_and_b(dim, nl, nc):
         k = int(k)
         fd = float((J(chi0.at[k].add(e)) - J(chi0.at[k].add(-e))) / (2 * e))
         assert abs(float(g[k]) - fd) / (abs(fd) + 1e-30) < 2e-3
+
+
+# ----------------------------------------------------------------------
+# M21 — ∇φ Hall-probe sensor (B = -∇φ, vector, at many probes)
+# ----------------------------------------------------------------------
+
+def test_gradient_sensor_matches_direct_field():
+    """The Hall sensor's B = -∇φ equals a direct central-difference gradient of
+    the reconstructed field φ = Wn·c at the probe points."""
+    from maddening.nodes.adaptive.wavelets import sensors as SEN, matrixfree as MF
+    node = WaveletVarcoeffNode(dim=2, n_levels=4, n_coarse=2, mass=0.5, h0=(0.0, 1.0))
+    side, dim, h, N = node.side, node.dim, node._h, node.N_max
+    probes = jnp.asarray([10, 200, 555, 900])
+    gs = SEN.GradientSensor(node._wn_apply, side, dim, h, probes)
+    # some coefficients from a solve
+    s = node.initial_state()
+    c = s["c"]
+    B = gs.observe(c)                                   # (n_probe, dim)
+    assert B.shape == (4, dim)
+    phi = np.asarray(node._wn_apply(c)).reshape((side,) * dim)
+    for j, p in enumerate([10, 200, 555, 900]):
+        for d in range(dim):
+            gd = -(np.roll(phi, -1, axis=d) - np.roll(phi, 1, axis=d))[
+                tuple(np.unravel_index(p, (side,) * dim))] / (2 * h)
+            assert abs(float(B[j, d]) - gd) < 1e-10
+
+
+def test_hall_misfit_objective_differentiates():
+    """An inverse Hall objective ‖B(χ) − B_meas‖² differentiates w.r.t. χ — the
+    application-1 inference gradient, through operator, RHS and ∇ sensor."""
+    from maddening.nodes.adaptive.wavelets import sensors as SEN
+    dim, nl, nc = 2, 3, 2
+    node = WaveletVarcoeffNode(dim=dim, n_levels=nl, n_coarse=nc, mass=0.5,
+                               h0=(0.0, 1.0))
+    side, h, N = node.side, node._h, node.N_max
+    probes = jnp.asarray([5, 50, 123, 200])
+    gs = SEN.GradientSensor(node._wn_apply, side, dim, h, probes)
+
+    chi0 = jnp.asarray(0.3 * np.cos(2 * np.pi * np.arange(N) / N))
+    empty = {"c": jnp.zeros(N), "mask": jnp.zeros(N, bool), "theta": chi0}
+    mask = jax.lax.stop_gradient(node.compute_active_set(empty, is_cold_start=True))
+    # a fixed synthetic measurement to fit against
+    B_meas = gs.observe(node.solve_frozen({**empty, "mask": mask}, mask)["c"]) * 1.1
+
+    def J(chi):
+        st = node.solve_frozen({**empty, "theta": chi, "mask": mask}, mask)
+        return jnp.sum((gs.observe(st["c"]) - B_meas) ** 2)
+
+    g = jax.grad(J)(chi0)
+    gj = jax.jit(jax.grad(J))(chi0)
+    assert float(jnp.max(jnp.abs(g - gj)) / (jnp.max(jnp.abs(g)) + 1e-30)) < 1e-8
+    rng = np.random.default_rng(4)
+    e = 1e-4
+    for k in rng.choice(N, 5, replace=False):
+        k = int(k)
+        fd = float((J(chi0.at[k].add(e)) - J(chi0.at[k].add(-e))) / (2 * e))
+        assert abs(float(g[k]) - fd) / (abs(fd) + 1e-30) < 2e-3

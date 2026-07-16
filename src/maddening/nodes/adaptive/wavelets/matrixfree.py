@@ -35,7 +35,20 @@ from maddening.nodes.adaptive.wavelets import transform as T
 __all__ = ["make_wn_ops", "make_wave_apply",
            "make_laplacian_apply", "make_varcoeff_apply",
            "make_masked_operator_fn", "masked_cg_solve",
-           "wave_diagonal_fast"]
+           "wave_diagonal_fast", "grid_gradient"]
+
+
+def grid_gradient(u_flat: jax.Array, side: int, dim: int, h: float):
+    """Central-difference gradient on the periodic grid.
+
+    Returns a list ``[∂₀u, …, ∂_{dim-1}u]`` of flat length-``side**dim`` arrays.
+    This is the derivative operator the ∇φ / Hall-probe sensor (M21) needs — no
+    gradient operator existed in ``transform.py``.  Linear in ``u``, so it
+    composes with the (linear) synthesis to give a differentiable ``B = -∇φ``.
+    """
+    u = u_flat.reshape((side,) * dim)
+    return [((jnp.roll(u, -1, axis=d) - jnp.roll(u, 1, axis=d)) / (2 * h)).reshape(-1)
+            for d in range(dim)]
 
 
 def wave_diagonal_fast(n_levels: int, n_coarse: int, order: int, dim: int,

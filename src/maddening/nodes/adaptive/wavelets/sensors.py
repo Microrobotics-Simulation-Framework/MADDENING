@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = ["Sensor", "LinearSensor", "point_sensor", "multipoint_sensor",
-           "field_functional"]
+           "field_functional", "GradientSensor"]
 
 
 @runtime_checkable
@@ -78,3 +78,36 @@ def field_functional(Wn: jax.Array, weights: jax.Array) -> LinearSensor:
     """
     row = jnp.asarray(weights) @ Wn
     return LinearSensor(row[None, :], scalar=True)
+
+
+class GradientSensor:
+    """Hall-probe sensor: the field perturbation ``B = -∇φ`` at probe points.
+
+    Hall magnetometers measure a magnetic field, ``B = -∇φ`` for the scalar
+    potential φ — a *vector* per probe, not a point value.  φ is reconstructed
+    from the wavelet coefficients matrix-free (``phi_from_c = Wn·c``), the
+    periodic central-difference :func:`~maddening.nodes.adaptive.wavelets.\
+matrixfree.grid_gradient` gives ∇φ, and the requested components are gathered at
+    the probe indices.  Linear in ``c`` and fully differentiable, so an inverse
+    objective ``‖B(χ) − B_measured‖²`` differentiates w.r.t. χ.
+
+    ``observe(c)`` returns shape ``(n_probe, n_component)``.  An application
+    objective reduces that to a scalar itself (e.g. a misfit norm).
+    """
+
+    def __init__(self, phi_from_c, side: int, dim: int, h: float,
+                 probe_indices, components=None):
+        self.phi_from_c = phi_from_c
+        self.side = int(side)
+        self.dim = int(dim)
+        self.h = float(h)
+        self.probes = jnp.asarray(probe_indices)
+        self.components = tuple(range(dim)) if components is None else tuple(components)
+
+    def observe(self, c: jax.Array) -> jax.Array:
+        from maddening.nodes.adaptive.wavelets.matrixfree import grid_gradient
+        phi = self.phi_from_c(c)
+        grads = grid_gradient(phi, self.side, self.dim, self.h)
+        # B = -∇φ, gathered at the probes, stacked over requested components
+        cols = [(-grads[d])[self.probes] for d in self.components]
+        return jnp.stack(cols, axis=-1)          # (n_probe, n_component)

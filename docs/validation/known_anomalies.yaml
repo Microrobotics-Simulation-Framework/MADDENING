@@ -78,8 +78,17 @@ anomalies:
       fixed_relaxation for acceleration="fixed" and never seeds Aitken.
       The defect is therefore an UNDOCUMENTED CALLER CONTRACT — the clip
       reads as establishing an invariant it does not establish — rather
-      than a reachable numerical fault.  It becomes reachable only if a
-      future caller seeds or injects omega from outside that induction.
+      than a reachable numerical fault.
+
+      That qualifier is in-tree only, and MADDENING is explicitly modular:
+      the coupling accelerators are public callables and third-party nodes
+      and drivers are a supported use.  An EXTERNAL caller that supplies
+      omega from outside the loop induction — a custom solver loop, a
+      resumed checkpoint, a swept parameter — can reach an out-of-range
+      relaxation factor, and for that caller the clip reads as an
+      established invariant when it is not.  So this is a documented
+      CALLER CONTRACT for anyone outside the in-tree induction, and only
+      not_safety_relevant because in-tree callers all satisfy it.
     affected_components:
       - "maddening.core.coupling.acceleration.aitken_relaxation"
     affected_versions: "0.3.0"

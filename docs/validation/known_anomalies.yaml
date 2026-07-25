@@ -52,3 +52,40 @@ anomalies:
     workaround: "Manually verify CFL condition: dt * alpha / dx^2 < 0.5"
     resolution_status: "open"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-003"
+    title: "Aitken relaxation factor escapes its clip on the fallback path"
+    description: >
+      In aitken_relaxation (maddening/core/coupling/acceleration.py), the
+      relaxation factor is clipped to [0.01, 2.0] at line 282, but line 284
+      then re-emits the caller's raw omega on the small-denominator
+      fallback: new_omega = jnp.where(denom > 1e-30, new_omega, omega).
+      Because the where is applied AFTER the clip, the returned factor is
+      only in range if the caller's omega was already in range — the clip
+      does not constrain the fallback branch at all.  The fallback is taken
+      on iteration 0 (prev_residual is zero, so delta_r and denom are zero)
+      and on every converged iteration (successive residuals coincide), i.e.
+      on most iterations rather than in an edge case.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No in-tree caller can reach an out-of-range factor.  Every Aitken loop
+      seeds its carry with omega = 1.0 (graph_manager.py:191 and the
+      fori_loop init_carry near :1106), and the invariant is inductive: each
+      iteration returns either jnp.clip(., 0.01, 2.0) or the omega it was
+      given, so an in-range input yields an in-range output forever.
+      group.relaxation, the one user-settable relaxation factor, feeds
+      fixed_relaxation for acceleration="fixed" and never seeds Aitken.
+      The defect is therefore an UNDOCUMENTED CALLER CONTRACT — the clip
+      reads as establishing an invariant it does not establish — rather
+      than a reachable numerical fault.  It becomes reachable only if a
+      future caller seeds or injects omega from outside that induction.
+    affected_components:
+      - "maddening.core.coupling.acceleration.aitken_relaxation"
+    affected_versions: "0.3.0"
+    workaround: >
+      None needed for in-tree use.  A caller supplying omega from outside
+      the loop induction must ensure it lies in [0.01, 2.0]; alternatively
+      apply the clip after the where rather than before it.
+    resolution_status: "open"
+    github_issue: null

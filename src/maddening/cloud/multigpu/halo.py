@@ -1,7 +1,7 @@
 """Halo exchange primitive for sharded stencil computations.
 
 Provides :func:`halo_exchange` -- a collective op that, **when called
-inside a** :func:`jax.experimental.shard_map.shard_map` **with a named
+inside a** :func:`jax.shard_map` **with a named
 mesh axis matching the shard layout**, returns a padded copy of the
 local array with ghost cells from neighbouring shards filled in along
 one or more spatial axes.

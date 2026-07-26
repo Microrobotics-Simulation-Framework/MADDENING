@@ -13,7 +13,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maddening.cloud.multigpu.iterative_solver import (
@@ -85,7 +85,7 @@ def _laplacian_1d_matvec_sharded(mesh: Mesh, n_per_shard: int, dtype=jnp.float32
             mesh=mesh,
             in_specs=(P("devices"),),
             out_specs=P("devices"),
-            check_rep=False,
+            check_vma=False,
         )(x)
 
     return matvec

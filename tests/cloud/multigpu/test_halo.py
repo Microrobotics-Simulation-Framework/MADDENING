@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import PartitionSpec as P
 
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
@@ -50,7 +50,7 @@ def _wrap_1d(mesh, mesh_axis, spatial_axis, halo, boundary):
     return shard_map(
         _impl, mesh=mesh,
         in_specs=P(mesh_axis), out_specs=P(mesh_axis),
-        check_rep=False,
+        check_vma=False,
     )
 
 
@@ -75,7 +75,7 @@ def _wrap_pencil(mesh, axes, boundary):
     return shard_map(
         _impl, mesh=mesh,
         in_specs=P(*spec), out_specs=P(*spec),
-        check_rep=False,
+        check_vma=False,
     )
 
 
@@ -222,7 +222,7 @@ def test_halo_exchange_gradient_matches_fd():
             mesh=mesh,
             in_specs=P("devices"),
             out_specs=P("devices"),
-            check_rep=False,
+            check_vma=False,
         )(x)
         return jnp.sum(out ** 2)
 

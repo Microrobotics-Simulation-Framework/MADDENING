@@ -179,7 +179,7 @@ class TestA6ContractIsV040Ready:
             [[i, (i + 1) % n_global] for i in range(n_global)],
             dtype=np.int32,
         )
-        from jax.experimental.shard_map import shard_map
+        from jax import shard_map
         from jax.sharding import PartitionSpec as P, NamedSharding
 
         from maddening.cloud.multigpu.halo_unstructured import (
@@ -202,7 +202,7 @@ class TestA6ContractIsV040Ready:
             return shard_map(
                 shard_matvec, mesh=mesh,
                 in_specs=(P("devices"),), out_specs=P("devices"),
-                check_rep=False,
+                check_vma=False,
             )(x)
 
         b = jnp.ones(n_global, dtype=jnp.float32)

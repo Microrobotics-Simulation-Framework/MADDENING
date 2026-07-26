@@ -24,7 +24,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maddening.cloud.multigpu.halo import halo_exchange
@@ -463,7 +463,7 @@ class ShardedStencilNode(SimulationNode):
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs),
             out_specs=out_specs,
-            check_rep=False,
+            check_vma=False,
         )
         # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
         # overhead on CPU; wrapping it in jit reduces that to microseconds.

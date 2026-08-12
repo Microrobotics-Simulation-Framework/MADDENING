@@ -1,0 +1,29 @@
+
+### dim=2 nl=4 nc=2 kind=jump mass=1.0  N=1024
+contrast   hybrid  mg-harm   mg-rap   (agree hyb,rap vs mg-harm)
+       1       40        7        7   (2.5e-10, 8.6e-11)  res hyb/harm/rap 7e-09/3e-09/2e-09
+      10      133       10        8   (2.1e-10, 1.6e-10)  res hyb/harm/rap 9e-09/9e-09/2e-09
+     100      488       16       10   (1.2e-10, 3.1e-11)  res hyb/harm/rap 8e-09/6e-09/3e-09
+    1000     1425       26       11   (8.7e-11, 1.5e-11)  res hyb/harm/rap 1e-08/6e-09/5e-09
+   10000     3125       40       12   (4.2e-10, 4.3e-12)  res hyb/harm/rap 1e-08/2e-09/4e-09
+
+### dim=2 nl=4 nc=2 kind=checker mass=1.0  N=1024
+contrast   hybrid  mg-harm   mg-rap   (agree hyb,rap vs mg-harm)
+       1       40        7        7   (2.5e-10, 8.6e-11)  res hyb/harm/rap 7e-09/3e-09/2e-09
+      10      111       12        8   (8.3e-11, 2.4e-11)  res hyb/harm/rap 8e-09/2e-09/4e-09
+     100      328       22       10   (7.0e-11, 6.8e-12)  res hyb/harm/rap 9e-09/2e-09/9e-10
+    1000      608       43       11   (8.2e-11, 3.5e-12)  res hyb/harm/rap 9e-09/5e-09/1e-09
+   10000      850       97       12   (9.9e-11, 2.1e-12)  res hyb/harm/rap 9e-09/9e-09/1e-09
+
+### dim=2 nl=5 nc=2 kind=jump mass=1.0  N=4096
+contrast   hybrid  mg-harm   mg-rap   (agree hyb,rap vs mg-harm)
+       1       48        7        7   (2.0e-10, 1.4e-10)  res hyb/harm/rap 6e-09/4e-09/2e-09
+      10      163       11        8   (1.6e-10, 5.4e-11)  res hyb/harm/rap 1e-08/2e-09/9e-10
+     100      720       18       10   (7.3e-11, 4.4e-11)  res hyb/harm/rap 9e-09/7e-09/4e-10
+    1000     2360       31       10   (9.2e-11, 1.2e-10)  res hyb/harm/rap 9e-09/4e-09/8e-09
+   10000     5606       50       12   (8.2e-11, 9.2e-12)  res hyb/harm/rap 1e-08/8e-09/4e-09
+
+### dim=3 nl=3 nc=2 kind=jump mass=1.0  N=4096
+contrast   hybrid  mg-harm   mg-rap   (agree hyb,rap vs mg-harm)
+       1       62        9        9   (1.6e-09, 1.4e-10)  res hyb/harm/rap 8e-09/9e-10/1e-09
+      10      167       11        9   (1.3e-09, 3.4e-10)  res hyb/harm/rap 9e-09/2e-09/4e-09

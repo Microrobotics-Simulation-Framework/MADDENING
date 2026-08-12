@@ -1,0 +1,93 @@
+# Advisory stelling contract soak.
+#
+# NON-BLOCKING BY CONSTRUCTION, two ways: the script always exits 0, and the job
+# carries continue-on-error. Nothing here may turn a MADDENING PR red.
+#
+# What it is for: verdict churn under real MADDENING commits. That number only
+# accumulates with elapsed time, so this runs from early even though the checker
+# is pre-1.0 and several engine tightenings are still queued — each of those will
+# produce a re-baseline, and an advisory job costs nothing when it does.
+#
+# ── TWO DECISIONS ENCODED HERE, BOTH FLAGGED FOR REVIEW ──────────────────────
+#
+# 1. JAX VERSION DIVERGENCE. MADDENING's own CI pins jax==0.5.1 (see ci.yml).
+#    Every stelling measurement to date was taken at jax 0.11.0. jaxpr IS the
+#    verification IR, so a different jax may lower the same MADDENING source to a
+#    different jaxpr and legitimately produce a different verdict.
+#
+#    This job pins 0.11.0 so its verdicts stay comparable with the recorded
+#    baseline. The cost of that choice: it does NOT tell you whether a MADDENING
+#    change breaks under the jax version MADDENING actually tests with. Running
+#    both is the complete answer; running 0.5.1 only would make every recorded
+#    verdict incomparable. Revisit when MADDENING moves off 0.5.1.
+#
+# 2. FETCHING STELLING. stelling lives at github.com/NicholasEhsanRoy/stelling,
+#    a different account from this repo's org. The https install below works
+#    only if that repository is PUBLIC. If it is private, this job will fail to
+#    install and — because of continue-on-error — will do so silently, which is
+#    the wrong failure mode for a job whose whole point is producing a number.
+#    MEASURED 2026-07-26: `git ls-remote https://github.com/NicholasEhsanRoy/stelling`
+#    prompts for credentials, so the repo is NOT anonymously fetchable and this
+#    step WILL fail as written. A deploy key or PAT secret is required. Until then
+#    the soak runs locally against the sweeps repo; see w6_soak.py.
+name: stelling advisory
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contract-soak:
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory: never blocks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned jax + maddening + stelling
+        run: |
+          python -m pip install --upgrade pip
+          # 0.11.0 deliberately, NOT ci.yml's 0.5.1 — see decision 1 above.
+          pip install "jax==0.11.0"
+          # --no-deps everywhere after this: nothing may move jax.
+          pip install --no-deps -e .
+          pip install --no-deps pyyaml numpy
+          pip install --no-deps "stelling @ git+https://github.com/NicholasEhsanRoy/stelling@main"
+          python -c "import jax; assert jax.__version__ == '0.11.0', jax.__version__; print('jax pin held:', jax.__version__)"
+
+      - name: Contract soak (advisory — read the COVERAGE line, not the tick)
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: "--xla_gpu_autotune_level=0"
+        run: |
+          # runner lives in the stelling-sweeps repo (measurement harness,
+          # not MADDENING engine code); check it out alongside or vendor it.
+          python ../stelling-sweeps/w6_soak.py | tee stelling-soak.txt
+
+      - name: Summary — SETUP_FAILED and RAN-WITH-RESULTS must be distinguishable
+        if: always()
+        run: |
+          # Advisory means "do not fail the build". It does NOT mean a missing
+          # number may look like a clean one. A job whose only product is a
+          # COVERAGE line must say loudly when it never produced one.
+          if grep -q '^COVERAGE:' stelling-soak.txt 2>/dev/null; then
+            echo "RAN-WITH-RESULTS" >> "$GITHUB_STEP_SUMMARY"
+            grep '^COVERAGE:' stelling-soak.txt >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## SETUP_FAILED — the soak produced no COVERAGE line" >> "$GITHUB_STEP_SUMMARY"
+            echo "The advisory job did not run to a result. This is NOT a clean run." >> "$GITHUB_STEP_SUMMARY"
+            echo "Most likely cause: stelling is not anonymously fetchable (measured 2026-07-26)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload soak record
+        uses: actions/upload-artifact@v4
+        with:
+          name: stelling-soak-${{ github.sha }}
+          path: stelling-soak.txt
+          if-no-files-found: warn

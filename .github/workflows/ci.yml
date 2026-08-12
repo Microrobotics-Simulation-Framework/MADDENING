@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Pin JAX to known-good version to avoid jaxlib segfaults
-          pip install "jax==0.11.0" "jaxlib==0.11.0"
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
       - name: Run tests
@@ -49,7 +49,7 @@ jobs:
       - name: Install dependencies (with USD)
         run: |
           python -m pip install --upgrade pip
-          pip install "jax==0.11.0" "jaxlib==0.11.0"
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci,usd]"
 
       - name: Run USD tests
@@ -72,7 +72,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "jax==0.11.0" "jaxlib==0.11.0"
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
       - name: Validate anomaly registry

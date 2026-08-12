@@ -2268,7 +2268,7 @@ class GraphManager:
         """Enable multi-GPU coupling and (in v0.2) stencil sharding.
 
         Requires at least one coupling group with ``iteration_mode="jacobi"``.
-        Uses ``jax.experimental.shard_map`` to distribute node updates
+        Uses ``jax.shard_map`` to distribute node updates
         across a device mesh.
 
         Parameters

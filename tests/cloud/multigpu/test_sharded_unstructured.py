@@ -244,7 +244,7 @@ class TestExchangeUnstructured:
         exchange, the ghost slot for the boundary cell holds the
         correct neighbouring shard's value.
         """
-        from jax.experimental.shard_map import shard_map
+        from jax import shard_map
         from jax.sharding import PartitionSpec as P
 
         mesh = create_device_mesh(shape=(4,))
@@ -281,7 +281,6 @@ class TestExchangeUnstructured:
         out = shard_map(
             shard_fn, mesh=mesh,
             in_specs=(P("devices"),), out_specs=P("devices"),
-            check_rep=False,
         )(sharded)
 
         host = jax.device_get(out)
@@ -427,7 +426,7 @@ class TestPoissonOnGraph:
         action is computed via :func:`exchange_unstructured` so we
         exercise the full §A5 + §A6 compose path.
         """
-        from jax.experimental.shard_map import shard_map
+        from jax import shard_map
         from jax.sharding import PartitionSpec as P
 
         from maddening.cloud.multigpu.iterative_solver import sharded_cg
@@ -509,7 +508,6 @@ class TestPoissonOnGraph:
                 shard_matvec, mesh=mesh,
                 in_specs=(P("devices"), P("devices")),
                 out_specs=P("devices"),
-                check_rep=False,
             )(x, gather_sharded)
 
         # RHS: choose b so the solution is x[i] = i, anchored at 0.

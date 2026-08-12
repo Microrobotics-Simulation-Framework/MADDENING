@@ -36,8 +36,8 @@ classifiers = [
 # Base install: simulation engine (CPU JAX + NumPy + PyYAML).
 # For GPU acceleration, add the cuda12 or tpu extra.
 dependencies = [
-    "jax>=0.4,<0.6",
-    "jaxlib>=0.4,<0.6",
+    "jax>=0.10,<0.13",
+    "jaxlib>=0.10,<0.13",
     "numpy>=1.24",
     "pyyaml>=6.0",
     # ExceptionGroup is a builtin on 3.11+; backport the 3.10 path.
@@ -51,8 +51,8 @@ dependencies = [
 # ── Hardware acceleration ──────────────────────────────────────────
 # Base install gives CPU JAX.  These upgrade to GPU/TPU.
 # Combine with any other extra:  pip install maddening[cuda12,server]
-cuda12 = ["jax[cuda12]>=0.4,<0.6"]
-tpu = ["jax[tpu]>=0.4,<0.6"]
+cuda12 = ["jax[cuda12]>=0.10,<0.13"]
+tpu = ["jax[tpu]>=0.10,<0.13"]
 
 # ── Differentiable linear solve (experimental pilot, v0.3.1) ────────
 # `maddening.core.solver_utils.ift_linear_solve` lazy-imports lineax.
@@ -181,6 +181,18 @@ ci = [
     # this to a user-facing [ift] extra + a friendlier import error
     # is scheduled for v0.4.0 -- see plans/MADDENING_v0.4.0_PLAN.md.
     "lineax>=0.0.7",
+    # Formal verification (stelling) and property-based testing (hypothesis).
+    # stelling[solvers] pulls z3-solver + cvc5 for full SMT escalation.
+    "stelling>=0.1",
+    "stelling[solvers]",
+    "hypothesis>=6.165,<7",
+]
+
+# Formal verification and property-based testing (user-facing).
+# Downstream users who want to verify their own nodes install this.
+verify = [
+    "stelling>=0.1",
+    "hypothesis>=6.165,<7",
 ]
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)

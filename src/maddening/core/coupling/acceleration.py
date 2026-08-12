@@ -276,12 +276,15 @@ def aitken_relaxation(
     residual = x_raw_flat - x_old_flat
     delta_r = residual - prev_residual_flat
     denom = jnp.sum(delta_r ** 2)
-    # Guard against zero denominator (first iteration or identical residuals)
-    safe_denom = jnp.where(denom > 1e-30, denom, jnp.array(1.0))
+    # Guard against zero/non-finite denominator.  When denom overflows to
+    # inf in float32 (delta_r entries > ~1.84e19), the division produces
+    # nan.  The isfinite check catches this and falls back to input omega.
+    denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
+    safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
     new_omega = -omega * jnp.sum(prev_residual_flat * delta_r) / safe_denom
     new_omega = jnp.clip(new_omega, 0.01, 2.0)
-    # Fall back to current omega when denominator is too small
-    new_omega = jnp.where(denom > 1e-30, new_omega, omega)
+    # Fall back to current omega when denominator is degenerate or overflowed
+    new_omega = jnp.where(denom_ok, new_omega, omega)
 
     x_relaxed = x_old_flat + new_omega * residual
     return x_relaxed, new_omega, residual

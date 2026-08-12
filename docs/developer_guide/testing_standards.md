@@ -108,6 +108,38 @@ python scripts/check_citations.py
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
 
+## 4. Formal Verification and Property-Based Testing (recommended for physics nodes)
+
+Location: `tests/verification/stelling/` and `tests/verification/hypothesis/`
+
+Beyond analytical benchmarks, MADDENING provides two additional verification
+layers. See the full [Verification Guide](verification.md) for details.
+
+**Property-based testing** (hypothesis) — test universal invariants:
+
+```python
+from maddening.testing.strategies import node_states, bounded_dt
+from hypothesis import given, settings
+
+@given(state=node_states(my_node, bounds={...}), dt=bounded_dt())
+@settings(max_examples=500, deadline=None)
+def test_my_node_finite(state, dt):
+    out = my_node.update(state, {}, dt)
+    for val in out.values():
+        assert jnp.all(jnp.isfinite(val))
+```
+
+**Formal verification** (stelling) — prove bounds universally:
+
+```python
+from maddening.testing.verification import verify_node
+
+results = verify_node(my_node, bounds={"field": (lo, hi)})
+assert results["no_overflow"].status == "VERIFIED"
+```
+
+Install with `pip install maddening[verify]`.
+
 ## Test Organization
 
 ```
@@ -118,7 +150,12 @@ tests/
 ├── api/            # Server, WebSocket, binary encoder tests
 ├── viz/            # Visualization tests (skipped in CI — require display)
 ├── compliance/     # Metadata, anomaly registry, stability tests
-└── verification/   # Analytical benchmarks (registered with @verification_benchmark)
+└── verification/   # Verification suite
+    ├── stelling/       # Formal proofs (stelling)
+    ├── hypothesis/     # Property-based tests (hypothesis)
+    │   └── nodes/      # Per-node property tests
+    ├── test_gradient_health.py    # Pre-existing gradient checks
+    └── test_heat_analytical.py    # Pre-existing analytical benchmark
 ```
 
 ## pytest Configuration

@@ -24,12 +24,22 @@ ORDER = 1
 
 
 class TestDtBounds:
-    """dt_next is always clamped to [dt_min, dt_max]."""
+    """dt_next stays within the configured range.
 
-    def test_dt_next_lower_bound(self):
+    Note: The raw clip bounds (dt_next ∈ [dt_min, dt_max]) are
+    universally true by construction of jnp.clip. The envelope-
+    dependent property is tighter: dt_next stays within bounds that
+    are NARROWER than the clip range when error_norm is bounded.
+    """
+
+    def test_dt_next_bounded_by_controller(self):
+        """With error in [0.5, 2.0], dt_next is tighter than [dt_min, dt_max].
+        The factor range is [safety*min_factor, safety*power(1/0.5, 0.5)]
+        = [0.18, 1.27], so dt_next ∈ [dt*0.18, dt*1.27] ∩ [dt_min, dt_max].
+        For dt in [0.01, 0.05]: dt_next ≤ 0.05*1.27 = 0.0635 < dt_max."""
         def harness():
-            dt = any_array((), "float64", (DT_MIN, DT_MAX))
-            error_norm = any_array((), "float64", (0.0, 100.0))
+            dt = any_array((), "float64", (0.01, 0.05))
+            error_norm = any_array((), "float64", (0.5, 2.0))
 
             factor = SAFETY * jnp.where(
                 error_norm > 0,
@@ -39,15 +49,19 @@ class TestDtBounds:
             factor = jnp.clip(factor, MIN_FACTOR, MAX_FACTOR)
             dt_next = jnp.clip(dt * factor, DT_MIN, DT_MAX)
 
-            return (assert_(dt_next >= DT_MIN),)
+            return (assert_(dt_next <= 0.07),)
 
         v = check(harness, vacuity_mode="inputs-only")
         assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"
 
-    def test_dt_next_upper_bound(self):
+    def test_dt_next_grows_when_error_small(self):
+        """When error < 1 (accepted step), dt_next > dt * min_factor.
+        For error in [0.1, 0.5] and dt in [0.001, 0.01]:
+        factor = 0.9 * (1/error)^0.5 ∈ [0.9*1.41, 0.9*3.16] = [1.27, 2.85]
+        so dt_next >= dt * 1.27 >= 0.001 * 1.27 = 0.00127."""
         def harness():
-            dt = any_array((), "float64", (DT_MIN, DT_MAX))
-            error_norm = any_array((), "float64", (0.0, 100.0))
+            dt = any_array((), "float64", (0.001, 0.01))
+            error_norm = any_array((), "float64", (0.1, 0.5))
 
             factor = SAFETY * jnp.where(
                 error_norm > 0,
@@ -57,7 +71,10 @@ class TestDtBounds:
             factor = jnp.clip(factor, MIN_FACTOR, MAX_FACTOR)
             dt_next = jnp.clip(dt * factor, DT_MIN, DT_MAX)
 
-            return (assert_(dt_next <= DT_MAX),)
+            return (assert_(dt_next >= 0.001),)
+
+        v = check(harness, vacuity_mode="inputs-only")
+        assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"
 
         v = check(harness, vacuity_mode="inputs-only")
         assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"

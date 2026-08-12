@@ -1,9 +1,7 @@
 """Shared fixtures for MADDENING tests."""
 
 import os
-# Force CPU backend for tests -- jaxlib 0.5.1 has a segfault in the CUDA XLA
-# compiler triggered by matmul/einsum on 3D+ arrays.  Must be set before JAX
-# is imported.
+# Force CPU backend for tests.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest

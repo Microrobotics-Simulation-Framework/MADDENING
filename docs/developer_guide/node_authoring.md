@@ -184,6 +184,23 @@ def test_your_analytical_comparison():
     ...
 ```
 
+**Property-based tests** (`tests/verification/hypothesis/nodes/`) — recommended:
+- Verify finiteness, structure preservation, determinism for random inputs
+- Test conservation laws and energy dissipation where applicable
+- See the [Verification Guide](verification.md) for the full checklist
+
+```python
+from maddening.testing.strategies import node_states, bounded_dt
+from hypothesis import given, settings
+
+@given(state=node_states(your_node, bounds={...}), dt=bounded_dt())
+@settings(max_examples=500, deadline=None)
+def test_your_node_always_finite(state, dt):
+    out = your_node.update(state, {}, dt)
+    for val in out.values():
+        assert jnp.all(jnp.isfinite(val))
+```
+
 **Integration test** — mandatory:
 - Test the node within a `GraphManager` (add node, connect edges, run steps)
 

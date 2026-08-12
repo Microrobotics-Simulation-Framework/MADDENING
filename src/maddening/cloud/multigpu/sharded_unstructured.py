@@ -42,7 +42,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.shard_map import shard_map
+from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from maddening.cloud.multigpu.halo_unstructured import (
@@ -299,7 +299,6 @@ class ShardedUnstructuredNode(SimulationNode):
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs),
             out_specs=out_specs,
-            check_rep=False,
         )
         fn = jax.jit(sm)
         self._sharded_cache[key] = fn

@@ -89,6 +89,8 @@ class SpringDamperNode(SimulationNode):
         initial_position: float = 0.0,
         initial_velocity: float = 0.0,
     ):
+        if mass <= 0:
+            raise ValueError(f"mass must be positive, got {mass}")
         super().__init__(
             name,
             timestep,

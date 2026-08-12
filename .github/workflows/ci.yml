@@ -92,4 +92,50 @@ jobs:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          python -m pytest tests/compliance/ tests/verification/ -v --tb=short -p stelling.overflow
+          python -m pytest tests/compliance/ -v --tb=short
+
+  verify-stelling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci]"
+
+      - name: Run stelling formal verification
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest tests/verification/stelling/ -v --tb=short -p stelling.overflow
+
+  verify-hypothesis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          pip install -e ".[ci]"
+
+      - name: Run hypothesis property tests
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest tests/verification/hypothesis/ -v --tb=short

@@ -113,31 +113,21 @@ properties involving control flow through `jnp.where`).
 
 ## Stelling feature requests (for next release)
 
-Properties we WANT to verify but stelling currently cannot handle:
+1. **isfinite transfer + select_n branch pruning**: The `isfinite`
+   transfer (~30 lines) unlocks select_n pruning for free. Once
+   landed, MADDENING's Aitken division-guard XFAIL becomes VERIFIED,
+   and `node_no_overflow` can use `assert_(jnp.isfinite(x))` directly
+   instead of the bounded-proxy. Expected in next stelling release.
 
-1. **select_n branch reasoning**: The most impactful gap. When
-   `jnp.where(cond, path_a, path_b)` is used and one branch has a
-   division-by-zero, stelling should be able to prove properties of
-   the OTHER branch when the condition is provably true/false over
-   the declared envelope. Currently produces UNKNOWN because both
-   branches are propagated.
+2. **Float32 precision modeling**: Stelling operates in exact real (ℝ)
+   semantics. A float32 mode would allow proving properties like
+   "clip(x, 0.01, 2.0) >= 0.01" at the actual representable precision.
+   May come in next release.
 
-2. **jnp.all / jnp.any over arrays**: Element-wise assertions work
-   but `jnp.all(pred_array)` doesn't propagate through the reduction
-   to produce a scalar verdict. Supporting `reduce_and` / `reduce_or`
-   transfers would allow array-wide property statements.
-
-3. **jnp.isfinite transfer**: Currently `isfinite` in an assertion
-   is not decidable. A transfer that maps `[a, b]` (both finite) to
-   `True` and `[-inf, inf]` to `unknown` would allow overflow-freedom
-   proofs without hypothesis.
-
-4. **Float32 precision modeling**: Stelling operates in real (ℝ)
-   semantics. A float32 mode that models truncation and flush-to-zero
-   would allow proving properties like "clip(x, 0.01, 2.0) >= 0.01"
-   at the actual representable precision, rather than in exact reals
-   where it trivially holds but fails in float32 due to
-   representation gaps.
+**Note on reduce_and:** NOT needed. stelling's `assert_` is already
+elementwise on arrays — `assert_(x > 0)` checks each element without
+needing `jnp.all()`. The bare array form is strictly better (fewer
+equations, same semantics).
 
 ## Extending for your own nodes
 

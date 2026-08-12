@@ -152,8 +152,8 @@ def node_boundedness(
         assertions = []
         for field, (lo, hi) in output_bounds.items():
             if field in out:
-                assertions.append(assert_(jnp.all(out[field] >= lo)))
-                assertions.append(assert_(jnp.all(out[field] <= hi)))
+                assertions.append(assert_(out[field] >= lo))
+                assertions.append(assert_(out[field] <= hi))
         return tuple(assertions)
 
     kwargs = {"vacuity_mode": "inputs-only"}
@@ -175,9 +175,11 @@ def node_no_overflow(
     *,
     solver_timeout_ms: int | None = None,
 ) -> VerificationResult:
-    """Verify that update() produces no inf/nan for bounded inputs.
+    """Verify that update() produces no overflow for bounded inputs.
 
-    Asserts that every element of the output state is finite.
+    Asserts that every element of the output state is within
+    representable bounds (proxy for finiteness until stelling gains
+    an isfinite transfer).
 
     Parameters
     ----------
@@ -206,9 +208,13 @@ def node_no_overflow(
         dt = any_array((), "float64", dt_range)
         out = node.update(state, {}, dt)
 
+        # Elementwise assertions — stelling checks each element of the
+        # array independently (no jnp.all needed; assert_ on an array
+        # is already elementwise in stelling).
         assertions = []
         for field in out:
-            assertions.append(assert_(jnp.all(jnp.isfinite(out[field]))))
+            assertions.append(assert_(out[field] > -1e30))
+            assertions.append(assert_(out[field] < 1e30))
         return tuple(assertions)
 
     kwargs = {"vacuity_mode": "inputs-only"}

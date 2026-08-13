@@ -121,8 +121,8 @@ class TestAitkenOverflowGuard:
     delta_r^2 overflows to inf, producing inf/inf = nan."""
 
     def test_omega_bounded_with_overflow_guard(self):
-        """The full implementation (with isfinite guard) still produces
-        bounded omega for all inputs in a wide envelope."""
+        """The full implementation (with nested-where guards) still
+        produces bounded omega for all inputs in a wide envelope."""
         def harness():
             x_old = any_array((4,), "float64", (-1e8, 1e8))
             x_raw = any_array((4,), "float64", (-1e8, 1e8))
@@ -132,11 +132,14 @@ class TestAitkenOverflowGuard:
             residual = x_raw - x_old
             delta_r = residual - prev_r
             denom = jnp.sum(delta_r ** 2)
-            denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
-            safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
-            new_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
-            new_omega = jnp.clip(new_omega, 0.01, 2.0)
-            new_omega = jnp.where(denom_ok, new_omega, omega)
+            safe_denom = jnp.where(denom > 1e-30, denom, jnp.array(1.0))
+            raw_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
+            raw_omega = jnp.clip(raw_omega, 0.01, 2.0)
+            new_omega = jnp.where(
+                jnp.isfinite(denom),
+                jnp.where(denom > 1e-30, raw_omega, omega),
+                omega,
+            )
 
             return (
                 assert_(new_omega >= 0.01),
@@ -158,11 +161,14 @@ class TestAitkenOverflowGuard:
             residual = x_raw - x_old
             delta_r = residual - prev_r
             denom = jnp.sum(delta_r ** 2)
-            denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
-            safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
-            new_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
-            new_omega = jnp.clip(new_omega, 0.01, 2.0)
-            new_omega = jnp.where(denom_ok, new_omega, omega)
+            safe_denom = jnp.where(denom > 1e-30, denom, jnp.array(1.0))
+            raw_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
+            raw_omega = jnp.clip(raw_omega, 0.01, 2.0)
+            new_omega = jnp.where(
+                jnp.isfinite(denom),
+                jnp.where(denom > 1e-30, raw_omega, omega),
+                omega,
+            )
 
             x_relaxed = x_old + new_omega * residual
             return (
@@ -180,13 +186,16 @@ class TestAitkenDivisionGuardDocumented:
     analysis due to select_n tracing both branches."""
 
     @pytest.mark.xfail(
-        reason="Interval analysis cannot reason through select_n with "
-               "division-by-possibly-zero in the unused branch. "
+        reason="select_n pruning on gt comparison not yet implemented "
+               "in stelling 0.2. The inner where(denom > 1e-30, ...) "
+               "cannot be pruned to the fallback branch even though "
+               "denom is provably <= 1e-30. Awaiting AND transfer. "
                "Covered by hypothesis suite.",
         strict=True,
     )
     def test_fallback_preserves_omega_limitation(self):
-        """This property is TRUE but unprovable by interval methods."""
+        """This property is TRUE but unprovable until stelling gains
+        comparison-based select_n pruning (AND transfer)."""
         def harness():
             prev_r = any_array((4,), "float64", (-1e-16, 1e-16))
             omega = any_array((), "float64", (0.5, 1.5))
@@ -196,11 +205,14 @@ class TestAitkenDivisionGuardDocumented:
             residual = x_raw - x_old
             delta_r = residual - prev_r
             denom = jnp.sum(delta_r ** 2)
-            denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
-            safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
-            new_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
-            new_omega = jnp.clip(new_omega, 0.01, 2.0)
-            new_omega = jnp.where(denom_ok, new_omega, omega)
+            safe_denom = jnp.where(denom > 1e-30, denom, jnp.array(1.0))
+            raw_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
+            raw_omega = jnp.clip(raw_omega, 0.01, 2.0)
+            new_omega = jnp.where(
+                jnp.isfinite(denom),
+                jnp.where(denom > 1e-30, raw_omega, omega),
+                omega,
+            )
 
             return (assert_(new_omega == omega),)
 

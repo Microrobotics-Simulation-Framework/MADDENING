@@ -377,10 +377,11 @@ def iqn_ils_update(
     V_masked = new_V * col_mask[None, :]
     W_masked = new_W * col_mask[None, :]
 
-    # Solve V^T V c = -V^T r via regularized normal equations
-    VtV = V_masked.T @ V_masked + 1e-10 * jnp.eye(max_cols)
-    Vtr = V_masked.T @ (-residual)
-    c = jnp.linalg.solve(VtV, Vtr)
+    # Solve min_c ||V c + r||_2 via SVD-based least squares.
+    # This avoids the normal equations (V^T V) which square the condition
+    # number of V — problematic in float32 near convergence when V columns
+    # become nearly collinear.
+    c, _, _, _ = jnp.linalg.lstsq(V_masked, -residual, rcond=1e-6)
 
     # QN correction
     correction = W_masked @ c + residual

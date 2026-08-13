@@ -179,21 +179,10 @@ class TestAitkenDivisionGuardDocumented:
     → return input omega) cannot be formally verified via interval
     analysis due to select_n tracing both branches."""
 
-    @pytest.mark.xfail(
-        reason="Dependency problem: select_n correctly prunes to the "
-               "fallback branch (new_omega = omega), but the assertion "
-               "new_omega == omega compares two independent intervals "
-               "[0.5, 1.5] == [0.5, 1.5] which is undecidable in a "
-               "non-relational domain. Solver escalation would resolve "
-               "this (SMT tracks variable identity), but is_finite has "
-               "no SMT emission rule yet. Covered by hypothesis suite.",
-        strict=True,
-    )
-    def test_fallback_preserves_omega_limitation(self):
-        """This property is TRUE. select_n prunes correctly, but the
-        equality assertion hits the dependency problem (same-source
-        variables indistinguishable in interval arithmetic). Needs
-        solver escalation via is_finite SMT emission rule."""
+    def test_fallback_preserves_omega(self):
+        """When denom is too small, new_omega equals input omega.
+        Proved via solver escalation (SMT tracks variable identity
+        through select_n pruning)."""
         def harness():
             prev_r = any_array((4,), "float64", (-1e-16, 1e-16))
             omega = any_array((), "float64", (0.5, 1.5))

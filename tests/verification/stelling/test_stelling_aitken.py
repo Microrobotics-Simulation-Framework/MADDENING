@@ -146,6 +146,33 @@ class TestAitkenOverflowGuard:
         v = check(harness, vacuity_mode="inputs-only")
         assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"
 
+    def test_output_always_finite(self):
+        """The isfinite transfer (stelling 0.2) proves the Aitken
+        output is always finite for bounded inputs."""
+        def harness():
+            x_old = any_array((4,), "float64", (-1e8, 1e8))
+            x_raw = any_array((4,), "float64", (-1e8, 1e8))
+            prev_r = any_array((4,), "float64", (-1e8, 1e8))
+            omega = any_array((), "float64", (0.01, 2.0))
+
+            residual = x_raw - x_old
+            delta_r = residual - prev_r
+            denom = jnp.sum(delta_r ** 2)
+            denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
+            safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
+            new_omega = -omega * jnp.sum(prev_r * delta_r) / safe_denom
+            new_omega = jnp.clip(new_omega, 0.01, 2.0)
+            new_omega = jnp.where(denom_ok, new_omega, omega)
+
+            x_relaxed = x_old + new_omega * residual
+            return (
+                assert_(jnp.isfinite(new_omega)),
+                assert_(jnp.isfinite(x_relaxed)),
+            )
+
+        v = check(harness, vacuity_mode="inputs-only")
+        assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"
+
 
 class TestAitkenDivisionGuardDocumented:
     """Document the limitation: the full fallback path (denom <= 1e-30

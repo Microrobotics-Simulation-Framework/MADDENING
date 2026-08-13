@@ -109,3 +109,25 @@ class TestMixedNormNonNegativity:
 
         v = check(harness, vacuity_mode="inputs-only")
         assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"
+
+
+class TestMixedNormDivisionGuard:
+    """The fixed mixed norm produces finite results even with atol=0."""
+
+    def test_finite_with_zero_atol(self):
+        """After fix: jnp.where(scale > 0, diff/max(scale, 1e-300), 0.0)
+        produces finite output for all inputs regardless of atol."""
+        def harness():
+            a = any_array((), "float64", (-1e6, 1e6))
+            b = any_array((), "float64", (-1e6, 1e6))
+            atol = 0.0
+            rtol = 1e-3
+            diff = jnp.abs(a - b)
+            scale = atol + rtol * jnp.maximum(jnp.abs(a), jnp.abs(b))
+            scaled = jnp.where(
+                scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0
+            )
+            return (assert_(jnp.isfinite(scaled)),)
+
+        v = check(harness, vacuity_mode="inputs-only")
+        assert v.status == "VERIFIED", f"Expected VERIFIED, got {v.status}"

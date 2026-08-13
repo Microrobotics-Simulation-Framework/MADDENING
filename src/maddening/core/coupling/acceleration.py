@@ -94,7 +94,7 @@ def coupling_residual_mixed(
             scale = atol + rtol * jnp.maximum(
                 jnp.abs(new_val), jnp.abs(old_val)
             )
-            scaled = diff / scale
+            scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
             count = count + scaled.size
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
@@ -143,7 +143,7 @@ def coupling_residual_interface(
         scale = atol + rtol * jnp.maximum(
             jnp.abs(new_val), jnp.abs(old_val)
         )
-        scaled = diff / scale
+        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
         count = count + scaled.size
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))

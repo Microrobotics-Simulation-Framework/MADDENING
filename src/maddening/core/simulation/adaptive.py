@@ -68,7 +68,7 @@ def _tree_error_norm(state_fine, state_coarse, atol, rtol):
         nonlocal sum_sq, count
         diff = jnp.abs(fine - coarse)
         scale = atol + rtol * jnp.maximum(jnp.abs(fine), jnp.abs(coarse))
-        scaled = diff / scale
+        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
         sum_sq += jnp.sum(scaled ** 2)
         count += scaled.size
 

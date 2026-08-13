@@ -180,16 +180,20 @@ class TestAitkenDivisionGuardDocumented:
     analysis due to select_n tracing both branches."""
 
     @pytest.mark.xfail(
-        reason="select_n does not read its condition operand's propagated "
-               "boolean interval to prune branches. The condition "
-               "(denom > 1e-30) & isfinite(denom) IS provably False "
-               "(assert_(~cond) → VERIFIED), but select_n still merges "
-               "both branches. Covered by hypothesis suite.",
+        reason="Dependency problem: select_n correctly prunes to the "
+               "fallback branch (new_omega = omega), but the assertion "
+               "new_omega == omega compares two independent intervals "
+               "[0.5, 1.5] == [0.5, 1.5] which is undecidable in a "
+               "non-relational domain. Solver escalation would resolve "
+               "this (SMT tracks variable identity), but is_finite has "
+               "no SMT emission rule yet. Covered by hypothesis suite.",
         strict=True,
     )
     def test_fallback_preserves_omega_limitation(self):
-        """This property is TRUE but unprovable until select_n uses
-        the propagated boolean interval of its condition operand."""
+        """This property is TRUE. select_n prunes correctly, but the
+        equality assertion hits the dependency problem (same-source
+        variables indistinguishable in interval arithmetic). Needs
+        solver escalation via is_finite SMT emission rule."""
         def harness():
             prev_r = any_array((4,), "float64", (-1e-16, 1e-16))
             omega = any_array((), "float64", (0.5, 1.5))

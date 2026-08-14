@@ -64,6 +64,26 @@ class TestAdaptiveDtInductive:
         )
         assert v.status == "VERIFIED"
 
+    def test_dt_stays_bounded_with_sqrt(self):
+        """The full PI formula with sqrt preserves dt bounds."""
+        def pi_sqrt_body(state, constants):
+            error = state["error"]
+            dt = state["dt"]
+            factor = 0.9 * jnp.power(1.0 / error, 0.5)
+            factor = jnp.clip(factor, 0.2, 5.0)
+            dt_new = jnp.clip(dt * factor, 1e-8, 0.1)
+            return {"error": error, "dt": dt_new}
+
+        v = check_inductive_step(
+            pi_sqrt_body,
+            state_bounds={
+                "error": ((0.01, 10.0), "float64"),
+                "dt": ((1e-8, 0.1), "float64"),
+            },
+            solver_timeout_ms=SOLVER_TIMEOUT,
+        )
+        assert v.status == "VERIFIED"
+
 
 class TestAitkenOmegaInductive:
     """Aitken omega bounds are preserved by the clip operation."""

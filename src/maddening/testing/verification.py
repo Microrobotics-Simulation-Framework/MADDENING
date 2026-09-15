@@ -1,330 +1,425 @@
-"""Formal verification harness for SimulationNode subclasses.
+"""Property-based verification harness for SimulationNode subclasses.
 
-Provides reusable property checks that use stelling to prove numerical
-properties of a node's ``update()`` function over declared input
-envelopes.
+Runs a battery of universal checks against a node's ``update()`` by
+sampling inputs with Hypothesis and shrinking any failure to a minimal
+counterexample.  The checks are the ones every physics node should
+satisfy regardless of what it models: finite outputs, preserved state
+structure, determinism, JIT/eager agreement, and finite gradients.
 
 Usage::
 
-    from maddening.testing.verification import verify_node, node_no_overflow
+    from maddening.testing.verification import verify_node
 
     node = MyPhysicsNode(name="test", timestep=0.01)
-    bounds = {"field_a": (-100.0, 100.0), "field_b": (0.0, 1000.0)}
-    results = verify_node(node, bounds)
-    # results is a dict mapping check names to stelling verdicts
+    results = verify_node(node, bounds={"temperature": (200.0, 5000.0)})
+    for name, r in results.items():
+        print(name, r.status, r.counterexample if r.failed else "")
+    assert all(r.passed for r in results.values())
 
-Each check function takes a node + bounds → verdict dict. Users can
-also call individual checks directly for finer control.
+Each check is also exposed as a standalone function (``node_finite``,
+``node_gradient_finite``, ...) for finer control, and
+:func:`node_invariant` accepts an arbitrary predicate.
 
-Requires ``stelling >= 0.1``. Install via::
+Requires ``hypothesis >= 6.165``. Install via::
 
     pip install maddening[verify]
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import traceback
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import jax
 import jax.numpy as jnp
+import numpy as np
+
+from maddening.testing.strategies import (
+    boundary_inputs_for,
+    bounded_dt,
+    node_states,
+)
+
+try:
+    from hypothesis import HealthCheck, given, settings
+    from hypothesis import strategies as st
+    from hypothesis.errors import HypothesisException
+except ImportError as e:  # pragma: no cover - exercised only without extra
+    raise ImportError(
+        "hypothesis is required for property-based verification. "
+        "Install it with: pip install maddening[verify]"
+    ) from e
 
 
-def _import_stelling():
-    try:
-        from stelling.harness import any_array, assert_
-        from stelling.preconditions import check
-        return any_array, assert_, check
-    except ImportError as e:
-        raise ImportError(
-            "stelling is required for formal verification. "
-            "Install it with: pip install maddening[verify]"
-        ) from e
+Bounds = dict[str, tuple[float, float]]
 
 
-@dataclass(frozen=True)
+@dataclass
 class VerificationResult:
-    """Result of a single verification check."""
+    """Outcome of one check.
+
+    ``status`` is ``"PASS"`` (no counterexample found in ``n_examples``
+    samples), ``"FAIL"`` (a shrunk counterexample is in
+    ``counterexample``), or ``"ERROR"`` (the check itself could not run,
+    e.g. ``update()`` is not differentiable; see ``detail``).
+    """
     name: str
     status: str
     detail: str = ""
+    counterexample: dict[str, Any] = field(default_factory=dict)
+    n_examples: int = 0
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "PASS"
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "FAIL"
+
+    def __str__(self) -> str:
+        head = f"{self.name}: {self.status}"
+        if self.failed:
+            return f"{head}\n  counterexample: {self.counterexample}\n  {self.detail}"
+        if self.status == "ERROR":
+            return f"{head}\n  {self.detail}"
+        return f"{head} ({self.n_examples} examples)"
 
 
-def node_shape_stability(
-    node,
-    bounds: dict[str, tuple[float, float]],
-    dt_range: tuple[float, float] = (1e-4, 0.1),
+@dataclass(frozen=True)
+class _Inputs:
+    node: Any
+    bounds: Bounds
+    boundary_bounds: Bounds
+    boundary_inputs: dict | None
+    dt_range: tuple[float, float]
+    dtype: np.dtype
+
+    def strategy(self) -> st.SearchStrategy:
+        if self.boundary_inputs is not None:
+            bi = st.just(self.boundary_inputs)
+        else:
+            bi = boundary_inputs_for(
+                self.node, self.boundary_bounds, dtype=self.dtype,
+            )
+        return st.tuples(
+            node_states(self.node, self.bounds, dtype=self.dtype),
+            bi,
+            bounded_dt(*self.dt_range),
+        )
+
+
+def _run(
+    name: str,
+    inputs: _Inputs,
+    body: Callable[[dict, dict, float], None],
     *,
-    solver_timeout_ms: int | None = None,
+    max_examples: int,
+    derandomize: bool,
 ) -> VerificationResult:
-    """Verify that update() preserves state structure.
+    """Drive ``body`` under Hypothesis and package the outcome.
 
-    Checks that the output pytree has the same keys as the input.
-    This is verified by asserting that each output field sum is finite
-    (a proxy for "the field exists and has the right shape").
-
-    Parameters
-    ----------
-    node : SimulationNode
-        The node to verify.
-    bounds : dict
-        Mapping from state field names to (lo, hi) bounds for the
-        declared input envelope.
-    dt_range : tuple
-        (min_dt, max_dt) range for the timestep declaration.
-    solver_timeout_ms : int, optional
-        Solver timeout for SMT escalation.
+    Hypothesis replays the minimal failing example last, so the inputs
+    recorded on the final call are the shrunk counterexample.
     """
-    any_array, assert_, check = _import_stelling()
+    last: dict[str, Any] = {}
+    count = 0
 
-    initial = node.initial_state()
-
-    def harness():
-        state = {}
-        for field, arr in initial.items():
-            if field in bounds:
-                lo, hi = bounds[field]
-            else:
-                lo, hi = -1e6, 1e6
-            state[field] = any_array(arr.shape, "float64", (lo, hi))
-
-        dt = any_array((), "float64", dt_range)
-        out = node.update(state, {}, dt)
-
-        assertions = []
-        for field in initial:
-            assertions.append(assert_(jnp.isfinite(jnp.sum(out[field]))))
-        return tuple(assertions)
-
-    kwargs = {"vacuity_mode": "inputs-only"}
-    if solver_timeout_ms:
-        kwargs["solver_timeout_ms"] = solver_timeout_ms
-
-    v = check(harness, **kwargs)
-    return VerificationResult(
-        name="shape_stability",
-        status=v.status,
-        detail=v.render() if hasattr(v, "render") else "",
+    @settings(
+        max_examples=max_examples,
+        deadline=None,
+        database=None,
+        derandomize=derandomize,
+        suppress_health_check=[HealthCheck.too_slow],
     )
+    @given(inputs.strategy())
+    def prop(args):
+        nonlocal count
+        state, bi, dt = args
+        count += 1
+        last.clear()
+        last.update(state=state, boundary_inputs=bi, dt=dt)
+        body(state, bi, dt)
+
+    try:
+        prop()
+    except AssertionError as e:
+        return VerificationResult(
+            name, "FAIL", detail=str(e) or "assertion failed",
+            counterexample=dict(last), n_examples=count,
+        )
+    except HypothesisException as e:
+        return VerificationResult(name, "ERROR", detail=f"{type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001 - update() raised on some input
+        return VerificationResult(
+            name, "FAIL",
+            detail=f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}",
+            counterexample=dict(last), n_examples=count,
+        )
+    return VerificationResult(name, "PASS", n_examples=count)
+
+
+def _to_np(x: Any) -> np.ndarray:
+    return np.asarray(jax.device_get(x))
+
+
+# ---------------------------------------------------------------------------
+# Individual checks
+# ---------------------------------------------------------------------------
+
+
+def node_finite(inputs: _Inputs, **kw) -> VerificationResult:
+    """Every output field is finite for every sampled input."""
+    def body(state, bi, dt):
+        out = inputs.node.update(state, bi, dt)
+        for f, v in out.items():
+            assert bool(jnp.all(jnp.isfinite(v))), f"non-finite value in '{f}'"
+    return _run("finite", inputs, body, **kw)
+
+
+def node_structure(inputs: _Inputs, **kw) -> VerificationResult:
+    """Output keys, shapes and dtypes match the input state."""
+    def body(state, bi, dt):
+        out = inputs.node.update(state, bi, dt)
+        assert set(out) == set(state), (
+            f"key mismatch: {sorted(set(out) ^ set(state))}"
+        )
+        for f in state:
+            assert out[f].shape == state[f].shape, (
+                f"shape mismatch in '{f}': {out[f].shape} != {state[f].shape}"
+            )
+            assert out[f].dtype == state[f].dtype, (
+                f"dtype mismatch in '{f}': {out[f].dtype} != {state[f].dtype}"
+            )
+    return _run("structure", inputs, body, **kw)
+
+
+def node_deterministic(inputs: _Inputs, **kw) -> VerificationResult:
+    """Two eager calls on identical inputs are bit-identical."""
+    def body(state, bi, dt):
+        a = inputs.node.update(state, bi, dt)
+        b = inputs.node.update(state, bi, dt)
+        for f in a:
+            assert np.array_equal(_to_np(a[f]), _to_np(b[f]), equal_nan=True), (
+                f"non-deterministic output in '{f}'"
+            )
+    return _run("deterministic", inputs, body, **kw)
+
+
+def node_jit_consistent(inputs: _Inputs, rtol: float = 1e-5, atol: float = 1e-6, **kw):
+    """``jax.jit(update)`` agrees with the eager call.
+
+    Disagreement usually means Python-side branching on array values,
+    a host-side side effect, or a dtype that changes under tracing.
+    """
+    jitted = jax.jit(inputs.node.update)
+
+    def body(state, bi, dt):
+        a = inputs.node.update(state, bi, dt)
+        b = jitted(state, bi, dt)
+        for f in a:
+            x, y = _to_np(a[f]), _to_np(b[f])
+            assert np.allclose(x, y, rtol=rtol, atol=atol, equal_nan=True), (
+                f"jit/eager mismatch in '{f}': max abs diff "
+                f"{np.max(np.abs(x - y))}"
+            )
+    return _run("jit_consistent", inputs, body, **kw)
+
+
+def node_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
+    """``d(sum of outputs)/d(state)`` is finite for every float field.
+
+    This is the check that catches backward-pass-only failures: NaN
+    from ``lstsq``/``solve`` VJPs on rank-deficient inputs, ``sqrt`` or
+    ``norm`` at zero, ``jnp.where`` guards that protect the forward but
+    not the gradient.
+    """
+    node = inputs.node
+
+    def body(state, bi, dt):
+        diff = {f: v for f, v in state.items() if jnp.issubdtype(v.dtype, jnp.floating)}
+        if not diff:
+            return
+        rest = {f: v for f, v in state.items() if f not in diff}
+
+        def loss(d):
+            out = node.update({**rest, **d}, bi, dt)
+            return sum(jnp.sum(v) for v in out.values()
+                       if jnp.issubdtype(v.dtype, jnp.floating))
+
+        g = jax.grad(loss)(diff)
+        for f, v in g.items():
+            assert bool(jnp.all(jnp.isfinite(v))), f"non-finite gradient wrt '{f}'"
+    return _run("gradient_finite", inputs, body, **kw)
 
 
 def node_boundedness(
-    node,
-    bounds: dict[str, tuple[float, float]],
-    output_bounds: dict[str, tuple[float, float]],
-    dt_range: tuple[float, float] = (1e-4, 0.01),
-    *,
-    solver_timeout_ms: int | None = None,
+    inputs: _Inputs, output_bounds: Bounds, **kw,
 ) -> VerificationResult:
-    """Verify that output state stays within declared bounds.
-
-    For each field in ``output_bounds``, asserts that every element
-    of the output is within [lo, hi] after one step.
-
-    Parameters
-    ----------
-    node : SimulationNode
-        The node to verify.
-    bounds : dict
-        Input state envelope.
-    output_bounds : dict
-        Expected output bounds per field.
-    dt_range : tuple
-        Timestep envelope.
-    solver_timeout_ms : int, optional
-        Solver timeout.
-    """
-    any_array, assert_, check = _import_stelling()
-
-    initial = node.initial_state()
-
-    def harness():
-        state = {}
-        for field, arr in initial.items():
-            if field in bounds:
-                lo, hi = bounds[field]
-            else:
-                lo, hi = -1e6, 1e6
-            state[field] = any_array(arr.shape, "float64", (lo, hi))
-
-        dt = any_array((), "float64", dt_range)
-        out = node.update(state, {}, dt)
-
-        assertions = []
-        for field, (lo, hi) in output_bounds.items():
-            if field in out:
-                assertions.append(assert_(out[field] >= lo))
-                assertions.append(assert_(out[field] <= hi))
-        return tuple(assertions)
-
-    kwargs = {"vacuity_mode": "inputs-only"}
-    if solver_timeout_ms:
-        kwargs["solver_timeout_ms"] = solver_timeout_ms
-
-    v = check(harness, **kwargs)
-    return VerificationResult(
-        name="boundedness",
-        status=v.status,
-        detail=v.render() if hasattr(v, "render") else "",
-    )
-
-
-def node_no_overflow(
-    node,
-    bounds: dict[str, tuple[float, float]],
-    dt_range: tuple[float, float] = (1e-4, 0.01),
-    *,
-    solver_timeout_ms: int | None = None,
-) -> VerificationResult:
-    """Verify that update() produces no overflow for bounded inputs.
-
-    Asserts that every element of the output state is within
-    representable bounds (proxy for finiteness until stelling gains
-    an isfinite transfer).
-
-    Parameters
-    ----------
-    node : SimulationNode
-        The node to verify.
-    bounds : dict
-        Input state envelope.
-    dt_range : tuple
-        Timestep envelope.
-    solver_timeout_ms : int, optional
-        Solver timeout.
-    """
-    any_array, assert_, check = _import_stelling()
-
-    initial = node.initial_state()
-
-    def harness():
-        state = {}
-        for field, arr in initial.items():
-            if field in bounds:
-                lo, hi = bounds[field]
-            else:
-                lo, hi = -1e6, 1e6
-            state[field] = any_array(arr.shape, "float64", (lo, hi))
-
-        dt = any_array((), "float64", dt_range)
-        out = node.update(state, {}, dt)
-
-        # Elementwise assertions — stelling checks each element of the
-        # array independently (no jnp.all needed; assert_ on an array
-        # is already elementwise in stelling).
-        assertions = []
-        for field in out:
-            assertions.append(assert_(out[field] > -1e30))
-            assertions.append(assert_(out[field] < 1e30))
-        return tuple(assertions)
-
-    kwargs = {"vacuity_mode": "inputs-only"}
-    if solver_timeout_ms:
-        kwargs["solver_timeout_ms"] = solver_timeout_ms
-
-    v = check(harness, **kwargs)
-    return VerificationResult(
-        name="no_overflow",
-        status=v.status,
-        detail=v.render() if hasattr(v, "render") else "",
-    )
+    """Each field named in ``output_bounds`` stays within ``[lo, hi]``."""
+    def body(state, bi, dt):
+        out = inputs.node.update(state, bi, dt)
+        for f, (lo, hi) in output_bounds.items():
+            if f not in out:
+                continue
+            v = _to_np(out[f])
+            assert np.all(v >= lo) and np.all(v <= hi), (
+                f"'{f}' left [{lo}, {hi}]: min={v.min()}, max={v.max()}"
+            )
+    return _run("boundedness", inputs, body, **kw)
 
 
 def node_energy_monotone(
-    node,
-    bounds: dict[str, tuple[float, float]],
-    energy_fn: Callable[[dict], Any],
-    dt_range: tuple[float, float] = (1e-4, 0.01),
-    *,
-    solver_timeout_ms: int | None = None,
+    inputs: _Inputs, energy_fn: Callable[[dict], Any], rtol: float = 1e-6, **kw,
 ) -> VerificationResult:
-    """Verify that energy is non-increasing (dissipative system).
+    """``energy_fn(update(state)) <= energy_fn(state)`` (dissipative step).
 
-    Parameters
-    ----------
-    node : SimulationNode
-        The node to verify.
-    bounds : dict
-        Input state envelope.
-    energy_fn : callable
-        Function from state dict to scalar energy.
-    dt_range : tuple
-        Timestep envelope.
-    solver_timeout_ms : int, optional
-        Solver timeout.
+    ``rtol`` allows float32 round-off; a genuine energy gain is orders
+    of magnitude larger than that.
     """
-    any_array, assert_, check = _import_stelling()
+    def body(state, bi, dt):
+        e0 = float(energy_fn(state))
+        e1 = float(energy_fn(inputs.node.update(state, bi, dt)))
+        assert e1 <= e0 * (1 + rtol) + 1e-12, f"energy rose: {e0} -> {e1}"
+    return _run("energy_monotone", inputs, body, **kw)
 
-    initial = node.initial_state()
 
-    def harness():
-        state = {}
-        for field, arr in initial.items():
-            if field in bounds:
-                lo, hi = bounds[field]
-            else:
-                lo, hi = -1e6, 1e6
-            state[field] = any_array(arr.shape, "float64", (lo, hi))
+def node_invariant(
+    inputs: _Inputs,
+    predicate: Callable[[dict, dict, dict, float], bool],
+    name: str = "invariant",
+    **kw,
+) -> VerificationResult:
+    """``predicate(state_in, state_out, boundary_inputs, dt)`` holds."""
+    def body(state, bi, dt):
+        out = inputs.node.update(state, bi, dt)
+        assert bool(predicate(state, out, bi, dt)), f"'{name}' violated"
+    return _run(name, inputs, body, **kw)
 
-        dt = any_array((), "float64", dt_range)
-        e_before = energy_fn(state)
-        out = node.update(state, {}, dt)
-        e_after = energy_fn(out)
-        return (assert_(e_after <= e_before),)
 
-    kwargs = {"vacuity_mode": "inputs-only"}
-    if solver_timeout_ms:
-        kwargs["solver_timeout_ms"] = solver_timeout_ms
+# ---------------------------------------------------------------------------
+# Batteries
+# ---------------------------------------------------------------------------
 
-    v = check(harness, **kwargs)
-    return VerificationResult(
-        name="energy_monotone",
-        status=v.status,
-        detail=v.render() if hasattr(v, "render") else "",
+DEFAULT_CHECKS = (
+    "finite", "structure", "deterministic", "jit_consistent", "gradient_finite",
+)
+
+
+def make_inputs(
+    node,
+    bounds: Bounds | None = None,
+    *,
+    boundary_bounds: Bounds | None = None,
+    boundary_inputs: dict | None = None,
+    dt_range: tuple[float, float] = (1e-4, 0.01),
+    dtype: np.dtype = np.float32,
+) -> _Inputs:
+    """Bundle the sampling envelope for the standalone ``node_*`` checks."""
+    return _Inputs(
+        node, bounds or {}, boundary_bounds or {}, boundary_inputs,
+        dt_range, np.dtype(dtype),
     )
 
 
 def verify_node(
     node,
-    bounds: dict[str, tuple[float, float]],
+    bounds: Bounds | None = None,
     *,
     checks: list[str] | None = None,
+    boundary_bounds: Bounds | None = None,
+    boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
-    solver_timeout_ms: int | None = None,
+    dtype: np.dtype = np.float32,
+    output_bounds: Bounds | None = None,
+    energy_fn: Callable[[dict], Any] | None = None,
+    invariants: dict[str, Callable[[dict, dict, dict, float], bool]] | None = None,
+    max_examples: int = 200,
+    derandomize: bool = False,
 ) -> dict[str, VerificationResult]:
-    """Run all applicable verification checks on a node.
+    """Run a battery of property checks on ``node.update``.
 
     Parameters
     ----------
     node : SimulationNode
-        The node to verify.
     bounds : dict
-        Input state envelope: field name → (lo, hi).
+        Per-state-field ``(lo, hi)`` sampling envelope.  Unlisted fields
+        default to ``(-1e4, 1e4)``.
     checks : list of str, optional
-        Subset of checks to run. Default: all applicable.
-        Valid names: "shape_stability", "no_overflow".
-    dt_range : tuple
+        Subset of :data:`DEFAULT_CHECKS` to run.  ``output_bounds``,
+        ``energy_fn`` and ``invariants`` add their checks regardless.
+    boundary_bounds : dict, optional
+        Envelope for inputs declared in ``node.boundary_input_spec()``.
+    boundary_inputs : dict, optional
+        Fixed boundary-input dict; overrides sampling.  Use it when the
+        node has no ``boundary_input_spec`` but ``update`` requires an
+        input.
+    dt_range : (float, float)
         Timestep envelope.
-    solver_timeout_ms : int, optional
-        Solver timeout for SMT escalation.
+    dtype : numpy dtype
+        Sampling dtype.  ``float32`` matches the execution dtype most
+        nodes use, so overflow is found where it actually happens.
+    output_bounds : dict, optional
+        Enables :func:`node_boundedness`.
+    energy_fn : callable, optional
+        Enables :func:`node_energy_monotone`.
+    invariants : dict[str, callable], optional
+        Extra ``name -> predicate(state_in, state_out, boundary, dt)``
+        checks.
+    max_examples : int
+        Samples per check.
+    derandomize : bool
+        Seed Hypothesis from the check's own structure so repeated runs
+        draw identical samples (reproducible CI, weaker exploration).
 
     Returns
     -------
     dict[str, VerificationResult]
-        Mapping from check name to result.
     """
-    available = {
-        "shape_stability": node_shape_stability,
-        "no_overflow": node_no_overflow,
+    inputs = make_inputs(
+        node, bounds, boundary_bounds=boundary_bounds,
+        boundary_inputs=boundary_inputs, dt_range=dt_range, dtype=dtype,
+    )
+    kw = dict(max_examples=max_examples, derandomize=derandomize)
+    battery = {
+        "finite": node_finite,
+        "structure": node_structure,
+        "deterministic": node_deterministic,
+        "jit_consistent": node_jit_consistent,
+        "gradient_finite": node_gradient_finite,
     }
+    selected = list(DEFAULT_CHECKS) if checks is None else list(checks)
+    unknown = set(selected) - set(battery)
+    if unknown:
+        raise ValueError(
+            f"unknown checks {sorted(unknown)}; valid: {sorted(battery)}"
+        )
 
-    if checks is None:
-        checks = list(available.keys())
-
-    results = {}
-    for name in checks:
-        if name in available:
-            results[name] = available[name](
-                node, bounds, dt_range,
-                solver_timeout_ms=solver_timeout_ms,
-            )
+    results: dict[str, VerificationResult] = {}
+    for name in selected:
+        results[name] = battery[name](inputs, **kw)
+    if output_bounds:
+        results["boundedness"] = node_boundedness(inputs, output_bounds, **kw)
+    if energy_fn is not None:
+        results["energy_monotone"] = node_energy_monotone(inputs, energy_fn, **kw)
+    for name, pred in (invariants or {}).items():
+        results[name] = node_invariant(inputs, pred, name=name, **kw)
     return results
+
+
+def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
+    """``verify_node`` that raises ``AssertionError`` listing every failure.
+
+    Convenient as a one-line pytest body::
+
+        def test_my_node():
+            assert_node_verified(my_node, bounds={"T": (200.0, 5000.0)})
+    """
+    results = verify_node(node, bounds, **kwargs)
+    bad = [r for r in results.values() if not r.passed]
+    if bad:
+        raise AssertionError(
+            f"{type(node).__name__} failed {len(bad)} check(s):\n"
+            + "\n".join(str(r) for r in bad)
+        )

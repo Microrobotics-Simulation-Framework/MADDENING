@@ -24,7 +24,7 @@ def implicit_euler_step(
     dt: float,
     n_newton: int = 5,
     initial_guess: dict | None = None,
-) -> dict:
+) -> tuple[dict, jnp.ndarray]:
     """Solve the backward Euler equation using fixed-count Newton.
 
     Solves::
@@ -60,8 +60,12 @@ def implicit_euler_step(
 
     Returns
     -------
-    dict
+    state : dict
         The solved state x_new.
+    residual_norm : jnp.ndarray
+        L2 norm of the final residual.  The caller should check this
+        against a tolerance and reject the step if Newton did not
+        converge (e.g., shrink dt in adaptive timestepping).
     """
     if initial_guess is None:
         x = {k: v.copy() for k, v in state_old.items()}
@@ -95,11 +99,14 @@ def implicit_euler_step(
     def newton_step(i, x_f):
         r = residual_flat(x_f)
         J = jax.jacfwd(residual_flat)(x_f)
-        # Solve J * dx = -r using regularized linear solve
         n = x_f.shape[0]
         J_reg = J + 1e-10 * jnp.eye(n)
         dx = jnp.linalg.solve(J_reg, -r)
         return x_f + dx
 
     x_flat = jax.lax.fori_loop(0, n_newton, newton_step, x_flat)
-    return _unflatten(x_flat)
+
+    final_residual = residual_flat(x_flat)
+    residual_norm = jnp.sqrt(jnp.sum(final_residual ** 2))
+
+    return _unflatten(x_flat), residual_norm

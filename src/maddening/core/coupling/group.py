@@ -121,7 +121,7 @@ class CouplingGroup:
         matrix-free shape our backward uses) — including on
         well-conditioned operators like ``0.5*I``.  The
         ``"bicgstab"`` option is therefore *not* exposed here.  See
-        ``_ift_solve_bwd`` and
+        ``_ift_linear_solve`` and
         ``tests/core/test_coupling_ift_lineax.py`` for the
         investigation notes.
     """

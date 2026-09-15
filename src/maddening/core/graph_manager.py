@@ -27,7 +27,7 @@ import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
 
-# ``lineax`` is imported lazily inside ``_ift_solve_bwd`` — it pulls in
+# ``lineax`` is imported lazily inside ``_ift_linear_solve`` — it pulls in
 # equinox + optax transitively, which we do NOT want to make a hard
 # module-load-time dependency.  Only users who opt into ``solver='ift'``
 # trigger the lineax import path.
@@ -91,7 +91,7 @@ class ExternalInputSpec:
 # differentiation pattern for coupling-group fixed points.  They are
 # defined at module scope so neither the forward nor the backward path
 # closes over any JAX tracer — this is the key constraint that lets
-# ``jax.grad(jax.jit(gm.step))`` flow correctly through the custom_vjp
+# ``jax.grad(jax.jit(gm.step))`` flow correctly through the custom_jvp
 # rule (see optimistix's ``_implicit_impl`` / its ``_is_global_function``
 # assertion for the same pattern, and JAX issue #2912 for the
 # DynamicJaxprTracer-as-constant failure mode when this rule is
@@ -104,7 +104,7 @@ class ExternalInputSpec:
 
 def _F_dispatch(F_pure, x, consts):
     # Trampoline: forwards to a closure-converted pure function.
-    # Kept top-level so the custom_vjp residual sees ``F_pure`` as a
+    # Kept top-level so the custom_jvp rule sees ``F_pure`` as a
     # plain Python global, not a captured closure.
     return F_pure(x, *consts)
 
@@ -113,7 +113,7 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
     """While-loop fixed-point iteration of ``x = F_pure(x, *consts)``.
 
     Returns ``(x_star, n_iters)``.  No autodiff machinery here — that
-    is layered on by ``_ift_solve``'s custom_vjp.
+    is layered on by ``_ift_solve``'s custom_jvp.
 
     ``acceleration`` is a static Python string selecting the forward
     iterator wrapper.  Supported values:
@@ -266,12 +266,15 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
             col_mask = jnp.arange(max_cols) < i
             V_masked = V_new * col_mask[None, :]
             W_masked = W_new * col_mask[None, :]
-            # Solve  W^T W c = W^T r_cur  via lstsq.  rcond keeps the
-            # solve well-defined when W still has only a handful of
-            # populated columns and the rest are zero (rank-deficient).
-            c, _resid, _rank, _sv = jnp.linalg.lstsq(
-                W_masked, r_cur, rcond=1e-10,
-            )
+            # Solve  W c ≈ r_cur  via the SVD pseudo-inverse.  The
+            # relative cutoff keeps the solve well-defined when W still
+            # has only a handful of populated columns and the rest are
+            # zero (rank-deficient).  ``pinv`` rather than ``lstsq`` for
+            # the same reason as ``iqn_ils_update``: lstsq's derivative
+            # is NaN on repeated zero singular values.  The IFT rule
+            # never differentiates this body, but keep the two sites
+            # consistent so nobody re-inherits the trap by unrolling.
+            c = jnp.linalg.pinv(W_masked, rtol=1e-10) @ r_cur
             # Standard IMVJ update (Degroote 2008):  x_{k+1} = x_k - V c
             # where c solves the secant LS  W c ≈ r_cur.  This implies
             # J_R^{-1} r_cur ≈ V c, so Δx_QN = -V c is the QN step.
@@ -324,18 +327,26 @@ def _ift_solve_impl(
     Differentiates via the implicit function theorem:
         ``dx*/d(consts) = (I - dF/dx)^{-1} dF/d(consts)``
     evaluated at the fixed point.  ``x0`` itself receives a zero
-    cotangent (the fixed point is invariant under the initial guess
+    derivative (the fixed point is invariant under the initial guess
     in the converged limit).
+
+    The rule is installed as a ``jax.custom_jvp`` (see
+    ``_ift_solve_jvp``) rather than a ``custom_vjp``: JAX obtains
+    reverse mode by transposing the (linear) tangent rule, and lineax's
+    ``linear_solve`` is transposable, so one definition serves
+    ``jax.jvp`` / ``jacfwd`` (the FMI ``FORWARD`` directional
+    derivative), ``jax.grad`` / ``vjp`` / ``jacrev``, and higher
+    order.  A ``custom_vjp`` cannot be forward-differentiated at all.
 
     ``acceleration`` is a static Python string — see
     ``_ift_fixed_point_fwd_impl`` for supported values.  It controls
-    only the forward iterator; the backward is identical for all
-    values because the IFT adjoint depends on ``F`` at ``x*``, not on
-    the path taken to reach ``x*``.
+    only the forward iterator; the derivative is identical for all
+    values because the IFT rule depends on ``F`` at ``x*``, not on the
+    path taken to reach ``x*``.
 
     ``linear_solver`` is a static Python string — ``"gmres"`` (default),
-    ``"bicgstab"``, or ``"dense"`` — selecting the backward adjoint
-    solver.  See ``_ift_solve_bwd`` for the dispatch details.
+    ``"bicgstab"``, or ``"dense"`` — selecting the tangent/adjoint
+    solver.  See ``_ift_linear_solve`` for the dispatch details.
     """
     x_star, _ = _ift_fixed_point_fwd_impl(
         F_pure, x0, consts, tol, max_iter, acceleration
@@ -343,87 +354,59 @@ def _ift_solve_impl(
     return x_star
 
 
-def _ift_solve_fwd(
-    F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
-):
-    # fwd has the SAME signature as the original function under
-    # jax.custom_vjp's nondiff_argnums convention.  Only bwd is
-    # rearranged (nondiff first, then residual, then output cotangent).
-    x_star, _ = _ift_fixed_point_fwd_impl(
-        F_pure, x0, consts, tol, max_iter, acceleration
-    )
-    return x_star, (x_star, consts)
+def _ift_linear_solve(matvec, rhs, linear_solver):
+    """Solve ``A v = rhs`` for the matrix-free operator ``v -> matvec(v)``.
 
+    ``A`` is ``I - dF/dx`` at the fixed point.  Every backend goes
+    through lineax so that the solve is linear in ``rhs`` *and*
+    transposable — that is what lets JAX derive the reverse-mode rule
+    (a solve with ``A^T``) from the forward-mode rule automatically.
+    Memory is O(N) for the matrix-free backends; no Jacobian is ever
+    materialised except under ``"dense"``.
 
-def _ift_solve_bwd(
-    F_pure, tol, max_iter, acceleration, linear_solver, residual, g
-):
-    del tol, max_iter, acceleration  # backward is acceleration-agnostic
-    x_star, consts = residual
-    # Linear system to solve:  (I - dF/dx)^T u = g.
-    #
-    # The matrix-vector product v -> (I - dF/dx)^T v is exactly
-    # ``v - J^T v``, where ``J^T v`` is the vjp of the one-iteration
-    # function ``F`` at ``x_star`` applied to ``v``.  This is matrix
-    # free — no jacobian is ever materialized — so memory is O(N) and
-    # compute per matvec is one F-vjp.  We hand the matvec to lineax
-    # as a ``FunctionLinearOperator`` and let its GMRES (or BiCGStab)
-    # iterate.
-    #
-    # Backends, dispatched by ``linear_solver`` plus the
-    # ``MADDENING_IFT_DENSE_SOLVE`` env var (env var wins for triage):
-    #
-    # * ``"gmres"`` (default) — lineax GMRES.  Safe non-symmetric solver.
-    # * ``"dense"`` — historical ``jacrev + jnp.linalg.solve``.  O(N^2)
-    #   memory, O(N^3) compute.  Kept as a swap-in triage fallback and
-    #   promoted to a first-class config option.
-    #
-    # * ``"bicgstab"`` — lineax BiCGStab.  *Disabled at the
-    #   CouplingGroup field level* in lineax 0.0.7: BiCGStab returns
-    #   NaN when driving a ``FunctionLinearOperator`` (the matrix-free
-    #   shape this backward uses) — confirmed on a well-conditioned
-    #   ``0.5*I`` test, so this is a lineax-side issue, not a property
-    #   of MADDENING's coupling Jacobian.  The dispatch arm is left in
-    #   place so a future lineax fix can re-enable it by widening the
-    #   ``linear_solver`` Literal on CouplingGroup; users who want to
-    #   try it can still construct CouplingGroup with
-    #   ``linear_solver="bicgstab"`` (the runtime accepts the string).
-    _, vjp_fn = jax.vjp(lambda xx: _F_dispatch(F_pure, xx, consts), x_star)
+    Backends, dispatched by ``linear_solver`` plus the
+    ``MADDENING_IFT_DENSE_SOLVE`` env var (env var wins for triage):
+
+    * ``"gmres"`` (default) — lineax GMRES.  Safe non-symmetric solver.
+    * ``"dense"`` — materialise ``A`` with ``jacfwd`` and LU-solve.
+      O(N^2) memory, O(N^3) compute.  Triage fallback, promoted to a
+      first-class config option.
+    * ``"bicgstab"`` — lineax BiCGStab.  *Disabled at the CouplingGroup
+      field level* in lineax 0.0.7: BiCGStab returns NaN when driving a
+      ``FunctionLinearOperator`` — confirmed on a well-conditioned
+      ``0.5*I`` test, so this is a lineax-side issue, not a property of
+      MADDENING's coupling Jacobian.  The dispatch arm is left in place
+      so a future lineax fix can re-enable it by widening the
+      ``linear_solver`` Literal on CouplingGroup.
+
+    Lineax raises (``throw=True`` default) when a solve reports
+    failure, so a non-converged adjoint is loud rather than silent.
+    """
+    # Lazy import — keeps lineax (and its equinox/optax transitive
+    # deps) out of module load time.  Only callers who opt into
+    # ``solver='ift'`` pay this import cost.
+    import lineax as lx  # noqa: PLC0415  (lazy by design)
 
     force_dense = os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1"
     effective_solver = "dense" if force_dense else linear_solver
+    n = rhs.shape[0]
 
     if effective_solver == "dense":
-        J = jax.jacrev(lambda xx: _F_dispatch(F_pure, xx, consts))(x_star)
-        n = x_star.shape[0]
-        A = jnp.eye(n, dtype=x_star.dtype) - J
-        u = jnp.linalg.solve(A.T, g)
+        A = jax.jacfwd(matvec)(jnp.zeros_like(rhs))
+        op = lx.MatrixLinearOperator(A)
+        solver = lx.LU()
     else:
-        # Lazy import — keeps lineax (and its equinox/optax transitive
-        # deps) out of module load time.  Only callers who opt into
-        # ``solver='ift'`` pay this import cost.
-        import lineax as lx  # noqa: PLC0415  (lazy by design)
-
-        def _matvec(v):
-            (Jt_v,) = vjp_fn(v)
-            return v - Jt_v
-
-        op = lx.FunctionLinearOperator(
-            _matvec, jax.eval_shape(lambda: g)
-        )
-        n = x_star.shape[0]
-
+        op = lx.FunctionLinearOperator(matvec, jax.eval_shape(lambda: rhs))
         if effective_solver == "bicgstab":
             # BiCGStab has no ``restart`` parameter (it operates on a
             # fixed three-vector recurrence rather than building a
             # Krylov subspace).  ``max_steps`` only needs to bound the
             # outer iteration count.
-            max_steps = max(4 * n, 200)
             solver = lx.BiCGStab(
-                rtol=1e-6, atol=1e-8, max_steps=max_steps,
+                rtol=1e-6, atol=1e-8, max_steps=max(4 * n, 200),
             )
         elif effective_solver == "gmres":
-            # (I - dF/dx)^T is in general non-symmetric; GMRES is the
+            # (I - dF/dx) is in general non-symmetric; GMRES is the
             # safe default.  rtol/atol are matched to the float32
             # regime the surrounding code uses.
             #
@@ -434,10 +417,10 @@ def _ift_solve_bwd(
             # groups whose flat state is larger than 20 floats (any
             # chain of >=10 two-DOF nodes — common!), the
             # default-20 GMRES silently converges to a *low-rank
-            # approximation* of the adjoint solve.  It looks fine
+            # approximation* of the solve.  It looks fine
             # (converged=True, residual small in the projected
-            # subspace) but the returned ``u`` lies in a 20-D
-            # subspace of an N-D problem, so the resulting gradient
+            # subspace) but the returned vector lies in a 20-D
+            # subspace of an N-D problem, so the resulting derivative
             # is structurally wrong — *not* a near-correct answer
             # with extra noise, but a different gradient.
             #
@@ -450,37 +433,56 @@ def _ift_solve_bwd(
             # test_gmres_restart_too_small_silently_corrupts_gradient
             # for the regression guard.
             restart = min(n, 50)
-            max_steps = max(4 * restart, 100)
             solver = lx.GMRES(
                 rtol=1e-6,
                 atol=1e-8,
                 restart=restart,
-                max_steps=max_steps,
+                max_steps=max(4 * restart, 100),
             )
         else:
             raise ValueError(
-                f"_ift_solve_bwd: unsupported linear_solver="
+                f"_ift_linear_solve: unsupported linear_solver="
                 f"{linear_solver!r}; expected one of "
                 f"'gmres', 'bicgstab', 'dense'."
             )
 
-        result = lx.linear_solve(op, g, solver=solver)
-        u = result.value
-    # consts cotangent: dF/d(consts)^T @ u, via vjp wrt consts only.
-    _, vjp_fn_c = jax.vjp(lambda cc: _F_dispatch(F_pure, x_star, cc), consts)
-    (consts_bar,) = vjp_fn_c(u)
-    # x0 receives zero cotangent.
-    x0_bar = jnp.zeros_like(x_star)
-    return (x0_bar, consts_bar)
+    return lx.linear_solve(op, rhs, solver=solver).value
+
+
+def _ift_solve_jvp(
+    F_pure, tol, max_iter, acceleration, linear_solver, primals, tangents
+):
+    # Tangent rule of the implicit function theorem at ``x*``:
+    #     (I - dF/dx) x_dot = dF/d(consts) . consts_dot
+    # Linear in ``consts_dot`` (a jvp of F composed with a lineax solve),
+    # so JAX can transpose it for reverse mode.  ``x0_dot`` is ignored:
+    # the converged fixed point does not depend on the initial guess.
+    x0, consts = primals
+    _x0_dot, consts_dot = tangents
+    x_star = _ift_solve(
+        F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
+    )
+    _, rhs = jax.jvp(
+        lambda cc: _F_dispatch(F_pure, x_star, cc), (consts,), (consts_dot,)
+    )
+
+    def _matvec(v):
+        _, Jv = jax.jvp(
+            lambda xx: _F_dispatch(F_pure, xx, consts), (x_star,), (v,)
+        )
+        return v - Jv
+
+    x_dot = _ift_linear_solve(_matvec, rhs, linear_solver)
+    return x_star, x_dot
 
 
 # nondiff_argnums: 0=F_pure (callable), 3=tol (static float),
 #                  4=max_iter (static int), 5=acceleration (static str),
 #                  6=linear_solver (static str).
-_ift_solve = jax.custom_vjp(
+_ift_solve = jax.custom_jvp(
     _ift_solve_impl, nondiff_argnums=(0, 3, 4, 5, 6)
 )
-_ift_solve.defvjp(_ift_solve_fwd, _ift_solve_bwd)
+_ift_solve.defjvp(_ift_solve_jvp)
 
 
 # ------------------------------------------------------------------
@@ -995,7 +997,7 @@ def _run_coupled_block_impl(
             """
             # Operate on the flattened group-state vector ``x``.  We
             # need a top-level ``F_pure(x, *consts)`` so the
-            # custom_vjp rule does not close over any tracer
+            # custom_jvp rule does not close over any tracer
             # (see JAX issue #2912 / optimistix's _is_global_function
             # assertion).  jax.closure_convert hoists any tracers
             # ``one_pass`` captures into an explicit ``consts``
@@ -1155,7 +1157,7 @@ def _run_coupled_block_impl(
             # When the user opts into ``solver='ift'`` with
             # ``acceleration='iqn-imvj'``, route into ``_run_ift_forward``
             # so the QN updates happen inside the IFT while_loop and the
-            # backward goes through the acceleration-agnostic custom_vjp
+            # backward goes through the acceleration-agnostic custom_jvp
             # rule (matrix-free lineax GMRES at the fixed point).
             #
             # **Per-step only** for this prototype.  The fori-loop branch
@@ -1165,7 +1167,7 @@ def _run_coupled_block_impl(
             # Why not cross-timestep warm-start here yet?  Three coupled
             # changes are required and each has a sharp edge:
             #
-            # 1. ``_ift_solve``'s custom_vjp must return ``(x_star, V, W)``
+            # 1. ``_ift_solve``'s custom_jvp must return ``(x_star, V, W)``
             #    rather than just ``x_star``, with zero cotangents on V/W
             #    in the backward (V/W are forward-only state).  Mechanical
             #    but touches the autodiff signature.
@@ -1360,7 +1362,7 @@ def _run_coupled_block_impl(
             )
 
             if use_ift:
-                # ----- IFT path: while_loop forward + custom_vjp backward.
+                # ----- IFT path: while_loop forward + custom_jvp (IFT) derivative.
                 # See ``_run_ift_forward`` below for the shared
                 # closure_convert + ``_ift_solve`` plumbing; this
                 # acceleration='none' branch is just the most common

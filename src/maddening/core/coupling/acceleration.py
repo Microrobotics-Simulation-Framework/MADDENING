@@ -94,7 +94,7 @@ def coupling_residual_mixed(
             scale = atol + rtol * jnp.maximum(
                 jnp.abs(new_val), jnp.abs(old_val)
             )
-            scaled = diff / scale
+            scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
             count = count + scaled.size
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
@@ -143,7 +143,7 @@ def coupling_residual_interface(
         scale = atol + rtol * jnp.maximum(
             jnp.abs(new_val), jnp.abs(old_val)
         )
-        scaled = diff / scale
+        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
         count = count + scaled.size
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
@@ -377,10 +377,17 @@ def iqn_ils_update(
     V_masked = new_V * col_mask[None, :]
     W_masked = new_W * col_mask[None, :]
 
-    # Solve V^T V c = -V^T r via regularized normal equations
-    VtV = V_masked.T @ V_masked + 1e-10 * jnp.eye(max_cols)
-    Vtr = V_masked.T @ (-residual)
-    c = jnp.linalg.solve(VtV, Vtr)
+    # Solve min_c ||V c + r||_2 via the SVD pseudo-inverse.
+    # This avoids the normal equations (V^T V) which square the condition
+    # number of V — problematic in float32 near convergence when V columns
+    # become nearly collinear.  ``pinv`` rather than ``lstsq``: the masked
+    # matrix routinely carries several exactly-zero columns (inactive or
+    # warm-started-but-empty), i.e. repeated zero singular values, and
+    # lstsq's SVD derivative divides by ``s_i^2 - s_j^2`` there, so the
+    # unrolled (fori) gradient came out NaN.  pinv's custom_jvp is
+    # well-defined for rank-deficient input; the forward value is the
+    # same minimum-norm solution with the same relative cutoff.
+    c = jnp.linalg.pinv(V_masked, rtol=1e-6) @ (-residual)
 
     # QN correction
     correction = W_masked @ c + residual

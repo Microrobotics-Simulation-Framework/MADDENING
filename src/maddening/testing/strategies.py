@@ -40,6 +40,23 @@ except ImportError as e:
 import jax.numpy as jnp
 
 
+def _representable(lo: float, hi: float, dtype: np.dtype) -> tuple[float, float]:
+    """Round ``(lo, hi)`` inward to values exactly representable in ``dtype``.
+
+    Hypothesis refuses ``st.floats(min_value=0.1, width=32)`` because
+    ``0.1`` is not a float32; rounding inward keeps samples inside the
+    envelope the caller declared.
+    """
+    lo_r, hi_r = dtype.type(lo), dtype.type(hi)
+    if lo_r < lo:
+        lo_r = np.nextafter(lo_r, dtype.type(np.inf))
+    if hi_r > hi:
+        hi_r = np.nextafter(hi_r, dtype.type(-np.inf))
+    if lo_r > hi_r:
+        raise ValueError(f"bounds ({lo}, {hi}) contain no {dtype} value")
+    return float(lo_r), float(hi_r)
+
+
 def node_states(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,
@@ -69,8 +86,8 @@ def node_states(
     field_strategies = {}
     for field, arr in initial.items():
         shape = tuple(int(d) for d in arr.shape)
-        lo, hi = bounds.get(field, (-1e4, 1e4))
-        field_dtype = dtype if dtype is not None else np.float32
+        field_dtype = np.dtype(dtype if dtype is not None else np.float32)
+        lo, hi = _representable(*bounds.get(field, (-1e4, 1e4)), field_dtype)
         width = 32 if field_dtype == np.float32 else 64
         field_strategies[field] = arrays(
             dtype=field_dtype,
@@ -139,16 +156,19 @@ def boundary_inputs_for(
     if not spec:
         return st.just({})
 
+    dtype = np.dtype(dtype)
+    width = 32 if dtype == np.float32 else 64
     input_strategies = {}
     for name, input_spec in spec.items():
         shape = tuple(int(d) for d in input_spec.shape) if hasattr(input_spec, "shape") else ()
-        lo, hi = bounds.get(name, (-1e4, 1e4))
+        lo, hi = _representable(*bounds.get(name, (-1e4, 1e4)), dtype)
         input_strategies[name] = arrays(
             dtype=dtype,
             shape=shape,
             elements=st.floats(
                 min_value=lo, max_value=hi,
                 allow_nan=False, allow_infinity=False,
+                width=width,
             ),
         ).map(jnp.asarray)
 

@@ -1,8 +1,8 @@
-"""Testing and verification utilities for MADDENING nodes.
+"""Testing utilities for MADDENING nodes.
 
-This module provides reusable harnesses for formally verifying and
-property-testing :class:`~maddening.core.node.SimulationNode`
-subclasses.
+Property-based testing harnesses for
+:class:`~maddening.core.node.SimulationNode` subclasses, built on
+Hypothesis.
 
 Install the ``[verify]`` extra to use this module::
 
@@ -10,10 +10,11 @@ Install the ``[verify]`` extra to use this module::
 
 Two sub-modules:
 
-- :mod:`maddening.testing.verification` — stelling-based formal
-  verification (proves properties over ALL inputs in a declared
-  envelope).
-- :mod:`maddening.testing.strategies` — Hypothesis strategies for
-  property-based testing (samples from a rich input space and shrinks
-  counterexamples).
+- :mod:`maddening.testing.verification` — ``verify_node`` battery
+  (finite outputs, preserved structure, determinism, jit/eager
+  agreement, finite gradients, plus opt-in bounds / energy / custom
+  invariants), each failure shrunk to a minimal counterexample.
+- :mod:`maddening.testing.strategies` — Hypothesis strategies that
+  generate states, boundary inputs and timesteps from a node's declared
+  interface, for writing your own ``@given`` tests.
 """

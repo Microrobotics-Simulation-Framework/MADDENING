@@ -1,208 +1,129 @@
-# Formal Verification and Property-Based Testing
+# Property-Based Verification
 
-MADDENING provides a two-layer verification system for proving numerical
-correctness of simulation code:
+MADDENING ships a property-based testing layer (built on
+[Hypothesis](https://hypothesis.readthedocs.io/)) for physics nodes: sample
+inputs from a declared envelope, check universal invariants, and shrink any
+failure to a minimal counterexample.
 
-1. **Stelling** (formal verification) — proves properties over ALL inputs
-   in a declared bounded envelope. A VERIFIED result is a mathematical
-   proof, not a sample.
-2. **Hypothesis** (property-based testing) — samples from a rich input
-   space with counterexample shrinking. Finds real bugs through random
-   testing.
-
-Install both via:
+Install via:
 
 ```bash
 pip install maddening[verify]
 ```
 
-## When to use which
-
-| Goal | Tool | Strength |
-|------|------|----------|
-| Prove a bound holds universally | stelling | Sound — no false negatives |
-| Find edge-case bugs | hypothesis | Broad coverage + minimal counterexamples |
-| Verify division-by-zero guards | hypothesis | stelling can't reason through `jnp.where` branches with division |
-| Prove non-negativity of a scalar | stelling | Interval arithmetic handles this directly |
-| Test array-wide properties | hypothesis | stelling's `reduce_and` support is limited |
-| Test at float32 precision | hypothesis | stelling operates in exact ℝ semantics |
-
 ## Verifying your own nodes
 
-### Quick start (hypothesis)
+### One-liner battery
 
 ```python
-from hypothesis import given, settings
-from maddening.testing.strategies import node_states, bounded_dt
+from maddening.testing.verification import assert_node_verified
 
-@given(
-    state=node_states(my_node, bounds={"temperature": (200.0, 5000.0)}),
-    dt=bounded_dt(1e-5, 0.01),
-)
-@settings(max_examples=500, deadline=None)
-def test_my_node_finite(state, dt):
-    out = my_node.update(state, {}, dt)
-    for field, val in out.items():
-        assert jnp.all(jnp.isfinite(val))
+def test_my_node():
+    assert_node_verified(
+        my_node,
+        bounds={"temperature": (200.0, 5000.0), "pressure": (1e3, 1e7)},
+        dt_range=(1e-5, 0.001),
+    )
 ```
 
-The `node_states` strategy reads your node's `initial_state()` to determine
-field names and shapes, then generates random arrays within the declared
-bounds. `bounded_dt` generates realistic timestep values.
+This runs the default battery — every check a physics node should pass
+regardless of what it models:
 
-### Quick start (stelling)
+| Check | What it catches |
+|-------|-----------------|
+| `finite` | NaN/inf in any output field |
+| `structure` | Dropped/added keys, shape or dtype drift |
+| `deterministic` | Non-reproducible output (stray RNG, host side effects) |
+| `jit_consistent` | Eager vs `jax.jit` disagreement (Python branching on array values) |
+| `gradient_finite` | NaN in `d(outputs)/d(state)` — backward-pass-only failures such as `lstsq`/`solve` VJPs on rank-deficient inputs, `sqrt`/`norm` at zero, `jnp.where` guards that protect the forward but not the gradient |
+
+Failures list the shrunk counterexample. For programmatic access use
+`verify_node`, which returns a `dict[str, VerificationResult]`:
 
 ```python
 from maddening.testing.verification import verify_node
 
-results = verify_node(
+results = verify_node(my_node, bounds={...}, max_examples=500)
+for name, r in results.items():
+    print(name, r.status)          # PASS / FAIL / ERROR
+    if r.failed:
+        print(r.counterexample)    # {"state": ..., "boundary_inputs": ..., "dt": ...}
+```
+
+### Opt-in physics checks
+
+```python
+verify_node(
     my_node,
-    bounds={"temperature": (200.0, 5000.0), "pressure": (1e3, 1e7)},
-    dt_range=(1e-5, 0.001),
-    solver_timeout_ms=10000,
+    bounds={"T": (200.0, 5000.0)},
+    output_bounds={"T": (0.0, 1e5)},            # boundedness
+    energy_fn=lambda s: 0.5 * jnp.sum(s["v"]**2),  # energy_monotone
+    invariants={                                # arbitrary predicates
+        "mass_conserved": lambda s_in, s_out, bi, dt:
+            jnp.allclose(jnp.sum(s_in["rho"]), jnp.sum(s_out["rho"]), rtol=1e-5),
+    },
 )
-for name, result in results.items():
-    print(f"{name}: {result.status}")
-    # status is VERIFIED, UNKNOWN, or REFUTED
 ```
 
-`verify_node` runs a default set of checks (shape stability, overflow
-freedom). For custom properties, use stelling's API directly.
+### Boundary inputs
 
-### Writing custom stelling harnesses
+Inputs declared in `boundary_input_spec()` are sampled automatically; bound
+them with `boundary_bounds={...}`. If `update()` needs an input the node does
+not declare, pass a fixed dict with `boundary_inputs={...}`.
 
-A stelling harness transcribes your node's arithmetic into a function that
-stelling can trace. Declare inputs with `any_array`, assert properties with
-`assert_`:
+### Writing your own `@given` tests
+
+The strategies underneath the battery are public:
 
 ```python
-import jax.numpy as jnp
-from stelling.harness import any_array, assert_
-from stelling.preconditions import check
+from hypothesis import given, settings
+from maddening.testing.strategies import node_states, bounded_dt, boundary_inputs_for
 
-def harness():
-    # Declare inputs over a bounded envelope
-    T = any_array((10,), "float64", (200.0, 5000.0))
-    dt = any_array((), "float64", (1e-5, 0.001))
-
-    # Transcribe the node's arithmetic
-    dT = -0.1 * T  # exponential cooling
-    T_new = T + dt * dT
-
-    # Assert the property
-    return (assert_(jnp.all(T_new > 0.0)),)
-
-v = check(harness, vacuity_mode="inputs-only", solver_timeout_ms=10000)
-assert v.status == "VERIFIED"
+@given(
+    state=node_states(my_node, bounds={"temperature": (200.0, 5000.0)}),
+    bi=boundary_inputs_for(my_node, bounds={"inlet_T": (200.0, 400.0)}),
+    dt=bounded_dt(1e-5, 0.01),
+)
+@settings(max_examples=500, deadline=None)
+def test_my_node_cools(state, bi, dt):
+    out = my_node.update(state, bi, dt)
+    assert jnp.all(out["temperature"] <= state["temperature"].max())
 ```
-
-**Key rules for stelling harnesses:**
-
-1. Transcribe the arithmetic directly — don't import and call the node's
-   `update()` method (stelling needs to trace the jaxpr).
-2. Use `"float64"` for declarations (stelling operates in real arithmetic).
-3. Keep declarations scalar or small arrays — stelling scales with equation
-   count, not array size.
-4. Use `solver_timeout_ms` when the property requires SMT escalation (e.g.,
-   correlation-dependent properties like `a - a == 0`).
-
-### Writing custom hypothesis strategies
-
-For boundary inputs or complex state structures, extend the built-in
-strategies:
-
-```python
-from hypothesis import strategies as st
-from hypothesis.extra.numpy import arrays
-import numpy as np
-
-# Strategy for a specific boundary input format
-my_boundary_inputs = st.fixed_dictionaries({
-    "pressure_inlet": arrays(
-        dtype=np.float32, shape=(10,),
-        elements=st.floats(min_value=1e3, max_value=1e7,
-                           allow_nan=False, allow_infinity=False),
-    ),
-})
-```
-
-## Available strategies (`maddening.testing.strategies`)
 
 | Strategy | Purpose |
 |----------|---------|
-| `node_states(node, bounds)` | Generate valid state dicts matching a node's interface |
-| `bounded_dt(min, max)` | Generate realistic timestep values |
-| `boundary_inputs_for(node, bounds)` | Generate inputs matching `boundary_input_spec()` |
+| `node_states(node, bounds)` | State dicts matching `initial_state()` |
+| `bounded_dt(min, max)` | Realistic timestep values |
+| `boundary_inputs_for(node, bounds)` | Inputs matching `boundary_input_spec()` |
 
-## Available verification checks (`maddening.testing.verification`)
+Sampling defaults to `float32` — the dtype most nodes execute in — so
+overflow shows up where it actually happens.
 
-| Check | What it proves |
-|-------|---------------|
-| `node_shape_stability` | Output pytree has same structure as input |
-| `node_no_overflow` | All output elements are finite |
-| `node_boundedness` | Output stays within declared bounds |
-| `node_energy_monotone` | Energy is non-increasing (dissipative systems) |
-| `verify_node` | Runs all applicable checks |
-
-## Running the verification suite
+## Running the suite
 
 ```bash
-# Full verification suite (stelling + hypothesis)
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/
-
-# With stelling overflow detection (integer narrowing tripwire)
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/ -p stelling.overflow
-
-# Just stelling (formal proofs)
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/stelling/
-
-# Just hypothesis (property-based)
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/hypothesis/
 ```
 
-**Note:** The stelling overflow plugin (`-p stelling.overflow`) must NOT be
-loaded globally — it interferes with the multigpu virtual device setup (the
-plugin triggers JAX initialization before XLA_FLAGS are set). Load it
-explicitly only when running verification tests.
+`tests/verification/hypothesis/conftest.py` disables the Hypothesis deadline
+globally because the first example of every test pays JIT compilation.
 
-## CI integration
+## Limitations
 
-The CI compliance job runs the verification suite automatically:
-
-```yaml
-# .github/workflows/ci.yml (compliance job)
-python -m pytest tests/compliance/ tests/verification/ -v --tb=short -p stelling.overflow
-```
-
-## Known limitations of the verification system
-
-See `tests/verification/README.md` for the full table of verified
-properties, known limitations, and stelling feature requests.
-
-Key limitations:
-
-1. **select_n branch tracing** — stelling cannot prove properties that
-   depend on `jnp.where` NOT taking a branch with division-by-zero.
-   Use hypothesis for these.
-2. **Array-wide assertions** — `jnp.all(pred)` is not supported by
-   stelling. Use scalar declarations or per-element assertions.
-3. **Float32 precision** — stelling operates in exact ℝ. Properties
-   that depend on float32 representability (e.g., `clip(x, 0.01) >= 0.01`)
-   must be tested via hypothesis.
-4. **JIT deadline** — hypothesis tests that trigger JIT compilation on
-   first run may exceed the 200ms default deadline. The verification
-   suite disables deadlines globally via a conftest profile.
+1. **Sampling, not proof.** A PASS means no counterexample was found in
+   `max_examples` draws. Raise `max_examples` for cheap nodes; use
+   `derandomize=True` if CI must be bit-reproducible.
+2. **Subnormals.** XLA flushes subnormals to zero on most backends, so
+   properties that depend on them cannot be tested meaningfully.
+3. **Cost scales with `update()`.** Nodes with large grids should use tight
+   `bounds` and small shapes in the test fixture; the battery calls
+   `update()` roughly `5 * max_examples` times plus one `jax.grad`.
 
 ## Checklist for new nodes
 
-When adding a new physics node, include these verification steps:
-
-- [ ] Add hypothesis test: `update()` returns finite values for bounded inputs
-- [ ] Add hypothesis test: `update()` preserves state structure (keys + shapes)
-- [ ] Add hypothesis test: `update(state, {}, dt=0)` is identity (zero-step)
-- [ ] Add hypothesis test: `update()` is deterministic (same in → same out)
-- [ ] If dissipative: add hypothesis test for energy non-increase
-- [ ] If conservation law: add hypothesis test for conserved quantity
-- [ ] Document any CFL or stability conditions in `meta.limitations`
-- [ ] Document any parameter constraints (e.g., mass > 0) with validation in `__init__`
-- [ ] If arithmetic is simple enough: add stelling harness for key bounds
+- [ ] `assert_node_verified(node, bounds=...)` with a physically meaningful envelope
+- [ ] `update(state, bi, dt=0)` is identity (zero-step) — add as an `invariants` entry
+- [ ] If dissipative: `energy_fn=`
+- [ ] If a conservation law applies: `invariants=` for the conserved quantity
+- [ ] Document CFL / stability conditions in `meta.limitations`
+- [ ] Document parameter constraints (e.g. `mass > 0`) with validation in `__init__`

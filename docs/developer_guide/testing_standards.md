@@ -108,12 +108,12 @@ python scripts/check_citations.py
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
 
-## 4. Formal Verification and Property-Based Testing (recommended for physics nodes)
+## 4. Property-Based Testing (recommended for physics nodes)
 
-Location: `tests/verification/stelling/` and `tests/verification/hypothesis/`
+Location: `tests/verification/hypothesis/`
 
-Beyond analytical benchmarks, MADDENING provides two additional verification
-layers. See the full [Verification Guide](verification.md) for details.
+Beyond analytical benchmarks, MADDENING provides a Hypothesis-based
+property-testing layer. See the full [Verification Guide](verification.md).
 
 **Property-based testing** (hypothesis) — test universal invariants:
 
@@ -129,13 +129,14 @@ def test_my_node_finite(state, dt):
         assert jnp.all(jnp.isfinite(val))
 ```
 
-**Formal verification** (stelling) — prove bounds universally:
+**Node battery** — finite outputs, structure, determinism, jit/eager
+agreement, finite gradients, in one call:
 
 ```python
-from maddening.testing.verification import verify_node
+from maddening.testing.verification import assert_node_verified
 
-results = verify_node(my_node, bounds={"field": (lo, hi)})
-assert results["no_overflow"].status == "VERIFIED"
+def test_my_node():
+    assert_node_verified(my_node, bounds={"field": (lo, hi)})
 ```
 
 Install with `pip install maddening[verify]`.
@@ -151,7 +152,6 @@ tests/
 ├── viz/            # Visualization tests (skipped in CI — require display)
 ├── compliance/     # Metadata, anomaly registry, stability tests
 └── verification/   # Verification suite
-    ├── stelling/       # Formal proofs (stelling)
     ├── hypothesis/     # Property-based tests (hypothesis)
     │   └── nodes/      # Per-node property tests
     ├── test_gradient_health.py    # Pre-existing gradient checks

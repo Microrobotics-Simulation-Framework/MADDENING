@@ -110,6 +110,30 @@ class TestIQNILSUnit:
         )
         assert int(result[3]) == 2  # n_cols grew from 1 to 2
 
+    def test_iqn_ils_gradient_finite_with_empty_active_columns(self):
+        """Warm-start (``jacobian_reuse``) marks columns active before
+        they hold data, so the LS matrix has repeated zero singular
+        values.  ``lstsq``'s SVD derivative is NaN there; the update must
+        stay differentiable (unrolled fori gradient)."""
+        n_dof, max_cols = 4, 5
+        x_old = jnp.array([1.0, 2.0, 3.0, 4.0])
+        prev_r = jnp.array([0.05, -0.1, 0.02, 0.0])
+        prev_s = x_old - 0.1
+        V = jnp.zeros((n_dof, max_cols))
+        W = jnp.zeros((n_dof, max_cols))
+
+        def out_sum(x_raw):
+            x_new = iqn_ils_update(
+                x_raw, x_old, prev_r, prev_s, V, W,
+                jnp.int32(3), jnp.array(1.0), jnp.zeros(n_dof),
+            )[0]
+            return jnp.sum(x_new)
+
+        x_raw = jnp.array([1.1, 2.2, 3.3, 4.4])
+        assert jnp.isfinite(out_sum(x_raw))
+        g = jax.grad(out_sum)(x_raw)
+        assert jnp.all(jnp.isfinite(g)), g
+
 
 # ==================================================================
 # Integration tests

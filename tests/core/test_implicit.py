@@ -97,7 +97,7 @@ class TestImplicitEulerStep:
         bi = {"anchor_position": jnp.array(0.0)}
         dt = 0.01
 
-        new_state = implicit_euler_step(
+        new_state, _ = implicit_euler_step(
             spring.implicit_residual, state, bi, dt, n_newton=5,
         )
 
@@ -120,7 +120,7 @@ class TestImplicitEulerStep:
         }
         dt = 0.001
 
-        new_state = implicit_euler_step(
+        new_state, _ = implicit_euler_step(
             heat.implicit_residual, state, bi, dt, n_newton=5,
         )
 
@@ -152,7 +152,7 @@ class TestImplicitEulerStep:
         # Implicit Euler should stay stable
         state_implicit = state
         for _ in range(20):
-            state_implicit = implicit_euler_step(
+            state_implicit, _ = implicit_euler_step(
                 spring.implicit_residual, state_implicit, bi, dt,
                 n_newton=10,
             )
@@ -190,8 +190,9 @@ class TestImplicitEulerStep:
                 spring.implicit_residual, s, bi, 0.01, n_newton=3,
             )
 
-        new_state = step(state)
+        new_state, res_norm = step(state)
         assert jnp.isfinite(new_state["position"])
+        assert jnp.isfinite(res_norm)
 
     def test_implicit_grad(self):
         """Implicit Euler should be differentiable."""
@@ -205,7 +206,7 @@ class TestImplicitEulerStep:
         def loss_fn(x0):
             state = {"position": x0, "velocity": jnp.array(0.0)}
             for _ in range(5):
-                state = implicit_euler_step(
+                state, _ = implicit_euler_step(
                     spring.implicit_residual, state, bi, 0.01,
                     n_newton=3,
                 )
@@ -227,22 +228,24 @@ class TestImplicitEulerStep:
         dt = 0.01
 
         # Reference with many Newton iterations
-        ref = implicit_euler_step(
+        ref, ref_res = implicit_euler_step(
             spring.implicit_residual, state, bi, dt, n_newton=20,
         )
 
         # Fewer iterations
-        few = implicit_euler_step(
+        few, few_res = implicit_euler_step(
             spring.implicit_residual, state, bi, dt, n_newton=2,
         )
 
         # More iterations should be closer to the reference
-        more = implicit_euler_step(
+        more, more_res = implicit_euler_step(
             spring.implicit_residual, state, bi, dt, n_newton=5,
         )
 
         err_few = abs(float(few["position"]) - float(ref["position"]))
         err_more = abs(float(more["position"]) - float(ref["position"]))
+        # More iterations should have smaller residual
+        assert float(more_res) <= float(few_res) + 1e-10
 
         assert err_more <= err_few + 1e-10, (
             f"More Newton iters error {err_more} should be <= "

@@ -73,7 +73,7 @@ class TestIQNILSUnit:
 
         result = iqn_ils_update(
             x_raw, x_old, prev_r, prev_s,
-            V, W, n_cols, omega, prev_ra,
+            V, W, n_cols, omega, prev_ra, have_prev=False,
         )
         x_new = result[0]
         assert jnp.all(jnp.isfinite(x_new))
@@ -88,11 +88,26 @@ class TestIQNILSUnit:
             jnp.zeros(n_dof), x_old,
             jnp.zeros((n_dof, 3)), jnp.zeros((n_dof, 3)),
             jnp.int32(0), jnp.array(1.0), jnp.zeros(n_dof),
+            have_prev=False,
         )
         x_new = result[0]
         assert jnp.all(jnp.isfinite(x_new))
         # n_cols should still be 0 on first call
         assert int(result[3]) == 0
+
+    def test_iqn_ils_first_column_added_once_prev_is_real(self):
+        """n_cols must leave 0 as soon as a real previous iterate exists —
+        the old ``n_cols == 0`` first-iteration test could never do so, and
+        IQN-ILS silently ran as Aitken."""
+        n_dof = 2
+        result = iqn_ils_update(
+            jnp.array([1.1, 2.2]), jnp.array([1.0, 2.0]),
+            jnp.array([0.05, 0.1]), jnp.array([0.9, 1.8]),
+            jnp.zeros((n_dof, 3)), jnp.zeros((n_dof, 3)),
+            jnp.int32(0), jnp.array(1.0), jnp.zeros(n_dof),
+            have_prev=True,
+        )
+        assert int(result[3]) == 1
 
     def test_iqn_ils_column_count_grows(self):
         """After a non-first iteration, n_cols should increase."""
@@ -107,6 +122,7 @@ class TestIQNILSUnit:
             jnp.zeros((n_dof, max_cols)),
             jnp.zeros((n_dof, max_cols)),
             jnp.int32(1), jnp.array(1.0), jnp.zeros(n_dof),
+            have_prev=True,
         )
         assert int(result[3]) == 2  # n_cols grew from 1 to 2
 
@@ -126,6 +142,7 @@ class TestIQNILSUnit:
             x_new = iqn_ils_update(
                 x_raw, x_old, prev_r, prev_s, V, W,
                 jnp.int32(3), jnp.array(1.0), jnp.zeros(n_dof),
+                have_prev=True,
             )[0]
             return jnp.sum(x_new)
 

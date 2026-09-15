@@ -9,6 +9,75 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+### Changed
+
+- **Coupling groups now default to the early-exit solver** (`CouplingGroup.solver="ift"`).
+  The fixed-point iteration is a `jax.lax.while_loop` that exits as soon as the
+  group's convergence norm meets its threshold, for every `acceleration`,
+  `iteration_mode`, `convergence_norm` and `diagnostics` setting.  The legacy
+  unrolled `fori_loop` ran `max_iterations` passes regardless of convergence
+  (measured: step cost linear in `max_iterations`, 80–90 % dead iterations at
+  typical convergence).  IQN-IMVJ cross-timestep Jacobian reuse now runs inside
+  the while_loop with the same shift-and-insert column convention as before.
+- **IFT derivative rule is a `jax.custom_jvp`** (was `custom_vjp`).  JAX derives
+  reverse mode by transposing the linear tangent rule through lineax, so one
+  definition serves `jax.jvp` / `jacfwd` (the FMI `FORWARD` directional
+  derivative — previously a `TypeError` through coupled steps), `jax.grad` /
+  `jacrev`, and `jax.hessian`.
+- `iqn_ils_update` takes a keyword-only `have_prev` flag saying whether the
+  previous-iterate arguments are real; loop bodies pass `i > first`.
+
+### Added
+
+- `CouplingGroup.strict_convergence`: raise (jit-safe, via `equinox.error_if`)
+  when a group exits at `max_iterations` unconverged, since the IFT gradient is
+  then invalid.  Off by default.
+- `GraphManager.coupling_diagnostics()` reports `"converged"` per group.
+- `maddening.testing.verification` is a Hypothesis battery (`verify_node`,
+  `assert_node_verified`): finite outputs, preserved structure, determinism,
+  jit/eager agreement, finite gradients, plus opt-in `output_bounds`,
+  `energy_fn` and custom `invariants`; failures return the shrunk
+  counterexample.
+
+### Deprecated
+
+- `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the next
+  minor release.
+
+### Removed
+
+- The stelling formal-verification suite, CI job and `stelling` dependency.
+  The `[verify]` extra now only pulls `hypothesis`.
+
+### Fixed
+
+- **IQN-ILS never activated without Jacobian reuse**: the first-iteration test
+  was `n_cols == 0` and reset `n_cols` to 0, so the secant basis never grew and
+  the method silently ran as Aitken.  With `jacobian_reuse > 0` it escaped only
+  by admitting a bogus first column.
+- **IQN safeguard vetoed valid steps on stiff problems**: the quasi-Newton
+  correction was rejected above 10× the residual, but a correct Newton step is
+  ≈ residual / (1 − ρ) (50× at ρ = 0.98).  Bound relaxed to a blow-up guard.
+- **IQN secant basis**: `W` is now built from differences of the raw operator
+  outputs (Degroote 2009) rather than of the inputs; 2 vs 5 iterations on the
+  ρ = 0.98 test contraction.
+- **IQN gradient NaN with `jacobian_reuse > 0`**: `jnp.linalg.lstsq`'s SVD
+  derivative is NaN on the repeated zero singular values of the masked secant
+  matrix; replaced by `jnp.linalg.pinv` (rank-deficiency-safe `custom_jvp`,
+  same solution).
+- IFT path ignored `convergence_norm` (hard-coded L2 against `tolerance`) and,
+  for IQN modes, iterated with non-interface fields frozen at their first-pass
+  values, giving the residual a floor and running to the cap.
+- Fori-path diagnostics recorded the residual one iteration stale.
+- IFT linear solve reported a spurious GMRES "iterative breakdown" on long
+  runs: lineax's tolerance is elementwise, so exact-zero entries of a
+  cotangent had to reach `atol=1e-8` absolute while float32 round-off from
+  the large entries is ~1e-5.  The solve now goes through
+  `jax.lax.custom_linear_solve` with `atol` scaled to the largest rhs entry
+  and `rtol` no tighter than ~100 ulp of the dtype.
+- `maddening.testing.strategies` rejected float32 bounds that are not exactly
+  representable (e.g. `0.1`); bounds now round inward to the sampling dtype.
+
 ## [0.3.1] - 2026-06-22
 
 An **experimental-pilot** point release: it ships one small, self-contained,

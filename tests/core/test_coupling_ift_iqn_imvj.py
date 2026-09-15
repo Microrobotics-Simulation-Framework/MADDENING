@@ -45,7 +45,7 @@ import pytest
 
 from maddening.core.graph_manager import (
     GraphManager,
-    _ift_fixed_point_fwd_impl,
+    _fixed_point_while,
 )
 from maddening.nodes.spring import SpringDamperNode
 
@@ -185,7 +185,7 @@ def test_backward_parity_ift_iqn_imvj_through_jit():
 # ----------------------------------------------------------------------
 # 3. Convergence-rate evidence on a stiff non-symmetric contraction.
 #
-# We use ``_ift_fixed_point_fwd_impl`` directly with a hand-built
+# We use ``_fixed_point_while`` directly with a hand-built
 # F(x) = A x + b where ``A`` is a non-symmetric matrix with
 # eigenvalues  (0.98, 0.5)  — a contraction with spectral radius
 # 0.98 (so Gauss-Seidel converges, but very slowly) and a strongly
@@ -233,11 +233,17 @@ def test_convergence_rate_iqn_imvj_beats_aitken_on_stiff_scene():
     tol = 1e-5  # float32-comfortable
     max_iter = 500
 
+    def step(x, *consts):
+        x_new = F(x, *consts)
+        return x_new, jnp.linalg.norm(x_new - x)
+
+    zeros_vw = jnp.zeros((x0.shape[0], max(max_iter - 1, 1)), dtype=x0.dtype)
     n_iters = {}
     x_star = {}
     for acc in ("none", "aitken", "iqn-imvj"):
-        xs, nit = _ift_fixed_point_fwd_impl(
-            F, x0, consts, tol, max_iter, acc,
+        accel_init = (zeros_vw, zeros_vw) if acc == "iqn-imvj" else ()
+        xs, nit, _res, _vw = _fixed_point_while(
+            step, x0, consts, accel_init, tol, max_iter, acc, 1.0, 0, None,
         )
         n_iters[acc] = int(nit)
         x_star[acc] = xs

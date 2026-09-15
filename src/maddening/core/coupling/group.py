@@ -5,10 +5,12 @@ When nodes form a cycle, the default behaviour is *staggering*: back-edges
 read previous-timestep values.  For strongly-coupled subsystems this can be
 inaccurate or unstable.
 
-A ``CouplingGroup`` wraps a set of cyclic nodes in a ``jax.lax.fori_loop``
+A ``CouplingGroup`` wraps a set of cyclic nodes in a ``jax.lax.while_loop``
 that iterates the group each timestep until the state change drops below a
-tolerance (or ``max_iterations`` is reached).  All edges within the group
-become *forward* edges during iteration, giving Gauss-Seidel convergence.
+tolerance (or ``max_iterations`` is reached), differentiating through the
+converged fixed point via the implicit function theorem.  All edges within
+the group become *forward* edges during iteration, giving Gauss-Seidel
+convergence.
 
 Supports multiple convergence norms, acceleration methods (Aitken,
 fixed relaxation, IQN-ILS, IQN-IMVJ), Jacobi iteration mode, and
@@ -17,6 +19,7 @@ subcycling for mixed-timestep coupling groups.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, fields
 from typing import Literal, Optional, Union, get_args, get_origin, get_type_hints
 
@@ -92,21 +95,37 @@ class CouplingGroup:
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
         for smoothly varying problems.
-    solver : {"fori", "ift"}
-        How the fixed-point iteration is solved.  ``"fori"`` (default)
-        runs a static ``jax.lax.fori_loop`` for ``max_iterations`` and
-        differentiates straight through the iterates.  ``"ift"`` runs
-        a ``jax.lax.while_loop`` that terminates early on convergence
-        and uses implicit-function-theorem differentiation in the
-        backward pass (more accurate gradients in the
-        partially-converged regime, plus a meaningful forward speed-up
-        when convergence is reached before ``max_iterations``).
-        Supported with ``acceleration`` in ``{"none", "aitken",
-        "iqn-imvj"}`` and ``iteration_mode="gauss-seidel"``; other
-        combinations silently fall back to ``"fori"``.
+    solver : {"ift", "fori"}
+        How the fixed-point iteration is solved.  ``"ift"`` (default)
+        runs a ``jax.lax.while_loop`` that exits as soon as the
+        group's convergence norm meets its threshold, and
+        differentiates via the implicit function theorem at the fixed
+        point — a ``custom_jvp`` rule, so ``jax.jvp`` / ``jacfwd`` and
+        ``jax.grad`` / ``jacrev`` both work through the step.  Every
+        ``acceleration``, ``iteration_mode``, ``convergence_norm`` and
+        ``diagnostics`` setting is supported.  The IFT derivative is
+        exact only at a converged fixed point; see
+        ``strict_convergence``.
+
+        ``"fori"`` is the legacy path — a static ``jax.lax.fori_loop``
+        that always runs ``max_iterations`` passes (freezing the state
+        once converged) and differentiates straight through the
+        iterates.  Deprecated: emits ``DeprecationWarning`` and will be
+        removed in the next minor release.  Forward-mode AD does not
+        work through it.
+    strict_convergence : bool
+        For ``solver="ift"``: if True, raise a runtime error (via
+        ``equinox.error_if``, jit-safe) when the group exits at
+        ``max_iterations`` without meeting its threshold, since the
+        gradient through that step is then invalid.  Default False:
+        the condition is only reported via
+        ``GraphManager.coupling_diagnostics()["converged"]`` when
+        ``diagnostics=True``.  Recommended True for training and
+        calibration runs.
     linear_solver : {"gmres", "dense"}
-        Backend used by the ``"ift"`` backward to solve the adjoint
-        system ``(I - dF/dx)^T u = g``.  ``"gmres"`` (default) is the
+        Backend used by the ``"ift"`` derivative rule to solve the
+        tangent system ``(I - dF/dx) x_dot = rhs`` (and, transposed,
+        the adjoint system).  ``"gmres"`` (default) is the
         matrix-free GMRES path via lineax — the safe default for the
         non-symmetric coupling Jacobians MADDENING produces.
         ``"dense"`` is the legacy ``jacrev + jnp.linalg.solve`` path,
@@ -145,7 +164,8 @@ class CouplingGroup:
     jacobian_reuse: int = 0
     waveform_iterations: int = 1
     predictor: Literal["none", "linear", "quadratic"] = "none"
-    solver: Literal["fori", "ift"] = "fori"
+    solver: Literal["fori", "ift"] = "ift"
+    strict_convergence: bool = False
     linear_solver: Literal["gmres", "dense"] = "gmres"
 
     def __post_init__(self) -> None:
@@ -178,6 +198,15 @@ class CouplingGroup:
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
                 )
+        if self.solver == "fori":
+            warnings.warn(
+                "CouplingGroup solver='fori' is deprecated and will be "
+                "removed in the next minor release; the default "
+                "solver='ift' exits early on convergence and supports "
+                "forward- and reverse-mode AD.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
 
 
 def _literal_options(ann: object) -> Optional[tuple]:

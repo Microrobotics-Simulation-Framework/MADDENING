@@ -48,7 +48,24 @@ update inside the loop — `JAX_LOG_COMPILES=1` shows ~30 separate
 cache warms, and the steady-state cost is dominated by GPU dispatch
 latency rather than actual compute.
 
-**Sketch**:
+**Status (2026-09-15)** — diagnosis revised, main fix landed:
+
+- Measured on CPU (2 × 400k-cell HeatNode group, converges at iteration 2):
+  fori step cost was linear in `max_iterations` (≈2.4 ms/iter) regardless of
+  convergence — 80 % dead iterations at N=10, 90 % at N=20.  There was no
+  per-node `jit` boundary, no host sync, and one XLA compile per step, so the
+  launch-overhead hypothesis below was *not* the cause; the "~30 tracing
+  events" were node-level compiles.
+- **Landed**: `CouplingGroup.solver="ift"` (early-exit `while_loop` + IFT
+  derivative) is the default; step cost is flat in `max_iterations`.
+- Of the ≈2.4 ms/iter, ≈0.8 ms was physics and ≈1.5 ms bookkeeping.  Still
+  open: `_apply_interface_overrides` does a full-array `.at[idx].set` per node
+  per iteration (≈0.9 ms/node/iter) although the correction is
+  iteration-invariant (hoist it out of the loop); the residual is over the
+  full state (the `"interface"` norm is cheaper).
+- Acceptance below still needs measuring on the AR4 graph on GPU.
+
+**Sketch** (original):
 
 1. **Audit the coupling-group code path** (`maddening.core.coupling.group`)
    to confirm whether it uses `lax.while_loop` (preferred — single

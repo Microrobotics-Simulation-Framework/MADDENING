@@ -300,13 +300,23 @@ def iqn_ils_update(
     n_cols: jnp.ndarray,
     omega: jnp.ndarray,
     prev_r_aitken: jnp.ndarray,
+    *,
+    have_prev,
 ) -> tuple:
     """IQN-ILS quasi-Newton update with Aitken fallback.
 
     Builds a low-rank approximation of the inverse Jacobian from
     residual and state differences across iterations.  Falls back
-    to Aitken relaxation when the quasi-Newton update is invalid
-    (first iteration, NaN, or excessively large step).
+    to Aitken relaxation when no secant columns are available yet or
+    the quasi-Newton step is invalid (NaN, or a blow-up).
+
+    ``have_prev`` (bool scalar, keyword-only) says whether
+    ``prev_residual`` / ``prev_state`` hold a real previous iterate.
+    A new secant column is appended only when it is True; on the first
+    iteration of a step it must be False, otherwise the seeded zeros
+    enter the secant basis as a bogus column.  It is independent of
+    ``n_cols`` so that warm-started columns (``jacobian_reuse``) can
+    accelerate from the very first iteration.
 
     Parameters
     ----------
@@ -317,7 +327,9 @@ def iqn_ils_update(
     prev_residual : jnp.ndarray
         Residual from the previous iteration, shape ``(n_dof,)``.
     prev_state : jnp.ndarray
-        State from the previous iteration, shape ``(n_dof,)``.
+        Raw fixed-point result ``x_raw`` from the previous iteration,
+        shape ``(n_dof,)`` (the sixth return value of the previous
+        call).
     V_mat : jnp.ndarray
         Pre-allocated residual difference matrix, shape
         ``(n_dof, max_cols)``.
@@ -343,33 +355,40 @@ def iqn_ils_update(
         Updated active column count.
     residual : jnp.ndarray
         Current residual.
-    x_old_flat : jnp.ndarray
-        Current state (becomes prev_state next iteration).
+    x_raw_flat : jnp.ndarray
+        Current raw fixed-point result (becomes ``prev_state`` next
+        iteration).
     new_omega : jnp.ndarray
         Updated Aitken omega.
     cur_r_aitken : jnp.ndarray
         Current Aitken residual.
     """
     residual = x_raw_flat - x_old_flat
-    is_first = n_cols == 0
+    add_col = jnp.asarray(have_prev)
 
-    # Compute differences for V and W
+    # Secant columns (Degroote 2009): V holds residual differences, W
+    # holds differences of the *raw operator outputs* x~.  The update
+    # x_raw + W c with V c ~= -r then approximates the output at zero
+    # residual.  Building W from input differences instead turns the
+    # step into a hybrid that converges markedly slower on stiff
+    # contractions (5 vs 2 iterations on the rho=0.98 test scene).
     delta_r = residual - prev_residual
-    delta_x = x_old_flat - prev_state
+    delta_x = x_raw_flat - prev_state
 
     # Shift existing columns right, add new column at position 0
     max_cols = V_mat.shape[1]
     new_V = jnp.where(
-        is_first, V_mat,
+        add_col,
         jnp.roll(V_mat, shift=1, axis=1).at[:, 0].set(delta_r),
+        V_mat,
     )
     new_W = jnp.where(
-        is_first, W_mat,
+        add_col,
         jnp.roll(W_mat, shift=1, axis=1).at[:, 0].set(delta_x),
+        W_mat,
     )
     new_n_cols = jnp.where(
-        is_first, jnp.int32(0),
-        jnp.minimum(n_cols + 1, max_cols),
+        add_col, jnp.minimum(n_cols + 1, max_cols), n_cols,
     )
 
     # Mask inactive columns to zero
@@ -398,19 +417,24 @@ def iqn_ils_update(
         x_old_flat, x_raw_flat, prev_r_aitken, omega
     )
 
-    # Validate QN result: must be finite and not excessively large
+    # Validate QN result: finite, and not a blow-up.  The bound is
+    # deliberately loose: a correct quasi-Newton step is roughly
+    # ``residual / (1 - rho)`` for a contraction of spectral radius
+    # ``rho``, i.e. 50x the residual at rho = 0.98.  A tight cap (this
+    # used to be 10x) silently vetoes IQN on exactly the stiff problems
+    # it exists for and degrades it to Aitken.
     correction_norm = jnp.sqrt(jnp.sum(correction ** 2))
     residual_norm = jnp.sqrt(jnp.sum(residual ** 2))
     is_valid = (
         jnp.all(jnp.isfinite(x_qn))
-        & (correction_norm < 10.0 * jnp.maximum(residual_norm, 1e-12))
-        & ~is_first
+        & (correction_norm < 1e6 * jnp.maximum(residual_norm, 1e-12))
+        & (new_n_cols > 0)
     )
     x_new = jnp.where(is_valid, x_qn, x_aitken)
 
     return (
         x_new, new_V, new_W, new_n_cols,
-        residual, x_old_flat,
+        residual, x_raw_flat,
         new_omega, cur_r_aitken,
     )
 

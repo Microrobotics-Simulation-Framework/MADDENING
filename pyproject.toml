@@ -219,6 +219,9 @@ filterwarnings = [
     "ignore:WARNING. cycle detected:UserWarning",
     # RigidBody2DNode is deprecated but existing tests still exercise it
     "ignore:RigidBody2DNode is deprecated:DeprecationWarning",
+    # solver='fori' is deprecated; the fori-vs-ift parity tests keep
+    # exercising it until it is removed.
+    "ignore:CouplingGroup solver='fori' is deprecated:DeprecationWarning",
     # ZMQ sockets not always cleanly closed in tests
     "ignore::ResourceWarning:zmq",
     "ignore::pytest.PytestUnraisableExceptionWarning",

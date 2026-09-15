@@ -1,6 +1,7 @@
 """System identification helpers built on the graph parameter pytree.
 
-Two pieces, both pure JAX so they compose with ``jax.jit`` / ``jax.grad``:
+Three pieces, the first two pure JAX so they compose with ``jax.jit`` /
+``jax.grad``:
 
 * :func:`windowed_loss` — a teacher-forced, windowed trajectory loss.
   Long rollouts of stiff or chaotic dynamics give exploding gradients; the
@@ -12,8 +13,11 @@ Two pieces, both pure JAX so they compose with ``jax.jit`` / ``jax.grad``:
   function, from ``jax.jacfwd`` sensitivities.  Its eigen-decomposition
   says which parameter *combinations* the data cannot distinguish; the
   eigenvector of a near-zero eigenvalue names them.
+* :func:`fit` — Adam on a loss over the params pytree, in the
+  unconstrained coordinates and under the trainable mask the graph's
+  :class:`~maddening.core.params.ParamSpec` declarations define.
 
-Both take the ``params`` pytree exactly as ``GraphManager.params`` holds
+All take the ``params`` pytree exactly as ``GraphManager.params`` holds
 it, so the same object flows into ``gm.run_scan(params=...)``, an
 optimiser, and these diagnostics.
 
@@ -231,11 +235,32 @@ def _param_names(params) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
+    """Flat indices (in ``ravel_pytree`` order) of the leaves ``mask``
+    marks True; ``None`` when there is no mask."""
+    if mask is None:
+        return None
+    leaves = jax.tree.leaves(params)
+    flags = jax.tree.leaves(mask)
+    if len(flags) != len(leaves):
+        raise ValueError("mask must have the same tree structure as params")
+    idx, offset = [], 0
+    for leaf, flag in zip(leaves, flags):
+        n = int(np.asarray(leaf).size)
+        if bool(flag):
+            idx.extend(range(offset, offset + n))
+        offset += n
+    if not idx:
+        raise ValueError("mask selects no parameters")
+    return np.asarray(idx)
+
+
 def fim(
     residual_fn: Callable[[dict], Any],
     params: dict,
     *,
     scale: Optional[str] = "relative",
+    mask: Optional[dict] = None,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -260,15 +285,22 @@ def fim(
         parameters in different units are comparable and the condition
         number is not dominated by units.  ``None`` uses raw
         sensitivities.
+    mask : pytree of bool, optional
+        Same structure as ``params``; only leaves marked ``True`` are
+        treated as parameters (``GraphManager.trainable_mask()``).  The
+        report's ``param_names`` / matrix are restricted accordingly.
     """
     flat, unravel = ravel_pytree(params)
+    idx = _masked_indices(params, mask)
 
     def _r(theta):
-        return ravel_pytree(residual_fn(unravel(theta)))[0]
+        full = theta if idx is None else flat.at[idx].set(theta)
+        return ravel_pytree(residual_fn(unravel(full)))[0]
 
-    J = jax.jacfwd(_r)(flat)
+    theta0 = flat if idx is None else flat[idx]
+    J = jax.jacfwd(_r)(theta0)
     if scale == "relative":
-        J = J * flat[None, :]
+        J = J * theta0[None, :]
     elif scale is not None:
         raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
 
@@ -278,7 +310,125 @@ def fim(
     cond = float("inf") if lo <= 0.0 else hi / lo
     crb = jnp.diag(jnp.linalg.pinv(F))
     crb = jnp.where(jnp.isfinite(crb), crb, jnp.nan)
+    names = _param_names(params)
+    if idx is not None:
+        names = tuple(names[i] for i in idx)
     return FIMReport(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, cond=cond, crb=crb,
-        param_names=_param_names(params),
+        param_names=names,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fitting under ParamSpec (mask + reparametrisation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FitResult:
+    """Outcome of :func:`fit`.
+
+    ``params`` is a physical pytree (already mapped back through
+    ``GraphManager.constrain``); ``losses[i]`` is the loss *before*
+    update ``i``; ``converged`` is whether ``losses[-1] <= tol``.
+    """
+    params: dict
+    losses: np.ndarray
+    converged: bool
+    n_iter: int
+
+
+def fit(
+    gm,
+    loss_fn: Callable[[dict], Any],
+    *,
+    params: Optional[dict] = None,
+    mask: Optional[dict] = None,
+    n_iter: int = 200,
+    lr: float = 0.05,
+    tol: float = 0.0,
+    betas: tuple[float, float] = (0.9, 0.999),
+    eps: float = 1e-8,
+    callback: Optional[Callable[[int, float, dict], None]] = None,
+) -> FitResult:
+    """Adam on ``loss_fn(params)`` respecting the graph's :class:`ParamSpec`.
+
+    The optimiser works in the unconstrained coordinates of
+    ``GraphManager.unconstrain`` (log for positive constants, logit for
+    intervals), so a positive parameter cannot cross zero and a bounded
+    one cannot leave its interval, and it only moves the leaves the
+    ``mask`` marks trainable (default ``gm.trainable_mask()``: the
+    nodes' declarations plus ``gm.set_param_spec`` overrides).  This is
+    what stops a fit from wandering along an unidentifiable direction
+    through a parameter the data cannot see — freeze it with
+    ``gm.set_param_spec(node, key, ParamSpec(trainable=False))`` after
+    :func:`fim` has named it.
+
+    Parameters
+    ----------
+    gm : GraphManager
+        Supplies the specs; ``gm.params`` is the default start.
+    loss_fn : callable
+        ``params (physical pytree) -> scalar``; typically a closure over
+        :func:`windowed_loss`.
+    params : dict, optional
+        Starting pytree (``gm.params`` layout).
+    mask : pytree of bool, optional
+        Overrides ``gm.trainable_mask()``.
+    n_iter, lr, tol, betas, eps
+        Adam hyper-parameters; ``tol > 0`` stops early once the loss is
+        at or below it.
+    callback : callable, optional
+        ``callback(i, loss, params)`` after each evaluation.
+    """
+    start = gm._params_or_default(params)  # noqa: SLF001
+    gm.check_params(start)
+    mask = gm.trainable_mask(start) if mask is None else mask
+    b1, b2 = betas
+
+    u0 = gm.unconstrain(start)
+    flat_u, unravel = ravel_pytree(u0)
+    idx = _masked_indices(start, mask)
+    if idx is None:
+        idx = np.arange(flat_u.size)
+    theta0 = flat_u[idx]
+
+    def objective(theta):
+        u = unravel(flat_u.at[idx].set(theta))
+        return loss_fn(gm.constrain(u))
+
+    value_and_grad = jax.jit(jax.value_and_grad(objective))
+
+    @jax.jit
+    def adam_step(theta, m, v, g, i):
+        m = b1 * m + (1 - b1) * g
+        v = b2 * v + (1 - b2) * g * g
+        m_hat = m / (1 - b1 ** i)
+        v_hat = v / (1 - b2 ** i)
+        return theta - lr * m_hat / (jnp.sqrt(v_hat) + eps), m, v
+
+    theta = theta0
+    m = jnp.zeros_like(theta)
+    v = jnp.zeros_like(theta)
+    losses: list[float] = []
+    converged = False
+    i = 0
+    for i in range(1, n_iter + 1):
+        loss, g = value_and_grad(theta)
+        loss_f = float(loss)
+        losses.append(loss_f)
+        if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g))):
+            raise FloatingPointError(
+                f"non-finite loss or gradient at iteration {i} (loss={loss_f})"
+            )
+        if callback is not None:
+            callback(i, loss_f, gm.constrain(unravel(flat_u.at[idx].set(theta))))
+        if tol > 0.0 and loss_f <= tol:
+            converged = True
+            break
+        theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
+
+    final = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+    return FitResult(
+        params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
     )

@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @stability(StabilityLevel.STABLE)
@@ -105,6 +106,15 @@ class SpringDamperNode(SimulationNode):
     def halo_width(self) -> dict[int, int]:
         """Pointwise (no spatial neighbour access)."""
         return {}
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "stiffness": ParamSpec(bounds=(0.0, None), transform="log", units="N/m"),
+            "damping": ParamSpec(bounds=(0.0, None), units="N*s/m"),
+            "mass": ParamSpec(bounds=(0.0, None), transform="log", units="kg"),
+            "rest_length": ParamSpec(units="m"),
+        }
 
     def initial_state(self) -> dict:
         return {

@@ -48,6 +48,7 @@ import numpy as np
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -896,9 +897,26 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state_padded["wall_mask"]
         return result
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            # tau = 0.5 + nu / cs2 must stay > 0.5, i.e. nu > 0 strictly.
+            "viscosity": ParamSpec(
+                bounds=(0.0, None), transform="log", units="lattice",
+                description="kinematic viscosity; tau = 0.5 + nu / cs2",
+            ),
+        }
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """One collide-stream step.  ``viscosity`` comes from the injected
+        ``params`` when the graph supplies them (so ``tau`` is a traced,
+        differentiable constant); the lattice, faces and wall geometry are
+        structural and always come from the node."""
         f = state["f"]
-        tau = self._tau
+        p = self.params if params is None else {**self.params, **params}
+        tau = 0.5 + p["viscosity"] / self._cs2
         lat = self._lat
         e = lat.e
         w = lat.w

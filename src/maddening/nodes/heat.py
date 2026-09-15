@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 def _laplacian_2nd_order_uniform(T_padded, dx):
@@ -257,6 +258,18 @@ class HeatNode(SimulationNode):
             ),
         }
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "thermal_diffusivity": ParamSpec(
+                bounds=(0.0, None), transform="log", units="m^2/s",
+            ),
+            "length": ParamSpec(bounds=(0.0, None), transform="log", units="m"),
+            # Geometry of the non-uniform grid: read from ``self.params``
+            # (it fixes the stencil), never fitted.
+            "grid_points": ParamSpec(trainable=False, description="grid geometry"),
+        }
+
     def halo_width(self) -> dict[int, int]:
         """One ghost cell per side per FD stencil radius on axis 0.
 
@@ -286,7 +299,7 @@ class HeatNode(SimulationNode):
 
         return {"temperature": temperature}
 
-    def _compute_laplacian(self, T, T_left, T_right):
+    def _compute_laplacian(self, T, T_left, T_right, length=None):
         """Compute the Laplacian d^2T/dx^2 using the configured stencil.
 
         Parameters
@@ -295,6 +308,10 @@ class HeatNode(SimulationNode):
             Current temperature field.
         T_left, T_right : scalar
             Dirichlet boundary values.
+        length : scalar, optional
+            Domain length for the uniform grid; ``None`` reads
+            ``self.params["length"]``.  ``update`` passes the injected
+            (traced) value so ``length`` is a differentiable parameter.
 
         Returns
         -------
@@ -322,7 +339,7 @@ class HeatNode(SimulationNode):
             return _laplacian_nonuniform(T_padded, x_padded)
 
         # Uniform grid
-        L = self.params["length"]
+        L = self.params["length"] if length is None else length
         dx = L / n
         stencil_order = self.params.get("stencil_order", 2)
 
@@ -431,6 +448,7 @@ class HeatNode(SimulationNode):
         n = self.params["n_cells"]
         p = self.params if params is None else {**self.params, **params}
         alpha = p["thermal_diffusivity"]
+        length = p["length"]
 
         T = state["temperature"]  # shape (n,)
 
@@ -443,7 +461,7 @@ class HeatNode(SimulationNode):
         source = jnp.broadcast_to(jnp.asarray(source, dtype=jnp.float32), (n,))
 
         # --- Laplacian ---
-        laplacian = self._compute_laplacian(T, T_left, T_right)
+        laplacian = self._compute_laplacian(T, T_left, T_right, length)
 
         T_new = T + alpha * dt * laplacian + source * dt
 

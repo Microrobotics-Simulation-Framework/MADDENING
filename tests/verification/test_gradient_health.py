@@ -213,58 +213,39 @@ class TestParameterRecovery:
         _, traj = jax.lax.scan(body, init, None, length=n_steps)
         return traj
 
-    FIT = ("stiffness", "damping")
-
-    @classmethod
-    def _adam(cls, loss_fn, params, n_iter, lr=0.3):
-        """Adam on the ``FIT`` entries only.  Updating every float in the
-        node pytree would also move ``mass``, and (k, c, m) scaled
-        together leaves the trajectory unchanged — the unidentifiable
-        direction ``maddening.sysid.fim`` reports."""
-        grad_fn = jax.jit(jax.grad(loss_fn))
-        mask = {n: {k: (k in cls.FIT) for k in node} for n, node in params.items()}
-        m = jax.tree.map(jnp.zeros_like, params)
-        v = jax.tree.map(jnp.zeros_like, params)
-        b1, b2, eps = 0.9, 0.999, 1e-8
-        for i in range(1, n_iter + 1):
-            g = grad_fn(params)
-            assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(g)), (
-                f"non-finite gradient at iteration {i}"
-            )
-            m = jax.tree.map(lambda m_, g_: b1 * m_ + (1 - b1) * g_, m, g)
-            v = jax.tree.map(lambda v_, g_: b2 * v_ + (1 - b2) * g_ ** 2, v, g)
-            params = jax.tree.map(
-                lambda p_, m_, v_, fit: jnp.maximum(
-                    p_ - lr * (m_ / (1 - b1 ** i)) / (jnp.sqrt(v_ / (1 - b2 ** i)) + eps),
-                    0.1,
-                ) if fit else p_,
-                params, m, v, mask,
-            )
-        return params
-
     def _recover(self, build, nodes, k0, c0):
+        """``maddening.sysid.fit`` for (k, c) with ``mass`` and
+        ``rest_length`` frozen per node.  (k, c, m) scaled together leaves
+        the trajectory unchanged, and in the coupled pair ``fim`` reports
+        a weak direction (cond ~8e3) pairing a node's damping with its
+        rest length; a fit allowed to walk either lands 100 steps of data
+        at the right loss with the wrong damping."""
+        from maddening.core.params import ParamSpec
+        from maddening.sysid import fit
+
         gm = build(self.K_TRUE, self.C_TRUE)
         ref = self._positions(gm, gm.params, self.N_STEPS, nodes)
+        for n in nodes:
+            gm.set_param_spec(n, "mass", ParamSpec(trainable=False))
+            gm.set_param_spec(n, "rest_length", ParamSpec(trainable=False))
 
-        def loss_fn(node_params):
+        def loss_fn(params):
             return jnp.mean(
-                (self._positions(gm, {"nodes": node_params, "mappings": {}},
-                                 self.N_STEPS, nodes) - ref) ** 2
+                (self._positions(gm, params, self.N_STEPS, nodes) - ref) ** 2
             )
 
-        start = jax.tree.map(lambda x: x, gm.params["nodes"])
+        start = jax.tree.map(lambda x: x, gm.params)
         for n in nodes:
-            start[n]["stiffness"] = jnp.asarray(k0, dtype=jnp.float32)
-            start[n]["damping"] = jnp.asarray(c0, dtype=jnp.float32)
-        loss_jit = jax.jit(loss_fn)
-        initial_loss = float(loss_jit(start))
-        fitted = self._adam(loss_fn, start, 500)
-        final_loss = float(loss_jit(fitted))
-        assert final_loss < initial_loss * 1e-3, (initial_loss, final_loss)
+            start["nodes"][n]["stiffness"] = jnp.asarray(k0, dtype=jnp.float32)
+            start["nodes"][n]["damping"] = jnp.asarray(c0, dtype=jnp.float32)
+        res = fit(gm, loss_fn, params=start, n_iter=500, lr=0.1)
+        assert res.losses[-1] < res.losses[0] * 1e-3, (res.losses[0], res.losses[-1])
         for n in nodes:
-            k, c = float(fitted[n]["stiffness"]), float(fitted[n]["damping"])
+            fitted = res.params["nodes"][n]
+            k, c = float(fitted["stiffness"]), float(fitted["damping"])
             assert abs(k - self.K_TRUE) / self.K_TRUE < 0.05, f"{n}: k={k}"
             assert abs(c - self.C_TRUE) / self.C_TRUE < 0.10, f"{n}: c={c}"
+            assert float(fitted["mass"]) == 1.0, f"{n}: mass moved"
 
     def test_parameter_recovery_single_spring(self):
         """k, c recovered through gm's step with the params pytree."""

@@ -11,6 +11,7 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import inspect
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,39 @@ class SimulationNode(ABC):
         entries) rather than from ``self.params`` directly.
         """
         ...
+
+    def accepts_params(self) -> bool:
+        """True when :meth:`update` declares a ``params`` keyword.
+
+        Such nodes receive their entry of the graph parameter pytree on
+        every call; the others keep the 3-argument contract and read
+        constants from ``self.params`` (baked into the trace, so not
+        differentiable through the graph).
+        """
+        try:
+            sig = inspect.signature(self.update)
+        except (TypeError, ValueError):
+            return False
+        return "params" in sig.parameters
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        """Per-parameter :class:`ParamSpec` for the leaves of
+        :meth:`params_pytree`.
+
+        Default: every ``initial_*`` entry is ``trainable=False`` (an
+        initial condition, not a dynamics constant — ``update`` never
+        reads it); everything else is the default spec (trainable,
+        unbounded, identity).  Subclasses extend the returned dict with
+        bounds and transforms for their constants, e.g.
+        ``{"stiffness": ParamSpec(bounds=(0, None), transform="log")}``.
+        A graph can override any entry with
+        :meth:`GraphManager.set_param_spec`.
+        """
+        return {
+            key: ParamSpec(trainable=False, description="initial condition")
+            for key in self.params
+            if key.startswith("initial_")
+        }
 
     def params_pytree(self) -> dict:
         """The node's differentiable parameters as a pytree of arrays.

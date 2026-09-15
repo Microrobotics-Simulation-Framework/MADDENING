@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 # ------------------------------------------------------------------
@@ -182,6 +183,14 @@ class RigidBodyNode(SimulationNode):
     def halo_width(self) -> dict[int, int]:
         """Pointwise (no spatial neighbour access)."""
         return {}
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "mass": ParamSpec(bounds=(0.0, None), transform="log", units="kg"),
+            "inertia": ParamSpec(bounds=(0.0, None), transform="log", units="kg*m^2"),
+            "gravity": ParamSpec(units="m/s^2"),
+        }
 
     def initial_state(self) -> dict:
         p = self.params

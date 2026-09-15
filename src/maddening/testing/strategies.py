@@ -74,9 +74,12 @@ def node_states(
         The node whose state structure to match.
     bounds : dict, optional
         Per-field (lo, hi) bounds. Fields not in bounds default to
-        (-1e4, 1e4).
+        (-1e4, 1e4) (integer fields: the dtype's full range).
     dtype : numpy dtype
-        Array dtype for generated states.
+        Array dtype for generated *floating* states.  Fields whose
+        ``initial_state`` is bool or integer keep that dtype and are
+        sampled as booleans / integers, so ``structure`` can check dtype
+        preservation on monitor-style nodes.
     """
     if bounds is None:
         bounds = {}
@@ -86,6 +89,25 @@ def node_states(
     field_strategies = {}
     for field, arr in initial.items():
         shape = tuple(int(d) for d in arr.shape)
+        init_dtype = np.dtype(getattr(arr, "dtype", np.float32))
+        if init_dtype == np.bool_:
+            # Flags (a health monitor's status bits): sample both values.
+            field_strategies[field] = arrays(
+                dtype=np.bool_, shape=shape, elements=st.booleans(),
+            ).map(jnp.asarray)
+            continue
+        if np.issubdtype(init_dtype, np.integer):
+            # Counters / indices keep their integer dtype; ``bounds`` (if
+            # given) are rounded inward, else the dtype's own range.
+            info = np.iinfo(init_dtype)
+            lo_b, hi_b = bounds.get(field, (info.min, info.max))
+            lo_i = int(max(np.ceil(lo_b), info.min))
+            hi_i = int(min(np.floor(hi_b), info.max))
+            field_strategies[field] = arrays(
+                dtype=init_dtype, shape=shape,
+                elements=st.integers(min_value=lo_i, max_value=hi_i),
+            ).map(jnp.asarray)
+            continue
         field_dtype = np.dtype(dtype if dtype is not None else np.float32)
         lo, hi = _representable(*bounds.get(field, (-1e4, 1e4)), field_dtype)
         width = 32 if field_dtype == np.float32 else 64

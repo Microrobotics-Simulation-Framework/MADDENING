@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 import xml.etree.ElementTree as ET
 
+import numpy as np
+
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import (
     _STABILITY_REGISTRY,
@@ -94,6 +96,10 @@ class FMIVariable:
     shape : tuple of int, optional
         Array shape, for FMI 3.0 dynamic arrays.  Empty / None means
         scalar.
+    start : str, optional
+        Initial value as the XML ``start`` attribute text (FMI 3.0
+        requires one for ``parameter`` and ``input`` causality; arrays
+        are space-separated in row-major order).
     """
     name: str
     value_reference: int
@@ -103,6 +109,7 @@ class FMIVariable:
     description: str = ""
     unit: str = ""
     shape: Optional[tuple[int, ...]] = None
+    start: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.causality not in _CAUSALITIES:
@@ -208,6 +215,8 @@ class ModelDescription:
             v_el = ET.SubElement(mv, fmi_type, attrib=attrib)
             if var.unit:
                 v_el.set("unit", var.unit)
+            if var.start is not None:
+                v_el.set("start", var.start)
             if var.shape:
                 # FMI 3.0 dynamic arrays — emit one <Dimension> per axis.
                 for dim in var.shape:
@@ -292,6 +301,7 @@ def build_model_description(
     selected_outputs: Optional[Iterable[tuple[str, str]]] = None,
     include_evolving: bool = False,
     default_step_size: Optional[float] = None,
+    include_parameters: bool = True,
 ) -> ModelDescription:
     """Build an FMI 3.0 :class:`ModelDescription` from a ``GraphManager``.
 
@@ -319,6 +329,15 @@ def build_model_description(
     default_step_size : float, optional
         Default fixed step size for the FMU's experiment block.
         Defaults to the graph's master timestep when available.
+    include_parameters : bool, default True
+        Expose every leaf of ``graph_manager.params["nodes"]`` as a
+        ``causality="parameter"``, ``variability="tunable"`` variable
+        named ``<node>.params.<key>`` (same stability filter as outputs), with
+        ``description`` / ``unit`` from the node's
+        :class:`~maddening.core.params.ParamSpec`.  These are backed by
+        the graph parameter pytree, so an importer that sets one changes
+        the next step without a recompile, and the FMU's directional
+        derivatives with respect to them are the real ``jax.jvp``.
 
     Returns
     -------
@@ -403,6 +422,50 @@ def build_model_description(
                 shape=shape or None,
             ))
             next_vr += 1
+
+    # ----- Parameters (graph parameter pytree) -----
+    if include_parameters:
+        used = {v.name for v in variables}
+        node_params = getattr(graph_manager, "params", {}) or {}
+        node_params = node_params.get("nodes", {}) if isinstance(node_params, dict) else {}
+        specs_fn = getattr(graph_manager, "param_specs", None)
+        all_specs = specs_fn().get("nodes", {}) if callable(specs_fn) else {}
+        for node_name, leaves in node_params.items():
+            node_spec = nodes.get(node_name)
+            node = getattr(node_spec, "node", node_spec)
+            node_class_name = f"{type(node).__module__}.{type(node).__name__}"
+            if not _ensure_stable_only_or_opt_in(node_class_name, include_evolving):
+                continue
+            node_specs = all_specs.get(node_name, {})
+            for key, leaf in leaves.items():
+                # Own namespace, mirroring params["nodes"][node][key]: a
+                # parameter may share its key with a state field (a
+                # node's initial position, say) and must not clash with
+                # the "<node>.<field>" output.
+                name = f"{node_name}.params.{key}"
+                if name in used:  # pragma: no cover - defensive
+                    raise ValueError(f"FMU variable name clash: {name!r}")
+                used.add(name)
+                spec = node_specs.get(key)
+                dtype = str(getattr(leaf, "dtype", "float32"))
+                shape = tuple(getattr(leaf, "shape", ()) or ())
+                flat = np.asarray(leaf).ravel()
+                start = " ".join(repr(float(x)) for x in flat)
+                variables.append(FMIVariable(
+                    name=name,
+                    value_reference=next_vr,
+                    dtype=dtype,
+                    causality="parameter",
+                    variability="tunable",
+                    description=(
+                        (spec.description if spec is not None and spec.description else "")
+                        or f"Parameter {key!r} of node {node_name!r}"
+                    ),
+                    unit=(spec.units if spec is not None else "") or "",
+                    shape=shape or None,
+                    start=start,
+                ))
+                next_vr += 1
 
     # ----- Defaults -----
     if default_step_size is None:

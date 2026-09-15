@@ -36,6 +36,15 @@ regardless of what it models:
 | `deterministic` | Non-reproducible output (stray RNG, host side effects) |
 | `jit_consistent` | Eager vs `jax.jit` disagreement (Python branching on array values) |
 | `gradient_finite` | NaN in `d(outputs)/d(state)` — backward-pass-only failures such as `lstsq`/`solve` VJPs on rank-deficient inputs, `sqrt`/`norm` at zero, `jnp.where` guards that protect the forward but not the gradient |
+| `params_consistent` | `update(..., params=node.params_pytree())` disagreeing with `update(...)` beyond float32 round-off — a constant read from `self.params` on one path and from the injected `params` on the other, so the graph (which always injects) calibrates a different model from the one tested in isolation |
+| `params_gradient_finite` | NaN in `d(outputs)/d(params_pytree)` — the gradient an optimiser or `maddening.sysid` uses |
+| `params_effective` | A trainable leaf of `params_pytree()` whose gradient is zero on *every* sample — `update` still reads that constant from `self.params`, so the graph's injected value (and any calibration of it) is silently ignored.  Aggregated over the battery, so a parameter that only matters on some inputs passes as long as one sample exercised it; declare a leaf `ParamSpec(trainable=False)` if it is genuinely not a dynamics constant |
+
+The `params_*` checks report `SKIP` (which counts as passed) for a
+node whose `update` does not take a `params` keyword; see
+`SimulationNode.accepts_params()`.  `tests/verification/test_builtin_nodes_verified.py`
+(and `_lbm.py`) run the battery on every built-in node and are the
+ledger of which nodes have migrated to `params`.
 
 Failures list the shrunk counterexample. For programmatic access use
 `verify_node`, which returns a `dict[str, VerificationResult]`:
@@ -45,7 +54,7 @@ from maddening.testing.verification import verify_node
 
 results = verify_node(my_node, bounds={...}, max_examples=500)
 for name, r in results.items():
-    print(name, r.status)          # PASS / FAIL / ERROR
+    print(name, r.status)          # PASS / FAIL / ERROR / SKIP
     if r.failed:
         print(r.counterexample)    # {"state": ..., "boundary_inputs": ..., "dt": ...}
 ```

@@ -86,11 +86,33 @@ class YourNode(SimulationNode):
     def initial_state(self):
         return {"field": jnp.zeros(self.state_spec["field"])}
 
-    def update(self, state, boundary_inputs, dt):
-        # Pure JAX operations only
+    def param_specs(self):
+        # Bounds / transforms / trainable flags for the constants below;
+        # initial_* entries are trainable=False by default.
+        return {**super().param_specs(),
+                "key": ParamSpec(bounds=(0.0, None), transform="log", units="...")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        # Pure JAX operations only.  Read every float constant from ``p``:
+        # the graph injects its (traced, differentiable) params pytree,
+        # so a constant read from self.params here would be invisible to
+        # jax.grad and to runtime changes.  Structural entries (ints,
+        # shapes, dicts) stay on self.params.
+        p = self.params if params is None else {**self.params, **params}
+        k = p["key"]
         ...
         return new_state
 ```
+
+The `params` keyword is the [graph parameter contract](../user_guide/parameters.md):
+`SimulationNode.params_pytree()` (every float-valued entry of `self.params`
+by default) is what the graph injects, `param_specs()` says what an
+optimiser may do with each leaf, and the `verify_node` battery's
+`params_consistent` / `params_gradient_finite` / `params_effective` checks
+fail on the classic mistakes (a constant read from `self.params` on one
+path only, a NaN gradient, a leaf the update never reads).  A node on the
+old 3-argument `update` still works, but its constants are baked into the
+trace and absent from `gm.params`.
 
 ### 2. Required Metadata (`NodeMeta`)
 

@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 def _cardiac_output(phase, systole_fraction, q_max):
@@ -141,7 +142,7 @@ class HeartPumpNode(SimulationNode):
             initial_pressure=initial_pressure,
         )
 
-    def _compute_q_max(self):
+    def _compute_q_max(self, p=None):
         """Compute peak systolic flow rate from stroke volume.
 
         The integral of Q_max * sin(pi * phase / sf) over phase in
@@ -151,16 +152,32 @@ class HeartPumpNode(SimulationNode):
 
             Q_max = stroke_volume * pi / (2 * sf / f)
                   = stroke_volume * pi * f / (2 * sf)
+
+        ``p`` is the (possibly injected) parameter dict; ``None`` reads
+        ``self.params``.
         """
-        sv = self.params["stroke_volume"]
-        hr = self.params["heart_rate"]
-        sf = self.params["systole_fraction"]
+        p = self.params if p is None else p
+        sv = p["stroke_volume"]
+        hr = p["heart_rate"]
+        sf = p["systole_fraction"]
         freq = hr / 60.0  # beats per second
         return sv * jnp.pi * freq / (2.0 * sf)
 
     def halo_width(self) -> dict[int, int]:
         """Pointwise (no spatial neighbour access)."""
         return {}
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "resistance": ParamSpec(bounds=(0.0, None), transform="log"),
+            "compliance": ParamSpec(bounds=(0.0, None), transform="log"),
+            "heart_rate": ParamSpec(bounds=(0.0, None), transform="log", units="bpm"),
+            "stroke_volume": ParamSpec(bounds=(0.0, None)),
+            "venous_pressure": ParamSpec(units="Pa"),
+            # Divides the phase: must stay strictly inside (0, 1).
+            "systole_fraction": ParamSpec(bounds=(0.0, 1.0), transform="logit"),
+        }
 
     def initial_state(self) -> dict:
         return {
@@ -171,19 +188,25 @@ class HeartPumpNode(SimulationNode):
             "flow_rate": jnp.array(0.0, dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Forward Euler update for the 2-element Windkessel model.
 
         1. Advance cardiac cycle phase.
         2. Compute cardiac output from waveform.
         3. Compute outflow through peripheral resistance.
         4. Update arterial pressure.
+
+        All Windkessel constants come from the injected ``params`` when
+        the graph supplies them.
         """
-        R = self.params["resistance"]
-        C = self.params["compliance"]
-        hr = self.params["heart_rate"]
-        sf = self.params["systole_fraction"]
-        P_venous = self.params["venous_pressure"]
+        p = self.params if params is None else {**self.params, **params}
+        R = p["resistance"]
+        C = p["compliance"]
+        hr = p["heart_rate"]
+        sf = p["systole_fraction"]
+        P_venous = p["venous_pressure"]
 
         P_art = state["arterial_pressure"]
         phase = state["phase"]
@@ -192,7 +215,7 @@ class HeartPumpNode(SimulationNode):
         phase_new = jnp.fmod(phase + dt * hr / 60.0, 1.0)
 
         # 2. Compute cardiac output
-        q_max = self._compute_q_max()
+        q_max = self._compute_q_max(p)
         Q_heart = _cardiac_output(phase_new, sf, q_max)
 
         # 3. Compute outflow (use backpressure if provided)

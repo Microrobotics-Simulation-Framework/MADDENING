@@ -155,6 +155,7 @@ flowchart LR
 
 user_guide/installation
 user_guide/quickstart
+user_guide/parameters
 user_guide/cloud_resume
 glossary
 ```

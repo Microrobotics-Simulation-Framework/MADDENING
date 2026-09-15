@@ -40,7 +40,19 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   where `closure_convert` hoists them into the IFT rule — and a changed
   value takes effect without recompiling.  A node opts in by declaring
   `update(..., *, params=None)` and reading its constants from `params`
-  (`SpringDamperNode`, `BallNode`, `HeatNode`, `RigidBodyNode` migrated);
+  (`SpringDamperNode`, `BallNode`, `HeatNode`, `RigidBodyNode` migrated;
+  then `RigidBody2DNode` — mass, inertia, gravity; `HeartPumpNode` — the
+  six Windkessel constants including `systole_fraction` on a logit spec;
+  `TableNode` and `HealthCheckNode` — on the contract with no dynamics
+  constant to inject, `checks` and the surface height stay structural;
+  `LBMNode` — `viscosity`, so `tau` is a traced constant; `LBMPipeNode` —
+  `tau`, `tau_tracer`, `propeller_strength`, `gravity` and the Shan-Chen
+  constants `G`, `rho_0`, `rho_wall`, `rho_liquid`, `rho_gas`, the latter
+  trainable only when the node was built multiphase since `G != 0`
+  selects the branch; `SurrogateNode` — every floating leaf of the
+  network weights as a flat `"weights<path>"` entry, rebuilt into the
+  weights pytree inside `update`, so `jax.grad` of a trajectory loss
+  reaches the surrogate weights and fine-tuned weights need no recompile);
   nodes on the 3-argument contract keep working unchanged.
   `SimulationNode.params_pytree()` defaults to the float-valued entries of
   `self.params`; structural values (`n_cells`, shapes, ...) stay on the
@@ -54,6 +66,68 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   into an FMA in one compiled shape and not another; `run_sweep` and
   individual `run_scan` results can now differ by ~1 ulp (they were
   bit-identical before), and the vmap-consistency test allows a few ulps.
+- **`ParamSpec`** (`maddening.core.params`): per-parameter `trainable`,
+  `bounds` and `transform` (`"log"` for strictly positive constants,
+  `"logit"` for intervals, `None` = clip).  Nodes declare specs for their
+  constants in `SimulationNode.param_specs()` (`initial_*` entries default
+  to `trainable=False`; the four migrated nodes declare bounds/transforms);
+  `GraphManager.set_param_spec(node, key, spec)` overrides per graph.
+  `gm.trainable_mask()`, `gm.unconstrain()` / `gm.constrain(u)` and
+  `gm.check_params()` are the pytree maps an optimiser needs; the
+  transforms clamp to the representable float32 interior so a saturated
+  step (`exp(89)`, `sigmoid(17)`) stays finite and invertible.
+- `maddening.sysid.fit(gm, loss_fn, ...)`: Adam in the unconstrained
+  coordinates under the trainable mask, returning physical params inside
+  their bounds with frozen leaves bit-identical; raises on a non-finite
+  gradient.  `fim(..., mask=)` restricts the Fisher matrix to the leaves a
+  mask (e.g. `gm.trainable_mask()`) selects.  `TestParameterRecovery` now
+  fits through `sysid.fit` with `mass` frozen by spec.
+- Passing a `params` pytree that names a node whose `update` takes no
+  `params`, an unknown node, or an unknown parameter key is now a
+  `ValueError` at trace time (previously silently ignored — and a gradient
+  with respect to it silently zero).  `gm.nodes_without_params()` lists
+  the nodes whose constants are baked; `compile()` logs them.
+- `verify_node` / `assert_node_verified` battery gains `params_consistent`
+  (injected `params_pytree()` reproduces the baked-constant step to float32
+  round-off), `params_gradient_finite` (finite `d(outputs)/d(params)`) and
+  `params_effective` (every trainable leaf has a non-zero gradient on at
+  least one sample — catches a constant still read from `self.params`);
+  all `SKIP` — a new `VerificationResult` status that counts as passed —
+  on nodes whose `update` takes no `params`.  `SimulationNode.accepts_params()`
+  exposes that probe.  `tests/verification/test_builtin_nodes_verified.py`
+  runs the full battery on every built-in node in CI and asserts the
+  migrated ones do not skip the params checks.
+- Hypothesis property suites for the params pytree
+  (`test_hypothesis_params.py`: baked ≡ traced step, `step` ≡ `run_scan` ≡
+  `run_sweep` within ulps, float32 params gradient vs float64 finite
+  differences, jvp/vjp adjoint identity through an IFT-coupled group, no
+  dirty/recompile/mutation on a modified pytree, checkpoint round trip) and
+  for `maddening.sysid` (`test_hypothesis_sysid.py`: `windowed_loss` zero
+  at truth and non-negative elsewhere over random tilings, single window ≡
+  direct trajectory loss, unconverged masking, FIM symmetric PSD with
+  orthonormal eigenvectors, injected null directions recovered).
+- User guide page `docs/user_guide/parameters.md`.
+- REST `PUT /graph/params/{node}` validates values against the node's
+  `ParamSpec` bounds before writing anything (400 with the offending leaf).
+- `maddening.testing.strategies.node_states` samples bool / integer state
+  fields with their own dtype, so the `structure` check covers monitor-style
+  nodes (`HealthCheckNode`) instead of being skipped.
+- **Params persistence and FMI.**  `gm.to_dict()` / `from_dict` and USD
+  (`save_graph_to_usd` / `load_graph_from_usd`) store each node's
+  *effective* params (`gm.effective_node_params`: constructor args with
+  the live `gm.params` values written over them) and the graph's
+  `ParamSpec` overrides (`param_specs` key; `maddening:paramSpecOverridesJson`
+  on the node prim), so a calibrated graph reloads calibrated with the
+  same trainable mask.  `build_model_description` exposes every
+  `gm.params` leaf as an FMI `parameter` / `tunable` variable
+  `<node>.params.<key>` with `ParamSpec` description and units
+  (`include_parameters=False` to opt out).  `SidecarConfig(params=...)`
+  makes the sidecar call the compiled step's 3-argument contract and
+  serve `get_params` / `set_params` (also as wire requests); a set value
+  takes effect on the next step without recompiling, unknown names or
+  wrong shapes are errors, and FMU state snapshots carry the parameters
+  (`serialize_fmu_state(params=)`, `deserialize_fmu_state(return_params=True)`;
+  legacy snapshots still load).
 - `maddening.sysid`: `windowed_loss` (teacher-forced windowed trajectory
   loss with optional masking of windows where a coupling group exited
   unconverged) and `fim` (Fisher information `JᵀJ` from `jacfwd`
@@ -86,6 +160,19 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Fixed
 
+- `LBMPipeNode` (multiphase): `_shan_chen_force` used `np.exp` on
+  `rho_wall / rho_0`, which are traced now that the graph injects params;
+  five multiphase graph tests failed with a tracer-conversion error.  Now
+  `jnp.exp`.
+- `LBMPipeNode` (multiphase): the EDM velocity clamp took
+  `sqrt(sum(u**2))`, whose gradient is NaN on a cell with exactly zero
+  shifted velocity (a uniform lattice, found by the `gradient_finite`
+  battery).  The sum is now floored at 1e-20 inside the sqrt; the forward
+  is unchanged wherever `|u| > 1e-10`, which the existing clamp assumed.
+- `HeatNode`: `length` was in `params_pytree()` but the Laplacian read it
+  from `self.params`, so an injected value was ignored and its gradient
+  identically zero.  `update` now passes the injected `length` to the
+  stencil (the new `params_effective` check fails on exactly this).
 - **IQN-ILS never activated without Jacobian reuse**: the first-iteration test
   was `n_cols == 0` and reset `n_cols` to 0, so the secant basis never grew and
   the method silently ran as Aitken.  With `jacobian_reuse > 0` it escaped only

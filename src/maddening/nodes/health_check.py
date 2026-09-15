@@ -89,12 +89,18 @@ class HealthCheckNode(SimulationNode):
             "check_results": jnp.ones(max(n_checks, 1), dtype=jnp.bool_),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Run configured checks on monitored fields from boundary inputs.
 
         Uses only simple JAX primitives (jnp.isfinite, jnp.sum, jnp.all,
         comparisons) — fundamentally different from any physics node's
         numerical operations, per the Algorithmic Diversity Principle.
+
+        On the graph ``params`` contract for uniformity; ``checks`` is
+        structural (it fixes the trace) and is always read from
+        ``self.params``, so the node has no differentiable parameters.
         """
         checks = self.params.get("checks", {})
         if not checks:

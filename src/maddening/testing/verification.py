@@ -4,7 +4,10 @@ Runs a battery of universal checks against a node's ``update()`` by
 sampling inputs with Hypothesis and shrinking any failure to a minimal
 counterexample.  The checks are the ones every physics node should
 satisfy regardless of what it models: finite outputs, preserved state
-structure, determinism, JIT/eager agreement, and finite gradients.
+structure, determinism, JIT/eager agreement, finite gradients, and —
+for nodes that take the graph's ``params`` pytree — injected params
+reproducing the baked constants and finite gradients with respect to
+them.
 
 Usage::
 
@@ -61,8 +64,11 @@ class VerificationResult:
 
     ``status`` is ``"PASS"`` (no counterexample found in ``n_examples``
     samples), ``"FAIL"`` (a shrunk counterexample is in
-    ``counterexample``), or ``"ERROR"`` (the check itself could not run,
-    e.g. ``update()`` is not differentiable; see ``detail``).
+    ``counterexample``), ``"ERROR"`` (the check itself could not run,
+    e.g. ``update()`` is not differentiable; see ``detail``), or
+    ``"SKIP"`` (the check does not apply to this node, e.g. the params
+    checks on a node whose ``update`` takes no ``params``).  ``SKIP``
+    counts as passed.
     """
     name: str
     status: str
@@ -72,17 +78,21 @@ class VerificationResult:
 
     @property
     def passed(self) -> bool:
-        return self.status == "PASS"
+        return self.status in ("PASS", "SKIP")
 
     @property
     def failed(self) -> bool:
         return self.status == "FAIL"
 
+    @property
+    def skipped(self) -> bool:
+        return self.status == "SKIP"
+
     def __str__(self) -> str:
         head = f"{self.name}: {self.status}"
         if self.failed:
             return f"{head}\n  counterexample: {self.counterexample}\n  {self.detail}"
-        if self.status == "ERROR":
+        if self.status in ("ERROR", "SKIP"):
             return f"{head}\n  {self.detail}"
         return f"{head} ({self.n_examples} examples)"
 
@@ -254,6 +264,139 @@ def node_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     return _run("gradient_finite", inputs, body, **kw)
 
 
+def _node_accepts_params(node) -> bool:
+    probe = getattr(node, "accepts_params", None)
+    return bool(probe()) if callable(probe) else False
+
+
+def _skip_no_params(name: str) -> VerificationResult:
+    return VerificationResult(
+        name, "SKIP",
+        detail="update() does not take a params keyword (constants are "
+               "baked into the trace; see SimulationNode.params_pytree)",
+    )
+
+
+def node_params_consistent(
+    inputs: _Inputs, rtol: float = 1e-5, atol: float = 1e-6, **kw,
+) -> VerificationResult:
+    """Injected params reproduce the baked-constant step.
+
+    ``update(state, bi, dt, params=node.params_pytree())`` must agree
+    with ``update(state, bi, dt)`` to float32 round-off.  The graph runs
+    the first form (traced, differentiable constants); a node that
+    reads a constant from ``self.params`` on one path and from
+    ``params`` on the other, or applies it differently, silently
+    calibrates the wrong model.  Round-off (not exactness) is the
+    contract because a traced constant can be FMA-contracted where a
+    Python float is folded.
+
+    ``SKIP`` for nodes whose ``update`` takes no ``params``.
+    """
+    node = inputs.node
+    if not _node_accepts_params(node):
+        return _skip_no_params("params_consistent")
+    injected = node.params_pytree()
+
+    def body(state, bi, dt):
+        a = node.update(state, bi, dt)
+        b = node.update(state, bi, dt, params=injected)
+        assert set(a) == set(b), f"key mismatch: {sorted(set(a) ^ set(b))}"
+        for f in a:
+            x, y = _to_np(a[f]), _to_np(b[f])
+            assert np.allclose(x, y, rtol=rtol, atol=atol, equal_nan=True), (
+                f"baked/injected params mismatch in '{f}': max abs diff "
+                f"{np.max(np.abs(x - y))}"
+            )
+    return _run("params_consistent", inputs, body, **kw)
+
+
+def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
+    """``d(sum of outputs)/d(params_pytree)`` is finite.
+
+    The params analogue of :func:`node_gradient_finite`: calibration and
+    system identification differentiate with respect to these leaves,
+    so a backward-only NaN here (``sqrt`` of a parameter at zero, a
+    ``where`` guard that protects only the forward) is what breaks an
+    optimiser.  ``SKIP`` for nodes whose ``update`` takes no ``params``
+    or whose :meth:`params_pytree` is empty.
+    """
+    node = inputs.node
+    if not _node_accepts_params(node):
+        return _skip_no_params("params_gradient_finite")
+    base = node.params_pytree()
+    if not base:
+        return VerificationResult(
+            "params_gradient_finite", "SKIP", detail="params_pytree() is empty",
+        )
+
+    def body(state, bi, dt):
+        def loss(p):
+            out = node.update(state, bi, dt, params=p)
+            return sum(jnp.sum(v) for v in out.values()
+                       if jnp.issubdtype(v.dtype, jnp.floating))
+
+        g = jax.grad(loss)(base)
+        for f, v in g.items():
+            assert bool(jnp.all(jnp.isfinite(v))), (
+                f"non-finite gradient wrt param '{f}'"
+            )
+    return _run("params_gradient_finite", inputs, body, **kw)
+
+
+def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
+    """Every *trainable* parameter influences the output.
+
+    A leaf of :meth:`params_pytree` that ``update`` reads from
+    ``self.params`` instead of the injected ``params`` is a silent trap:
+    the graph passes a value, an optimiser moves it, nothing changes and
+    the gradient is identically zero.  ``params_consistent`` cannot see
+    that (both paths read the same constant), so this check aggregates
+    over the sampled inputs and fails if some trainable leaf had a zero
+    gradient on *every* example.  A leaf that only matters on some
+    inputs (a restitution coefficient without a collision) passes as
+    long as one sample exercised it.  ``SKIP`` for nodes without
+    ``params`` and for leaves declared ``trainable=False``.
+    """
+    node = inputs.node
+    if not _node_accepts_params(node):
+        return _skip_no_params("params_effective")
+    base = node.params_pytree()
+    specs = node.param_specs() if hasattr(node, "param_specs") else {}
+    trainable = [k for k in base if specs.get(k) is None or specs[k].trainable]
+    if not trainable:
+        return VerificationResult(
+            "params_effective", "SKIP", detail="no trainable parameters",
+        )
+    seen_nonzero: set[str] = set()
+
+    def body(state, bi, dt):
+        def loss(p):
+            out = node.update(state, bi, dt, params=p)
+            return sum(jnp.sum(v) for v in out.values()
+                       if jnp.issubdtype(v.dtype, jnp.floating))
+
+        g = jax.grad(loss)(base)
+        for k in trainable:
+            if k not in seen_nonzero and bool(jnp.any(g[k] != 0)):
+                seen_nonzero.add(k)
+
+    r = _run("params_effective", inputs, body, **kw)
+    if r.status != "PASS":
+        return r
+    dead = sorted(set(trainable) - seen_nonzero)
+    if dead:
+        return VerificationResult(
+            "params_effective", "FAIL", n_examples=r.n_examples,
+            detail=(
+                f"zero gradient on every sample wrt trainable param(s) {dead}: "
+                "update() probably reads them from self.params instead of "
+                "the injected params (or declare them ParamSpec(trainable=False))"
+            ),
+        )
+    return r
+
+
 def node_boundedness(
     inputs: _Inputs, output_bounds: Bounds, **kw,
 ) -> VerificationResult:
@@ -304,6 +447,7 @@ def node_invariant(
 
 DEFAULT_CHECKS = (
     "finite", "structure", "deterministic", "jit_consistent", "gradient_finite",
+    "params_consistent", "params_gradient_finite", "params_effective",
 )
 
 
@@ -388,6 +532,9 @@ def verify_node(
         "deterministic": node_deterministic,
         "jit_consistent": node_jit_consistent,
         "gradient_finite": node_gradient_finite,
+        "params_consistent": node_params_consistent,
+        "params_gradient_finite": node_params_gradient_finite,
+        "params_effective": node_params_effective,
     }
     selected = list(DEFAULT_CHECKS) if checks is None else list(checks)
     unknown = set(selected) - set(battery)

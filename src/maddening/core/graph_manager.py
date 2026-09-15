@@ -38,6 +38,13 @@ from maddening.core.coupling import CouplingGroup
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
+from maddening.core.params import (
+    ParamSpec,
+    check_bounds as _check_bounds,
+    constrain as _constrain,
+    trainable_mask as _trainable_mask,
+    unconstrain as _unconstrain,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.schedule import (
     detect_cycles,
@@ -65,6 +72,10 @@ class _NodeSpec:
 
 
 def _update_accepts_params(node: SimulationNode) -> bool:
+    probe = getattr(node, "accepts_params", None)
+    if callable(probe):
+        return bool(probe())
+    # Duck-typed node objects that don't subclass SimulationNode.
     try:
         sig = inspect.signature(node.update)
     except (TypeError, ValueError):
@@ -1477,6 +1488,8 @@ class GraphManager:
         # recompile, and differentiate with respect to it for
         # calibration / system identification.
         self.params: dict = {"nodes": {}, "mappings": {}}
+        # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
+        self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
 
     def _snapshot_params(self) -> dict:
         return {
@@ -1490,6 +1503,137 @@ class GraphManager:
 
     def _params_or_default(self, params):
         return self.params if params is None else params
+
+    def _validate_params(self, params: dict) -> None:
+        """Reject a ``params`` pytree that names something the step cannot
+        use.  Runs Python-side at trace time (dict keys are static), so
+        it costs nothing per step.
+
+        A node that does not take ``params`` is *absent* from
+        ``gm.params`` — passing an entry for it would be silently
+        ignored, and a gradient with respect to it silently zero — so an
+        explicit entry is an error, as is an unknown parameter name.
+        """
+        nodes = params.get("nodes", {}) if isinstance(params, dict) else None
+        if nodes is None:
+            raise TypeError(
+                "params must be a dict with a 'nodes' entry (see GraphManager.params)"
+            )
+        for node_name, node_params in nodes.items():
+            spec = self._nodes.get(node_name)
+            if spec is None:
+                raise ValueError(
+                    f"params['nodes'] names unknown node {node_name!r}; "
+                    f"graph nodes: {sorted(self._nodes)}"
+                )
+            if not spec.accepts_params:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] given, but "
+                    f"{type(spec.node).__name__}.update() takes no 'params' "
+                    "keyword: its constants are baked into the trace, so this "
+                    "entry would be ignored and any gradient with respect to it "
+                    "would be zero.  Migrate the node (declare "
+                    "update(self, state, boundary_inputs, dt, *, params=None) "
+                    "and read constants from params) or drop the entry."
+                )
+            known = set(spec.node.params_pytree())
+            unknown = set(node_params) - known
+            if unknown:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] has unknown key(s) "
+                    f"{sorted(unknown)}; {type(spec.node).__name__}.params_pytree() "
+                    f"exposes {sorted(known)}"
+                )
+
+    # ------------------------------------------------------------------
+    # ParamSpec: trainable mask, bounds, reparametrisation
+    # ------------------------------------------------------------------
+
+    def param_specs(self) -> dict:
+        """``{"nodes": {name: {key: ParamSpec}}, "mappings": {}}`` mirroring
+        :attr:`params`: each node's :meth:`SimulationNode.param_specs`
+        with the graph's :meth:`set_param_spec` overrides applied.
+        Leaves without an entry use the default (trainable, unbounded)."""
+        out: dict = {"nodes": {}, "mappings": {}}
+        for name, spec in self._nodes.items():
+            if not spec.accepts_params:
+                continue
+            merged = dict(spec.node.param_specs())
+            merged.update(self._param_spec_overrides.get(name, {}))
+            out["nodes"][name] = merged
+        return out
+
+    def set_param_spec(self, node: str, key: str, spec: ParamSpec) -> None:
+        """Override one parameter's :class:`ParamSpec` for this graph
+        (e.g. freeze a node's ``mass`` when the data cannot identify it).
+        Does not dirty the graph: specs are optimiser-side metadata."""
+        if node not in self._nodes:
+            raise KeyError(f"unknown node {node!r}")
+        if not self._nodes[node].accepts_params:
+            raise ValueError(
+                f"node {node!r} takes no params; nothing to specify"
+            )
+        if key not in self._nodes[node].node.params_pytree():
+            raise KeyError(
+                f"node {node!r} has no parameter {key!r}; "
+                f"params_pytree() exposes "
+                f"{sorted(self._nodes[node].node.params_pytree())}"
+            )
+        if not isinstance(spec, ParamSpec):
+            raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
+        self._param_spec_overrides.setdefault(node, {})[key] = spec
+
+    def trainable_mask(self, params: Optional[dict] = None) -> dict:
+        """``params``-shaped pytree of Python bools (``True`` = an
+        optimiser may move the leaf)."""
+        return _trainable_mask(self._params_or_default(params), self.param_specs())
+
+    def unconstrain(self, params: Optional[dict] = None) -> dict:
+        """Map trainable leaves to unconstrained optimiser coordinates
+        (``log`` for positive constants, ``logit`` for intervals); other
+        leaves pass through.  Inverse of :meth:`constrain`."""
+        return _unconstrain(self._params_or_default(params), self.param_specs())
+
+    def constrain(self, u: dict) -> dict:
+        """Map optimiser coordinates back to a physical ``params`` pytree
+        (also clips bounded identity leaves)."""
+        return _constrain(u, self.param_specs())
+
+    def check_params(self, params: Optional[dict] = None) -> None:
+        """Raise ``ValueError`` if any leaf is outside its declared bounds
+        or the pytree names a node/key the step cannot use."""
+        params = self._params_or_default(params)
+        self._validate_params(params)
+        _check_bounds(params, self.param_specs())
+
+    def nodes_without_params(self) -> list[str]:
+        """Names of nodes whose ``update`` takes no ``params`` keyword —
+        their constants are not differentiable through the graph."""
+        return [n for n, s in self._nodes.items() if not s.accepts_params]
+
+    def effective_node_params(self, name: str, params: Optional[dict] = None) -> dict:
+        """The node's constructor ``params`` with the live values of
+        :attr:`params` (or ``params``) written over them, as plain Python
+        scalars/lists.  This is what serialisation stores, so a calibrated
+        graph reloads with the calibrated constants."""
+        spec = self._nodes[name]
+        out = dict(spec.node.params)
+        live = self._params_or_default(params).get("nodes", {}).get(name, {})
+        snapshot = spec.node.params_pytree()
+        for key, value in live.items():
+            # Only overlay a leaf that actually changed: the pytree holds
+            # float32 promotions of the constructor floats (0.05 ->
+            # 0.05000000074505806), and an uncalibrated constant should
+            # serialise exactly as it was given.
+            base = snapshot.get(key)
+            if base is not None and np.array_equal(np.asarray(base), np.asarray(value)):
+                continue
+            out[key] = np.asarray(value).tolist()
+        return out
+
+    def param_spec_overrides(self) -> dict[str, dict[str, ParamSpec]]:
+        """Graph-level overrides set with :meth:`set_param_spec`."""
+        return {n: dict(o) for n, o in self._param_spec_overrides.items() if o}
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -2077,6 +2221,12 @@ class GraphManager:
         # Snapshot the differentiable parameters before building the
         # step so the closure default (``params=None``) is this snapshot.
         self.params = self._snapshot_params()
+        baked = self.nodes_without_params()
+        if baked:
+            logger.info(
+                "nodes without a params keyword (constants baked, not "
+                "differentiable through the graph): %s", baked,
+            )
 
         step_fn = self._build_step_fn()
         self._compiled_step = jax.jit(step_fn)
@@ -2318,8 +2468,10 @@ class GraphManager:
         params_snapshot = self.params
 
         def _resolve_params(params):
-            p = params_snapshot if params is None else params
-            return p.get("nodes", {})
+            if params is None:
+                return params_snapshot.get("nodes", {})
+            self._validate_params(params)
+            return params.get("nodes", {})
 
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
@@ -2940,8 +3092,11 @@ class GraphManager:
             )
 
         def dt_step_fn(state, external_inputs, dt, params=None):
-            p = params_snapshot if params is None else params
-            node_params = p.get("nodes", {})
+            if params is None:
+                node_params = params_snapshot.get("nodes", {})
+            else:
+                self._validate_params(params)
+                node_params = params.get("nodes", {})
             new_state = {k: v for k, v in state.items()}
 
             if has_coupling:
@@ -3278,9 +3433,26 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the graph structure (not runtime state)."""
+        """Serialise the graph structure (not runtime state).
+
+        Node ``params`` are the *effective* values — the constructor
+        arguments with the live :attr:`params` written over them (see
+        :meth:`effective_node_params`) — and ``param_specs`` carries the
+        graph's :meth:`set_param_spec` overrides.
+        """
+        nodes = []
+        for name, spec in self._nodes.items():
+            d = spec.node.to_dict()
+            if spec.accepts_params:
+                d["params"] = self.effective_node_params(name)
+            nodes.append(d)
+        overrides = {
+            n: {k: s.to_dict() for k, s in o.items()}
+            for n, o in self.param_spec_overrides().items()
+        }
         return {
-            "nodes": [spec.node.to_dict() for spec in self._nodes.values()],
+            "nodes": nodes,
+            **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
             "external_inputs": [
                 {
@@ -3308,6 +3480,9 @@ class GraphManager:
             node_cls = node_registry[nd["type"]]
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
+        for node_name, overrides in config.get("param_specs", {}).items():
+            for key, spec_dict in overrides.items():
+                gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
         for ed in config["edges"]:
             gm.add_edge(
                 source=ed["source_node"],

@@ -371,6 +371,9 @@ class SimulationServer:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             node = self.gm._nodes[node_name].node
             live = self.gm.params.get("nodes", {}).get(node_name)
+            specs = self.gm.param_specs().get("nodes", {}).get(node_name, {})
+            # Validate everything before mutating anything: an
+            # out-of-bounds slider value is a 400 here, not a NaN later.
             for key, value in req.params.items():
                 if key not in node.params:
                     raise HTTPException(
@@ -378,6 +381,14 @@ class SimulationServer:
                         detail=f"Unknown param '{key}' for node '{node_name}'. "
                                f"Available: {list(node.params.keys())}",
                     )
+                spec = specs.get(key)
+                if spec is not None and live is not None and key in live \
+                        and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    try:
+                        spec.check(value, name=key)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc))
+            for key, value in req.params.items():
                 node.params[key] = value
                 if live is not None and key in live and isinstance(value, (int, float)) \
                         and not isinstance(value, bool):

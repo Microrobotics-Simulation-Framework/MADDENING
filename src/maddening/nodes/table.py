@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @stability(StabilityLevel.STABLE)
@@ -49,11 +50,25 @@ class TableNode(SimulationNode):
         """Pointwise (no spatial neighbour access)."""
         return {}
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            # The surface height is the initial state, not a dynamics
+            # constant: ``update`` never reads it.
+            "position": ParamSpec(trainable=False, description="initial condition", units="m"),
+        }
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["position"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
-        """Static: return state unchanged."""
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """Static: return state unchanged.
+
+        On the graph ``params`` contract for uniformity; the node has no
+        dynamics constant to read from it.
+        """
         return state

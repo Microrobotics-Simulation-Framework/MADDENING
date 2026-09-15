@@ -187,11 +187,25 @@ def save_graph_to_usd(
             prim.GetAttribute("maddening:timestep").Set(
                 float(spec.timestep)
             )
+            # Effective params: constructor args with the live (possibly
+            # calibrated) ``gm.params`` values written over them, so the
+            # reloaded node is the one that was calibrated.
+            node_params = (
+                gm.effective_node_params(node_name)
+                if spec.accepts_params else node_obj.params
+            )
             prim.GetAttribute("maddening:paramsJson").Set(
                 json.dumps(
-                    _params_to_serializable(node_obj.params), default=str
+                    _params_to_serializable(node_params), default=str
                 )
             )
+            overrides = gm.param_spec_overrides().get(node_name)
+            if overrides:
+                attr = prim.CreateAttribute(
+                    "maddening:paramSpecOverridesJson",
+                    Sdf.ValueTypeNames.String,
+                )
+                attr.Set(json.dumps({k: s.to_dict() for k, s in overrides.items()}))
 
         # Edge attributes
         for i, edge in enumerate(gm._edges):
@@ -312,6 +326,13 @@ def load_graph_from_usd(
             node = cls(name=node_name, timestep=timestep, **params)
             gm.add_node(node)
             node_name_map[child.GetName()] = node_name
+
+            overrides_attr = child.GetAttribute("maddening:paramSpecOverridesJson")
+            overrides_json = overrides_attr.Get() if overrides_attr else None
+            if overrides_json:
+                from maddening.core.params import ParamSpec  # noqa: PLC0415
+                for key, spec_dict in json.loads(overrides_json).items():
+                    gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
 
     # --- Edges ---
     edges_prim = stage.GetPrimAtPath(root_path + "/edges")

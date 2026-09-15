@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 import pickle
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -51,6 +51,7 @@ def serialize_fmu_state(
     *,
     state: dict[str, dict[str, Any]],
     schema_token: str,
+    params: Optional[dict] = None,
 ) -> FMUState:
     """Snapshot a graph state to an opaque :class:`FMUState` handle.
 
@@ -63,6 +64,10 @@ def serialize_fmu_state(
         The model's instantiation token (from
         :class:`ModelDescription.instantiation_token`).  Recorded so
         deserialisation can catch the wrong-FMU case.
+    params : dict, optional
+        The graph parameter pytree in force (``GraphManager.params``
+        layout).  FMI ``parameter`` variables are part of the FMU state,
+        so a snapshot taken after an importer tuned one restores it.
 
     Notes
     -----
@@ -78,8 +83,25 @@ def serialize_fmu_state(
         node: {field: np.asarray(val) for field, val in fields.items()}
         for node, fields in state.items()
     }
-    payload = pickle.dumps(coerced, protocol=pickle.HIGHEST_PROTOCOL)
+    if params is None:
+        payload_obj: Any = coerced
+    else:
+        payload_obj = {
+            _STATE_KEY: coerced,
+            _PARAMS_KEY: _coerce_tree(params),
+        }
+    payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
     return FMUState(payload=payload, schema_token=schema_token)
+
+
+_STATE_KEY = "__maddening_state__"
+_PARAMS_KEY = "__maddening_params__"
+
+
+def _coerce_tree(tree: Any) -> Any:
+    if isinstance(tree, dict):
+        return {k: _coerce_tree(v) for k, v in tree.items()}
+    return np.asarray(tree)
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -87,8 +109,13 @@ def deserialize_fmu_state(
     fmu_state: FMUState,
     *,
     expected_schema_token: str,
-) -> dict[str, dict[str, Any]]:
+    return_params: bool = False,
+) -> Any:
     """Restore a graph state from an :class:`FMUState` handle.
+
+    Returns the state dict, or ``(state, params)`` when
+    ``return_params`` is true (``params`` is ``None`` for a snapshot
+    taken without a parameter pytree).
 
     Raises
     ------
@@ -104,7 +131,12 @@ def deserialize_fmu_state(
             f"{expected_schema_token!r}.  This snapshot is incompatible "
             "with the loaded FMU.",
         )
-    return pickle.loads(fmu_state.payload)
+    obj = pickle.loads(fmu_state.payload)
+    if isinstance(obj, dict) and _STATE_KEY in obj:
+        state, params = obj[_STATE_KEY], obj.get(_PARAMS_KEY)
+    else:
+        state, params = obj, None
+    return (state, params) if return_params else state
 
 
 __all__ = [

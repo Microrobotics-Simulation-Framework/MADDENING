@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 GRAVITY = -9.81  # default; use gravity param on BallNode for per-instance control
 
@@ -82,6 +83,15 @@ class BallNode(SimulationNode):
     def halo_width(self) -> dict[int, int]:
         """Pointwise (no spatial neighbour access)."""
         return {}
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            # Inclusive bounds: a perfectly elastic (1.0) or perfectly
+            # inelastic (0.0) ball is a valid model, so no logit.
+            "elasticity": ParamSpec(bounds=(0.0, 1.0)),
+            "gravity": ParamSpec(units="m/s^2"),
+        }
 
     def initial_state(self) -> dict:
         return {

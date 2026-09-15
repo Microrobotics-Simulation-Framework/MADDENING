@@ -258,3 +258,29 @@ class TestCheckpointEndpoints:
         resp = loaded_client.post(f"/checkpoint/load?path={path}")
         assert resp.status_code == 200
         assert "state" in resp.json()
+
+
+# ------------------------------------------------------------------
+# Params endpoint: live pytree + ParamSpec bounds
+# ------------------------------------------------------------------
+
+class TestParamsEndpoint:
+    def test_put_live_param_takes_effect_without_recompile(self, loaded_client):
+        resp = loaded_client.put("/graph/params/ball", json={"params": {"elasticity": 0.5}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["params"]["elasticity"] == 0.5
+        # A second read reflects the value.
+        assert loaded_client.get("/graph/params/ball").json()["elasticity"] == 0.5
+
+    def test_put_out_of_bounds_is_400_and_mutates_nothing(self, loaded_client):
+        before = loaded_client.get("/graph/params/ball").json()
+        resp = loaded_client.put("/graph/params/ball",
+                                 json={"params": {"elasticity": 1.5, "gravity": -1.0}})
+        assert resp.status_code == 400
+        assert "elasticity" in resp.json()["detail"] and "above bound" in resp.json()["detail"]
+        after = loaded_client.get("/graph/params/ball").json()
+        assert after == before          # gravity was not written either
+
+    def test_put_unknown_key_is_400(self, loaded_client):
+        resp = loaded_client.put("/graph/params/ball", json={"params": {"nope": 1.0}})
+        assert resp.status_code == 400

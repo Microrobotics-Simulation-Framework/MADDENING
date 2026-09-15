@@ -57,6 +57,62 @@ class EnergyGain(_Scalar):
         return {"x": s["x"] * (1.0 + dt)}
 
 
+class ParamsPathDivergence(_Scalar):
+    """Reads ``rest`` from ``self.params`` on the baked path but forgets
+    it on the injected path — the calibration-of-the-wrong-model fault."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=2.0, rest=1.0)
+
+    def update(self, s, bi, dt, *, params=None):
+        if params is None:
+            return {"x": s["x"] - dt * self.params["k"] * (s["x"] - self.params["rest"])}
+        return {"x": s["x"] - dt * params["k"] * s["x"]}
+
+
+class ParamsGradientNaN(_Scalar):
+    """Forward is finite for every ``k``; d/dk of ``sqrt(k**2)`` is NaN at
+    the baked value ``k == 0``."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=0.0)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": s["x"] + dt * jnp.sqrt(p["k"] ** 2)}
+
+
+class ParamsDeadLeaf(_Scalar):
+    """``rate`` is in ``params_pytree()`` (a float) but ``update`` reads
+    it from ``self.params``: injected and baked paths agree, the gradient
+    wrt the injected leaf is identically zero — the heat-node ``length``
+    trap this check was written for."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=2.0, rate=0.5)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": s["x"] - dt * p["k"] * s["x"] * self.params["rate"]}
+
+
+class ParamsSometimesEffective(_Scalar):
+    """``bounce`` only matters when ``x < 0`` (half the samples)."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=2.0, bounce=0.5)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        x = s["x"] - dt * p["k"] * s["x"]
+        return {"x": jnp.where(x < 0, -x * p["bounce"], x)}
+
+
+class ParamsClean(_Scalar):
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=2.0, rest=1.0, label="a", n=3)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": s["x"] - dt * p["k"] * (s["x"] - p["rest"])}
+
+
 KW = dict(max_examples=200, derandomize=True)
 
 
@@ -124,6 +180,111 @@ def test_builtin_node_passes_full_battery():
                          damping=1.0, rest_length=1.0),
         max_examples=100, derandomize=True,
     )
+
+
+def test_params_path_divergence_caught():
+    res = verify_node(ParamsPathDivergence(name="n", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)},
+                      checks=["params_consistent", "params_gradient_finite"], **KW)
+    assert res["params_consistent"].failed
+    assert "baked/injected params mismatch in 'x'" in res["params_consistent"].detail
+    assert res["params_gradient_finite"].passed
+
+
+def test_params_gradient_only_nan_caught():
+    res = verify_node(ParamsGradientNaN(name="n", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)}, **KW)
+    assert res["finite"].passed
+    assert res["gradient_finite"].passed          # d/dx is fine
+    assert res["params_consistent"].passed
+    assert res["params_gradient_finite"].failed   # d/dk is not
+    assert "wrt param 'k'" in res["params_gradient_finite"].detail
+
+
+def test_params_dead_leaf_caught_by_effective_check():
+    res = verify_node(ParamsDeadLeaf(name="n", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)}, **KW)
+    assert res["params_consistent"].passed        # both paths agree ...
+    assert res["params_gradient_finite"].passed   # ... and zero is finite
+    assert res["params_effective"].failed         # but 'rate' is dead
+    assert "['rate']" in res["params_effective"].detail
+    assert "'k'" not in res["params_effective"].detail
+
+
+def test_params_effective_aggregates_over_samples():
+    node = ParamsSometimesEffective(name="n", timestep=0.01)
+    res = verify_node(node, bounds={"x": (-1.0, 1.0)},
+                      checks=["params_effective"], **KW)
+    assert res["params_effective"].passed
+    # Sampling only x > 0 never exercises the bounce branch: reported,
+    # so an envelope that cannot reach a parameter is visible.
+    res = verify_node(node, bounds={"x": (0.5, 1.0)},
+                      checks=["params_effective"], **KW)
+    assert res["params_effective"].failed
+    assert "['bounce']" in res["params_effective"].detail
+
+
+def test_params_effective_respects_trainable_false():
+    from maddening.core.params import ParamSpec
+
+    class Declared(ParamsDeadLeaf):
+        def param_specs(self):
+            return {"rate": ParamSpec(trainable=False, description="fixed")}
+
+    res = verify_node(Declared(name="n", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)}, checks=["params_effective"], **KW)
+    assert res["params_effective"].passed
+
+
+def test_params_checks_skip_for_nodes_without_params():
+    res = verify_node(EnergyGain(name="n", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)},
+                      checks=["params_consistent", "params_gradient_finite"], **KW)
+    for name in ("params_consistent", "params_gradient_finite"):
+        assert res[name].skipped and res[name].passed
+        assert "does not take a params keyword" in str(res[name])
+    # SKIP never fails the assertion form.
+    assert_node_verified(EnergyGain(name="n", timestep=0.01),
+                         bounds={"x": (0.0, 1.0)},
+                         checks=["params_consistent"], **KW)
+
+
+def test_params_checks_pass_for_clean_node_and_ignore_structural_entries():
+    node = ParamsClean(name="n", timestep=0.01)
+    assert set(node.params_pytree()) == {"k", "rest"}   # not label / n
+    res = verify_node(node, bounds={"x": (0.0, 1.0)}, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["params_consistent"].n_examples > 0
+    assert res["params_gradient_finite"].n_examples > 0
+
+
+class Monitor(SimulationNode):
+    """bool + int32 state: the sampler must keep those dtypes."""
+    def initial_state(self):
+        return {"ok": jnp.array(True), "count": jnp.array(0, jnp.int32),
+                "x": jnp.array(0.0, jnp.float32)}
+
+    def update(self, s, bi, dt):
+        return {"ok": s["ok"] & (s["x"] < 1e3), "count": s["count"] + 1,
+                "x": s["x"] * 0.5}
+
+
+class MonitorDtypeDrift(Monitor):
+    def update(self, s, bi, dt):
+        out = super().update(s, bi, dt)
+        out["count"] = out["count"].astype(jnp.float32)   # drift
+        return out
+
+
+def test_non_float_state_sampled_with_its_dtype_and_structure_checked():
+    res = verify_node(Monitor(name="m", timestep=0.01),
+                      bounds={"x": (0.0, 1.0), "count": (0, 100)}, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["gradient_finite"].passed     # only 'x' differentiated
+    bad = verify_node(MonitorDtypeDrift(name="m", timestep=0.01),
+                      bounds={"x": (0.0, 1.0)}, checks=["structure"], **KW)
+    assert bad["structure"].failed
+    assert "dtype mismatch in 'count'" in bad["structure"].detail
 
 
 def test_assert_node_verified_reports_all_failures():

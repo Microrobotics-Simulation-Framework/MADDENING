@@ -224,6 +224,12 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
     # optax 0.2.x sets jax_pmap_shmap_merge which is deprecated in JAX 0.9+
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
+    # anyio >= 4.14 deprecates the anyio.abc.BlockingPortal alias that
+    # starlette's testclient still imports at module level, which turns
+    # every tests/api collection into an error.  Fixed on starlette main
+    # (Kludex/starlette#3497) but not in any release as of 1.6.0; drop
+    # this filter and bump the starlette floor once it ships.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
     # SelkiesRenderer emits PerformanceWarning on CPU fallback
     "ignore::maddening.warnings.PerformanceWarning",
     # SkyPilot deprecation warnings

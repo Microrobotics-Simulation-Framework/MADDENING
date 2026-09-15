@@ -19,13 +19,13 @@ Background
 ----------
 
 The wrapper exists because the existing in-tree pattern for
-matrix-free linear solves (``graph_manager._ift_solve_bwd``) is
+matrix-free linear solves (``graph_manager._ift_linear_solve``) is
 module-private — it builds a ``lineax.FunctionLinearOperator`` from a
 callable, calls ``lineax.GMRES`` with a carefully-chosen restart, and
 returns the solution.  Any node author writing an adaptive PDE solver
 needs the same idiom.  Exposing it as a public primitive avoids each
 node author re-deriving the GMRES restart clamp from the
-``_ift_solve_bwd`` regression test.
+``_ift_linear_solve`` regression test.
 
 The restart clamp is critical.  Lineax's default GMRES restart is 20.
 For a coupling group whose flat state is larger than 20 floats (any
@@ -116,7 +116,7 @@ def ift_linear_solve(
 
     For ``solver="gmres"`` the internal restart is clamped to
     ``min(N, 50)`` to guard against the silent-low-rank-adjoint bug
-    documented in ``graph_manager._ift_solve_bwd``.
+    documented in ``graph_manager._ift_linear_solve``.
 
     Raises
     ------
@@ -187,7 +187,7 @@ def ift_linear_solve(
         # silently converges to a low-rank approximation; the resulting
         # gradient is structurally wrong.  Clamp to min(N, 50) and
         # bump max_steps for headroom.  See module docstring and
-        # graph_manager._ift_solve_bwd:430-451 for the long-form
+        # graph_manager._ift_linear_solve for the long-form
         # rationale and the coupling-layer regression guard at
         # tests/core/test_coupling_ift_lineax.py.
         restart = min(n, 50)

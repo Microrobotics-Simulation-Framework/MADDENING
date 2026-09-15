@@ -254,7 +254,7 @@ def test_bicgstab_known_breakdown_with_function_operator():
     Literal.
 
     Investigation (2026-05-30): the BiCGStab dispatch arm in
-    ``_ift_solve_bwd`` is wired correctly, but the underlying
+    ``_ift_linear_solve`` is wired correctly, but the underlying
     ``lineax.BiCGStab`` returns NaN whenever it drives a
     ``FunctionLinearOperator`` (the matrix-free shape MADDENING's
     IFT backward uses) — including on a well-conditioned ``0.5*I``
@@ -332,7 +332,7 @@ def test_dense_matches_gmres_gradient_small_chain():
 # returned ``u`` is structurally wrong, producing structurally
 # wrong gradients.  This silent-corruption mode was hit during the
 # initial lineax migration at N=250 and motivated the explicit
-# ``restart=min(N, 50)`` in ``_ift_solve_bwd``.
+# ``restart=min(N, 50)`` in ``_ift_linear_solve``.
 #
 # Reproducing the silent-corruption gradient empirically is finicky:
 # whether the 20-D Krylov subspace happens to contain (a projection
@@ -360,7 +360,7 @@ def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
 
     This is the regression guard against silent gradient corruption
     described in the comment block above.  See also the long-form
-    comment in ``_ift_solve_bwd`` (search for "GMRES restart
+    comment in ``_ift_linear_solve`` (search for "GMRES restart
     gotcha").
     """
     import lineax as lx  # noqa: PLC0415
@@ -410,12 +410,12 @@ def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
             "lx.GMRES called without an explicit restart= kwarg.  This "
             "means the lineax default-20 restart is in effect, which "
             "silently corrupts gradients for N>20 (see comment in "
-            "_ift_solve_bwd).  Restore the explicit restart=min(N,50)."
+            "_ift_linear_solve).  Restore the explicit restart=min(N,50)."
         )
         assert restart >= expected_min_restart, (
             f"lx.GMRES called with restart={restart}, but the production "
             f"floor is {expected_min_restart}.  See the GMRES restart "
-            f"gotcha comment in _ift_solve_bwd."
+            f"gotcha comment in _ift_linear_solve."
         )
         # Likewise, ``max_steps`` must be at least 4*restart so the
         # algorithm has headroom for several restart cycles.

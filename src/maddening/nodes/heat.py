@@ -417,15 +417,20 @@ class HeatNode(SimulationNode):
             [T_pad[:halo], T_new_interior, T_pad[-halo:]], axis=0
         )}
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Explicit finite-difference update for the 1D heat equation.
 
         Dirichlet BCs are enforced by setting the boundary ghost values
         before computing the stencil, and overwriting the boundary cells
-        after the update.
+        after the update.  ``n_cells`` is structural and always comes
+        from ``self.params``; ``thermal_diffusivity`` comes from the
+        injected ``params`` when the graph supplies them.
         """
         n = self.params["n_cells"]
-        alpha = self.params["thermal_diffusivity"]
+        p = self.params if params is None else {**self.params, **params}
+        alpha = p["thermal_diffusivity"]
 
         T = state["temperature"]  # shape (n,)
 

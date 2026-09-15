@@ -16,6 +16,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
+import jax.numpy as jnp
+import numpy as np
+
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
@@ -131,8 +134,51 @@ class SimulationNode(ABC):
         """Pure function: (state, boundary_inputs, dt) -> new_state.
 
         Must be JAX-traceable.  No Python-level side-effects.
+
+        A node may declare an optional keyword-only ``params`` argument
+        (``update(self, state, boundary_inputs, dt, *, params=None)``).
+        When it does, the graph passes the node's entry of the graph
+        parameter pytree (see :meth:`params_pytree`) on every call — as
+        traced arrays, so ``jax.grad`` reaches them and they can change
+        between steps without recompiling.  Read constants from
+        ``params`` (falling back to ``self.params`` for structural
+        entries) rather than from ``self.params`` directly.
         """
         ...
+
+    def params_pytree(self) -> dict:
+        """The node's differentiable parameters as a pytree of arrays.
+
+        Default: every float-valued entry of ``self.params`` — Python
+        floats, floating-point arrays, and lists/tuples of numbers —
+        promoted to float32 arrays.  Ints, bools, strings and nested
+        dicts are structural (they change shapes or the trace) and are
+        excluded; they stay on the recompile path.
+
+        ``GraphManager.compile`` snapshots this into
+        ``GraphManager.params["nodes"][name]`` for nodes whose
+        :meth:`update` accepts ``params``.
+        """
+        out: dict = {}
+        for key, value in self.params.items():
+            if isinstance(value, (bool, int, str, dict)) or value is None:
+                continue
+            if isinstance(value, float):
+                out[key] = jnp.asarray(value, dtype=jnp.float32)
+                continue
+            # Arrays, tracers (a node built inside a traced function),
+            # and lists/tuples of numbers.  Anything jnp can't turn into
+            # a floating array is structural and skipped.
+            try:
+                arr = jnp.asarray(value)
+            except (TypeError, ValueError):
+                continue
+            if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+                continue
+            if isinstance(value, (list, tuple)):
+                arr = arr.astype(jnp.float32)
+            out[key] = arr
+        return out
 
     # ------------------------------------------------------------------
     # Introspection helpers used by GraphManager

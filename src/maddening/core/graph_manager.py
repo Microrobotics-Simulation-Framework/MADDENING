@@ -19,6 +19,7 @@ import math
 import os
 import warnings
 from collections import defaultdict
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
@@ -56,6 +57,25 @@ class _NodeSpec:
     node: SimulationNode          # the descriptor object
     update_fn: Callable           # node.update  (pure function)
     timestep: float
+    # True when ``update`` declares a ``params`` keyword: the graph then
+    # passes the node's entry of the graph parameter pytree on every
+    # call (traced, differentiable).  Nodes that don't opt in keep the
+    # 3-argument contract and read constants from ``self.params``.
+    accepts_params: bool = False
+
+
+def _update_accepts_params(node: SimulationNode) -> bool:
+    try:
+        sig = inspect.signature(node.update)
+    except (TypeError, ValueError):
+        return False
+    return "params" in sig.parameters
+
+
+def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
+    if spec.accepts_params and node_params is not None:
+        return spec.update_fn(state, boundary_inputs, dt, params=node_params)
+    return spec.update_fn(state, boundary_inputs, dt)
 
 
 @dataclass(frozen=True)
@@ -523,7 +543,7 @@ def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
-    multigpu_device_map=None,
+    multigpu_device_map=None, node_params=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -549,6 +569,10 @@ def _run_coupled_block_impl(
 
     max_iters = group.max_iterations
     group_node_names = list(group_schedule)
+    _node_params = node_params or {}
+
+    def _np(nn):
+        return _node_params.get(nn)
     group_node_set = set(group_node_names)
     use_mixed_norm = group.convergence_norm == "mixed"
     use_interface_norm = group.convergence_norm == "interface"
@@ -745,7 +769,7 @@ def _run_coupled_block_impl(
             else:
                 # constant: use end-of-step values
                 bi = _resolve_boundary(nn, s_cur, flux_s)
-            new_sub = nodes[nn].update_fn(sub_state, bi, sub_dt)
+            new_sub = _node_update(nodes[nn], sub_state, bi, sub_dt, _np(nn))
             new_sub = _apply_interface_overrides(
                 new_sub, sub_state, bi, sub_dt, nodes[nn].node,
                 coupled_bi_names=coupled_bi_names_by_node.get(nn),
@@ -772,7 +796,7 @@ def _run_coupled_block_impl(
             else:
                 bi = _resolve_boundary(nn, s, flux_s)
                 pre = initial_node_states[nn]
-                s[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                s[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 s[nn] = _apply_interface_overrides(
                     s[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
@@ -819,7 +843,7 @@ def _run_coupled_block_impl(
                         bi = jax.tree.map(
                             lambda x: jax.device_put(x, device), bi,
                         )
-                results[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                results[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 results[nn] = _apply_interface_overrides(
                     results[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
@@ -1054,7 +1078,11 @@ def _run_coupled_block_impl(
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
-            diag_data = (iter_count, final_res) if track_diag else None
+            # Always reported (not only with ``diagnostics=True``): the
+            # scalars are already in the carry, and the converged flag
+            # is what tells a training loop that the IFT gradient
+            # through this step is trustworthy.
+            diag_data = (iter_count, final_res)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -1381,8 +1409,12 @@ def _run_coupled_block_impl(
         )
         result[_META_KEY] = meta_update
 
-    # Write diagnostics to _meta if requested
-    if group.diagnostics and diag_data is not None:
+    # Write diagnostics to _meta.  Always under solver="ift" *when the
+    # incoming state already carries ``_meta`` (compile() pre-populates
+    # it, keeping the pytree structure stable across scan); a state
+    # built by hand without ``_meta`` keeps its structure.  The legacy
+    # fori path only reports with diagnostics=True.
+    if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         iter_count, final_res = diag_data
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
@@ -1438,6 +1470,26 @@ class GraphManager:
         # Multi-GPU state (set by enable_multigpu)
         self._multigpu_mesh = None
         self._multigpu_device_map: Optional[dict[str, int]] = None
+        # Differentiable graph parameters — the third pytree of the
+        # compiled step, next to state and external inputs.  Refreshed
+        # from the nodes on every compile; edit in place (or pass
+        # ``params=`` to step/run_scan) to change constants without a
+        # recompile, and differentiate with respect to it for
+        # calibration / system identification.
+        self.params: dict = {"nodes": {}, "mappings": {}}
+
+    def _snapshot_params(self) -> dict:
+        return {
+            "nodes": {
+                name: spec.node.params_pytree()
+                for name, spec in self._nodes.items()
+                if spec.accepts_params
+            },
+            "mappings": {},
+        }
+
+    def _params_or_default(self, params):
+        return self.params if params is None else params
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -1452,6 +1504,7 @@ class GraphManager:
             node=node,
             update_fn=node.update,
             timestep=node.delta_t,
+            accepts_params=_update_accepts_params(node),
         )
         self._nodes[node.name] = spec
         self._state[node.name] = node.initial_state()
@@ -1953,7 +2006,9 @@ class GraphManager:
         # Ensure _meta exists with correct structure when coupling
         # diagnostics are enabled.  Pre-populate diagnostic keys so
         # the pytree structure is stable across lax.scan iterations.
-        has_diagnostics = any(g.diagnostics for g in self._coupling_groups)
+        has_diagnostics = any(
+            g.diagnostics or g.solver == "ift" for g in self._coupling_groups
+        )
         has_imvj = any(
             g.acceleration == "iqn-imvj" for g in self._coupling_groups
         )
@@ -1964,7 +2019,7 @@ class GraphManager:
             meta = self._state.get(_META_KEY, {})
             for g in self._coupling_groups:
                 key = "+".join(sorted(g.nodes))
-                if g.diagnostics:
+                if g.diagnostics or g.solver == "ift":
                     meta[f"coupling_{key}_iterations"] = jnp.array(
                         0, dtype=jnp.int32
                     )
@@ -2018,6 +2073,10 @@ class GraphManager:
                         0, dtype=jnp.int32
                     )
             self._state[_META_KEY] = meta
+
+        # Snapshot the differentiable parameters before building the
+        # step so the closure default (``params=None``) is this snapshot.
+        self.params = self._snapshot_params()
 
         step_fn = self._build_step_fn()
         self._compiled_step = jax.jit(step_fn)
@@ -2252,8 +2311,18 @@ class GraphManager:
         # Track flux outputs for flux-based edges in non-coupled path
         flux_state: dict[str, dict] = {}
 
+        # ``params=None`` on the step means "the compile-time snapshot":
+        # baked in as constants, exactly the pre-params behaviour.  An
+        # explicit ``params`` is a traced input, so ``jax.grad`` reaches
+        # it and a new value needs no recompile.
+        params_snapshot = self.params
+
+        def _resolve_params(params):
+            p = params_snapshot if params is None else params
+            return p.get("nodes", {})
+
         def _resolve_and_update_node(
-            node_name, new_state, full_state, external_inputs,
+            node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None,
         ):
             """Resolve boundary inputs and update a single node.
@@ -2301,8 +2370,9 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes[node_name]
-            new_node_state = spec.update_fn(
-                new_state[node_name], boundary_inputs, spec.timestep
+            new_node_state = _node_update(
+                spec, new_state[node_name], boundary_inputs, spec.timestep,
+                node_params.get(node_name),
             )
 
             # Compute fluxes for this node if it produces them
@@ -2317,7 +2387,7 @@ class GraphManager:
             return new_node_state
 
         def _run_coupled_block(group, group_schedule, new_state,
-                               full_state, external_inputs,
+                               full_state, external_inputs, node_params,
                                runtime_dt=None):
             """Execute a coupling group with Gauss-Seidel iteration.
 
@@ -2351,16 +2421,18 @@ class GraphManager:
                 ext_by_target=ext_by_target, back_edge_set=back_edge_set,
                 has_external=has_external, all_edges=self._edges,
                 multigpu_device_map=self._multigpu_device_map,
+                node_params=node_params,
             )
 
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
-            def graph_step(full_state, external_inputs):
+            def graph_step(full_state, external_inputs, params=None):
+                node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
                 for node_name in schedule:
                     new_state[node_name] = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs
+                        node_name, new_state, full_state, external_inputs, node_params
                     )
                 return new_state
 
@@ -2368,20 +2440,21 @@ class GraphManager:
 
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
-            def graph_step_coupled(full_state, external_inputs):
+            def graph_step_coupled(full_state, external_inputs, params=None):
+                node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
                 for block in blocks:
                     if block[0] == "node":
                         node_name = block[1]
                         new_state[node_name] = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs
+                            node_name, new_state, full_state, external_inputs, node_params
                         )
                     else:
                         _, group, group_schedule = block
                         new_state = _run_coupled_block(
                             group, group_schedule, new_state,
-                            full_state, external_inputs,
+                            full_state, external_inputs, node_params,
                         )
 
                 return new_state
@@ -2389,7 +2462,8 @@ class GraphManager:
             return graph_step_coupled
 
         # ---- Multi-rate path (with or without coupling) ----
-        def graph_step_multirate(full_state, external_inputs):
+        def graph_step_multirate(full_state, external_inputs, params=None):
+            node_params = _resolve_params(params)
             step_count = full_state[_META_KEY]["step_count"]
             new_state = {k: v for k, v in full_state.items()}
 
@@ -2409,7 +2483,7 @@ class GraphManager:
                     if block[0] == "node":
                         node_name = block[1]
                         updated = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs
+                            node_name, new_state, full_state, external_inputs, node_params
                         )
                         new_state[node_name] = _apply_multirate(
                             node_name, updated, new_state
@@ -2418,7 +2492,7 @@ class GraphManager:
                         _, group, group_schedule = block
                         coupled_result = _run_coupled_block(
                             group, group_schedule, new_state,
-                            full_state, external_inputs,
+                            full_state, external_inputs, node_params,
                         )
                         for nn in group_schedule:
                             new_state[nn] = _apply_multirate(
@@ -2433,7 +2507,7 @@ class GraphManager:
             else:
                 for node_name in schedule:
                     updated = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs
+                        node_name, new_state, full_state, external_inputs, node_params
                     )
                     new_state[node_name] = _apply_multirate(
                         node_name, updated, new_state
@@ -2486,14 +2560,14 @@ class GraphManager:
               ``max_iterations``; under ``solver="ift"`` the gradient
               through that step is then unreliable.
 
-            Empty dict if no coupling groups have ``diagnostics=True``
-            or no step has been taken yet.
+            Reported for every group under ``solver="ift"`` (the
+            default); legacy ``solver="fori"`` groups only with
+            ``diagnostics=True``.  Empty dict if no step has been taken
+            yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
         for group in self._coupling_groups:
-            if not group.diagnostics:
-                continue
             key = "+".join(sorted(group.nodes))
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
@@ -2514,7 +2588,12 @@ class GraphManager:
     # Execution
     # ------------------------------------------------------------------
 
-    def step(self, external_inputs: Optional[dict[str, dict]] = None) -> dict[str, dict]:
+    def step(
+        self,
+        external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
+    ) -> dict[str, dict]:
         """Advance the simulation by one base timestep.
 
         Parameters
@@ -2523,6 +2602,10 @@ class GraphManager:
             Values injected from outside the graph, structured as
             ``{node_name: {field_name: value, ...}, ...}``.
             If ``None``, zeros are used for all declared external inputs.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.  Passing a modified pytree changes node
+            constants for this step without recompiling.
 
         Returns the full state dict after the step (excluding internal
         metadata).
@@ -2533,8 +2616,9 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
-        self._state = self._compiled_step(self._state, external_inputs)
+        self._state = self._compiled_step(self._state, external_inputs, params)
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -2544,6 +2628,8 @@ class GraphManager:
         n_steps: int,
         callback: Optional[Callable] = None,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> None:
         """Run *n_steps* simulation steps (at the base timestep rate).
 
@@ -2565,9 +2651,10 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._state = self._compiled_step(self._state, external_inputs)
+            self._state = self._compiled_step(self._state, external_inputs, params)
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
             if callback is not None:
@@ -2577,6 +2664,8 @@ class GraphManager:
         self,
         n_steps: int,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> dict[str, dict]:
         """Run *n_steps* using ``jax.lax.scan`` for maximum performance.
 
@@ -2599,6 +2688,8 @@ class GraphManager:
         external_inputs : dict, optional
             Static external inputs applied identically every step.
             If ``None``, zeros are used for all declared external inputs.
+        params : dict, optional
+            Graph parameter pytree; ``None`` uses :attr:`params`.
 
         Returns
         -------
@@ -2612,17 +2703,18 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         # Build the raw (unjitted) step function -- lax.scan will JIT
         # the entire scan body, so an inner jit would be redundant.
         step_fn = self._build_step_fn()
 
-        # Close over the static external inputs so the scan body has
-        # the correct signature: (carry, x) -> (carry, None)
+        # Close over the static external inputs (and params) so the scan
+        # body has the correct signature: (carry, x) -> (carry, None)
         ext = external_inputs
 
         def scan_body(state, _unused):
-            new_state = step_fn(state, ext)
+            new_state = step_fn(state, ext, params)
             return new_state, None
 
         final_state, _ = jax.lax.scan(scan_body, self._state, None, length=n_steps)
@@ -2633,6 +2725,8 @@ class GraphManager:
         self,
         n_steps: int,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict[str, dict]]:
         """Run *n_steps* via ``jax.lax.scan``, returning all intermediate states.
 
@@ -2667,12 +2761,13 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         step_fn = self._build_step_fn()
         ext = external_inputs
 
         def scan_body(state, _unused):
-            new_state = step_fn(state, ext)
+            new_state = step_fn(state, ext, params)
             return new_state, new_state  # carry, output (stacked by scan)
 
         final_state, history = jax.lax.scan(scan_body, self._state, None, length=n_steps)
@@ -2689,6 +2784,8 @@ class GraphManager:
         initial_states: dict[str, dict],
         external_inputs: Optional[dict[str, dict]] = None,
         return_history: bool = False,
+        *,
+        params: Optional[dict] = None,
     ):
         """Run a batch of simulations over different initial conditions.
 
@@ -2728,6 +2825,7 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         step_fn = self._build_step_fn()
         ext = external_inputs
@@ -2736,7 +2834,7 @@ class GraphManager:
         if return_history:
             def simulate(init_state):
                 def scan_body(state, _unused):
-                    new_state = step_fn(state, ext)
+                    new_state = step_fn(state, ext, params)
                     return new_state, new_state
                 final, hist = jax.lax.scan(scan_body, init_state, None, length=n_steps)
                 return self._user_state(final), self._user_state(hist)
@@ -2747,7 +2845,7 @@ class GraphManager:
         else:
             def simulate(init_state):
                 def scan_body(state, _unused):
-                    new_state = step_fn(state, ext)
+                    new_state = step_fn(state, ext, params)
                     return new_state, None
                 final, _ = jax.lax.scan(scan_body, init_state, None, length=n_steps)
                 return self._user_state(final)
@@ -2806,8 +2904,10 @@ class GraphManager:
                 if edge.source_node in group.nodes and edge.target_node in group.nodes:
                     coupled_internal_edges.add(edge)
 
+        params_snapshot = self.params
+
         def _resolve_and_update(node_name, new_state, full_state, ext, dt,
-                                force_forward_edges=None):
+                                node_params, force_forward_edges=None):
             boundary_inputs: dict[str, Any] = {}
             for edge in edges_by_target[node_name]:
                 if edge in back_edge_set and (
@@ -2834,9 +2934,14 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes_dict[node_name]
-            return spec.update_fn(new_state[node_name], boundary_inputs, dt)
+            return _node_update(
+                spec, new_state[node_name], boundary_inputs, dt,
+                node_params.get(node_name),
+            )
 
-        def dt_step_fn(state, external_inputs, dt):
+        def dt_step_fn(state, external_inputs, dt, params=None):
+            p = params_snapshot if params is None else params
+            node_params = p.get("nodes", {})
             new_state = {k: v for k, v in state.items()}
 
             if has_coupling:
@@ -2844,7 +2949,8 @@ class GraphManager:
                     if block[0] == "node":
                         nn = block[1]
                         new_state[nn] = _resolve_and_update(
-                            nn, new_state, state, external_inputs, dt
+                            nn, new_state, state, external_inputs, dt,
+                            node_params,
                         )
                     else:
                         _, group, group_schedule = block
@@ -2858,11 +2964,13 @@ class GraphManager:
                             has_external=has_external,
                             all_edges=self._edges,
                             multigpu_device_map=self._multigpu_device_map,
+                            node_params=node_params,
                         )
             else:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(
-                        nn, new_state, state, external_inputs, dt
+                        nn, new_state, state, external_inputs, dt,
+                        node_params,
                     )
 
             return new_state
@@ -2935,6 +3043,7 @@ class GraphManager:
         dt_step_fn = self._build_dt_step_fn()
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
+        params = self.params
 
         t = 0.0
         dt = dt_initial
@@ -2952,11 +3061,11 @@ class GraphManager:
             dt_jax = jnp.array(dt)
 
             # Full step
-            state_full = dt_step_jit(state, external_inputs, dt_jax)
+            state_full = dt_step_jit(state, external_inputs, dt_jax, params)
             # Two half-steps
             half_dt = dt_jax / 2.0
-            state_half = dt_step_jit(state, external_inputs, half_dt)
-            state_half = dt_step_jit(state_half, external_inputs, half_dt)
+            state_half = dt_step_jit(state, external_inputs, half_dt, params)
+            state_half = dt_step_jit(state_half, external_inputs, half_dt, params)
 
             # Error estimate
             user_full = self._user_state(state_full)
@@ -3072,6 +3181,7 @@ class GraphManager:
 
         dt_step_fn = self._build_dt_step_fn()
         ext = external_inputs
+        params = self.params
 
         t_end_jax = jnp.array(t_end)
         dt_min_jax = jnp.array(dt_min)
@@ -3088,10 +3198,10 @@ class GraphManager:
             done = t >= t_end_jax
 
             # Full step + two half-steps
-            state_full = dt_step_fn(state, ext, dt)
+            state_full = dt_step_fn(state, ext, dt, params)
             half_dt = dt / 2.0
-            state_half = dt_step_fn(state, ext, half_dt)
-            state_half = dt_step_fn(state_half, ext, half_dt)
+            state_half = dt_step_fn(state, ext, half_dt, params)
+            state_half = dt_step_fn(state_half, ext, half_dt, params)
 
             # Error estimate
             user_full = {k: v for k, v in state_full.items() if k != _META_KEY}

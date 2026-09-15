@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 # Key used by GraphManager for internal multi-rate bookkeeping.
 _META_KEY = "_meta"
+_PARAMS_KEY = "_params"
 
 # Schema version for the integrity manifest.
 #
@@ -101,6 +102,12 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
             key = f"{_META_KEY}/{field_name}"
             arrays[key] = np.asarray(value)
 
+    # Differentiable graph parameters (node constants), so a calibrated
+    # graph restores with the values it was calibrated to.
+    for node_name, node_params in graph_manager.params.get("nodes", {}).items():
+        for pname, value in node_params.items():
+            arrays[f"{_PARAMS_KEY}/{node_name}/{pname}"] = np.asarray(value)
+
     np.savez(path, **arrays)
 
     # numpy.savez appends .npz if not already present
@@ -138,6 +145,7 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     # Separate meta keys from node keys.
     meta_keys: dict[str, np.ndarray] = {}
     node_keys: dict[str, dict[str, np.ndarray]] = {}
+    param_keys: dict[str, dict[str, np.ndarray]] = {}
 
     for flat_key in data.files:
         parts = flat_key.split("/", 1)
@@ -149,6 +157,9 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         prefix, field = parts
         if prefix == _META_KEY:
             meta_keys[field] = data[flat_key]
+        elif prefix == _PARAMS_KEY:
+            node_name, pname = field.split("/", 1)
+            param_keys.setdefault(node_name, {})[pname] = data[flat_key]
         else:
             node_keys.setdefault(prefix, {})[field] = data[flat_key]
 
@@ -194,6 +205,15 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     else:
         # If checkpoint had no meta but graph currently has it, reset.
         raw_state.pop(_META_KEY, None)
+
+    # Restore graph parameters for nodes/keys the current graph knows;
+    # unknown ones are ignored (a node may have stopped accepting params).
+    current_params = graph_manager.params.get("nodes", {})
+    for node_name, saved in param_keys.items():
+        if node_name in current_params:
+            for pname, arr in saved.items():
+                if pname in current_params[node_name]:
+                    current_params[node_name][pname] = jnp.array(arr)
 
 
 # ---------------------------------------------------------------------------

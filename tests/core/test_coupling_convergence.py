@@ -246,13 +246,24 @@ class TestDiagnostics:
         assert diag[key]["iterations"] >= 1
         assert diag[key]["residual"] >= 0.0
 
-    def test_diagnostics_off_by_default(self):
+    def test_diagnostics_always_reported_under_default_solver(self):
+        """Iteration count / residual / converged ride in the loop carry,
+        so they are reported even without ``diagnostics=True``."""
         gm = _make_bidirectional_springs()
         gm.add_coupling_group(["spring_a", "spring_b"])
         gm.compile()
         gm.step()
-        diag = gm.coupling_diagnostics()
-        assert diag == {}
+        diag = gm.coupling_diagnostics()["spring_a+spring_b"]
+        assert diag["iterations"] >= 1
+        assert isinstance(diag["converged"], bool)
+
+    def test_diagnostics_off_by_default_on_fori(self):
+        gm = _make_bidirectional_springs()
+        with pytest.warns(DeprecationWarning):
+            gm.add_coupling_group(["spring_a", "spring_b"], solver="fori")
+        gm.compile()
+        gm.step()
+        assert gm.coupling_diagnostics() == {}
 
     def test_diagnostics_residual_decreases(self):
         """For a well-conditioned problem, final residual < first residual."""

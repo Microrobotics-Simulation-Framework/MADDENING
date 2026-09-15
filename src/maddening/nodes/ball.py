@@ -89,15 +89,18 @@ class BallNode(SimulationNode):
             "velocity": jnp.array(self.params["initial_velocity"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Integrate gravity, then handle collision if table_position is provided."""
-        gravity = self.params["gravity"]
+        p = self.params if params is None else {**self.params, **params}
+        gravity = p["gravity"]
         velocity = state["velocity"] + gravity * dt
         position = state["position"] + velocity * dt
 
         table_pos = boundary_inputs.get("table_position", None)
         if table_pos is not None:
-            elasticity = self.params["elasticity"]
+            elasticity = p["elasticity"]
             hit = position < table_pos
             position = jnp.where(hit, table_pos, position)
             velocity = jnp.where(

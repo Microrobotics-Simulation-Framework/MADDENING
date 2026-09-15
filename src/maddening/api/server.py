@@ -360,10 +360,17 @@ class SimulationServer:
 
         @app.put("/graph/params/{node_name}", tags=["params"])
         def set_node_params(node_name: str, req: SetNodeParamsRequest):
-            """Update node parameters. Triggers recompilation on next step."""
+            """Update node parameters.
+
+            Float parameters of nodes that accept injected params are
+            written to ``gm.params`` and take effect on the next step
+            without recompiling; anything else (structural values, nodes
+            on the legacy contract) marks the graph dirty as before.
+            """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             node = self.gm._nodes[node_name].node
+            live = self.gm.params.get("nodes", {}).get(node_name)
             for key, value in req.params.items():
                 if key not in node.params:
                     raise HTTPException(
@@ -372,7 +379,11 @@ class SimulationServer:
                                f"Available: {list(node.params.keys())}",
                     )
                 node.params[key] = value
-            self.gm._dirty = True
+                if live is not None and key in live and isinstance(value, (int, float)) \
+                        and not isinstance(value, bool):
+                    live[key] = jnp.asarray(value, dtype=live[key].dtype)
+                else:
+                    self.gm._dirty = True
             return {"status": "ok", "params": _jax_to_python(node.params)}
 
         # -- checkpoint endpoints -------------------------------------------

@@ -112,17 +112,22 @@ class SpringDamperNode(SimulationNode):
             "velocity": jnp.array(self.params["initial_velocity"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Semi-implicit Euler integration of spring-damper dynamics.
 
         If ``anchor_position`` is not supplied the anchor defaults to the
         origin (0.0), so the node still produces sensible behaviour when
-        tested in isolation.
+        tested in isolation.  ``params`` (injected by the graph) overrides
+        the constants in ``self.params`` with traced, differentiable
+        values.
         """
-        k = self.params["stiffness"]
-        c = self.params["damping"]
-        m = self.params["mass"]
-        rest = self.params["rest_length"]
+        p = self.params if params is None else {**self.params, **params}
+        k = p["stiffness"]
+        c = p["damping"]
+        m = p["mass"]
+        rest = p["rest_length"]
 
         position = state["position"]
         velocity = state["velocity"]

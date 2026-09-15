@@ -29,6 +29,41 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Added
 
+- **Graph parameter pytree** — the compiled step is now
+  `step_fn(state, external_inputs, params)`.  `GraphManager.params`
+  (`{"nodes": {name: node.params_pytree()}, "mappings": {}}`) is snapshotted
+  at compile time and passed on every `step` / `run` / `run_scan` /
+  `run_scan_with_history` / `run_sweep` / adaptive run (each accepts an
+  optional `params=` keyword).  Node constants are therefore traced inputs
+  rather than closure constants baked into the jit: `jax.grad` /
+  `jax.jvp` / `jacfwd` reach them — including through coupling groups,
+  where `closure_convert` hoists them into the IFT rule — and a changed
+  value takes effect without recompiling.  A node opts in by declaring
+  `update(..., *, params=None)` and reading its constants from `params`
+  (`SpringDamperNode`, `BallNode`, `HeatNode`, `RigidBodyNode` migrated);
+  nodes on the 3-argument contract keep working unchanged.
+  `SimulationNode.params_pytree()` defaults to the float-valued entries of
+  `self.params`; structural values (`n_cells`, shapes, ...) stay on the
+  recompile path.  Checkpoints save and restore `params`; the REST
+  `PUT /graph/params/{node}` updates `gm.params` in place for such nodes
+  instead of forcing a recompile.  `TestParameterRecovery` now recovers
+  `k, c` through the real graph (single spring and a coupled group), with
+  the float32 gradient matching a float64 finite difference to 2.4e-6
+  relative over 100 steps.  One consequence: expressions like
+  `dt * gravity` are no longer constant-folded, so XLA may contract them
+  into an FMA in one compiled shape and not another; `run_sweep` and
+  individual `run_scan` results can now differ by ~1 ulp (they were
+  bit-identical before), and the vmap-consistency test allows a few ulps.
+- `maddening.sysid`: `windowed_loss` (teacher-forced windowed trajectory
+  loss with optional masking of windows where a coupling group exited
+  unconverged) and `fim` (Fisher information `JᵀJ` from `jacfwd`
+  sensitivities, relative scaling, eigen-decomposition, Cramér–Rao bounds)
+  — the identifiability check correctly isolates the (k, c, m) common-scale
+  direction on a spring observed through position only.
+- Coupling iteration count and residual are now always written to `_meta`
+  under the default solver (not only with `diagnostics=True`), so
+  `coupling_diagnostics()` and scan histories always carry the converged
+  flag.
 - `CouplingGroup.strict_convergence`: raise (jit-safe, via `equinox.error_if`)
   when a group exits at `max_iterations` unconverged, since the IFT gradient is
   then invalid.  Off by default.

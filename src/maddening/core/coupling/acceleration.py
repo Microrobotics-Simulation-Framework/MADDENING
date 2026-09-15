@@ -377,11 +377,17 @@ def iqn_ils_update(
     V_masked = new_V * col_mask[None, :]
     W_masked = new_W * col_mask[None, :]
 
-    # Solve min_c ||V c + r||_2 via SVD-based least squares.
+    # Solve min_c ||V c + r||_2 via the SVD pseudo-inverse.
     # This avoids the normal equations (V^T V) which square the condition
     # number of V — problematic in float32 near convergence when V columns
-    # become nearly collinear.
-    c, _, _, _ = jnp.linalg.lstsq(V_masked, -residual, rcond=1e-6)
+    # become nearly collinear.  ``pinv`` rather than ``lstsq``: the masked
+    # matrix routinely carries several exactly-zero columns (inactive or
+    # warm-started-but-empty), i.e. repeated zero singular values, and
+    # lstsq's SVD derivative divides by ``s_i^2 - s_j^2`` there, so the
+    # unrolled (fori) gradient came out NaN.  pinv's custom_jvp is
+    # well-defined for rank-deficient input; the forward value is the
+    # same minimum-norm solution with the same relative cutoff.
+    c = jnp.linalg.pinv(V_masked, rtol=1e-6) @ (-residual)
 
     # QN correction
     correction = W_masked @ c + residual

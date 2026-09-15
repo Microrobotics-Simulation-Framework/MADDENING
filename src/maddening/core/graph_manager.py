@@ -266,12 +266,15 @@ def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
             col_mask = jnp.arange(max_cols) < i
             V_masked = V_new * col_mask[None, :]
             W_masked = W_new * col_mask[None, :]
-            # Solve  W^T W c = W^T r_cur  via lstsq.  rcond keeps the
-            # solve well-defined when W still has only a handful of
-            # populated columns and the rest are zero (rank-deficient).
-            c, _resid, _rank, _sv = jnp.linalg.lstsq(
-                W_masked, r_cur, rcond=1e-10,
-            )
+            # Solve  W c ≈ r_cur  via the SVD pseudo-inverse.  The
+            # relative cutoff keeps the solve well-defined when W still
+            # has only a handful of populated columns and the rest are
+            # zero (rank-deficient).  ``pinv`` rather than ``lstsq`` for
+            # the same reason as ``iqn_ils_update``: lstsq's derivative
+            # is NaN on repeated zero singular values.  The IFT rule
+            # never differentiates this body, but keep the two sites
+            # consistent so nobody re-inherits the trap by unrolling.
+            c = jnp.linalg.pinv(W_masked, rtol=1e-10) @ r_cur
             # Standard IMVJ update (Degroote 2008):  x_{k+1} = x_k - V c
             # where c solves the secant LS  W c ≈ r_cur.  This implies
             # J_R^{-1} r_cur ≈ V c, so Δx_QN = -V c is the QN step.

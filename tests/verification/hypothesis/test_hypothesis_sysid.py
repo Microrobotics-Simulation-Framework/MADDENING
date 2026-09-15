@@ -409,9 +409,16 @@ class TestFIM:
         ev = np.asarray(rep.eigvals, dtype=np.float64)
         ratio = ev[0] / ev[-1]
         assert ratio < 1e-3, ratio
-        v = np.asarray(rep.eigvecs[:, 0], dtype=np.float64)
-        cos = abs(v @ np.ones(3) / np.sqrt(3.0))
-        assert cos > 0.98, (cos, v)
+        # The common-scale direction must lie in the *near-null subspace*
+        # (every eigenvalue below 1e-3 of the largest), not necessarily on
+        # the single smallest eigenvector: when damping is weakly
+        # identifiable too, the two smallest eigenvalues are close and any
+        # rotation within their plane is an equally valid eigenbasis.
+        V = np.asarray(rep.eigvecs, dtype=np.float64)
+        null = V[:, ev < 1e-3 * ev[-1]]
+        d = np.ones(3) / np.sqrt(3.0)
+        proj = np.linalg.norm(null.T @ d)
+        assert proj > 0.98, (proj, ev / ev[-1], V[:, 0])
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=20, deadline=None)

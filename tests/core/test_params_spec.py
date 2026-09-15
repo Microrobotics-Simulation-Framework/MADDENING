@@ -87,12 +87,18 @@ def test_mask_mirrors_params_and_defaults_to_trainable():
 # Properties
 # ---------------------------------------------------------------------------
 
-finite = dict(allow_nan=False, allow_infinity=False)
+# Draw float32-representable values with no float32 subnormals: the
+# leaves are cast to float32, XLA's CPU backend may flush a denormal
+# (1e-45) to zero inside ``clip``, and the identity leaves are asserted
+# bit-identical.  Bounds are exact binary fractions (Hypothesis refuses a
+# ``width=32`` bound that float32 cannot represent).
+finite = dict(allow_nan=False, allow_infinity=False, allow_subnormal=False, width=32)
+finite64 = dict(allow_nan=False, allow_infinity=False)
 
 
 @given(
-    k=st.floats(0.001, 1e4, **finite), c=st.floats(0.0, 1e3, **finite),
-    m=st.floats(0.001, 1e3, **finite), e=st.floats(0.01, 0.99, **finite),
+    k=st.floats(2 ** -10, 1e4, **finite), c=st.floats(0.0, 1e3, **finite),
+    m=st.floats(2 ** -10, 1e3, **finite), e=st.floats(2 ** -6, 63 / 64, **finite),
     off=st.floats(-1e3, 1e3, **finite), x0=st.floats(-1e3, 1e3, **finite),
 )
 @settings(max_examples=200, deadline=None)
@@ -111,7 +117,7 @@ def test_constrain_inverts_unconstrain_inside_bounds(k, c, m, e, off, x0):
 
 
 @given(
-    u=st.lists(st.floats(-30.0, 30.0, **finite), min_size=6, max_size=6),
+    u=st.lists(st.floats(-30.0, 30.0, **finite64), min_size=6, max_size=6),
 )
 @settings(max_examples=200, deadline=None)
 def test_constrain_lands_inside_bounds_for_any_coordinates(u):
@@ -129,7 +135,7 @@ def test_constrain_lands_inside_bounds_for_any_coordinates(u):
     check_bounds(p, SPECS)                  # every trainable leaf inside
 
 
-@given(u=st.floats(-1e4, 1e4, **finite))
+@given(u=st.floats(-1e4, 1e4, **finite64))
 @settings(max_examples=200, deadline=None)
 def test_unconstrain_of_constrain_is_finite_for_any_coordinate(u):
     """float32 ``exp``/``sigmoid`` saturate for |u| beyond ~17-87; the

@@ -1,6 +1,6 @@
 """Property-based tests for Aitken delta-squared relaxation.
 
-Complements the stelling suite by sampling from a much richer space,
+Samples from a rich input space,
 including the degenerate regime (denom <= 1e-30) that interval
 analysis cannot verify due to JAX's select_n tracing both branches.
 """

@@ -176,17 +176,13 @@ ci = [
     # this to a user-facing [ift] extra + a friendlier import error
     # is scheduled for v0.4.0 -- see plans/MADDENING_v0.4.0_PLAN.md.
     "lineax>=0.0.7",
-    # Formal verification (stelling) and property-based testing (hypothesis).
-    # stelling[solvers] pulls z3-solver + cvc5 for full SMT escalation.
-    "stelling>=0.1",
-    "stelling[solvers]",
+    # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
 ]
 
-# Formal verification and property-based testing (user-facing).
+# Property-based node verification (user-facing).
 # Downstream users who want to verify their own nodes install this.
 verify = [
-    "stelling>=0.1",
     "hypothesis>=6.165,<7",
 ]
 

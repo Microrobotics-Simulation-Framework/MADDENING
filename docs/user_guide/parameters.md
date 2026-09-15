@@ -157,6 +157,17 @@ continuing.
   carry the parameters.  Directional derivatives with respect to a
   parameter are the same `jax.jvp` the graph uses everywhere.
 
+## Mapping weights
+
+Edges with an interface `mapping` keep their weights under
+`gm.params["mappings"]["<src>.<field>-><tgt>.<field>"]`, with the same
+traced-input semantics as node constants.  They are `trainable=False`
+by default (an interface operator is geometry, not a physical constant);
+a learned edge opts in with `gm.set_param_spec(edge.key, "H", ParamSpec())`.
+See the [interface mapping guide](../algorithm_guide/coupling/interface_mapping.md).
+Checkpoints store node params only; mapping weights are rebuilt from the
+graph definition.
+
 ## What is not a parameter
 
 * Initial conditions (`initial_*`): they are state, not dynamics, and are

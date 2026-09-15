@@ -9,7 +9,7 @@ optionally applying *transform* first."
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -26,6 +26,16 @@ class EdgeSpec:
     additive: bool = False  # If True, ADD to existing boundary_input value
     source_units: Optional[str] = None  # Physical units of the source field
     target_units: Optional[str] = None  # Physical units after transform
+    # Interface mapping (``maddening.core.coupling.mapping.Mapping``)
+    # applied before ``transform``; its weights live in
+    # ``GraphManager.params["mappings"][edge.key]``.
+    mapping: Optional[Any] = None
+
+    @property
+    def key(self) -> str:
+        """Stable identifier: ``"<src>.<field>-><tgt>.<field>"``."""
+        return (f"{self.source_node}.{self.source_field}->"
+                f"{self.target_node}.{self.target_field}")
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -38,6 +48,11 @@ class EdgeSpec:
             "source_field": self.source_field,
             "target_field": self.target_field,
         }
+        if self.mapping is not None:
+            describe = getattr(self.mapping, "describe", None)
+            d["mapping"] = describe() if callable(describe) else {
+                "kind": getattr(self.mapping, "kind", type(self.mapping).__name__),
+            }
         if self.transform is not None:
             d["transform"] = self.transform.__qualname__
         if self.additive:
@@ -50,6 +65,8 @@ class EdgeSpec:
 
     def __repr__(self) -> str:
         arrow = f"{self.source_node}.{self.source_field} -> {self.target_node}.{self.target_field}"
+        if self.mapping is not None:
+            arrow += f"  (mapping {self.mapping!r})"
         if self.transform is not None:
             arrow += f"  (via {self.transform.__qualname__})"
         if self.source_units or self.target_units:

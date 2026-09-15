@@ -21,7 +21,7 @@ import warnings
 from collections import defaultdict
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -87,6 +87,27 @@ def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
     if spec.accepts_params and node_params is not None:
         return spec.update_fn(state, boundary_inputs, dt, params=node_params)
     return spec.update_fn(state, boundary_inputs, dt)
+
+
+class _ResolvedParams(NamedTuple):
+    """The graph parameter pytree split for the step builders: per-node
+    pytrees (``nodes[name]``) and per-edge mapping weights
+    (``mappings[edge.key]``).  Both are traced when an explicit ``params``
+    is passed, baked constants otherwise."""
+    nodes: dict
+    mappings: dict
+
+
+def _apply_edge(edge: EdgeSpec, value, params):
+    """Mapping (interface transfer) first, then the scalar transform."""
+    if edge.mapping is not None:
+        weights = None
+        if params is not None:
+            weights = params.mappings.get(edge.key)
+        value = edge.mapping.apply(value, weights)
+    if edge.transform is not None:
+        value = edge.transform(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -580,7 +601,7 @@ def _run_coupled_block_impl(
 
     max_iters = group.max_iterations
     group_node_names = list(group_schedule)
-    _node_params = node_params or {}
+    _node_params = node_params.nodes if node_params is not None else {}
 
     def _np(nn):
         return _node_params.get(nn)
@@ -681,8 +702,7 @@ def _run_coupled_block_impl(
             else:
                 src_state = s
             value = _resolve_value(edge, src_state, flux_s)
-            if edge.transform is not None:
-                value = edge.transform(value)
+            value = _apply_edge(edge, value, node_params)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -749,8 +769,7 @@ def _run_coupled_block_impl(
                     )
             else:
                 value = _resolve_value(edge, s_cur, flux_s)
-            if edge.transform is not None:
-                value = edge.transform(value)
+            value = _apply_edge(edge, value, node_params)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -1498,7 +1517,11 @@ class GraphManager:
                 for name, spec in self._nodes.items()
                 if spec.accepts_params
             },
-            "mappings": {},
+            "mappings": {
+                edge.key: edge.mapping.params_pytree()
+                for edge in self._edges
+                if edge.mapping is not None
+            },
         }
 
     def _params_or_default(self, params):
@@ -1544,6 +1567,21 @@ class GraphManager:
                     f"{sorted(unknown)}; {type(spec.node).__name__}.params_pytree() "
                     f"exposes {sorted(known)}"
                 )
+        mapped = {e.key: e for e in self._edges if e.mapping is not None}
+        for key, weights in params.get("mappings", {}).items():
+            edge = mapped.get(key)
+            if edge is None:
+                raise ValueError(
+                    f"params['mappings'] names unknown edge {key!r}; mapped "
+                    f"edges: {sorted(mapped)}"
+                )
+            known = set(edge.mapping.params_pytree())
+            unknown = set(weights) - known
+            if unknown:
+                raise ValueError(
+                    f"params['mappings'][{key!r}] has unknown key(s) "
+                    f"{sorted(unknown)}; the mapping exposes {sorted(known)}"
+                )
 
     # ------------------------------------------------------------------
     # ParamSpec: trainable mask, bounds, reparametrisation
@@ -1561,12 +1599,38 @@ class GraphManager:
             merged = dict(spec.node.param_specs())
             merged.update(self._param_spec_overrides.get(name, {}))
             out["nodes"][name] = merged
+        # Interface-mapping weights are geometry-derived operators, not
+        # physical constants: frozen unless a learned edge opts in with
+        # ``set_param_spec(edge.key, "H", ParamSpec())``.
+        for edge in self._edges:
+            if edge.mapping is None:
+                continue
+            merged = {
+                k: ParamSpec(trainable=False, description="interface mapping weights")
+                for k in edge.mapping.params_pytree()
+            }
+            merged.update(self._param_spec_overrides.get(edge.key, {}))
+            out["mappings"][edge.key] = merged
         return out
 
     def set_param_spec(self, node: str, key: str, spec: ParamSpec) -> None:
         """Override one parameter's :class:`ParamSpec` for this graph
-        (e.g. freeze a node's ``mass`` when the data cannot identify it).
+        (e.g. freeze a node's ``mass`` when the data cannot identify it,
+        or make a mapped edge's weights trainable by passing the edge
+        key — ``"<src>.<field>-><tgt>.<field>"`` — as ``node``).
         Does not dirty the graph: specs are optimiser-side metadata."""
+        if not isinstance(spec, ParamSpec):
+            raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
+        mapped = {e.key: e for e in self._edges if e.mapping is not None}
+        if node in mapped:
+            known = mapped[node].mapping.params_pytree()
+            if key not in known:
+                raise KeyError(
+                    f"mapping on edge {node!r} has no weight {key!r}; it exposes "
+                    f"{sorted(known)}"
+                )
+            self._param_spec_overrides.setdefault(node, {})[key] = spec
+            return
         if node not in self._nodes:
             raise KeyError(f"unknown node {node!r}")
         if not self._nodes[node].accepts_params:
@@ -1579,8 +1643,6 @@ class GraphManager:
                 f"params_pytree() exposes "
                 f"{sorted(self._nodes[node].node.params_pytree())}"
             )
-        if not isinstance(spec, ParamSpec):
-            raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
         self._param_spec_overrides.setdefault(node, {})[key] = spec
 
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
@@ -1665,8 +1727,17 @@ class GraphManager:
         additive: bool = False,
         source_units: Optional[str] = None,
         target_units: Optional[str] = None,
+        mapping: Optional[Any] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
+
+        ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
+        transfers the source field onto the target interface before
+        ``transform`` is applied; its weights are snapshotted into
+        ``params["mappings"][edge.key]`` at compile time and passed as a
+        traced input on every step.  Its ``n_source`` must equal the
+        source field's size; ``n_target`` must match the target's
+        declared ``boundary_input_spec`` shape when that is an array.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -1685,11 +1756,68 @@ class GraphManager:
         if isinstance(transform, str):
             from maddening.core.transforms import resolve_transform
             transform = resolve_transform(transform)
+        if mapping is not None:
+            self._check_mapping_shapes(source, source_field, target, target_field, mapping)
         edge = EdgeSpec(source, target, source_field, target_field,
-                        transform, additive, source_units, target_units)
+                        transform, additive, source_units, target_units,
+                        mapping=mapping)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
+
+    def _check_mapping_shapes(self, source, source_field, target, target_field, mapping):
+        for attr in ("apply", "params_pytree", "n_source", "n_target"):
+            if not hasattr(mapping, attr):
+                raise TypeError(
+                    f"mapping must implement the Mapping protocol (missing {attr!r})"
+                )
+        src_spec = self._nodes.get(source)
+        if src_spec is not None:
+            src_state = src_spec.node.initial_state()
+            if source_field in src_state:
+                n = int(np.prod(np.shape(src_state[source_field])[:1] or (1,)))
+                if mapping.n_source != n:
+                    raise ValueError(
+                        f"mapping n_source={mapping.n_source} does not match "
+                        f"{source}.{source_field} (size {n} along axis 0)"
+                    )
+        tgt_spec = self._nodes.get(target)
+        if tgt_spec is not None:
+            bspec = tgt_spec.node.boundary_input_spec().get(target_field)
+            shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
+            if shape and mapping.n_target != int(shape[0]):
+                raise ValueError(
+                    f"mapping n_target={mapping.n_target} does not match "
+                    f"{target}.{target_field} declared shape {shape}"
+                )
+
+    @property
+    def edges(self) -> list[EdgeSpec]:
+        return list(self._edges)
+
+    def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
+        """Boundary inputs ``node_name`` would receive from the *current*
+        state: every incoming edge (mapping, transform, additive) plus the
+        zero defaults of its external inputs.  A debugging / inspection
+        helper; the compiled step resolves edges itself."""
+        if node_name not in self._nodes:
+            raise KeyError(f"unknown node {node_name!r}")
+        p = self._params_or_default(params)
+        resolved = _ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
+        out: dict[str, Any] = {}
+        for edge in self._edges:
+            if edge.target_node != node_name:
+                continue
+            value = self._state[edge.source_node][edge.source_field]
+            value = _apply_edge(edge, value, resolved)
+            if edge.additive and edge.target_field in out:
+                out[edge.target_field] = out[edge.target_field] + value
+            else:
+                out[edge.target_field] = value
+        for ei in self._external_inputs:
+            if ei.target_node == node_name and ei.target_field not in out:
+                out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
+        return out
 
     def add_external_input(
         self,
@@ -1915,6 +2043,10 @@ class GraphManager:
             if src_val is not None:
                 src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
                 spec_shape = tuple(spec.shape)
+                if e.mapping is not None and src_shape:
+                    # The mapping changes axis 0 to its n_target; the
+                    # rest of the shape (vector components) passes through.
+                    src_shape = (int(e.mapping.n_target),) + src_shape[1:]
                 # Skip when spec leaves any dimension symbolic (negative
                 # convention) or when a transform may reshape on the fly.
                 if (e.transform is None
@@ -1932,7 +2064,7 @@ class GraphManager:
             # Dtype check: only when both source and spec dtypes are set.
             if src_val is not None and spec.dtype is not None:
                 src_dtype = getattr(src_val, "dtype", None)
-                if src_dtype is not None and e.transform is None:
+                if src_dtype is not None and e.transform is None and e.mapping is None:
                     if str(src_dtype) != str(jnp.dtype(spec.dtype)):
                         issues.append(
                             f"WARNING[dtype]: edge "
@@ -2469,9 +2601,10 @@ class GraphManager:
 
         def _resolve_params(params):
             if params is None:
-                return params_snapshot.get("nodes", {})
-            self._validate_params(params)
-            return params.get("nodes", {})
+                params = params_snapshot
+            else:
+                self._validate_params(params)
+            return _ResolvedParams(params.get("nodes", {}), params.get("mappings", {}))
 
         def _resolve_and_update_node(
             node_name, new_state, full_state, external_inputs, node_params,
@@ -2506,8 +2639,7 @@ class GraphManager:
                     value = flux_state[src_nn][edge.source_field]
                 else:
                     value = src_state[src_nn][edge.source_field]
-                if edge.transform is not None:
-                    value = edge.transform(value)
+                value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -2524,7 +2656,7 @@ class GraphManager:
             spec = nodes[node_name]
             new_node_state = _node_update(
                 spec, new_state[node_name], boundary_inputs, spec.timestep,
-                node_params.get(node_name),
+                node_params.nodes.get(node_name),
             )
 
             # Compute fluxes for this node if it produces them
@@ -3070,8 +3202,7 @@ class GraphManager:
                 else:
                     src_state = new_state
                 value = src_state[edge.source_node][edge.source_field]
-                if edge.transform is not None:
-                    value = edge.transform(value)
+                value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -3088,15 +3219,17 @@ class GraphManager:
             spec = nodes_dict[node_name]
             return _node_update(
                 spec, new_state[node_name], boundary_inputs, dt,
-                node_params.get(node_name),
+                node_params.nodes.get(node_name),
             )
 
         def dt_step_fn(state, external_inputs, dt, params=None):
             if params is None:
-                node_params = params_snapshot.get("nodes", {})
+                params = params_snapshot
             else:
                 self._validate_params(params)
-                node_params = params.get("nodes", {})
+            node_params = _ResolvedParams(
+                params.get("nodes", {}), params.get("mappings", {}),
+            )
             new_state = {k: v for k, v in state.items()}
 
             if has_coupling:
@@ -3484,6 +3617,14 @@ class GraphManager:
             for key, spec_dict in overrides.items():
                 gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
         for ed in config["edges"]:
+            if "mapping" in ed:
+                raise ValueError(
+                    f"edge {ed['source_node']}.{ed['source_field']} -> "
+                    f"{ed['target_node']}.{ed['target_field']} was saved with an "
+                    f"interface mapping ({ed['mapping']}); rebuilding mappings "
+                    "from a config (MappingSpec) is not implemented yet — add "
+                    "the edge with mapping= after from_dict."
+                )
             gm.add_edge(
                 source=ed["source_node"],
                 target=ed["target_node"],

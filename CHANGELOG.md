@@ -107,6 +107,32 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   direct trajectory loss, unconverged masking, FIM symmetric PSD with
   orthonormal eigenvectors, injected null directions recovered).
 - User guide page `docs/user_guide/parameters.md`.
+- **Interface mappings on edges** (`maddening.core.coupling.mapping`):
+  `add_edge(..., mapping=)` takes a `Mapping` (`apply` / `apply_T` /
+  `params_pytree`), applied before the scalar `transform`; its weights
+  are snapshotted into `gm.params["mappings"]["<src>.<field>-><tgt>.<field>"]`
+  and passed as a traced input on every step, so `jax.grad` reaches them
+  (also through an IFT coupling group) and a replaced matrix needs no
+  recompile.  `StaticLinearMapping` with factories `rbf_mapping`
+  (polynomial augmentation on by default, solve instead of `inv`,
+  kernel-relative ridge, `mode="consistent"|"conservative"` where
+  conservative is the transpose of the reverse consistent map and
+  preserves totals exactly), `nearest_neighbor_mapping`,
+  `projection_1d_mapping`, `matrix_mapping`.  Matrices are assembled and
+  solved in float64 on the host at construction.  Gates: patch test
+  (constants and linear fields reproduced across random non-conforming
+  point sets, float32 round-off and 1e-8 in float64) and conservation test
+  for every kernel; a mapped edge reproduces the closure-transform result;
+  gradient with respect to the weights is finite and non-zero.  Mapping
+  weights are `trainable=False` by default (opt in with
+  `set_param_spec(edge.key, "H", ParamSpec())`); `add_edge` checks
+  `n_source` / `n_target` against the field and declared boundary shape;
+  `gm.edges`, `gm.resolve_boundary_inputs(node)`; `to_dict` records
+  `mapping.describe()` (never the weights) and `from_dict` /
+  `save_graph_to_usd` refuse mapped edges until `MappingSpec` lands with
+  the USD read path.  `rbf_interpolation` (closure API) now shares the
+  same matrix construction, so its multiquadric constant test went from
+  `atol=0.1` to round-off.  Guide: `docs/algorithm_guide/coupling/interface_mapping.md`.
 - REST `PUT /graph/params/{node}` validates values against the node's
   `ParamSpec` bounds before writing anything (400 with the offending leaf).
 - `maddening.testing.strategies.node_states` samples bool / integer state

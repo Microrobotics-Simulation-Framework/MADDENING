@@ -118,8 +118,15 @@ def save_graph_to_usd(
     root_path : str
         Path for the root prim.
     """
-    # Validate edge transforms before writing (fail early)
+    # Validate edge transforms / mappings before writing (fail early)
     for edge in gm._edges:
+        if edge.mapping is not None:
+            raise ValueError(
+                f"Edge {edge.key} carries an interface mapping "
+                f"({edge.mapping!r}); USD serialisation of mappings "
+                "(MappingSpec) is not implemented yet — see the interface "
+                "mapping guide.  Remove the mapping or use transform=."
+            )
         if edge.transform is not None:
             tname = get_transform_name(edge.transform)
             if tname is None:

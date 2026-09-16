@@ -217,8 +217,10 @@ same field pair (two additive contributions) gets its own slot,
 by default (an interface operator is geometry, not a physical constant);
 a learned edge opts in with `gm.set_param_spec(edge.key, "H", ParamSpec())`.
 See the [interface mapping guide](../algorithm_guide/coupling/interface_mapping.md).
-Checkpoints store node params only; mapping weights are rebuilt from the
-graph definition.
+A config (`to_dict`, USD) stores the mapping's *recipe* (`MappingSpec`:
+kind, hyper-parameters, point references) and rebuilds the weights on
+load; a checkpoint stores the weights themselves (`_params_mappings/`),
+and when both are loaded the checkpoint's — possibly trained — weights win.
 
 ## What is not a parameter
 

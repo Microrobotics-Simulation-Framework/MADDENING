@@ -511,17 +511,18 @@ class HeatNode(SimulationNode):
             "right_temperature": ("temperature", -1),
         }
 
-    def compute_interface_correction(self, pre_state, boundary_inputs, dt):
+    def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
         """Recompute boundary-cell temperatures from the FD stencil.
 
         HeatNode's ``update()`` enforces Dirichlet BCs by overwriting
         T[0] and T[-1] after the FD update.  When those BCs come from
         coupling, this overwrites the physically meaningful stencil
         value.  This method recomputes the stencil value so the
-        coupling system can restore it.
+        coupling system can restore it.  Same constants as ``update``.
         """
+        p = self.params if params is None else {**self.params, **params}
         n = self.params["n_cells"]
-        alpha = self.params["thermal_diffusivity"]
+        alpha = p["thermal_diffusivity"]
 
         T = pre_state["temperature"]
         T_left = boundary_inputs.get("left_temperature", T[0])

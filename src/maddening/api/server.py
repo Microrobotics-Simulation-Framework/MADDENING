@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -353,7 +354,10 @@ class SimulationServer:
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             node = self.gm._nodes[node_name].node
-            return _jax_to_python(node.params)
+            # The live pytree wins over the constructor value: it is what
+            # the step uses after a fit or a checkpoint restore.
+            live = self.gm.params.get("nodes", {}).get(node_name) or {}
+            return {**_jax_to_python(node.params), **_jax_to_python(live)}
 
         @app.put("/graph/params/{node_name}", tags=["params"])
         def set_node_params(node_name: str, req: SetNodeParamsRequest):
@@ -369,6 +373,13 @@ class SimulationServer:
             node = self.gm._nodes[node_name].node
             live = self.gm.params.get("nodes", {}).get(node_name) or {}
             specs = self.gm.param_specs().get("nodes", {}).get(node_name, {})
+            # Before the first compile ``gm.params`` is empty; validate a
+            # params node against its own pytree so the same request gets
+            # the same answer one compile() earlier or later.
+            probe_only = False
+            if not live and getattr(node, "accepts_params", lambda: False)():
+                live = dict(node.params_pytree())
+                probe_only = True
             # A key is addressable if it is a constructor param *or* a leaf
             # of the live pytree (surrogate weights, sharded wrappers whose
             # inner node owns the params).
@@ -415,9 +426,14 @@ class SimulationServer:
                 staged[key] = new
             for key, value in req.params.items():
                 if key in staged:
-                    live[key] = staged[key]
+                    if not probe_only:
+                        live[key] = staged[key]
                     if key in node.params:
-                        node.params[key] = value
+                        # Store the constructor's Python type, never the
+                        # raw JSON value: a JSON ``40`` for a float leaf
+                        # would turn it into an ``int`` that
+                        # ``params_pytree`` no longer exposes.
+                        node.params[key] = np.asarray(staged[key]).tolist()
                 else:
                     node.params[key] = value
                     self.gm._dirty = True

@@ -70,7 +70,9 @@ def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
 
 The graph passes the node's entry on every flux evaluation, so a
 calibrated stiffness changes the force a flux edge *delivers*, not only
-the node's own integration.  A flux producer whose `update` takes
+the node's own integration.  The same rule applies to
+`compute_interface_correction(..., *, params=None)` for nodes that
+recompute coupled interface cells (`HeatNode`).  A flux producer whose `update` takes
 `params` but whose `compute_boundary_fluxes` does not is exactly the
 trap the 2026-09 audit found; `verify_node` now fails it.
 

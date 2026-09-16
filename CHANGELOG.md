@@ -316,6 +316,25 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Independent audit, round 2** (12 findings, all fixed; report under
+  `benchmarks/results/audit2/`, regression tests in
+  `tests/core/test_audit_round2.py`).  `compute_interface_correction`
+  joined the params contract (a calibrated diffusivity now also corrects
+  the coupled interface cells; `HeatNode`, `HybridNode`), and `HybridNode`
+  forwards `params` to its physics node.  `PUT /graph/params/{node}`
+  stores the constructor's Python type (a JSON `40` for a float leaf used
+  to turn it into an `int` the pytree no longer exposed), validates a
+  request before the first compile exactly as after it, and `GET` returns
+  the live view.  `load_state` compiles a fresh graph *before* restoring,
+  so the multirate step counter and coupling history survive a
+  load-before-compile; checkpoints now carry `params["mappings"]`, and a
+  params leaf of the wrong shape is refused.  `remove_edge` drops
+  ordinal-key overrides; Python-scalar leaves in `gm.params` are coerced
+  to the leaf dtype (no retrace, kept on recompile, also under x64); the
+  coupling residual `_meta` seed takes the group's floating dtype
+  (float64 graphs no longer fail `run_scan` after compile); the logit
+  clamp uses `nextafter` limits so a few-ulp-wide interval stays strictly
+  inside.
 - **FMU export of a real graph had no inputs and a wrong step size.**
   `build_model_description` looked for a `_external_input_specs` dict a
   `GraphManager` never had, so external inputs were silently omitted, and

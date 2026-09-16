@@ -522,8 +522,15 @@ class SimulationNode(ABC):
         pre_state: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, list[tuple[int, Any]]]:
         """Compute corrected values at interface DOFs.
+
+        A node that takes ``params`` in :meth:`update` must take it here
+        too (same ``{**self.params, **params}`` rule): the coupling
+        system passes the node's ``gm.params`` entry, so a calibrated
+        diffusivity also corrects the interface cells.
 
         After ``update()`` is called, the coupling system calls this
         method to obtain what the interface DOF values *should* be

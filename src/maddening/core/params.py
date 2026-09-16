@@ -33,6 +33,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -151,8 +152,16 @@ class ParamSpec:
             # clip never inverts, and let ``check`` report such a value.
             m = 4.0 * float(fi.eps) * max(abs(lo), abs(hi), hi - lo)
             m = min(m, 0.25 * (hi - lo))
+            # ``lo + m`` / ``hi - m`` can round back onto the bound for an
+            # interval a few ulps wide; the next representable float
+            # inside is the true limit, so take the wider of the two.
+            _t = np.dtype(fi.dtype).type
+            inner_lo = max(lo + m, float(np.nextafter(_t(lo), _t(np.inf))))
+            inner_hi = min(hi - m, float(np.nextafter(_t(hi), _t(-np.inf))))
+            if inner_lo > inner_hi:                    # no interior float at all
+                inner_lo = inner_hi = 0.5 * (lo + hi)
             p = lo + (hi - lo) * jax.nn.sigmoid(u)
-            return jnp.clip(p, lo + m, hi - m)
+            return jnp.clip(p, inner_lo, inner_hi)
         lo, hi = self.bounds
         if lo is not None or hi is not None:
             # Python-float bounds would promote an integer leaf (integer

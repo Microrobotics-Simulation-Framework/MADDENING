@@ -67,9 +67,23 @@ class HybridNode(SimulationNode):
     def initial_state(self) -> dict:
         return self.physics_node.initial_state()
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
-        """Physics update + additive correction."""
-        physics_result = self.physics_node.update(state, boundary_inputs, dt)
+    # -- graph params contract: delegate to the wrapped physics node ----
+    def accepts_params(self) -> bool:
+        return _accepts_params(self.physics_node.update)
+
+    def params_pytree(self) -> dict:
+        return self.physics_node.params_pytree()
+
+    def param_specs(self) -> dict:
+        return self.physics_node.param_specs()
+
+    def update(self, state: dict, boundary_inputs: dict, dt: float, *, params=None) -> dict:
+        """Physics update + additive correction (``params`` reaches the
+        physics node when it takes them, so a hybrid stays calibratable)."""
+        if params is not None and _accepts_params(self.physics_node.update):
+            physics_result = self.physics_node.update(state, boundary_inputs, dt, params=params)
+        else:
+            physics_result = self.physics_node.update(state, boundary_inputs, dt)
         correction = self.correction_fn(state, boundary_inputs, dt)
         result = {}
         for k in physics_result:
@@ -97,7 +111,11 @@ class HybridNode(SimulationNode):
     def interface_dof_indices(self):
         return self.physics_node.interface_dof_indices()
 
-    def compute_interface_correction(self, pre_state, boundary_inputs, dt):
+    def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
+        if params is not None and _accepts_params(self.physics_node.compute_interface_correction):
+            return self.physics_node.compute_interface_correction(
+                pre_state, boundary_inputs, dt, params=params,
+            )
         return self.physics_node.compute_interface_correction(
             pre_state, boundary_inputs, dt
         )

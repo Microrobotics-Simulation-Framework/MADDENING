@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 # Key used by GraphManager for internal multi-rate bookkeeping.
 _META_KEY = "_meta"
 _PARAMS_KEY = "_params"
+_MAPPINGS_KEY = "_params_mappings"
 
 # Schema version for the integrity manifest.
 #
@@ -107,6 +108,11 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     for node_name, node_params in graph_manager.params.get("nodes", {}).items():
         for pname, value in node_params.items():
             arrays[f"{_PARAMS_KEY}/{node_name}/{pname}"] = np.asarray(value)
+    # Interface-mapping weights are trainable leaves too (edge keys hold
+    # no '/', so they nest under the same prefix scheme).
+    for edge_key, weights in graph_manager.params.get("mappings", {}).items():
+        for wname, value in weights.items():
+            arrays[f"{_MAPPINGS_KEY}/{edge_key}/{wname}"] = np.asarray(value)
 
     np.savez(path, **arrays)
 
@@ -146,6 +152,7 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     meta_keys: dict[str, np.ndarray] = {}
     node_keys: dict[str, dict[str, np.ndarray]] = {}
     param_keys: dict[str, dict[str, np.ndarray]] = {}
+    mapping_keys: dict[str, dict[str, np.ndarray]] = {}
 
     for flat_key in data.files:
         parts = flat_key.split("/", 1)
@@ -160,8 +167,19 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         elif prefix == _PARAMS_KEY:
             node_name, pname = field.split("/", 1)
             param_keys.setdefault(node_name, {})[pname] = data[flat_key]
+        elif prefix == _MAPPINGS_KEY:
+            edge_key, wname = field.rsplit("/", 1)
+            mapping_keys.setdefault(edge_key, {})[wname] = data[flat_key]
         else:
             node_keys.setdefault(prefix, {})[field] = data[flat_key]
+
+    # A graph that has never compiled has no params pytree and no _meta;
+    # compile first so load-then-run equals compile-then-load (otherwise
+    # the compile triggered by the first step would re-seed _meta -- the
+    # multirate step counter, predictor / IQN history -- and drop params).
+    if (getattr(graph_manager, "_dirty", False)
+            or getattr(graph_manager, "_compiled_step", None) is None):
+        graph_manager.compile()
 
     # ---- Validate against current graph structure ----
     current_nodes = set(graph_manager.node_names)
@@ -208,19 +226,26 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
 
     # Restore graph parameters for nodes/keys the current graph knows;
     # unknown ones are ignored (a node may have stopped accepting params).
-    # ``gm.params`` is only populated by compile(): a checkpoint loaded
-    # before the first compile would otherwise drop its params silently.
-    if param_keys and (
-        getattr(graph_manager, "_dirty", False)
-        or getattr(graph_manager, "_compiled_step", None) is None
-    ):
-        graph_manager.compile()
-    current_params = graph_manager.params.get("nodes", {})
-    for node_name, saved in param_keys.items():
-        if node_name in current_params:
+    # A leaf whose shape differs from the live one is an error, like a
+    # state field: restoring it would run the graph wrong.
+    def _restore(section: str, saved_tree: dict) -> None:
+        current = graph_manager.params.get(section, {})
+        for owner, saved in saved_tree.items():
+            if owner not in current:
+                continue
             for pname, arr in saved.items():
-                if pname in current_params[node_name]:
-                    current_params[node_name][pname] = jnp.array(arr)
+                if pname not in current[owner]:
+                    continue
+                live = jnp.asarray(current[owner][pname])
+                if tuple(arr.shape) != tuple(live.shape):
+                    raise ValueError(
+                        f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
+                        f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
+                    )
+                current[owner][pname] = jnp.asarray(arr, dtype=live.dtype)
+
+    _restore("nodes", param_keys)
+    _restore("mappings", mapping_keys)
 
 
 # ---------------------------------------------------------------------------

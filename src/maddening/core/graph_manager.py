@@ -81,6 +81,16 @@ class _NodeSpec:
     flux_accepts_params: bool = False
 
 
+def _correction_accepts_params(node: SimulationNode) -> bool:
+    fn = getattr(node, "compute_interface_correction", None)
+    if fn is None:
+        return False
+    try:
+        return "params" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _flux_accepts_params(node: SimulationNode) -> bool:
     fn = getattr(node, "compute_boundary_fluxes", None)
     if fn is None:
@@ -609,7 +619,7 @@ def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
 
 
 def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
-                               node_obj, coupled_bi_names=None):
+                               node_obj, coupled_bi_names=None, node_params=None):
     """Correct interface DOFs after update to undo internal BC enforcement.
 
     Nodes like HeatNode enforce Dirichlet BCs by overwriting boundary
@@ -656,9 +666,14 @@ def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
     if not filtered_bi:
         return node_state
     with jax.named_scope("coupling:interface_override"):
-        corrections = node_obj.compute_interface_correction(
-            pre_state, filtered_bi, dt
-        )
+        if node_params is not None and _correction_accepts_params(node_obj):
+            corrections = node_obj.compute_interface_correction(
+                pre_state, filtered_bi, dt, params=node_params,
+            )
+        else:
+            corrections = node_obj.compute_interface_correction(
+                pre_state, filtered_bi, dt
+            )
         if not corrections:
             return node_state
         result = {**node_state}
@@ -916,6 +931,7 @@ def _run_coupled_block_impl(
             new_sub = _apply_interface_overrides(
                 new_sub, sub_state, bi, sub_dt, nodes[nn].node,
                 coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
             )
             return new_sub, None
 
@@ -958,6 +974,7 @@ def _run_coupled_block_impl(
                 s[nn] = _apply_interface_overrides(
                     s[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
                 )
             # Compute fluxes for this node
             if nn in flux_producing_nodes:
@@ -1005,6 +1022,7 @@ def _run_coupled_block_impl(
                 results[nn] = _apply_interface_overrides(
                     results[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
                 )
         s = {k: v for k, v in latest_results.items()}
         for nn in group_node_names:
@@ -1715,17 +1733,36 @@ class GraphManager:
                     if base is None:
                         dropped.append(f"{section}[{owner!r}][{key!r}]")
                         continue
-                    v = jnp.asarray(value)
-                    if v.shape != jnp.shape(base) or v.dtype != jnp.asarray(base).dtype:
-                        dropped.append(f"{section}[{owner!r}][{key!r}] (shape/dtype changed)")
+                    base_dtype = jnp.asarray(base).dtype
+                    if jnp.shape(value) != jnp.shape(base):
+                        dropped.append(f"{section}[{owner!r}][{key!r}] (shape changed)")
                         continue
-                    fresh_sec[owner][key] = v
+                    # A Python float assigned into gm.params is float64
+                    # under x64 and weak-typed otherwise: coerce to the
+                    # leaf's own dtype (strongly typed) so it is kept and
+                    # the jitted step is not retraced.
+                    fresh_sec[owner][key] = jnp.asarray(value, dtype=base_dtype)
         if dropped:
             warnings.warn(
                 "compile() dropped live gm.params leaves that no longer fit "
                 f"the graph: {dropped}", RuntimeWarning, stacklevel=3,
             )
         return fresh
+
+    def _coerce_params_leaves(self, tree: dict) -> None:
+        """In place: non-array / weak-typed leaves -> strongly typed arrays
+        of the dtype the leaf had at compile time (float32 fallback)."""
+        dtypes = getattr(self, "_params_dtypes", {}) or {}
+        for section in ("nodes", "mappings"):
+            for owner, leaves in (tree.get(section) or {}).items():
+                if not isinstance(leaves, dict):
+                    continue
+                for key, v in leaves.items():
+                    dt = dtypes.get(section, {}).get(owner, {}).get(key)
+                    if not hasattr(v, "dtype"):
+                        leaves[key] = jnp.asarray(v, dtype=dt or jnp.float32)
+                    elif getattr(v, "weak_type", False):
+                        leaves[key] = v.astype(v.dtype)
 
     def reset_params(self) -> None:
         """Discard live/calibrated values: ``gm.params`` becomes the
@@ -1738,6 +1775,11 @@ class GraphManager:
         keeps its *live* value (not the constructor constant), so a
         partial pytree means "override these" and nothing else."""
         if params is None:
+            # A Python scalar assigned into gm.params (``gm.params[...] =
+            # 32.0``) would reach the jitted step weak-typed and retrace
+            # it; coerce such leaves in place to the leaf dtype recorded
+            # at compile time.
+            self._coerce_params_leaves(self.params)
             return self.params
         if not isinstance(params, dict):
             return params                  # let _validate_params complain
@@ -1748,14 +1790,21 @@ class GraphManager:
             merged = {owner: dict(leaves) for owner, leaves in live_sec.items()}
             for owner, leaves in given.items():
                 if owner in merged and isinstance(leaves, dict):
-                    merged[owner] = {**merged[owner], **leaves}
+                    # keep the live leaf's dtype for a Python scalar the
+                    # caller hands in (weak types retrace the step)
+                    fixed = {
+                        k: (jnp.asarray(v, dtype=jnp.asarray(merged[owner][k]).dtype)
+                            if k in merged[owner] and not hasattr(v, "dtype") else v)
+                        for k, v in leaves.items()
+                    }
+                    merged[owner] = {**merged[owner], **fixed}
                 else:
                     merged[owner] = leaves      # unknown owner: validation reports it
             out[section] = merged
         for k, v in params.items():
             if k not in ("nodes", "mappings"):
                 out[k] = v
-        return out
+        return _strong_typed(out)
 
     def _validate_params(self, params: dict) -> None:
         """Reject a ``params`` pytree that names something the step cannot
@@ -2170,7 +2219,9 @@ class GraphManager:
                 and e.target_field == edge.target_field
             )
         ]
-        self._param_spec_overrides.pop(edge.key, None)
+        for key in list(self._param_spec_overrides):
+            if key.split("#")[0] == edge.key:
+                self._param_spec_overrides.pop(key, None)
         for key in list(self.params.get("mappings", {})):
             if key.split("#")[0] == edge.key:
                 self.params["mappings"].pop(key, None)
@@ -2592,7 +2643,19 @@ class GraphManager:
                     meta[f"coupling_{key}_iterations"] = jnp.array(
                         0, dtype=jnp.int32
                     )
-                    meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=jnp.float32)
+                    # Seed in the dtype the residual is computed in (the
+                    # group's floating state), so a float64 graph under
+                    # x64 keeps a stable scan carry / trace signature.
+                    res_dtype = jnp.float32
+                    for nn_ in g.nodes:
+                        for leaf in self._state.get(nn_, {}).values():
+                            if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating):
+                                res_dtype = jnp.asarray(leaf).dtype
+                                break
+                        else:
+                            continue
+                        break
+                    meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=res_dtype)
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -2679,6 +2742,13 @@ class GraphManager:
         # that no longer fits is dropped with a warning.  ``reset_params``
         # restores the constructor values on purpose.
         self.params = self._merge_live_params(self._snapshot_params(), self.params)
+        self._params_dtypes = {
+            section: {
+                owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
+                for owner, leaves in self.params.get(section, {}).items()
+            }
+            for section in ("nodes", "mappings")
+        }
         baked = self.nodes_without_params()
         if baked:
             logger.info(

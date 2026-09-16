@@ -103,11 +103,52 @@ accept:
 
 | Scheme | Behaviour |
 |---|---|
-| `file:///path/to/snap.npz` | Local file copy.  Useful for local testing and shared-filesystem clusters. |
-| `http://…/snap.npz` | HTTP GET via the stdlib `urllib`.  No auth headers (yet); use a presigned URL if you need them. |
+| `file:///path/to/snap.npz` | Local file copy.  Useful for local testing and shared-filesystem clusters.  The path is percent-decoded (`%20` is a space); a directory is rejected with a `ValueError`. |
+| `http://…/snap.npz` | HTTP GET via the stdlib `urllib`, with a timeout (`timeout=`, default 60 s; `MADDENING_RESUME_TIMEOUT` in the entry point).  No auth headers (yet); use a presigned URL if you need them — and see the presigned-URL note below. |
 | `https://…/snap.npz` | Same as `http://` over TLS. |
-| Bare path (`/path/to/snap.npz`) | Treated as `file://`. |
-| `s3://`, `gs://`, `az://` / `abfs://` / `azure://`, `memory://`, any other fsspec protocol | Read through [fsspec](https://filesystem-spec.readthedocs.io/) (v0.4.0).  Install `fsspec` plus the backend for the scheme (`s3fs`, `gcsfs`, `adlfs`); a missing backend raises an `ImportError` naming the package to install.  Credentials come from the backend's usual environment (e.g. `AWS_*` variables). |
+| Bare POSIX path (`/path/to/snap.npz`) | Treated as `file://`.  Windows drive-letter paths (`C:\…`) are not supported: the drive letter parses as a URL scheme. |
+| `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `abfs://`, `abfss://`, `adl://`, `azure://`, `memory://` — **exactly these; no other fsspec protocol** | Read through [fsspec](https://filesystem-spec.readthedocs.io/) (v0.4.0).  Install `fsspec` plus the backend for the scheme (`s3fs`, `gcsfs`, `adlfs`); a missing backend raises an `ImportError` naming the package to install.  Credentials come from the backend's usual environment (e.g. `AWS_*` variables).  `ftp://`, `sftp://`, `hdfs://`, `oss://` and the like are rejected with a `ValueError` even though fsspec knows them. |
+
+An empty URL raises `ValueError("empty checkpoint URL")`; any scheme
+outside the table raises `ValueError("Unsupported URL scheme …")`.
+
+### The manifest URL and presigned URLs
+
+The sidecar manifest is fetched from the checkpoint URL with
+`.manifest.json` appended to the **path** component; the query string
+and fragment are preserved.  So
+
+```text
+https://bucket.s3.amazonaws.com/run/sim.npz?X-Amz-Signature=…
+```
+
+looks for
+
+```text
+https://bucket.s3.amazonaws.com/run/sim.npz.manifest.json?X-Amz-Signature=…
+```
+
+A presigned URL only authorises the one object it was signed for, so
+that derived URL is rejected by S3/GCS/Azure.  With presigned storage,
+presign the manifest too and hand both URLs over:
+
+```bash
+RESUME_FROM_URL="https://…/sim.npz?X-Amz-Signature=A" \
+RESUME_MANIFEST_URL="https://…/sim.npz.manifest.json?X-Amz-Signature=B" \
+    python -m maddening.cloud.entrypoint
+```
+
+or, from Python, `download_and_load_state(gm, url, manifest_url=…)`.
+The entry point logs URLs with the query string replaced by
+`<redacted>` so the signatures never reach the container log.
+
+### Temporary files
+
+Without a `dest_dir=`, the checkpoint and manifest are downloaded into
+a fresh per-call temporary directory that is removed again when the
+call returns or raises.  Pass `dest_dir=` to keep the downloaded files.
+Downloads are streamed to disk in 1 MiB chunks, so the resume host
+does not need the whole checkpoint in memory.
 
 ## What's still on you, the orchestrator
 
@@ -154,9 +195,26 @@ no extra dependencies.
 
 If anything in steps 6-7 fails, the entry-point **logs and
 continues with the in-memory (fresh) state** — a failed resume
-should not block a healthy server from starting.  Lab convention:
+should not block a healthy server from starting.  An HTTP source
+that never answers is cut off after `MADDENING_RESUME_TIMEOUT`
+seconds (default 60) so it cannot hold the port closed forever.  On
+success the log line names the manifest's `schema_version`,
+`size_bytes`, the first 12 hex digits of `sha256`, and
+`extra.session_id` / `extra.stage_at_snapshot`.  Lab convention:
 have your orchestrator notify you if `RESUME_FROM_URL` was set but
 the manifest didn't apply.
+
+```{note}
+The stock entry point does not load a graph yet (`MADDENING_GRAPH_USD`
+is a stub), and a checkpoint can only be restored into a graph with
+the same nodes.  When `RESUME_FROM_URL` is set and the server's graph
+has no nodes, the entry point logs
+"resume is impossible until a graph is loaded" and starts fresh
+instead of failing later with a node-mismatch error.  Embedders that
+build the `SimulationServer` with a populated `GraphManager` and call
+{func}`~maddening.cloud.entrypoint.resume_from_env` get the full
+resume.
+```
 
 ## Disabling the integrity check
 

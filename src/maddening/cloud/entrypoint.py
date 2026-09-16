@@ -62,16 +62,7 @@ def main() -> None:
     server = SimulationServer(node_registry={})
 
     # v0.2 #8: resume from a remote checkpoint URL if requested.
-    resume_url = os.environ.get("RESUME_FROM_URL", "")
-    if resume_url:
-        try:
-            resume_from_url(server, resume_url)
-            logger.info("Resumed simulation state from %s", resume_url)
-        except Exception:
-            # Non-fatal: log and continue with the in-memory state.
-            logger.exception(
-                "Failed to resume from %s; starting fresh", resume_url,
-            )
+    resume_from_env(server)
 
     # Graceful shutdown on SIGTERM
     shutdown_event = None
@@ -99,21 +90,134 @@ def main() -> None:
     )
 
 
-def resume_from_url(server, url: str, *, skip_integrity_check: bool = False) -> dict:
+#: Environment variables the entry point reads for the resume step.
+RESUME_URL_ENV = "RESUME_FROM_URL"
+RESUME_MANIFEST_URL_ENV = "RESUME_MANIFEST_URL"
+RESUME_TIMEOUT_ENV = "MADDENING_RESUME_TIMEOUT"
+
+
+def resume_from_env(server, environ: Optional[dict] = None) -> Optional[dict]:
+    """Run the ``RESUME_FROM_URL`` step of the entry point (non-fatal).
+
+    Reads ``RESUME_FROM_URL`` (checkpoint), ``RESUME_MANIFEST_URL``
+    (optional: the manifest's own URL, needed with presigned storage
+    because a presigned URL authorises one object only) and
+    ``MADDENING_RESUME_TIMEOUT`` (seconds, default
+    :data:`maddening.cloud.resume.DEFAULT_TIMEOUT`).  Any failure is
+    logged and swallowed so a bad checkpoint never blocks a healthy
+    server from starting.  URLs are logged with their query string
+    redacted (presigned signatures are credentials).
+
+    Parameters
+    ----------
+    server : SimulationServer
+        Owner of the ``GraphManager`` to restore into.
+    environ : dict, optional
+        Environment mapping; defaults to :data:`os.environ`.
+
+    Returns
+    -------
+    dict or None
+        The manifest when the resume succeeded, else ``None`` (nothing
+        requested, graph empty, or the resume failed).
+    """
+    env = os.environ if environ is None else environ
+    url = env.get(RESUME_URL_ENV, "")
+    if not url:
+        return None
+    shown = redact_url(url)
+    node_names = getattr(server.gm, "node_names", None)
+    if node_names is not None and len(node_names) == 0:
+        # TODO(graph loading): main() has no graph source yet (MADDENING_GRAPH_USD
+        # is a stub), so a checkpoint can never match.  Say so instead of
+        # failing later with "Checkpoint node mismatch".
+        logger.error(
+            "%s=%s is set but the server's graph has no nodes; resume is "
+            "impossible until a graph is loaded (MADDENING_GRAPH_USD loading is "
+            "not implemented). Starting fresh.",
+            RESUME_URL_ENV, shown,
+        )
+        return None
+    manifest_url = env.get(RESUME_MANIFEST_URL_ENV) or None
+    timeout_raw = env.get(RESUME_TIMEOUT_ENV, "")
+    kwargs: dict = {}
+    if timeout_raw:
+        try:
+            kwargs["timeout"] = float(timeout_raw)
+        except ValueError:
+            logger.warning(
+                "Ignoring non-numeric %s=%r; using the default timeout",
+                RESUME_TIMEOUT_ENV, timeout_raw,
+            )
+    try:
+        manifest = resume_from_url(server, url, manifest_url=manifest_url, **kwargs)
+    except Exception:
+        # Non-fatal: log and continue with the in-memory state.
+        logger.exception("Failed to resume from %s; starting fresh", shown)
+        return None
+    extra = manifest.get("extra") or {}
+    logger.info(
+        "Resumed simulation state from %s (schema_version=%s size_bytes=%s "
+        "sha256=%s session_id=%s stage_at_snapshot=%s)",
+        shown,
+        manifest.get("schema_version"),
+        manifest.get("size_bytes"),
+        (manifest.get("sha256") or "")[:12] or None,
+        extra.get("session_id"),
+        extra.get("stage_at_snapshot"),
+    )
+    return manifest
+
+
+def redact_url(url: str) -> str:
+    """*url* with its query string replaced by ``<redacted>`` for logging.
+
+    Presigned URLs carry their signature in the query string, so the
+    raw URL must never reach the container log.  The fragment is
+    dropped too; scheme, host and path are kept so the log still says
+    where the checkpoint came from.
+    """
+    import urllib.parse
+
+    parts = urllib.parse.urlsplit(url)
+    if not parts.query and not parts.fragment:
+        return url
+    return urllib.parse.urlunsplit(
+        parts._replace(query="<redacted>" if parts.query else "", fragment=""),
+    )
+
+
+def resume_from_url(
+    server,
+    url: str,
+    *,
+    skip_integrity_check: bool = False,
+    manifest_url: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> dict:
     """Download a checkpoint from *url* and restore the server's graph.
 
     Used by the cloud entrypoint when the ``RESUME_FROM_URL`` env var
     is set — typically by the orchestrator that just relaunched after
     a spot preemption.
 
-    Supported URL schemes: ``file://``, ``http(s)://``, and the ``fsspec``
-    cloud-storage schemes; see :func:`maddening.cloud.resume.download_and_load_state`.
+    Supported URL schemes are the closed allow-list of
+    :func:`maddening.cloud.resume.download_and_load_state` (``file://``,
+    ``http(s)://`` and the listed ``fsspec`` cloud-storage schemes).
+    *manifest_url* and *timeout* are forwarded unchanged (``None`` keeps
+    the transport's defaults).
 
     Returns the checkpoint manifest dict for caller logging.
     """
     from maddening.cloud.resume import download_and_load_state
+    kwargs: dict = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     return download_and_load_state(
-        server.gm, url, skip_integrity_check=skip_integrity_check,
+        server.gm, url,
+        skip_integrity_check=skip_integrity_check,
+        manifest_url=manifest_url,
+        **kwargs,
     )
 
 

@@ -87,10 +87,24 @@ latency rather than actual compute.
   depends on each iteration's boundary inputs (not hoistable), only nodes
   with interface DOFs pay it, and on a GPU heat chain (4 x 64 cells) the
   whole coupling cost is 0.04 ms/step.
-- Remaining lever for this graph is on MIME's side: `max_iterations=8`
-  (or an `"interface"` norm with `rtol`) so the group converges instead of
-  truncating one order short of tolerance, and Aitken acceleration
-  (contraction ~16x per iteration suggests 2–3 iterations would do).
+- Remaining lever for this graph is on MIME's side.  Measured (same
+  graph, same 20-step start, 100 steps, RTX A2000; `|dpos|` is the max
+  body-position difference against MIME's current cap-6 result, position
+  scale 7e-4 m):
+
+  | group config                      | ms/step | iters | converged | dpos    |
+  |-----------------------------------|--------:|------:|----------:|--------:|
+  | cap 6, L2 1e-6 (MIME today)       |  1.66   | 5.0   |   8 %     | —       |
+  | cap 8                             |  2.03   | 6.6   |  74 %     | 3.5e-10 |
+  | cap 12, aitken                    |  2.20   | 8.9   |  71 %     | 3.5e-10 |
+  | cap 12, iqn-ils                   |  4.65   | 7.5   |  87 %     | 1.4e-9  |
+  | cap 12, interface norm rtol 1e-4  |  1.60   | 3.1   | 100 %     | 1.2e-8  |
+
+  Recommendation for MIME: `convergence_norm="interface", rtol=1e-4`
+  (with a cap of 12 as a guard): the group converges on every step in
+  ~3 iterations, is the fastest variant, and differs from today's
+  truncated result by 1.6e-5 relative.  Aitken does not help on this
+  fixed point; IQN-ILS costs more per iteration than it saves at 5 nodes.
 
 **Sketch** (original):
 

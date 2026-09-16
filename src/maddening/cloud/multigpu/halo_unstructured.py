@@ -46,7 +46,11 @@ import jax.numpy as jnp
 from jax import lax
 import numpy as np
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
+
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class UnstructuredPartitionLayout:
     """Per-shard index tables for graph-partitioned sharding.
@@ -137,6 +141,7 @@ class UnstructuredPartitionLayout:
         return int(matches[0])
 
 
+@stability(StabilityLevel.EVOLVING)
 def build_unstructured_partition(
     *,
     partition_assignment: np.ndarray,
@@ -274,6 +279,7 @@ def build_unstructured_partition(
     )
 
 
+@stability(StabilityLevel.EVOLVING)
 def exchange_unstructured(
     local: jax.Array,
     *,
@@ -418,6 +424,7 @@ def _build_ghost_source_table(
     return (src_of_slot, k_in_src)
 
 
+@stability(StabilityLevel.EVOLVING)
 def partition_value(
     *,
     value: np.ndarray,
@@ -450,6 +457,7 @@ def partition_value(
     return out
 
 
+@stability(StabilityLevel.EVOLVING)
 def gather_value(
     *,
     per_shard: np.ndarray,

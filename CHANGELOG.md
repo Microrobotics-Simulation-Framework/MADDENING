@@ -176,6 +176,35 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   with a `"fit_progress"` event (`EVENT_FIT_PROGRESS`: method, iteration,
   loss, params) every `notify_every` iterations, so the REST relay and
   live stage can show a calibration as it runs.
+- **v0.4.0 plan items (sharded solvers, coupling, stability):**
+  `sharded_cg` / `sharded_gmres` gain `differentiable=True`, which routes
+  the solve through `lax.custom_linear_solve` so `jax.grad` and `jax.jvp`
+  through the result — and the IFT adjoint of a coupling group whose node
+  solves with them — are exact linear-solve adjoints using the same
+  backend *and the same preconditioner* in the adjoint solve (`iters` is
+  then -1; off by default to keep the STABLE result contract).
+  `jacobi_preconditioner(diag)` and `block_jacobi_preconditioner(blocks)`
+  are the first users of the `preconditioner=` hook; `backend="lineax"`
+  now refuses a preconditioner instead of silently dropping it.  Gradient
+  parity through the preconditioned solve is tested against the dense
+  reference (reverse and forward mode, RHS and operator coefficients) and
+  on a 4-device CPU-virtual mesh.  C1: a multi-physics IQN-IMVJ test
+  (heat rod ⊗ spring, different operators per sub-domain) through the
+  IFT while_loop with cross-timestep warm start, fori parity and a
+  finite-difference gradient check.  Second stability wave: the
+  unstructured partition layout / halo exchange / partition + gather
+  helpers, `SidecarConfig` and `FMUState` are tagged `EVOLVING`.
+  C4: `SimulationNode.domain_integral_axes()` — a domain integral can be
+  reduced over a subset of mesh axes (one leading axis per unreduced
+  axis) or not at all (per-shard values stacked), on both sharded
+  wrappers; a body-surface integral living on some shards no longer
+  needs a full-mesh `psum`.
+- The IFT Krylov adjoint raises an actionable `ImportError` naming
+  `pip install maddening[ift]` (and the `linear_solver='dense'` fallback)
+  when lineax is missing; `tests/core/test_solver_ift_no_lineax.py`.
+- Hypothesis property over random graphs of built-in nodes: the compiled
+  step must trace exactly once across steps and after `set_node_state`
+  (`test_hypothesis_retrace.py`).
 - REST `PUT /graph/params/{node}` validates values against the node's
   `ParamSpec` bounds before writing anything (400 with the offending leaf).
 - `maddening.testing.strategies.node_states` samples bool / integer state
@@ -244,6 +273,17 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   per declared input on every call (~1.5 ms/step on GPU for a graph with
   external inputs stepped without explicit inputs); the zero arrays are
   now allocated once per compile and shared (outer dicts stay fresh).
+- `unflatten_coupled_state` returned every field as float32, so an
+  integer / boolean leaf of a node inside a coupling group came back as
+  float after each step (semantic drift, and a retrace of the jitted
+  step); it now restores each field's dtype.
+- Gauss-Seidel coupling with a *flux* edge whose consumer is scheduled
+  before its producer raised `KeyError` on the first pass; fluxes are now
+  seeded from the previous iterate (two sweeps, producers may depend on
+  each other) and overwritten as producers update.  IQN acceleration
+  derived its interface fields from edge source fields, so a flux edge
+  (not a state field) raised `KeyError` at compile; a flux source now maps
+  to the producer's state fields.
 - `LBMPipeNode` (multiphase): `_shan_chen_force` used `np.exp` on
   `rho_wall / rho_0`, which are traced now that the graph injects params;
   five multiphase graph tests failed with a tracer-conversion error.  Now

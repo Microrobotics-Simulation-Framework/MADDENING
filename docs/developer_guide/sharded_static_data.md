@@ -224,11 +224,14 @@ invalidate cleanly even when shape and dtype are unchanged.
 
 ## What's still TODO
 
-* **Partial-axis psum.**  `domain_integral_fields()` triggers a
-  full-mesh `psum` over every mesh axis.  Reductions over a
-  subset of axes (e.g. for outputs that vary along one axis but
-  integrate along the others) are out of scope for v0.2.1 — open
-  an issue if you need it.
+* ~~**Partial-axis psum.**~~  Done in v0.4.0: override
+  `domain_integral_axes()` to map an integral key to the mesh axes it
+  is reduced over (`{"drag": ("spatial_z",)}`); the result keeps one
+  leading dimension per *unreduced* mesh axis, sharded along it, and an
+  empty tuple stacks the per-shard partial values without reducing.  A
+  key without an entry is still `psum`-med over the full mesh.  Both
+  `ShardedStencilNode` and `ShardedUnstructuredNode` honour it
+  (`tests/cloud/multigpu/test_partial_axis_integrals.py`).
 * **Sharded static arrays without halos.**  v0.2.1 rejects a
   sharded `StaticArray` whose `shard_axis` doesn't appear in
   `node.halo_width()`.  A future relaxation could allow such

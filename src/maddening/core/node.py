@@ -404,6 +404,20 @@ class SimulationNode(ABC):
             )
         return self.update(state_padded, boundary_inputs, dt)
 
+    def domain_integral_axes(self) -> dict[str, tuple[str, ...]]:
+        """Mesh axes to reduce each domain integral over (C4, v0.4.0).
+
+        Default: empty dict = every key in :meth:`domain_integral_fields`
+        is ``psum``-med over the *full* mesh.  A key mapped to a tuple of
+        mesh-axis names is reduced over those axes only; the result then
+        keeps one leading dimension per *unreduced* mesh axis (in mesh
+        order), sharded along it — e.g. a body-surface drag that lives
+        on the shards of one pencil row, or a per-slab integral.  An
+        empty tuple means no reduction: the per-shard partial values are
+        stacked.  Values must be floating-point.
+        """
+        return {}
+
     def domain_integral_fields(self) -> set[str]:
         """Output keys that are domain integrals (cross-shard reductions).
 

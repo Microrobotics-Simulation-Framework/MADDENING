@@ -46,7 +46,16 @@ All three share the same substrate:
   signature is identical.
 * Outputs are classified the same way: keys in `state_fields()` have
   halo/padding stripped; keys in `domain_integral_fields()` get
-  `lax.psum`-ed across the mesh; other keys raise.
+  `lax.psum`-ed across the mesh — or across the subset of mesh axes
+  `domain_integral_axes()` names for them, keeping a leading axis per
+  unreduced mesh axis; other keys raise.
+* The sharded Krylov solvers (`sharded_cg` / `sharded_gmres`) take a
+  `preconditioner=` (`jacobi_preconditioner`, `block_jacobi_preconditioner`
+  ship) and `differentiable=True`, which routes the solve through
+  `lax.custom_linear_solve` so a node that solves inside a differentiated
+  step gets an exact linear-solve adjoint with the same preconditioner
+  applied in the adjoint solve; the iteration count is then reported as
+  -1.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
 

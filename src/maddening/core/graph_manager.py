@@ -121,6 +121,26 @@ def _import_lineax():
     return lx
 
 
+def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
+    """Per-node state fields to accelerate for a coupling group.
+
+    The fields the group's internal edges *read* from each producer.  An
+    edge whose ``source_field`` is not a state field (a boundary flux
+    from ``compute_boundary_fluxes``) is a function of the producer's
+    state, so the producer's whole state stands in for it.  ``None``
+    when no internal edge exists (accelerate everything).
+    """
+    ifields: dict[str, set] = {}
+    for edge in edges:
+        if edge.source_node in group_nodes and edge.target_node in group_nodes:
+            fields = state.get(edge.source_node, {})
+            if edge.source_field in fields:
+                ifields.setdefault(edge.source_node, set()).add(edge.source_field)
+            else:
+                ifields.setdefault(edge.source_node, set()).update(fields.keys())
+    return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
+
+
 def _strong_typed(tree):
     """Strip JAX weak typing from every array leaf.
 
@@ -681,18 +701,9 @@ def _run_coupled_block_impl(
         if group.accelerated_fields is not None:
             accel_fields = group.accelerated_fields
         else:
-            interface_fields: dict[str, set] = {}
-            for edge in group_internal_list:
-                interface_fields.setdefault(
-                    edge.source_node, set()
-                ).add(edge.source_field)
-            if interface_fields:
-                accel_fields = {
-                    nn: tuple(sorted(fields))
-                    for nn, fields in interface_fields.items()
-                }
-            else:
-                accel_fields = None
+            accel_fields = _interface_state_fields(
+                group_internal_list, group.nodes, new_state,
+            )
     else:
         accel_fields = None
 
@@ -731,7 +742,9 @@ def _run_coupled_block_impl(
         spec = nodes[nn]
         return runtime_dt if runtime_dt is not None else spec.timestep
 
-    def _resolve_value(edge, src_state, flux_s):
+    _MISSING = object()
+
+    def _resolve_value(edge, src_state, flux_s, strict=True):
         """Get value from state or flux dict."""
         src_nn = edge.source_node
         src_dict = src_state.get(src_nn, {})
@@ -739,18 +752,26 @@ def _run_coupled_block_impl(
             return src_dict[edge.source_field]
         if flux_s and src_nn in flux_s and edge.source_field in flux_s[src_nn]:
             return flux_s[src_nn][edge.source_field]
+        if not strict:
+            return _MISSING
         # Fall back (will KeyError if truly missing)
         return src_state[src_nn][edge.source_field]
 
-    def _resolve_boundary(nn, s, flux_s=None):
-        """Resolve boundary inputs for node nn from state s."""
+    def _resolve_boundary(nn, s, flux_s=None, strict=True):
+        """Resolve boundary inputs for node nn from state s.
+
+        ``strict=False`` omits inputs whose flux is not available yet
+        (used to seed fluxes from the previous iterate before a pass).
+        """
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
             if edge in back_edge_set and edge not in group_internal:
                 src_state = full_state
             else:
                 src_state = s
-            value = _resolve_value(edge, src_state, flux_s)
+            value = _resolve_value(edge, src_state, flux_s, strict=strict)
+            if value is _MISSING:
+                continue
             value = _apply_edge(edge, value, node_params)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
@@ -864,6 +885,21 @@ def _run_coupled_block_impl(
         """Gauss-Seidel: sequential updates, each sees latest results."""
         s = {k: v for k, v in latest_results.items()}
         flux_s: dict[str, dict] = {}
+        if has_flux_edges:
+            # A flux consumer scheduled *before* its producer reads the
+            # producer's flux from the previous iterate (the fixed-point
+            # semantics); once the producer updates below, its entry is
+            # overwritten for the nodes that follow it.  Without this a
+            # back-edge on a flux field raised KeyError in the first pass.
+            # Two sweeps: producers may need each other's fluxes, so the
+            # first sweep tolerates missing ones, the second has them all.
+            for strict in (False, True):
+                for nn in group_node_names:
+                    if nn in flux_producing_nodes:
+                        bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
+                        flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
+                            latest_results[nn], bi0, _get_dt(nn)
+                        )
         for nn in group_node_names:
             if use_subcycling and group_dividers[nn] > 1:
                 n_sub = group_dividers[nn]
@@ -2360,17 +2396,7 @@ class GraphManager:
                     if g.accelerated_fields is not None:
                         af = g.accelerated_fields
                     else:
-                        ifields: dict[str, set] = {}
-                        for edge in self._edges:
-                            if (edge.source_node in g.nodes
-                                    and edge.target_node in g.nodes):
-                                ifields.setdefault(
-                                    edge.source_node, set()
-                                ).add(edge.source_field)
-                        af = {
-                            nn: tuple(sorted(fs))
-                            for nn, fs in ifields.items()
-                        } if ifields else None
+                        af = _interface_state_fields(self._edges, g.nodes, self._state)
                     n_dof = flatten_coupled_state(
                         self._state, list(g.nodes), fields=af
                     ).shape[0]

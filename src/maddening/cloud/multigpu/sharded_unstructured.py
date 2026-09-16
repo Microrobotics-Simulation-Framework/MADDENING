@@ -289,8 +289,13 @@ class ShardedUnstructuredNode(SimulationNode):
         bi_specs = {k: P() for k in boundary_inputs}
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
+        axes_decl = dict(getattr(self._inner, "domain_integral_axes", dict)())
         for k in self._inner.domain_integral_fields():
-            out_specs[k] = P()  # fully replicated after psum
+            axes = axes_decl.get(k)
+            if axes is None or self._mesh_axis in tuple(axes):
+                out_specs[k] = P()  # fully replicated after psum
+            else:
+                out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
 
         local_fn = self._build_local_update()
 
@@ -311,6 +316,7 @@ class ShardedUnstructuredNode(SimulationNode):
         n_local_max = layout.n_local_max
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
+        integral_axes = dict(getattr(inner, 'domain_integral_axes', dict)())
 
         def _local_update(local_state, local_bi, local_dt, local_static):
             # Strip the leading device dimension that shard_map already
@@ -348,7 +354,11 @@ class ShardedUnstructuredNode(SimulationNode):
                     # Strip the ghost tail.
                     out[k] = v[:n_local_max]
                 elif k in integrals:
-                    out[k] = lax.psum(v, axis_name=mesh_axis)
+                    axes = integral_axes.get(k)
+                    if axes is None or mesh_axis in tuple(axes):
+                        out[k] = lax.psum(v, axis_name=mesh_axis)
+                    else:
+                        out[k] = v[None]          # stacked along the mesh axis
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "

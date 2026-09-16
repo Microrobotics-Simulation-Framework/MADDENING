@@ -71,6 +71,7 @@ def _copy_tree(tree: Any) -> Any:
     return tree
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
     """Static configuration handed to :class:`FmuSidecar` at startup.

@@ -279,6 +279,25 @@ class ShardedStencilNode(SimulationNode):
         """Proxy to the wrapped node's declaration."""
         return self._inner.domain_integral_fields()
 
+    def domain_integral_axes(self) -> dict[str, tuple[str, ...]]:
+        """Proxy to the wrapped node's declaration."""
+        return dict(getattr(self._inner, "domain_integral_axes", dict)())
+
+    def _integral_reduction(self, key: str):
+        """``(reduce_axes, unreduced_axes)`` for a domain-integral key."""
+        mesh_axes = tuple(self._mesh.axis_names)
+        axes = self.domain_integral_axes().get(key)
+        if axes is None:
+            return mesh_axes, ()
+        axes = tuple(axes)
+        unknown = [a for a in axes if a not in mesh_axes]
+        if unknown:
+            raise ValueError(
+                f"domain_integral_axes[{key!r}] names mesh axes {unknown} "
+                f"not in mesh.axis_names={mesh_axes}"
+            )
+        return axes, tuple(a for a in mesh_axes if a not in axes)
+
     # ------------------------------------------------------------------
     # update path
     # ------------------------------------------------------------------
@@ -303,6 +322,7 @@ class ShardedStencilNode(SimulationNode):
         halo_widths = inner.halo_width()
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
+        integral_reduction = {k: self._integral_reduction(k) for k in integrals}
         accepts_static_padded = self._inner_accepts_static_padded
         accepts_shard_info = self._inner_accepts_shard_info
         mesh_axis_tup = tuple(mesh.axis_names)
@@ -403,7 +423,11 @@ class ShardedStencilNode(SimulationNode):
                 if k in state_set:
                     out[k] = strip_fn(v, original=local_state[k])
                 elif k in integrals:
-                    out[k] = lax.psum(v, axis_name=mesh_axis_tup)
+                    reduce_axes, unreduced = integral_reduction[k]
+                    red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v
+                    # One leading axis per unreduced mesh axis: the local
+                    # value is that shard's slice of the stacked result.
+                    out[k] = red[(None,) * len(unreduced)] if unreduced else red
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "
@@ -456,7 +480,8 @@ class ShardedStencilNode(SimulationNode):
         # so shard_map's pytree consistency check catches it too.
         out_specs = dict(state_specs)
         for k in self._inner.domain_integral_fields():
-            out_specs[k] = P()
+            _, unreduced = self._integral_reduction(k)
+            out_specs[k] = P(*unreduced) if unreduced else P()
 
         sm = shard_map(
             self._local_update_fn,

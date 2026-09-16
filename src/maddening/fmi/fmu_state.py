@@ -19,6 +19,7 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class FMUState:
     """Opaque handle holding a frozen snapshot of a MADDENING graph state.

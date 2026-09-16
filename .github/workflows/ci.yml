@@ -7,7 +7,58 @@ on:
     branches: [main, "release/**"]
 
 jobs:
+  # Decide which lanes a change needs.  A change that touches only
+  # documentation (docs/, Markdown, plans/, .claude/, LICENSE) runs the
+  # compliance job alone: that job owns the docs checks (citations,
+  # implementation mapping, anomaly registry) and the only tests that read
+  # docs/ (tests/compliance).  Anything else, including this workflow, runs
+  # every lane.  A push with no usable base (new branch, force-push) counts
+  # as code.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
+            base="$(git merge-base "origin/$BASE_REF" HEAD || true)"
+          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          else
+            base=""
+          fi
+          if [ -z "$base" ]; then
+            echo "no diff base; running every lane"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          echo "changed files vs $base:"; printf '  %s\n' $changed
+          code=false
+          for f in $changed; do
+            case "$f" in
+              docs/*|plans/*|.claude/*|*.md|*.rst|LICENSE|LICENSE.*|CITATION.cff) ;;
+              *) code=true; break ;;
+            esac
+          done
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code lanes needed: $code"
+
   test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -45,6 +96,8 @@ jobs:
           python -m pytest tests/ -v --tb=short --ignore=tests/viz
 
   test-usd:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +156,8 @@ jobs:
           python -m pytest tests/compliance/ -v --tb=short
 
   verify-hypothesis:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

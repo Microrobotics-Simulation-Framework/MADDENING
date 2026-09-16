@@ -48,8 +48,13 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   the traffic; `tcp_bridge` gains `recv_raw`, `send_binary`,
   `encode_binary`, `decode_binary`, `values_of`, `state_of`,
   `PROTOCOL_VERSION`.  C unit tests, the sanitizer fuzz harness (now
-  also binary-flagged replies) and `tests/fmi/test_binary_frames.py`
-  cover it; user guide: "Wire protocol" in `fmu_export.md`.
+  also binary-flagged replies), `tests/fmi/test_binary_frames.py` and the
+  Hypothesis properties in `tests/fmi/test_binary_frames_properties.py`
+  (bitwise float64 round trip incl. NaN payloads / infinities / negative
+  zero / subnormals; any byte string decodes consistently or raises
+  `ValueError`; any flagged frame after a binary hello gets exactly one
+  reply and the connection keeps serving) cover it; user guide: "Wire
+  protocol" in `fmu_export.md`.
 - **Per-neighbour unstructured halo exchange** (v0.4.0 plan hard gate,
   the hardware-independent part).  `exchange_unstructured(...,
   method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`

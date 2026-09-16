@@ -62,6 +62,54 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   (Green's-function reference for `-u'' + u = f`).  `ift_linear_solve` is
   promoted from `EXPERIMENTAL` to `STABLE` with its signature unchanged, as
   its v0.3.1 docstring promised.  The wavelet subclass stays post-1.0.
+- **Interface mappings are serialisable** (`MappingSpec`, the "13(a)" half of
+  the deferred mapping-serialisation item).  Every mapping factory
+  (`rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
+  `matrix_mapping`) attaches a `MappingSpec` — kind, hyper-parameters and
+  *references* to its point sets, never the weights — which
+  `GraphManager.to_dict` / `from_dict`, the config helpers and
+  `save_graph_to_usd` / `load_graph_from_usd` (attribute
+  `maddening:mappingSpecJson`) now carry instead of refusing mapped edges.
+  Point references are `{"node": name, "field": key}` (a node's
+  `static_data` or array-valued parameter), `{"asset": "<file>.npy|.npz"}`
+  (relative to the config / stage directory, `base_dir=`; no absolute
+  paths or `..`) or an inline list for at most 64 points; the factories
+  take `source_ref=` / `target_ref=` (`matrix_mapping(asset=)` — an
+  explicit matrix is never inlined).  On load the mapping is rebuilt by
+  the same factory (weights bitwise equal) and registered in
+  `params["mappings"]` as `add_edge(mapping=)` does — which now also
+  accepts a spec directly; a checkpoint loaded afterwards keeps its
+  (possibly trained) weights.  A mapping without a complete spec is
+  refused by the writers with a message naming the argument to pass
+  (`to_dict(strict_mappings=False)` for display; the REST `GET /graph`
+  uses it).  The FMI exporter is unchanged (mapping weights never reach
+  the FMU).  Guide: algorithm_guide/coupling/interface_mapping.md,
+  "Serialisation".
+- **Multi-GPU hardware-session tooling** (local preparation for the
+  human-supervised 4xA100 session; nothing here launches a pod).
+  `benchmarks/multigpu/run_pod.py` is the pod-side runner: `--goal
+  exchange` times `all_to_all` vs `ppermute` unstructured halo exchanges
+  at 1e5-1e6 cells (warmup + repeats, min/median, bytes from
+  `exchange_traffic()`, bit-identity), `--goal forward` runs a
+  `ShardedUnstructuredNode` at 1e6 cells on a real mesh (`--mesh
+  edges.npz`) or a synthetic one against the unsharded node, `--goal
+  gradient` reports sharded-vs-unsharded gradient parity through a
+  rollout and the preconditioned `sharded_cg`; each goal writes one JSON
+  under `--out`, `--summarise DIR` prints the ranking table and the
+  ppermute-vs-all_to_all recommendation (only real-GPU points at >= 1e5
+  cells decide), and `--dry-run` proves the whole script on CPU virtual
+  devices (`tests/cloud/multigpu/test_run_pod_dry_run.py`, slow lane).
+  `benchmarks/multigpu/README.md` is the session runbook (launch by
+  hand with `CloudLauncher`/SkyPilot, copy-back, stop the pod).  The
+  `tests/cloud/multigpu` conftest now forces virtual host devices only
+  when no accelerator is about to be used (`JAX_PLATFORMS` naming
+  cuda/gpu/rocm/tpu, or unset with a CUDA jaxlib plugin + `nvidia-smi`
+  GPU + visible devices, leaves `XLA_FLAGS` alone; `MADDENING_VIRTUAL_DEVICES=N`
+  overrides either way; `tests/cloud/multigpu/test_conftest_device_policy.py`),
+  so on a GPU pod with `JAX_PLATFORMS=cuda` the multi-device tests run on
+  the GPUs instead of 16 virtual CPUs.  The cloud examples' install
+  command pinned `jax[cuda12]>=0.4,<0.6` (uninstallable next to this
+  package); they now use the `pyproject` range `>=0.10,<0.13`.
 - **FMU sidecar protocol 2: binary frames for bulk payloads.**  Bit 31 of
   the 4-byte length prefix marks a binary frame (`[u32 BE header_len]
   [header JSON][raw bytes]`); after a `{"op":"hello","protocol":2,

@@ -8,7 +8,10 @@ from a USD stage.
 
 Edge transforms are serialized by their registered name (see
 :mod:`maddening.core.transforms`).  Unregistered transforms raise
-an error during serialization.
+an error during serialization.  Edge interface mappings are serialized
+as their :class:`~maddening.core.coupling.mapping_spec.MappingSpec`
+(JSON in ``maddening:mappingSpecJson``) and rebuilt on load; the
+weights themselves live in checkpoints, never in the stage.
 """
 
 from __future__ import annotations
@@ -119,14 +122,12 @@ def save_graph_to_usd(
         Path for the root prim.
     """
     # Validate edge transforms / mappings before writing (fail early)
+    from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+        check_mapping_serialisable,
+    )
     for edge in gm._edges:
         if edge.mapping is not None:
-            raise ValueError(
-                f"Edge {edge.key} carries an interface mapping "
-                f"({edge.mapping!r}); USD serialisation of mappings "
-                "(MappingSpec) is not implemented yet — see the interface "
-                "mapping guide.  Remove the mapping or use transform=."
-            )
+            check_mapping_serialisable(edge.mapping, edge_key=edge.key)
         if edge.transform is not None:
             tname = get_transform_name(edge.transform)
             if tname is None:
@@ -230,6 +231,14 @@ def save_graph_to_usd(
             if edge.transform is not None:
                 tname = get_transform_name(edge.transform)
                 prim.GetAttribute("maddening:transformName").Set(tname)
+            if edge.mapping is not None:
+                # The spec (kind, hyper-parameters, point references) plus
+                # the shape ``describe()`` adds, as one JSON string — the
+                # idiom used for ParamSpec overrides above.
+                attr = prim.CreateAttribute(
+                    "maddening:mappingSpecJson", Sdf.ValueTypeNames.String,
+                )
+                attr.Set(json.dumps(edge.mapping.describe()))
 
         # Coupling group attributes
         for i, group in enumerate(gm._coupling_groups):
@@ -285,6 +294,7 @@ def save_graph_to_usd(
 def load_graph_from_usd(
     stage: Usd.Stage,
     root_path: str = "/Simulation",
+    base_dir=None,
 ) -> "GraphManager":
     """Reconstruct a GraphManager from a USD stage.
 
@@ -294,6 +304,11 @@ def load_graph_from_usd(
         The USD stage containing a MADDENING simulation graph.
     root_path : str
         Path of the root ``MaddeningSimulationGraph`` prim.
+    base_dir : path-like, optional
+        Directory that ``{"asset": ...}`` point references of edge
+        mappings are relative to.  Defaults to the directory of the
+        stage's root layer when it is a file, else the working
+        directory.
 
     Returns
     -------
@@ -308,6 +323,11 @@ def load_graph_from_usd(
         raise ValueError(f"No prim at {root_path}")
 
     gm = GraphManager()
+    if base_dir is None:
+        real = stage.GetRootLayer().realPath
+        if real:
+            from pathlib import Path  # noqa: PLC0415
+            base_dir = Path(real).parent
 
     # --- Nodes ---
     nodes_prim = stage.GetPrimAtPath(root_path + "/nodes")
@@ -369,6 +389,17 @@ def load_graph_from_usd(
             if transform_name:
                 transform = resolve_transform(transform_name)
 
+            mapping = None
+            spec_attr = child.GetAttribute("maddening:mappingSpecJson")
+            spec_json = spec_attr.Get() if spec_attr else None
+            if spec_json:
+                mapping = gm._rebuild_mapping(  # noqa: SLF001
+                    {"source_node": source_node, "target_node": target_node,
+                     "source_field": source_field, "target_field": target_field,
+                     "mapping": json.loads(spec_json)},
+                    gm.point_resolver(base_dir),
+                )
+
             gm.add_edge(
                 source_node,
                 target_node,
@@ -376,6 +407,7 @@ def load_graph_from_usd(
                 target_field,
                 transform=transform,
                 additive=bool(additive) if additive is not None else False,
+                mapping=mapping,
             )
 
     # --- Coupling groups ---

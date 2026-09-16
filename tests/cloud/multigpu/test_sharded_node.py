@@ -1,8 +1,5 @@
 """Tests for ShardedPointwiseNode data-parallel wrapper."""
 
-import os
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
-
 import jax
 import jax.numpy as jnp
 import pytest

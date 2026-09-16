@@ -1,17 +1,13 @@
 """Tests for 2-D (pencil) device mesh creation.
 
-Forces 8 virtual CPU devices via ``XLA_FLAGS`` before JAX is imported.
-Covers M2 of the v0.2 halo-exchange roadmap.
+Needs 8 (some tests 16) virtual CPU devices, which the directory's
+conftest provides; skips where fewer are visible.  Covers M2 of the v0.2
+halo-exchange roadmap.
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-# Force 8 virtual CPU devices. Must be set before JAX is imported.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
 
 import jax  # noqa: E402
 

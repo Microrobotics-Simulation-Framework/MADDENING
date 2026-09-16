@@ -150,3 +150,31 @@ def test_gradient_wrt_diffusivity_through_sharded_heat_step():
 
     g = jax.grad(loss)(jnp.float32(0.1))
     assert bool(jnp.isfinite(g)) and float(g) != 0.0
+
+
+def test_sharded_heat_takes_a_grid_shaped_source_like_the_unsharded_node():
+    """audit round 4: ShardedStencilNode halo-pads a grid-shaped input and
+    HeatNode.update_padded expected it at the unpadded local shape."""
+    import numpy as np
+    from maddening.cloud.multigpu.device_mesh import create_device_mesh
+    from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+    from maddening.nodes.heat import HeatNode
+
+    def mk():
+        return HeatNode("h", 1e-4, n_cells=16, thermal_diffusivity=0.1, initial_temperature=1.0)
+
+    mesh = create_device_mesh(shape=(4,))
+    sh = ShardedStencilNode(mk(), mesh, axis_map={"devices": 0}, boundary="edge")
+    un = mk()
+    rng = np.random.default_rng(0)
+    # only the per-cell source: the global Dirichlet ends are a separate
+    # (pre-existing) sharded-heat concern and are not what this checks
+    bi = {"heat_source": jnp.asarray(rng.standard_normal(16), jnp.float32)}
+    a = b = un.initial_state()
+    for _ in range(3):
+        a, b = sh.update(a, bi, 1e-4), un.update(b, bi, 1e-4)
+    # interior cells: the two global end cells follow the wrapper's halo
+    # policy ("edge") rather than the unsharded node's self-Dirichlet
+    # fallback, a pre-existing sharded-heat semantic outside this check
+    np.testing.assert_allclose(np.asarray(a["temperature"])[1:-1],
+                               np.asarray(b["temperature"])[1:-1], rtol=1e-5, atol=1e-6)

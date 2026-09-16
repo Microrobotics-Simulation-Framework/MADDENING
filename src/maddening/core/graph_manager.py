@@ -1749,6 +1749,20 @@ class GraphManager:
             )
         return fresh
 
+    def _check_param_shapes(self, section: str, owner: str, leaves: dict) -> None:
+        """A leaf of the wrong shape would broadcast the node's *state* to
+        that shape for good; shapes are static, so this is free."""
+        expected = (getattr(self, "_params_shapes", None) or {}).get(section, {}).get(owner)
+        if not expected:
+            return
+        for key, v in leaves.items():
+            want = expected.get(key)
+            if want is not None and tuple(jnp.shape(v)) != want:
+                raise ValueError(
+                    f"params[{section!r}][{owner!r}][{key!r}] has shape "
+                    f"{tuple(jnp.shape(v))}, expected {want}"
+                )
+
     def _coerce_params_leaves(self, tree: dict) -> None:
         """In place: non-array / weak-typed leaves -> strongly typed arrays
         of the dtype the leaf had at compile time (float32 fallback)."""
@@ -1763,6 +1777,7 @@ class GraphManager:
                         leaves[key] = jnp.asarray(v, dtype=dt or jnp.float32)
                     elif getattr(v, "weak_type", False):
                         leaves[key] = v.astype(v.dtype)
+                self._check_param_shapes(section, owner, leaves)
 
     @property
     def trace_count(self) -> int:
@@ -1863,6 +1878,7 @@ class GraphManager:
                     "gm.step / gm.run_scan(params=...), which completes it "
                     "from the live gm.params."
                 )
+            self._check_param_shapes("nodes", node_name, node_params)
         absent = [
             n for n, sp in self._nodes.items() if sp.accepts_params and n not in nodes
         ]
@@ -1896,6 +1912,7 @@ class GraphManager:
                     f"params['mappings'][{key!r}] has unknown key(s) "
                     f"{sorted(unknown)}; the mapping exposes {sorted(known)}"
                 )
+            self._check_param_shapes("mappings", key, weights)
 
     # ------------------------------------------------------------------
     # ParamSpec: trainable mask, bounds, reparametrisation
@@ -2025,6 +2042,14 @@ class GraphManager:
         """Register a node and initialise its state."""
         if node.name in self._nodes:
             raise ValueError(f"Node '{node.name}' already exists in the graph.")
+        bad = [t for t in ("/", "#", "->") if t in node.name]
+        if not node.name or bad:
+            # These tokens delimit checkpoint keys, mapping slots and edge
+            # keys; a node name containing them corrupts those namespaces.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: must be non-empty and must "
+                f"not contain {bad or ['/', '#', '->']}"
+            )
 
         spec = _NodeSpec(
             node=node,
@@ -2752,6 +2777,13 @@ class GraphManager:
         self._params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
+                for owner, leaves in self.params.get(section, {}).items()
+            }
+            for section in ("nodes", "mappings")
+        }
+        self._params_shapes = {
+            section: {
+                owner: {k: tuple(jnp.shape(v)) for k, v in leaves.items()}
                 for owner, leaves in self.params.get(section, {}).items()
             }
             for section in ("nodes", "mappings")

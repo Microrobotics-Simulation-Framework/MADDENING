@@ -236,7 +236,9 @@ static int read_endpoint(fmi3String resource_path, char *host, size_t hostcap, i
     const char *colon = strrchr(spec, ':');
     if (!colon) return -1;
     size_t hl = (size_t)(colon - spec);
-    if (hl + 1 > hostcap) return -1;
+    /* "[::1]:5555": strip the brackets around an IPv6 literal */
+    if (hl >= 2 && spec[0] == '[' && spec[hl - 1] == ']') { spec += 1; hl -= 2; }
+    if (hl == 0 || hl + 1 > hostcap) return -1;
     memcpy(host, spec, hl); host[hl] = '\0';
     *port = atoi(colon + 1);
     return *port > 0 ? 0 : -1;
@@ -515,6 +517,17 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
     Instance *in = (Instance *)instance;
     FmuState *st = (FmuState *)FMUState;
     if (!in || !st) return fmi3Error;
+    /* The blob is embedded verbatim in a JSON string: only the base64
+     * alphabet the bridge produces is allowed, so importer-supplied bytes
+     * (fmi3DeserializeFMUState) can never break the request framing. */
+    for (size_t i = 0; i < st->n; ++i) {
+        unsigned char c = (unsigned char)st->blob[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              || c == '+' || c == '/' || c == '=')) {
+            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: FMU state blob is not valid");
+            return fmi3Error;
+        }
+    }
     if (req_reserve(in, st->n + 64)) return fmi3Fatal;
     sprintf(in->req, "{\"op\":\"set_state\",\"state\":\"%s\"}", st->blob);
     return bridge_call(in, in->req);

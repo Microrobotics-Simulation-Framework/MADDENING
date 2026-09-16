@@ -130,6 +130,22 @@ class TrainSurrogateRequest(BaseModel):
 # SimulationServer
 # ------------------------------------------------------------------
 
+def _dry_run_node(node) -> None:
+    """Abstractly trace one ``update`` of a freshly built node on its own
+    initial state with zero boundary inputs: catches constants of the
+    wrong type / shape before the node enters the graph."""
+    import jax  # noqa: PLC0415
+
+    state = node.initial_state()
+    bi = {}
+    try:
+        for name, spec in (node.boundary_input_spec() or {}).items():
+            bi[name] = jnp.zeros(tuple(getattr(spec, "shape", ()) or ()), jnp.float32)
+    except Exception:  # noqa: BLE001 - descriptor is advisory
+        bi = {}
+    jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
+
+
 class SimulationServer:
     """Wraps a ``GraphManager`` with a FastAPI HTTP + WebSocket interface.
 
@@ -150,10 +166,15 @@ class SimulationServer:
         self,
         node_registry: dict[str, type[SimulationNode]],
         graph_manager: Optional[GraphManager] = None,
+        checkpoint_root: Optional[str] = None,
         frame_renderer: Optional[Any] = None,
     ) -> None:
         self.registry = dict(node_registry)
         self.gm = graph_manager if graph_manager is not None else GraphManager()
+        # /checkpoint/{save,load} only touch files under this directory
+        # (an unauthenticated client must not choose arbitrary server
+        # paths).  Bind the server to localhost or put it behind auth.
+        self.checkpoint_root = Path(checkpoint_root or Path.cwd() / "checkpoints").resolve()
         self.relay = StateRelay()
         self.runner: Optional[RealtimeRunner] = None
         self._runner_started = False
@@ -282,10 +303,23 @@ class SimulationServer:
                 node = node_cls(name=req.name, timestep=req.timestep, **req.params)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
+            # Nodes do not validate their constants; a bad one only fails
+            # inside the trace and would wedge every later /sim/step.
+            # Trace one update on the node's own initial state (abstractly,
+            # no compute) before it enters the graph.
+            try:
+                _dry_run_node(node)
+            except Exception as exc:  # noqa: BLE001 - any trace failure is a 400
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"node '{req.name}' cannot run with these params: {exc}",
+                )
+            if req.name in self.gm._nodes:
+                raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
             try:
                 self.gm.add_node(node)
             except ValueError as exc:
-                raise HTTPException(status_code=409, detail=str(exc))
+                raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok", "node": node.to_dict()}
 
         @app.delete("/graph/nodes/{name}", tags=["graph"])
@@ -298,10 +332,28 @@ class SimulationServer:
 
         @app.post("/graph/edges", tags=["graph"], status_code=201)
         def add_edge(req: AddEdgeRequest):
-            self.gm.add_edge(
-                source=req.source_node, target=req.target_node,
-                source_field=req.source_field, target_field=req.target_field,
-            )
+            for n in (req.source_node, req.target_node):
+                if n not in self.gm._nodes:
+                    raise HTTPException(status_code=404, detail=f"No node '{n}'.")
+            src = self.gm._nodes[req.source_node].node
+            fields = set(self.gm.get_node_state(req.source_node))
+            try:
+                fields |= set(src.boundary_flux_spec())
+            except Exception:  # noqa: BLE001 - optional descriptor
+                pass
+            if req.source_field not in fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{req.source_node}' has no field or flux '{req.source_field}'. "
+                           f"Available: {sorted(fields)}",
+                )
+            try:
+                self.gm.add_edge(
+                    source=req.source_node, target=req.target_node,
+                    source_field=req.source_field, target_field=req.target_field,
+                )
+            except (ValueError, KeyError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok"}
 
         @app.delete("/graph/edges", tags=["graph"])
@@ -340,11 +392,33 @@ class SimulationServer:
 
         @app.put("/graph/state/{node_name}", tags=["state"])
         def set_node_state(node_name: str, req: SetNodeStateRequest):
-            try:
-                jax_state = _python_to_jax(req.state)
-                self.gm.set_node_state(node_name, jax_state)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
+            """Replace a node's state.  Every field is required, coerced to
+            the live leaf's dtype, and must match its shape and be finite;
+            a 400 names the field and writes nothing."""
+            if node_name not in self.gm._nodes:
+                raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+            live = self.gm.get_node_state(node_name)
+            if set(req.state) != set(live):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"state fields must be exactly {sorted(live)}; got {sorted(req.state)}",
+                )
+            staged = {}
+            for field, value in req.state.items():
+                want = jnp.asarray(live[field])
+                try:
+                    arr = jnp.asarray(value, dtype=want.dtype)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(status_code=400, detail=f"{field}: {exc}")
+                if arr.shape != want.shape:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{field}: expected shape {want.shape}, got {arr.shape}",
+                    )
+                if jnp.issubdtype(arr.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(arr))):
+                    raise HTTPException(status_code=400, detail=f"{field}: value must be finite")
+                staged[field] = arr
+            self.gm.set_node_state(node_name, staged)
             return {"status": "ok"}
 
         # -- parameter endpoints ---------------------------------------------
@@ -398,7 +472,17 @@ class SimulationServer:
                         detail=f"Unknown param '{key}' for node '{node_name}'. "
                                f"Available: {available}",
                     )
-                if key not in live or isinstance(value, bool):
+                if isinstance(value, bool):
+                    # only a genuinely boolean constructor param takes a bool;
+                    # for a numeric leaf it would become 1.0 / 0.0 and drop
+                    # out of the params pytree at the next recompile
+                    if key in live or not isinstance(node.params.get(key), bool):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{key}: expected a number, got a boolean",
+                        )
+                    continue
+                if key not in live:
                     continue
                 try:
                     new = jnp.asarray(value, dtype=live[key].dtype)
@@ -442,20 +526,37 @@ class SimulationServer:
 
         # -- checkpoint endpoints -------------------------------------------
 
+        def _checkpoint_path(name: str) -> Path:
+            root = self.checkpoint_root
+            target = (root / name).resolve()
+            if root != target and root not in target.parents:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"checkpoint path must stay under {root} (got {name!r})",
+                )
+            return target
+
         @app.post("/checkpoint/save", tags=["checkpoint"])
         def checkpoint_save(path: str = "checkpoint.npz"):
+            target = _checkpoint_path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
             try:
-                self.gm.save_state(path)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            return {"status": "ok", "path": path}
+                saved = self.gm.save_state(str(target))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
+            return {"status": "ok", "path": str(saved or target)}
 
         @app.post("/checkpoint/load", tags=["checkpoint"])
         def checkpoint_load(path: str = "checkpoint.npz"):
+            target = _checkpoint_path(path)
+            if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
+                raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
             try:
-                self.gm.load_state(path)
-            except Exception as exc:
+                self.gm.load_state(str(target))
+            except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
+            except Exception:  # noqa: BLE001 - do not leak file/parse internals
+                raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
             return {"status": "ok", "state": self._state_json()}
 
         # -- simulation control endpoints -----------------------------------

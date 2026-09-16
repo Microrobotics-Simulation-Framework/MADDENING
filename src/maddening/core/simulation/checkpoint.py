@@ -207,11 +207,21 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                 f"saved={sorted(saved_fields)}"
             )
 
-    # ---- Apply loaded state ----
+    # ---- Validate shapes, coerce dtypes, then apply ----
+    staged_states: dict[str, dict] = {}
     for node_name in current_nodes:
-        new_state = {
-            field: jnp.array(arr) for field, arr in node_keys[node_name].items()
-        }
+        live = graph_manager.get_node_state(node_name)
+        new_state = {}
+        for field, arr in node_keys[node_name].items():
+            want = jnp.asarray(live[field])
+            if tuple(arr.shape) != tuple(want.shape):
+                raise ValueError(
+                    f"Checkpoint field '{node_name}/{field}' has shape {tuple(arr.shape)}, "
+                    f"graph has {tuple(want.shape)}"
+                )
+            new_state[field] = jnp.asarray(arr, dtype=want.dtype)
+        staged_states[node_name] = new_state
+    for node_name, new_state in staged_states.items():
         graph_manager.set_node_state(node_name, new_state)
 
     # Restore _meta if present in the checkpoint.
@@ -220,9 +230,10 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         raw_state[_META_KEY] = {
             field: jnp.array(arr) for field, arr in meta_keys.items()
         }
-    else:
-        # If checkpoint had no meta but graph currently has it, reset.
-        raw_state.pop(_META_KEY, None)
+    # A checkpoint without ``_meta`` (written by a graph that had none)
+    # keeps the freshly compiled ``_meta`` of *this* graph: a multirate
+    # step counter or coupling history seeded at zero is the right start,
+    # whereas dropping the key made the next step raise KeyError.
 
     # Restore graph parameters for nodes/keys the current graph knows;
     # unknown ones are ignored (a node may have stopped accepting params).

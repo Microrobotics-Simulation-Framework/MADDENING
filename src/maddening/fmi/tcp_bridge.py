@@ -73,14 +73,19 @@ def _recv_exact(conn: socket.socket, n: int) -> Optional[bytes]:
     return bytes(buf)
 
 
-def recv_message(conn: socket.socket) -> Optional[dict]:
+def recv_frame(conn: socket.socket) -> Optional[bytes]:
+    """One length-prefixed frame (``None`` at EOF; ``ValueError`` over the limit)."""
     head = _recv_exact(conn, _HEADER.size)
     if head is None:
         return None
     (n,) = _HEADER.unpack(head)
     if n > _MAX_MESSAGE:
         raise ValueError(f"message of {n} bytes exceeds the {_MAX_MESSAGE}-byte limit")
-    body = _recv_exact(conn, n)
+    return _recv_exact(conn, n)
+
+
+def recv_message(conn: socket.socket) -> Optional[dict]:
+    body = recv_frame(conn)
     if body is None:
         return None
     return json.loads(body.decode("utf-8"))
@@ -135,7 +140,11 @@ class FmuTcpBridge:
         self._vars: dict[int, FMIVariable] = {
             v.value_reference: v for v in model_description.variables
         }
-        self._inputs: dict[str, dict[str, Any]] = {}      # {node: {field: array}}
+        # Every declared input starts at its advertised start value (0),
+        # exactly as gm.step() fills an unset external input, so a node
+        # whose update() has a non-zero fallback for a *missing* input
+        # (HeatNode's T_left = T[0]) behaves like the graph.
+        self._inputs: dict[str, dict[str, Any]] = self._zero_inputs()
         self._time = 0.0
         self._initial_state = _copy_tree(sidecar.state)
         self._initial_params = _copy_tree(sidecar.params)
@@ -204,11 +213,20 @@ class FmuTcpBridge:
             try:
                 while not self._stop.is_set():
                     try:
-                        req = recv_message(conn)
+                        body = recv_frame(conn)
                     except (OSError, ValueError):
+                        break                              # socket / framing error
+                    if body is None:
                         break
-                    if req is None:
-                        break
+                    try:
+                        req = json.loads(body.decode("utf-8"))
+                        if not isinstance(req, dict):
+                            raise ValueError("request must be a JSON object")
+                    except (ValueError, UnicodeDecodeError) as exc:
+                        # a corrupt request (an FMU-state blob with stray
+                        # quotes, say) is an error reply, not a dead instance
+                        send_message(conn, {"ok": False, "error": f"malformed request: {exc}"})
+                        continue
                     send_message(conn, self.handle(req))
             finally:
                 self._busy.release()
@@ -242,8 +260,15 @@ class FmuTcpBridge:
                         f"communication step {h!r} is not a whole multiple of the "
                         f"master timestep {self._dt!r}"
                     )
-                for _ in range(n):
-                    self._sidecar.step(self._inputs)
+                saved = self._sidecar._state                        # noqa: SLF001
+                try:
+                    for _ in range(n):
+                        self._sidecar.step(self._inputs)
+                except Exception:
+                    # a failed sub-step must not leave a partial advance
+                    # behind: the importer is told nothing happened
+                    self._sidecar._state = saved                    # noqa: SLF001
+                    raise
                 self._time = float(req.get("t", self._time)) + n * self._dt
                 return {"ok": True, "t": self._time}
             if op == "get_state":
@@ -255,13 +280,21 @@ class FmuTcpBridge:
                 self._sidecar._state = _copy_tree(self._initial_state)      # noqa: SLF001
                 if self._initial_params is not None:
                     self._sidecar._params = _copy_tree(self._initial_params)  # noqa: SLF001
-                self._inputs, self._time = {}, 0.0
+                self._inputs, self._time = self._zero_inputs(), 0.0
                 return {"ok": True}
             if op == "terminate":
                 return {"ok": True}
             return {"ok": False, "error": f"unknown op {op!r}"}
         except Exception as exc:  # noqa: BLE001 - reported to the importer
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def _zero_inputs(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for var in self._md.variables:
+            if var.causality == "input" and not var.is_clock:
+                node, _, field = var.name.partition(".")
+                out.setdefault(node, {})[field] = jnp.zeros(var.shape or (), dtype=var.dtype)
+        return out
 
     # -------------------------------------------------------- FMU state blob
     _META = "_meta"
@@ -296,6 +329,31 @@ class FmuTcpBridge:
             raise ValueError(f"FMU state blob is not a valid archive: {exc}") from exc
         with data:
             keys = set(data.files)
+            # Never decompress more than the model can hold: a compressed
+            # member must not exceed the live leaf it claims to replace.
+            zf = getattr(data, "zip", None)
+            live_bytes = {
+                f"s/{n}/{f}": int(np.asarray(v).nbytes)
+                for n, fields in self._sidecar.state.items() for f, v in fields.items()
+            }
+            for section in ("nodes", "mappings"):
+                for owner, leaves in (self._sidecar.params or {}).get(section, {}).items():
+                    for k, v in leaves.items():
+                        live_bytes[f"p/{section}/{owner}/{k}"] = int(np.asarray(v).nbytes)
+            for var in self._md.variables:
+                if var.causality == "input":
+                    node, _, field = var.name.partition(".")
+                    live_bytes[f"i/{node}/{field}"] = int(np.zeros(var.shape or (), var.dtype).nbytes)
+            if zf is not None:
+                for k in keys:
+                    try:
+                        size = zf.getinfo(k + ".npy").file_size
+                    except KeyError:
+                        continue
+                    cap = live_bytes.get(k, 256) + 4096
+                    if size > cap:
+                        raise ValueError(f"FMU state member {k!r} is {size} bytes, more than the "
+                                         f"{cap} the model can hold")
             if "_token" not in keys or str(data["_token"]) != self._md.instantiation_token:
                 raise ValueError("FMU state belongs to a different model (schema token mismatch)")
             state = {n: dict(f) for n, f in self._sidecar.state.items()}
@@ -328,7 +386,7 @@ class FmuTcpBridge:
                             if arr.shape != live.shape:
                                 raise ValueError(f"FMU state param {key}: shape {arr.shape} != {live.shape}")
                             new_params[section][owner][k] = jnp.asarray(arr, dtype=live.dtype)
-            inputs: dict[str, dict[str, Any]] = {}
+            inputs: dict[str, dict[str, Any]] = self._zero_inputs()
             for k in keys:
                 if k.startswith("i/"):
                     _, node, field = k.split("/", 2)
@@ -341,6 +399,8 @@ class FmuTcpBridge:
                         raise ValueError(f"FMU state input {node}.{field}: bad shape {arr.shape}")
                     inputs.setdefault(node, {})[field] = jnp.asarray(arr, dtype=var.dtype)
             t = float(data["_time"]) if "_time" in keys else 0.0
+            if not np.isfinite(t):
+                raise ValueError("FMU state carries a non-finite time")
         # every check passed: commit
         self._sidecar._state = new_state                      # noqa: SLF001
         if new_params is not None:
@@ -410,4 +470,4 @@ class FmuTcpBridge:
         return out
 
 
-__all__ = ["FmuTcpBridge", "recv_message", "send_message"]
+__all__ = ["FmuTcpBridge", "recv_frame", "recv_message", "send_message"]

@@ -127,6 +127,10 @@ static void test_read_endpoint(void) {
     CHECK(read_endpoint(NULL, host, sizeof host, &port) == -1);
     setenv("MADDENING_FMU_ENDPOINT", "::1:6000", 1);      /* last colon wins */
     CHECK(read_endpoint(NULL, host, sizeof host, &port) == 0 && strcmp(host, "::1") == 0 && port == 6000);
+    setenv("MADDENING_FMU_ENDPOINT", "[::1]:6001", 1);    /* bracketed IPv6 literal */
+    CHECK(read_endpoint(NULL, host, sizeof host, &port) == 0 && strcmp(host, "::1") == 0 && port == 6001);
+    setenv("MADDENING_FMU_ENDPOINT", "[]:6001", 1);
+    CHECK(read_endpoint(NULL, host, sizeof host, &port) == -1);
     /* host longer than the buffer is refused, not truncated */
     char big[600]; memset(big, 'a', 590); memcpy(big + 590, ":1234", 6);
     setenv("MADDENING_FMU_ENDPOINT", big, 1);
@@ -292,6 +296,13 @@ static void test_fmu_state(void) {
     Instance *dead = fake_instance(SOCK_INVALID);
     CHECK(fmi3SetFMUState((fmi3Instance)dead, NULL) == fmi3Error);
     CHECK(fmi3SerializedFMUStateSize(NULL, NULL, &n) == fmi3Error);
+    /* importer-supplied bytes that are not base64 never reach the wire */
+    fmi3FMUState junk = NULL;
+    CHECK(fmi3DeserializeFMUState(NULL, (const fmi3Byte *)"abc\"def\\x", 9, &junk) == fmi3OK);
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, junk) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "not valid") != NULL);
+    fmi3FreeFMUState(NULL, &junk);
     free_instance(dead);
 }
 

@@ -194,21 +194,33 @@ def test_fuzz_under_valgrind(tmp_path):
 
 @pytest.mark.skipif(CLANG is None, reason="clang (libFuzzer) not installed")
 def test_libfuzzer_short_campaign(tmp_path):
-    """Coverage-guided fuzzing of the reply parser for a bounded time."""
+    """Coverage-guided fuzzing of the reply parser for a bounded time.
+
+    Built with UBSan (not ASan): on the GitHub runner an ASan-instrumented
+    libFuzzer process reported ~7.6 GB RSS already at INITED with 25 MB of
+    live heap, tripping libFuzzer's RSS-based limit, while the same binary
+    sits at ~40 MB on a workstation.  So the guard here is a per-allocation
+    limit (``-malloc_limit_mb``), which does not depend on how the host
+    accounts resident memory; memory safety and leaks of the identical
+    harness are covered by the ASan seeded runs and valgrind above.  This
+    campaign contributes coverage-guided input exploration.
+    """
     exe = tmp_path / "libfuzz"
-    cmd = ["clang", "-g", "-O1", "-DLIBFUZZER", "-fsanitize=fuzzer,address,undefined",
+    cmd = ["clang", "-g", "-O1", "-DLIBFUZZER", "-fsanitize=fuzzer,undefined",
+           "-fno-sanitize-recover=undefined",
            f"-I{FMI3_INCLUDE_DIR}", str(C_DIR / "fuzz_maddening_fmu.c"), "-o", str(exe), "-lpthread"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         pytest.skip(f"clang cannot build libFuzzer targets here: {proc.stderr[-500:]}")
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    # -rss_limit_mb makes a memory blow-up a clean libFuzzer failure
-    # instead of an OOM-killed CI job; the harness is thread-free and
-    # sits around 40 MB.
+    # No RSS-based abort (see docstring); a single allocation above 256 MB
+    # still fails the campaign cleanly instead of OOM-killing the job.
     proc = subprocess.run([str(exe), str(corpus), "-max_total_time=20", "-max_len=4096",
-                           "-timeout=10", "-rss_limit_mb=1024"], capture_output=True,
-                          text=True, timeout=300,
-                          env={**os.environ, **SAN_ENV, "ASAN_OPTIONS": "detect_leaks=1"})
-    assert proc.returncode == 0, proc.stderr[-6000:]
+                           "-timeout=10", "-rss_limit_mb=0", "-malloc_limit_mb=256",
+                           "-print_final_stats=1"],
+                          capture_output=True, text=True, timeout=300,
+                          env={**os.environ, "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"})
+    head = "\n".join(proc.stderr.splitlines()[:25])
+    assert proc.returncode == 0, f"--- libFuzzer start ---\n{head}\n--- end ---\n{proc.stderr[-4000:]}"
     assert "Done" in proc.stderr or "DONE" in proc.stderr or "NEW" in proc.stderr, proc.stderr[-2000:]

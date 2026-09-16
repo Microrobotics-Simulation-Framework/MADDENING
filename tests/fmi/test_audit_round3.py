@@ -111,7 +111,8 @@ def test_set_is_atomic_and_refuses_non_finite_inputs():
     anchor, el = _vr(md, "spring.anchor_position"), _vr(md, "ball.params.elasticity")
     r = bridge.handle({"op": "set", "vr": [anchor, el], "values": [0.9, 1.5]})
     assert not r["ok"] and "above bound" in r["error"]
-    assert bridge._inputs == {}                          # the input was not committed
+    # the input was not committed: still the advertised zero start value
+    assert float(bridge._inputs["spring"]["anchor_position"]) == 0.0
     r = bridge.handle({"op": "set", "vr": [anchor], "values": [float("inf")]})
     assert not r["ok"] and "finite" in r["error"]
     assert bridge.handle({"op": "set", "vr": [anchor, el], "values": [0.9, 0.5]})["ok"]

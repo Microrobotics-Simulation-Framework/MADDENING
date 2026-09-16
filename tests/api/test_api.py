@@ -247,15 +247,21 @@ class TestVizEndpoints:
 # ------------------------------------------------------------------
 
 class TestCheckpointEndpoints:
-    def test_save_and_load(self, loaded_client, tmp_path):
-        path = str(tmp_path / "test_checkpoint.npz")
-        # Save
-        resp = loaded_client.post(f"/checkpoint/save?path={path}")
+    def test_save_and_load(self, tmp_path):
+        # Checkpoint names are relative to the server's checkpoint_root
+        # (an unauthenticated client cannot choose arbitrary server paths).
+        gm = GraphManager()
+        gm.add_node(TableNode(name="table", timestep=0.01, position=0.0))
+        gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=5.0, elasticity=0.7))
+        gm.add_edge("table", "ball", "position", "table_position")
+        gm.compile()
+        server = SimulationServer(node_registry=REGISTRY, graph_manager=gm, checkpoint_root=tmp_path)
+        client = TestClient(server.create_app())
+        resp = client.post("/checkpoint/save?path=test_checkpoint.npz")
         assert resp.status_code == 200
-        # Step to change state
-        loaded_client.post("/sim/step")
-        # Load back
-        resp = loaded_client.post(f"/checkpoint/load?path={path}")
+        assert (tmp_path / "test_checkpoint.npz").exists()
+        client.post("/sim/step")
+        resp = client.post("/checkpoint/load?path=test_checkpoint.npz")
         assert resp.status_code == 200
         assert "state" in resp.json()
 

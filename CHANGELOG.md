@@ -345,6 +345,13 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ### Security
+- **REST checkpoint endpoints are confined to a directory.**
+  `/checkpoint/save` and `/checkpoint/load` took an arbitrary server-side
+  path from an unauthenticated client (arbitrary file write, file-existence
+  oracle).  Paths are now relative to `SimulationServer(checkpoint_root=)`
+  (default `./checkpoints`) and must resolve under it; load errors no
+  longer echo parser internals.  The API still has no authentication:
+  bind it to localhost or put it behind a proxy that authenticates.
 - **FMU bridge no longer unpickles importer bytes** (independent audit
   round 3, CRITICAL).  `FmuTcpBridge` `set_state` used `pickle.loads` on
   the base64 payload an importer hands to `fmi3SetFMUState`, i.e. remote
@@ -356,6 +363,31 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **Independent audit, round 4** (residue across rounds 1-3; report under
+  `benchmarks/results/audit4/`, regression tests in
+  `tests/core/test_audit_round4.py` and `tests/fmi/test_audit_round4_fmi.py`).
+  FMU bridge: an input the importer never set is now the advertised zero
+  start value (like `gm.step()`), also after `reset` and `set_state`, so a
+  HeatNode FMU no longer runs adiabatic until its first `fmi3Set*`; a
+  multi-sub-step `step` that fails leaves state and time untouched; a
+  malformed request gets an error reply instead of a dropped connection;
+  an FMU-state member larger than the live leaf is refused before it is
+  decompressed and a non-finite time is refused; the C wrapper refuses a
+  non-base64 state blob before it can break the request framing and
+  accepts `[::1]:port` endpoints.  REST: `PUT /graph/state` validates
+  field set, dtype, shape and finiteness before writing; a JSON boolean
+  for a numeric param is a 400 (it used to drop the leaf at the next
+  recompile); `POST /graph/nodes` traces one update abstractly before
+  adding the node (a bad constant used to wedge every later step);
+  `POST /graph/edges` checks that the nodes and the source field exist.
+  Core: `load_state` refuses a state field of the wrong shape and coerces
+  dtype; a checkpoint without `_meta` keeps the freshly compiled `_meta`
+  instead of leaving a multirate graph to raise `KeyError`; a wrong-shape
+  params leaf is refused by `step(params=)` and by `gm.params[...] =`
+  (it used to broadcast the node's state permanently); `add_node` refuses
+  names containing `/`, `#` or `->`; a sharded `HeatNode` accepts a
+  halo-padded per-cell `heat_source`.  `fsspec` joins the `ci`/`dev`
+  extras so the cloud-URL checkpoint tests run in CI instead of skipping.
 - **FMU wrapper survives a sidecar that goes away.**  A `send()` to a
   closed peer raised SIGPIPE and killed the importer's whole process;
   sends now use `MSG_NOSIGNAL` (`SO_NOSIGPIPE` on macOS) and the call

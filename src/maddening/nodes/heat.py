@@ -431,9 +431,11 @@ class HeatNode(SimulationNode):
         source = boundary_inputs.get(
             "heat_source", jnp.zeros(n_local, dtype=jnp.float32)
         )
-        source = jnp.broadcast_to(
-            jnp.asarray(source, dtype=jnp.float32), (n_local,)
-        )
+        source = jnp.asarray(source, dtype=jnp.float32)
+        if source.ndim == 1 and source.shape[0] == n_local + 2 * halo:
+            # a grid-shaped input arrives halo-padded from ShardedStencilNode
+            source = source[halo:-halo]
+        source = jnp.broadcast_to(source, (n_local,))
 
         T_new_interior = T_interior + alpha * dt * lap + source * dt
 

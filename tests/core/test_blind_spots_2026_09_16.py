@@ -290,3 +290,47 @@ def test_sidecar_without_params_ignores_params_in_snapshot():
                                params={"nodes": {"n": {"k": jnp.array(1.0)}}, "mappings": {}})
     sc.set_fmu_state(snap)
     assert sc.params is None and float(sc.state["n"]["x"]) == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Subcycling group with an integer leaf; adaptive stepping with mapped edges
+# ---------------------------------------------------------------------------
+
+
+def test_int_leaf_in_subcycled_group_steps_and_differentiates():
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0, initial_position=1.0))
+    gm.add_node(Counter("c", 0.005, gain=2.0))            # 2 substeps per group step
+    gm.add_edge("s", "c", "position", "x")
+    gm.add_edge("c", "s", "y", "anchor_position")
+    gm.add_coupling_group(["s", "c"], max_iterations=15, tolerance=1e-8, subcycling=True)
+    gm.compile()
+    for _ in range(3):
+        gm.step()
+    assert gm._state["c"]["n"].dtype == jnp.int32 and int(gm._state["c"]["n"]) == 6
+    step = gm._build_step_fn(); ext = gm._default_external_inputs()
+
+    def loss(p):
+        final, _ = jax.lax.scan(lambda s, _: (step(s, ext, p), None), gm._state, None, length=3)
+        return final["c"]["y"] ** 2
+
+    g = jax.grad(loss)(gm.params)
+    assert bool(jnp.isfinite(g["nodes"]["c"]["gain"])) and float(g["nodes"]["c"]["gain"]) != 0.0
+
+
+def test_adaptive_stepping_with_mapped_edges_and_params_validation():
+    gm = _mapped_rods()
+    key = "c.temperature->f.heat_source"
+    # params flow through the adaptive dt-step builder (mapping weights included)
+    out = gm.run_adaptive(t_end=5e-4, dt_initial=1e-4, dt_min=1e-5, dt_max=2e-4)
+    assert all(bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(out) if hasattr(v, "dtype")
+               and jnp.issubdtype(v.dtype, jnp.floating))
+    bad = jax.tree.map(lambda x: x, gm.params)
+    bad["mappings"]["ghost->edge"] = {"H": jnp.zeros((2, 2))}
+    with pytest.raises(ValueError, match="unknown edge"):
+        gm.check_params(bad)
+    # a wrong weight key is rejected too
+    bad2 = jax.tree.map(lambda x: x, gm.params)
+    bad2["mappings"][key] = {"W": bad2["mappings"][key]["H"]}
+    with pytest.raises(ValueError, match="unknown key"):
+        gm.step(params=bad2)

@@ -128,6 +128,8 @@ jobs:
     # errors so the count is visible, but `continue-on-error` stops it
     # from failing the workflow; the summary is in the step summary and
     # the log.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

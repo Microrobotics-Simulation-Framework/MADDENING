@@ -237,12 +237,14 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   on the node prim), so a calibrated graph reloads calibrated with the
   same trainable mask.  `build_model_description` exposes every
   `gm.params` leaf as an FMI `parameter` / `tunable` variable
-  `<node>.params.<key>` with `ParamSpec` description and units
-  (`include_parameters=False` to opt out).  `SidecarConfig(params=...)`
+  `<node>.params.<key>` with `ParamSpec` description, units and bounds
+  (XML `min` / `max`; `include_parameters=False` to opt out).
+  `SidecarConfig(params=..., param_specs=gm.param_specs())`
   makes the sidecar call the compiled step's 3-argument contract and
   serve `get_params` / `set_params` (also as wire requests); a set value
-  takes effect on the next step without recompiling, unknown names or
-  wrong shapes are errors, and FMU state snapshots carry the parameters
+  takes effect on the next step without recompiling, unknown names,
+  wrong shapes or out-of-bounds values are errors (the call is atomic),
+  and FMU state snapshots carry the parameters
   (`serialize_fmu_state(params=)`, `deserialize_fmu_state(return_params=True)`;
   legacy snapshots still load).
 - `maddening.sysid`: `windowed_loss` (teacher-forced windowed trajectory

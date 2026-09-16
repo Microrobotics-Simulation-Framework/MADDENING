@@ -162,13 +162,16 @@ continuing.
   as a `causality="parameter"`, `variability="tunable"` variable named
   `<node>.params.<key>` (its own namespace, mirroring the pytree path, so
   it never collides with a `<node>.<field>` output), with
-  `ParamSpec.description` / `units` as its
-  metadata (`include_parameters=False` to opt out).  A sidecar built
-  with `SidecarConfig(params=gm.params, step_fn=gm._compiled_step)`
-  serves them through `get_params` / `set_params` (wire kinds
-  `get_params` / `set_params`); a set value takes effect on the next
-  step without recompiling, and `GetFMUState` / `SetFMUState` snapshots
-  carry the parameters.  Directional derivatives with respect to a
+  `ParamSpec.description` / `units` as its metadata and
+  `ParamSpec.bounds` as the XML `min` / `max` attributes
+  (`include_parameters=False` to opt out).  A sidecar built with
+  `SidecarConfig(params=gm.params, param_specs=gm.param_specs(),
+  step_fn=gm._compiled_step)` serves them through `get_params` /
+  `set_params` (wire kinds `get_params` / `set_params`); a set value
+  takes effect on the next step without recompiling, a value outside
+  the declared bounds is rejected before anything is written (the same
+  rule as `PUT /graph/params`), and `GetFMUState` / `SetFMUState`
+  snapshots carry the parameters.  Directional derivatives with respect to a
   parameter are the same `jax.jvp` the graph uses everywhere.
 
 ## Mapping weights

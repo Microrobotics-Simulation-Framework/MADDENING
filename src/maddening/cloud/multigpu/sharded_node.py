@@ -112,7 +112,6 @@ class ShardedPointwiseNode(SimulationNode):
         return d
 
 
-@stability(StabilityLevel.STABLE)
 def _params_signature(params) -> tuple:
     """Cache-key component for a params pytree (structure + shapes)."""
     if not params:
@@ -123,6 +122,7 @@ def _params_signature(params) -> tuple:
     )
 
 
+@stability(StabilityLevel.STABLE)
 class ShardedStencilNode(SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 

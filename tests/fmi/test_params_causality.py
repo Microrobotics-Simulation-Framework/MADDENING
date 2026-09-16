@@ -46,6 +46,7 @@ def _sidecar(gm):
         step_fn=gm._compiled_step,
         initial_state=gm._state,
         params=gm.params,
+        param_specs=gm.param_specs(),
     ))
 
 
@@ -178,3 +179,55 @@ class TestDirectionalDerivativeWrtParameter:
         g = jax.grad(f)(k0)
         assert float(t) != 0.0
         assert np.isclose(float(t), float(g), rtol=1e-5)
+
+
+class TestBoundsThroughFMI:
+    """``ParamSpec.bounds`` reach the importer (XML min/max) and are
+    enforced by the sidecar, the same rule as ``PUT /graph/params``."""
+
+    def test_model_description_emits_min_max_from_param_spec(self, gm):
+        import xml.etree.ElementTree as ET
+
+        gm.set_param_spec("spring", "stiffness", ParamSpec(bounds=(1.0, 100.0)))
+        md = build_model_description(gm, model_name="m")
+        by_name = {v.name: v for v in md.variables}
+        assert by_name["spring.params.stiffness"].min == 1.0
+        assert by_name["spring.params.stiffness"].max == 100.0
+        # BallNode declares elasticity in [0, 1] and gravity <= 0
+        assert (by_name["ball.params.elasticity"].min,
+                by_name["ball.params.elasticity"].max) == (0.0, 1.0)
+        root = ET.fromstring(md.to_xml())
+        el = next(v for v in root.find("ModelVariables")
+                  if v.get("name") == "spring.params.stiffness")
+        assert el.get("min") == "1.0" and el.get("max") == "100.0"
+        half = next(v for v in root.find("ModelVariables")
+                    if v.get("name") == "spring.params.damping")
+        assert half.get("min") == "0.0" and half.get("max") is None
+        unbounded = next(v for v in root.find("ModelVariables")
+                         if v.get("name") == "ball.params.gravity")
+        assert unbounded.get("min") is None and unbounded.get("max") is None
+
+    def test_set_params_rejects_out_of_bounds_atomically(self, gm):
+        _, sc = _sidecar(gm)
+        before = {k: np.asarray(v).copy() for k, v in sc.get_params().items()}
+        with pytest.raises(ValueError, match="ball.params.elasticity.*above bound"):
+            sc.set_params({"spring.params.damping": 9.0,
+                           "ball.params.elasticity": 1.5})
+        after = sc.get_params()
+        for k, v in before.items():
+            np.testing.assert_array_equal(np.asarray(after[k]), v)   # damping untouched
+        # the wire protocol reports it as an error, not a crash
+        status, err = pickle.loads(sc.handle(pickle.dumps(
+            ("set_params", {"ball.params.elasticity": -0.1}))))
+        assert status == "err" and "below bound" in err
+        # in-bounds still works
+        sc.set_params({"ball.params.elasticity": 0.9})
+        assert float(sc.get_params()["ball.params.elasticity"]) == pytest.approx(0.9)
+
+    def test_sidecar_without_specs_keeps_old_behaviour(self, gm):
+        md = build_model_description(gm, model_name="m")
+        sc = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params))
+        sc.set_params({"ball.params.elasticity": 1.5})      # no specs: no check
+        assert float(sc.get_params()["ball.params.elasticity"]) == 1.5

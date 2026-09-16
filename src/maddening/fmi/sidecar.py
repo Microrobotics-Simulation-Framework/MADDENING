@@ -98,12 +98,19 @@ class SidecarConfig:
         (``<node>.params.<key>``) are served from / written into it by
         :meth:`FmuSidecar.get_params` / :meth:`FmuSidecar.set_params`
         and carried in the FMU state snapshot.
+    param_specs : dict, optional
+        ``GraphManager.param_specs()`` for the same graph.  When given,
+        :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
+        declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
+        description advertises), so an importer cannot drive the step
+        with a constant the graph declares invalid.
     """
     schema_token: str
     step_fn: Callable[..., dict]
     initial_state: dict[str, dict[str, Any]]
     unknown_fn: Optional[Callable[[Any], Any]] = None
     params: Optional[dict] = None
+    param_specs: Optional[dict] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -157,9 +164,12 @@ class FmuSidecar:
         """Write FMI ``parameter`` variables (``fmi3SetFloat*`` on a
         parameter value reference) into the pytree the next step uses.
 
-        Keys are ``"<node>.params.<key>"``; an unknown name or a shape
-        that differs from the current leaf is an error, so an importer
-        cannot silently tune a constant the step never reads.
+        Keys are ``"<node>.params.<key>"``; an unknown name, a shape
+        that differs from the current leaf, or a value outside the
+        leaf's ``ParamSpec.bounds`` (when the config carries
+        ``param_specs``) is an error, so an importer cannot silently
+        tune a constant the step never reads or declares invalid.  The
+        call is atomic: nothing is written unless every update is valid.
         """
         if self._params is None:
             raise RuntimeError(
@@ -167,6 +177,8 @@ class FmuSidecar:
                 "exposes no parameter variables.",
             )
         nodes = self._params.get("nodes", {})
+        spec_nodes = (self._config.param_specs or {}).get("nodes", {})
+        staged: list[tuple[str, str, Any]] = []
         for name, value in updates.items():
             node, sep, key = name.partition(".params.")
             if not sep or node not in nodes or key not in nodes[node]:
@@ -179,6 +191,11 @@ class FmuSidecar:
                 raise ValueError(
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",
                 )
+            spec = spec_nodes.get(node, {}).get(key)
+            if spec is not None:
+                spec.check(new, name=name)
+            staged.append((node, key, new))
+        for node, key, new in staged:
             nodes[node][key] = new
 
     def get_directional_derivative(

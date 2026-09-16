@@ -100,6 +100,10 @@ class FMIVariable:
         Initial value as the XML ``start`` attribute text (FMI 3.0
         requires one for ``parameter`` and ``input`` causality; arrays
         are space-separated in row-major order).
+    min, max : float, optional
+        Declared bounds (the XML ``min`` / ``max`` attributes).  For
+        graph parameters these come from :class:`ParamSpec.bounds`, so
+        an importer sees the same envelope the sidecar enforces.
     """
     name: str
     value_reference: int
@@ -110,6 +114,8 @@ class FMIVariable:
     unit: str = ""
     shape: Optional[tuple[int, ...]] = None
     start: Optional[str] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.causality not in _CAUSALITIES:
@@ -217,6 +223,10 @@ class ModelDescription:
                 v_el.set("unit", var.unit)
             if var.start is not None:
                 v_el.set("start", var.start)
+            if var.min is not None:
+                v_el.set("min", repr(float(var.min)))
+            if var.max is not None:
+                v_el.set("max", repr(float(var.max)))
             if var.shape:
                 # FMI 3.0 dynamic arrays — emit one <Dimension> per axis.
                 for dim in var.shape:
@@ -464,6 +474,8 @@ def build_model_description(
                     unit=(spec.units if spec is not None else "") or "",
                     shape=shape or None,
                     start=start,
+                    min=(spec.bounds[0] if spec is not None else None),
+                    max=(spec.bounds[1] if spec is not None else None),
                 ))
                 next_vr += 1
 

@@ -34,10 +34,12 @@ Reference implementation
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 The Python sidecar lives in this module as :class:`FmuSidecar`.  The
-C wrapper that ships in the FMU itself is out of scope for v0.3.0
-(it's a v0.4.0 / MIME v0.5.0 deliverable).  Tests can call the
-sidecar directly without going through a real ZMQ socket — see
-``tests/fmi/test_sidecar.py``.
+C wrapper that ships in the FMU (``maddening/fmi/c/maddening_fmu.c``)
+talks to it through :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, a
+TCP transport carrying length-prefixed JSON (no libzmq needed on the
+importer's side); the pickle protocol below stays for in-process use
+and Python clients.  Tests can call the sidecar directly without a
+socket — see ``tests/fmi/test_sidecar.py``.
 """
 
 from __future__ import annotations
@@ -46,6 +48,9 @@ import pickle
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+
+import jax.numpy as jnp
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -60,6 +65,15 @@ from maddening.fmi.fmu_state import (
 )
 
 
+def _copy_tree(tree: Any) -> Any:
+    """Shallow-copy the dict spine so ``set_params`` never mutates the
+    caller's pytree (leaves are immutable arrays)."""
+    if isinstance(tree, dict):
+        return {k: _copy_tree(v) for k, v in tree.items()}
+    return tree
+
+
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
     """Static configuration handed to :class:`FmuSidecar` at startup.
@@ -78,11 +92,27 @@ class SidecarConfig:
     unknown_fn : callable, optional
         ``unknown_fn(x) -> y`` for directional derivative requests.
         If ``None``, ``get_dd`` requests will error.
+    params : dict, optional
+        The graph parameter pytree (``GraphManager.params`` layout).
+        When given, ``step_fn`` is called as
+        ``step_fn(state, external_inputs, params)`` — the compiled
+        step's contract — and the FMI ``parameter`` variables
+        (``<node>.params.<key>``) are served from / written into it by
+        :meth:`FmuSidecar.get_params` / :meth:`FmuSidecar.set_params`
+        and carried in the FMU state snapshot.
+    param_specs : dict, optional
+        ``GraphManager.param_specs()`` for the same graph.  When given,
+        :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
+        declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
+        description advertises), so an importer cannot drive the step
+        with a constant the graph declares invalid.
     """
     schema_token: str
-    step_fn: Callable[[dict, dict], dict]
+    step_fn: Callable[..., dict]
     initial_state: dict[str, dict[str, Any]]
     unknown_fn: Optional[Callable[[Any], Any]] = None
+    params: Optional[dict] = None
+    param_specs: Optional[dict] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -98,16 +128,77 @@ class FmuSidecar:
     def __init__(self, config: SidecarConfig) -> None:
         self._config = config
         self._state = dict(config.initial_state)
+        self._params = (
+            None if config.params is None else _copy_tree(config.params)
+        )
 
     @property
     def state(self) -> dict[str, dict[str, Any]]:
         return self._state
 
+    @property
+    def params(self) -> Optional[dict]:
+        return self._params
+
     # -- High-level handlers -------------------------------------------------
 
     def step(self, external_inputs: dict[str, dict[str, Any]]) -> dict:
-        self._state = self._config.step_fn(self._state, external_inputs)
+        if self._params is None:
+            self._state = self._config.step_fn(self._state, external_inputs)
+        else:
+            self._state = self._config.step_fn(
+                self._state, external_inputs, self._params,
+            )
         return self._state
+
+    def get_params(self) -> dict[str, Any]:
+        """``{"<node>.params.<key>": value}`` for every FMI ``parameter``
+        variable (the names ``build_model_description`` emits)."""
+        if self._params is None:
+            return {}
+        return {
+            f"{node}.params.{key}": value
+            for node, leaves in self._params.get("nodes", {}).items()
+            for key, value in leaves.items()
+        }
+
+    def set_params(self, updates: dict[str, Any]) -> None:
+        """Write FMI ``parameter`` variables (``fmi3SetFloat*`` on a
+        parameter value reference) into the pytree the next step uses.
+
+        Keys are ``"<node>.params.<key>"``; an unknown name, a shape
+        that differs from the current leaf, or a value outside the
+        leaf's ``ParamSpec.bounds`` (when the config carries
+        ``param_specs``) is an error, so an importer cannot silently
+        tune a constant the step never reads or declares invalid.  The
+        call is atomic: nothing is written unless every update is valid.
+        """
+        if self._params is None:
+            raise RuntimeError(
+                "Sidecar wasn't configured with a params pytree; the FMU "
+                "exposes no parameter variables.",
+            )
+        nodes = self._params.get("nodes", {})
+        spec_nodes = (self._config.param_specs or {}).get("nodes", {})
+        staged: list[tuple[str, str, Any]] = []
+        for name, value in updates.items():
+            node, sep, key = name.partition(".params.")
+            if not sep or node not in nodes or key not in nodes[node]:
+                raise KeyError(
+                    f"unknown parameter {name!r}; known: {sorted(self.get_params())}",
+                )
+            current = nodes[node][key]
+            new = jnp.asarray(value, dtype=current.dtype)
+            if new.shape != current.shape:
+                raise ValueError(
+                    f"parameter {name!r} has shape {current.shape}, got {new.shape}",
+                )
+            spec = spec_nodes.get(node, {}).get(key)
+            if spec is not None:
+                spec.check(new, name=name)
+            staged.append((node, key, new))
+        for node, key, new in staged:
+            nodes[node][key] = new
 
     def get_directional_derivative(
         self, kind: DirectionalDerivativeKind, x: Any, v: Any,
@@ -125,12 +216,21 @@ class FmuSidecar:
         return serialize_fmu_state(
             state=self._state,
             schema_token=self._config.schema_token,
+            params=self._params,
         )
 
     def set_fmu_state(self, fmu_state: FMUState) -> None:
-        self._state = deserialize_fmu_state(
+        state, params = deserialize_fmu_state(
             fmu_state, expected_schema_token=self._config.schema_token,
+            return_params=True,
         )
+        self._state = state
+        if params is not None and self._params is not None:
+            self._params = {
+                k: ({n: {kk: jnp.asarray(vv) for kk, vv in leaves.items()}
+                     for n, leaves in v.items()} if isinstance(v, dict) else v)
+                for k, v in params.items()
+            }
 
     # -- Wire-level RPC -----------------------------------------------------
 
@@ -159,6 +259,14 @@ class FmuSidecar:
             if kind == "get_state":
                 fmu_state = self.get_fmu_state()
                 return pickle.dumps(("ok", fmu_state))
+            if kind == "get_params":
+                return pickle.dumps(("ok", {
+                    k: np.asarray(v) for k, v in self.get_params().items()
+                }))
+            if kind == "set_params":
+                _, updates = payload
+                self.set_params(updates)
+                return pickle.dumps(("ok", None))
             if kind == "set_state":
                 _, fmu_state = payload
                 self.set_fmu_state(fmu_state)

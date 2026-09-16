@@ -344,3 +344,175 @@ class TestStabilityTagging:
     def test_sharded_gmres_tagged_stable(self):
         from maddening.core.compliance.metadata import StabilityLevel
         assert sharded_gmres._stability_level == StabilityLevel.STABLE
+
+
+# ---------------------------------------------------------------------------
+# v0.4.0: preconditioners + gradient parity through the (preconditioned)
+# solve.  The IFT / custom_vjp adjoint of a node that solves with
+# sharded_cg must stay exact with the preconditioner applied in the
+# adjoint solve too — checked here against the dense reference.
+# ---------------------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+
+from maddening.cloud.multigpu.iterative_solver import (  # noqa: E402
+    block_jacobi_preconditioner,
+    jacobi_preconditioner,
+)
+
+
+def _scaled_laplacian(n, scale):
+    """SPD ``D A D`` with a wide diagonal spread: CG needs the preconditioner."""
+    A = _laplacian_1d_dense(n)
+    D = jnp.diag(scale)
+    return D @ A @ D
+
+
+def _blocks_of(M, bs):
+    n = M.shape[0]
+    return jnp.stack([M[i:i + bs, i:i + bs] for i in range(0, n, bs)])
+
+
+class TestPreconditioned:
+
+    def test_block_jacobi_matches_dense_and_cuts_iterations(self):
+        n, bs = 32, 4
+        scale = jnp.asarray(np.geomspace(1.0, 100.0, n), jnp.float32)
+        M = _scaled_laplacian(n, scale)
+        b = jnp.arange(n, dtype=jnp.float32) + 1.0
+        x_ref = jnp.linalg.solve(M, b)
+        mv = lambda x: M @ x  # noqa: E731
+        plain = sharded_cg(mv, b, max_iters=2000, rtol=1e-6, atol=1e-8, backend="loop")
+        pc = sharded_cg(mv, b, max_iters=2000, rtol=1e-6, atol=1e-8, backend="loop",
+                        preconditioner=block_jacobi_preconditioner(_blocks_of(M, bs)))
+        for r in (plain, pc):
+            assert jnp.allclose(r.value, x_ref, rtol=1e-3, atol=1e-3)
+        assert int(pc.iters) < int(plain.iters), (int(pc.iters), int(plain.iters))
+        jac = sharded_cg(mv, b, max_iters=2000, rtol=1e-6, atol=1e-8, backend="loop",
+                         preconditioner=jacobi_preconditioner(jnp.diag(M)))
+        assert jnp.allclose(jac.value, x_ref, rtol=1e-3, atol=1e-3)
+        assert int(jac.iters) < int(plain.iters)
+
+    def test_lineax_backend_rejects_preconditioner(self):
+        pytest.importorskip("lineax")
+        with pytest.raises(ValueError, match="cannot apply a preconditioner"):
+            sharded_cg(lambda x: x, jnp.ones(4), backend="lineax",
+                       preconditioner=lambda r: r)
+        with pytest.raises(ValueError, match="cannot apply a preconditioner"):
+            sharded_gmres(lambda x: x, jnp.ones(4), backend="lineax",
+                          preconditioner=lambda r: r)
+
+    def test_block_jacobi_shape_validation(self):
+        with pytest.raises(ValueError, match="n_blocks, bs, bs"):
+            block_jacobi_preconditioner(jnp.ones((3, 2)))
+        M = block_jacobi_preconditioner(jnp.eye(2)[None].repeat(3, 0))
+        with pytest.raises(ValueError, match="built for n=6"):
+            M(jnp.ones(5))
+
+    @pytest.mark.parametrize("solver", ["cg", "gmres"])
+    def test_grad_and_jvp_through_preconditioned_solve_match_dense(self, solver):
+        """Reverse and forward mode through the differentiable, preconditioned
+        solve equal the dense linear-solve derivatives — w.r.t. the RHS and
+        w.r.t. the operator coefficients the matvec closes over."""
+        n, bs = 16, 4
+        scale = jnp.asarray(np.geomspace(1.0, 10.0, n), jnp.float32)
+        A0 = _scaled_laplacian(n, scale)
+        b0 = jnp.arange(n, dtype=jnp.float32) + 1.0
+        blocks = _blocks_of(A0, bs)
+
+        def solve_it(coef, b):
+            A = A0 + coef * jnp.eye(n, dtype=jnp.float32)
+            mv = lambda x: A @ x  # noqa: E731
+            kw = dict(max_iters=500, rtol=1e-7, atol=1e-9, backend="loop",
+                      preconditioner=block_jacobi_preconditioner(blocks),
+                      differentiable=True)
+            r = sharded_cg(mv, b, **kw) if solver == "cg" else sharded_gmres(mv, b, restart=16, **kw)
+            return r.value
+
+        def dense(coef, b):
+            return jnp.linalg.solve(A0 + coef * jnp.eye(n, dtype=jnp.float32), b)
+
+        loss = lambda coef, b: jnp.sum(solve_it(coef, b) ** 2)  # noqa: E731
+        loss_d = lambda coef, b: jnp.sum(dense(coef, b) ** 2)  # noqa: E731
+        c0 = jnp.asarray(0.5, jnp.float32)
+        g_c, g_b = jax.grad(loss, argnums=(0, 1))(c0, b0)
+        d_c, d_b = jax.grad(loss_d, argnums=(0, 1))(c0, b0)
+        assert jnp.allclose(g_c, d_c, rtol=2e-3, atol=1e-3), (g_c, d_c)
+        assert jnp.allclose(g_b, d_b, rtol=2e-3, atol=1e-3)
+        # forward mode
+        v = jnp.ones_like(b0)
+        _, t = jax.jvp(lambda b: solve_it(c0, b), (b0,), (v,))
+        _, t_d = jax.jvp(lambda b: dense(c0, b), (b0,), (v,))
+        assert jnp.allclose(t, t_d, rtol=2e-3, atol=1e-3)
+        # diagnostics on the differentiable path
+        # float32 CG plateaus around 1e-6 relative; ask for a reachable
+        # tolerance when checking the post-hoc diagnostics.
+        r = sharded_cg(lambda x: A0 @ x, b0, max_iters=500, rtol=1e-4, backend="loop",
+                       differentiable=True)
+        assert bool(r.converged) and int(r.iters) == -1 and float(r.residual_norm) < 1e-2
+
+    def test_grad_through_sharded_preconditioned_cg_on_4_device_mesh(self):
+        """Sharded matvec + preconditioner + reverse mode: parity with the
+        unsharded reference (the plan's 4-device CPU-virtual gate)."""
+        mesh = _make_4_device_mesh()
+        n_per_shard = 8
+        n = n_per_shard * 4
+        matvec_ref = _laplacian_1d_matvec_unsharded(n)
+        matvec_sh = _laplacian_1d_matvec_sharded(mesh, n_per_shard)
+        diag = jnp.full((n,), 2.0, jnp.float32)
+        pc = jacobi_preconditioner(diag)
+
+        def loss_sh(b):
+            x = sharded_cg(matvec_sh, b, mesh=mesh, in_specs=P("devices"),
+                           max_iters=500, backend="loop", preconditioner=pc,
+                           differentiable=True).value
+            return jnp.sum(x ** 2)
+
+        def loss_ref(b):
+            x = sharded_cg(matvec_ref, b, max_iters=500, backend="loop",
+                           preconditioner=pc, differentiable=True).value
+            return jnp.sum(x ** 2)
+
+        b = jnp.arange(n, dtype=jnp.float32) + 1.0
+        g_sh = jax.device_get(jax.grad(loss_sh)(b))
+        g_ref = jax.device_get(jax.grad(loss_ref)(b))
+        assert jnp.allclose(jnp.asarray(g_sh), jnp.asarray(g_ref), rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.slow
+class TestGradientParityAtScale:
+    """The v0.4.0 plan's gradient-parity gate at real-mesh size, the half
+    that runs on CPU-virtual devices: 10^5 DOF over 4 shards, reverse and
+    forward mode through the differentiable, Jacobi-preconditioned CG,
+    against the unsharded reference."""
+
+    def test_grad_and_jvp_through_sharded_cg_at_1e5_dof(self):
+        mesh = _make_4_device_mesh()
+        n_per_shard = 25_000
+        n = n_per_shard * 4
+        matvec_ref = _laplacian_1d_matvec_unsharded(n)
+        matvec_sh = _laplacian_1d_matvec_sharded(mesh, n_per_shard)
+        pc = jacobi_preconditioner(jnp.full((n,), 2.0, jnp.float32))
+        kw = dict(max_iters=3000, rtol=1e-6, atol=1e-8, backend="loop",
+                  preconditioner=pc, differentiable=True)
+        # a smooth right-hand side keeps the CG iteration count moderate
+        b = jnp.sin(jnp.linspace(0.0, 6.0, n, dtype=jnp.float32)) + 0.1
+
+        def loss_sh(b):
+            return jnp.sum(sharded_cg(matvec_sh, b, mesh=mesh, in_specs=P("devices"), **kw).value ** 2)
+
+        def loss_ref(b):
+            return jnp.sum(sharded_cg(matvec_ref, b, **kw).value ** 2)
+
+        g_sh = np.asarray(jax.device_get(jax.grad(loss_sh)(b)))
+        g_ref = np.asarray(jax.device_get(jax.grad(loss_ref)(b)))
+        scale = np.max(np.abs(g_ref))
+        assert scale > 0
+        np.testing.assert_allclose(g_sh / scale, g_ref / scale, rtol=1e-3, atol=1e-3)
+        v = jnp.ones_like(b)
+        _, t_sh = jax.jvp(lambda bb: sharded_cg(matvec_sh, bb, mesh=mesh, in_specs=P("devices"),
+                                                **kw).value, (b,), (v,))
+        _, t_ref = jax.jvp(lambda bb: sharded_cg(matvec_ref, bb, **kw).value, (b,), (v,))
+        t_sh, t_ref = np.asarray(jax.device_get(t_sh)), np.asarray(jax.device_get(t_ref))
+        s2 = np.max(np.abs(t_ref))
+        np.testing.assert_allclose(t_sh / s2, t_ref / s2, rtol=1e-3, atol=1e-3)

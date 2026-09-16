@@ -135,8 +135,11 @@ class TestRBFInterpolation:
                                        kernel="multiquadric")
         result = transform(values)
         assert jnp.all(jnp.isfinite(result))
-        # Constant function should map to constant
-        assert jnp.allclose(result, 1.0, atol=0.1)
+        # Patch test: with polynomial augmentation a constant field is
+        # reproduced to float32 round-off (it used to be atol=0.1).
+        assert jnp.allclose(result, 1.0, rtol=1e-5, atol=1e-5)
+        linear = transform(source[:, 0])
+        assert jnp.allclose(linear, target[:, 0], rtol=1e-4, atol=1e-5)
 
     def test_thin_plate_spline_kernel(self):
         source = jnp.linspace(0, 1, 5).reshape(-1, 1)

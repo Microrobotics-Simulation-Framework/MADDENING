@@ -12,10 +12,10 @@ Two categories of tests:
 
 2. **Parameter recovery** (Tier 1 calibration test): given a reference
    trajectory from "true" parameters, recover those parameters via
-   gradient descent.  This uses inline physics (not the GraphManager
-   node contract) because node.params are currently Python floats
-   that don't participate in JAX autodiff.  The framework-level
-   integration is planned for Phase 4.
+   gradient descent through the graph's own step function, with
+   ``jax.grad`` taken with respect to ``GraphManager.params`` (node
+   constants as a traced pytree) — for a single spring and through a
+   coupling group.
 """
 
 import os
@@ -163,184 +163,181 @@ class TestGradientHealthMultiPhysics:
 class TestParameterRecovery:
     """Recover physical parameters from a reference trajectory.
 
-    Uses inline spring physics with JAX-traced parameters (k, c)
-    rather than the GraphManager node contract, because node.params
-    are currently Python floats that don't participate in autodiff.
-
-    This proves the concept: differentiable simulation + gradient
-    descent can recover physical parameters from trajectory data.
+    Goes through the real graph: ``jax.grad`` of a trajectory loss with
+    respect to ``gm.params`` — the third pytree of the compiled step —
+    for a single spring and for a two-spring coupling group solved by
+    the default early-exit IFT solver.  This is the proof that node
+    constants are traced, differentiable inputs rather than closure
+    constants baked into the jit.
     """
 
-    @staticmethod
-    def _spring_step(state, k, c, m, rest, anchor, dt):
-        """Single spring step with JAX-traced parameters."""
-        pos, vel = state["position"], state["velocity"]
-        force = -k * (pos - anchor - rest) - c * vel
-        acc = force / m
-        vel_new = vel + acc * dt
-        pos_new = pos + vel_new * dt
-        return {"position": pos_new, "velocity": vel_new}
+    K_TRUE, C_TRUE = 30.0, 2.0
+    N_STEPS = 100
 
     @staticmethod
-    def _coupled_step(state, k, c, dt=0.01, m=1.0, rest=1.0):
-        """One step of two bidirectionally-coupled springs."""
-        # Spring A uses B's position as anchor
-        sa = TestParameterRecovery._spring_step(
-            state["sa"], k, c, m, rest, state["sb"]["position"], dt
-        )
-        # Spring B uses A's NEW position as anchor (Gauss-Seidel)
-        sb = TestParameterRecovery._spring_step(
-            state["sb"], k, c, m, rest, sa["position"], dt
-        )
-        return {"sa": sa, "sb": sb}
+    def _single(k, c):
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", 0.01, stiffness=k, damping=c,
+                                     mass=1.0, rest_length=1.0,
+                                     initial_position=0.0))
+        gm.compile()
+        return gm
 
-    def _generate_reference(self, k_true, c_true, n_steps):
-        """Generate a reference trajectory with true parameters."""
-        state = {
-            "sa": {"position": jnp.array(0.0),
-                   "velocity": jnp.array(0.0)},
-            "sb": {"position": jnp.array(3.0),
-                   "velocity": jnp.array(0.0)},
-        }
-        trajectory = []
-        for _ in range(n_steps):
-            state = self._coupled_step(state, k_true, c_true)
-            trajectory.append(state["sa"]["position"])
-        return jnp.stack(trajectory)
+    @staticmethod
+    def _coupled(k, c):
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("sa", 0.01, stiffness=k, damping=c,
+                                     mass=1.0, rest_length=1.0,
+                                     initial_position=0.0))
+        gm.add_node(SpringDamperNode("sb", 0.01, stiffness=k, damping=c,
+                                     mass=1.0, rest_length=1.0,
+                                     initial_position=3.0))
+        gm.add_edge("sa", "sb", "position", "anchor_position")
+        gm.add_edge("sb", "sa", "position", "anchor_position")
+        gm.add_coupling_group(["sa", "sb"], max_iterations=20, tolerance=1e-8)
+        gm.compile()
+        return gm
 
-    def test_parameter_recovery_springs(self):
-        """Recover spring stiffness and damping from trajectory data."""
-        # True parameters (moderate stiffness for good conditioning)
-        k_true = jnp.array(30.0)
-        c_true = jnp.array(2.0)
-        n_steps = 100
+    @staticmethod
+    def _positions(gm, params, n_steps, nodes, state0=None):
+        """Stacked positions of ``nodes`` over an n-step rollout through
+        the graph's step function with an explicit params pytree."""
+        step_fn = gm._build_step_fn()
+        ext = gm._default_external_inputs()
 
-        # Generate reference trajectory
-        ref_traj = self._generate_reference(k_true, c_true, n_steps)
+        def body(s, _):
+            s = step_fn(s, ext, params)
+            return s, jnp.stack([s[n]["position"] for n in nodes])
 
-        # Loss: trajectory deviation from reference
+        init = gm._state if state0 is None else state0
+        _, traj = jax.lax.scan(body, init, None, length=n_steps)
+        return traj
+
+    def _recover(self, build, nodes, k0, c0):
+        """``maddening.sysid.fit`` for (k, c) with ``mass`` and
+        ``rest_length`` frozen per node.  (k, c, m) scaled together leaves
+        the trajectory unchanged, and in the coupled pair ``fim`` reports
+        a weak direction (cond ~8e3) pairing a node's damping with its
+        rest length; a fit allowed to walk either lands 100 steps of data
+        at the right loss with the wrong damping."""
+        from maddening.core.params import ParamSpec
+        from maddening.sysid import fit
+
+        gm = build(self.K_TRUE, self.C_TRUE)
+        ref = self._positions(gm, gm.params, self.N_STEPS, nodes)
+        for n in nodes:
+            gm.set_param_spec(n, "mass", ParamSpec(trainable=False))
+            gm.set_param_spec(n, "rest_length", ParamSpec(trainable=False))
+
         def loss_fn(params):
-            k, c = params
-            state = {
-                "sa": {"position": jnp.array(0.0),
-                       "velocity": jnp.array(0.0)},
-                "sb": {"position": jnp.array(3.0),
-                       "velocity": jnp.array(0.0)},
-            }
-            def body(s, _):
-                s_new = self._coupled_step(s, k, c)
-                return s_new, s_new["sa"]["position"]
-            _, traj = jax.lax.scan(body, state, None, length=n_steps)
-            return jnp.mean((traj - ref_traj) ** 2)
+            return jnp.mean(
+                (self._positions(gm, params, self.N_STEPS, nodes) - ref) ** 2
+            )
 
-        # Start with wrong parameters
-        params = jnp.array([15.0, 5.0])  # k=15 (true=30), c=5 (true=2)
+        start = jax.tree.map(lambda x: x, gm.params)
+        for n in nodes:
+            start["nodes"][n]["stiffness"] = jnp.asarray(k0, dtype=jnp.float32)
+            start["nodes"][n]["damping"] = jnp.asarray(c0, dtype=jnp.float32)
+        res = fit(gm, loss_fn, params=start, n_iter=500, lr=0.1)
+        assert res.losses[-1] < res.losses[0] * 1e-3, (res.losses[0], res.losses[-1])
+        for n in nodes:
+            fitted = res.params["nodes"][n]
+            k, c = float(fitted["stiffness"]), float(fitted["damping"])
+            assert abs(k - self.K_TRUE) / self.K_TRUE < 0.05, f"{n}: k={k}"
+            assert abs(c - self.C_TRUE) / self.C_TRUE < 0.10, f"{n}: c={c}"
+            assert float(fitted["mass"]) == 1.0, f"{n}: mass moved"
 
-        # Adam optimizer
-        lr = 1.0
-        m = jnp.zeros(2)
-        v = jnp.zeros(2)
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
+    def test_parameter_recovery_single_spring(self):
+        """k, c recovered through gm's step with the params pytree."""
+        self._recover(self._single, ("s",), 15.0, 5.0)
 
-        grad_fn = jax.jit(jax.grad(loss_fn))
-        loss_fn_jit = jax.jit(loss_fn)
+    def test_parameter_recovery_coupled_springs(self):
+        """Same through a coupling group (IFT rule carries d/d params)."""
+        self._recover(self._coupled, ("sa", "sb"), 15.0, 5.0)
 
-        initial_loss = float(loss_fn_jit(params))
+    def test_params_gradient_matches_float64_finite_differences(self):
+        """The float32 params gradient against a float64 central
+        difference of the same rollout."""
+        def loss_of_k(gm, k, dtype):
+            # Nodes hard-code float32 state; promote the initial state
+            # (not the node) so the whole rollout runs in ``dtype``.
+            params = jax.tree.map(lambda x: jnp.asarray(x, dtype), gm.params)
+            params["nodes"]["s"]["stiffness"] = jnp.asarray(k, dtype=dtype)
+            state0 = jax.tree.map(
+                lambda x: x.astype(dtype) if jnp.issubdtype(x.dtype, jnp.floating) else x,
+                gm._state,
+            )
+            traj = self._positions(gm, params, self.N_STEPS, ("s",), state0)
+            return jnp.sum(traj ** 2)
 
-        for i in range(500):
-            g = grad_fn(params)
-            assert jnp.all(jnp.isfinite(g)), f"NaN gradient at step {i}"
-            m = beta1 * m + (1 - beta1) * g
-            v = beta2 * v + (1 - beta2) * g ** 2
-            m_hat = m / (1 - beta1 ** (i + 1))
-            v_hat = v / (1 - beta2 ** (i + 1))
-            params = params - lr * m_hat / (jnp.sqrt(v_hat) + eps)
-            params = jnp.maximum(params, 0.1)
+        gm32 = self._single(self.K_TRUE, self.C_TRUE)
+        g32 = float(jax.grad(lambda k: loss_of_k(gm32, k, jnp.float32))(
+            jnp.asarray(self.K_TRUE, jnp.float32)))
 
-        final_loss = float(loss_fn_jit(params))
-        k_recovered, c_recovered = float(params[0]), float(params[1])
+        prev = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", True)
+        try:
+            gm64 = self._single(self.K_TRUE, self.C_TRUE)
+            h = 1e-4 * self.K_TRUE
+            lp = float(loss_of_k(gm64, self.K_TRUE + h, jnp.float64))
+            lm = float(loss_of_k(gm64, self.K_TRUE - h, jnp.float64))
+            g_fd = (lp - lm) / (2 * h)
+            g64 = float(jax.grad(lambda k: loss_of_k(gm64, k, jnp.float64))(
+                jnp.asarray(self.K_TRUE, jnp.float64)))
+        finally:
+            jax.config.update("jax_enable_x64", prev)
 
-        # Verification gates
-        assert final_loss < initial_loss * 1e-3, (
-            f"Loss didn't drop 3 orders: {initial_loss:.2e} -> {final_loss:.2e}"
-        )
-        assert abs(k_recovered - 30.0) / 30.0 < 0.05, (
-            f"k not recovered: {k_recovered:.2f} (true=30.0)"
-        )
-        assert abs(c_recovered - 2.0) / 2.0 < 0.10, (
-            f"c not recovered: {c_recovered:.2f} (true=2.0)"
-        )
+        rel32 = abs(g32 - g_fd) / abs(g_fd)
+        rel64 = abs(g64 - g_fd) / abs(g_fd)
+        print(f"\n[params grad] float32 AD={g32:.6g}  float64 AD={g64:.6g}  "
+              f"float64 FD={g_fd:.6g}  rel err: f32={rel32:.2e} f64={rel64:.2e}")
+        assert rel64 < 1e-6, rel64
+        assert rel32 < 1e-2, rel32
 
-    def test_parameter_recovery_different_ics(self):
-        """Recovery works from multiple initial conditions."""
-        k_true = jnp.array(25.0)
-        c_true = jnp.array(3.0)
-        n_steps = 80
+    def test_jvp_wrt_params_through_coupled_step(self):
+        gm = self._coupled(self.K_TRUE, self.C_TRUE)
+        compiled = gm._compiled_step
+        ext = gm._default_external_inputs()
+        state = gm._state
 
-        # Generate references from 3 different ICs
-        ics = [
-            (0.0, 3.0),
-            (1.0, 4.0),
-            (-1.0, 2.0),
-        ]
-        refs = []
-        for pos_a, pos_b in ics:
-            state = {
-                "sa": {"position": jnp.array(pos_a),
-                       "velocity": jnp.array(0.0)},
-                "sb": {"position": jnp.array(pos_b),
-                       "velocity": jnp.array(0.0)},
-            }
-            def body(s, _):
-                s_new = self._coupled_step(s, k_true, c_true)
-                return s_new, s_new["sa"]["position"]
-            _, traj = jax.lax.scan(body, state, None, length=n_steps)
-            refs.append((pos_a, pos_b, traj))
+        def f(k):
+            params = jax.tree.map(lambda x: x, gm.params)
+            params["nodes"]["sa"]["stiffness"] = k
+            out = compiled(state, ext, params)
+            return out["sb"]["position"]
 
-        # Multi-trajectory loss
-        def loss_fn(params):
-            k, c = params
-            total = jnp.array(0.0)
-            for pos_a, pos_b, ref_traj in refs:
-                state = {
-                    "sa": {"position": jnp.array(pos_a),
-                           "velocity": jnp.array(0.0)},
-                    "sb": {"position": jnp.array(pos_b),
-                           "velocity": jnp.array(0.0)},
-                }
-                def body(s, _):
-                    s_new = self._coupled_step(s, k, c)
-                    return s_new, s_new["sa"]["position"]
-                _, traj = jax.lax.scan(body, state, None, length=n_steps)
-                total = total + jnp.mean((traj - ref_traj) ** 2)
-            return total / len(refs)
+        k0 = jnp.asarray(self.K_TRUE, jnp.float32)
+        _, t = jax.jvp(f, (k0,), (jnp.ones_like(k0),))
+        g = jax.grad(f)(k0)
+        assert bool(jnp.isfinite(t)) and bool(jnp.isfinite(g))
+        assert abs(float(t) - float(g)) < 1e-5 * max(1.0, abs(float(g)))
 
-        params = jnp.array([12.0, 8.0])
+    def test_params_change_takes_effect_without_recompile(self):
+        gm = self._single(self.K_TRUE, self.C_TRUE)
+        gm.step()
+        compiled = gm._compiled_step
+        s_before = dict(gm._state["s"])
+        a = gm.step()["s"]["position"]
+        gm._state["s"] = s_before
+        gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(2 * self.K_TRUE, jnp.float32)
+        b = gm.step()["s"]["position"]
+        assert gm._compiled_step is compiled
+        assert gm._dirty is False
+        assert float(a) != float(b)
 
-        # Adam
-        lr = 1.0
-        m = jnp.zeros(2)
-        v = jnp.zeros(2)
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
-        grad_fn = jax.jit(jax.grad(loss_fn))
-        loss_fn_jit = jax.jit(loss_fn)
-        initial_loss = float(loss_fn_jit(params))
+    def test_nodes_without_params_keyword_keep_working(self):
+        class Legacy(SpringDamperNode):
+            def update(self, state, boundary_inputs, dt):  # 3-arg contract
+                return super().update(state, boundary_inputs, dt)
 
-        for i in range(500):
-            g = grad_fn(params)
-            m = beta1 * m + (1 - beta1) * g
-            v = beta2 * v + (1 - beta2) * g ** 2
-            m_hat = m / (1 - beta1 ** (i + 1))
-            v_hat = v / (1 - beta2 ** (i + 1))
-            params = params - lr * m_hat / (jnp.sqrt(v_hat) + eps)
-            params = jnp.maximum(params, 0.1)
+        gm = GraphManager()
+        gm.add_node(Legacy("l", 0.01, stiffness=10.0, damping=1.0,
+                           initial_position=0.5))
+        gm.compile()
+        assert "l" not in gm.params["nodes"]
+        out = gm.step()
+        assert bool(jnp.isfinite(out["l"]["position"]))
 
-        final_loss = float(loss_fn_jit(params))
-        k_rec, c_rec = float(params[0]), float(params[1])
-
-        assert final_loss < initial_loss * 0.001
-        assert abs(k_rec - 25.0) / 25.0 < 0.05
-        assert abs(c_rec - 3.0) / 3.0 < 0.10
 
     def test_gradient_through_graphmanager_scan(self):
         """Verify that jax.grad works through GraphManager's run_scan

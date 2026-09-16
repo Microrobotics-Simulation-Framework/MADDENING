@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -144,6 +145,14 @@ class RigidBody2DNode(SimulationNode):
         """Pointwise (no spatial neighbour access)."""
         return {}
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "mass": ParamSpec(bounds=(0.0, None), transform="log", units="kg"),
+            "inertia": ParamSpec(bounds=(0.0, None), transform="log", units="kg*m^2"),
+            "gravity": ParamSpec(units="m/s^2"),
+        }
+
     def initial_state(self) -> dict:
         p = self.params
         return {
@@ -153,16 +162,21 @@ class RigidBody2DNode(SimulationNode):
             "omega": jnp.array(p["initial_omega"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Semi-implicit Euler integration of 2D rigid-body dynamics.
 
         If ``force`` or ``torque`` are not supplied in *boundary_inputs*
         they default to zero, so the node still produces sensible
         behaviour when tested in isolation (free fall under gravity).
+        ``mass``, ``inertia`` and ``gravity`` come from the injected
+        ``params`` when the graph supplies them.
         """
-        mass = self.params["mass"]
-        inertia = self.params["inertia"]
-        gravity = jnp.array(self.params["gravity"], dtype=jnp.float32)
+        p = self.params if params is None else {**self.params, **params}
+        mass = p["mass"]
+        inertia = p["inertia"]
+        gravity = jnp.asarray(p["gravity"], dtype=jnp.float32)
 
         x = state["x"]
         angle = state["angle"]

@@ -118,8 +118,15 @@ def save_graph_to_usd(
     root_path : str
         Path for the root prim.
     """
-    # Validate edge transforms before writing (fail early)
+    # Validate edge transforms / mappings before writing (fail early)
     for edge in gm._edges:
+        if edge.mapping is not None:
+            raise ValueError(
+                f"Edge {edge.key} carries an interface mapping "
+                f"({edge.mapping!r}); USD serialisation of mappings "
+                "(MappingSpec) is not implemented yet — see the interface "
+                "mapping guide.  Remove the mapping or use transform=."
+            )
         if edge.transform is not None:
             tname = get_transform_name(edge.transform)
             if tname is None:
@@ -187,11 +194,25 @@ def save_graph_to_usd(
             prim.GetAttribute("maddening:timestep").Set(
                 float(spec.timestep)
             )
+            # Effective params: constructor args with the live (possibly
+            # calibrated) ``gm.params`` values written over them, so the
+            # reloaded node is the one that was calibrated.
+            node_params = (
+                gm.effective_node_params(node_name)
+                if spec.accepts_params else node_obj.params
+            )
             prim.GetAttribute("maddening:paramsJson").Set(
                 json.dumps(
-                    _params_to_serializable(node_obj.params), default=str
+                    _params_to_serializable(node_params), default=str
                 )
             )
+            overrides = gm.param_spec_overrides().get(node_name)
+            if overrides:
+                attr = prim.CreateAttribute(
+                    "maddening:paramSpecOverridesJson",
+                    Sdf.ValueTypeNames.String,
+                )
+                attr.Set(json.dumps({k: s.to_dict() for k, s in overrides.items()}))
 
         # Edge attributes
         for i, edge in enumerate(gm._edges):
@@ -312,6 +333,24 @@ def load_graph_from_usd(
             node = cls(name=node_name, timestep=timestep, **params)
             gm.add_node(node)
             node_name_map[child.GetName()] = node_name
+
+            overrides_attr = child.GetAttribute("maddening:paramSpecOverridesJson")
+            overrides_json = overrides_attr.Get() if overrides_attr else None
+            if overrides_json:
+                import warnings  # noqa: PLC0415
+
+                from maddening.core.params import ParamSpec  # noqa: PLC0415
+                for key, spec_dict in json.loads(overrides_json).items():
+                    try:
+                        gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
+                    except (KeyError, ValueError) as exc:
+                        # The node class changed since the stage was
+                        # written (parameter renamed, node no longer takes
+                        # params): keep loading, say what was dropped.
+                        warnings.warn(
+                            f"ignoring ParamSpec override {node_name}.{key} from "
+                            f"the USD stage: {exc}", RuntimeWarning, stacklevel=2,
+                        )
 
     # --- Edges ---
     edges_prim = stage.GetPrimAtPath(root_path + "/edges")

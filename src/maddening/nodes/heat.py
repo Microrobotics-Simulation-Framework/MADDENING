@@ -21,6 +21,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 def _laplacian_2nd_order_uniform(T_padded, dx):
@@ -257,6 +258,18 @@ class HeatNode(SimulationNode):
             ),
         }
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "thermal_diffusivity": ParamSpec(
+                bounds=(0.0, None), transform="log", units="m^2/s",
+            ),
+            "length": ParamSpec(bounds=(0.0, None), transform="log", units="m"),
+            # Geometry of the non-uniform grid: read from ``self.params``
+            # (it fixes the stencil), never fitted.
+            "grid_points": ParamSpec(trainable=False, description="grid geometry"),
+        }
+
     def halo_width(self) -> dict[int, int]:
         """One ghost cell per side per FD stencil radius on axis 0.
 
@@ -286,7 +299,7 @@ class HeatNode(SimulationNode):
 
         return {"temperature": temperature}
 
-    def _compute_laplacian(self, T, T_left, T_right):
+    def _compute_laplacian(self, T, T_left, T_right, length=None):
         """Compute the Laplacian d^2T/dx^2 using the configured stencil.
 
         Parameters
@@ -295,6 +308,10 @@ class HeatNode(SimulationNode):
             Current temperature field.
         T_left, T_right : scalar
             Dirichlet boundary values.
+        length : scalar, optional
+            Domain length for the uniform grid; ``None`` reads
+            ``self.params["length"]``.  ``update`` passes the injected
+            (traced) value so ``length`` is a differentiable parameter.
 
         Returns
         -------
@@ -322,7 +339,7 @@ class HeatNode(SimulationNode):
             return _laplacian_nonuniform(T_padded, x_padded)
 
         # Uniform grid
-        L = self.params["length"]
+        L = self.params["length"] if length is None else length
         dx = L / n
         stencil_order = self.params.get("stencil_order", 2)
 
@@ -359,6 +376,7 @@ class HeatNode(SimulationNode):
         *,
         static_padded: dict | None = None,
         shard_info: dict | None = None,
+        params=None,
     ) -> dict:
         """Sharded update from a halo-padded temperature field.
 
@@ -376,6 +394,11 @@ class HeatNode(SimulationNode):
         For non-zero Dirichlet temperatures or per-shard BC overrides,
         plug into the coupling system (M8) rather than this primitive.
         Non-uniform grids are not yet supported under sharding.
+
+        Same params contract as :meth:`update`: ``thermal_diffusivity``
+        and ``length`` come from the injected ``params`` when the
+        (sharded) graph supplies them, so a ``ShardedStencilNode``
+        wrapping a HeatNode is calibratable like the unsharded node.
         """
         if self._is_nonuniform:
             raise NotImplementedError(
@@ -386,10 +409,11 @@ class HeatNode(SimulationNode):
         T_pad = state_padded["temperature"]
         halo = int(self.halo_width()[0])
         if halo == 0:
-            return self.update(state_padded, boundary_inputs, dt)
+            return self.update(state_padded, boundary_inputs, dt, params=params)
 
-        alpha = self.params["thermal_diffusivity"]
-        L = self.params["length"]
+        p = self.params if params is None else {**self.params, **params}
+        alpha = p["thermal_diffusivity"]
+        L = p["length"]
         n_global = self.params["n_cells"]
         dx = L / n_global
         stencil_order = self.params.get("stencil_order", 2)
@@ -407,9 +431,11 @@ class HeatNode(SimulationNode):
         source = boundary_inputs.get(
             "heat_source", jnp.zeros(n_local, dtype=jnp.float32)
         )
-        source = jnp.broadcast_to(
-            jnp.asarray(source, dtype=jnp.float32), (n_local,)
-        )
+        source = jnp.asarray(source, dtype=jnp.float32)
+        if source.ndim == 1 and source.shape[0] == n_local + 2 * halo:
+            # a grid-shaped input arrives halo-padded from ShardedStencilNode
+            source = source[halo:-halo]
+        source = jnp.broadcast_to(source, (n_local,))
 
         T_new_interior = T_interior + alpha * dt * lap + source * dt
 
@@ -417,15 +443,21 @@ class HeatNode(SimulationNode):
             [T_pad[:halo], T_new_interior, T_pad[-halo:]], axis=0
         )}
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Explicit finite-difference update for the 1D heat equation.
 
         Dirichlet BCs are enforced by setting the boundary ghost values
         before computing the stencil, and overwriting the boundary cells
-        after the update.
+        after the update.  ``n_cells`` is structural and always comes
+        from ``self.params``; ``thermal_diffusivity`` comes from the
+        injected ``params`` when the graph supplies them.
         """
         n = self.params["n_cells"]
-        alpha = self.params["thermal_diffusivity"]
+        p = self.params if params is None else {**self.params, **params}
+        alpha = p["thermal_diffusivity"]
+        length = p["length"]
 
         T = state["temperature"]  # shape (n,)
 
@@ -438,7 +470,7 @@ class HeatNode(SimulationNode):
         source = jnp.broadcast_to(jnp.asarray(source, dtype=jnp.float32), (n,))
 
         # --- Laplacian ---
-        laplacian = self._compute_laplacian(T, T_left, T_right)
+        laplacian = self._compute_laplacian(T, T_left, T_right, length)
 
         T_new = T + alpha * dt * laplacian + source * dt
 
@@ -481,17 +513,18 @@ class HeatNode(SimulationNode):
             "right_temperature": ("temperature", -1),
         }
 
-    def compute_interface_correction(self, pre_state, boundary_inputs, dt):
+    def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
         """Recompute boundary-cell temperatures from the FD stencil.
 
         HeatNode's ``update()`` enforces Dirichlet BCs by overwriting
         T[0] and T[-1] after the FD update.  When those BCs come from
         coupling, this overwrites the physically meaningful stencil
         value.  This method recomputes the stencil value so the
-        coupling system can restore it.
+        coupling system can restore it.  Same constants as ``update``.
         """
+        p = self.params if params is None else {**self.params, **params}
         n = self.params["n_cells"]
-        alpha = self.params["thermal_diffusivity"]
+        alpha = p["thermal_diffusivity"]
 
         T = pre_state["temperature"]
         T_left = boundary_inputs.get("left_temperature", T[0])
@@ -548,15 +581,17 @@ class HeatNode(SimulationNode):
             ),
         }
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        # Same constants as ``update`` (see SpringDamperNode).
+        p = self.params if params is None else {**self.params, **params}
         T = state["temperature"]
-        alpha = self.params["thermal_diffusivity"]
+        alpha = p["thermal_diffusivity"]
         if self._is_nonuniform:
             x = self._grid_x
             dx_left = x[1] - x[0]
             dx_right = x[-1] - x[-2]
         else:
-            dx_left = self.params["length"] / self.params["n_cells"]
+            dx_left = p["length"] / p["n_cells"]
             dx_right = dx_left
         return {
             "left_heat_flux": -alpha * (T[1] - T[0]) / dx_left,

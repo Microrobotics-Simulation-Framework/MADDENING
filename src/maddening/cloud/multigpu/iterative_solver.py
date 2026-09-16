@@ -389,6 +389,100 @@ def _try_lineax_solve(
 
 
 # ---------------------------------------------------------------------------
+# Differentiable wrapper (v0.4.0: gradient parity through the solve)
+# ---------------------------------------------------------------------------
+
+
+def _differentiable_solve(
+    matvec, b, *, solve_value, transpose_solve_value, symmetric, rtol, atol,
+) -> SharedSolveResult:
+    """Route the solve through ``lax.custom_linear_solve``.
+
+    Forward mode (``jax.jvp``) and reverse mode (``jax.grad``) then use
+    ``solve_value`` / ``transpose_solve_value`` on tangents and
+    cotangents — the same backend, *with the same preconditioner* — and
+    the derivative with respect to anything ``matvec`` closes over
+    (operator coefficients) flows through.  The Krylov loop itself is
+    never differentiated, which is what makes reverse mode possible at
+    all (``lax.while_loop`` has no transpose).
+
+    The iteration count cannot escape ``custom_linear_solve`` (its
+    ``solve`` returns the vector only), so ``iters`` is reported as -1;
+    ``residual_norm`` / ``converged`` come from one extra matvec.
+    """
+    kw = {"symmetric": True} if symmetric else {"transpose_solve": transpose_solve_value}
+    x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
+    res = b - matvec(x)
+    res_norm = jnp.linalg.norm(res)
+    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    return SharedSolveResult(
+        value=x, converged=res_norm <= tol, iters=jnp.int32(-1), residual_norm=res_norm,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Preconditioners (v0.4.0: first users of the ``preconditioner=`` hook)
+# ---------------------------------------------------------------------------
+
+
+@stability(StabilityLevel.EVOLVING)
+def jacobi_preconditioner(diag: jax.Array) -> Callable[[jax.Array], jax.Array]:
+    """``M(r) = r / diag`` — the diagonal (point-Jacobi) preconditioner.
+
+    ``diag`` is the global diagonal of the operator, laid out like the
+    solution vector (sharded the same way when the solver runs on a
+    mesh).  Zero entries are replaced by 1 so a padded / masked row
+    cannot produce ``inf``.
+    """
+    diag = jnp.asarray(diag)
+    safe = jnp.where(diag == 0, jnp.ones_like(diag), diag)
+
+    def apply(r):
+        return r / safe
+
+    return apply
+
+
+@stability(StabilityLevel.EVOLVING)
+def block_jacobi_preconditioner(
+    blocks: jax.Array,
+) -> Callable[[jax.Array], jax.Array]:
+    """``M(r) = blockdiag(blocks)⁻¹ r`` — block-Jacobi with dense blocks.
+
+    ``blocks`` has shape ``(n_blocks, bs, bs)``: the diagonal blocks of
+    the operator in the solution vector's ordering (block ``k`` covers
+    entries ``k*bs : (k+1)*bs``).  Each application is one batched
+    ``jnp.linalg.solve`` — no factorisation is cached, which keeps the
+    preconditioner a pure function the adjoint can differentiate
+    through (the IFT / ``custom_vjp`` adjoint applies it in the adjoint
+    solve as well, see ``TestPreconditioned`` in
+    ``tests/cloud/multigpu/test_iterative_solver.py``).  For the
+    partitioned FVM case the natural blocks are per-shard (or
+    per-cell-group) diagonal blocks the mesh-prep step extracts
+    host-side.
+    """
+    blocks = jnp.asarray(blocks)
+    if blocks.ndim != 3 or blocks.shape[1] != blocks.shape[2]:
+        raise ValueError(f"blocks must have shape (n_blocks, bs, bs), got {blocks.shape}")
+    n_blocks, bs, _ = blocks.shape
+
+    def apply(r):
+        if r.shape[0] != n_blocks * bs:
+            raise ValueError(
+                f"block_jacobi_preconditioner built for n={n_blocks * bs}, "
+                f"got a vector of length {r.shape[0]}"
+            )
+        rb = r.reshape(n_blocks, bs, *r.shape[1:])
+        if rb.ndim == 2:
+            out = jnp.linalg.solve(blocks, rb[..., None])[..., 0]
+        else:
+            out = jnp.linalg.solve(blocks, rb)
+        return out.reshape(r.shape)
+
+    return apply
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -406,8 +500,17 @@ def sharded_cg(
     max_iters: int = 200,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]] = None,
     backend: str = "auto",
+    differentiable: bool = False,
 ) -> SharedSolveResult:
     """Preconditioned conjugate gradient on a sharded matvec.
+
+    ``differentiable=True`` routes the solve through
+    ``lax.custom_linear_solve`` so ``jax.grad`` / ``jax.jvp`` through the
+    result (and the IFT adjoint of a coupling group whose node calls
+    this) are exact linear-solve adjoints using the same backend and
+    preconditioner; ``iters`` is then -1.  Off by default so the STABLE
+    result contract (iteration count) is unchanged; a node whose
+    ``update`` calls this inside a differentiated step must set it.
 
     Parameters
     ----------
@@ -459,34 +562,49 @@ def sharded_cg(
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    if backend == "lineax":
-        result = _try_lineax_solve(
-            "cg", matvec, b, rtol=rtol, atol=atol,
-            restart=0, max_iters=max_iters,
-        )
-        if result is None:
-            raise RuntimeError("backend='lineax' requested but lineax not installed")
-        return result
-    if backend == "loop":
+    def _run(mv, rhs):
+        if backend == "lineax":
+            if preconditioner is not None:
+                raise ValueError(
+                    "backend='lineax' cannot apply a preconditioner (lineax's CG "
+                    "takes none); use backend='loop' or 'auto' (auto routes a "
+                    "preconditioned solve to the loop backend)."
+                )
+            result = _try_lineax_solve(
+                "cg", mv, rhs, rtol=rtol, atol=atol,
+                restart=0, max_iters=max_iters,
+            )
+            if result is None:
+                raise RuntimeError("backend='lineax' requested but lineax not installed")
+            return result
+        if backend == "loop":
+            return _cg_loop(
+                mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+                max_iters=max_iters, preconditioner=preconditioner,
+            )
+        if backend != "auto":
+            raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
+
+        # auto: try lineax first if no preconditioner (lineax doesn't take ours);
+        # otherwise loop.
+        if preconditioner is None:
+            result = _try_lineax_solve(
+                "cg", mv, rhs, rtol=rtol, atol=atol,
+                restart=0, max_iters=max_iters,
+            )
+            if result is not None:
+                return result
         return _cg_loop(
-            matvec, b, x0=x0, rtol=rtol, atol=atol,
+            mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
             max_iters=max_iters, preconditioner=preconditioner,
         )
-    if backend != "auto":
-        raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
 
-    # auto: try lineax first if no preconditioner (lineax doesn't take ours);
-    # otherwise loop.
-    if preconditioner is None:
-        result = _try_lineax_solve(
-            "cg", matvec, b, rtol=rtol, atol=atol,
-            restart=0, max_iters=max_iters,
-        )
-        if result is not None:
-            return result
-    return _cg_loop(
-        matvec, b, x0=x0, rtol=rtol, atol=atol,
-        max_iters=max_iters, preconditioner=preconditioner,
+    if not differentiable:
+        return _run(matvec, b)
+    return _differentiable_solve(
+        matvec, b, solve_value=lambda mv, rhs: _run(mv, rhs).value,
+        transpose_solve_value=None, symmetric=True,
+        rtol=rtol, atol=atol,
     )
 
 
@@ -504,8 +622,13 @@ def sharded_gmres(
     max_iters: int = 200,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]] = None,
     backend: str = "auto",
+    differentiable: bool = False,
 ) -> SharedSolveResult:
     """Restarted GMRES on a sharded matvec.
+
+    ``differentiable=True`` as for :func:`sharded_cg`; the transpose
+    solve is GMRES on the transposed operator (``jax.linear_transpose``),
+    with the same preconditioner.
 
     See :func:`sharded_cg` for the matvec / mesh / in_specs contract.
 
@@ -533,39 +656,56 @@ def sharded_gmres(
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    if backend == "lineax":
-        result = _try_lineax_solve(
-            "gmres", matvec, b, rtol=rtol, atol=atol,
-            restart=restart, max_iters=max_iters,
-        )
-        if result is None:
-            raise RuntimeError("backend='lineax' requested but lineax not installed")
-        return result
-    if backend == "loop":
+    def _run(mv, rhs):
+        if backend == "lineax":
+            if preconditioner is not None:
+                raise ValueError(
+                    "backend='lineax' cannot apply a preconditioner (lineax's GMRES "
+                    "takes none); use backend='loop' or 'auto'."
+                )
+            result = _try_lineax_solve(
+                "gmres", mv, rhs, rtol=rtol, atol=atol,
+                restart=restart, max_iters=max_iters,
+            )
+            if result is None:
+                raise RuntimeError("backend='lineax' requested but lineax not installed")
+            return result
+        if backend == "loop":
+            return _gmres_loop(
+                mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+                restart=restart, max_iters=max_iters,
+                preconditioner=preconditioner,
+            )
+        if backend != "auto":
+            raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
+
+        if preconditioner is None:
+            result = _try_lineax_solve(
+                "gmres", mv, rhs, rtol=rtol, atol=atol,
+                restart=restart, max_iters=max_iters,
+            )
+            if result is not None:
+                return result
         return _gmres_loop(
-            matvec, b, x0=x0, rtol=rtol, atol=atol,
+            mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
             restart=restart, max_iters=max_iters,
             preconditioner=preconditioner,
         )
-    if backend != "auto":
-        raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
 
-    if preconditioner is None:
-        result = _try_lineax_solve(
-            "gmres", matvec, b, rtol=rtol, atol=atol,
-            restart=restart, max_iters=max_iters,
-        )
-        if result is not None:
-            return result
-    return _gmres_loop(
-        matvec, b, x0=x0, rtol=rtol, atol=atol,
-        restart=restart, max_iters=max_iters,
-        preconditioner=preconditioner,
+    if not differentiable:
+        return _run(matvec, b)
+    return _differentiable_solve(
+        matvec, b, solve_value=lambda mv, rhs: _run(mv, rhs).value,
+        transpose_solve_value=lambda vecmat, ct: _run(vecmat, ct).value,
+        symmetric=False,
+        rtol=rtol, atol=atol,
     )
 
 
 __all__ = [
     "SharedSolveResult",
+    "block_jacobi_preconditioner",
+    "jacobi_preconditioner",
     "sharded_cg",
     "sharded_gmres",
 ]

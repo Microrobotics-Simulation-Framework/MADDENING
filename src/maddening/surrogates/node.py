@@ -5,6 +5,7 @@ Drop-in replacement for any physics node: same state dict, same
 boundary_inputs contract, works with jit/scan/grad/vmap.
 """
 
+import jax
 import jax.numpy as jnp
 
 from maddening.core.compliance.metadata import StabilityLevel
@@ -42,6 +43,9 @@ def rk4_integrator(state: dict, deriv_fn, dt: float) -> dict:
 # SurrogateNode
 # ------------------------------------------------------------------
 
+_WEIGHTS_PREFIX = "weights"
+
+
 @stability(StabilityLevel.EXPERIMENTAL)
 class SurrogateNode(SimulationNode):
     """A simulation node backed by a trained neural surrogate.
@@ -66,6 +70,18 @@ class SurrogateNode(SimulationNode):
         Integration function for derivative mode.  Signature:
         ``(state, deriv_fn, dt) -> new_state``.
         Defaults to :func:`euler_integrator`.
+
+    Notes
+    -----
+    The weights are reachable through the graph parameter pytree:
+    :meth:`params_pytree` exposes every floating leaf of ``weights`` as
+    a flat entry ``"weights<path>"`` (e.g. ``"weights['scale']"``) so
+    ``gm.params["nodes"][name]`` stays a flat dict of arrays (what
+    checkpoints and the REST endpoint expect), and :meth:`update`
+    rebuilds the weights pytree from the injected leaves.  ``jax.grad``
+    of a trajectory loss with respect to ``gm.params`` therefore reaches
+    the surrogate weights, and fine-tuned weights take effect without
+    a recompile.
     """
 
     def __init__(
@@ -103,8 +119,49 @@ class SurrogateNode(SimulationNode):
             for field in self.state_spec
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
-        weights = self.params["weights"]
+    # -- weights <-> flat params leaves -------------------------------
+
+    def _weight_leaves(self):
+        """``(paths, leaves, treedef)`` of the weights pytree."""
+        flat, treedef = jax.tree_util.tree_flatten_with_path(self.params["weights"])
+        paths = [jax.tree_util.keystr(path) for path, _ in flat]
+        leaves = [leaf for _, leaf in flat]
+        return paths, leaves, treedef
+
+    @staticmethod
+    def _is_float_leaf(leaf) -> bool:
+        try:
+            return jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+        except (TypeError, ValueError):
+            return False
+
+    def params_pytree(self) -> dict:
+        """Floating leaves of ``weights`` as flat ``"weights<path>"``
+        entries (plus any float-valued scalar in ``self.params``)."""
+        out = {
+            k: v for k, v in super().params_pytree().items()
+            if k != _WEIGHTS_PREFIX
+        }
+        paths, leaves, _ = self._weight_leaves()
+        for path, leaf in zip(paths, leaves):
+            if self._is_float_leaf(leaf):
+                out[f"{_WEIGHTS_PREFIX}{path}"] = jnp.asarray(leaf)
+        return out
+
+    def _resolve_weights(self, params):
+        if params is None:
+            return self.params["weights"]
+        paths, leaves, treedef = self._weight_leaves()
+        merged = [
+            params.get(f"{_WEIGHTS_PREFIX}{path}", leaf)
+            for path, leaf in zip(paths, leaves)
+        ]
+        return jax.tree_util.tree_unflatten(treedef, merged)
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        weights = self._resolve_weights(params)
         arch = self.architecture
 
         if arch.mode == "direct":

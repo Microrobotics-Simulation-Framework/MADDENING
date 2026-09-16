@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 
 
+_EDGE_CALLS = {"add_edge", "EdgeSpec"}
+
+
 def _find_transform_string_refs(filepath: Path) -> list[tuple[int, str]]:
     """Find string literals used as transform= arguments in a file.
 
@@ -33,6 +36,12 @@ def _find_transform_string_refs(filepath: Path) -> list[tuple[int, str]]:
     results = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
+            # Only edge constructors: ``ParamSpec(transform="log")`` is a
+            # parameter reparametrisation, not an edge transform.
+            func = node.func
+            name = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name not in _EDGE_CALLS:
+                continue
             for kw in node.keywords:
                 if kw.arg == "transform" and isinstance(kw.value, ast.Constant):
                     if isinstance(kw.value.value, str):

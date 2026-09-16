@@ -48,6 +48,7 @@ import numpy as np
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -752,6 +753,7 @@ class LBMNode(SimulationNode):
         *,
         static_padded: dict | None = None,
         shard_info: dict | None = None,
+        params=None,
     ) -> dict:
         """Halo-aware LBM step.
 
@@ -774,7 +776,10 @@ class LBMNode(SimulationNode):
         in possession of the full inlet/outlet face.
         """
         f_pad = state_padded["f"]
-        tau = self._tau
+        # Same contract as ``update``: viscosity from the injected params
+        # when the (sharded) graph supplies them.
+        p = self.params if params is None else {**self.params, **params}
+        tau = 0.5 + p["viscosity"] / self._cs2
         lat = self._lat
         e = lat.e
         w = lat.w
@@ -896,9 +901,26 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state_padded["wall_mask"]
         return result
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            # tau = 0.5 + nu / cs2 must stay > 0.5, i.e. nu > 0 strictly.
+            "viscosity": ParamSpec(
+                bounds=(0.0, None), transform="log", units="lattice",
+                description="kinematic viscosity; tau = 0.5 + nu / cs2",
+            ),
+        }
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """One collide-stream step.  ``viscosity`` comes from the injected
+        ``params`` when the graph supplies them (so ``tau`` is a traced,
+        differentiable constant); the lattice, faces and wall geometry are
+        structural and always come from the node."""
         f = state["f"]
-        tau = self._tau
+        p = self.params if params is None else {**self.params, **params}
+        tau = 0.5 + p["viscosity"] / self._cs2
         lat = self._lat
         e = lat.e
         w = lat.w
@@ -993,9 +1015,11 @@ class LBMNode(SimulationNode):
         )
 
     def compute_boundary_fluxes(
-        self, state: dict, boundary_inputs: dict, dt: float,
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
     ) -> dict:
-        """Expose average pressure at the outlet face for coupling."""
+        """Expose average pressure at the outlet face for coupling.
+
+        Reads no constants, so ``params`` is accepted for the contract only."""
         pressure = state["pressure"]
         outlet_axis, outlet_side = _FACE_MAP[self._outlet_face]
 

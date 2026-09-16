@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @stability(StabilityLevel.STABLE)
@@ -106,23 +107,37 @@ class SpringDamperNode(SimulationNode):
         """Pointwise (no spatial neighbour access)."""
         return {}
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            "stiffness": ParamSpec(bounds=(0.0, None), transform="log", units="N/m"),
+            "damping": ParamSpec(bounds=(0.0, None), units="N*s/m"),
+            "mass": ParamSpec(bounds=(0.0, None), transform="log", units="kg"),
+            "rest_length": ParamSpec(units="m"),
+        }
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["initial_position"], dtype=jnp.float32),
             "velocity": jnp.array(self.params["initial_velocity"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Semi-implicit Euler integration of spring-damper dynamics.
 
         If ``anchor_position`` is not supplied the anchor defaults to the
         origin (0.0), so the node still produces sensible behaviour when
-        tested in isolation.
+        tested in isolation.  ``params`` (injected by the graph) overrides
+        the constants in ``self.params`` with traced, differentiable
+        values.
         """
-        k = self.params["stiffness"]
-        c = self.params["damping"]
-        m = self.params["mass"]
-        rest = self.params["rest_length"]
+        p = self.params if params is None else {**self.params, **params}
+        k = p["stiffness"]
+        c = p["damping"]
+        m = p["mass"]
+        rest = p["rest_length"]
 
         position = state["position"]
         velocity = state["velocity"]
@@ -178,12 +193,16 @@ class SpringDamperNode(SimulationNode):
             ),
         }
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        # Same constants as ``update``: a calibrated stiffness must change
+        # the force this node delivers over a flux edge, not only its own
+        # integration.
+        p = self.params if params is None else {**self.params, **params}
         anchor = boundary_inputs.get(
             "anchor_position", jnp.array(0.0, dtype=jnp.float32)
         )
-        k = self.params["stiffness"]
-        c = self.params["damping"]
-        rest = self.params["rest_length"]
+        k = p["stiffness"]
+        c = p["damping"]
+        rest = p["rest_length"]
         force = -k * (state["position"] - anchor - rest) - c * state["velocity"]
         return {"spring_force": force}

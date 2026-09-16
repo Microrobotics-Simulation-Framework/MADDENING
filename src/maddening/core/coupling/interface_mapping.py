@@ -96,11 +96,16 @@ def rbf_interpolation(
     target_points: jnp.ndarray,
     epsilon: float = 1.0,
     kernel: str = "gaussian",
+    polynomial: bool = True,
+    ridge: float = 1e-8,
 ) -> Callable:
     """Create an RBF interpolation from source to target points.
 
     Pre-computes the interpolation matrix ``H`` such that the returned
-    transform is simply ``H @ source_values``.
+    transform is simply ``H @ source_values``.  The matrix is a closure
+    constant; prefer ``add_edge(..., mapping=rbf_mapping(...))`` (see
+    :mod:`maddening.core.coupling.mapping`), whose weights live in the
+    graph parameter pytree and are differentiable / replaceable.
 
     Parameters
     ----------
@@ -113,6 +118,11 @@ def rbf_interpolation(
     kernel : str
         One of ``"gaussian"``, ``"multiquadric"``,
         ``"inverse_multiquadric"``, ``"thin_plate_spline"``.
+    polynomial : bool
+        Augment with the linear polynomial so constant and linear fields
+        are reproduced exactly (default ``True``).
+    ridge : float
+        Regularisation relative to ``max|Φ_ss|``.
 
     Returns
     -------
@@ -121,39 +131,15 @@ def rbf_interpolation(
         ``source_values`` has shape ``(N_src,)`` or ``(N_src, C)``
         and ``target_values`` has the corresponding target shape.
     """
-    source_points = jnp.asarray(source_points)
-    target_points = jnp.asarray(target_points)
+    # Shared with ``maddening.core.coupling.mapping``: polynomial-augmented
+    # interpolant (constants / linear fields reproduced exactly), solved
+    # rather than inverted, kernel-relative ridge.
+    from maddening.core.coupling.mapping import rbf_matrix  # noqa: PLC0415
 
-    # Pairwise distances
-    r_ss = jnp.sqrt(jnp.sum(
-        (source_points[:, None, :] - source_points[None, :, :]) ** 2,
-        axis=-1,
-    ))
-    r_ts = jnp.sqrt(jnp.sum(
-        (target_points[:, None, :] - source_points[None, :, :]) ** 2,
-        axis=-1,
-    ))
-
-    def _kernel(r, eps, name):
-        if name == "gaussian":
-            return jnp.exp(-(eps * r) ** 2)
-        elif name == "multiquadric":
-            return jnp.sqrt(1.0 + (eps * r) ** 2)
-        elif name == "inverse_multiquadric":
-            return 1.0 / jnp.sqrt(1.0 + (eps * r) ** 2)
-        elif name == "thin_plate_spline":
-            # r^2 * log(r), with 0*log(0) = 0
-            r_safe = jnp.where(r > 0, r, 1.0)
-            return jnp.where(r > 0, r ** 2 * jnp.log(r_safe), 0.0)
-        else:
-            raise ValueError(f"Unknown kernel: {name}")
-
-    Phi_ss = _kernel(r_ss, epsilon, kernel)
-    Phi_ts = _kernel(r_ts, epsilon, kernel)
-
-    # Pre-compute interpolation matrix: H = Phi_ts @ inv(Phi_ss + eps*I)
-    Phi_ss_reg = Phi_ss + 1e-8 * jnp.eye(source_points.shape[0])
-    H = Phi_ts @ jnp.linalg.inv(Phi_ss_reg)
+    H = rbf_matrix(
+        source_points, target_points, kernel=kernel, epsilon=epsilon,
+        polynomial=polynomial, ridge=ridge,
+    )
 
     def transform(source_values):
         return H @ source_values

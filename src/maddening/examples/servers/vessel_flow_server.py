@@ -170,8 +170,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     @app.post("/sim/reset")
     async def sim_reset():
         runner.stop()
-        for name, spec in gm._nodes.items():
-            gm._state[name] = spec.node.initial_state()
+        gm.reset_state()
         gm._dirty = True
         _clot_active[0] = False
         _clot_pos[0] = None

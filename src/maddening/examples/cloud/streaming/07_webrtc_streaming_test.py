@@ -201,8 +201,7 @@ selkies_renderer = SelkiesRenderer(adapter, selkies, config=stream_config)
 # --- Profile: matplotlib + Selkies push ---
 print("\n--- Performance: matplotlib + GStreamer push ---")
 # Reset state
-for name, spec in gm._nodes.items():
-    gm._state[name] = spec.node.initial_state()
+gm.reset_state()
 
 # Setup the SelkiesRenderer (starts the GStreamer pipeline)
 selkies_renderer.setup(graph_info)
@@ -246,8 +245,7 @@ print(f"\nPerf results: /tmp/webrtc_perf.json")
 # --- Now start the full server with SelkiesRenderer ---
 print("\n--- Starting FastAPI server with WebRTC streaming ---")
 # Reset state again
-for name, spec in gm._nodes.items():
-    gm._state[name] = spec.node.initial_state()
+gm.reset_state()
 
 relay = StateRelay()
 relay.attach(gm)

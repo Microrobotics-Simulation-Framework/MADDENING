@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 # Key used by GraphManager for internal multi-rate bookkeeping.
 _META_KEY = "_meta"
+_PARAMS_KEY = "_params"
+_MAPPINGS_KEY = "_params_mappings"
 
 # Schema version for the integrity manifest.
 #
@@ -101,6 +103,17 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
             key = f"{_META_KEY}/{field_name}"
             arrays[key] = np.asarray(value)
 
+    # Differentiable graph parameters (node constants), so a calibrated
+    # graph restores with the values it was calibrated to.
+    for node_name, node_params in graph_manager.params.get("nodes", {}).items():
+        for pname, value in node_params.items():
+            arrays[f"{_PARAMS_KEY}/{node_name}/{pname}"] = np.asarray(value)
+    # Interface-mapping weights are trainable leaves too (edge keys hold
+    # no '/', so they nest under the same prefix scheme).
+    for edge_key, weights in graph_manager.params.get("mappings", {}).items():
+        for wname, value in weights.items():
+            arrays[f"{_MAPPINGS_KEY}/{edge_key}/{wname}"] = np.asarray(value)
+
     np.savez(path, **arrays)
 
     # numpy.savez appends .npz if not already present
@@ -138,6 +151,8 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     # Separate meta keys from node keys.
     meta_keys: dict[str, np.ndarray] = {}
     node_keys: dict[str, dict[str, np.ndarray]] = {}
+    param_keys: dict[str, dict[str, np.ndarray]] = {}
+    mapping_keys: dict[str, dict[str, np.ndarray]] = {}
 
     for flat_key in data.files:
         parts = flat_key.split("/", 1)
@@ -149,8 +164,22 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         prefix, field = parts
         if prefix == _META_KEY:
             meta_keys[field] = data[flat_key]
+        elif prefix == _PARAMS_KEY:
+            node_name, pname = field.split("/", 1)
+            param_keys.setdefault(node_name, {})[pname] = data[flat_key]
+        elif prefix == _MAPPINGS_KEY:
+            edge_key, wname = field.rsplit("/", 1)
+            mapping_keys.setdefault(edge_key, {})[wname] = data[flat_key]
         else:
             node_keys.setdefault(prefix, {})[field] = data[flat_key]
+
+    # A graph that has never compiled has no params pytree and no _meta;
+    # compile first so load-then-run equals compile-then-load (otherwise
+    # the compile triggered by the first step would re-seed _meta -- the
+    # multirate step counter, predictor / IQN history -- and drop params).
+    if (getattr(graph_manager, "_dirty", False)
+            or getattr(graph_manager, "_compiled_step", None) is None):
+        graph_manager.compile()
 
     # ---- Validate against current graph structure ----
     current_nodes = set(graph_manager.node_names)
@@ -178,11 +207,21 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                 f"saved={sorted(saved_fields)}"
             )
 
-    # ---- Apply loaded state ----
+    # ---- Validate shapes, coerce dtypes, then apply ----
+    staged_states: dict[str, dict] = {}
     for node_name in current_nodes:
-        new_state = {
-            field: jnp.array(arr) for field, arr in node_keys[node_name].items()
-        }
+        live = graph_manager.get_node_state(node_name)
+        new_state = {}
+        for field, arr in node_keys[node_name].items():
+            want = jnp.asarray(live[field])
+            if tuple(arr.shape) != tuple(want.shape):
+                raise ValueError(
+                    f"Checkpoint field '{node_name}/{field}' has shape {tuple(arr.shape)}, "
+                    f"graph has {tuple(want.shape)}"
+                )
+            new_state[field] = jnp.asarray(arr, dtype=want.dtype)
+        staged_states[node_name] = new_state
+    for node_name, new_state in staged_states.items():
         graph_manager.set_node_state(node_name, new_state)
 
     # Restore _meta if present in the checkpoint.
@@ -191,9 +230,33 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         raw_state[_META_KEY] = {
             field: jnp.array(arr) for field, arr in meta_keys.items()
         }
-    else:
-        # If checkpoint had no meta but graph currently has it, reset.
-        raw_state.pop(_META_KEY, None)
+    # A checkpoint without ``_meta`` (written by a graph that had none)
+    # keeps the freshly compiled ``_meta`` of *this* graph: a multirate
+    # step counter or coupling history seeded at zero is the right start,
+    # whereas dropping the key made the next step raise KeyError.
+
+    # Restore graph parameters for nodes/keys the current graph knows;
+    # unknown ones are ignored (a node may have stopped accepting params).
+    # A leaf whose shape differs from the live one is an error, like a
+    # state field: restoring it would run the graph wrong.
+    def _restore(section: str, saved_tree: dict) -> None:
+        current = graph_manager.params.get(section, {})
+        for owner, saved in saved_tree.items():
+            if owner not in current:
+                continue
+            for pname, arr in saved.items():
+                if pname not in current[owner]:
+                    continue
+                live = jnp.asarray(current[owner][pname])
+                if tuple(arr.shape) != tuple(live.shape):
+                    raise ValueError(
+                        f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
+                        f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
+                    )
+                current[owner][pname] = jnp.asarray(arr, dtype=live.dtype)
+
+    _restore("nodes", param_keys)
+    _restore("mappings", mapping_keys)
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +472,11 @@ def download_and_load_state(
     Supported URL schemes:
       * ``file://`` — local file path
       * ``http://`` / ``https://`` — HTTP GET
+      * ``s3://``, ``gs://`` / ``gcs://``, ``az://`` / ``abfs://`` /
+        ``azure://`` (and any other ``fsspec`` protocol, e.g. ``memory://``)
+        — via ``fsspec`` (C3, v0.4.0); install the matching backend
+        (``s3fs``, ``gcsfs``, ``adlfs``).  Credentials come from the
+        backend's usual environment / config.
 
     A manifest at ``<url>.manifest.json`` is downloaded alongside the
     .npz so the integrity check can run without a side channel.
@@ -417,10 +485,10 @@ def download_and_load_state(
     """
     import tempfile as _tempfile
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("file", "http", "https", ""):
+    if parsed.scheme not in ("file", "http", "https", "") and not _is_fsspec_scheme(parsed.scheme):
         raise ValueError(
-            f"Unsupported URL scheme {parsed.scheme!r}; "
-            "expected file://, http://, or https://"
+            f"Unsupported URL scheme {parsed.scheme!r}; expected file://, "
+            "http://, https://, or an fsspec protocol (s3://, gs://, az://, ...)"
         )
 
     if dest_dir is None:
@@ -467,4 +535,43 @@ def _fetch(url: str, dest: Path) -> None:
         with urllib.request.urlopen(url) as response:  # noqa: S310 — trusted
             dest.write_bytes(response.read())
         return
+    if _is_fsspec_scheme(parsed.scheme):
+        fs, path = _fsspec_open(url)
+        with fs.open(path, "rb") as f:
+            dest.write_bytes(f.read())
+        return
     raise ValueError(f"unsupported URL scheme: {parsed.scheme}")
+
+
+_FSSPEC_SCHEMES = {"s3", "s3a", "gs", "gcs", "az", "abfs", "abfss", "azure", "adl", "memory"}
+_FSSPEC_BACKENDS = {"s3": "s3fs", "s3a": "s3fs", "gs": "gcsfs", "gcs": "gcsfs",
+                    "az": "adlfs", "abfs": "adlfs", "abfss": "adlfs", "azure": "adlfs",
+                    "adl": "adlfs"}
+
+
+def _is_fsspec_scheme(scheme: str) -> bool:
+    return scheme in _FSSPEC_SCHEMES
+
+
+def _fsspec_open(url: str):
+    """``(filesystem, path)`` for an fsspec URL, with actionable errors."""
+    scheme = urllib.parse.urlparse(url).scheme
+    try:
+        import fsspec  # noqa: PLC0415
+    except ImportError as e:
+        raise ImportError(
+            f"{scheme}:// checkpoint URLs need fsspec"
+            + (f" and {_FSSPEC_BACKENDS[scheme]}" if scheme in _FSSPEC_BACKENDS else "")
+            + f":  pip install fsspec {_FSSPEC_BACKENDS.get(scheme, '')}".rstrip()
+        ) from e
+    # "azure://" is not an fsspec protocol name; adlfs registers "az" / "abfs".
+    if scheme == "azure":
+        url = "az://" + url[len("azure://"):]
+    try:
+        fs, path = fsspec.core.url_to_fs(url)
+    except (ImportError, ValueError) as e:
+        raise ImportError(
+            f"no fsspec backend for {scheme}://; install "
+            f"{_FSSPEC_BACKENDS.get(scheme, 'the matching fsspec backend')}"
+        ) from e
+    return fs, path

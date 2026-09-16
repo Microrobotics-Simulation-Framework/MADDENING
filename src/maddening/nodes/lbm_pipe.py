@@ -59,6 +59,7 @@ import numpy as np
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 # ── D3Q19 lattice constants ─────────────────────────────────────────
 # Use numpy (not jnp) so these remain concrete values inside JIT/scan.
@@ -344,7 +345,8 @@ def _shan_chen_force(density, G, rho_0, wall_mask, rho_wall):
 
     # Pseudopotential field — set wall cells to psi(rho_wall) to control
     # wetting and prevent spurious interface forces at pipe boundaries.
-    psi_wall = rho_0 * (1.0 - np.exp(-rho_wall / rho_0))
+    # jnp, not np: rho_0 / rho_wall are traced graph parameters.
+    psi_wall = rho_0 * (1.0 - jnp.exp(-rho_wall / rho_0))
     psi_field = jnp.where(wall_mask, psi_wall, _psi(density, rho_0))
 
     # Weighted sum of shifted psi * e_q.
@@ -748,11 +750,44 @@ class LBMPipeNode(SimulationNode):
             "tracer_f": tracer_f,
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def param_specs(self) -> dict[str, ParamSpec]:
+        multiphase = self._G != 0.0
+        return {
+            **super().param_specs(),
+            # BGK stability needs tau > 0.5 strictly.
+            "tau": ParamSpec(bounds=(0.5, None), transform="log"),
+            "tau_tracer": ParamSpec(bounds=(0.5, None), transform="log",
+                                    trainable=not multiphase),
+            "propeller_strength": ParamSpec(units="lattice force"),
+            "gravity": ParamSpec(units="lattice acceleration"),
+            # Shan-Chen constants: read only on the multiphase branch,
+            # which ``G != 0`` at construction selects (structural).
+            "G": ParamSpec(trainable=multiphase),
+            "rho_0": ParamSpec(bounds=(0.0, None), transform="log", trainable=multiphase),
+            "rho_wall": ParamSpec(bounds=(0.0, None), transform="log", trainable=multiphase),
+            "rho_liquid": ParamSpec(bounds=(0.0, None), transform="log", trainable=multiphase),
+            "rho_gas": ParamSpec(bounds=(0.0, None), transform="log", trainable=multiphase),
+            # Geometry (masks built at construction) and initial fill.
+            "pipe_radius": ParamSpec(trainable=False, description="geometry"),
+            "propeller_radius": ParamSpec(trainable=False, description="geometry"),
+            "fill_fraction": ParamSpec(trainable=False, description="initial fill"),
+        }
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """One collide-stream step (D3Q19 + D3Q7 tracer or Shan-Chen).
+
+        Relaxation times, forcing and the Shan-Chen constants come from
+        the injected ``params`` when the graph supplies them; the pipe /
+        propeller masks and the single- vs multiphase branch are
+        structural and fixed at construction.
+        """
         f = state["f"]
-        tau = self.params["tau"]
+        p = self.params if params is None else {**self.params, **params}
+        tau = p["tau"]
         prop_strength = boundary_inputs.get(
-            "propeller_force", self.params["propeller_strength"],
+            "propeller_force", p["propeller_strength"],
         )
         fluid_mask = ~self._wall_mask
 
@@ -767,7 +802,7 @@ class LBMPipeNode(SimulationNode):
             jnp.where(self._propeller_mask, prop_strength, 0.0)
         )
         # Gravity
-        gravity = self.params.get("gravity", 0.0)
+        gravity = p.get("gravity", 0.0)
         force = force.at[:, :, :, 2].set(
             force[:, :, :, 2] + jnp.where(fluid_mask, gravity, 0.0)
         )
@@ -778,8 +813,8 @@ class LBMPipeNode(SimulationNode):
             # it exactly captures the force effect on equilibrium without
             # a Taylor expansion that breaks down at large interface forces.
             sc_force = _shan_chen_force(
-                density, self._G, self._rho_0,
-                self._wall_mask, self._rho_wall,
+                density, p["G"], p["rho_0"],
+                self._wall_mask, p["rho_wall"],
             )
             total_force = force + sc_force
 
@@ -790,8 +825,13 @@ class LBMPipeNode(SimulationNode):
             f_eq_bare = _equilibrium(density, velocity_raw)
             u_shifted = velocity_raw + total_force / density_safe[..., None]
             # Clamp shifted velocity to prevent f_eq breakdown
-            # (equilibrium becomes non-physical when |u| approaches c_s)
-            u_mag = jnp.sqrt(jnp.sum(u_shifted ** 2, axis=-1, keepdims=True))
+            # (equilibrium becomes non-physical when |u| approaches c_s).
+            # Floor inside the sqrt: d/du sqrt(sum u^2) is NaN at u == 0
+            # (a uniform lattice), and the forward is unchanged wherever
+            # |u| > 1e-10, which the maximum() below already assumes.
+            u_mag = jnp.sqrt(jnp.maximum(
+                jnp.sum(u_shifted ** 2, axis=-1, keepdims=True), 1e-20,
+            ))
             scale = jnp.minimum(
                 1.0, 0.25 / jnp.maximum(u_mag, 1e-10),
             )
@@ -844,8 +884,8 @@ class LBMPipeNode(SimulationNode):
         if self._G != 0.0:
             # Multiphase: derive tracer from density
             tracer_new = jnp.clip(
-                (density_new - self._rho_gas)
-                / (self._rho_liquid - self._rho_gas),
+                (density_new - p["rho_gas"])
+                / (p["rho_liquid"] - p["rho_gas"]),
                 0.0, 1.0,
             )
             tracer_new = jnp.where(self._wall_mask, 0.0, tracer_new)
@@ -859,7 +899,7 @@ class LBMPipeNode(SimulationNode):
             g_post = jnp.where(
                 self._wall_mask[..., None],
                 tracer_f,  # no collision at walls
-                tracer_f - (tracer_f - g_eq) / self._tau_tracer,
+                tracer_f - (tracer_f - g_eq) / p["tau_tracer"],
             )
             g_streamed = _stream7(g_post)
             g_bounced = g_streamed[..., _OPP7]

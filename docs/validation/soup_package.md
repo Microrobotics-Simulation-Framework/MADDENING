@@ -29,7 +29,7 @@
 - **Neural surrogates**: Train and deploy neural network replacements for physics nodes
 - **Adaptive timestepping**: {term}`Richardson extrapolation` with {term}`PI controller`
 - **Parameter sweeps**: Batched simulation via `jax.vmap`
-- **{term}`Coupling`**: {term}`Gauss-Seidel` iterative coupling via `jax.lax.fori_loop`
+- **{term}`Coupling`**: {term}`Gauss-Seidel` iterative coupling via an early-exit `jax.lax.while_loop` with implicit-function-theorem differentiation
 
 ### Capabilities NOT Provided
 

@@ -11,13 +11,18 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import inspect
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
+import jax.numpy as jnp
+import numpy as np
+
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 
 @dataclass(frozen=True)
@@ -131,8 +136,84 @@ class SimulationNode(ABC):
         """Pure function: (state, boundary_inputs, dt) -> new_state.
 
         Must be JAX-traceable.  No Python-level side-effects.
+
+        A node may declare an optional keyword-only ``params`` argument
+        (``update(self, state, boundary_inputs, dt, *, params=None)``).
+        When it does, the graph passes the node's entry of the graph
+        parameter pytree (see :meth:`params_pytree`) on every call — as
+        traced arrays, so ``jax.grad`` reaches them and they can change
+        between steps without recompiling.  Read constants from
+        ``params`` (falling back to ``self.params`` for structural
+        entries) rather than from ``self.params`` directly.
         """
         ...
+
+    def accepts_params(self) -> bool:
+        """True when :meth:`update` declares a ``params`` keyword.
+
+        Such nodes receive their entry of the graph parameter pytree on
+        every call; the others keep the 3-argument contract and read
+        constants from ``self.params`` (baked into the trace, so not
+        differentiable through the graph).
+        """
+        try:
+            sig = inspect.signature(self.update)
+        except (TypeError, ValueError):
+            return False
+        return "params" in sig.parameters
+
+    def param_specs(self) -> dict[str, ParamSpec]:
+        """Per-parameter :class:`ParamSpec` for the leaves of
+        :meth:`params_pytree`.
+
+        Default: every ``initial_*`` entry is ``trainable=False`` (an
+        initial condition, not a dynamics constant — ``update`` never
+        reads it); everything else is the default spec (trainable,
+        unbounded, identity).  Subclasses extend the returned dict with
+        bounds and transforms for their constants, e.g.
+        ``{"stiffness": ParamSpec(bounds=(0, None), transform="log")}``.
+        A graph can override any entry with
+        :meth:`GraphManager.set_param_spec`.
+        """
+        return {
+            key: ParamSpec(trainable=False, description="initial condition")
+            for key in self.params
+            if key.startswith("initial_")
+        }
+
+    def params_pytree(self) -> dict:
+        """The node's differentiable parameters as a pytree of arrays.
+
+        Default: every float-valued entry of ``self.params`` — Python
+        floats, floating-point arrays, and lists/tuples of numbers —
+        promoted to float32 arrays.  Ints, bools, strings and nested
+        dicts are structural (they change shapes or the trace) and are
+        excluded; they stay on the recompile path.
+
+        ``GraphManager.compile`` snapshots this into
+        ``GraphManager.params["nodes"][name]`` for nodes whose
+        :meth:`update` accepts ``params``.
+        """
+        out: dict = {}
+        for key, value in self.params.items():
+            if isinstance(value, (bool, int, str, dict)) or value is None:
+                continue
+            if isinstance(value, float):
+                out[key] = jnp.asarray(value, dtype=jnp.float32)
+                continue
+            # Arrays, tracers (a node built inside a traced function),
+            # and lists/tuples of numbers.  Anything jnp can't turn into
+            # a floating array is structural and skipped.
+            try:
+                arr = jnp.asarray(value)
+            except (TypeError, ValueError):
+                continue
+            if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+                continue
+            if isinstance(value, (list, tuple)):
+                arr = arr.astype(jnp.float32)
+            out[key] = arr
+        return out
 
     # ------------------------------------------------------------------
     # Introspection helpers used by GraphManager
@@ -323,6 +404,20 @@ class SimulationNode(ABC):
             )
         return self.update(state_padded, boundary_inputs, dt)
 
+    def domain_integral_axes(self) -> dict[str, tuple[str, ...]]:
+        """Mesh axes to reduce each domain integral over (C4, v0.4.0).
+
+        Default: empty dict = every key in :meth:`domain_integral_fields`
+        is ``psum``-med over the *full* mesh.  A key mapped to a tuple of
+        mesh-axis names is reduced over those axes only; the result then
+        keeps one leading dimension per *unreduced* mesh axis (in mesh
+        order), sharded along it — e.g. a body-surface drag that lives
+        on the shards of one pencil row, or a per-slab integral.  An
+        empty tuple means no reduction: the per-shard partial values are
+        stacked.  Values must be floating-point.
+        """
+        return {}
+
     def domain_integral_fields(self) -> set[str]:
         """Output keys that are domain integrals (cross-shard reductions).
 
@@ -427,8 +522,15 @@ class SimulationNode(ABC):
         pre_state: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, list[tuple[int, Any]]]:
         """Compute corrected values at interface DOFs.
+
+        A node that takes ``params`` in :meth:`update` must take it here
+        too (same ``{**self.params, **params}`` rule): the coupling
+        system passes the node's ``gm.params`` entry, so a calibrated
+        diffusivity also corrects the interface cells.
 
         After ``update()`` is called, the coupling system calls this
         method to obtain what the interface DOF values *should* be
@@ -453,7 +555,7 @@ class SimulationNode(ABC):
         return {}
 
     def compute_boundary_fluxes(
-        self, state: dict, boundary_inputs: dict, dt: float
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
     ) -> dict:
         """Compute flux quantities at coupling interfaces.
 
@@ -463,6 +565,14 @@ class SimulationNode(ABC):
 
         Must be JAX-traceable (pure function).
         Default: empty dict (no fluxes).
+
+        A node that takes ``params`` in :meth:`update` must take it here
+        too and read its constants from it (``{**self.params, **params}``):
+        the graph passes the node's entry of ``GraphManager.params`` on
+        every flux evaluation, so a calibrated stiffness changes the
+        force a flux edge delivers, not only the node's own integration.
+        A node that declares no ``params`` keyword here is called with
+        the 3-argument form and its fluxes use the constructor constants.
         """
         return {}
 

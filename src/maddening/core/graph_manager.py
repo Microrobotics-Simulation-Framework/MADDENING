@@ -19,11 +19,13 @@ import math
 import os
 import warnings
 from collections import defaultdict
+import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,21 @@ logger = logging.getLogger(__name__)
 # trigger the lineax import path.
 
 from maddening.core.coupling import CouplingGroup
+from maddening.core.coupling.acceleration import (
+    float_fields_of,
+    state_float_image,
+    state_from_float_image,
+)
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
+from maddening.core.params import (
+    ParamSpec,
+    check_bounds as _check_bounds,
+    constrain as _constrain,
+    trainable_mask as _trainable_mask,
+    unconstrain as _unconstrain,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.schedule import (
     detect_cycles,
@@ -55,6 +69,147 @@ class _NodeSpec:
     node: SimulationNode          # the descriptor object
     update_fn: Callable           # node.update  (pure function)
     timestep: float
+    # True when ``update`` declares a ``params`` keyword: the graph then
+    # passes the node's entry of the graph parameter pytree on every
+    # call (traced, differentiable).  Nodes that don't opt in keep the
+    # 3-argument contract and read constants from ``self.params``.
+    accepts_params: bool = False
+    # Same for ``compute_boundary_fluxes``: a flux producer that reads
+    # its constants from ``params`` gets the node's pytree entry on
+    # every flux evaluation (a calibrated stiffness changes the force a
+    # flux edge delivers).
+    flux_accepts_params: bool = False
+
+
+def _correction_accepts_params(node: SimulationNode) -> bool:
+    fn = getattr(node, "compute_interface_correction", None)
+    if fn is None:
+        return False
+    try:
+        return "params" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _flux_accepts_params(node: SimulationNode) -> bool:
+    fn = getattr(node, "compute_boundary_fluxes", None)
+    if fn is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return "params" in sig.parameters
+
+
+def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
+    """``spec.node.compute_boundary_fluxes`` with the params contract."""
+    if spec.flux_accepts_params and node_params is not None:
+        return spec.node.compute_boundary_fluxes(
+            state, boundary_inputs, dt, params=node_params,
+        )
+    return spec.node.compute_boundary_fluxes(state, boundary_inputs, dt)
+
+
+def _update_accepts_params(node: SimulationNode) -> bool:
+    probe = getattr(node, "accepts_params", None)
+    if callable(probe):
+        return bool(probe())
+    # Duck-typed node objects that don't subclass SimulationNode.
+    try:
+        sig = inspect.signature(node.update)
+    except (TypeError, ValueError):
+        return False
+    return "params" in sig.parameters
+
+
+def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
+    # named_scope is trace-time metadata only (no runtime cost); the
+    # profiler's trace attribution keys device kernels on it.
+    with jax.named_scope(f"node:{spec.node.name}"):
+        if spec.accepts_params and node_params is not None:
+            return spec.update_fn(state, boundary_inputs, dt, params=node_params)
+        return spec.update_fn(state, boundary_inputs, dt)
+
+
+class _ResolvedParams(NamedTuple):
+    """The graph parameter pytree split for the step builders: per-node
+    pytrees (``nodes[name]``) and per-edge mapping weights
+    (``mappings[edge.key]``).  Both are traced when an explicit ``params``
+    is passed, baked constants otherwise."""
+    nodes: dict
+    mappings: dict
+
+
+def _import_lineax():
+    """``import lineax`` with an actionable error when it is missing.
+
+    The matrix-free Krylov adjoint of the IFT solver (``linear_solver=
+    "gmres" | "bicgstab"``) needs lineax; it is an optional dependency
+    (``pip install maddening[ift]``) so the base install stays light.
+    """
+    try:
+        import lineax as lx  # noqa: PLC0415  (lazy by design)
+    except ImportError as e:
+        raise ImportError(
+            "lineax is required for the matrix-free Krylov adjoint of the "
+            "coupling solver (solver='ift' with linear_solver='gmres' or "
+            "'bicgstab').  Install it with:  pip install maddening[ift]\n"
+            "Or use linear_solver='dense' (no lineax dependency; it builds "
+            "the coupling Jacobian explicitly, slower on large groups)."
+        ) from e
+    return lx
+
+
+def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
+    """Per-node state fields to accelerate for a coupling group.
+
+    The fields the group's internal edges *read* from each producer.  An
+    edge whose ``source_field`` is not a state field (a boundary flux
+    from ``compute_boundary_fluxes``) is a function of the producer's
+    state, so the producer's whole state stands in for it.  ``None``
+    when no internal edge exists (accelerate everything).
+    """
+    ifields: dict[str, set] = {}
+    for edge in edges:
+        if edge.source_node in group_nodes and edge.target_node in group_nodes:
+            fields = state.get(edge.source_node, {})
+            if edge.source_field in fields:
+                ifields.setdefault(edge.source_node, set()).add(edge.source_field)
+            else:
+                ifields.setdefault(edge.source_node, set()).update(fields.keys())
+    return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
+
+
+def _strong_typed(tree):
+    """Strip JAX weak typing from every array leaf.
+
+    ``jnp.array(0.0)`` is *weak-typed*; the same leaf after one step is
+    strongly typed (it is the result of arithmetic with typed arrays),
+    and a jitted step keyed on ``(shape, dtype, weak_type)`` retraces —
+    once per leaf whose weak type flips, typically on the second and
+    third steps of every run (measured: three compiles of the same step
+    on the MIME AR4 graph, ~2.6 s).  Normalising the seed state and the
+    values callers hand in keeps the trace signature constant.
+    """
+    def _fix(x):
+        if getattr(x, "weak_type", False):
+            return x.astype(x.dtype)
+        return x
+    return jax.tree.map(_fix, tree)
+
+
+def _apply_edge(edge: EdgeSpec, value, params):
+    """Mapping (interface transfer) first, then the scalar transform."""
+    if edge.mapping is not None:
+        weights = None
+        if params is not None:
+            weights = params.mappings.get(edge.key)
+        with jax.named_scope("edge:mapping"):
+            value = edge.mapping.apply(value, weights)
+    if edge.transform is not None:
+        value = edge.transform(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -102,233 +257,139 @@ class ExternalInputSpec:
 # of tracers extracted by ``jax.closure_convert`` at the call site.
 
 
-def _F_dispatch(F_pure, x, consts):
-    # Trampoline: forwards to a closure-converted pure function.
-    # Kept top-level so the custom_jvp rule sees ``F_pure`` as a
-    # plain Python global, not a captured closure.
-    return F_pure(x, *consts)
+def _F_dispatch(step_pure, x, consts):
+    # Trampoline: forwards to a closure-converted pure function and
+    # keeps only the next iterate.  Kept top-level so the custom_jvp
+    # rule sees ``step_pure`` as a plain Python global, not a captured
+    # closure.
+    return step_pure(x, *consts)[0]
 
 
-def _ift_fixed_point_fwd_impl(F_pure, x0, consts, tol, max_iter, acceleration):
-    """While-loop fixed-point iteration of ``x = F_pure(x, *consts)``.
+def _fixed_point_while(
+    step_pure, x0, consts, accel_init, threshold, max_iter,
+    acceleration, relaxation, n_reuse, sub_idx,
+):
+    """Early-exit fixed-point iteration ``x = F(x)`` with acceleration.
 
-    Returns ``(x_star, n_iters)``.  No autodiff machinery here — that
-    is layered on by ``_ift_solve``'s custom_jvp.
+    ``step_pure(x, *consts) -> (F(x), residual)`` is the closure-converted
+    one-pass function; ``residual`` is the group's configured convergence
+    measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm),
+    compared against the static ``threshold``.  The loop always runs at
+    least one body iteration and at most ``max_iter - 1``, so the number
+    of ``F`` evaluations at the cap (first pass + body iterations) equals
+    ``max_iter`` — the same budget as the legacy fori path.
 
-    ``acceleration`` is a static Python string selecting the forward
-    iterator wrapper.  Supported values:
+    ``sub_idx`` (static tuple of ints, or None) restricts the
+    acceleration to a subset of ``x`` — the IQN interface fields — while
+    the iterate, the residual and the fixed point stay the full vector.
+    Non-accelerated entries take the raw ``F(x)`` value each iteration,
+    matching the fori path's ``_build_accel_state``.
 
-    - ``"none"``    : bare Gauss-Seidel, ``x_{k+1} = F(x_k)``.
-    - ``"aitken"``  : Aitken delta-squared relaxation around ``F``.
-    - ``"iqn-imvj"``: Interface quasi-Newton with inverse multi-vector
-      Jacobian.  Builds ``V`` (input differences) and ``W`` (residual
-      differences) matrices within the while_loop carry, solves a
-      rank-deficient least-squares each iteration to get a coefficient
-      vector ``c``, and applies ``dx_qn = V c - r_cur``.  Per-step only
-      — V/W reset to zeros at the start of each timestep; cross-timestep
-      warm-start is a deferred follow-up.
+    Returns ``(x_star, n_iters, final_res, (V, W))``: ``n_iters`` is the
+    number of body iterations run (as a float, for the diagnostics
+    carry), ``final_res`` the residual of the last pass, and ``(V, W)``
+    the IQN secant matrices (an empty tuple for other accelerations).
+    No autodiff machinery here; the IFT rule is layered on by
+    ``_ift_solve``.
 
-    The backward (IFT adjoint) is **acceleration-agnostic**: it
-    differentiates the bare contraction ``F`` at the fixed point
-    ``x*``, since acceleration is just a forward-pass technique for
-    *getting to* ``x*`` faster — at the fixed point ``x* = F(x*)``
-    regardless of what wrapper was used to reach it.  This is why the
-    bwd rule below does not need an ``acceleration`` argument.
+    Acceleration wrappers (static ``acceleration``):
+
+    - ``"none"``   : ``x_{k+1} = F(x_k)``.
+    - ``"fixed"``  : constant relaxation ``x + relaxation * (F(x) - x)``.
+    - ``"aitken"`` : Aitken delta-squared relaxation.
+    - ``"iqn-ils"`` / ``"iqn-imvj"``: interface quasi-Newton via
+      ``iqn_ils_update`` (shift-and-insert secant columns, Aitken
+      fallback).  ``accel_init = (V, W)`` seeds the secant matrices —
+      zeros for ILS, the previous timestep's columns masked to the first
+      ``n_reuse`` for IMVJ — so cross-timestep Jacobian reuse runs inside
+      the while_loop with the same column convention as the fori path.
     """
-    if acceleration == "none":
-
-        def cond(carry):
-            x, x_prev, i = carry
-            not_converged = jnp.linalg.norm(x - x_prev) > tol
-            not_maxed = i < max_iter
-            first = i == jnp.int32(0)
-            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
-
-        def body(carry):
-            x, _x_prev, i = carry
-            x_new = _F_dispatch(F_pure, x, consts)
-            return (x_new, x, i + jnp.int32(1))
-
-        x_star, _, n_iters = jax.lax.while_loop(
-            cond,
-            body,
-            (x0, x0 + jnp.array(1.0, dtype=x0.dtype), jnp.int32(0)),
-        )
-        return x_star, n_iters
-
-    if acceleration == "aitken":
-        # Lazy import to keep this module's load cheap.
-        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-            aitken_relaxation,
-        )
-
-        n_dof = x0.shape[0]
-        dtype = x0.dtype
-
-        # Carry: (x_cur, x_prev, i, omega, prev_r).  ``x_prev`` lets
-        # the cond_fun check ||F(x_cur) - x_cur|| via the raw residual
-        # bookkeeping each iter rather than re-evaluating F just to
-        # decide on termination.  We use the same "first iter always
-        # runs" guard as the no-accel path so a single F-evaluation
-        # always happens (matches fori-Aitken semantics).
-        def cond(carry):
-            x, x_prev, i, _omega, _prev_r = carry
-            not_converged = jnp.linalg.norm(x - x_prev) > tol
-            not_maxed = i < max_iter
-            first = i == jnp.int32(0)
-            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
-
-        def body(carry):
-            x_cur, _x_prev, i, omega, prev_r = carry
-            # One raw Gauss-Seidel pass.
-            x_raw = _F_dispatch(F_pure, x_cur, consts)
-            # Aitken-relaxed update: x_rel = x_cur + new_omega * (x_raw - x_cur)
-            x_rel, new_omega, cur_r = aitken_relaxation(
-                x_cur, x_raw, prev_r, omega,
-            )
-            return (x_rel, x_cur, i + jnp.int32(1), new_omega, cur_r)
-
-        init_omega = jnp.array(1.0, dtype=dtype)
-        init_prev_r = jnp.zeros(n_dof, dtype=dtype)
-        # Seed x_prev as x0 + 1 so the first cond evaluation lets the
-        # loop body run at least once (matches the no-accel path).
-        init_carry = (
-            x0,
-            x0 + jnp.array(1.0, dtype=dtype),
-            jnp.int32(0),
-            init_omega,
-            init_prev_r,
-        )
-        x_star, _, n_iters, _, _ = jax.lax.while_loop(cond, body, init_carry)
-        return x_star, n_iters
-
-    if acceleration == "iqn-imvj":
-        # Interface quasi-Newton with inverse multi-vector Jacobian.
-        # Carry: (x_cur, x_prev, i, V, W, prev_r).
-        #
-        # The math (per iteration i >= 1):
-        #   r_cur  = F(x_cur) - x_cur                 # current residual
-        #   V[:, i-1] = x_cur - x_prev                # input diff column
-        #   W[:, i-1] = r_cur - prev_r                # residual diff column
-        #   solve  W c ≈ r_cur                        # secant LS:
-        #                                              c = (W^T W)^{-1} W^T r_cur
-        #   dx_qn = -V c                              # Δx_QN ≈ -J_R^{-1} r_cur
-        #                                              where J_R^{-1} ≈ V c / r_cur
-        #   x_new = x_cur + dx_qn = x_cur - V c
-        # At i == 0 there are no columns yet: do a bare Gauss-Seidel step.
-        #
-        # V/W are preallocated to ``(n_dof, max_cols)`` zeros at iter 0;
-        # while_loop requires fixed shapes, so columns past ``i-1`` stay
-        # zero.  jnp.linalg.lstsq is robust to the resulting rank deficit.
-        #
-        # **Per-step only.**  V/W reset to zeros each timestep — no
-        # cross-timestep warm-start (deferred follow-up; the per-step
-        # variant captures within-step convergence benefit and the
-        # warm-start machinery is mutable-state coupled to CouplingGroup
-        # which is JAX-trace-incompatible without special care).
-        n_dof = x0.shape[0]
-        dtype = x0.dtype
-        max_cols = max(max_iter - 1, 1)
-
-        def cond(carry):
-            # Convergence uses the *residual* ``prev_r = F(x_prev) - x_prev``
-            # rather than the step size ``||x - x_prev||``.  For Gauss-Seidel
-            # / Aitken the two are equivalent (the step is the residual), but
-            # for IMVJ the quasi-Newton step can be tiny even when the residual
-            # is still large (e.g. ill-conditioned early-iter LS solve), which
-            # would otherwise produce a spurious "converged" exit.  We force
-            # at least one iter via the ``first`` flag, so the iter-0 zero
-            # ``prev_r`` does not abort the loop.
-            _x, _x_prev, i, _V, _W, prev_r = carry
-            not_converged = jnp.linalg.norm(prev_r) > tol
-            not_maxed = i < max_iter
-            first = i == jnp.int32(0)
-            return jnp.logical_or(first, jnp.logical_and(not_converged, not_maxed))
-
-        def _gs_step(args):
-            # First iter (i==0): pure Gauss-Seidel.  Just return F(x_cur).
-            x_cur, _x_prev, _i, V, W, _prev_r, x_new, r_cur = args
-            return x_new, V, W, r_cur
-
-        def _imvj_step(args):
-            # i >= 1: write column (i-1) into V/W, lstsq, apply dx_qn.
-            x_cur, x_prev, i, V, W, prev_r, _x_new, r_cur = args
-            delta_x = x_cur - x_prev
-            delta_r = r_cur - prev_r
-            # Masked write: column index = i-1.  ``.at[:, i-1].set`` is a
-            # dynamic-index slice update, fine inside while_loop.
-            col_idx = i - jnp.int32(1)
-            V_new = V.at[:, col_idx].set(delta_x)
-            W_new = W.at[:, col_idx].set(delta_r)
-            # Zero out columns >= i (active count = i).  Cleaner than
-            # trusting lstsq to handle the leftover zeros — explicit mask
-            # makes the rank deficit visible in W_masked.
-            col_mask = jnp.arange(max_cols) < i
-            V_masked = V_new * col_mask[None, :]
-            W_masked = W_new * col_mask[None, :]
-            # Solve  W c ≈ r_cur  via the SVD pseudo-inverse.  The
-            # relative cutoff keeps the solve well-defined when W still
-            # has only a handful of populated columns and the rest are
-            # zero (rank-deficient).  ``pinv`` rather than ``lstsq`` for
-            # the same reason as ``iqn_ils_update``: lstsq's derivative
-            # is NaN on repeated zero singular values.  The IFT rule
-            # never differentiates this body, but keep the two sites
-            # consistent so nobody re-inherits the trap by unrolling.
-            c = jnp.linalg.pinv(W_masked, rtol=1e-10) @ r_cur
-            # Standard IMVJ update (Degroote 2008):  x_{k+1} = x_k - V c
-            # where c solves the secant LS  W c ≈ r_cur.  This implies
-            # J_R^{-1} r_cur ≈ V c, so Δx_QN = -V c is the QN step.
-            dx_qn = -(V_masked @ c)
-            x_qn = x_cur + dx_qn
-            # Guard against blow-up: if the QN step produced NaN/inf,
-            # fall back to a Gauss-Seidel step.  Cheap insurance against
-            # ill-conditioned early-iter lstsq edge cases.
-            qn_finite = jnp.all(jnp.isfinite(x_qn))
-            x_out = jnp.where(qn_finite, x_qn, x_cur + r_cur)
-            return x_out, V_new, W_new, r_cur
-
-        def body(carry):
-            x_cur, _x_prev, i, V, W, prev_r = carry
-            x_new = _F_dispatch(F_pure, x_cur, consts)
-            r_cur = x_new - x_cur
-            args = (x_cur, _x_prev, i, V, W, prev_r, x_new, r_cur)
-            x_out, V_out, W_out, r_out = jax.lax.cond(
-                i == jnp.int32(0), _gs_step, _imvj_step, args,
-            )
-            return (x_out, x_cur, i + jnp.int32(1), V_out, W_out, r_out)
-
-        init_V = jnp.zeros((n_dof, max_cols), dtype=dtype)
-        init_W = jnp.zeros((n_dof, max_cols), dtype=dtype)
-        init_prev_r = jnp.zeros(n_dof, dtype=dtype)
-        init_carry = (
-            x0,
-            x0 + jnp.array(1.0, dtype=dtype),
-            jnp.int32(0),
-            init_V,
-            init_W,
-            init_prev_r,
-        )
-        x_star, _, n_iters, _, _, _ = jax.lax.while_loop(
-            cond, body, init_carry,
-        )
-        return x_star, n_iters
-
-    raise ValueError(
-        f"_ift_fixed_point_fwd_impl: unsupported acceleration={acceleration!r}; "
-        "supported values are 'none', 'aitken', and 'iqn-imvj'."
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        aitken_relaxation,
+        fixed_relaxation,
+        iqn_ils_update,
     )
+
+    idx = None if sub_idx is None else jnp.asarray(sub_idx, dtype=jnp.int32)
+    x0_acc = x0 if idx is None else x0[idx]
+    n_dof = x0_acc.shape[0]
+    dtype = x0.dtype
+    zeros = jnp.zeros(n_dof, dtype=dtype)
+    one = jnp.array(1.0, dtype=dtype)
+    is_iqn = acceleration in ("iqn-ils", "iqn-imvj")
+
+    if acceleration in ("none", "fixed"):
+        acc0 = ()
+    elif acceleration == "aitken":
+        acc0 = (one, zeros)  # omega, prev_residual
+    elif is_iqn:
+        V0, W0 = accel_init
+        # V, W, n_cols, prev_residual, prev_raw, omega, prev_r_aitken
+        acc0 = (V0, W0, jnp.int32(n_reuse), zeros, x0_acc, one, zeros)
+    else:
+        raise ValueError(
+            f"_fixed_point_while: unsupported acceleration="
+            f"{acceleration!r}; expected one of 'none', 'fixed', "
+            "'aitken', 'iqn-ils', 'iqn-imvj'."
+        )
+
+    def accelerate(x, x_raw, acc, i):
+        with jax.named_scope("coupling:accelerate"):
+            return _accelerate(x, x_raw, acc, i)
+
+    def _accelerate(x, x_raw, acc, i):
+        if acceleration == "none":
+            return x_raw, acc
+        if acceleration == "fixed":
+            return fixed_relaxation(x, x_raw, relaxation), acc
+        if acceleration == "aitken":
+            omega, prev_r = acc
+            x_new, omega, cur_r = aitken_relaxation(x, x_raw, prev_r, omega)
+            return x_new, (omega, cur_r)
+        V, W, n_cols, prev_r, prev_s, omega, prev_ra = acc
+        x_new, V, W, n_cols, cur_r, cur_s, omega, cur_ra = iqn_ils_update(
+            x_raw, x, prev_r, prev_s, V, W, n_cols, omega, prev_ra,
+            have_prev=i > 0,
+        )
+        return x_new, (V, W, n_cols, cur_r, cur_s, omega, cur_ra)
+
+    def cond(carry):
+        _x, res, i, _acc = carry
+        first = i == jnp.int32(0)
+        keep_going = jnp.logical_and(res > threshold, i < max_iter - 1)
+        return jnp.logical_or(first, keep_going)
+
+    def body(carry):
+        x, _res, i, acc = carry
+        x_raw, res = step_pure(x, *consts)
+        if idx is None:
+            x_new, acc = accelerate(x, x_raw, acc, i)
+        else:
+            x_new_sub, acc = accelerate(x[idx], x_raw[idx], acc, i)
+            x_new = x_raw.at[idx].set(x_new_sub)
+        return x_new, res, i + jnp.int32(1), acc
+
+    init = (x0, jnp.array(jnp.inf, dtype=dtype), jnp.int32(0), acc0)
+    x_star, final_res, n_iters, acc = jax.lax.while_loop(cond, body, init)
+    vw = (acc[0], acc[1]) if is_iqn else ()
+    return x_star, n_iters.astype(dtype), final_res, vw
 
 
 def _ift_solve_impl(
-    F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
+    step_pure, x0, consts, accel_init, threshold, max_iter,
+    acceleration, relaxation, n_reuse, sub_idx, linear_solver,
 ):
-    """Returns ``x_star`` such that ``x_star = F_pure(x_star, *consts)``.
+    """Returns ``(x_star, aux)`` with ``x_star = F(x_star, *consts)``.
 
-    Differentiates via the implicit function theorem:
+    ``aux = (n_iters, final_res, (V, W))`` is forward-only bookkeeping
+    from :func:`_fixed_point_while` (diagnostics and IQN secant matrices
+    for cross-timestep reuse); it carries a zero derivative.
+
+    ``x_star`` differentiates via the implicit function theorem:
         ``dx*/d(consts) = (I - dF/dx)^{-1} dF/d(consts)``
-    evaluated at the fixed point.  ``x0`` itself receives a zero
-    derivative (the fixed point is invariant under the initial guess
-    in the converged limit).
+    evaluated at the fixed point.  ``x0`` and ``accel_init`` receive a
+    zero derivative (the fixed point is invariant under the initial
+    guess and the acceleration state in the converged limit).
 
     The rule is installed as a ``jax.custom_jvp`` (see
     ``_ift_solve_jvp``) rather than a ``custom_vjp``: JAX obtains
@@ -338,30 +399,48 @@ def _ift_solve_impl(
     derivative), ``jax.grad`` / ``vjp`` / ``jacrev``, and higher
     order.  A ``custom_vjp`` cannot be forward-differentiated at all.
 
-    ``acceleration`` is a static Python string — see
-    ``_ift_fixed_point_fwd_impl`` for supported values.  It controls
-    only the forward iterator; the derivative is identical for all
-    values because the IFT rule depends on ``F`` at ``x*``, not on the
-    path taken to reach ``x*``.
+    The derivative is valid only at a converged fixed point.  When the
+    loop exits at ``max_iter`` unconverged, ``final_res`` says so
+    (surfaced through ``GraphManager.coupling_diagnostics`` and, with
+    ``CouplingGroup.strict_convergence``, a runtime error); the
+    derivative is then off by roughly ``residual * cond(I - dF/dx)``.
 
-    ``linear_solver`` is a static Python string — ``"gmres"`` (default),
-    ``"bicgstab"``, or ``"dense"`` — selecting the tangent/adjoint
-    solver.  See ``_ift_linear_solve`` for the dispatch details.
+    ``acceleration`` / ``relaxation`` / ``n_reuse`` are static and
+    control only the forward iterator; the derivative is identical for
+    all of them because the IFT rule depends on ``F`` at ``x*``, not on
+    the path taken to reach ``x*``.  ``linear_solver`` selects the
+    tangent/adjoint solver — see ``_ift_linear_solve``.
     """
-    x_star, _ = _ift_fixed_point_fwd_impl(
-        F_pure, x0, consts, tol, max_iter, acceleration
+    x_star, n_iters, final_res, vw = _fixed_point_while(
+        step_pure, x0, consts, accel_init, threshold, max_iter,
+        acceleration, relaxation, n_reuse, sub_idx,
     )
-    return x_star
+    return x_star, (n_iters, final_res, vw)
+
 
 
 def _ift_linear_solve(matvec, rhs, linear_solver):
     """Solve ``A v = rhs`` for the matrix-free operator ``v -> matvec(v)``.
 
-    ``A`` is ``I - dF/dx`` at the fixed point.  Every backend goes
-    through lineax so that the solve is linear in ``rhs`` *and*
-    transposable — that is what lets JAX derive the reverse-mode rule
-    (a solve with ``A^T``) from the forward-mode rule automatically.
-    Memory is O(N) for the matrix-free backends; no Jacobian is ever
+    ``A`` is ``I - dF/dx`` at the fixed point.  Wrapped in
+    ``jax.lax.custom_linear_solve`` so JAX treats the result as linear
+    in ``rhs``: forward mode re-solves with the tangent rhs and reverse
+    mode calls ``transpose_solve`` with ``A^T`` — that is what lets JAX
+    derive the reverse-mode rule (an adjoint solve) from the
+    forward-mode rule automatically — while the *inside* of the solve
+    is free to depend on the rhs non-linearly.  We use that freedom for
+    the tolerance: lineax's criterion is elementwise (residual entry
+    ``i`` under ``atol + rtol * |rhs_i|``), and cotangent / tangent
+    vectors routinely carry exact zeros (a loss touching only some
+    fields), whose entries would otherwise have to reach ``atol``
+    absolute while float32 round-off from the large entries is
+    ``~eps * max|rhs|``.  Once the Krylov space is exhausted (small
+    systems use ``restart = n``) lineax then reports an "iterative
+    breakdown" for a solve that is as exact as the dtype allows.  So
+    ``atol`` is scaled to the largest rhs entry — the usual "relative
+    to ||b||" Krylov criterion — and ``rtol`` is no tighter than ~100
+    ulp of the dtype (1e-6 in float64, 1.2e-5 in float32).  Memory is
+    O(N) for the matrix-free backends; no Jacobian is ever
     materialised except under ``"dense"``.
 
     Backends, dispatched by ``linear_solver`` plus the
@@ -382,33 +461,40 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     Lineax raises (``throw=True`` default) when a solve reports
     failure, so a non-converged adjoint is loud rather than silent.
     """
-    # Lazy import — keeps lineax (and its equinox/optax transitive
-    # deps) out of module load time.  Only callers who opt into
-    # ``solver='ift'`` pay this import cost.
-    import lineax as lx  # noqa: PLC0415  (lazy by design)
-
     force_dense = os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1"
     effective_solver = "dense" if force_dense else linear_solver
+    if effective_solver not in ("gmres", "bicgstab", "dense"):
+        raise ValueError(
+            f"_ift_linear_solve: unsupported linear_solver="
+            f"{linear_solver!r}; expected one of "
+            f"'gmres', 'bicgstab', 'dense'."
+        )
     n = rhs.shape[0]
+    rtol = max(1e-6, 100.0 * float(jnp.finfo(rhs.dtype).eps))
 
-    if effective_solver == "dense":
-        A = jax.jacfwd(matvec)(jnp.zeros_like(rhs))
-        op = lx.MatrixLinearOperator(A)
-        solver = lx.LU()
-    else:
-        op = lx.FunctionLinearOperator(matvec, jax.eval_shape(lambda: rhs))
+    def _dense(mv, b):
+        A = jax.jacfwd(mv)(jnp.zeros_like(b))
+        return jnp.linalg.solve(A, b)
+
+    def _krylov(mv, b):
+        # Lazy import — keeps lineax (and its equinox/optax transitive
+        # deps) out of module load time.  Only callers who opt into
+        # ``solver='ift'`` pay this import cost.
+        lx = _import_lineax()
+
+        atol = 1e-8 + rtol * jnp.max(jnp.abs(b))
+        op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
         if effective_solver == "bicgstab":
             # BiCGStab has no ``restart`` parameter (it operates on a
             # fixed three-vector recurrence rather than building a
             # Krylov subspace).  ``max_steps`` only needs to bound the
             # outer iteration count.
             solver = lx.BiCGStab(
-                rtol=1e-6, atol=1e-8, max_steps=max(4 * n, 200),
+                rtol=rtol, atol=atol, max_steps=max(4 * n, 200),
             )
-        elif effective_solver == "gmres":
+        else:
             # (I - dF/dx) is in general non-symmetric; GMRES is the
-            # safe default.  rtol/atol are matched to the float32
-            # regime the surrounding code uses.
+            # safe default.
             #
             # *** GMRES restart gotcha ***
             #
@@ -434,53 +520,60 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
             # for the regression guard.
             restart = min(n, 50)
             solver = lx.GMRES(
-                rtol=1e-6,
-                atol=1e-8,
+                rtol=rtol,
+                atol=atol,
                 restart=restart,
                 max_steps=max(4 * restart, 100),
             )
-        else:
-            raise ValueError(
-                f"_ift_linear_solve: unsupported linear_solver="
-                f"{linear_solver!r}; expected one of "
-                f"'gmres', 'bicgstab', 'dense'."
-            )
+        return lx.linear_solve(op, b, solver=solver).value
 
-    return lx.linear_solve(op, rhs, solver=solver).value
+    solve = _dense if effective_solver == "dense" else _krylov
+    # ``transpose_solve`` receives ``vecmat = v -> A^T v`` and must
+    # solve ``A^T x = b``; the same routine serves both.
+    return jax.lax.custom_linear_solve(
+        matvec, rhs, solve, transpose_solve=solve,
+    )
 
 
 def _ift_solve_jvp(
-    F_pure, tol, max_iter, acceleration, linear_solver, primals, tangents
+    step_pure, threshold, max_iter, acceleration, relaxation, n_reuse,
+    sub_idx, linear_solver, primals, tangents,
 ):
     # Tangent rule of the implicit function theorem at ``x*``:
     #     (I - dF/dx) x_dot = dF/d(consts) . consts_dot
     # Linear in ``consts_dot`` (a jvp of F composed with a lineax solve),
-    # so JAX can transpose it for reverse mode.  ``x0_dot`` is ignored:
-    # the converged fixed point does not depend on the initial guess.
-    x0, consts = primals
-    _x0_dot, consts_dot = tangents
-    x_star = _ift_solve(
-        F_pure, x0, consts, tol, max_iter, acceleration, linear_solver
+    # so JAX can transpose it for reverse mode.  ``x0_dot`` and
+    # ``accel_dot`` are ignored: the converged fixed point does not
+    # depend on the initial guess or the accelerator's seed state, and
+    # ``aux`` is forward-only bookkeeping with a zero tangent.
+    x0, consts, accel_init = primals
+    _x0_dot, consts_dot, _accel_dot = tangents
+    x_star, aux = _ift_solve(
+        step_pure, x0, consts, accel_init, threshold, max_iter,
+        acceleration, relaxation, n_reuse, sub_idx, linear_solver,
     )
     _, rhs = jax.jvp(
-        lambda cc: _F_dispatch(F_pure, x_star, cc), (consts,), (consts_dot,)
+        lambda cc: _F_dispatch(step_pure, x_star, cc), (consts,), (consts_dot,)
     )
 
     def _matvec(v):
         _, Jv = jax.jvp(
-            lambda xx: _F_dispatch(F_pure, xx, consts), (x_star,), (v,)
+            lambda xx: _F_dispatch(step_pure, xx, consts), (x_star,), (v,)
         )
         return v - Jv
 
     x_dot = _ift_linear_solve(_matvec, rhs, linear_solver)
-    return x_star, x_dot
+    aux_dot = jax.tree.map(jnp.zeros_like, aux)
+    return (x_star, aux), (x_dot, aux_dot)
 
 
-# nondiff_argnums: 0=F_pure (callable), 3=tol (static float),
-#                  4=max_iter (static int), 5=acceleration (static str),
-#                  6=linear_solver (static str).
+# nondiff_argnums: 0=step_pure (callable), 4=threshold (static float),
+#                  5=max_iter (static int), 6=acceleration (static str),
+#                  7=relaxation (static float), 8=n_reuse (static int),
+#                  9=sub_idx (static tuple | None), 10=linear_solver
+#                  (static str).
 _ift_solve = jax.custom_jvp(
-    _ift_solve_impl, nondiff_argnums=(0, 3, 4, 5, 6)
+    _ift_solve_impl, nondiff_argnums=(0, 4, 5, 6, 7, 8, 9, 10)
 )
 _ift_solve.defjvp(_ift_solve_jvp)
 
@@ -494,6 +587,8 @@ EVENT_EDGE_ADDED = "edge_added"
 EVENT_EDGE_REMOVED = "edge_removed"
 EVENT_COMPILED = "compiled"
 EVENT_STEP = "step"
+# Emitted by maddening.sysid.fit / fit_lm / fit_multiple_shooting.
+EVENT_FIT_PROGRESS = "fit_progress"
 
 
 _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
@@ -524,7 +619,7 @@ def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
 
 
 def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
-                               node_obj, coupled_bi_names=None):
+                               node_obj, coupled_bi_names=None, node_params=None):
     """Correct interface DOFs after update to undo internal BC enforcement.
 
     Nodes like HeatNode enforce Dirichlet BCs by overwriting boundary
@@ -570,25 +665,31 @@ def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
         filtered_bi = boundary_inputs
     if not filtered_bi:
         return node_state
-    corrections = node_obj.compute_interface_correction(
-        pre_state, filtered_bi, dt
-    )
-    if not corrections:
-        return node_state
-    result = {**node_state}
-    for field, idx_val_list in corrections.items():
-        arr = result[field]
-        for idx, val in idx_val_list:
-            arr = arr.at[idx].set(val)
-        result[field] = arr
-    return result
+    with jax.named_scope("coupling:interface_override"):
+        if node_params is not None and _correction_accepts_params(node_obj):
+            corrections = node_obj.compute_interface_correction(
+                pre_state, filtered_bi, dt, params=node_params,
+            )
+        else:
+            corrections = node_obj.compute_interface_correction(
+                pre_state, filtered_bi, dt
+            )
+        if not corrections:
+            return node_state
+        result = {**node_state}
+        for field, idx_val_list in corrections.items():
+            arr = result[field]
+            for idx, val in idx_val_list:
+                arr = arr.at[idx].set(val)
+            result[field] = arr
+        return result
 
 
 def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
-    multigpu_device_map=None,
+    multigpu_device_map=None, node_params=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -614,6 +715,10 @@ def _run_coupled_block_impl(
 
     max_iters = group.max_iterations
     group_node_names = list(group_schedule)
+    _node_params = node_params.nodes if node_params is not None else {}
+
+    def _np(nn):
+        return _node_params.get(nn)
     group_node_set = set(group_node_names)
     use_mixed_norm = group.convergence_norm == "mixed"
     use_interface_norm = group.convergence_norm == "interface"
@@ -641,18 +746,9 @@ def _run_coupled_block_impl(
         if group.accelerated_fields is not None:
             accel_fields = group.accelerated_fields
         else:
-            interface_fields: dict[str, set] = {}
-            for edge in group_internal_list:
-                interface_fields.setdefault(
-                    edge.source_node, set()
-                ).add(edge.source_field)
-            if interface_fields:
-                accel_fields = {
-                    nn: tuple(sorted(fields))
-                    for nn, fields in interface_fields.items()
-                }
-            else:
-                accel_fields = None
+            accel_fields = _interface_state_fields(
+                group_internal_list, group.nodes, new_state,
+            )
     else:
         accel_fields = None
 
@@ -685,13 +781,28 @@ def _run_coupled_block_impl(
 
     # Save the initial state for each node at the beginning of
     # the timestep -- this is what we always integrate FROM.
-    initial_node_states = {nn: new_state[nn] for nn in group_node_names}
+    # Float32 *images* of the pre-step states: ``one_pass`` closes over
+    # them, and an integer / boolean / PRNG-key leaf hoisted by
+    # ``closure_convert`` into the IFT custom_jvp's constants cannot be
+    # linearised under a ``lax.scan`` (see ``_run_ift_forward``).  The
+    # images are bit-exact for every supported dtype (wide integers
+    # travel as 16-bit limbs, keys as their uint32 data); ``_pre(nn)``
+    # restores the leaves at the point of use.
+    _init_imgs, _init_metas = {}, {}
+    for nn in group_node_names:
+        _init_imgs[nn], _init_metas[nn] = state_float_image(new_state[nn])
+    initial_node_states = _init_imgs
+
+    def _pre(nn):
+        return state_from_float_image(initial_node_states[nn], _init_metas[nn])
 
     def _get_dt(nn):
         spec = nodes[nn]
         return runtime_dt if runtime_dt is not None else spec.timestep
 
-    def _resolve_value(edge, src_state, flux_s):
+    _MISSING = object()
+
+    def _resolve_value(edge, src_state, flux_s, strict=True):
         """Get value from state or flux dict."""
         src_nn = edge.source_node
         src_dict = src_state.get(src_nn, {})
@@ -699,20 +810,27 @@ def _run_coupled_block_impl(
             return src_dict[edge.source_field]
         if flux_s and src_nn in flux_s and edge.source_field in flux_s[src_nn]:
             return flux_s[src_nn][edge.source_field]
+        if not strict:
+            return _MISSING
         # Fall back (will KeyError if truly missing)
         return src_state[src_nn][edge.source_field]
 
-    def _resolve_boundary(nn, s, flux_s=None):
-        """Resolve boundary inputs for node nn from state s."""
+    def _resolve_boundary(nn, s, flux_s=None, strict=True):
+        """Resolve boundary inputs for node nn from state s.
+
+        ``strict=False`` omits inputs whose flux is not available yet
+        (used to seed fluxes from the previous iterate before a pass).
+        """
         boundary_inputs: dict[str, Any] = {}
         for edge in edges_by_target[nn]:
             if edge in back_edge_set and edge not in group_internal:
                 src_state = full_state
             else:
                 src_state = s
-            value = _resolve_value(edge, src_state, flux_s)
-            if edge.transform is not None:
-                value = edge.transform(value)
+            value = _resolve_value(edge, src_state, flux_s, strict=strict)
+            if value is _MISSING:
+                continue
+            value = _apply_edge(edge, value, node_params)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -779,8 +897,7 @@ def _run_coupled_block_impl(
                     )
             else:
                 value = _resolve_value(edge, s_cur, flux_s)
-            if edge.transform is not None:
-                value = edge.transform(value)
+            value = _apply_edge(edge, value, node_params)
             if edge.additive and edge.target_field in boundary_inputs:
                 boundary_inputs[edge.target_field] = (
                     boundary_inputs[edge.target_field] + value
@@ -798,7 +915,7 @@ def _run_coupled_block_impl(
     def _run_substeps(nn, n_substeps, sub_dt, s_prev, s_cur,
                        flux_s=None, s_prev_prev=None):
         """Run n_substeps sub-steps for a fast node using lax.scan."""
-        init_sub_state = initial_node_states[nn]
+        init_sub_state = _pre(nn)
 
         def substep_body(sub_state, sub_idx):
             alpha = (sub_idx + 1.0) / n_substeps
@@ -810,10 +927,11 @@ def _run_coupled_block_impl(
             else:
                 # constant: use end-of-step values
                 bi = _resolve_boundary(nn, s_cur, flux_s)
-            new_sub = nodes[nn].update_fn(sub_state, bi, sub_dt)
+            new_sub = _node_update(nodes[nn], sub_state, bi, sub_dt, _np(nn))
             new_sub = _apply_interface_overrides(
                 new_sub, sub_state, bi, sub_dt, nodes[nn].node,
                 coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
             )
             return new_sub, None
 
@@ -826,6 +944,21 @@ def _run_coupled_block_impl(
         """Gauss-Seidel: sequential updates, each sees latest results."""
         s = {k: v for k, v in latest_results.items()}
         flux_s: dict[str, dict] = {}
+        if has_flux_edges:
+            # A flux consumer scheduled *before* its producer reads the
+            # producer's flux from the previous iterate (the fixed-point
+            # semantics); once the producer updates below, its entry is
+            # overwritten for the nodes that follow it.  Without this a
+            # back-edge on a flux field raised KeyError in the first pass.
+            # Two sweeps: producers may need each other's fluxes, so the
+            # first sweep tolerates missing ones, the second has them all.
+            for strict in (False, True):
+                for nn in group_node_names:
+                    if nn in flux_producing_nodes:
+                        bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
+                        flux_s[nn] = _node_fluxes(
+                            nodes[nn], latest_results[nn], bi0, _get_dt(nn), _np(nn),
+                        )
         for nn in group_node_names:
             if use_subcycling and group_dividers[nn] > 1:
                 n_sub = group_dividers[nn]
@@ -836,17 +969,18 @@ def _run_coupled_block_impl(
                 # Interface overrides already applied per sub-step
             else:
                 bi = _resolve_boundary(nn, s, flux_s)
-                pre = initial_node_states[nn]
-                s[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                pre = _pre(nn)
+                s[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 s[nn] = _apply_interface_overrides(
                     s[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
                 )
             # Compute fluxes for this node
             if nn in flux_producing_nodes:
                 bi_for_flux = _resolve_boundary(nn, s, flux_s)
-                flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
-                    s[nn], bi_for_flux, _get_dt(nn)
+                flux_s[nn] = _node_fluxes(
+                    nodes[nn], s[nn], bi_for_flux, _get_dt(nn), _np(nn),
                 )
         return s
 
@@ -858,8 +992,8 @@ def _run_coupled_block_impl(
             for nn in group_node_names:
                 if nn in flux_producing_nodes:
                     bi = _resolve_boundary(nn, latest_results)
-                    flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
-                        latest_results[nn], bi, _get_dt(nn)
+                    flux_s[nn] = _node_fluxes(
+                        nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
                     )
 
         results = {}
@@ -874,7 +1008,7 @@ def _run_coupled_block_impl(
             else:
                 # Optionally place computation on assigned device
                 bi = _resolve_boundary(nn, latest_results, flux_s)
-                pre = initial_node_states[nn]
+                pre = _pre(nn)
                 if multigpu_device_map is not None and nn in multigpu_device_map:
                     dev_idx = multigpu_device_map[nn]
                     devices = jax.devices()
@@ -884,10 +1018,11 @@ def _run_coupled_block_impl(
                         bi = jax.tree.map(
                             lambda x: jax.device_put(x, device), bi,
                         )
-                results[nn] = nodes[nn].update_fn(pre, bi, _get_dt(nn))
+                results[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 results[nn] = _apply_interface_overrides(
                     results[nn], pre, bi, _get_dt(nn), nodes[nn].node,
                     coupled_bi_names=coupled_bi_names_by_node.get(nn),
+                    node_params=_np(nn),
                 )
         s = {k: v for k, v in latest_results.items()}
         for nn in group_node_names:
@@ -897,23 +1032,25 @@ def _run_coupled_block_impl(
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
     def _compute_residual(s_new, s_old):
-        if use_interface_norm:
-            return coupling_residual_interface(
-                s_new, s_old, group_internal_list,
-                group.atol, group.rtol,
-            )
-        if use_mixed_norm:
-            return coupling_residual_mixed(
-                s_new, s_old, group_node_names,
-                group.atol, group.rtol,
-            )
-        return coupling_residual_l2(s_new, s_old, group_node_names)
+        with jax.named_scope("coupling:residual"):
+            if use_interface_norm:
+                return coupling_residual_interface(
+                    s_new, s_old, group_internal_list,
+                    group.atol, group.rtol,
+                )
+            if use_mixed_norm:
+                return coupling_residual_mixed(
+                    s_new, s_old, group_node_names,
+                    group.atol, group.rtol,
+                )
+            return coupling_residual_l2(s_new, s_old, group_node_names)
 
     # Convergence threshold depends on norm type
-    conv_threshold = (
-        jnp.array(1.0) if (use_mixed_norm or use_interface_norm)
-        else jnp.array(group.tolerance)
+    conv_threshold_value = (
+        1.0 if (use_mixed_norm or use_interface_norm)
+        else float(group.tolerance)
     )
+    conv_threshold = jnp.array(conv_threshold_value)
 
     # Helper: flatten/unflatten with optional auto-detected fields
     def _flatten(s):
@@ -984,104 +1121,189 @@ def _run_coupled_block_impl(
                     s_merged[k_s] = s_cur[k_s]
             return s_merged
 
-        def _run_ift_forward(template_state, acceleration):
-            """Run the IFT forward (while_loop) and return the full state.
+        def _iqn_warm_start():
+            """Seed the IQN secant matrices.  Returns ``(V, W, n_reuse)``.
+
+            Zeros for IQN-ILS; for IQN-IMVJ the previous timestep's
+            columns from ``_meta``, masked to the first
+            ``jacobian_reuse`` so stale columns beyond the reuse window
+            do not enter the secant solve.
+            """
+            max_cols = max(max_iters - 1, 1)
+            if group.acceleration != "iqn-imvj":
+                return (jnp.zeros((n_dof, max_cols)),
+                        jnp.zeros((n_dof, max_cols)), 0)
+            group_key = "+".join(sorted(group.nodes))
+            meta = new_state_inner.get(_META_KEY, {})
+            stored_V = meta.get(
+                f"coupling_{group_key}_V", jnp.zeros((n_dof, max_cols)),
+            )
+            stored_W = meta.get(
+                f"coupling_{group_key}_W", jnp.zeros((n_dof, max_cols)),
+            )
+            n_reuse = min(group.jacobian_reuse, max_cols)
+            reuse_mask = jnp.arange(max_cols) < n_reuse
+            return (stored_V * reuse_mask[None, :],
+                    stored_W * reuse_mask[None, :], n_reuse)
+
+        def _run_ift_forward(template_state):
+            """Run the early-exit while_loop solver; return ``(state, diag, vw)``.
 
             ``template_state`` is the post-first-pass full state dict
-            (``state_after_first``); the IFT solver operates on its
-            flattened coupling subset while preserving the embedding
-            into the full state for ``one_pass``.  ``acceleration`` is
-            ``"none"`` or ``"aitken"`` and selects the while_loop body
-            wrapper; the IFT backward is unchanged across acceleration
-            modes (it is intrinsic to ``F`` at ``x*``).
+            (``state_after_first``).  The solver iterates on the
+            flattened *full* state of the group's nodes (every field,
+            like the fori path), embedded back into ``template_state``
+            for ``one_pass`` so boundary resolution can see nodes
+            outside the group.  IQN acceleration acts on the
+            interface-field subset through a static index map into
+            that vector.  ``diag`` is ``(n_iters, final_res)`` and
+            ``vw`` the IQN ``(V, W)`` matrices (``None`` for other
+            accelerations).  The IFT derivative is intrinsic to ``F``
+            at ``x*`` and unchanged across acceleration modes.
             """
-            # Operate on the flattened group-state vector ``x``.  We
-            # need a top-level ``F_pure(x, *consts)`` so the
-            # custom_jvp rule does not close over any tracer
-            # (see JAX issue #2912 / optimistix's _is_global_function
+            # We need a top-level ``step_pure(x, *consts)`` so the
+            # custom_jvp rule does not close over any tracer (see JAX
+            # issue #2912 / optimistix's _is_global_function
             # assertion).  jax.closure_convert hoists any tracers
-            # ``one_pass`` captures into an explicit ``consts``
-            # pytree we then pass through ``_ift_solve``.
-            #
-            # **Embedded coupling groups** (group members read state
-            # from non-group nodes): ``_unflatten`` only emits the
-            # coupling subset, but ``one_pass`` needs the full state
-            # dict so its boundary-resolution can look up the
-            # outside nodes.  We embed the unflattened group state
-            # into ``template_state`` (which is ``state_after_first``
-            # and already carries every node), then pass the full
-            # dict to ``one_pass``.  The outside-node entries in
-            # ``template_state`` are tracers from the surrounding
-            # jit trace — ``jax.closure_convert`` will hoist them
-            # into ``consts`` automatically, so the IFT adjoint
-            # propagates gradients back through them.
-            # When ``accel_fields`` is non-None (IQN modes), ``_flatten``
-            # / ``_unflatten`` operate on the *interface-field subset*
-            # rather than the full per-node state.  We need to splice
-            # those interface fields back into the full node dict before
-            # calling ``one_pass`` (which expects every node to carry
-            # all of its state), and again on the way out so ``_merge``
-            # sees a result with the same pytree shape as
-            # ``template_state``.
-            def _splice_group(s_full, group_part):
-                """Merge accelerated interface fields from ``group_part``
-                into the corresponding nodes of ``s_full``; non-accel
-                fields stay as they were in ``s_full``.
-                """
-                if accel_fields is None:
-                    # Whole-node replacement (e.g. acceleration='none').
-                    s_out = {k: v for k, v in s_full.items()}
-                    for nn in group_node_names:
-                        s_out[nn] = group_part[nn]
-                    return s_out
-                s_out = {k: v for k, v in s_full.items()}
+            # ``one_pass`` captures — including the outside-node
+            # entries of ``template_state`` — into an explicit
+            # ``consts`` pytree, so the IFT rule propagates
+            # derivatives through them.
+            # Only floating fields live in the fixed-point vector.  An
+            # integer / boolean field (a counter, a flag) is recomputed
+            # from the pre-step state on every pass, so its first-pass
+            # value is already the converged one; keeping it out avoids
+            # float<->int casts in the loop and float0 tangents in the
+            # IFT rule (which leaked tracers under reverse mode through
+            # a scan).
+            float_fields = {
+                nn: tuple(
+                    f for f in sorted(template_state[nn])
+                    if jnp.issubdtype(template_state[nn][f].dtype, jnp.floating)
+                )
+                for nn in group_node_names
+            }
+
+            # ``jax.closure_convert`` hoists every tracer ``_step_flat``
+            # touches into the custom_jvp's constants.  An *integer or
+            # boolean* constant there breaks JAX's linearisation of the
+            # rule under a ``lax.scan`` (UnexpectedTracerError in reverse
+            # mode, a missing constant handler in forward mode; reproduced
+            # on JAX 0.10 / 0.11 with a bare custom_jvp + closure_convert).
+            # So the closure only ever sees bit-exact float32 *images*
+            # of such leaves (``float_image``: 16-bit limbs for wide
+            # integers, uint32 data for PRNG keys), restored inside.
+            leaf_metas: dict = {}
+            template_img: dict = {}
+            for k, d in template_state.items():
+                if isinstance(d, dict):
+                    template_img[k], leaf_metas[k] = state_float_image(d)
+                else:
+                    template_img[k] = d
+
+            def _flatten_full(s):
+                return flatten_coupled_state(s, group_node_names, fields=float_fields)
+
+            def _embed(x_full):
+                part = unflatten_coupled_state(
+                    x_full, template_img, group_node_names, fields=float_fields,
+                )
+                s = {}
+                for k, d in template_img.items():
+                    if isinstance(d, dict):
+                        s[k] = state_from_float_image(d, leaf_metas[k])
+                    else:
+                        s[k] = d
                 for nn in group_node_names:
-                    merged = {fld: val for fld, val in s_full[nn].items()}
-                    af = accel_fields.get(nn, ())
-                    for fld in af:
-                        if fld in group_part.get(nn, {}):
-                            merged[fld] = group_part[nn][fld]
-                    s_out[nn] = merged
-                return s_out
+                    s[nn] = {**s[nn], **part[nn]}
+                return s
 
-            def _F_one_pass_flat(x_flat):
-                group_part = _unflatten(x_flat, template_state)
-                s = _splice_group(template_state, group_part)
+            def _step_flat(x_full):
+                s = _embed(x_full)
                 s_new = one_pass(s)
-                # ``_flatten`` only emits the accelerated-field subset
-                # (when accel_fields is set), so the round-trip is
-                # well-defined regardless of the splicing above.
-                return _flatten(s_new)
+                # The residual is the group's configured norm on the
+                # full per-node state, exactly as the fori path
+                # computes it.
+                return _flatten_full(s_new), _compute_residual(s_new, s)
 
-            x0_flat = _flatten(template_state)
-            F_pure, consts_list = jax.closure_convert(
-                _F_one_pass_flat, x0_flat
+            x0_full = _flatten_full(template_state)
+            step_pure, consts_list = jax.closure_convert(
+                _step_flat, x0_full
             )
             consts = tuple(consts_list)
 
-            x_star_flat = _ift_solve(
-                F_pure, x0_flat, consts,
-                float(group.tolerance),
-                int(max_iters),
-                acceleration,
-                str(getattr(group, "linear_solver", "gmres")),
-            )
-            # Reconstruct the full per-node state at the fixed point.
-            # We need one more ``one_pass`` evaluation here for the
-            # non-accelerated fields (e.g. velocity), because the IFT
-            # solver only carries the accelerated-field subset through
-            # its while_loop carry.  At ``x*`` the position is fixed, so
-            # this final pass produces velocity consistent with the
-            # converged position.
-            group_part_final = _unflatten(x_star_flat, template_state)
-            spliced = _splice_group(template_state, group_part_final)
             if accel_fields is not None:
-                final_full = one_pass(spliced)
+                # Positions of the accelerated (interface) fields in
+                # the full flat vector: flatten an index-valued state
+                # of the same structure, restricted to those fields.
+                idx_state = unflatten_coupled_state(
+                    np.arange(int(x0_full.shape[0]), dtype=np.int32),
+                    template_img, group_node_names, fields=float_fields,
+                )
+                # Pure numpy: the same node/field order as
+                # ``flatten_coupled_state(..., fields=accel_fields)``,
+                # but without going through jnp (which would trace).
+                parts = [
+                    np.ravel(np.asarray(idx_state[nn][fld]))
+                    for nn in group_node_names if nn in accel_fields
+                    for fld in sorted(accel_fields[nn])
+                    if fld in float_fields[nn]
+                ]
+                sub_idx = tuple(int(i) for i in np.concatenate(parts))
             else:
-                final_full = spliced
-            return _merge(template_state, final_full, jnp.array(False))
+                sub_idx = None
 
-        # ---- Build fori_loop body based on acceleration + diagnostics ----
+            if group.acceleration in ("iqn-ils", "iqn-imvj"):
+                init_V, init_W, n_reuse = _iqn_warm_start()
+                accel_init = (init_V, init_W)
+            else:
+                accel_init, n_reuse = (), 0
+
+            x_star_full, (n_iters, final_res, vw) = _ift_solve(
+                step_pure, x0_full, consts, accel_init,
+                conv_threshold_value,
+                int(max_iters),
+                group.acceleration,
+                float(group.relaxation),
+                int(n_reuse),
+                sub_idx,
+                str(group.linear_solver),
+            )
+            if group.strict_convergence:
+                # Lazy: equinox ships with lineax, which this path
+                # already requires.
+                import equinox as eqx  # noqa: PLC0415
+
+                x_star_full = eqx.error_if(
+                    x_star_full, final_res > conv_threshold_value,
+                    f"coupling group {sorted(group.nodes)} exited at "
+                    f"max_iterations={max_iters} without converging; "
+                    "the IFT gradient is invalid here. Raise "
+                    "max_iterations, loosen the tolerance, or set "
+                    "strict_convergence=False to only report this via "
+                    "coupling_diagnostics().",
+                )
+            final = _merge(template_state, _embed(x_star_full), jnp.array(False))
+            return final, (n_iters, final_res), (vw if vw else None)
+
+        if group.solver == "ift":
+            final_state, (iter_count, final_res), vw = _run_ift_forward(
+                state_after_first
+            )
+            r = {k: v for k, v in new_state_inner.items()}
+            for nn in group_node_names:
+                r[nn] = final_state[nn]
+            # Always reported (not only with ``diagnostics=True``): the
+            # scalars are already in the carry, and the converged flag
+            # is what tells a training loop that the IFT gradient
+            # through this step is trustworthy.
+            diag_data = (iter_count, final_res)
+            return r, diag_data, vw
+
+        # ---- Legacy unrolled fori_loop path (``solver="fori"``,
+        # deprecated).  Runs ``max_iterations`` passes regardless of
+        # convergence, freezing the state once converged, and
+        # differentiates straight through the iterates. ----
 
         if group.acceleration == "aitken":
             if track_diag:
@@ -1099,7 +1321,7 @@ def _run_coupled_block_impl(
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
-                    new_res = jnp.where(new_converged, fres, residual)
+                    new_res = jnp.where(converged, fres, residual)
                     return s_merged, new_converged, new_count, new_res, new_omega, cur_r
 
                 init_carry = (
@@ -1113,197 +1335,103 @@ def _run_coupled_block_impl(
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[2], final_carry[3]
             else:
-                use_ift_aitken = (
-                    getattr(group, "solver", "fori") == "ift"
-                    and not use_jacobi
-                )
-                if use_ift_aitken:
-                    # ----- IFT + Aitken path.  See _run_ift_forward for
-                    # the shared plumbing.  The forward while_loop wraps
-                    # each ``F(x)`` call in Aitken delta-squared
-                    # relaxation; the backward IFT adjoint uses the bare
-                    # ``F`` (acceleration-agnostic at the fixed point).
-                    final_state = _run_ift_forward(
-                        state_after_first, "aitken",
+                def body_fn(i, carry):
+                    s_cur, converged, omega, prev_r = carry
+                    s_raw = one_pass(s_cur)
+                    residual = _compute_residual(s_raw, s_cur)
+                    new_converged = converged | (residual <= conv_threshold)
+                    x_old = _flatten(s_cur)
+                    x_raw = _flatten(s_raw)
+                    x_rel, new_omega, cur_r = aitken_relaxation(
+                        x_old, x_raw, prev_r, omega
                     )
-                else:
-                    def body_fn(i, carry):
-                        s_cur, converged, omega, prev_r = carry
-                        s_raw = one_pass(s_cur)
-                        residual = _compute_residual(s_raw, s_cur)
-                        new_converged = converged | (residual <= conv_threshold)
-                        x_old = _flatten(s_cur)
-                        x_raw = _flatten(s_raw)
-                        x_rel, new_omega, cur_r = aitken_relaxation(
-                            x_old, x_raw, prev_r, omega
-                        )
-                        s_partial = _unflatten(x_rel, s_cur)
-                        s_accel = _build_accel_state(s_raw, s_partial)
-                        s_merged = _merge(s_cur, s_accel, new_converged)
-                        return s_merged, new_converged, new_omega, cur_r
+                    s_partial = _unflatten(x_rel, s_cur)
+                    s_accel = _build_accel_state(s_raw, s_partial)
+                    s_merged = _merge(s_cur, s_accel, new_converged)
+                    return s_merged, new_converged, new_omega, cur_r
 
-                    init_carry = (
-                        state_after_first, jnp.array(False),
-                        jnp.array(1.0), jnp.zeros(n_dof),
-                    )
-                    final_carry = jax.lax.fori_loop(
-                        1, max_iters, body_fn, init_carry
-                    )
-                    final_state = final_carry[0]
+                init_carry = (
+                    state_after_first, jnp.array(False),
+                    jnp.array(1.0), jnp.zeros(n_dof),
+                )
+                final_carry = jax.lax.fori_loop(
+                    1, max_iters, body_fn, init_carry
+                )
+                final_state = final_carry[0]
 
         elif group.acceleration in ("iqn-ils", "iqn-imvj"):
-            # ----- IFT + IQN-IMVJ short-circuit -----
-            #
-            # When the user opts into ``solver='ift'`` with
-            # ``acceleration='iqn-imvj'``, route into ``_run_ift_forward``
-            # so the QN updates happen inside the IFT while_loop and the
-            # backward goes through the acceleration-agnostic custom_jvp
-            # rule (matrix-free lineax GMRES at the fixed point).
-            #
-            # **Per-step only** for this prototype.  The fori-loop branch
-            # below still owns cross-timestep warm-start (V/W persisted
-            # in ``_META_KEY``); the IFT path re-zeros V/W each step.
-            #
-            # Why not cross-timestep warm-start here yet?  Three coupled
-            # changes are required and each has a sharp edge:
-            #
-            # 1. ``_ift_solve``'s custom_jvp must return ``(x_star, V, W)``
-            #    rather than just ``x_star``, with zero cotangents on V/W
-            #    in the backward (V/W are forward-only state).  Mechanical
-            #    but touches the autodiff signature.
-            # 2. ``_ift_fixed_point_fwd_impl`` for ``iqn-imvj`` must accept
-            #    ``init_V``, ``init_W``, ``init_ncols`` as dynamic args
-            #    and return the final V/W from the while_loop carry.
-            # 3. The column-write logic in ``_imvj_step`` currently writes
-            #    at column ``i - 1`` (zero-based, starting from the first
-            #    body iter).  Warm-start means iteration 0 must write at
-            #    column ``init_ncols`` and (when ``init_ncols + max_iter``
-            #    exceeds ``max_cols``) cycle older columns out — the same
-            #    shift-or-modulo convention the fori path's
-            #    ``iqn_ils_update`` already implements.  This is a real
-            #    change to the IMVJ math, not just plumbing.
-            #
-            # The blocking item is (3): the per-step IMVJ math here uses
-            # a "write at column i-1" convention that is structurally
-            # incompatible with warm-start.  Adopting the fori path's
-            # shift-and-insert convention (insert at column 0, shift the
-            # rest right) inside a while_loop body is doable but needs
-            # its own correctness test against the fori-loop IMVJ output
-            # before being trusted — and the IFT-IMVJ adjoint at the
-            # fixed point is mathematically unaffected, so the gradient
-            # parity test alone doesn't catch a column-write bug.
-            #
-            # Deferred to 0.4.x along with the IQN-ILS IFT extension.
-            # The 0.3.x polish does not regress the per-step variant.
-            use_ift_iqn_imvj = (
-                group.acceleration == "iqn-imvj"
-                and getattr(group, "solver", "fori") == "ift"
-                and not use_jacobi
-                and not track_diag
-            )
-            if use_ift_iqn_imvj:
-                final_state = _run_ift_forward(
-                    state_after_first, "iqn-imvj",
+            init_V, init_W, n_reuse = _iqn_warm_start()
+            init_ncols = jnp.int32(n_reuse)
+            init_flat = _flatten(state_after_first)
+
+            if track_diag:
+                def body_fn(i, carry):
+                    (s_cur, converged, icount, fres,
+                     V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                    s_raw = one_pass(s_cur)
+                    residual = _compute_residual(s_raw, s_cur)
+                    new_converged = converged | (residual <= conv_threshold)
+                    x_old = _flatten(s_cur)
+                    x_raw = _flatten(s_raw)
+                    (x_new, nV, nW, nnc,
+                     cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                        x_raw, x_old, prev_r, prev_s,
+                        V, W, nc, omega, prev_ra,
+                        have_prev=i > 1,
+                    )
+                    s_partial = _unflatten(x_new, s_cur)
+                    s_accel = _build_accel_state(s_raw, s_partial)
+                    s_merged = _merge(s_cur, s_accel, new_converged)
+                    new_count = icount + jnp.where(new_converged, 0.0, 1.0)
+                    new_res = jnp.where(converged, fres, residual)
+                    return (s_merged, new_converged, new_count, new_res,
+                            nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
+
+                init_carry = (
+                    state_after_first, jnp.array(False),
+                    jnp.array(1.0), first_r,
+                    init_V, init_W, init_ncols,
+                    jnp.zeros(n_dof), init_flat,
+                    jnp.array(1.0), jnp.zeros(n_dof),
                 )
-                # No cross-timestep V/W persistence for the IFT variant.
-                # The vw_data block below checks for the IFT short-circuit
-                # and skips the META write in that case.
-                final_V = None
-                final_W = None
+                final_carry = jax.lax.fori_loop(
+                    1, max_iters, body_fn, init_carry
+                )
+                final_state = final_carry[0]
+                iter_count, final_res = final_carry[2], final_carry[3]
+                final_V, final_W = final_carry[4], final_carry[5]
             else:
-                max_cols = max(max_iters - 1, 1)
+                def body_fn(i, carry):
+                    (s_cur, converged,
+                     V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                    s_raw = one_pass(s_cur)
+                    residual = _compute_residual(s_raw, s_cur)
+                    new_converged = converged | (residual <= conv_threshold)
+                    x_old = _flatten(s_cur)
+                    x_raw = _flatten(s_raw)
+                    (x_new, nV, nW, nnc,
+                     cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
+                        x_raw, x_old, prev_r, prev_s,
+                        V, W, nc, omega, prev_ra,
+                        have_prev=i > 1,
+                    )
+                    s_partial = _unflatten(x_new, s_cur)
+                    s_accel = _build_accel_state(s_raw, s_partial)
+                    s_merged = _merge(s_cur, s_accel, new_converged)
+                    return (s_merged, new_converged,
+                            nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
 
-                # IQN-IMVJ: warm-start V/W from previous timestep
-                if group.acceleration == "iqn-imvj":
-                    group_key = "+".join(sorted(group.nodes))
-                    meta = new_state_inner.get(_META_KEY, {})
-                    stored_V = meta.get(
-                        f"coupling_{group_key}_V",
-                        jnp.zeros((n_dof, max_cols)),
-                    )
-                    stored_W = meta.get(
-                        f"coupling_{group_key}_W",
-                        jnp.zeros((n_dof, max_cols)),
-                    )
-                    n_reuse = min(group.jacobian_reuse, max_cols)
-                    # Keep first n_reuse columns from previous timestep
-                    reuse_mask = jnp.arange(max_cols) < n_reuse
-                    init_V = stored_V * reuse_mask[None, :]
-                    init_W = stored_W * reuse_mask[None, :]
-                    init_ncols = jnp.int32(n_reuse)
-                else:
-                    init_V = jnp.zeros((n_dof, max_cols))
-                    init_W = jnp.zeros((n_dof, max_cols))
-                    init_ncols = jnp.int32(0)
-
-                init_flat = _flatten(state_after_first)
-
-                if track_diag:
-                    def body_fn(i, carry):
-                        (s_cur, converged, icount, fres,
-                         V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
-                        s_raw = one_pass(s_cur)
-                        residual = _compute_residual(s_raw, s_cur)
-                        new_converged = converged | (residual <= conv_threshold)
-                        x_old = _flatten(s_cur)
-                        x_raw = _flatten(s_raw)
-                        (x_new, nV, nW, nnc,
-                         cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
-                            x_raw, x_old, prev_r, prev_s,
-                            V, W, nc, omega, prev_ra,
-                        )
-                        s_partial = _unflatten(x_new, s_cur)
-                        s_accel = _build_accel_state(s_raw, s_partial)
-                        s_merged = _merge(s_cur, s_accel, new_converged)
-                        new_count = icount + jnp.where(new_converged, 0.0, 1.0)
-                        new_res = jnp.where(new_converged, fres, residual)
-                        return (s_merged, new_converged, new_count, new_res,
-                                nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
-
-                    init_carry = (
-                        state_after_first, jnp.array(False),
-                        jnp.array(1.0), first_r,
-                        init_V, init_W, init_ncols,
-                        jnp.zeros(n_dof), init_flat,
-                        jnp.array(1.0), jnp.zeros(n_dof),
-                    )
-                    final_carry = jax.lax.fori_loop(
-                        1, max_iters, body_fn, init_carry
-                    )
-                    final_state = final_carry[0]
-                    iter_count, final_res = final_carry[2], final_carry[3]
-                    final_V, final_W = final_carry[4], final_carry[5]
-                else:
-                    def body_fn(i, carry):
-                        (s_cur, converged,
-                         V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
-                        s_raw = one_pass(s_cur)
-                        residual = _compute_residual(s_raw, s_cur)
-                        new_converged = converged | (residual <= conv_threshold)
-                        x_old = _flatten(s_cur)
-                        x_raw = _flatten(s_raw)
-                        (x_new, nV, nW, nnc,
-                         cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
-                            x_raw, x_old, prev_r, prev_s,
-                            V, W, nc, omega, prev_ra,
-                        )
-                        s_partial = _unflatten(x_new, s_cur)
-                        s_accel = _build_accel_state(s_raw, s_partial)
-                        s_merged = _merge(s_cur, s_accel, new_converged)
-                        return (s_merged, new_converged,
-                                nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
-
-                    init_carry = (
-                        state_after_first, jnp.array(False),
-                        init_V, init_W, init_ncols,
-                        jnp.zeros(n_dof), init_flat,
-                        jnp.array(1.0), jnp.zeros(n_dof),
-                    )
-                    final_carry = jax.lax.fori_loop(
-                        1, max_iters, body_fn, init_carry
-                    )
-                    final_state = final_carry[0]
-                    final_V, final_W = final_carry[2], final_carry[3]
+                init_carry = (
+                    state_after_first, jnp.array(False),
+                    init_V, init_W, init_ncols,
+                    jnp.zeros(n_dof), init_flat,
+                    jnp.array(1.0), jnp.zeros(n_dof),
+                )
+                final_carry = jax.lax.fori_loop(
+                    1, max_iters, body_fn, init_carry
+                )
+                final_state = final_carry[0]
+                final_V, final_W = final_carry[2], final_carry[3]
 
         elif group.acceleration == "fixed":
             omega_val = group.relaxation
@@ -1321,7 +1449,7 @@ def _run_coupled_block_impl(
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
-                    new_res = jnp.where(new_converged, fres, residual)
+                    new_res = jnp.where(converged, fres, residual)
                     return s_merged, new_converged, new_count, new_res
 
                 init_carry = (
@@ -1355,22 +1483,7 @@ def _run_coupled_block_impl(
 
         else:
             # No acceleration ("none")
-            use_ift = (
-                getattr(group, "solver", "fori") == "ift"
-                and not use_jacobi
-                and not track_diag
-            )
-
-            if use_ift:
-                # ----- IFT path: while_loop forward + custom_jvp (IFT) derivative.
-                # See ``_run_ift_forward`` below for the shared
-                # closure_convert + ``_ift_solve`` plumbing; this
-                # acceleration='none' branch is just the most common
-                # entry point.
-                final_state = _run_ift_forward(
-                    state_after_first, "none",
-                )
-            elif track_diag:
+            if track_diag:
                 def body_fn(i, carry):
                     s_cur, converged, icount, fres = carry
                     s_new = one_pass(s_cur)
@@ -1378,7 +1491,7 @@ def _run_coupled_block_impl(
                     new_converged = converged | (residual <= conv_threshold)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
-                    new_res = jnp.where(new_converged, fres, residual)
+                    new_res = jnp.where(converged, fres, residual)
                     return s_merged, new_converged, new_count, new_res
 
                 init_carry = (
@@ -1415,13 +1528,9 @@ def _run_coupled_block_impl(
         if track_diag:
             diag_data = (iter_count, final_res)
 
-        # Store V/W for IQN-IMVJ.  ``final_V`` / ``final_W`` are None
-        # when the IFT-IMVJ short-circuit fired (per-step variant — no
-        # cross-timestep warm-start, see comments at the IMVJ branch).
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
-            if final_V is not None and final_W is not None:
-                vw_data = (final_V, final_W)
+            vw_data = (final_V, final_W)
 
         return r, diag_data, vw_data
 
@@ -1462,14 +1571,17 @@ def _run_coupled_block_impl(
                 # Linear: x_pred = 2*x_n - x_{n-1}
                 x_pred = 2.0 * x_n - x_nm1
 
-            # Only apply if we have at least 2 stored states
+            # Only apply if we have at least 2 stored states.  Only the
+            # floating fields are extrapolated; a counter or flag keeps
+            # its first-pass value.
             has_history = pred_count >= 2
-            x_cur = flatten_coupled_state(new_state, group_node_names)
+            pred_fields = float_fields_of(new_state, group_node_names)
+            x_cur = flatten_coupled_state(new_state, group_node_names, fields=pred_fields)
             x_use = jnp.where(has_history, x_pred, x_cur)
 
             # Unflatten and update new_state with predicted values
             predicted = unflatten_coupled_state(
-                x_use, new_state, group_node_names
+                x_use, new_state, group_node_names, fields=pred_fields,
             )
             new_state = {k: v for k, v in new_state.items()}
             for nn in group_node_names:
@@ -1492,7 +1604,9 @@ def _run_coupled_block_impl(
     # Store predictor history in _meta
     # ------------------------------------------------------------------
     if use_predictor:
-        converged_flat = flatten_coupled_state(result, group_node_names)
+        converged_flat = flatten_coupled_state(
+            result, group_node_names, fields=float_fields_of(result, group_node_names),
+        )
         result.setdefault(_META_KEY, {})
         meta_update = dict(result.get(_META_KEY, {}))
 
@@ -1515,8 +1629,12 @@ def _run_coupled_block_impl(
         )
         result[_META_KEY] = meta_update
 
-    # Write diagnostics to _meta if requested
-    if group.diagnostics and diag_data is not None:
+    # Write diagnostics to _meta.  Always under solver="ift" *when the
+    # incoming state already carries ``_meta`` (compile() pre-populates
+    # it, keeping the pytree structure stable across scan); a state
+    # built by hand without ``_meta`` keeps its structure.  The legacy
+    # fori path only reports with diagnostics=True.
+    if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         iter_count, final_res = diag_data
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
@@ -1572,6 +1690,349 @@ class GraphManager:
         # Multi-GPU state (set by enable_multigpu)
         self._multigpu_mesh = None
         self._multigpu_device_map: Optional[dict[str, int]] = None
+        # Differentiable graph parameters — the third pytree of the
+        # compiled step, next to state and external inputs.  Refreshed
+        # from the nodes on every compile; edit in place (or pass
+        # ``params=`` to step/run_scan) to change constants without a
+        # recompile, and differentiate with respect to it for
+        # calibration / system identification.
+        self.params: dict = {"nodes": {}, "mappings": {}}
+        # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
+        self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
+
+    def _snapshot_params(self) -> dict:
+        return {
+            "nodes": {
+                name: spec.node.params_pytree()
+                for name, spec in self._nodes.items()
+                if spec.accepts_params
+            },
+            "mappings": {
+                edge.key: edge.mapping.params_pytree()
+                for edge in self._edges
+                if edge.mapping is not None
+            },
+        }
+
+    @staticmethod
+    def _merge_live_params(fresh: dict, live: Optional[dict]) -> dict:
+        """``fresh`` (constructor snapshot) with every leaf of ``live`` that
+        still fits written over it; leaves that no longer fit warn."""
+        if not live:
+            return fresh
+        dropped = []
+        for section in ("nodes", "mappings"):
+            fresh_sec = fresh.setdefault(section, {})
+            for owner, leaves in (live.get(section) or {}).items():
+                if owner not in fresh_sec:
+                    if leaves:
+                        dropped.append(f"{section}[{owner!r}]")
+                    continue
+                for key, value in leaves.items():
+                    base = fresh_sec[owner].get(key)
+                    if base is None:
+                        dropped.append(f"{section}[{owner!r}][{key!r}]")
+                        continue
+                    base_dtype = jnp.asarray(base).dtype
+                    if jnp.shape(value) != jnp.shape(base):
+                        dropped.append(f"{section}[{owner!r}][{key!r}] (shape changed)")
+                        continue
+                    # A Python float assigned into gm.params is float64
+                    # under x64 and weak-typed otherwise: coerce to the
+                    # leaf's own dtype (strongly typed) so it is kept and
+                    # the jitted step is not retraced.
+                    fresh_sec[owner][key] = jnp.asarray(value, dtype=base_dtype)
+        if dropped:
+            warnings.warn(
+                "compile() dropped live gm.params leaves that no longer fit "
+                f"the graph: {dropped}", RuntimeWarning, stacklevel=3,
+            )
+        return fresh
+
+    def _check_param_shapes(self, section: str, owner: str, leaves: dict) -> None:
+        """A leaf of the wrong shape would broadcast the node's *state* to
+        that shape for good; shapes are static, so this is free."""
+        expected = (getattr(self, "_params_shapes", None) or {}).get(section, {}).get(owner)
+        if not expected:
+            return
+        for key, v in leaves.items():
+            want = expected.get(key)
+            if want is not None and tuple(jnp.shape(v)) != want:
+                raise ValueError(
+                    f"params[{section!r}][{owner!r}][{key!r}] has shape "
+                    f"{tuple(jnp.shape(v))}, expected {want}"
+                )
+
+    def _coerce_params_leaves(self, tree: dict) -> None:
+        """In place: non-array / weak-typed leaves -> strongly typed arrays
+        of the dtype the leaf had at compile time (float32 fallback)."""
+        dtypes = getattr(self, "_params_dtypes", {}) or {}
+        for section in ("nodes", "mappings"):
+            for owner, leaves in (tree.get(section) or {}).items():
+                if not isinstance(leaves, dict):
+                    continue
+                for key, v in leaves.items():
+                    dt = dtypes.get(section, {}).get(owner, {}).get(key)
+                    if not hasattr(v, "dtype"):
+                        leaves[key] = jnp.asarray(v, dtype=dt or jnp.float32)
+                    elif getattr(v, "weak_type", False):
+                        leaves[key] = v.astype(v.dtype)
+                self._check_param_shapes(section, owner, leaves)
+
+    @property
+    def trace_count(self) -> int:
+        """How many times the compiled step has been traced since the
+        last ``compile()`` (0 before the first step; more than 1 after
+        steady state means the step is being retraced)."""
+        return int(getattr(self, "_n_traces", 0))
+
+    def reset_params(self) -> None:
+        """Discard live/calibrated values: ``gm.params`` becomes the
+        constructor snapshot again (no recompile needed)."""
+        self.params = self._snapshot_params()
+
+    def _params_or_default(self, params):
+        """``gm.params`` when ``params`` is None; otherwise ``params``
+        completed from ``gm.params``: a node or key the caller left out
+        keeps its *live* value (not the constructor constant), so a
+        partial pytree means "override these" and nothing else."""
+        if params is None:
+            # A Python scalar assigned into gm.params (``gm.params[...] =
+            # 32.0``) would reach the jitted step weak-typed and retrace
+            # it; coerce such leaves in place to the leaf dtype recorded
+            # at compile time.
+            self._coerce_params_leaves(self.params)
+            return self.params
+        if not isinstance(params, dict):
+            return params                  # let _validate_params complain
+        out = {}
+        for section in ("nodes", "mappings"):
+            live_sec = self.params.get(section, {})
+            given = params.get(section, {}) or {}
+            merged = {owner: dict(leaves) for owner, leaves in live_sec.items()}
+            for owner, leaves in given.items():
+                if owner in merged and isinstance(leaves, dict):
+                    # keep the live leaf's dtype for a Python scalar the
+                    # caller hands in (weak types retrace the step)
+                    fixed = {
+                        k: (jnp.asarray(v, dtype=jnp.asarray(merged[owner][k]).dtype)
+                            if k in merged[owner] and not hasattr(v, "dtype") else v)
+                        for k, v in leaves.items()
+                    }
+                    merged[owner] = {**merged[owner], **fixed}
+                else:
+                    merged[owner] = leaves      # unknown owner: validation reports it
+            out[section] = merged
+        for k, v in params.items():
+            if k not in ("nodes", "mappings"):
+                out[k] = v
+        return _strong_typed(out)
+
+    def _validate_params(self, params: dict) -> None:
+        """Reject a ``params`` pytree that names something the step cannot
+        use.  Runs Python-side at trace time (dict keys are static), so
+        it costs nothing per step.
+
+        A node that does not take ``params`` is *absent* from
+        ``gm.params`` — passing an entry for it would be silently
+        ignored, and a gradient with respect to it silently zero — so an
+        explicit entry is an error, as is an unknown parameter name.
+        """
+        nodes = params.get("nodes", {}) if isinstance(params, dict) else None
+        if nodes is None:
+            raise TypeError(
+                "params must be a dict with a 'nodes' entry (see GraphManager.params)"
+            )
+        for node_name, node_params in nodes.items():
+            spec = self._nodes.get(node_name)
+            if spec is None:
+                raise ValueError(
+                    f"params['nodes'] names unknown node {node_name!r}; "
+                    f"graph nodes: {sorted(self._nodes)}"
+                )
+            if not spec.accepts_params:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] given, but "
+                    f"{type(spec.node).__name__}.update() takes no 'params' "
+                    "keyword: its constants are baked into the trace, so this "
+                    "entry would be ignored and any gradient with respect to it "
+                    "would be zero.  Migrate the node (declare "
+                    "update(self, state, boundary_inputs, dt, *, params=None) "
+                    "and read constants from params) or drop the entry."
+                )
+            known = set(spec.node.params_pytree())
+            unknown = set(node_params) - known
+            if unknown:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] has unknown key(s) "
+                    f"{sorted(unknown)}; {type(spec.node).__name__}.params_pytree() "
+                    f"exposes {sorted(known)}"
+                )
+            missing = known - set(node_params)
+            if missing:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] is missing key(s) "
+                    f"{sorted(missing)}.  The compiled step needs a complete "
+                    "pytree (a missing leaf would silently fall back to the "
+                    "constructor constant); pass a partial tree through "
+                    "gm.step / gm.run_scan(params=...), which completes it "
+                    "from the live gm.params."
+                )
+            self._check_param_shapes("nodes", node_name, node_params)
+        absent = [
+            n for n, sp in self._nodes.items() if sp.accepts_params and n not in nodes
+        ]
+        if absent:
+            raise ValueError(
+                f"params['nodes'] is missing node(s) {sorted(absent)}.  The "
+                "compiled step needs a complete pytree (a missing node would "
+                "silently use its constructor constants); pass a partial tree "
+                "through gm.step / gm.run_scan(params=...), which completes it "
+                "from the live gm.params."
+            )
+        mapped = {e.key: e for e in self._edges if e.mapping is not None}
+        given_maps = params.get("mappings", {}) or {}
+        absent_maps = sorted(set(mapped) - set(given_maps))
+        if absent_maps:
+            raise ValueError(
+                f"params['mappings'] is missing edge(s) {absent_maps}; pass a "
+                "partial tree through gm.step / gm.run_scan(params=...)."
+            )
+        for key, weights in given_maps.items():
+            edge = mapped.get(key)
+            if edge is None:
+                raise ValueError(
+                    f"params['mappings'] names unknown edge {key!r}; mapped "
+                    f"edges: {sorted(mapped)}"
+                )
+            known = set(edge.mapping.params_pytree())
+            unknown = set(weights) - known
+            if unknown:
+                raise ValueError(
+                    f"params['mappings'][{key!r}] has unknown key(s) "
+                    f"{sorted(unknown)}; the mapping exposes {sorted(known)}"
+                )
+            self._check_param_shapes("mappings", key, weights)
+
+    # ------------------------------------------------------------------
+    # ParamSpec: trainable mask, bounds, reparametrisation
+    # ------------------------------------------------------------------
+
+    def param_specs(self) -> dict:
+        """``{"nodes": {name: {key: ParamSpec}}, "mappings": {}}`` mirroring
+        :attr:`params`: each node's :meth:`SimulationNode.param_specs`
+        with the graph's :meth:`set_param_spec` overrides applied.
+        Leaves without an entry use the default (trainable, unbounded)."""
+        out: dict = {"nodes": {}, "mappings": {}}
+        for name, spec in self._nodes.items():
+            if not spec.accepts_params:
+                continue
+            merged = dict(spec.node.param_specs())
+            merged.update(self._param_spec_overrides.get(name, {}))
+            out["nodes"][name] = merged
+        # Interface-mapping weights are geometry-derived operators, not
+        # physical constants: frozen unless a learned edge opts in with
+        # ``set_param_spec(edge.key, "H", ParamSpec())``.
+        for edge in self._edges:
+            if edge.mapping is None:
+                continue
+            merged = {
+                k: ParamSpec(trainable=False, description="interface mapping weights")
+                for k in edge.mapping.params_pytree()
+            }
+            merged.update(self._param_spec_overrides.get(edge.key, {}))
+            out["mappings"][edge.key] = merged
+        return out
+
+    def set_param_spec(self, node: str, key: str, spec: ParamSpec) -> None:
+        """Override one parameter's :class:`ParamSpec` for this graph
+        (e.g. freeze a node's ``mass`` when the data cannot identify it,
+        or make a mapped edge's weights trainable by passing the edge
+        key — ``"<src>.<field>-><tgt>.<field>"`` — as ``node``).
+        Does not dirty the graph: specs are optimiser-side metadata."""
+        if not isinstance(spec, ParamSpec):
+            raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
+        mapped = {e.key: e for e in self._edges if e.mapping is not None}
+        if node in mapped:
+            known = mapped[node].mapping.params_pytree()
+            if key not in known:
+                raise KeyError(
+                    f"mapping on edge {node!r} has no weight {key!r}; it exposes "
+                    f"{sorted(known)}"
+                )
+            self._param_spec_overrides.setdefault(node, {})[key] = spec
+            return
+        if node not in self._nodes:
+            raise KeyError(f"unknown node {node!r}")
+        if not self._nodes[node].accepts_params:
+            raise ValueError(
+                f"node {node!r} takes no params; nothing to specify"
+            )
+        if key not in self._nodes[node].node.params_pytree():
+            raise KeyError(
+                f"node {node!r} has no parameter {key!r}; "
+                f"params_pytree() exposes "
+                f"{sorted(self._nodes[node].node.params_pytree())}"
+            )
+        self._param_spec_overrides.setdefault(node, {})[key] = spec
+
+    def trainable_mask(self, params: Optional[dict] = None) -> dict:
+        """``params``-shaped pytree of Python bools (``True`` = an
+        optimiser may move the leaf)."""
+        return _trainable_mask(self._params_or_default(params), self.param_specs())
+
+    def unconstrain(self, params: Optional[dict] = None) -> dict:
+        """Map trainable leaves to unconstrained optimiser coordinates
+        (``log`` for positive constants, ``logit`` for intervals); other
+        leaves pass through.  Inverse of :meth:`constrain`."""
+        return _unconstrain(self._params_or_default(params), self.param_specs())
+
+    def constrain(self, u: dict) -> dict:
+        """Map optimiser coordinates back to a physical ``params`` pytree
+        (also clips bounded identity leaves)."""
+        return _constrain(u, self.param_specs())
+
+    def check_params(self, params: Optional[dict] = None) -> None:
+        """Raise ``ValueError`` if any leaf is outside its declared bounds
+        or the pytree names a node/key the step cannot use."""
+        params = self._params_or_default(params)
+        self._validate_params(params)
+        _check_bounds(params, self.param_specs())
+
+    def nodes_without_params(self) -> list[str]:
+        """Names of nodes whose ``update`` takes no ``params`` keyword —
+        their constants are not differentiable through the graph."""
+        return [n for n, s in self._nodes.items() if not s.accepts_params]
+
+    def effective_node_params(self, name: str, params: Optional[dict] = None) -> dict:
+        """The node's constructor ``params`` with the live values of
+        :attr:`params` (or ``params``) written over them, as plain Python
+        scalars/lists.  This is what serialisation stores, so a calibrated
+        graph reloads with the calibrated constants."""
+        spec = self._nodes[name]
+        out = dict(spec.node.params)
+        live = self._params_or_default(params).get("nodes", {}).get(name, {})
+        snapshot = spec.node.params_pytree()
+        for key, value in live.items():
+            # Only constructor params can be written back; a derived leaf
+            # (a surrogate's ``weights['scale']``) is not a constructor
+            # argument and would break reconstruction.  Checkpoints carry
+            # those.
+            if key not in spec.node.params:
+                continue
+            # Only overlay a leaf that actually changed: the pytree holds
+            # float32 promotions of the constructor floats (0.05 ->
+            # 0.05000000074505806), and an uncalibrated constant should
+            # serialise exactly as it was given.
+            base = snapshot.get(key)
+            if base is not None and np.array_equal(np.asarray(base), np.asarray(value)):
+                continue
+            out[key] = np.asarray(value).tolist()
+        return out
+
+    def param_spec_overrides(self) -> dict[str, dict[str, ParamSpec]]:
+        """Graph-level overrides set with :meth:`set_param_spec`."""
+        return {n: dict(o) for n, o in self._param_spec_overrides.items() if o}
 
     # ------------------------------------------------------------------
     # Graph construction
@@ -1581,11 +2042,21 @@ class GraphManager:
         """Register a node and initialise its state."""
         if node.name in self._nodes:
             raise ValueError(f"Node '{node.name}' already exists in the graph.")
+        bad = [t for t in ("/", "#", "->") if t in node.name]
+        if not node.name or bad:
+            # These tokens delimit checkpoint keys, mapping slots and edge
+            # keys; a node name containing them corrupts those namespaces.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: must be non-empty and must "
+                f"not contain {bad or ['/', '#', '->']}"
+            )
 
         spec = _NodeSpec(
             node=node,
             update_fn=node.update,
             timestep=node.delta_t,
+            accepts_params=_update_accepts_params(node),
+            flux_accepts_params=_flux_accepts_params(node),
         )
         self._nodes[node.name] = spec
         self._state[node.name] = node.initial_state()
@@ -1602,8 +2073,17 @@ class GraphManager:
         additive: bool = False,
         source_units: Optional[str] = None,
         target_units: Optional[str] = None,
+        mapping: Optional[Any] = None,
     ) -> None:
         """Add a data-dependency edge between two nodes.
+
+        ``mapping`` (a :class:`maddening.core.coupling.mapping.Mapping`)
+        transfers the source field onto the target interface before
+        ``transform`` is applied; its weights are snapshotted into
+        ``params["mappings"][edge.key]`` at compile time and passed as a
+        traced input on every step.  Its ``n_source`` must equal the
+        source field's size; ``n_target`` must match the target's
+        declared ``boundary_input_spec`` shape when that is an array.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -1622,11 +2102,80 @@ class GraphManager:
         if isinstance(transform, str):
             from maddening.core.transforms import resolve_transform
             transform = resolve_transform(transform)
+        if mapping is not None:
+            self._check_mapping_shapes(source, source_field, target, target_field, mapping)
+        ordinal = 0
+        if mapping is not None:
+            # Mapping weights live in params["mappings"][edge.key]; a
+            # second mapped edge on the same field pair (two additive
+            # contributions, say) gets its own slot via the ordinal
+            # instead of silently sharing -- and using -- the other's
+            # weights.
+            base = f"{source}.{source_field}->{target}.{target_field}"
+            ordinal = sum(
+                1 for e in self._edges
+                if e.mapping is not None and e.key.split("#")[0] == base
+            )
         edge = EdgeSpec(source, target, source_field, target_field,
-                        transform, additive, source_units, target_units)
+                        transform, additive, source_units, target_units,
+                        mapping=mapping, ordinal=ordinal)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
+
+    def _check_mapping_shapes(self, source, source_field, target, target_field, mapping):
+        for attr in ("apply", "params_pytree", "n_source", "n_target"):
+            if not hasattr(mapping, attr):
+                raise TypeError(
+                    f"mapping must implement the Mapping protocol (missing {attr!r})"
+                )
+        src_spec = self._nodes.get(source)
+        if src_spec is not None:
+            src_state = src_spec.node.initial_state()
+            if source_field in src_state:
+                n = int(np.prod(np.shape(src_state[source_field])[:1] or (1,)))
+                if mapping.n_source != n:
+                    raise ValueError(
+                        f"mapping n_source={mapping.n_source} does not match "
+                        f"{source}.{source_field} (size {n} along axis 0)"
+                    )
+        tgt_spec = self._nodes.get(target)
+        if tgt_spec is not None:
+            bspec = tgt_spec.node.boundary_input_spec().get(target_field)
+            shape = tuple(getattr(bspec, "shape", ()) or ()) if bspec is not None else ()
+            if shape and mapping.n_target != int(shape[0]):
+                raise ValueError(
+                    f"mapping n_target={mapping.n_target} does not match "
+                    f"{target}.{target_field} declared shape {shape}"
+                )
+
+    @property
+    def edges(self) -> list[EdgeSpec]:
+        return list(self._edges)
+
+    def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
+        """Boundary inputs ``node_name`` would receive from the *current*
+        state: every incoming edge (mapping, transform, additive) plus the
+        zero defaults of its external inputs.  A debugging / inspection
+        helper; the compiled step resolves edges itself."""
+        if node_name not in self._nodes:
+            raise KeyError(f"unknown node {node_name!r}")
+        p = self._params_or_default(params)
+        resolved = _ResolvedParams(p.get("nodes", {}), p.get("mappings", {}))
+        out: dict[str, Any] = {}
+        for edge in self._edges:
+            if edge.target_node != node_name:
+                continue
+            value = self._state[edge.source_node][edge.source_field]
+            value = _apply_edge(edge, value, resolved)
+            if edge.additive and edge.target_field in out:
+                out[edge.target_field] = out[edge.target_field] + value
+            else:
+                out[edge.target_field] = value
+        for ei in self._external_inputs:
+            if ei.target_node == node_name and ei.target_field not in out:
+                out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
+        return out
 
     def add_external_input(
         self,
@@ -1669,6 +2218,18 @@ class GraphManager:
         self._external_inputs = [
             e for e in self._external_inputs if e.target_node != name
         ]
+        # ParamSpec overrides for the node and for mapped edges that
+        # touched it would otherwise survive and break to_dict/from_dict;
+        # its live params entry is discarded on purpose (an intentional
+        # removal / replacement must not warn at the next compile).
+        self._param_spec_overrides.pop(name, None)
+        for key in list(self._param_spec_overrides):
+            if key.startswith(f"{name}.") or f"->{name}." in key:
+                self._param_spec_overrides.pop(key, None)
+        self.params.get("nodes", {}).pop(name, None)
+        for key in list(self.params.get("mappings", {})):
+            if key.startswith(f"{name}.") or f"->{name}." in key:
+                self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_NODE_REMOVED, name)
 
@@ -1690,6 +2251,12 @@ class GraphManager:
                 and e.target_field == edge.target_field
             )
         ]
+        for key in list(self._param_spec_overrides):
+            if key.split("#")[0] == edge.key:
+                self._param_spec_overrides.pop(key, None)
+        for key in list(self.params.get("mappings", {})):
+            if key.split("#")[0] == edge.key:
+                self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_EDGE_REMOVED, edge)
 
@@ -1852,6 +2419,10 @@ class GraphManager:
             if src_val is not None:
                 src_shape = tuple(int(d) for d in getattr(src_val, "shape", ()))
                 spec_shape = tuple(spec.shape)
+                if e.mapping is not None and src_shape:
+                    # The mapping changes axis 0 to its n_target; the
+                    # rest of the shape (vector components) passes through.
+                    src_shape = (int(e.mapping.n_target),) + src_shape[1:]
                 # Skip when spec leaves any dimension symbolic (negative
                 # convention) or when a transform may reshape on the fly.
                 if (e.transform is None
@@ -1869,7 +2440,7 @@ class GraphManager:
             # Dtype check: only when both source and spec dtypes are set.
             if src_val is not None and spec.dtype is not None:
                 src_dtype = getattr(src_val, "dtype", None)
-                if src_dtype is not None and e.transform is None:
+                if src_dtype is not None and e.transform is None and e.mapping is None:
                     if str(src_dtype) != str(jnp.dtype(spec.dtype)):
                         issues.append(
                             f"WARNING[dtype]: edge "
@@ -2087,7 +2658,9 @@ class GraphManager:
         # Ensure _meta exists with correct structure when coupling
         # diagnostics are enabled.  Pre-populate diagnostic keys so
         # the pytree structure is stable across lax.scan iterations.
-        has_diagnostics = any(g.diagnostics for g in self._coupling_groups)
+        has_diagnostics = any(
+            g.diagnostics or g.solver == "ift" for g in self._coupling_groups
+        )
         has_imvj = any(
             g.acceleration == "iqn-imvj" for g in self._coupling_groups
         )
@@ -2098,11 +2671,23 @@ class GraphManager:
             meta = self._state.get(_META_KEY, {})
             for g in self._coupling_groups:
                 key = "+".join(sorted(g.nodes))
-                if g.diagnostics:
+                if g.diagnostics or g.solver == "ift":
                     meta[f"coupling_{key}_iterations"] = jnp.array(
                         0, dtype=jnp.int32
                     )
-                    meta[f"coupling_{key}_residual"] = jnp.array(0.0)
+                    # Seed in the dtype the residual is computed in (the
+                    # group's floating state), so a float64 graph under
+                    # x64 keeps a stable scan carry / trace signature.
+                    res_dtype = jnp.float32
+                    for nn_ in g.nodes:
+                        for leaf in self._state.get(nn_, {}).values():
+                            if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating):
+                                res_dtype = jnp.asarray(leaf).dtype
+                                break
+                        else:
+                            continue
+                        break
+                    meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=res_dtype)
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -2113,17 +2698,7 @@ class GraphManager:
                     if g.accelerated_fields is not None:
                         af = g.accelerated_fields
                     else:
-                        ifields: dict[str, set] = {}
-                        for edge in self._edges:
-                            if (edge.source_node in g.nodes
-                                    and edge.target_node in g.nodes):
-                                ifields.setdefault(
-                                    edge.source_node, set()
-                                ).add(edge.source_field)
-                        af = {
-                            nn: tuple(sorted(fs))
-                            for nn, fs in ifields.items()
-                        } if ifields else None
+                        af = _interface_state_fields(self._edges, g.nodes, self._state)
                     n_dof = flatten_coupled_state(
                         self._state, list(g.nodes), fields=af
                     ).shape[0]
@@ -2142,7 +2717,10 @@ class GraphManager:
                         flatten_coupled_state as _fcs_pred,
                     )
                     group_names_pred = list(g.nodes)
-                    flat0 = _fcs_pred(self._state, group_names_pred)
+                    flat0 = _fcs_pred(
+                        self._state, group_names_pred,
+                        fields=float_fields_of(self._state, group_names_pred),
+                    )
                     n_pred = 3 if g.predictor == "quadratic" else 2
                     for pi in range(n_pred):
                         meta[f"coupling_{key}_pred_{pi}"] = flat0
@@ -2153,8 +2731,84 @@ class GraphManager:
                     )
             self._state[_META_KEY] = meta
 
+        # Explicit accelerated_fields must name state fields of the group's
+        # nodes (a boundary flux is not a state field; use the default,
+        # which maps a flux edge to the producer's state fields).
+        for g in self._coupling_groups:
+            if g.accelerated_fields is None:
+                continue
+            for nn, fields in g.accelerated_fields.items():
+                if nn not in self._nodes or nn not in g.nodes:
+                    raise ValueError(
+                        f"accelerated_fields names node {nn!r}, not in coupling "
+                        f"group {sorted(g.nodes)}"
+                    )
+                have = set(self._state.get(nn, {}).keys())
+                bad = [f for f in fields if f not in have]
+                if bad:
+                    raise ValueError(
+                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
+                        f"of {nn!r} (state fields: {sorted(have)})"
+                    )
+
+        # Persistent XLA cache, if the user asked for one via the env var
+        # (see maddening.core.simulation.compile_cache).
+        from maddening.core.simulation.compile_cache import enable_from_env
+        enable_from_env()
+
+        # A weak-typed leaf in the seed state would retrace the jitted
+        # step once it comes back strongly typed after the first step.
+        self._state = _strong_typed(self._state)
+        # Zero external inputs are allocated once per compile, not per
+        # step (``jnp.zeros`` per input per call cost ~1.5 ms/step on GPU).
+        self._default_ext_leaves = {
+            (ei.target_node, ei.target_field): jnp.zeros(ei.shape, dtype=ei.dtype)
+            for ei in self._external_inputs
+        }
+
+        # Snapshot the differentiable parameters before building the
+        # step so the closure default (``params=None``) is this snapshot.
+        # Live values survive a recompile: a calibrated leaf whose
+        # node/key/shape/dtype still exist is carried over (adding an
+        # edge or an external input must not discard a fit); anything
+        # that no longer fits is dropped with a warning.  ``reset_params``
+        # restores the constructor values on purpose.
+        self.params = self._merge_live_params(self._snapshot_params(), self.params)
+        self._params_dtypes = {
+            section: {
+                owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
+                for owner, leaves in self.params.get(section, {}).items()
+            }
+            for section in ("nodes", "mappings")
+        }
+        self._params_shapes = {
+            section: {
+                owner: {k: tuple(jnp.shape(v)) for k, v in leaves.items()}
+                for owner, leaves in self.params.get(section, {}).items()
+            }
+            for section in ("nodes", "mappings")
+        }
+        baked = self.nodes_without_params()
+        if baked:
+            logger.info(
+                "nodes without a params keyword (constants baked, not "
+                "differentiable through the graph): %s", baked,
+            )
+
         step_fn = self._build_step_fn()
-        self._compiled_step = jax.jit(step_fn)
+        # Count Python-level traces of the step: a robust, JAX-version-
+        # independent retrace probe (the jit object's C++ cache count is
+        # not comparable across versions).  ``trace_count`` is 0 right
+        # after compile() and 1 after the first step of a well-behaved
+        # graph; a growing count means something in the call signature
+        # (weak types, dtypes, params structure) keeps changing.
+        self._n_traces = 0
+
+        def _counted_step(full_state, external_inputs, params=None):
+            self._n_traces += 1
+            return step_fn(full_state, external_inputs, params)
+
+        self._compiled_step = jax.jit(_counted_step)
 
         # Snapshot static_data hashes so we can detect drift.
         self._static_data_hashes = {
@@ -2386,8 +3040,21 @@ class GraphManager:
         # Track flux outputs for flux-based edges in non-coupled path
         flux_state: dict[str, dict] = {}
 
+        # ``params=None`` on the step means "the compile-time snapshot":
+        # baked in as constants, exactly the pre-params behaviour.  An
+        # explicit ``params`` is a traced input, so ``jax.grad`` reaches
+        # it and a new value needs no recompile.
+        params_snapshot = self.params
+
+        def _resolve_params(params):
+            if params is None:
+                params = params_snapshot
+            else:
+                self._validate_params(params)
+            return _ResolvedParams(params.get("nodes", {}), params.get("mappings", {}))
+
         def _resolve_and_update_node(
-            node_name, new_state, full_state, external_inputs,
+            node_name, new_state, full_state, external_inputs, node_params,
             force_forward_edges=None,
         ):
             """Resolve boundary inputs and update a single node.
@@ -2419,8 +3086,7 @@ class GraphManager:
                     value = flux_state[src_nn][edge.source_field]
                 else:
                     value = src_state[src_nn][edge.source_field]
-                if edge.transform is not None:
-                    value = edge.transform(value)
+                value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -2435,15 +3101,17 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes[node_name]
-            new_node_state = spec.update_fn(
-                new_state[node_name], boundary_inputs, spec.timestep
+            new_node_state = _node_update(
+                spec, new_state[node_name], boundary_inputs, spec.timestep,
+                node_params.nodes.get(node_name),
             )
 
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
             if type(spec.node).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-                fluxes = spec.node.compute_boundary_fluxes(
-                    new_node_state, boundary_inputs, spec.timestep
+                fluxes = _node_fluxes(
+                    spec, new_node_state, boundary_inputs, spec.timestep,
+                    node_params.nodes.get(node_name),
                 )
                 if fluxes:
                     flux_state[node_name] = fluxes
@@ -2451,7 +3119,7 @@ class GraphManager:
             return new_node_state
 
         def _run_coupled_block(group, group_schedule, new_state,
-                               full_state, external_inputs,
+                               full_state, external_inputs, node_params,
                                runtime_dt=None):
             """Execute a coupling group with Gauss-Seidel iteration.
 
@@ -2485,16 +3153,18 @@ class GraphManager:
                 ext_by_target=ext_by_target, back_edge_set=back_edge_set,
                 has_external=has_external, all_edges=self._edges,
                 multigpu_device_map=self._multigpu_device_map,
+                node_params=node_params,
             )
 
         if not is_multirate and not has_coupling:
             # ---- Uniform-rate, no coupling: fast path ----
-            def graph_step(full_state, external_inputs):
+            def graph_step(full_state, external_inputs, params=None):
+                node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
                 for node_name in schedule:
                     new_state[node_name] = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs
+                        node_name, new_state, full_state, external_inputs, node_params
                     )
                 return new_state
 
@@ -2502,20 +3172,21 @@ class GraphManager:
 
         if has_coupling and not is_multirate:
             # ---- Coupling groups, uniform rate ----
-            def graph_step_coupled(full_state, external_inputs):
+            def graph_step_coupled(full_state, external_inputs, params=None):
+                node_params = _resolve_params(params)
                 new_state = {k: v for k, v in full_state.items()}
 
                 for block in blocks:
                     if block[0] == "node":
                         node_name = block[1]
                         new_state[node_name] = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs
+                            node_name, new_state, full_state, external_inputs, node_params
                         )
                     else:
                         _, group, group_schedule = block
                         new_state = _run_coupled_block(
                             group, group_schedule, new_state,
-                            full_state, external_inputs,
+                            full_state, external_inputs, node_params,
                         )
 
                 return new_state
@@ -2523,7 +3194,8 @@ class GraphManager:
             return graph_step_coupled
 
         # ---- Multi-rate path (with or without coupling) ----
-        def graph_step_multirate(full_state, external_inputs):
+        def graph_step_multirate(full_state, external_inputs, params=None):
+            node_params = _resolve_params(params)
             step_count = full_state[_META_KEY]["step_count"]
             new_state = {k: v for k, v in full_state.items()}
 
@@ -2543,7 +3215,7 @@ class GraphManager:
                     if block[0] == "node":
                         node_name = block[1]
                         updated = _resolve_and_update_node(
-                            node_name, new_state, full_state, external_inputs
+                            node_name, new_state, full_state, external_inputs, node_params
                         )
                         new_state[node_name] = _apply_multirate(
                             node_name, updated, new_state
@@ -2552,7 +3224,7 @@ class GraphManager:
                         _, group, group_schedule = block
                         coupled_result = _run_coupled_block(
                             group, group_schedule, new_state,
-                            full_state, external_inputs,
+                            full_state, external_inputs, node_params,
                         )
                         for nn in group_schedule:
                             new_state[nn] = _apply_multirate(
@@ -2567,7 +3239,7 @@ class GraphManager:
             else:
                 for node_name in schedule:
                     updated = _resolve_and_update_node(
-                        node_name, new_state, full_state, external_inputs
+                        node_name, new_state, full_state, external_inputs, node_params
                     )
                     new_state[node_name] = _apply_multirate(
                         node_name, updated, new_state
@@ -2586,11 +3258,15 @@ class GraphManager:
         """Build a zero-valued external_inputs dict matching declared specs."""
         if not self._external_inputs:
             return _EMPTY_EXTERNAL_INPUTS
+        cache = getattr(self, "_default_ext_leaves", None) or {}
         ext: dict[str, dict] = {}
         for ei in self._external_inputs:
-            ext.setdefault(ei.target_node, {})[ei.target_field] = jnp.zeros(
-                ei.shape, dtype=ei.dtype
-            )
+            leaf = cache.get((ei.target_node, ei.target_field))
+            if leaf is None or leaf.shape != tuple(ei.shape) or leaf.dtype != jnp.dtype(ei.dtype):
+                leaf = jnp.zeros(ei.shape, dtype=ei.dtype)
+            # Fresh outer dicts each call (callers may edit them); the
+            # zero arrays themselves are immutable and shared.
+            ext.setdefault(ei.target_node, {})[ei.target_field] = leaf
         return ext
 
     # ------------------------------------------------------------------
@@ -2614,22 +3290,33 @@ class GraphManager:
 
             - ``"iterations"`` : int — coupling iterations used
             - ``"residual"`` : float — final residual norm
+            - ``"converged"`` : bool — residual met the group's
+              threshold (``tolerance`` for the L2 norm, ``1.0`` for the
+              mixed / interface norms).  ``False`` means the group hit
+              ``max_iterations``; under ``solver="ift"`` the gradient
+              through that step is then unreliable.
 
-            Empty dict if no coupling groups have ``diagnostics=True``
-            or no step has been taken yet.
+            Reported for every group under ``solver="ift"`` (the
+            default); legacy ``solver="fori"`` groups only with
+            ``diagnostics=True``.  Empty dict if no step has been taken
+            yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
         for group in self._coupling_groups:
-            if not group.diagnostics:
-                continue
             key = "+".join(sorted(group.nodes))
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
             if iter_key in meta:
+                residual = float(meta[res_key])
+                threshold = (
+                    1.0 if group.convergence_norm in ("mixed", "interface")
+                    else group.tolerance
+                )
                 result[key] = {
                     "iterations": int(meta[iter_key]),
-                    "residual": float(meta[res_key]),
+                    "residual": residual,
+                    "converged": residual <= threshold,
                 }
         return result
 
@@ -2637,7 +3324,12 @@ class GraphManager:
     # Execution
     # ------------------------------------------------------------------
 
-    def step(self, external_inputs: Optional[dict[str, dict]] = None) -> dict[str, dict]:
+    def step(
+        self,
+        external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
+    ) -> dict[str, dict]:
         """Advance the simulation by one base timestep.
 
         Parameters
@@ -2646,6 +3338,10 @@ class GraphManager:
             Values injected from outside the graph, structured as
             ``{node_name: {field_name: value, ...}, ...}``.
             If ``None``, zeros are used for all declared external inputs.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.  Passing a modified pytree changes node
+            constants for this step without recompiling.
 
         Returns the full state dict after the step (excluding internal
         metadata).
@@ -2656,8 +3352,9 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
-        self._state = self._compiled_step(self._state, external_inputs)
+        self._state = self._compiled_step(self._state, external_inputs, params)
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -2667,6 +3364,8 @@ class GraphManager:
         n_steps: int,
         callback: Optional[Callable] = None,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> None:
         """Run *n_steps* simulation steps (at the base timestep rate).
 
@@ -2688,9 +3387,10 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._state = self._compiled_step(self._state, external_inputs)
+            self._state = self._compiled_step(self._state, external_inputs, params)
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
             if callback is not None:
@@ -2700,6 +3400,8 @@ class GraphManager:
         self,
         n_steps: int,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> dict[str, dict]:
         """Run *n_steps* using ``jax.lax.scan`` for maximum performance.
 
@@ -2722,6 +3424,8 @@ class GraphManager:
         external_inputs : dict, optional
             Static external inputs applied identically every step.
             If ``None``, zeros are used for all declared external inputs.
+        params : dict, optional
+            Graph parameter pytree; ``None`` uses :attr:`params`.
 
         Returns
         -------
@@ -2735,17 +3439,18 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         # Build the raw (unjitted) step function -- lax.scan will JIT
         # the entire scan body, so an inner jit would be redundant.
         step_fn = self._build_step_fn()
 
-        # Close over the static external inputs so the scan body has
-        # the correct signature: (carry, x) -> (carry, None)
+        # Close over the static external inputs (and params) so the scan
+        # body has the correct signature: (carry, x) -> (carry, None)
         ext = external_inputs
 
         def scan_body(state, _unused):
-            new_state = step_fn(state, ext)
+            new_state = step_fn(state, ext, params)
             return new_state, None
 
         final_state, _ = jax.lax.scan(scan_body, self._state, None, length=n_steps)
@@ -2756,6 +3461,8 @@ class GraphManager:
         self,
         n_steps: int,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict[str, dict]]:
         """Run *n_steps* via ``jax.lax.scan``, returning all intermediate states.
 
@@ -2790,12 +3497,13 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         step_fn = self._build_step_fn()
         ext = external_inputs
 
         def scan_body(state, _unused):
-            new_state = step_fn(state, ext)
+            new_state = step_fn(state, ext, params)
             return new_state, new_state  # carry, output (stacked by scan)
 
         final_state, history = jax.lax.scan(scan_body, self._state, None, length=n_steps)
@@ -2812,6 +3520,8 @@ class GraphManager:
         initial_states: dict[str, dict],
         external_inputs: Optional[dict[str, dict]] = None,
         return_history: bool = False,
+        *,
+        params: Optional[dict] = None,
     ):
         """Run a batch of simulations over different initial conditions.
 
@@ -2851,6 +3561,7 @@ class GraphManager:
 
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
+        params = self._params_or_default(params)
 
         step_fn = self._build_step_fn()
         ext = external_inputs
@@ -2859,7 +3570,7 @@ class GraphManager:
         if return_history:
             def simulate(init_state):
                 def scan_body(state, _unused):
-                    new_state = step_fn(state, ext)
+                    new_state = step_fn(state, ext, params)
                     return new_state, new_state
                 final, hist = jax.lax.scan(scan_body, init_state, None, length=n_steps)
                 return self._user_state(final), self._user_state(hist)
@@ -2870,7 +3581,7 @@ class GraphManager:
         else:
             def simulate(init_state):
                 def scan_body(state, _unused):
-                    new_state = step_fn(state, ext)
+                    new_state = step_fn(state, ext, params)
                     return new_state, None
                 final, _ = jax.lax.scan(scan_body, init_state, None, length=n_steps)
                 return self._user_state(final)
@@ -2929,8 +3640,10 @@ class GraphManager:
                 if edge.source_node in group.nodes and edge.target_node in group.nodes:
                     coupled_internal_edges.add(edge)
 
+        params_snapshot = self.params
+
         def _resolve_and_update(node_name, new_state, full_state, ext, dt,
-                                force_forward_edges=None):
+                                node_params, force_forward_edges=None):
             boundary_inputs: dict[str, Any] = {}
             for edge in edges_by_target[node_name]:
                 if edge in back_edge_set and (
@@ -2941,8 +3654,7 @@ class GraphManager:
                 else:
                     src_state = new_state
                 value = src_state[edge.source_node][edge.source_field]
-                if edge.transform is not None:
-                    value = edge.transform(value)
+                value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
                         boundary_inputs[edge.target_field] + value
@@ -2957,9 +3669,19 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes_dict[node_name]
-            return spec.update_fn(new_state[node_name], boundary_inputs, dt)
+            return _node_update(
+                spec, new_state[node_name], boundary_inputs, dt,
+                node_params.nodes.get(node_name),
+            )
 
-        def dt_step_fn(state, external_inputs, dt):
+        def dt_step_fn(state, external_inputs, dt, params=None):
+            if params is None:
+                params = params_snapshot
+            else:
+                self._validate_params(params)
+            node_params = _ResolvedParams(
+                params.get("nodes", {}), params.get("mappings", {}),
+            )
             new_state = {k: v for k, v in state.items()}
 
             if has_coupling:
@@ -2967,7 +3689,8 @@ class GraphManager:
                     if block[0] == "node":
                         nn = block[1]
                         new_state[nn] = _resolve_and_update(
-                            nn, new_state, state, external_inputs, dt
+                            nn, new_state, state, external_inputs, dt,
+                            node_params,
                         )
                     else:
                         _, group, group_schedule = block
@@ -2981,11 +3704,13 @@ class GraphManager:
                             has_external=has_external,
                             all_edges=self._edges,
                             multigpu_device_map=self._multigpu_device_map,
+                            node_params=node_params,
                         )
             else:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(
-                        nn, new_state, state, external_inputs, dt
+                        nn, new_state, state, external_inputs, dt,
+                        node_params,
                     )
 
             return new_state
@@ -3058,6 +3783,7 @@ class GraphManager:
         dt_step_fn = self._build_dt_step_fn()
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
+        params = self.params
 
         t = 0.0
         dt = dt_initial
@@ -3075,11 +3801,11 @@ class GraphManager:
             dt_jax = jnp.array(dt)
 
             # Full step
-            state_full = dt_step_jit(state, external_inputs, dt_jax)
+            state_full = dt_step_jit(state, external_inputs, dt_jax, params)
             # Two half-steps
             half_dt = dt_jax / 2.0
-            state_half = dt_step_jit(state, external_inputs, half_dt)
-            state_half = dt_step_jit(state_half, external_inputs, half_dt)
+            state_half = dt_step_jit(state, external_inputs, half_dt, params)
+            state_half = dt_step_jit(state_half, external_inputs, half_dt, params)
 
             # Error estimate
             user_full = self._user_state(state_full)
@@ -3195,6 +3921,7 @@ class GraphManager:
 
         dt_step_fn = self._build_dt_step_fn()
         ext = external_inputs
+        params = self.params
 
         t_end_jax = jnp.array(t_end)
         dt_min_jax = jnp.array(dt_min)
@@ -3211,10 +3938,10 @@ class GraphManager:
             done = t >= t_end_jax
 
             # Full step + two half-steps
-            state_full = dt_step_fn(state, ext, dt)
+            state_full = dt_step_fn(state, ext, dt, params)
             half_dt = dt / 2.0
-            state_half = dt_step_fn(state, ext, half_dt)
-            state_half = dt_step_fn(state_half, ext, half_dt)
+            state_half = dt_step_fn(state, ext, half_dt, params)
+            state_half = dt_step_fn(state_half, ext, half_dt, params)
 
             # Error estimate
             user_full = {k: v for k, v in state_full.items() if k != _META_KEY}
@@ -3272,7 +3999,31 @@ class GraphManager:
     def set_node_state(self, name: str, state: dict) -> None:
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
-        self._state[name] = state
+        self._state[name] = _strong_typed(state)
+
+    def reset_state(self) -> None:
+        """Reset every node to its ``initial_state()`` and the internal
+        counters in ``_meta`` to zero, keeping the compiled step valid.
+
+        Prefer this to assigning ``initial_state()`` into ``_state``
+        directly: the seed values are normalised the way ``compile``
+        normalises them (weak types stripped), so the jitted step does not
+        retrace after a reset, and ``_meta``'s structure is preserved.
+        """
+        for name, spec in self._nodes.items():
+            self._state[name] = _strong_typed(spec.node.initial_state())
+        meta = self._state.get(_META_KEY)
+        if meta is not None:
+            for key, value in list(meta.items()):
+                if key in ("step_count", "sub_step") or key.endswith("_iterations") \
+                        or key.endswith("_pred_count"):
+                    meta[key] = jnp.zeros_like(value)
+                elif key.endswith("_residual"):
+                    meta[key] = jnp.zeros_like(value)
+                # IQN V/W and predictor histories are warm-start caches:
+                # zeroing them restarts cleanly too.
+                elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:
+                    meta[key] = jnp.zeros_like(value)
 
     # ------------------------------------------------------------------
     # Observer pattern
@@ -3291,9 +4042,26 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Serialise the graph structure (not runtime state)."""
+        """Serialise the graph structure (not runtime state).
+
+        Node ``params`` are the *effective* values — the constructor
+        arguments with the live :attr:`params` written over them (see
+        :meth:`effective_node_params`) — and ``param_specs`` carries the
+        graph's :meth:`set_param_spec` overrides.
+        """
+        nodes = []
+        for name, spec in self._nodes.items():
+            d = spec.node.to_dict()
+            if spec.accepts_params:
+                d["params"] = self.effective_node_params(name)
+            nodes.append(d)
+        overrides = {
+            n: {k: s.to_dict() for k, s in o.items()}
+            for n, o in self.param_spec_overrides().items()
+        }
         return {
-            "nodes": [spec.node.to_dict() for spec in self._nodes.values()],
+            "nodes": nodes,
+            **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
             "external_inputs": [
                 {
@@ -3321,12 +4089,27 @@ class GraphManager:
             node_cls = node_registry[nd["type"]]
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
+        for node_name, overrides in config.get("param_specs", {}).items():
+            for key, spec_dict in overrides.items():
+                gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
         for ed in config["edges"]:
+            if "mapping" in ed:
+                raise ValueError(
+                    f"edge {ed['source_node']}.{ed['source_field']} -> "
+                    f"{ed['target_node']}.{ed['target_field']} was saved with an "
+                    f"interface mapping ({ed['mapping']}); rebuilding mappings "
+                    "from a config (MappingSpec) is not implemented yet — add "
+                    "the edge with mapping= after from_dict."
+                )
             gm.add_edge(
                 source=ed["source_node"],
                 target=ed["target_node"],
                 source_field=ed["source_field"],
                 target_field=ed["target_field"],
+                transform=ed.get("transform"),          # registered name
+                additive=bool(ed.get("additive", False)),
+                source_units=ed.get("source_units"),
+                target_units=ed.get("target_units"),
             )
         for ei in config.get("external_inputs", []):
             gm.add_external_input(

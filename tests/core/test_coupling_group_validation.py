@@ -112,7 +112,7 @@ def test_default_construction_succeeds():
     """The default CouplingGroup (every field at its default) is valid."""
     g = CouplingGroup(nodes=NODES)
     # Each Literal field landed on its declared default.
-    assert g.solver == "fori"
+    assert g.solver == "ift"
     assert g.acceleration == "none"
     assert g.iteration_mode == "gauss-seidel"
     assert g.boundary_interpolation == "linear"

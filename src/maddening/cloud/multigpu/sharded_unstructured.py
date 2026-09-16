@@ -36,15 +36,18 @@ in v0.3.0 — surface a breaking change here, not in v0.4.0.
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
+from maddening.cloud.multigpu.sharded_node import _params_signature
 from maddening.cloud.multigpu.halo_unstructured import (
     UnstructuredPartitionLayout,
     exchange_unstructured,
@@ -103,6 +106,11 @@ class ShardedUnstructuredNode(SimulationNode):
         1-D JAX device mesh.
     layout : UnstructuredPartitionLayout
         Pre-computed partition / ghost / send-recv tables.
+    exchange : {"all_to_all", "ppermute"}, optional
+        Halo-exchange transport (see :func:`exchange_unstructured`):
+        one dense ``all_to_all`` (default) or one ``ppermute`` per
+        communicating cyclic shift, which moves far fewer cells when each
+        shard has few neighbours.  Results are bit-identical.
     mesh_axis : str, optional
         The name of the mesh axis to shard along.  Defaults to
         ``"devices"``.  Must match ``mesh.axis_names``.
@@ -122,6 +130,7 @@ class ShardedUnstructuredNode(SimulationNode):
         layout: UnstructuredPartitionLayout,
         *,
         mesh_axis: str = "devices",
+        exchange: str = "all_to_all",
     ) -> None:
         if mesh_axis not in mesh.axis_names:
             raise ValueError(
@@ -164,10 +173,16 @@ class ShardedUnstructuredNode(SimulationNode):
                 sharded_static[k] = v
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
+        if exchange not in ("all_to_all", "ppermute"):
+            raise ValueError(
+                f"ShardedUnstructuredNode: exchange must be 'all_to_all' or "
+                f"'ppermute', got {exchange!r}"
+            )
         self._inner = node
         self._mesh = mesh
         self._mesh_axis = mesh_axis
         self._layout = layout
+        self._exchange = exchange
         self._sharded_static = sharded_static
         # Cached compiled fns keyed by the input signature.
         self._sharded_cache: dict[Any, Any] = {}
@@ -243,14 +258,27 @@ class ShardedUnstructuredNode(SimulationNode):
     # -----------------------------------------------------------------
     # Pure-Python update plumbing (for tests / single-shard verification)
     # -----------------------------------------------------------------
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def accepts_params(self) -> bool:
+        return "params" in inspect.signature(self._inner.update_padded).parameters
+
+    def params_pytree(self) -> dict:
+        return self._inner.params_pytree() if self.accepts_params() else {}
+
+    def param_specs(self) -> dict:
+        return self._inner.param_specs() if self.accepts_params() else {}
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Run one step under sharding.
 
         The wrapper compiles a shard_map'd implementation per
-        (state_signature, bi_signature, static_signature) tuple and
-        dispatches.
+        (state_signature, bi_signature, static_signature, params
+        signature) tuple and dispatches.  ``params`` (the node's entry of
+        ``GraphManager.params``) is replicated to every shard and handed
+        to an inner ``update_padded(..., params=)``.
         """
-        fn = self._get_sharded_fn(state, boundary_inputs)
+        fn = self._get_sharded_fn(state, boundary_inputs, params)
         # Collect the per-partition static arrays from the inner node.
         static_partitioned = {}
         for k, sa in self._sharded_static.items():
@@ -264,12 +292,13 @@ class ShardedUnstructuredNode(SimulationNode):
                     + per_shard.shape[2:]
                 )), sharding,
             )
-        return fn(state, boundary_inputs, jnp.asarray(dt), static_partitioned)
+        return fn(state, boundary_inputs, jnp.asarray(dt), static_partitioned,
+                  params if params else {})
 
     # -----------------------------------------------------------------
     # Internals
     # -----------------------------------------------------------------
-    def _get_sharded_fn(self, state, boundary_inputs):
+    def _get_sharded_fn(self, state, boundary_inputs, params=None):
         key = (
             tuple(sorted((k, tuple(a.shape), str(a.dtype))
                          for k, a in state.items())),
@@ -280,39 +309,86 @@ class ShardedUnstructuredNode(SimulationNode):
                           str(self._sharded_static[k].value.dtype))
                          for k in self._sharded_static)),
             self._inner.static_data_hash(),
+            _params_signature(params),
         )
         cached = self._sharded_cache.get(key)
         if cached is not None:
             return cached
 
         state_specs = {k: P(self._mesh_axis) for k in state}
-        bi_specs = {k: P() for k in boundary_inputs}
+        cell_bi = self._cell_boundary_inputs(boundary_inputs)
+        bi_specs = {
+            k: (P(self._mesh_axis) if k in cell_bi else P())
+            for k in boundary_inputs
+        }
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
+        axes_decl = dict(getattr(self._inner, "domain_integral_axes", dict)())
         for k in self._inner.domain_integral_fields():
-            out_specs[k] = P()  # fully replicated after psum
+            axes = axes_decl.get(k)
+            if axes is None or self._mesh_axis in tuple(axes):
+                out_specs[k] = P()  # fully replicated after psum
+            else:
+                out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
 
-        local_fn = self._build_local_update()
+        local_fn = functools.partial(self._build_local_update(), cell_bi=cell_bi)
 
+        params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(
             local_fn,
             mesh=self._mesh,
-            in_specs=(state_specs, bi_specs, P(), static_specs),
+            in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
         )
         fn = jax.jit(sm)
         self._sharded_cache[key] = fn
         return fn
 
+    def _cell_boundary_inputs(self, boundary_inputs: dict) -> frozenset[str]:
+        """Names of the boundary inputs that are per-cell fields.
+
+        A per-cell boundary input is laid out like this wrapper's state:
+        leading axis of length ``n_devices * n_local_max`` in partition
+        order (what :meth:`initial_state` produces, and what
+        :func:`partition_value` gives for a global-order array).  It is
+        sharded and ghost-exchanged like a state field, so the inner sees
+        ``n_local_max + n_ghost_max`` rows.  Scalars and anything else are
+        replicated.  A global-order array (leading axis ``n_global_cells``)
+        is refused rather than silently misread.
+        """
+        n_layout = self._layout.n_devices * self._layout.n_local_max
+        n_global = int(np.asarray(self._layout.partition_assignment).size)
+        out = set()
+        for k, v in boundary_inputs.items():
+            shape = tuple(jnp.shape(v))
+            if not shape:
+                continue
+            if shape[0] == n_layout:
+                out.add(k)
+            elif shape[0] == n_global:
+                raise ValueError(
+                    f"boundary input {k!r} has leading axis {n_global} (global "
+                    f"cell order); ShardedUnstructuredNode expects per-cell "
+                    f"inputs in partition layout ({n_layout} rows) -- run it "
+                    "through partition_value(value=..., layout=...) and reshape "
+                    f"to ({n_layout}, ...) first."
+                )
+        return frozenset(out)
+
     def _build_local_update(self):
         inner = self._inner
         layout = self._layout
         mesh_axis = self._mesh_axis
+        exchange = self._exchange
         n_local_max = layout.n_local_max
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
+        integral_axes = dict(getattr(inner, 'domain_integral_axes', dict)())
 
-        def _local_update(local_state, local_bi, local_dt, local_static):
+        accepts_params = "params" in inspect.signature(inner.update_padded).parameters
+
+        def _local_update(local_state, local_bi, local_dt, local_static,
+                          local_params, *, cell_bi=frozenset()):
             # Strip the leading device dimension that shard_map already
             # collapsed for us — local arrays now have shape (n_local_max, *).
 
@@ -320,14 +396,21 @@ class ShardedUnstructuredNode(SimulationNode):
             padded_state = {}
             for k, arr in local_state.items():
                 padded_state[k] = exchange_unstructured(
-                    arr, layout=layout, mesh_axis=mesh_axis,
+                    arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
+            # 1b. Per-cell boundary inputs get the same ghost exchange so
+            #     the inner reads them at the padded local shape.
+            local_bi = {
+                k: (exchange_unstructured(v, layout=layout, mesh_axis=mesh_axis, method=exchange)
+                    if k in cell_bi else v)
+                for k, v in local_bi.items()
+            }
 
             # 2. Halo-exchange each partitioned static.
             padded_static = {}
             for k, arr in local_static.items():
                 padded_static[k] = exchange_unstructured(
-                    arr, layout=layout, mesh_axis=mesh_axis,
+                    arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
 
             # 3. shard_info — traced offset for nodes that want a per-shard tag.
@@ -335,10 +418,11 @@ class ShardedUnstructuredNode(SimulationNode):
             shard_info = {0: (idx * n_local_max, n_local_max)}
 
             # 4. Dispatch.
+            extra = {"params": local_params} if (accepts_params and local_params) else {}
             new = inner.update_padded(
                 padded_state, local_bi, local_dt,
                 static_padded=(padded_static or None),
-                shard_info=shard_info,
+                shard_info=shard_info, **extra,
             )
 
             # 5. Classify outputs.
@@ -348,7 +432,11 @@ class ShardedUnstructuredNode(SimulationNode):
                     # Strip the ghost tail.
                     out[k] = v[:n_local_max]
                 elif k in integrals:
-                    out[k] = lax.psum(v, axis_name=mesh_axis)
+                    axes = integral_axes.get(k)
+                    if axes is None or mesh_axis in tuple(axes):
+                        out[k] = lax.psum(v, axis_name=mesh_axis)
+                    else:
+                        out[k] = v[None]          # stacked along the mesh axis
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "
@@ -364,6 +452,7 @@ class ShardedUnstructuredNode(SimulationNode):
         d["sharded"] = True
         d["sharding"] = "unstructured"
         d["n_devices"] = self._layout.n_devices
+        d["exchange"] = self._exchange
         return d
 
 

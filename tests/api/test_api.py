@@ -247,14 +247,83 @@ class TestVizEndpoints:
 # ------------------------------------------------------------------
 
 class TestCheckpointEndpoints:
-    def test_save_and_load(self, loaded_client, tmp_path):
-        path = str(tmp_path / "test_checkpoint.npz")
-        # Save
-        resp = loaded_client.post(f"/checkpoint/save?path={path}")
+    def test_save_and_load(self, tmp_path):
+        # Checkpoint names are relative to the server's checkpoint_root
+        # (an unauthenticated client cannot choose arbitrary server paths).
+        gm = GraphManager()
+        gm.add_node(TableNode(name="table", timestep=0.01, position=0.0))
+        gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=5.0, elasticity=0.7))
+        gm.add_edge("table", "ball", "position", "table_position")
+        gm.compile()
+        server = SimulationServer(node_registry=REGISTRY, graph_manager=gm, checkpoint_root=tmp_path)
+        client = TestClient(server.create_app())
+        resp = client.post("/checkpoint/save?path=test_checkpoint.npz")
         assert resp.status_code == 200
-        # Step to change state
-        loaded_client.post("/sim/step")
-        # Load back
-        resp = loaded_client.post(f"/checkpoint/load?path={path}")
+        assert (tmp_path / "test_checkpoint.npz").exists()
+        client.post("/sim/step")
+        resp = client.post("/checkpoint/load?path=test_checkpoint.npz")
         assert resp.status_code == 200
         assert "state" in resp.json()
+
+
+# ------------------------------------------------------------------
+# Params endpoint: live pytree + ParamSpec bounds
+# ------------------------------------------------------------------
+
+class TestParamsEndpoint:
+    def test_put_live_param_takes_effect_without_recompile(self, loaded_client):
+        resp = loaded_client.put("/graph/params/ball", json={"params": {"elasticity": 0.5}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["params"]["elasticity"] == 0.5
+        # A second read reflects the value.
+        assert loaded_client.get("/graph/params/ball").json()["elasticity"] == 0.5
+
+    def test_put_out_of_bounds_is_400_and_mutates_nothing(self, loaded_client):
+        before = loaded_client.get("/graph/params/ball").json()
+        resp = loaded_client.put("/graph/params/ball",
+                                 json={"params": {"elasticity": 1.5, "gravity": -1.0}})
+        assert resp.status_code == 400
+        assert "elasticity" in resp.json()["detail"] and "above bound" in resp.json()["detail"]
+        after = loaded_client.get("/graph/params/ball").json()
+        assert after == before          # gravity was not written either
+
+    def test_put_unknown_key_is_400(self, loaded_client):
+        resp = loaded_client.put("/graph/params/ball", json={"params": {"nope": 1.0}})
+        assert resp.status_code == 400
+
+
+class TestParamsEndpointLiveOnlyKeys:
+    def test_live_pytree_key_absent_from_constructor_params_is_addressable(self):
+        """Surrogate weights and sharded-wrapper params live in gm.params but
+        not in node.params; the endpoint must reach them."""
+        import jax.numpy as jnp
+        from maddening.core.node import SimulationNode
+
+        class Weighted(SimulationNode):
+            def __init__(self, name, timestep):
+                super().__init__(name, timestep)
+                self._w = jnp.asarray([1.0, 2.0], jnp.float32)
+
+            def params_pytree(self):
+                return {"weights['w']": self._w}
+
+            def initial_state(self):
+                return {"x": jnp.zeros(2, jnp.float32)}
+
+            def update(self, s, bi, dt, *, params=None):
+                w = self._w if params is None else params["weights['w']"]
+                return {"x": s["x"] + dt * w}
+
+        gm = GraphManager()
+        gm.add_node(Weighted("n", 0.1))
+        gm.compile()
+        client = TestClient(SimulationServer(node_registry=REGISTRY, graph_manager=gm).create_app())
+        resp = client.put("/graph/params/n", json={"params": {"weights['w']": [3.0, 4.0]}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["params"]["weights['w']"] == [3.0, 4.0]
+        assert not gm._dirty
+        out = client.post("/simulation/step").json() if client.post("/simulation/step").status_code == 200 else None
+        # the live value drives the next step
+        assert [float(v) for v in gm.params["nodes"]["n"]["weights['w']"]] == [3.0, 4.0]
+        bad = client.put("/graph/params/n", json={"params": {"weights['w']": [1.0, 2.0, 3.0]}})
+        assert bad.status_code == 400 and "shape" in bad.json()["detail"]

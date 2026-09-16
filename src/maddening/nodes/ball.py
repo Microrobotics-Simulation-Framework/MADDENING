@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 
 GRAVITY = -9.81  # default; use gravity param on BallNode for per-instance control
 
@@ -83,21 +84,33 @@ class BallNode(SimulationNode):
         """Pointwise (no spatial neighbour access)."""
         return {}
 
+    def param_specs(self) -> dict[str, ParamSpec]:
+        return {
+            **super().param_specs(),
+            # Inclusive bounds: a perfectly elastic (1.0) or perfectly
+            # inelastic (0.0) ball is a valid model, so no logit.
+            "elasticity": ParamSpec(bounds=(0.0, 1.0)),
+            "gravity": ParamSpec(units="m/s^2"),
+        }
+
     def initial_state(self) -> dict:
         return {
             "position": jnp.array(self.params["initial_position"], dtype=jnp.float32),
             "velocity": jnp.array(self.params["initial_velocity"], dtype=jnp.float32),
         }
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Integrate gravity, then handle collision if table_position is provided."""
-        gravity = self.params["gravity"]
+        p = self.params if params is None else {**self.params, **params}
+        gravity = p["gravity"]
         velocity = state["velocity"] + gravity * dt
         position = state["position"] + velocity * dt
 
         table_pos = boundary_inputs.get("table_position", None)
         if table_pos is not None:
-            elasticity = self.params["elasticity"]
+            elasticity = p["elasticity"]
             hit = position < table_pos
             position = jnp.where(hit, table_pos, position)
             velocity = jnp.where(

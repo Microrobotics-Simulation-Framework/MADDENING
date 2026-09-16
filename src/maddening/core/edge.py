@@ -9,7 +9,7 @@ optionally applying *transform* first."
 """
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -26,6 +26,22 @@ class EdgeSpec:
     additive: bool = False  # If True, ADD to existing boundary_input value
     source_units: Optional[str] = None  # Physical units of the source field
     target_units: Optional[str] = None  # Physical units after transform
+    # Interface mapping (``maddening.core.coupling.mapping.Mapping``)
+    # applied before ``transform``; its weights live in
+    # ``GraphManager.params["mappings"][edge.key]``.
+    mapping: Optional[Any] = None
+    # Position among mapped edges on the same field pair (two additive
+    # mapped edges a.v->b.inp are legal); makes ``key`` -- and with it the
+    # ``params["mappings"]`` slot -- unique.  Assigned by ``add_edge``.
+    ordinal: int = 0
+
+    @property
+    def key(self) -> str:
+        """Stable identifier: ``"<src>.<field>-><tgt>.<field>"`` (plus
+        ``"#<n>"`` for the n-th further mapped edge on the same pair)."""
+        base = (f"{self.source_node}.{self.source_field}->"
+                f"{self.target_node}.{self.target_field}")
+        return base if not self.ordinal else f"{base}#{self.ordinal}"
 
     # ------------------------------------------------------------------
     # Serialization helpers
@@ -38,8 +54,18 @@ class EdgeSpec:
             "source_field": self.source_field,
             "target_field": self.target_field,
         }
+        if self.mapping is not None:
+            describe = getattr(self.mapping, "describe", None)
+            d["mapping"] = describe() if callable(describe) else {
+                "kind": getattr(self.mapping, "kind", type(self.mapping).__name__),
+            }
+        if self.ordinal:
+            d["ordinal"] = self.ordinal
         if self.transform is not None:
-            d["transform"] = self.transform.__qualname__
+            # The registered name reloads through add_edge(transform=str);
+            # an unregistered callable can only be named, not rebuilt.
+            from maddening.core.transforms import get_transform_name  # noqa: PLC0415
+            d["transform"] = get_transform_name(self.transform) or self.transform.__qualname__
         if self.additive:
             d["additive"] = True
         if self.source_units is not None:
@@ -50,6 +76,8 @@ class EdgeSpec:
 
     def __repr__(self) -> str:
         arrow = f"{self.source_node}.{self.source_field} -> {self.target_node}.{self.target_field}"
+        if self.mapping is not None:
+            arrow += f"  (mapping {self.mapping!r})"
         if self.transform is not None:
             arrow += f"  (via {self.transform.__qualname__})"
         if self.source_units or self.target_units:

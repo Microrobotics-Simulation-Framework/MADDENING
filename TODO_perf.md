@@ -48,7 +48,65 @@ update inside the loop — `JAX_LOG_COMPILES=1` shows ~30 separate
 cache warms, and the steady-state cost is dominated by GPU dispatch
 latency rather than actual compute.
 
-**Sketch**:
+**Status (2026-09-15)** — diagnosis revised, main fix landed:
+
+- Measured on CPU (2 × 400k-cell HeatNode group, converges at iteration 2):
+  fori step cost was linear in `max_iterations` (≈2.4 ms/iter) regardless of
+  convergence — 80 % dead iterations at N=10, 90 % at N=20.  There was no
+  per-node `jit` boundary, no host sync, and one XLA compile per step, so the
+  launch-overhead hypothesis below was *not* the cause; the "~30 tracing
+  events" were node-level compiles.
+- **Landed**: `CouplingGroup.solver="ift"` (early-exit `while_loop` + IFT
+  derivative) is the default; step cost is flat in `max_iterations`.
+- Of the ≈2.4 ms/iter, ≈0.8 ms was physics and ≈1.5 ms bookkeeping.  Still
+  open: `_apply_interface_overrides` does a full-array `.at[idx].set` per node
+  per iteration (≈0.9 ms/node/iter) although the correction is
+  iteration-invariant (hoist it out of the loop); the residual is over the
+  full state (the `"interface"` norm is cheaper).
+- Acceptance below still needs measuring on the AR4 graph on GPU.
+
+**Status (2026-09-16)** — measured on the AR4 + helical-UMR graph
+(RTX A2000, `benchmarks/bench_coupling.py --graph mime-ar4`, results in
+`benchmarks/results/ar4_before.json`):
+
+- Warm coupled step **1.41 ms**, staggered baseline **0.58 ms**; dispatch
+  floor 0.17 ms; the group (5 nodes, cap 6) runs 5 body iterations on
+  every step and never meets `tolerance=1e-6` (residual 1.9e-6 at the
+  cap; it converges to 6e-8 at 6 body iterations, i.e. cap 8).  Measured
+  coupling overhead 0.77 ms = 0.19 ms per extra iteration.  Device busy
+  ~40 % of the wall step with ~416 kernels/step under CUDA graphs: the
+  step is launch-bound, not compute-bound.  **Acceptance (<= 30 ms/step)
+  passes by 20x.**
+- The 33 ms/step the MIME driver reported was not the step: the
+  jitted step was compiled three times per run (weak-typed seed leaves
+  flipping to strong after the first steps — see CHANGELOG *Fixed*), and
+  two of those compiles fell inside the driver's "steady-state" timing
+  window.  With the seed state normalised the driver reports
+  **1.67 ms/step** wall, results unchanged.
+- The `_apply_interface_overrides` hoist idea is retired: the correction
+  depends on each iteration's boundary inputs (not hoistable), only nodes
+  with interface DOFs pay it, and on a GPU heat chain (4 x 64 cells) the
+  whole coupling cost is 0.04 ms/step.
+- Remaining lever for this graph is on MIME's side.  Measured (same
+  graph, same 20-step start, 100 steps, RTX A2000; `|dpos|` is the max
+  body-position difference against MIME's current cap-6 result, position
+  scale 7e-4 m):
+
+  | group config                      | ms/step | iters | converged | dpos    |
+  |-----------------------------------|--------:|------:|----------:|--------:|
+  | cap 6, L2 1e-6 (MIME today)       |  1.66   | 5.0   |   8 %     | —       |
+  | cap 8                             |  2.03   | 6.6   |  74 %     | 3.5e-10 |
+  | cap 12, aitken                    |  2.20   | 8.9   |  71 %     | 3.5e-10 |
+  | cap 12, iqn-ils                   |  4.65   | 7.5   |  87 %     | 1.4e-9  |
+  | cap 12, interface norm rtol 1e-4  |  1.60   | 3.1   | 100 %     | 1.2e-8  |
+
+  Recommendation for MIME: `convergence_norm="interface", rtol=1e-4`
+  (with a cap of 12 as a guard): the group converges on every step in
+  ~3 iterations, is the fastest variant, and differs from today's
+  truncated result by 1.6e-5 relative.  Aitken does not help on this
+  fixed point; IQN-ILS costs more per iteration than it saves at 5 nodes.
+
+**Sketch** (original):
 
 1. **Audit the coupling-group code path** (`maddening.core.coupling.group`)
    to confirm whether it uses `lax.while_loop` (preferred — single
@@ -81,6 +139,20 @@ way).
 ---
 
 ## TODO-PERF-2 — Persistent JAX compile-cache warmup tool
+
+**Status (2026-09-16) — done.** `maddening.core.simulation.compile_cache`:
+`enable(cache_dir)` (defaults: `MADDENING_COMPILATION_CACHE_DIR`, then
+`~/.cache/maddening/xla`; sets the persistent-cache thresholds so
+sub-second MADDENING compiles are cached), `enable_from_env()` (called by
+`GraphManager.compile()`, so exporting the env var is enough), and
+`warm_cache(gm_factory, n_steps=, scan_steps=)`.  Cross-process cache
+hit is tested (`tests/core/test_compile_cache.py`, slow lane).
+
+`one_pass_jacobi` `device_put` inside the traced body (TODO.md perf item
+6): measured on one RTX A2000 with a 4-rod jacobi heat chain, 0.203 vs
+0.187 ms/step with placement off/on, results bit-identical — a no-op on
+a single device.  Left in place: removing it would change multi-device
+semantics this rig cannot verify.
 
 **Surfaced by**: same. The persistent cache lives at
 `~/.cache/jax_compilation_cache` (set in `MIME/tests/conftest.py` and

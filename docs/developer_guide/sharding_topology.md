@@ -46,9 +46,48 @@ All three share the same substrate:
   signature is identical.
 * Outputs are classified the same way: keys in `state_fields()` have
   halo/padding stripped; keys in `domain_integral_fields()` get
-  `lax.psum`-ed across the mesh; other keys raise.
+  `lax.psum`-ed across the mesh — or across the subset of mesh axes
+  `domain_integral_axes()` names for them, keeping a leading axis per
+  unreduced mesh axis; other keys raise.
+* Both wrappers take part in the graph parameter contract: if the inner
+  node's `update_padded` accepts `params`, the wrapper exposes the inner
+  `params_pytree()` and hands the node's entry of `gm.params` (replicated
+  to every shard) to `update_padded(..., params=)`.
+* The sharded Krylov solvers (`sharded_cg` / `sharded_gmres`) take a
+  `preconditioner=` (`jacobi_preconditioner`, `block_jacobi_preconditioner`
+  ship) and `differentiable=True`, which routes the solve through
+  `lax.custom_linear_solve` so a node that solves inside a differentiated
+  step gets an exact linear-solve adjoint with the same preconditioner
+  applied in the adjoint solve; the iteration count is then reported as
+  -1.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
+* Boundary inputs are classified by shape.  A **grid-shaped** input (on
+  the stencil path: same extent as the state fields on every sharded
+  spatial axis, e.g. an LBM per-cell `body_force` map or a
+  `wall_mask_update`; on the unstructured path: leading axis of length
+  `n_devices * n_local_max` in partition layout, i.e. what
+  `partition_value` produces) is sharded and halo/ghost-padded exactly
+  like a state field, so `update_padded` receives it at the padded local
+  shape.  Everything else (a scalar pressure, a uniform `(D,)` force
+  vector) is replicated to every shard.  The unstructured wrapper refuses
+  a per-cell input given in *global* cell order rather than misreading it.
+
+## Halo-exchange transport (unstructured path)
+
+`exchange_unstructured` has two transports that return bit-identical
+slabs.  `method="all_to_all"` (default) packs one `(n_devices,
+n_ghost_max)` payload per shard and issues a single `lax.all_to_all`, so
+every shard sends `n_devices * n_ghost_max` cells whether or not it
+neighbours the receiver.  `method="ppermute"` issues one `lax.ppermute`
+per cyclic shift that actually carries cells, sized to that shift's
+largest message; a partition where shards talk to few neighbours moves a
+fraction of the cells.  `ShardedUnstructuredNode(..., exchange=...)`
+selects it per node, and `exchange_traffic(layout)` gives the cells
+moved per shard for both, plus the useful count, straight from the
+layout.  Which transport is *faster* under NCCL is hardware-dependent
+and is measured in the real multi-GPU session; the correctness and the
+byte counts are settled here.
 
 ## Partition-assignment handoff (unstructured path)
 

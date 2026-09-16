@@ -19,6 +19,13 @@ import time.  Levels:
 | API Surface | Stability Level |
 |---|---|
 | `maddening.api.binary_encoder.BinaryStateEncoder` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.UnstructuredPartitionLayout` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.build_unstructured_partition` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.exchange_unstructured` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.gather_value` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.partition_value` | evolving |
+| `maddening.cloud.multigpu.iterative_solver.block_jacobi_preconditioner` | evolving |
+| `maddening.cloud.multigpu.iterative_solver.jacobi_preconditioner` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.sharded_cg` | stable |
 | `maddening.cloud.multigpu.iterative_solver.sharded_gmres` | stable |
 | `maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode` | stable |
@@ -28,8 +35,14 @@ import time.  Levels:
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
 | `maddening.core.node.SimulationNode` | stable |
+| `maddening.core.params.ParamSpec` | evolving |
+| `maddening.core.params.check_bounds` | evolving |
+| `maddening.core.params.constrain` | evolving |
+| `maddening.core.params.trainable_mask` | evolving |
+| `maddening.core.params.unconstrain` | evolving |
 | `maddening.core.static_data.StaticArray` | stable |
 | `maddening.fmi.directional_derivatives.get_directional_derivative` | evolving |
+| `maddening.fmi.fmu_state.FMUState` | evolving |
 | `maddening.fmi.fmu_state.deserialize_fmu_state` | evolving |
 | `maddening.fmi.fmu_state.serialize_fmu_state` | evolving |
 | `maddening.fmi.model_description.build_model_description` | evolving |
@@ -48,4 +61,4 @@ import time.  Levels:
 | `maddening.surrogates.node.SurrogateNode` | experimental |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*29 API surfaces registered.*
+*42 API surfaces registered.*

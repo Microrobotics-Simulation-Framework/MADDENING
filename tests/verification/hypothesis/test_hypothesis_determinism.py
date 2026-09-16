@@ -493,16 +493,21 @@ class TestVmapConsistency:
         }
         sweep_results = gm_sweep.run_sweep(n_steps, batched_init)
 
+        # Not bit-exact: node constants are traced graph parameters, so
+        # ``dt * gravity`` is a runtime multiply feeding an add, which XLA
+        # may contract into an FMA for the batched shape but not the
+        # scalar one (or vice versa).  A few ulps is the honest contract.
+        ulp_tol = dict(rtol=4 * np.finfo(np.float32).eps, atol=1e-7)
         for i in range(batch_size):
             assert jnp.allclose(
                 sweep_results["b"]["position"][i],
                 individual_results[i]["b"]["position"],
-                atol=0.0, rtol=0.0,
+                **ulp_tol,
             ), f"Sweep position mismatch at index {i}"
             assert jnp.allclose(
                 sweep_results["b"]["velocity"][i],
                 individual_results[i]["b"]["velocity"],
-                atol=0.0, rtol=0.0,
+                **ulp_tol,
             ), f"Sweep velocity mismatch at index {i}"
 
 

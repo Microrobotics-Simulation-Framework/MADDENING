@@ -13,12 +13,28 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import jax
 import jax.numpy as jnp
 
 
 # ------------------------------------------------------------------
 # Convergence norms
 # ------------------------------------------------------------------
+
+def _is_float_leaf(v) -> bool:
+    return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
+
+def float_fields_of(state: dict[str, dict], node_names) -> dict[str, tuple[str, ...]]:
+    """``{node: (float fields...)}`` for the given nodes -- the fields a
+    coupling norm, a predictor or a fixed-point vector may contain.  A
+    counter, a flag or a PRNG key is recomputed from the pre-step state
+    on every pass and has no place in a floating-point norm."""
+    return {
+        nn: tuple(f for f in sorted(state[nn]) if _is_float_leaf(state[nn][f]))
+        for nn in node_names
+    }
+
 
 def coupling_residual_l2(
     s_new: dict[str, dict],
@@ -44,6 +60,8 @@ def coupling_residual_l2(
     total = jnp.array(0.0)
     for nn in node_names:
         for field_name in s_new[nn]:
+            if not _is_float_leaf(s_new[nn][field_name]):
+                continue        # counters / flags / keys: not part of the norm
             diff = s_new[nn][field_name] - s_old[nn][field_name]
             total = total + jnp.sum(diff ** 2)
     return jnp.sqrt(total)
@@ -90,6 +108,8 @@ def coupling_residual_mixed(
         for field_name in s_new[nn]:
             new_val = s_new[nn][field_name]
             old_val = s_old[nn][field_name]
+            if not _is_float_leaf(new_val):
+                continue        # counters / flags / keys: not part of the norm
             diff = jnp.abs(new_val - old_val)
             scale = atol + rtol * jnp.maximum(
                 jnp.abs(new_val), jnp.abs(old_val)
@@ -136,6 +156,8 @@ def coupling_residual_interface(
     for edge in interface_edges:
         new_val = s_new[edge.source_node][edge.source_field]
         old_val = s_old[edge.source_node][edge.source_field]
+        if not _is_float_leaf(new_val):
+            continue            # an integer interface field cannot carry a norm
         if edge.transform is not None:
             new_val = edge.transform(new_val)
             old_val = edge.transform(old_val)
@@ -191,6 +213,87 @@ def flatten_coupled_state(
     return jnp.concatenate(parts)
 
 
+# ------------------------------------------------------------------
+# Exact float32 images of non-float leaves
+# ------------------------------------------------------------------
+#
+# The IFT coupling solver closes over the pre-step state through
+# ``jax.closure_convert``; an integer / boolean / PRNG-key constant in
+# that closure breaks JAX's linearisation of the custom_jvp rule under a
+# ``lax.scan``.  So such leaves travel as float32 *images* and are
+# restored to their own dtype at the point of use.  A single float32
+# holds 24 bits exactly, so the image is exact only if we split wider
+# integers into 16-bit limbs (one leading axis of limbs, most
+# significant first) and unpack typed PRNG keys into their uint32 data.
+
+_IMAGE_SMALL = ("bool", "int8", "uint8", "int16", "uint16")
+
+
+def float_image(v):
+    """``(image, meta)``: a float32 array carrying ``v`` exactly.
+
+    ``meta`` is what :func:`from_float_image` needs to rebuild ``v``:
+    ``("float", dtype)`` (image is ``v`` itself), ``("small", dtype)``
+    (one float32 per element), ``("limbs", dtype, n_limbs)`` (16-bit
+    limbs on a new leading axis) or ``("key", impl, n_limbs)`` for a
+    typed PRNG key.
+    """
+    v = jnp.asarray(v)
+    dt = v.dtype
+    if jnp.issubdtype(dt, jnp.floating):
+        return v, ("float", dt)
+    if jax.dtypes.issubdtype(dt, jax.dtypes.prng_key):
+        data = jax.random.key_data(v)               # uint32, shape (*v.shape, 2)
+        img, (_, _, n) = float_image(data)
+        return img, ("key", jax.random.key_impl(v), n)
+    if str(dt) in _IMAGE_SMALL:
+        return v.astype(jnp.float32), ("small", dt)
+    if jnp.issubdtype(dt, jnp.integer):
+        nbits = jnp.iinfo(dt).bits
+        n = nbits // 16
+        u = v.view(jnp.dtype(f"uint{nbits}"))          # bit pattern, no sign issues
+        limbs = [((u >> (16 * (n - 1 - i))) & 0xFFFF).astype(jnp.float32) for i in range(n)]
+        return jnp.stack(limbs, axis=0), ("limbs", dt, n)
+    raise TypeError(
+        f"cannot carry a leaf of dtype {dt} through the coupling solver; "
+        "supported: floating, bool, integer, typed PRNG keys"
+    )
+
+
+def from_float_image(img, meta):
+    """Inverse of :func:`float_image` (bit-exact)."""
+    kind = meta[0]
+    if kind == "float":
+        return img if img.dtype == meta[1] else img.astype(meta[1])
+    if kind == "small":
+        return img.astype(meta[1])
+    if kind == "limbs":
+        _, dt, n = meta
+        nbits = 16 * n
+        udt = jnp.dtype(f"uint{nbits}")
+        acc = jnp.zeros(img.shape[1:], udt)
+        for i in range(n):
+            acc = acc | (img[i].astype(udt) << (16 * (n - 1 - i)))
+        return acc.view(dt)
+    if kind == "key":
+        _, impl, n = meta
+        data = from_float_image(img, ("limbs", jnp.dtype("uint32"), n))
+        return jax.random.wrap_key_data(data, impl=impl)
+    raise ValueError(f"unknown image kind {kind!r}")
+
+
+def state_float_image(state: dict) -> tuple[dict, dict]:
+    """Per-field :func:`float_image` of a node state dict -> ``(images, metas)``."""
+    imgs, metas = {}, {}
+    for f, v in state.items():
+        imgs[f], metas[f] = float_image(v)
+    return imgs, metas
+
+
+def state_from_float_image(imgs: dict, metas: dict) -> dict:
+    return {f: from_float_image(v, metas[f]) for f, v in imgs.items()}
+
+
 def unflatten_coupled_state(
     flat: jnp.ndarray,
     template: dict[str, dict],
@@ -226,11 +329,20 @@ def unflatten_coupled_state(
             field_list = sorted(template[nn].keys())
         result[nn] = {}
         for field in field_list:
-            shape = template[nn][field].shape
+            tmpl = template[nn][field]
+            shape = tmpl.shape
             size = 1
             for s in shape:
                 size *= s
-            result[nn][field] = flat[offset:offset + size].reshape(shape)
+            part = flat[offset:offset + size].reshape(shape)
+            # The flat vector is floating; restore the field's own dtype
+            # so an integer / boolean leaf (a step counter, a flag) does
+            # not come back as float32 after a coupled step — which is
+            # both a semantic drift and a retrace of the jitted step.
+            dtype = getattr(tmpl, "dtype", None)
+            if dtype is not None and part.dtype != dtype:
+                part = part.astype(dtype)
+            result[nn][field] = part
             offset += size
     return result
 
@@ -300,13 +412,23 @@ def iqn_ils_update(
     n_cols: jnp.ndarray,
     omega: jnp.ndarray,
     prev_r_aitken: jnp.ndarray,
+    *,
+    have_prev,
 ) -> tuple:
     """IQN-ILS quasi-Newton update with Aitken fallback.
 
     Builds a low-rank approximation of the inverse Jacobian from
     residual and state differences across iterations.  Falls back
-    to Aitken relaxation when the quasi-Newton update is invalid
-    (first iteration, NaN, or excessively large step).
+    to Aitken relaxation when no secant columns are available yet or
+    the quasi-Newton step is invalid (NaN, or a blow-up).
+
+    ``have_prev`` (bool scalar, keyword-only) says whether
+    ``prev_residual`` / ``prev_state`` hold a real previous iterate.
+    A new secant column is appended only when it is True; on the first
+    iteration of a step it must be False, otherwise the seeded zeros
+    enter the secant basis as a bogus column.  It is independent of
+    ``n_cols`` so that warm-started columns (``jacobian_reuse``) can
+    accelerate from the very first iteration.
 
     Parameters
     ----------
@@ -317,7 +439,9 @@ def iqn_ils_update(
     prev_residual : jnp.ndarray
         Residual from the previous iteration, shape ``(n_dof,)``.
     prev_state : jnp.ndarray
-        State from the previous iteration, shape ``(n_dof,)``.
+        Raw fixed-point result ``x_raw`` from the previous iteration,
+        shape ``(n_dof,)`` (the sixth return value of the previous
+        call).
     V_mat : jnp.ndarray
         Pre-allocated residual difference matrix, shape
         ``(n_dof, max_cols)``.
@@ -343,33 +467,40 @@ def iqn_ils_update(
         Updated active column count.
     residual : jnp.ndarray
         Current residual.
-    x_old_flat : jnp.ndarray
-        Current state (becomes prev_state next iteration).
+    x_raw_flat : jnp.ndarray
+        Current raw fixed-point result (becomes ``prev_state`` next
+        iteration).
     new_omega : jnp.ndarray
         Updated Aitken omega.
     cur_r_aitken : jnp.ndarray
         Current Aitken residual.
     """
     residual = x_raw_flat - x_old_flat
-    is_first = n_cols == 0
+    add_col = jnp.asarray(have_prev)
 
-    # Compute differences for V and W
+    # Secant columns (Degroote 2009): V holds residual differences, W
+    # holds differences of the *raw operator outputs* x~.  The update
+    # x_raw + W c with V c ~= -r then approximates the output at zero
+    # residual.  Building W from input differences instead turns the
+    # step into a hybrid that converges markedly slower on stiff
+    # contractions (5 vs 2 iterations on the rho=0.98 test scene).
     delta_r = residual - prev_residual
-    delta_x = x_old_flat - prev_state
+    delta_x = x_raw_flat - prev_state
 
     # Shift existing columns right, add new column at position 0
     max_cols = V_mat.shape[1]
     new_V = jnp.where(
-        is_first, V_mat,
+        add_col,
         jnp.roll(V_mat, shift=1, axis=1).at[:, 0].set(delta_r),
+        V_mat,
     )
     new_W = jnp.where(
-        is_first, W_mat,
+        add_col,
         jnp.roll(W_mat, shift=1, axis=1).at[:, 0].set(delta_x),
+        W_mat,
     )
     new_n_cols = jnp.where(
-        is_first, jnp.int32(0),
-        jnp.minimum(n_cols + 1, max_cols),
+        add_col, jnp.minimum(n_cols + 1, max_cols), n_cols,
     )
 
     # Mask inactive columns to zero
@@ -398,19 +529,24 @@ def iqn_ils_update(
         x_old_flat, x_raw_flat, prev_r_aitken, omega
     )
 
-    # Validate QN result: must be finite and not excessively large
+    # Validate QN result: finite, and not a blow-up.  The bound is
+    # deliberately loose: a correct quasi-Newton step is roughly
+    # ``residual / (1 - rho)`` for a contraction of spectral radius
+    # ``rho``, i.e. 50x the residual at rho = 0.98.  A tight cap (this
+    # used to be 10x) silently vetoes IQN on exactly the stiff problems
+    # it exists for and degrades it to Aitken.
     correction_norm = jnp.sqrt(jnp.sum(correction ** 2))
     residual_norm = jnp.sqrt(jnp.sum(residual ** 2))
     is_valid = (
         jnp.all(jnp.isfinite(x_qn))
-        & (correction_norm < 10.0 * jnp.maximum(residual_norm, 1e-12))
-        & ~is_first
+        & (correction_norm < 1e6 * jnp.maximum(residual_norm, 1e-12))
+        & (new_n_cols > 0)
     )
     x_new = jnp.where(is_valid, x_qn, x_aitken)
 
     return (
         x_new, new_V, new_W, new_n_cols,
-        residual, x_old_flat,
+        residual, x_raw_flat,
         new_omega, cur_r_aitken,
     )
 

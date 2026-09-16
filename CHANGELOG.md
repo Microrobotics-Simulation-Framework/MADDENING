@@ -39,6 +39,33 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **FMU sidecar protocol 2: binary frames for bulk payloads.**  Bit 31 of
+  the 4-byte length prefix marks a binary frame (`[u32 BE header_len]
+  [header JSON][raw bytes]`); after a `{"op":"hello","protocol":2,
+  "binary":true}` the bridge answers `get` / `get_state` with raw
+  little-endian float64 / raw `npz` bytes and accepts binary `set` /
+  `set_state`, so values no longer go through `%.17g` / `strtod` and
+  state blobs no longer through base64.  The C wrapper negotiates it and
+  falls back to JSON against a bridge whose hello lacks `protocol`; a
+  JSON-only client sees the protocol-1 behaviour unchanged (the hello
+  reply merely gains `protocol` and `binary`), and an unknown higher
+  protocol is refused at hello.  All validation (vr, bounds, read-only,
+  state token/shape/size, malformed frames as error replies) applies to
+  both forms; the C side checks the header count against the raw length
+  and the caller's array before any copy and refuses flagged lengths over
+  the 64 MiB limit before allocating.  Measured: a 10^6-element `get`
+  2.3 s as JSON vs 27 ms binary over loopback (8 bytes per value).
+  `FmuTcpBridge.binary_frames_served` / `binary_frames_received` count
+  the traffic; `tcp_bridge` gains `recv_raw`, `send_binary`,
+  `encode_binary`, `decode_binary`, `values_of`, `state_of`,
+  `PROTOCOL_VERSION`.  C unit tests, the sanitizer fuzz harness (now
+  also binary-flagged replies), `tests/fmi/test_binary_frames.py` and the
+  Hypothesis properties in `tests/fmi/test_binary_frames_properties.py`
+  (bitwise float64 round trip incl. NaN payloads / infinities / negative
+  zero / subnormals; any byte string decodes consistently or raises
+  `ValueError`; any flagged frame after a binary hello gets exactly one
+  reply and the connection keeps serving) cover it; user guide: "Wire
+  protocol" in `fmu_export.md`.
 - **Static type checking (phase 1, non-blocking).**  `pyrightconfig.json`
   (basic mode, `src/maddening` only, optional extras' imports downgraded to
   warnings), `pyright` in the `ci`/`dev` extras, a `typecheck` CI job that

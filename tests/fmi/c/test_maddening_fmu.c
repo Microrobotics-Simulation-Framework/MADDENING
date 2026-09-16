@@ -38,46 +38,84 @@ static void free_instance(Instance *in) {
     free(in->req); free(in->resp); free(in);
 }
 
-/* Fake sidecar: reads one framed request from `s`, returns it (malloc'd),
- * and writes `reply` (framed) back.  reply == NULL closes the socket. */
-static char *fake_exchange(sock_t s, const char *reply, size_t reply_len_override) {
+/* Fake sidecar: reads one framed request from `s` (the flag bit and the
+ * exact length are recorded, the body may hold NULs), then writes one
+ * reply frame back: `advertised` bytes announced, `reply_len` bytes
+ * actually sent, bit 31 set when `flag`.  reply == NULL closes the
+ * socket without answering; a short frame hangs up after sending. */
+typedef struct {
+    sock_t s; const char *reply; size_t reply_len; size_t advertised; int flag;
+    char *seen; size_t seen_len; int seen_flag; int closed;
+} ServerArgs;
+
+static void fake_exchange_x(ServerArgs *a) {
     unsigned char head[4];
-    if (recv_all(s, (char *)head, 4)) return NULL;
-    size_t n = ((size_t)head[0] << 24) | ((size_t)head[1] << 16) | ((size_t)head[2] << 8) | head[3];
+    a->seen = NULL; a->seen_len = 0; a->seen_flag = 0; a->closed = 0;
+    if (recv_all(a->s, (char *)head, 4)) return;
+    unsigned long w = get_be32(head);
+    size_t n = (size_t)(w & FRAME_LEN_MASK);
+    a->seen_flag = (w & FRAME_BINARY) != 0;
     char *req = (char *)malloc(n + 1);
-    if (recv_all(s, req, n)) { free(req); return NULL; }
+    if (recv_all(a->s, req, n)) { free(req); return; }
     req[n] = '\0';
-    if (reply == NULL) { sock_close(s); return req; }
-    size_t m = reply_len_override ? reply_len_override : strlen(reply);
-    unsigned char h2[4] = { (unsigned char)(m >> 24), (unsigned char)(m >> 16),
-                            (unsigned char)(m >> 8), (unsigned char)m };
-    send_all(s, (const char *)h2, 4);
-    send_all(s, reply, strlen(reply));   /* may be shorter than advertised */
-    if (reply_len_override) sock_close(s);   /* truncated frame: hang up */
-    return req;
+    a->seen = req; a->seen_len = n;
+    if (a->reply == NULL) { sock_close(a->s); a->closed = 1; return; }
+    unsigned char h2[4];
+    put_be32(h2, (unsigned long)a->advertised | (a->flag ? FRAME_BINARY : 0ul));
+    send_all(a->s, (const char *)h2, 4);
+    send_all(a->s, a->reply, a->reply_len);   /* may be shorter than advertised */
+    if (a->advertised != a->reply_len) { sock_close(a->s); a->closed = 1; }
 }
 
-typedef struct { sock_t s; const char *reply; size_t len_override; char *seen; } ServerArgs;
+static size_t slen(const char *s) { return s ? strlen(s) : 0; }
+
+/* JSON-only convenience used by the loopback listener. */
+static char *fake_exchange(sock_t s, const char *reply, size_t reply_len_override) {
+    size_t len = slen(reply);
+    ServerArgs a = { s, reply, len, reply_len_override ? reply_len_override : len, 0,
+                     NULL, 0, 0, 0 };
+    fake_exchange_x(&a);
+    return a.seen;
+}
+
 static void *server_thread(void *p) {
-    ServerArgs *a = (ServerArgs *)p;
-    a->seen = fake_exchange(a->s, a->reply, a->len_override);
+    fake_exchange_x((ServerArgs *)p);
     return NULL;
 }
 
 /* Run `body` on the client end while the fake server answers once; the
- * request the server saw is left in g_seen for the caller to inspect. */
+ * request the server saw is left in g_seen (g_seen_len bytes, flag bit
+ * in g_seen_flag) for the caller to inspect. */
 static char *g_seen = NULL;
-#define WITH_SERVER(reply, len_override, body) do {                              \
+static size_t g_seen_len = 0;
+static int g_seen_flag = 0;
+#define WITH_SERVER_X(reply_, reply_len_, advertised_, flag_, body) do {         \
     int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);              \
-    ServerArgs args = { sv[1], (reply), (len_override), NULL };                  \
+    ServerArgs args = { sv[1], (reply_), (reply_len_), (advertised_), (flag_),    \
+                        NULL, 0, 0, 0 };                                         \
     pthread_t th; pthread_create(&th, NULL, server_thread, &args);               \
     Instance *in = fake_instance(sv[0]);                                         \
     body;                                                                        \
     pthread_join(th, NULL);                                                      \
-    sock_close(sv[0]); if ((reply) != NULL && !(len_override)) sock_close(sv[1]); \
+    sock_close(sv[0]); if (!args.closed) sock_close(sv[1]);                      \
     free(g_seen); g_seen = args.seen ? args.seen : strdup("");                   \
+    g_seen_len = args.seen_len; g_seen_flag = args.seen_flag;                    \
     free_instance(in);                                                           \
 } while (0)
+/* JSON reply of strlen(reply) bytes, optionally announcing len_override. */
+#define WITH_SERVER(reply, len_override, body)                                   \
+    WITH_SERVER_X((reply), slen(reply), (len_override) ? (len_override) : slen(reply), 0, body)
+/* Binary-flagged reply of `len` bytes (announced as is). */
+#define WITH_BINARY_SERVER(reply, len, body) WITH_SERVER_X((reply), (len), (len), 1, body)
+
+/* [u32 BE header_len][hdr][raw] into out; returns the payload length. */
+static size_t bin_payload(unsigned char *out, const char *hdr, const void *raw, size_t rawlen) {
+    size_t hl = strlen(hdr);
+    put_be32(out, (unsigned long)hl);
+    memcpy(out + 4, hdr, hl);
+    if (rawlen) memcpy(out + 4 + hl, raw, rawlen);
+    return 4 + hl + rawlen;
+}
 
 /* ------------------------------------------------------- parse_values */
 
@@ -263,6 +301,238 @@ static void test_get_set_step(void) {
     });
 }
 
+/* ------------------------------------------------------- binary frames */
+
+static void test_binary_get_set(void) {
+    fmi3ValueReference vr[3] = { 7, 9, 11 };
+    unsigned char frame[256];
+    double two[2] = { 2.5, -1e-300 };
+    unsigned char le[16];
+    f64_to_le(le, two, 2);
+    /* a binary get reply carries the doubles verbatim (no strtod) */
+    size_t n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}", le, 16);
+    fmi3Float64 g64[2] = { 0, 0 };
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3OK);
+        CHECK(g64[0] == 2.5 && g64[1] == -1e-300);
+        CHECK(in->resp_binary && in->raw_len == 16 && strcmp(in->hdr, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}") == 0);
+    });
+    CHECK(g_seen_flag == 0 && strcmp(g_seen, "{\"op\":\"get\",\"vr\":[7,9]}") == 0);  /* get stays JSON */
+    /* narrower widths are widened from the same float64 wire form */
+    fmi3Float32 g32[2];
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 2, g32, 2) == fmi3OK);   /* parsed by flag, not mode */
+        CHECK(g32[0] == 2.5f);
+    });
+    /* fewer values requested than sent is fine; more is an error */
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, g64, 1) == fmi3OK && g64[0] == 2.5);
+    });
+    fmi3Float64 g3[3] = { 42, 42, 42 };
+    g_log_calls = 0;
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 3, g3, 3) == fmi3Error);
+    });
+    CHECK(g3[0] == 42 && strstr(g_last_log, "too few") != NULL);
+    /* header count and raw length disagree (both directions) */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":3,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    CHECK(strstr(g_last_log, "length mismatch") != NULL);
+    n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}", le, 15);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    /* n far too large for the raw part / for any frame, negative, absent */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":99999999999999999999,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    n = bin_payload(frame, "{\"ok\":true,\"n\":1099511627776,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    n = bin_payload(frame, "{\"ok\":true,\"n\":-2,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    n = bin_payload(frame, "{\"ok\":true,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    /* wrong / missing dtype */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f32\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    CHECK(strstr(g_last_log, "float64") != NULL);
+    /* truncated raw part: the announced length never arrives */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}", le, 16);
+    WITH_SERVER_X((const char *)frame, n - 5, n, 1, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+        CHECK(in->resp[0] == '\0' && !in->resp_binary);
+    });
+    /* header_len larger than the payload, or larger than the header cap */
+    put_be32(frame, 1000);
+    WITH_BINARY_SERVER((const char *)frame, 40, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+        CHECK(!in->resp_binary);
+    });
+    CHECK(strstr(g_last_log, "malformed") != NULL);
+    {
+        unsigned char *huge = (unsigned char *)malloc(HDR_MAX + 64);
+        put_be32(huge, HDR_MAX);
+        memset(huge + 4, ' ', HDR_MAX + 60);
+        WITH_BINARY_SERVER((const char *)huge, HDR_MAX + 64, {
+            in->binary = 1;
+            CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+        });
+        free(huge);
+    }
+    /* a frame shorter than the header-length field */
+    WITH_BINARY_SERVER("ab", 2, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    /* binary flag with an oversize length: refused before any allocation */
+    WITH_SERVER_X("x", 1, (size_t)FRAME_LEN_MASK, 1, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+        CHECK(in->resp_cap < 1000 && strstr(g_last_log, "frame limit") != NULL);
+    });
+    WITH_SERVER_X("x", 1, (size_t)FRAME_MAX_BINARY + 1, 1, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+        CHECK(in->resp_cap < 1000);
+    });
+    /* a binary-flagged error reply is reported like a JSON one */
+    n = bin_payload(frame, "{\"ok\":false,\"error\":\"KeyError: nope\"}", NULL, 0);
+    g_log_calls = 0;
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "KeyError: nope") != NULL);
+    /* binary set: header + raw doubles, no %.17g */
+    fmi3Float64 v64[3] = { 1.5, -2.0, 1e-9 };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->binary = 1;
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 3, v64, 3) == fmi3OK);
+    });
+    CHECK(g_seen_flag == 1);
+    {
+        const char *hdr = "{\"op\":\"set\",\"vr\":[7,9,11],\"n\":3,\"dtype\":\"f64\"}";
+        size_t hl = strlen(hdr);
+        CHECK(g_seen_len == 4 + hl + 24);
+        CHECK(get_be32((const unsigned char *)g_seen) == hl);
+        CHECK(memcmp(g_seen + 4, hdr, hl) == 0);
+        double back[3];
+        f64_from_le(back, (const unsigned char *)g_seen + 4 + hl, 3);
+        CHECK(back[0] == 1.5 && back[1] == -2.0 && back[2] == 1e-9);
+    }
+    fmi3Int32 vi[2] = { -5, 7 };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->binary = 1;
+        CHECK(fmi3SetInt32((fmi3Instance)in, vr, 2, vi, 2) == fmi3OK);
+    });
+    CHECK(g_seen_flag == 1 && g_seen_len == 4 + strlen("{\"op\":\"set\",\"vr\":[7,9],\"n\":2,\"dtype\":\"f64\"}") + 16);
+    /* non-finite values never leave the process on the binary path either */
+    fmi3Float64 bad[2] = { 1.0, INFINITY };
+    Instance *dead = fake_instance(SOCK_INVALID);
+    dead->binary = 1;
+    g_log_calls = 0;
+    CHECK(fmi3SetFloat64((fmi3Instance)dead, vr, 2, bad, 2) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "non-finite") != NULL);
+    /* a set larger than the frame limit is refused before any buffer grows
+     * (and before any value is read: the count alone decides) */
+    CHECK(do_set(dead, vr, 1, v64, (size_t)FRAME_MAX_BINARY / 8 + 1) == fmi3Error);
+    CHECK(dead->req_cap == 0 && strstr(g_last_log, "frame limit") != NULL);
+    free_instance(dead);
+    /* endianness helpers round-trip on this host */
+    {
+        double x[2] = { 0.1, -1.7976931348623157e308 }, y[2];
+        unsigned char w[16];
+        f64_to_le(w, x, 2); f64_from_le(y, w, 2);
+        CHECK(y[0] == 0.1 && y[1] == -1.7976931348623157e308);
+        if (host_is_little_endian()) CHECK(memcmp(w, x, 16) == 0);
+    }
+}
+
+static void test_binary_fmu_state(void) {
+    /* a get_state reply carries the npz bytes raw: NULs and all */
+    unsigned char blob[12] = { 'P', 'K', 0, 0, 1, 255, 0, 3, '"', '\\', 0, 9 };
+    unsigned char frame[128];
+    size_t n = bin_payload(frame, "{\"ok\":true,\"n\":12}", blob, 12);
+    fmi3FMUState st = NULL;
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK);
+    });
+    CHECK(st != NULL && ((FmuState *)st)->n == 12 && memcmp(((FmuState *)st)->blob, blob, 12) == 0);
+    /* serialize / deserialize keep the raw bytes */
+    size_t sz = 0;
+    CHECK(fmi3SerializedFMUStateSize(NULL, st, &sz) == fmi3OK && sz == 12);
+    fmi3Byte buf[12];
+    CHECK(fmi3SerializeFMUState(NULL, st, buf, 12) == fmi3OK && memcmp(buf, blob, 12) == 0);
+    fmi3FMUState st2 = NULL;
+    CHECK(fmi3DeserializeFMUState(NULL, buf, 12, &st2) == fmi3OK);
+    /* set_state on the binary path is length-delimited: no base64 check */
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->binary = 1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, st2) == fmi3OK);
+    });
+    CHECK(g_seen_flag == 1);
+    {
+        const char *hdr = "{\"op\":\"set_state\",\"n\":12}";
+        size_t hl = strlen(hdr);
+        CHECK(g_seen_len == 4 + hl + 12 && get_be32((const unsigned char *)g_seen) == hl);
+        CHECK(memcmp(g_seen + 4, hdr, hl) == 0 && memcmp(g_seen + 4 + hl, blob, 12) == 0);
+    }
+    /* the same blob on a JSON-mode instance is refused (not base64) */
+    Instance *dead = fake_instance(SOCK_INVALID);
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, st2) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "not valid") != NULL);
+    /* an oversize blob is refused before the request buffer grows */
+    FmuState huge = { (char *)"x", (size_t)FRAME_MAX_BINARY + 1 };
+    dead->binary = 1;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &huge) == fmi3Error && dead->req_cap == 0);
+    free_instance(dead);
+    fmi3FreeFMUState(NULL, &st); fmi3FreeFMUState(NULL, &st2);
+    /* count / raw length mismatch on get_state */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":11}", blob, 12);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
+    });
+    CHECK(st == NULL && strstr(g_last_log, "length mismatch") != NULL);
+    n = bin_payload(frame, "{\"ok\":true}", blob, 12);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3Error);
+    });
+    /* a JSON get_state reply still works on a binary-mode instance */
+    WITH_SERVER("{\"ok\":true,\"state\":\"QUJDRA==\"}", 0, {
+        in->binary = 1;
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK);
+    });
+    CHECK(st != NULL && ((FmuState *)st)->n == 8);
+    fmi3FreeFMUState(NULL, &st);
+}
+
 /* ----------------------------------------------------------- FMU state */
 
 static void test_fmu_state(void) {
@@ -308,14 +578,14 @@ static void test_fmu_state(void) {
 
 /* ------------------------------------------------ instantiate via TCP */
 
-typedef struct { int listen_fd; const char *hello_reply; int accepted; } Listener;
+typedef struct { int listen_fd; const char *hello_reply; int accepted; char *hello_seen; } Listener;
 static void *listener_thread(void *p) {
     Listener *L = (Listener *)p;
     int c = accept(L->listen_fd, NULL, NULL);
     if (c < 0) return NULL;
     L->accepted = 1;
     char *req = fake_exchange(c, L->hello_reply, 0);      /* hello */
-    free(req);
+    free(L->hello_seen); L->hello_seen = req;
     req = fake_exchange(c, "{\"ok\":true}", 0);          /* terminate (from FreeInstance) */
     free(req);
     sock_close(c);
@@ -333,8 +603,9 @@ static void test_instantiate(const char *good_token) {
     char ep[64]; snprintf(ep, sizeof ep, "127.0.0.1:%d", ntohs(addr.sin_port));
     setenv("MADDENING_FMU_ENDPOINT", ep, 1);
 
+    /* an old (protocol-1) bridge: its hello lacks "protocol" -> JSON everywhere */
     char reply[256]; snprintf(reply, sizeof reply, "{\"ok\":true,\"token\":\"%s\",\"model\":\"m\"}", good_token);
-    Listener L = { fd, reply, 0 };
+    Listener L = { fd, reply, 0, NULL };
     pthread_t th; pthread_create(&th, NULL, listener_thread, &L);
     fmi3Instance inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3True,
                                                     fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
@@ -342,15 +613,55 @@ static void test_instantiate(const char *good_token) {
     if (inst) {
         Instance *in = (Instance *)inst;
         CHECK(strcmp(in->instance_name, "i") == 0 && in->logging_on == fmi3True);
+        CHECK(in->binary == 0);
         CHECK(fmi3EnterInitializationMode(inst, fmi3False, 0, 0.5, fmi3False, 0) == fmi3OK && in->time == 0.5);
         CHECK(fmi3ExitInitializationMode(inst) == fmi3OK);
         fmi3FreeInstance(inst);                          /* sends terminate */
     }
     pthread_join(th, NULL);
     CHECK(L.accepted == 1);
+    /* the client always offers protocol 2 */
+    CHECK(L.hello_seen != NULL && strcmp(L.hello_seen, "{\"op\":\"hello\",\"protocol\":2,\"binary\":true}") == 0);
+    free(L.hello_seen);
+
+    /* a protocol-2 bridge that confirms binary frames */
+    char reply2[256];
+    snprintf(reply2, sizeof reply2,
+             "{\"ok\":true,\"token\":\"%s\",\"model\":\"m\",\"master_dt\":0.01,\"protocol\":2,\"binary\":true}",
+             good_token);
+    Listener Lb = { fd, reply2, 0, NULL };
+    pthread_create(&th, NULL, listener_thread, &Lb);
+    inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
+                                       fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
+    CHECK(inst != NULL);
+    if (inst) { CHECK(((Instance *)inst)->binary == 1); fmi3FreeInstance(inst); }
+    pthread_join(th, NULL);
+    free(Lb.hello_seen);
+
+    /* protocol 2 announced but binary declined: JSON */
+    snprintf(reply2, sizeof reply2,
+             "{\"ok\":true,\"token\":\"%s\",\"protocol\":2,\"binary\":false}", good_token);
+    Listener Lc = { fd, reply2, 0, NULL };
+    pthread_create(&th, NULL, listener_thread, &Lc);
+    inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
+                                       fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
+    CHECK(inst != NULL);
+    if (inst) { CHECK(((Instance *)inst)->binary == 0); fmi3FreeInstance(inst); }
+    pthread_join(th, NULL);
+    free(Lc.hello_seen);
+
+    /* a bridge that refuses the protocol -> NULL */
+    Listener Ld = { fd, "{\"ok\":false,\"error\":\"protocol 2 is not supported\"}", 0, NULL };
+    pthread_create(&th, NULL, listener_thread, &Ld);
+    g_log_calls = 0;
+    inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
+                                       fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
+    CHECK(inst == NULL && g_log_calls >= 1 && strstr(g_last_log, "not supported") != NULL);
+    pthread_join(th, NULL);            /* its second exchange sees the client's EOF */
+    free(Ld.hello_seen);
 
     /* token mismatch -> NULL, with a log line */
-    Listener L2 = { fd, reply, 0 };
+    Listener L2 = { fd, reply, 0, NULL };
     pthread_create(&th, NULL, listener_thread, &L2);
     g_log_calls = 0;
     inst = fmi3InstantiateCoSimulation("i", "wrong-token", NULL, fmi3False, fmi3False, fmi3False,
@@ -358,6 +669,7 @@ static void test_instantiate(const char *good_token) {
     CHECK(inst == NULL && g_log_calls >= 1 && strstr(g_last_log, "token") != NULL);
     shutdown(fd, SHUT_RDWR); sock_close(fd);
     pthread_join(th, NULL);
+    free(L2.hello_seen);
 
     /* no endpoint at all / closed port */
     unsetenv("MADDENING_FMU_ENDPOINT");
@@ -405,6 +717,8 @@ int main(int argc, char **argv) {
     test_read_endpoint();
     test_bridge_call_paths();
     test_get_set_step();
+    test_binary_get_set();
+    test_binary_fmu_state();
     test_fmu_state();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();

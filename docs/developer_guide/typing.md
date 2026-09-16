@@ -18,7 +18,7 @@ Whole-tree cleanliness is explicitly *not* a goal of either phase.
 # In an environment with the package and its extras installed
 # (pip install -e ".[ci]" or ".[dev]" -- both pull in pyright):
 pyright                                   # plain diagnostics, exit 1 on errors
-python scripts/typing_baseline.py         # per-rule / per-file summary (exit 0)
+python scripts/typing_baseline.py         # per-rule / per-file summary (exit 0, or 2 if the run cannot be trusted)
 python scripts/typing_baseline.py --markdown --top 20
 
 # Without installing pyright (uses the interpreter whose site-packages
@@ -28,12 +28,28 @@ python scripts/typing_baseline.py --pyright "uvx pyright" -- --pythonpath /path/
 ```
 
 `scripts/typing_baseline.py` runs `pyright --outputjson`, prints the totals,
-the counts per rule and the files with the most errors, and always exits 0
-unless `--fail-on-errors` is given (that flag is what the CI step uses so
-that the step is red when there are errors, while `continue-on-error`
-keeps the workflow green).  `--json FILE` summarises a stored run instead of
-invoking pyright, which is how `tests/test_typing_baseline.py` tests it
-without pyright installed.
+the counts per rule and the files with the most errors, and forwards
+whatever pyright wrote to stderr.  Its exit status separates *what pyright
+found* from *whether pyright ran*:
+
+| Exit | Meaning | CI (phase 1) |
+|---|---|---|
+| 0 | pyright completed; no errors, or `--fail-on-errors` not given | green |
+| 1 | pyright completed and reported errors (`--fail-on-errors`) | the *Report error count* step fails under `continue-on-error`; the workflow stays green |
+| 2 | **infrastructure failure**: the numbers cannot be trusted, so none are printed.  The pyright command is missing; pyright exited with a code other than 0/1 (3 = `pyrightconfig.json` could not be parsed, in which case it silently analysed the whole tree with the default config); stdout is not JSON; the `summary` block is missing or `filesAnalyzed` is below `--min-files` (default 1: a missing `include` path is reported by pyright on stderr only, with exit 0 and an empty, valid JSON document); a core import (`jax`, `numpy`, `yaml`) did not resolve; or more than `--max-missing-imports` (default 40; the baseline has 18, all optional extras) `reportMissingImports` diagnostics were reported | the *Run pyright* step **fails the job** |
+
+The import-resolution guard exists because a mis-resolved interpreter does
+not make the count go *up*: without `jax`/`numpy` most attribute and
+argument errors become `Unknown` and disappear (measured: 395 -> 230 errors,
+201 missing imports, nothing on stderr).  For the same reason a
+`--pythonpath PYTHON` given after `--` is checked before pyright runs: the
+path must exist and `PYTHON -c "import numpy"` must succeed; pyright itself
+accepts a non-existent path without a word.
+
+`--json FILE` summarises a stored run instead of invoking pyright (the same
+checks apply to the stored document), which is how
+`tests/test_typing_baseline.py` tests it without pyright installed; the
+failure paths are tested with a fake pyright executable.
 
 ## `pyrightconfig.json`
 
@@ -48,7 +64,7 @@ JSON has no comments, so the settings are explained here.
 | `reportMissingImports` | `"warning"` | Optional extras (`gi`/PyGObject, `pygfx`, `rendercanvas`, `skimage`, `fsspec`, `cupy`, plus `pxr`, `sky`, `zmq`, `lineax`, `fmpy` ... when those extras are not installed) are imported lazily or behind `try:`.  They must not count as errors in an environment without those extras. |
 | `reportMissingModuleSource` | `"warning"` | Same reason, for packages that ship only stubs. |
 | `reportMissingTypeStubs` | `false` | Several dependencies (`jax` internals, `pyvista`, `sky`, `pxr`) have no stubs; that is not something this repository can fix. |
-| `venvPath` / `venv` | *not set* | CI installs the package and pyright into the same environment, so `python` on `PATH` is the right interpreter.  Locally, pass `--pythonpath` (see above) rather than hard-coding a path in the shared config. |
+| `venvPath` / `venv` | *not set* | CI installs the package and pyright into the same environment, so `python` on `PATH` is the right interpreter; the script's import-resolution guard (above) is what turns a wrong interpreter into a failed job instead of a lower count.  Locally, pass `--pythonpath` (see above) rather than hard-coding a path in the shared config. |
 
 ## Baseline (phase 1)
 
@@ -63,19 +79,25 @@ environment (everything in `[ci]` installed except `gi`, `pygfx`,
 | standard | 466 | 94 | +69 `reportPossiblyUnboundVariable`, +2 `reportFunctionMemberAccess` |
 | strict | 11754 | 18 | (the `__all__` warnings become errors in strict) dominated by `reportUnknown*` / `reportMissingParameterType` (every unannotated parameter and every value that flows from one) |
 
-Of the 395 basic-mode errors, **30 are in the 12 modules that define a
-STABLE surface** (`core/graph_manager.py` 20, `core/edge.py` 3,
-`cloud/multigpu/iterative_solver.py` 3, `cloud/multigpu/sharded_unstructured.py` 2,
-`cloud/multigpu/sharded_node.py` 1, `nodes/heat.py` 1); that is the phase-2
-workload for the public contract.  The tier-1 packages (`core`, `nodes`,
-`fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) hold
-roughly 140 of the 395; the remaining ~250 are in `viz`, `usd`, `api` and
-`surrogates`, mostly `reportOptionalMemberAccess` / `reportAttributeAccessIssue`
-against optional or untyped third-party libraries (pxr, pygfx, matplotlib,
-fastapi extras), which is why those packages are ratcheted rather than
-cleaned.  Decided 2026-09-16: whole-tree strictness is not the goal, but
-the internals that refactors move through are, because pyright catches
-broken call sites there just as it does on the public surface.
+Of the 395 basic-mode errors, **33 are in 7 of the 12 modules that define
+a STABLE surface** (`core/graph_manager.py` 20, `core/edge.py` 3,
+`cloud/multigpu/iterative_solver.py` 3, `fmi/model_description.py` 3,
+`cloud/multigpu/sharded_unstructured.py` 2, `cloud/multigpu/sharded_node.py` 1,
+`nodes/heat.py` 1; the other five STABLE modules are clean); that is the
+phase-2 workload for the public contract.  The tier-1 scope (`core`,
+`nodes`, `fmi`, `cloud`, the module `sysid.py`, `serialization`, `testing`,
+`compliance`) holds **83** of the 395 (`core` 51, `cloud` 17, `nodes` 5,
+`testing` 5, `fmi` 4, `sysid.py` 1; `serialization` and `compliance` 0);
+the remaining **312** are in `viz` (90), `usd` (88), `api` (76) and
+`surrogates` (58), mostly `reportOptionalMemberAccess` /
+`reportAttributeAccessIssue` against optional or untyped third-party
+libraries (pxr, pygfx, matplotlib, fastapi extras), which is why those
+packages are ratcheted rather than cleaned.  (Counts re-measured by an
+independent audit of the phase-1 merge against the same pyright run;
+per-package figures are errors per top-level package under
+`src/maddening`.)  Decided 2026-09-16: whole-tree strictness is not the
+goal, but the internals that refactors move through are, because pyright
+catches broken call sites there just as it does on the public surface.
 
 ### Diagnostics by rule (basic)
 

@@ -395,7 +395,12 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   when the fuzz harness went thread-free: it preloads the fake reply
   into the socket instead of spawning a thread per iteration, which is
   what made the libFuzzer campaign reach 7.5 GB RSS and get OOM-killed on
-  the CI runner; the campaign now runs with `-rss_limit_mb=1024`.  The
+  the CI runner.  The campaign is now built with UBSan only (the ASan build
+  reported ~8 GB RSS at `INITED` with 25 MB of live heap on the runner and
+  in long test sessions, a host-accounting effect, not a leak) and guarded
+  by a per-allocation `-malloc_limit_mb` instead of an RSS limit; memory
+  safety of the same harness stays covered by the ASan seeded runs and
+  valgrind.  The
   cross-process persistent-cache test proves a hit by the cache
   directory gaining no entries rather than by a wall-clock ratio.
 - **Independent audit, round 3** (FMU bridge / wrapper / exchange;

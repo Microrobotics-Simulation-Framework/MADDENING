@@ -133,6 +133,49 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   the USD read path.  `rbf_interpolation` (closure API) now shares the
   same matrix construction, so its multiquadric constant test went from
   `atol=0.1` to round-off.  Guide: `docs/algorithm_guide/coupling/interface_mapping.md`.
+- **Profiler rewrite** (`maddening.core.simulation.profiler`): coupling
+  overhead is now *measured* (the graph is recompiled with every group
+  capped at one iteration and timed; the difference is the cost of the
+  extra iterations, reported per iteration) instead of inferred from
+  isolated node timings; per-group iteration statistics over the run
+  (mean / min / max against `max_iterations`, fraction of steps at the
+  cap, fraction converged) replace the last-step count that assumed
+  `max_iterations`; `dispatch_floor_ms` (a jitted identity on the state
+  pytree), median / p95 step time, device name; `trace=True` records a
+  short `jax.profiler` trace and attributes device kernel time to the
+  graph's `jax.named_scope` labels (`node:<name>`, `coupling:residual`,
+  `coupling:accelerate`, `coupling:interface_override`, `edge:mapping`),
+  with the device-busy fraction and kernels per step that tell a
+  launch-bound step from a compute-bound one.  Recommendations use the
+  new numbers (unconverged-at-cap, launch-bound, dispatch-bound).
+- `benchmarks/bench_coupling.py`: coupled-step benchmark (coupling group
+  vs staggered baseline, iterations used vs cap, measured per-iteration
+  cost, optional trace attribution, PERF-1 acceptance) for the MIME AR4
+  experiment graph (`--graph mime-ar4 --experiment DIR`), a two-spring
+  pair and a heat chain; JSON output under `benchmarks/results/`.
+- **Persistent compilation cache** (`maddening.core.simulation.compile_cache`,
+  PERF-2): `enable(cache_dir)` points JAX's persistent cache at a
+  directory with thresholds that cache sub-second compiles; `compile()`
+  honours `MADDENING_COMPILATION_CACHE_DIR`; `warm_cache(gm_factory,
+  n_steps=, scan_steps=)` compiles a graph's step and scan ahead of a run.
+  A cross-process cache hit is tested.  Developer guide:
+  `docs/developer_guide/profiling.md`.
+- `maddening.sysid` follow-ups: **multiple shooting** — `windowed_loss(...,
+  window_states=, continuity_weight=)` restarts each window from a free
+  state and ties consecutive windows with a continuity penalty,
+  `init_window_states` seeds them from the observations, and
+  `fit_multiple_shooting` optimises params and window states jointly
+  (noisy window starts no longer seed every window with measurement
+  error); **noise model** — `fim(..., noise_std=)` (scalar or per-leaf σ)
+  weights the residual so `crb` is in the parameters' own units;
+  **Levenberg–Marquardt** — `fit_lm(gm, residual_fn, ...)` uses the same
+  `jacfwd` sensitivities as `fim` in unconstrained coordinates under the
+  trainable mask and recovers a spring's (k, c) from 2× perturbations in
+  a handful of iterations where Adam needs hundreds; **progress events** —
+  `fit` / `fit_lm` / `fit_multiple_shooting` notify the graph's observers
+  with a `"fit_progress"` event (`EVENT_FIT_PROGRESS`: method, iteration,
+  loss, params) every `notify_every` iterations, so the REST relay and
+  live stage can show a calibration as it runs.
 - REST `PUT /graph/params/{node}` validates values against the node's
   `ParamSpec` bounds before writing anything (400 with the offending leaf).
 - `maddening.testing.strategies.node_states` samples bool / integer state
@@ -186,6 +229,21 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Fixed
 
+- **Every run compiled the step three times.**  Leaves seeded as
+  `jnp.array(0.0)` (nodes' initial states and MADDENING's own coupling
+  residual in `_meta`) are weak-typed; after one step they come back
+  strongly typed, so the jitted step retraced on the second step and
+  again on the third for leaves that only change later.  `compile()` and
+  `set_node_state()` now normalise weak types (`_strong_typed`), and the
+  `_meta` residual is seeded as float32.  Measured on the MIME AR4 graph
+  on an RTX A2000: three compiles (0.92 + 0.85 + 0.83 s) became one, and
+  the experiment driver's "steady-state" figure — which had absorbed two
+  of them — went from 9.5–33 ms/step to 1.7 ms/step.  Results are
+  bit-identical (only the trace signature changed).
+- `GraphManager._default_external_inputs()` allocated fresh `jnp.zeros`
+  per declared input on every call (~1.5 ms/step on GPU for a graph with
+  external inputs stepped without explicit inputs); the zero arrays are
+  now allocated once per compile and shared (outer dicts stay fresh).
 - `LBMPipeNode` (multiphase): `_shan_chen_force` used `np.exp` on
   `rho_wall / rho_0`, which are traced now that the graph injects params;
   five multiphase graph tests failed with a tracer-conversion error.  Now

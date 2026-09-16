@@ -84,9 +84,12 @@ def _update_accepts_params(node: SimulationNode) -> bool:
 
 
 def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
-    if spec.accepts_params and node_params is not None:
-        return spec.update_fn(state, boundary_inputs, dt, params=node_params)
-    return spec.update_fn(state, boundary_inputs, dt)
+    # named_scope is trace-time metadata only (no runtime cost); the
+    # profiler's trace attribution keys device kernels on it.
+    with jax.named_scope(f"node:{spec.node.name}"):
+        if spec.accepts_params and node_params is not None:
+            return spec.update_fn(state, boundary_inputs, dt, params=node_params)
+        return spec.update_fn(state, boundary_inputs, dt)
 
 
 class _ResolvedParams(NamedTuple):
@@ -98,13 +101,52 @@ class _ResolvedParams(NamedTuple):
     mappings: dict
 
 
+def _import_lineax():
+    """``import lineax`` with an actionable error when it is missing.
+
+    The matrix-free Krylov adjoint of the IFT solver (``linear_solver=
+    "gmres" | "bicgstab"``) needs lineax; it is an optional dependency
+    (``pip install maddening[ift]``) so the base install stays light.
+    """
+    try:
+        import lineax as lx  # noqa: PLC0415  (lazy by design)
+    except ImportError as e:
+        raise ImportError(
+            "lineax is required for the matrix-free Krylov adjoint of the "
+            "coupling solver (solver='ift' with linear_solver='gmres' or "
+            "'bicgstab').  Install it with:  pip install maddening[ift]\n"
+            "Or use linear_solver='dense' (no lineax dependency; it builds "
+            "the coupling Jacobian explicitly, slower on large groups)."
+        ) from e
+    return lx
+
+
+def _strong_typed(tree):
+    """Strip JAX weak typing from every array leaf.
+
+    ``jnp.array(0.0)`` is *weak-typed*; the same leaf after one step is
+    strongly typed (it is the result of arithmetic with typed arrays),
+    and a jitted step keyed on ``(shape, dtype, weak_type)`` retraces —
+    once per leaf whose weak type flips, typically on the second and
+    third steps of every run (measured: three compiles of the same step
+    on the MIME AR4 graph, ~2.6 s).  Normalising the seed state and the
+    values callers hand in keeps the trace signature constant.
+    """
+    def _fix(x):
+        if getattr(x, "weak_type", False):
+            return x.astype(x.dtype)
+        return x
+    return jax.tree.map(_fix, tree)
+
+
 def _apply_edge(edge: EdgeSpec, value, params):
     """Mapping (interface transfer) first, then the scalar transform."""
     if edge.mapping is not None:
         weights = None
         if params is not None:
             weights = params.mappings.get(edge.key)
-        value = edge.mapping.apply(value, weights)
+        with jax.named_scope("edge:mapping"):
+            value = edge.mapping.apply(value, weights)
     if edge.transform is not None:
         value = edge.transform(value)
     return value
@@ -232,6 +274,10 @@ def _fixed_point_while(
         )
 
     def accelerate(x, x_raw, acc, i):
+        with jax.named_scope("coupling:accelerate"):
+            return _accelerate(x, x_raw, acc, i)
+
+    def _accelerate(x, x_raw, acc, i):
         if acceleration == "none":
             return x_raw, acc
         if acceleration == "fixed":
@@ -374,7 +420,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # Lazy import — keeps lineax (and its equinox/optax transitive
         # deps) out of module load time.  Only callers who opt into
         # ``solver='ift'`` pay this import cost.
-        import lineax as lx  # noqa: PLC0415  (lazy by design)
+        lx = _import_lineax()
 
         atol = 1e-8 + rtol * jnp.max(jnp.abs(b))
         op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
@@ -481,6 +527,8 @@ EVENT_EDGE_ADDED = "edge_added"
 EVENT_EDGE_REMOVED = "edge_removed"
 EVENT_COMPILED = "compiled"
 EVENT_STEP = "step"
+# Emitted by maddening.sysid.fit / fit_lm / fit_multiple_shooting.
+EVENT_FIT_PROGRESS = "fit_progress"
 
 
 _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
@@ -557,18 +605,19 @@ def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
         filtered_bi = boundary_inputs
     if not filtered_bi:
         return node_state
-    corrections = node_obj.compute_interface_correction(
-        pre_state, filtered_bi, dt
-    )
-    if not corrections:
-        return node_state
-    result = {**node_state}
-    for field, idx_val_list in corrections.items():
-        arr = result[field]
-        for idx, val in idx_val_list:
-            arr = arr.at[idx].set(val)
-        result[field] = arr
-    return result
+    with jax.named_scope("coupling:interface_override"):
+        corrections = node_obj.compute_interface_correction(
+            pre_state, filtered_bi, dt
+        )
+        if not corrections:
+            return node_state
+        result = {**node_state}
+        for field, idx_val_list in corrections.items():
+            arr = result[field]
+            for idx, val in idx_val_list:
+                arr = arr.at[idx].set(val)
+            result[field] = arr
+        return result
 
 
 def _run_coupled_block_impl(
@@ -886,17 +935,18 @@ def _run_coupled_block_impl(
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
     def _compute_residual(s_new, s_old):
-        if use_interface_norm:
-            return coupling_residual_interface(
-                s_new, s_old, group_internal_list,
-                group.atol, group.rtol,
-            )
-        if use_mixed_norm:
-            return coupling_residual_mixed(
-                s_new, s_old, group_node_names,
-                group.atol, group.rtol,
-            )
-        return coupling_residual_l2(s_new, s_old, group_node_names)
+        with jax.named_scope("coupling:residual"):
+            if use_interface_norm:
+                return coupling_residual_interface(
+                    s_new, s_old, group_internal_list,
+                    group.atol, group.rtol,
+                )
+            if use_mixed_norm:
+                return coupling_residual_mixed(
+                    s_new, s_old, group_node_names,
+                    group.atol, group.rtol,
+                )
+            return coupling_residual_l2(s_new, s_old, group_node_names)
 
     # Convergence threshold depends on norm type
     conv_threshold_value = (
@@ -2299,7 +2349,7 @@ class GraphManager:
                     meta[f"coupling_{key}_iterations"] = jnp.array(
                         0, dtype=jnp.int32
                     )
-                    meta[f"coupling_{key}_residual"] = jnp.array(0.0)
+                    meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=jnp.float32)
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -2349,6 +2399,21 @@ class GraphManager:
                         0, dtype=jnp.int32
                     )
             self._state[_META_KEY] = meta
+
+        # Persistent XLA cache, if the user asked for one via the env var
+        # (see maddening.core.simulation.compile_cache).
+        from maddening.core.simulation.compile_cache import enable_from_env
+        enable_from_env()
+
+        # A weak-typed leaf in the seed state would retrace the jitted
+        # step once it comes back strongly typed after the first step.
+        self._state = _strong_typed(self._state)
+        # Zero external inputs are allocated once per compile, not per
+        # step (``jnp.zeros`` per input per call cost ~1.5 ms/step on GPU).
+        self._default_ext_leaves = {
+            (ei.target_node, ei.target_field): jnp.zeros(ei.shape, dtype=ei.dtype)
+            for ei in self._external_inputs
+        }
 
         # Snapshot the differentiable parameters before building the
         # step so the closure default (``params=None``) is this snapshot.
@@ -2810,11 +2875,15 @@ class GraphManager:
         """Build a zero-valued external_inputs dict matching declared specs."""
         if not self._external_inputs:
             return _EMPTY_EXTERNAL_INPUTS
+        cache = getattr(self, "_default_ext_leaves", None) or {}
         ext: dict[str, dict] = {}
         for ei in self._external_inputs:
-            ext.setdefault(ei.target_node, {})[ei.target_field] = jnp.zeros(
-                ei.shape, dtype=ei.dtype
-            )
+            leaf = cache.get((ei.target_node, ei.target_field))
+            if leaf is None or leaf.shape != tuple(ei.shape) or leaf.dtype != jnp.dtype(ei.dtype):
+                leaf = jnp.zeros(ei.shape, dtype=ei.dtype)
+            # Fresh outer dicts each call (callers may edit them); the
+            # zero arrays themselves are immutable and shared.
+            ext.setdefault(ei.target_node, {})[ei.target_field] = leaf
         return ext
 
     # ------------------------------------------------------------------
@@ -3547,7 +3616,7 @@ class GraphManager:
     def set_node_state(self, name: str, state: dict) -> None:
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
-        self._state[name] = state
+        self._state[name] = _strong_typed(state)
 
     # ------------------------------------------------------------------
     # Observer pattern

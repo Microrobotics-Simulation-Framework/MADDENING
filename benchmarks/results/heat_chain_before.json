@@ -1,0 +1,74 @@
+{
+  "graph": "heat-chain",
+  "label": "before override hoist",
+  "steps": 200,
+  "device": "cuda:0",
+  "jax": "0.11.0",
+  "acceptance_ms": 30.0,
+  "coupled_mean_step_ms": 0.17892301053507254,
+  "accepted": true,
+  "variants": [
+    {
+      "variant": "coupled",
+      "device": "cuda:0",
+      "jit_compile_ms": 313.54531898978166,
+      "mean_step_ms": 0.17892301053507254,
+      "median_step_ms": 0.1607785015949048,
+      "p95_step_ms": 0.2726822996919509,
+      "dispatch_floor_ms": 0.09384722070535645,
+      "one_iteration_step_ms": 0.14852694963337854,
+      "coupling_overhead_ms": 0.030396060901694,
+      "coupling_overhead_method": "measured",
+      "coupling_per_iteration_ms": 0.030396060901694,
+      "coupling_iter_stats": {
+        "rod0+rod1+rod2+rod3": {
+          "mean": 2.0,
+          "min": 2,
+          "max": 2,
+          "cap": 20,
+          "at_cap_fraction": 0.0,
+          "converged_fraction": 1.0,
+          "n": 50
+        }
+      },
+      "node_times_ms": {
+        "rod0": 0.13445969845633954,
+        "rod1": 0.1790607624570839,
+        "rod2": 0.16815928102005273,
+        "rod3": 0.1629294196027331
+      },
+      "trace": null,
+      "recommendations": [
+        "Dispatch floor (0.09 ms) is more than half the step: batch steps with run_scan instead of calling step() per timestep."
+      ],
+      "build_s": 0.3757596015930176
+    },
+    {
+      "variant": "baseline",
+      "device": "cuda:0",
+      "jit_compile_ms": 78.22412600216921,
+      "mean_step_ms": 0.1395305206096964,
+      "median_step_ms": 0.11379599163774401,
+      "p95_step_ms": 0.3408912452869116,
+      "dispatch_floor_ms": 0.07245428016176447,
+      "one_iteration_step_ms": 0.0,
+      "coupling_overhead_ms": 0.0,
+      "coupling_overhead_method": "",
+      "coupling_per_iteration_ms": 0.0,
+      "coupling_iter_stats": {},
+      "node_times_ms": {
+        "rod0": 0.07133227947633713,
+        "rod1": 0.06260926107643172,
+        "rod2": 0.08756410068599507,
+        "rod3": 0.1852977805538103
+      },
+      "trace": null,
+      "recommendations": [
+        "Dispatch floor (0.07 ms) is more than half the step: batch steps with run_scan instead of calling step() per timestep."
+      ],
+      "build_s": 0.005018472671508789
+    }
+  ],
+  "baseline_mean_step_ms": 0.1395305206096964,
+  "coupling_cost_vs_baseline_ms": 0.03939248992537614
+}

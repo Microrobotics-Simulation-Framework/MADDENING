@@ -1,0 +1,198 @@
+{
+  "graph": "mime-ar4",
+  "label": "5bd2ffc+mapping, before perf work",
+  "steps": 200,
+  "device": "cuda:0",
+  "jax": "0.11.0",
+  "acceptance_ms": 30.0,
+  "coupled_mean_step_ms": 1.4067686695489101,
+  "accepted": true,
+  "variants": [
+    {
+      "variant": "coupled",
+      "device": "cuda:0",
+      "jit_compile_ms": 891.2627249956131,
+      "mean_step_ms": 1.4067686695489101,
+      "median_step_ms": 1.2525249985628761,
+      "p95_step_ms": 2.1677419528714372,
+      "dispatch_floor_ms": 0.1733547999174334,
+      "one_iteration_step_ms": 0.6318957601615693,
+      "coupling_overhead_ms": 0.7748729093873408,
+      "coupling_overhead_method": "measured",
+      "coupling_per_iteration_ms": 0.1937182273468352,
+      "coupling_iter_stats": {
+        "body+ext_magnet+lub+magnet+mlp_drag": {
+          "mean": 5.0,
+          "min": 5,
+          "max": 5,
+          "cap": 6,
+          "at_cap_fraction": 1.0,
+          "converged_fraction": 0.0,
+          "n": 50
+        }
+      },
+      "node_times_ms": {
+        "motor": 0.1136622394551523,
+        "ext_magnet": 0.10182806028751656,
+        "magnet": 0.05078195972600952,
+        "gravity": 0.050784040649887174,
+        "mlp_drag": 0.08170965971658006,
+        "body": 0.1252991403453052,
+        "lub": 0.07232071977341548,
+        "arm": 0.4802769602974877
+      },
+      "trace": {
+        "device_busy_ms_per_step": 0.5647845000000058,
+        "device_busy_fraction": 0.4014764560978656,
+        "n_kernels_per_step": 415.95,
+        "host_dispatch_ms_per_step": 186.6748280000004,
+        "device_ms_by_scope": {
+          "unscoped": 0.5647845000000058
+        },
+        "top_kernels": [
+          [
+            "MemcpyD2D",
+            0.04314899999999985
+          ],
+          [
+            "input_reduce_fusion_6",
+            0.01760679999999998
+          ],
+          [
+            "input_add_reduce_fusion",
+            0.01709269999999999
+          ],
+          [
+            "loop_concatenate_fusion",
+            0.012312249999999995
+          ],
+          [
+            "loop_pad_fusion_1",
+            0.011963499999999995
+          ],
+          [
+            "loop_dynamic_update_slice_fusion_20",
+            0.01183844999999999
+          ],
+          [
+            "input_reduce_fusion_3",
+            0.010656099999999993
+          ],
+          [
+            "loop_add_multiply_fusion",
+            0.010625549999999994
+          ],
+          [
+            "loop_sqrt_fusion",
+            0.009500849999999996
+          ],
+          [
+            "loop_reduce_fusion_5",
+            0.009115100000000004
+          ],
+          [
+            "loop_select_fusion",
+            0.008950249999999998
+          ],
+          [
+            "triton_softmax_6",
+            0.008007400000000013
+          ]
+        ]
+      },
+      "recommendations": [
+        "Coupling group 'body+ext_magnet+lub+magnet+mlp_drag' hit max_iterations=6 on 100% of steps (converged 0%): raise the cap or loosen the tolerance; the IFT gradient is unreliable on unconverged steps."
+      ],
+      "build_s": 3.399890661239624
+    },
+    {
+      "variant": "baseline",
+      "device": "cuda:0",
+      "jit_compile_ms": 742.7844490011921,
+      "mean_step_ms": 0.5750897750112927,
+      "median_step_ms": 0.5353974920581095,
+      "p95_step_ms": 0.8066756439802703,
+      "dispatch_floor_ms": 0.3149392400518991,
+      "one_iteration_step_ms": 0.0,
+      "coupling_overhead_ms": 0.0,
+      "coupling_overhead_method": "",
+      "coupling_per_iteration_ms": 0.0,
+      "coupling_iter_stats": {},
+      "node_times_ms": {
+        "motor": 0.15849956049351022,
+        "ext_magnet": 0.09617729985620826,
+        "magnet": 0.048654261336196214,
+        "gravity": 0.031139399798121303,
+        "mlp_drag": 0.13589002017397434,
+        "body": 0.21280611981637776,
+        "lub": 0.08197418239433318,
+        "arm": 0.36092079913942143
+      },
+      "trace": {
+        "device_busy_ms_per_step": 0.21993905000000033,
+        "device_busy_fraction": 0.3824429846551898,
+        "n_kernels_per_step": 163.0,
+        "host_dispatch_ms_per_step": 1.3465764999999998,
+        "device_ms_by_scope": {
+          "unscoped": 0.21993905000000033
+        },
+        "top_kernels": [
+          [
+            "MemcpyD2D",
+            0.018443250000000036
+          ],
+          [
+            "void getrf_pivot<getrf_params_<float, 32, 1, 32, 32, 1> >(int, int, int, void*, int, long*, int, getrf_params_<float, 32, 1, 32, 32, 1>::data_type*, unsigned int*, unsigned int*, getrf_params_<float, 32, 1, 32, 32, 1>::data_type*, unsigned int, unsigned int, unsigned int, int*)",
+            0.0072512500000000025
+          ],
+          [
+            "wrapped_dot_2",
+            0.0052763999999999945
+          ],
+          [
+            "loop_add_fusion_2",
+            0.004870500000000001
+          ],
+          [
+            "loop_add_fusion_1",
+            0.004596949999999999
+          ],
+          [
+            "void trsv_ln_exec_up<float, 32u, 32u, 4u, false>(int, float const*, long, float*, long, int*)",
+            0.0039425
+          ],
+          [
+            "input_scatter_fusion_1",
+            0.003745550000000001
+          ],
+          [
+            "void trsv_ln_exec<float, 32u, 32u, 4u, true>(int, float const*, long, float*, long, int*)",
+            0.0035440000000000016
+          ],
+          [
+            "input_scatter_fusion_3",
+            0.0033841
+          ],
+          [
+            "wrapped_dot",
+            0.003091200000000001
+          ],
+          [
+            "input_concatenate_fusion",
+            0.0029041500000000003
+          ],
+          [
+            "input_reduce_fusion",
+            0.0028593000000000004
+          ]
+        ]
+      },
+      "recommendations": [
+        "Dispatch floor (0.31 ms) is more than half the step: batch steps with run_scan instead of calling step() per timestep."
+      ],
+      "build_s": 0.11284303665161133
+    }
+  ],
+  "baseline_mean_step_ms": 0.5750897750112927,
+  "coupling_cost_vs_baseline_ms": 0.8316788945376175
+}

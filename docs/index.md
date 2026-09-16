@@ -176,6 +176,7 @@ algorithm_guide/uq/*
 
 developer_guide/node_authoring
 developer_guide/testing_standards
+developer_guide/profiling
 developer_guide/documentation_standards
 developer_guide/edge_validation_migration
 developer_guide/halo_width_migration

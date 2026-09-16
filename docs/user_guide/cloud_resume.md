@@ -207,8 +207,8 @@ against a `_FakeCloudSession` + local tempfile.  What's
   backends themselves are third-party).
 * Multi-snapshot lifecycle (last-N retention, garbage collection).
 
-For the first two, the trade-off is: until you wire them, your
-orchestrator does the upload step explicitly with a CLI call.  The
-MADDENING contract is "write local file → orchestrator handles
-transport → entrypoint reads URL"; everything else is a
-nice-to-have (slipped to v0.4+ per the v0.3.0 plan §C3).
+The MADDENING contract is "write local file → orchestrator handles
+transport → entrypoint reads URL".  Whether the transport is a
+presigned `https://` URL or a bucket URL read through fsspec is the
+orchestrator's choice; retention and garbage collection stay outside
+the package.

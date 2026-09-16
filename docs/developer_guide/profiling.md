@@ -47,8 +47,9 @@ It cannot see a compile that happens inside a caller's timing loop.  A
 weak-typed leaf in the seed state (`jnp.array(0.0)` without a dtype)
 retraces the step when the leaf comes back strongly typed; `compile()`
 normalises the seed state, but a driver that assigns its own arrays
-into `gm._state` can reintroduce it — `gm._compiled_step._cache_size()`
-should stay at 1 across a run.
+into `gm._state` can reintroduce it — use `gm.set_node_state()` and
+`gm.reset_state()` instead, and check that `gm._compiled_step._cache_size()`
+stays at 1 across a run.
 
 ## `benchmarks/bench_coupling.py`
 

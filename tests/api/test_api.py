@@ -284,3 +284,40 @@ class TestParamsEndpoint:
     def test_put_unknown_key_is_400(self, loaded_client):
         resp = loaded_client.put("/graph/params/ball", json={"params": {"nope": 1.0}})
         assert resp.status_code == 400
+
+
+class TestParamsEndpointLiveOnlyKeys:
+    def test_live_pytree_key_absent_from_constructor_params_is_addressable(self):
+        """Surrogate weights and sharded-wrapper params live in gm.params but
+        not in node.params; the endpoint must reach them."""
+        import jax.numpy as jnp
+        from maddening.core.node import SimulationNode
+
+        class Weighted(SimulationNode):
+            def __init__(self, name, timestep):
+                super().__init__(name, timestep)
+                self._w = jnp.asarray([1.0, 2.0], jnp.float32)
+
+            def params_pytree(self):
+                return {"weights['w']": self._w}
+
+            def initial_state(self):
+                return {"x": jnp.zeros(2, jnp.float32)}
+
+            def update(self, s, bi, dt, *, params=None):
+                w = self._w if params is None else params["weights['w']"]
+                return {"x": s["x"] + dt * w}
+
+        gm = GraphManager()
+        gm.add_node(Weighted("n", 0.1))
+        gm.compile()
+        client = TestClient(SimulationServer(node_registry=REGISTRY, graph_manager=gm).create_app())
+        resp = client.put("/graph/params/n", json={"params": {"weights['w']": [3.0, 4.0]}})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["params"]["weights['w']"] == [3.0, 4.0]
+        assert not gm._dirty
+        out = client.post("/simulation/step").json() if client.post("/simulation/step").status_code == 200 else None
+        # the live value drives the next step
+        assert [float(v) for v in gm.params["nodes"]["n"]["weights['w']"]] == [3.0, 4.0]
+        bad = client.put("/graph/params/n", json={"params": {"weights['w']": [1.0, 2.0, 3.0]}})
+        assert bad.status_code == 400 and "shape" in bad.json()["detail"]

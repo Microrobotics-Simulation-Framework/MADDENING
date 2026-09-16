@@ -215,6 +215,15 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `viscosity` from the injected params, so a sharded LBM graph is
   calibratable and matches the unsharded graph for the same params;
   previously the sharded path silently ignored `gm.params`.
+- `GraphManager.reset_state()`: reset every node to `initial_state()` and
+  zero the `_meta` counters / coupling diagnostics / IQN warm-start
+  caches with the same weak-type normalisation `compile()` applies, so a
+  reset never retraces the jitted step.  The profiler, the REST server's
+  reset and the example servers use it instead of assigning
+  `initial_state()` into `_state`.
+- REST `PUT /graph/params/{node}` can address any leaf of the node's live
+  pytree, not only constructor params (surrogate weights, sharded wrappers
+  whose inner node owns the params), with shape and dtype checks.
 - REST `PUT /graph/params/{node}` validates values against the node's
   `ParamSpec` bounds before writing anything (400 with the offending leaf).
 - `maddening.testing.strategies.node_states` samples bool / integer state

@@ -211,11 +211,8 @@ class SimulationServer:
             self.runner = None
 
     def _reset_state(self) -> None:
-        """Reset all nodes to their initial state."""
-        for name, spec in self.gm._nodes.items():
-            self.gm._state[name] = spec.node.initial_state()
-        if "_meta" in self.gm._state:
-            self.gm._state["_meta"]["sub_step"] = jnp.array(0, dtype=jnp.int32)
+        """Reset all nodes to their initial state (normalised, no retrace)."""
+        self.gm.reset_state()
         # Reset relay counters
         with self.relay._lock:
             self.relay._step_count = 0
@@ -370,32 +367,46 @@ class SimulationServer:
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             node = self.gm._nodes[node_name].node
-            live = self.gm.params.get("nodes", {}).get(node_name)
+            live = self.gm.params.get("nodes", {}).get(node_name) or {}
             specs = self.gm.param_specs().get("nodes", {}).get(node_name, {})
+            # A key is addressable if it is a constructor param *or* a leaf
+            # of the live pytree (surrogate weights, sharded wrappers whose
+            # inner node owns the params).
+            available = sorted(set(node.params) | set(live))
             # Validate everything before mutating anything: an
             # out-of-bounds slider value is a 400 here, not a NaN later.
             for key, value in req.params.items():
-                if key not in node.params:
+                if key not in node.params and key not in live:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Unknown param '{key}' for node '{node_name}'. "
-                               f"Available: {list(node.params.keys())}",
+                               f"Available: {available}",
                     )
                 spec = specs.get(key)
-                if spec is not None and live is not None and key in live \
-                        and isinstance(value, (int, float)) and not isinstance(value, bool):
+                if spec is not None and key in live and not isinstance(value, bool):
                     try:
-                        spec.check(value, name=key)
+                        spec.check(jnp.asarray(value), name=key)
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc))
             for key, value in req.params.items():
-                node.params[key] = value
-                if live is not None and key in live and isinstance(value, (int, float)) \
-                        and not isinstance(value, bool):
-                    live[key] = jnp.asarray(value, dtype=live[key].dtype)
+                if key in live and not isinstance(value, bool):
+                    try:
+                        new = jnp.asarray(value, dtype=live[key].dtype)
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(status_code=400, detail=f"{key}: {exc}")
+                    if new.shape != live[key].shape:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{key}: expected shape {live[key].shape}, got {new.shape}",
+                        )
+                    live[key] = new
+                    if key in node.params:
+                        node.params[key] = value
                 else:
+                    node.params[key] = value
                     self.gm._dirty = True
-            return {"status": "ok", "params": _jax_to_python(node.params)}
+            shown = {**_jax_to_python(node.params), **_jax_to_python(live)}
+            return {"status": "ok", "params": shown}
 
         # -- checkpoint endpoints -------------------------------------------
 

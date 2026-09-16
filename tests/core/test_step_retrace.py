@@ -106,3 +106,46 @@ def test_results_unchanged_by_normalisation():
             gm.step()
         return np.asarray(gm._state["w"]["y"])
     np.testing.assert_array_equal(run(True), run(False))
+
+
+def test_reset_state_keeps_the_compiled_step_and_meta():
+    """A reset must not reintroduce weak types (retrace) or break _meta."""
+    gm = GraphManager()
+    gm.add_node(WeakSeed("w", 0.01))
+    gm.add_node(SpringDamperNode("a", 0.01, initial_position=0.0))
+    gm.add_node(SpringDamperNode("b", 0.02, initial_position=3.0))     # multi-rate
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.compile()
+    for _ in range(3):
+        gm.step()
+    assert int(gm._state["_meta"]["step_count"]) == 3
+    gm.reset_state()
+    assert int(gm._state["_meta"]["step_count"]) == 0
+    assert all(not l.weak_type for l in jax.tree.leaves(gm._state))
+    np.testing.assert_array_equal(np.asarray(gm._state["w"]["n"]), 0)
+    for _ in range(3):
+        gm.step()
+    assert _cache_size(gm) == 1
+    assert int(gm._state["w"]["n"]) == 3
+
+
+def test_reset_state_zeroes_coupling_diagnostics_and_warm_start():
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("a", 0.01, initial_position=0.0))
+    gm.add_node(SpringDamperNode("b", 0.01, initial_position=3.0))
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.add_edge("b", "a", "position", "anchor_position")
+    gm.add_coupling_group(["a", "b"], max_iterations=10, tolerance=1e-8,
+                          acceleration="iqn-imvj", jacobian_reuse=2)
+    gm.compile()
+    for _ in range(4):
+        gm.step()
+    meta = gm._state["_meta"]
+    assert any(float(jnp.max(jnp.abs(meta[k]))) > 0 for k in meta if k.endswith("_V"))
+    gm.reset_state()
+    meta = gm._state["_meta"]
+    assert all(float(jnp.max(jnp.abs(meta[k]))) == 0 for k in meta if k.endswith("_V"))
+    assert gm.coupling_diagnostics()["a+b"]["iterations"] == 0
+    for _ in range(3):
+        gm.step()
+    assert _cache_size(gm) == 1 and gm.coupling_diagnostics()["a+b"]["converged"]

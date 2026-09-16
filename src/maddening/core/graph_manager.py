@@ -3728,6 +3728,30 @@ class GraphManager:
             raise KeyError(f"No node named '{name}'.")
         self._state[name] = _strong_typed(state)
 
+    def reset_state(self) -> None:
+        """Reset every node to its ``initial_state()`` and the internal
+        counters in ``_meta`` to zero, keeping the compiled step valid.
+
+        Prefer this to assigning ``initial_state()`` into ``_state``
+        directly: the seed values are normalised the way ``compile``
+        normalises them (weak types stripped), so the jitted step does not
+        retrace after a reset, and ``_meta``'s structure is preserved.
+        """
+        for name, spec in self._nodes.items():
+            self._state[name] = _strong_typed(spec.node.initial_state())
+        meta = self._state.get(_META_KEY)
+        if meta is not None:
+            for key, value in list(meta.items()):
+                if key in ("step_count", "sub_step") or key.endswith("_iterations") \
+                        or key.endswith("_pred_count"):
+                    meta[key] = jnp.zeros_like(value)
+                elif key.endswith("_residual"):
+                    meta[key] = jnp.zeros_like(value)
+                # IQN V/W and predictor histories are warm-start caches:
+                # zeroing them restarts cleanly too.
+                elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:
+                    meta[key] = jnp.zeros_like(value)
+
     # ------------------------------------------------------------------
     # Observer pattern
     # ------------------------------------------------------------------

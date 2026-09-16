@@ -412,12 +412,10 @@ def profile_graph(
         report.node_sizes[name] = elems
         report.total_state_elements += elems
 
-    # JIT compile timing (first step)
-    # Reset state to initial
-    for name, spec in gm._nodes.items():
-        gm._state[name] = spec.node.initial_state()
-    if gm._is_multirate:
-        gm._state["_meta"] = {"step_count": jnp.array(0, dtype=jnp.int32)}
+    # JIT compile timing (first step); reset to the initial state the way
+    # ``compile`` seeds it (normalised, ``_meta`` intact) so the timed
+    # steps never include a retrace.
+    gm.reset_state()
 
     t0 = time.perf_counter()
     gm.step(external_inputs)

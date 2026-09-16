@@ -106,11 +106,12 @@ def resume_from_url(server, url: str, *, skip_integrity_check: bool = False) -> 
     is set — typically by the orchestrator that just relaunched after
     a spot preemption.
 
-    Supported URL schemes: ``file://``, ``http(s)://``.
+    Supported URL schemes: ``file://``, ``http(s)://``, and the ``fsspec``
+    cloud-storage schemes; see :func:`maddening.cloud.resume.download_and_load_state`.
 
     Returns the checkpoint manifest dict for caller logging.
     """
-    from maddening.core.simulation.checkpoint import download_and_load_state
+    from maddening.cloud.resume import download_and_load_state
     return download_and_load_state(
         server.gm, url, skip_integrity_check=skip_integrity_check,
     )

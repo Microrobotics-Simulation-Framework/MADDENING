@@ -187,6 +187,7 @@ developer_guide/sharding_topology
 developer_guide/stability_report
 developer_guide/versioned_docs
 developer_guide/adaptive_node
+developer_guide/typing
 ```
 
 ```{toctree}

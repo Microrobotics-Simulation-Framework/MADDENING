@@ -15,6 +15,12 @@
  * (see maddening.fmi.package.build_fmu_binary).
  */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+/* getaddrinfo / ssize_t / strdup under -std=c11 -pedantic */
+#  define _POSIX_C_SOURCE 200809L
+#  define _DEFAULT_SOURCE 1
+#endif
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,6 +97,7 @@ static fmi3Status bridge_call(Instance *in, const char *req) {
     size_t n = strlen(req);
     head[0] = (unsigned char)(n >> 24); head[1] = (unsigned char)(n >> 16);
     head[2] = (unsigned char)(n >> 8);  head[3] = (unsigned char)n;
+    if (in->resp) in->resp[0] = '\0';
     if (send_all(in->sock, (const char *)head, 4) || send_all(in->sock, req, n)) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: send failed");
         return fmi3Error;
@@ -106,7 +113,12 @@ static fmi3Status bridge_call(Instance *in, const char *req) {
         if (!p) return fmi3Fatal;
         in->resp = p; in->resp_cap = m + 1;
     }
-    if (recv_all(in->sock, in->resp, m)) {
+    /* Invariant: in->resp is always a NUL-terminated string, also after a
+     * failed or partial receive (a later parse must never run off the
+     * end of a half-filled buffer). */
+    in->resp[0] = '\0';
+    if (m > 0 && recv_all(in->sock, in->resp, m)) {
+        in->resp[0] = '\0';
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: recv body failed");
         return fmi3Error;
     }
@@ -121,6 +133,11 @@ static fmi3Status bridge_call(Instance *in, const char *req) {
 
 /* Parse "values":[n0,n1,...] from in->resp into out[0..n). */
 static fmi3Status parse_values(Instance *in, double *out, size_t n) {
+    if (n == 0) return fmi3OK;
+    if (in->resp == NULL) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: no reply to parse");
+        return fmi3Error;
+    }
     const char *p = strstr(in->resp, "\"values\":[");
     if (!p) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: reply has no values");
@@ -193,12 +210,18 @@ static int read_endpoint(fmi3String resource_path, char *host, size_t hostcap, i
         char path[1024];
         const char *rp = resource_path;
         if (strncmp(rp, "file://", 7) == 0) rp += 7;
-        snprintf(path, sizeof path, "%s%sendpoint.txt", rp,
-                 (rp[strlen(rp) - 1] == '/' || rp[strlen(rp) - 1] == '\\') ? "" : "/");
-        FILE *f = fopen(path, "r");
-        if (f) {
-            if (fgets(buf, sizeof buf, f)) spec = buf;
-            fclose(f);
+        size_t rl = strlen(rp);
+        if (rl > 0) {
+            snprintf(path, sizeof path, "%s%sendpoint.txt", rp,
+                     (rp[rl - 1] == '/' || rp[rl - 1] == '\\') ? "" : "/");
+            FILE *f = fopen(path, "r");
+            if (f) {
+                if (fgets(buf, sizeof buf, f)) {
+                    buf[strcspn(buf, "\r\n")] = '\0';     /* trailing newline */
+                    spec = buf;
+                }
+                fclose(f);
+            }
         }
     }
     if (!spec) return -1;
@@ -282,15 +305,15 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
         free(in); return NULL;
     }
     if (bridge_call(in, "{\"op\":\"hello\"}") != fmi3OK) {
-        sock_close(in->sock); free(in); return NULL;
+        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
     }
     if (instantiationToken && *instantiationToken) {
         char needle[300];
         snprintf(needle, sizeof needle, "\"token\":\"%s\"", instantiationToken);
-        if (strstr(in->resp, needle) == NULL) {
+        if (in->resp == NULL || strstr(in->resp, needle) == NULL) {
             inst_log(in, fmi3Error, "logStatusError",
                      "maddening_fmu: instantiation token does not match the sidecar's graph");
-            sock_close(in->sock); free(in); return NULL;
+            sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
         }
     }
     return (fmi3Instance)in;
@@ -459,6 +482,7 @@ FMI3_Export fmi3Status fmi3GetFMUState(fmi3Instance instance, fmi3FMUState *FMUS
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
     if (bridge_call(in, "{\"op\":\"get_state\"}") != fmi3OK) return fmi3Error;
+    if (in->resp == NULL) return fmi3Error;
     const char *p = strstr(in->resp, "\"state\":\"");
     if (!p) return fmi3Error;
     p += 9;

@@ -28,6 +28,14 @@ jobs:
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
+      - name: Install C toolchain for the FMU wrapper tests
+        # gcc + clang ship on ubuntu-latest; valgrind does not.  tests/fmi/
+        # test_c_unit.py builds the wrapper plain, with ASan/UBSan, runs the
+        # unit + fuzz binaries under both and under valgrind, and a short
+        # libFuzzer campaign with clang; each part self-skips if its tool is
+        # missing, so this step is what makes CI actually exercise them.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+
       - name: Run tests
         env:
           JAX_PLATFORMS: cpu

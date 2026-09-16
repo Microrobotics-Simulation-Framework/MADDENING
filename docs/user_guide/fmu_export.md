@@ -56,6 +56,43 @@ JSON object (`{"op": "set"|"get"|"step"|"get_state"|"set_state"|"reset"|
 schema.  Nothing but libc is required on the importer's side, which is why
 ZMQ is not used for the FMU path.
 
+## Why TCP + JSON, and when ZMQ would be worth it
+
+The v0.3.0 plan called the sidecar protocol "ZMQ".  The shipped wrapper
+uses a raw TCP socket with 4-byte-length-prefixed JSON frames instead.
+The trade-off, recorded so the choice can be revisited deliberately:
+
+**TCP + JSON (current)**
+
+* Nothing to link on the importer's side: the FMU binary depends on
+  libc only, so it loads in any FMI 3 importer on any machine without
+  a libzmq of a matching ABI.  This is the reason it was chosen.
+* One request in flight per instance, strictly request/reply, which is
+  exactly the FMI call pattern; framing is 20 lines of C and was easy to
+  unit-test and fuzz.
+* Costs: no built-in reconnect or heartbeat (a dead sidecar surfaces as
+  `fmi3Error` from the next call), one connection per instance, and no
+  transport-level multiplexing.
+
+**ZMQ (`REQ`/`REP` or `DEALER`/`ROUTER`)**
+
+* Pros: automatic reconnect and queueing, `inproc://`/`ipc://`/`tcp://`
+  behind one API, message framing for free, easier fan-out to several
+  sidecars behind a `ROUTER`, and the Python side already has pyzmq for
+  the multi-VM coordinator.
+* Cons: the FMU binary would link libzmq (a C++ library) and the
+  importer's process must be able to load it; version/ABI pinning
+  becomes part of the FMU's packaging story; `REQ`/`REP` state machines
+  make error recovery *harder* for a strict request/reply client, and
+  the C API needs the same length-prefixed JSON payload anyway.
+
+**Recommendation.**  Stay on TCP + JSON until a concrete need appears:
+many FMU instances against one sidecar process (then `ROUTER` on the
+Python side, still TCP framing in C), or a deployment where the sidecar
+restarts and instances must survive it (then reconnect logic, which
+ZMQ gives for free).  The payload format would not change either way,
+so the C wrapper's request builder and reply parser carry over.
+
 ## Multi-rate graphs: clocks
 
 `build_model_description(gm, ..., multi_clock=True)` emits one FMI 3.0

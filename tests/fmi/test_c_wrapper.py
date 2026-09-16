@@ -160,3 +160,86 @@ def test_fmpy_drives_the_compiled_fmu_against_the_graph(tmp_path):
     assert res["ball.position"][-1] == pytest.approx(float(out["ball"]["position"]), rel=1e-5)
     # the trajectory really moved through the FMU
     assert abs(res["spring.position"][-1] - res["spring.position"][0]) > 1e-3
+
+
+@needs_cc
+def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
+    """Use the FMU the way a master algorithm does, through FMPy's FMI 3
+    binding rather than ``simulate_fmu``: two instances against two
+    bridges in the same process, parameters set before initialisation,
+    get/set FMU state, serialize/deserialize, reset, terminate."""
+    fmpy = pytest.importorskip("fmpy")
+    from fmpy import extract, read_model_description
+    from fmpy.fmi3 import FMU3Slave
+
+    gm_a, gm_b = _graph(), _graph()
+    md_a, bridge_a = _bridge(gm_a)
+    md_b, bridge_b = _bridge(gm_b)
+    so = build_fmu_binary(tmp_path)
+    with bridge_a, bridge_b:
+        fmu_a = write_fmu(md_a, tmp_path / "a.fmu", binary=so, endpoint=bridge_a.endpoint)
+        fmu_b = write_fmu(md_b, tmp_path / "b.fmu", binary=so, endpoint=bridge_b.endpoint)
+        insts = []
+        for fmu, md in ((fmu_a, md_a), (fmu_b, md_b)):
+            unz = extract(str(fmu))
+            desc = read_model_description(unz)
+            inst = FMU3Slave(guid=desc.guid, unzipDirectory=unz,
+                             modelIdentifier=desc.coSimulation.modelIdentifier, instanceName="i")
+            inst.instantiate(loggingOn=True)
+            insts.append((inst, desc))
+        vr = {v.name: v.valueReference for v in insts[0][1].modelVariables}
+        k, pos, anchor = vr["spring.params.stiffness"], vr["spring.position"], vr["spring.anchor_position"]
+        (ia, _), (ib, _) = insts
+        ia.setFloat64([k], [45.0])                          # before initialisation
+        ib.setFloat64([k], [30.0])
+        for inst in (ia, ib):
+            inst.enterInitializationMode(startTime=0.0)
+            inst.exitInitializationMode()
+        ia.setFloat64([anchor], [0.25])
+        t = 0.0
+        for _ in range(5):
+            ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
+            ib.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
+            t += DT
+        assert ia.getFloat64([k])[0] == 45.0 and ib.getFloat64([k])[0] == 30.0
+        pa, pb = ia.getFloat64([pos])[0], ib.getFloat64([pos])[0]
+        assert pa != pb                                     # instances are independent
+        # state round trip, both in memory and serialized
+        st = ia.getFMUState()
+        blob = ia.serializeFMUState(st)
+        for _ in range(5):
+            ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
+            t += DT
+        assert ia.getFloat64([pos])[0] != pa
+        ia.setFMUState(st)
+        assert ia.getFloat64([pos])[0] == pa
+        st2 = ia.deserializeFMUState(blob)
+        ia.setFMUState(st2)
+        assert ia.getFloat64([pos])[0] == pa
+        ia.freeFMUState(st)
+        ia.freeFMUState(st2)
+        # reset returns to the initial state and constructor params
+        ia.reset()
+        assert ia.getFloat64([pos])[0] == 0.5 and ia.getFloat64([k])[0] == 30.0
+        for inst in (ia, ib):
+            inst.terminate()
+            inst.freeInstance()
+    # the reference graph agrees with instance a's first 5 steps
+    ref = _graph()
+    p = ref.params
+    p["nodes"]["spring"]["stiffness"] = jnp.asarray(45.0, jnp.float32)
+    out = ref.run_scan(5, external_inputs={"spring": {"anchor_position": jnp.asarray(0.25, jnp.float32)}},
+                       params=p)
+    assert pa == pytest.approx(float(out["spring"]["position"]), rel=1e-6)
+
+
+@needs_cc
+def test_fmpy_validate_fmu_reports_no_problems(tmp_path):
+    fmpy = pytest.importorskip("fmpy")
+    from fmpy.validation import validate_fmu
+
+    gm = _graph()
+    md, _ = _bridge(gm)
+    fmu = write_fmu(md, tmp_path / "plant.fmu", binary=build_fmu_binary(tmp_path),
+                    endpoint="127.0.0.1:1")
+    assert validate_fmu(str(fmu)) == []

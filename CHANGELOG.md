@@ -316,6 +316,17 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU C wrapper, found by its own fuzz/sanitizer tests.**  A failed
+  instantiation after the `hello` exchange (token mismatch) leaked the
+  reply buffer; a failed or partial reply receive left a freshly grown
+  buffer unterminated, so a later parse could read past it (ASan
+  heap-buffer-overflow); `parse_values` / `GetFMUState` now refuse a
+  missing reply; a `file://` resource path with nothing after the prefix
+  is no longer indexed at `[-1]`; the endpoint file's trailing newline is
+  stripped; POSIX feature macros make the source build under
+  `-std=c11 -pedantic`.  Also: `gm.trace_count` replaces the jit cache
+  size as the retrace probe in tests (the cache count reads 0 on JAX
+  0.10, which broke CI).
 - **Independent audit, round 2** (12 findings, all fixed; report under
   `benchmarks/results/audit2/`, regression tests in
   `tests/core/test_audit_round2.py`).  `compute_interface_correction`
@@ -711,6 +722,21 @@ change; the aliases are removed in v0.3.
   builtins on Python 3.10.
 
 ### Verification
+- **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
+  `tests/fmi/c/`): a unit-test binary that includes the wrapper source
+  (framing, JSON number parsing, endpoint discovery, every FMI entry
+  point against a fake sidecar on a socketpair and a loopback listener),
+  built plain and with `-fsanitize=address,undefined`; a deterministic
+  fuzz harness for the reply surface (3 seeds x 3000 iterations in the
+  fast lane, 60k in the slow lane, also exported as a libFuzzer target);
+  the unit and fuzz binaries under valgrind memcheck; a short
+  coverage-guided libFuzzer campaign with clang; FMPy driving an ASan
+  build in a subprocess against a normal and a hostile bridge; FMPy's
+  low-level FMI 3 API with two instances (params before initialisation,
+  FMU state get/set/serialize, reset, terminate); `validate_fmu` on the
+  packaged FMU; and a warning-free `-std=c11 -pedantic` build.  CI
+  installs valgrind and clang so all of it runs there; each part
+  self-skips where its tool is missing.
 - Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
   via `-m "not slow"`).  Slow-marked tests deferred to a longer
   pre-release pass.

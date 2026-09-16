@@ -1,0 +1,17 @@
+{
+  "include": ["src/maddening"],
+  "exclude": [
+    "**/__pycache__",
+    "src/maddening/examples",
+    "tests",
+    "benchmarks",
+    "docs",
+    "scripts"
+  ],
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "warning",
+  "reportMissingTypeStubs": false
+}

@@ -1,18 +1,16 @@
-"""Regression tests for the independent audit of 2026-09-16, round 3
-(the FMU bridge / C wrapper / unstructured exchange).  Each failed
-before its fix.
+"""``FmuTcpBridge`` at its trust boundary and in its stepping contract.
 
-* the bridge never unpickles importer bytes: ``set_state`` with a
-  pickle payload is refused without executing anything, the state blob
-  is an arrays-only ``npz`` checked against the schema token and shapes;
+* ``set_state`` never unpickles importer bytes: a pickle payload is
+  refused without executing anything, and the arrays-only ``npz`` blob is
+  validated against the schema token and every shape before a write;
 * a communication step that is not a whole multiple of the master
-  timestep is refused (the FMU advertises a fixed step);
-* ``set`` is atomic across parameters and inputs, non-finite inputs are
-  refused;
-* a second FMU instance on one bridge gets a clear error instead of
-  blocking;
-* ``exchange_unstructured(method="all_to_all")`` works when no shard
-  needs a ghost cell.
+  timestep is refused (the FMU advertises a fixed step, no event mode);
+* ``set`` is atomic across parameters and inputs and refuses non-finite
+  inputs;
+* a second FMU instance on one bridge gets a clear error, not a hang.
+
+Originally written from the independent audit of 2026-09-16 (round 3; report and
+reproducers under ``benchmarks/results/audit3/``).
 """
 
 import base64

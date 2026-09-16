@@ -1,13 +1,11 @@
-"""Audit round 1 (feat/graph-params-sysid): sharded wrapper surfaces.
+"""``ShardedStencilNode`` around a ``HeatNode``: the grid-shaped
+boundary-input heuristic does not misclassify a profile along an
+unsharded axis, the wrapper exposes the inner node's params, an injected
+diffusivity drives the sharded step (and is differentiable through it),
+and a halo-padded per-cell heat source matches the unsharded node.
 
-* #8  ``ShardedStencilNode._grid_shaped_boundary_inputs`` classified an
-  ``(n,)`` input on an ``n x n`` grid sharded on axis 0 as grid-shaped
-  because only the sharded axis's extent was compared; it was then
-  sharded and halo-padded and the inner ``update_padded`` failed.  The
-  heuristic now requires the full leading grid shape.
-* ``HeatNode.update_padded`` read ``self.params["thermal_diffusivity"]``,
-  so a ``ShardedStencilNode(HeatNode)`` silently was not calibratable
-  (LBM had been migrated to the params contract, heat had not).
+Originally written from the independent audit of 2026-09-16 (round 1; report and
+reproducers under ``benchmarks/results/audit1/``).
 """
 
 import jax

@@ -1,11 +1,10 @@
-"""Audit round 1 (feat/graph-params-sysid): ``PUT /graph/params/{node}``.
+"""``PUT /graph/params/{node}`` validates every key before writing anything:
+a string, ``null``, a list for a scalar or a non-finite value for a live
+float is a 400 that names the key, and a bad key later in the request
+leaves an earlier valid key unwritten.
 
-Finding #7: a string for a live float produced a 500, and NaN passed the
-bounds check (every comparison with NaN is False) and was WRITTEN into
-``gm.params`` and ``node.params`` before the response failed.  The
-endpoint now validates dtype coercion, shape, finiteness and bounds for
-every key before mutating anything; any failure is a 400 naming the key
-and nothing is written.
+Originally written from the independent audit of 2026-09-16 (round 1; report and
+reproducers under ``benchmarks/results/audit1/``).
 """
 
 import os

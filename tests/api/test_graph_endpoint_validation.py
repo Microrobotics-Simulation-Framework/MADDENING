@@ -1,22 +1,21 @@
-"""Regression tests for the independent audit of 2026-09-16, round 4
-(core + REST side; report under benchmarks/results/audit4/).
+"""The graph-structure and state endpoints validate before they write.
 
-* REST ``PUT /graph/state``, ``POST /graph/nodes``, ``POST /graph/edges``
-  validate before writing; ``/checkpoint/{save,load}`` stay under a root;
-  a JSON boolean for a numeric param is a 400;
-* ``load_state`` refuses a state field of the wrong shape and coerces
-  dtype; a checkpoint without ``_meta`` keeps the compiled ``_meta``;
-* a wrong-shape params leaf is refused by ``step(params=)`` and by
-  ``gm.params[...] =``;
-* node names that would corrupt key namespaces are refused.
+* ``PUT /graph/state/{node}`` requires the exact field set, coerces to the
+  live dtype, checks shape and finiteness, and writes nothing on a 400;
+* ``PUT /graph/params/{node}`` refuses a JSON boolean for a numeric leaf;
+* ``POST /graph/nodes`` traces one update before adding the node, so a
+  bad constant cannot wedge every later ``/sim/step``;
+* ``POST /graph/edges`` checks that the nodes and the source field exist;
+* ``/checkpoint/{save,load}`` are confined to the server's checkpoint root.
+
+Originally written from the independent audit of 2026-09-16 (round 4; report and
+reproducers under ``benchmarks/results/audit4/``).
 """
 
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import jax.numpy as jnp
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -41,8 +40,6 @@ def _client(gm, **kw):
     return TestClient(SimulationServer(node_registry=REGISTRY, graph_manager=gm, **kw).create_app(),
                       raise_server_exceptions=False)
 
-
-# ------------------------------------------------------------------ REST
 
 def test_put_state_validates_before_writing():
     gm = _spring()
@@ -120,69 +117,3 @@ def test_checkpoint_endpoints_stay_under_the_root(tmp_path):
     c.post("/sim/step")
     r = c.post("/checkpoint/load?path=run1.npz")
     assert r.status_code == 200 and r.json()["state"]["s"]["position"] == pytest.approx(1.0)
-
-
-# ------------------------------------------------------------ checkpoints
-
-def test_load_state_refuses_wrong_shape_state_and_coerces_dtype(tmp_path):
-    from maddening.core.simulation.checkpoint import load_state, save_state
-
-    gm = _spring()
-    path = save_state(gm, tmp_path / "ck")
-    data = dict(np.load(path))
-    bad = dict(data)
-    bad["s/position"] = np.ones(3, np.float32)
-    np.savez(tmp_path / "bad.npz", **bad)
-    with pytest.raises(ValueError, match="shape"):
-        load_state(_spring(), tmp_path / "bad.npz")
-    odd = dict(data)
-    odd["s/position"] = np.array(7, np.int64)
-    np.savez(tmp_path / "odd.npz", **odd)
-    fresh = _spring()
-    load_state(fresh, tmp_path / "odd.npz")
-    assert fresh._state["s"]["position"].dtype == jnp.float32
-    fresh.step()
-    fresh.step()
-    assert fresh.trace_count == 1
-
-
-def test_checkpoint_without_meta_into_multirate_graph_keeps_compiled_meta(tmp_path):
-    from maddening.core.simulation.checkpoint import load_state, save_state
-
-    def build(slow_dt):
-        gm = GraphManager()
-        gm.add_node(SpringDamperNode("s", DT, initial_position=1.0))
-        gm.add_node(SpringDamperNode("b", slow_dt, initial_position=0.5))
-        gm.add_edge("s", "b", "position", "anchor_position")
-        gm.compile()
-        return gm
-
-    single = build(DT)
-    single.run(2)
-    path = save_state(single, tmp_path / "ck")
-    assert not any(k.startswith("_meta/") for k in np.load(path).files)
-    multi = build(2 * DT)
-    load_state(multi, path)
-    multi.run(3)                                    # used to raise KeyError: '_meta'
-    assert int(multi._state["_meta"]["step_count"]) == 3
-
-
-# ------------------------------------------------------------- params / names
-
-def test_wrong_shape_params_leaf_is_refused_everywhere():
-    gm = _spring()
-    with pytest.raises(ValueError, match="shape"):
-        gm.step(params={"nodes": {"s": {"stiffness": jnp.ones(3, jnp.float32) * 30}}})
-    gm.params["nodes"]["s"]["stiffness"] = jnp.ones(3, jnp.float32) * 30
-    with pytest.raises(ValueError, match="shape"):
-        gm.step()
-    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(30.0, jnp.float32)
-    gm.step()
-    assert gm._state["s"]["position"].shape == ()
-
-
-@pytest.mark.parametrize("name", ["a/b", "a#1", "a->b", ""])
-def test_node_names_that_break_key_namespaces_are_refused(name):
-    gm = GraphManager()
-    with pytest.raises(ValueError, match="invalid"):
-        gm.add_node(SpringDamperNode(name, DT))

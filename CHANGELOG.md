@@ -365,7 +365,7 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 ### Fixed
 - **Independent audit, round 4** (residue across rounds 1-3; report under
   `benchmarks/results/audit4/`, regression tests in
-  `tests/core/test_audit_round4.py` and `tests/fmi/test_audit_round4_fmi.py`).
+  `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).
   FMU bridge: an input the importer never set is now the advertised zero
   start value (like `gm.step()`), also after `reset` and `set_state`, so a
   HeatNode FMU no longer runs adiabatic until its first `fmi3Set*`; a
@@ -404,7 +404,7 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   cross-process persistent-cache test proves a hit by the cache
   directory gaining no entries rather than by a wall-clock ratio.
 - **Independent audit, round 3** (FMU bridge / wrapper / exchange;
-  regression tests in `tests/fmi/test_audit_round3.py`).  A
+  regression tests in `tests/fmi/test_bridge_security_and_stepping.py`).  A
   communication step that is not a whole multiple of the master timestep
   is refused instead of silently snapping the physics while reporting
   `t + h` (the FMU now advertises a fixed communication step); a `set`
@@ -430,7 +430,7 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   0.10, which broke CI).
 - **Independent audit, round 2** (12 findings, all fixed; report under
   `benchmarks/results/audit2/`, regression tests in
-  `tests/core/test_audit_round2.py`).  `compute_interface_correction`
+  `tests/core/test_params_persistence_edge_cases.py`).  `compute_interface_correction`
   joined the params contract (a calibrated diffusivity now also corrects
   the coupled interface cells; `HeatNode`, `HybridNode`), and `HybridNode`
   forwards `params` to its physics node.  `PUT /graph/params/{node}`

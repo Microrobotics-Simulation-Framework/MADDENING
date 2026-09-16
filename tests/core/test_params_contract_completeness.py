@@ -1,22 +1,22 @@
-"""Regression tests for the independent audit of 2026-09-16 (round 1),
-graph-manager side.  Each test failed before its fix.
+"""The graph parameter pytree reaches every code path that reads a node
+constant, and survives every operation that rebuilds the step.
 
-* flux edges honour the params pytree (value and gradient);
-* compile() keeps calibrated params; a checkpoint loaded before the
-  first compile keeps its params; ``reset_params`` is the explicit way
-  back to the constructor snapshot;
-* integer / uint32 / PRNG-key leaves survive a coupled step bit-exactly
-  (16-bit-limb float images), inside and outside the group;
-* two mapped edges on the same field pair are refused (they would share
-  one weights slot);
-* a partial params pytree passed through ``step``/``run_scan`` is
-  completed from the *live* ``gm.params``; the raw compiled step refuses
-  an incomplete one instead of silently using constructor constants;
-* ``set_param_spec`` overrides do not outlive their node/edge;
-* edge transform / additive / units survive ``to_dict`` -> ``from_dict``;
-* the predictor extrapolates floating fields only;
-* ``verify_node`` flags a flux producer that takes params in ``update``
-  but not in ``compute_boundary_fluxes``.
+* boundary fluxes use the injected params (value and gradient), inside and
+  outside coupling groups; ``verify_node`` flags a flux producer that
+  takes ``params`` in ``update`` only;
+* ``compile()`` keeps calibrated params across structural changes,
+  ``reset_params`` is the explicit way back, ``remove_node`` discards a
+  node's entry without a warning, the profiler's one-iteration variant
+  keeps live values, and ``load_state`` before the first compile keeps
+  the checkpoint's params;
+* two mapped edges on one field pair get their own weight slots;
+* a partial pytree through ``step``/``run_scan`` is completed from the
+  live ``gm.params`` while the raw compiled step refuses an incomplete one;
+* ``set_param_spec`` overrides do not outlive their node; edge transform,
+  additive flag and units survive ``to_dict`` -> ``from_dict``.
+
+Originally written from the independent audit of 2026-09-16 (round 1; report and
+reproducers under ``benchmarks/results/audit1/``).
 """
 
 import os
@@ -239,86 +239,6 @@ def test_profiler_one_iteration_variant_keeps_live_params():
 
 
 # ---------------------------------------------------------------------------
-# Non-float leaves in coupled graphs are bit-exact
-# ---------------------------------------------------------------------------
-
-class KeyHolder(SimulationNode):
-    def initial_state(self):
-        return {"y": jnp.array(0.0, jnp.float32),
-                "key": jnp.array([0xDEADBEEF, 0x12345678], jnp.uint32),
-                "big": jnp.array(2**24 + 1, jnp.int32),
-                "neg": jnp.array(-(2**31), jnp.int32),
-                "flag": jnp.array(True)}
-
-    def update(self, s, bi, dt, *, params=None):
-        x = bi.get("x", jnp.array(0.0, jnp.float32))
-        return {**s, "y": s["y"] + dt * (x - s["y"])}
-
-    def boundary_input_spec(self):
-        return {"x": BoundaryInputSpec(shape=(), description="drive")}
-
-
-class TypedKeyHolder(SimulationNode):
-    def initial_state(self):
-        return {"y": jnp.array(0.0, jnp.float32), "key": jax.random.key(0)}
-
-    def update(self, s, bi, dt, *, params=None):
-        x = bi.get("x", jnp.array(0.0, jnp.float32))
-        return {"y": s["y"] + dt * (x - s["y"]), "key": s["key"]}
-
-    def boundary_input_spec(self):
-        return {"x": BoundaryInputSpec(shape=(), description="drive")}
-
-
-def _coupled(holder_cls, extra=None, **kw):
-    gm = GraphManager()
-    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0, initial_position=1.0))
-    gm.add_node(holder_cls("k", 0.01))
-    if extra is not None:
-        gm.add_node(extra)
-    gm.add_edge("s", "k", "position", "x")
-    gm.add_edge("k", "s", "y", "anchor_position")
-    gm.add_coupling_group(["s", "k"], max_iterations=5, tolerance=1e-8, **kw)
-    gm.compile()
-    return gm
-
-
-@pytest.mark.parametrize("kw", [dict(), dict(solver="fori"), dict(predictor="linear"),
-                                dict(acceleration="iqn-ils")])
-def test_wide_integer_leaves_survive_a_coupled_step(kw):
-    gm = _coupled(KeyHolder, **kw)
-    out = gm.run_scan(3)
-    np.testing.assert_array_equal(np.asarray(out["k"]["key"]),
-                                  np.array([0xDEADBEEF, 0x12345678], np.uint32))
-    assert int(out["k"]["big"]) == 2**24 + 1
-    assert int(out["k"]["neg"]) == -(2**31)
-    assert bool(out["k"]["flag"]) is True
-    assert out["k"]["key"].dtype == jnp.uint32 and out["k"]["big"].dtype == jnp.int32
-
-
-def test_typed_prng_key_inside_and_outside_group():
-    gm = _coupled(TypedKeyHolder)
-    out = gm.run_scan(2)
-    assert jax.dtypes.issubdtype(out["k"]["key"].dtype, jax.dtypes.prng_key)
-    np.testing.assert_array_equal(np.asarray(jax.random.key_data(out["k"]["key"])),
-                                  np.asarray(jax.random.key_data(jax.random.key(0))))
-    gm2 = _coupled(KeyHolder, extra=TypedKeyHolder("free", 0.01))
-    out2 = gm2.run_scan(2)
-    np.testing.assert_array_equal(np.asarray(jax.random.key_data(out2["free"]["key"])),
-                                  np.asarray(jax.random.key_data(jax.random.key(0))))
-
-
-def test_gradient_still_flows_with_wide_integer_leaves_in_the_group():
-    gm = _coupled(KeyHolder)
-
-    def loss(p):
-        return jnp.sum(gm.run_scan(4, params=p)["k"]["y"] ** 2)
-
-    g = jax.grad(loss)(gm.params)["nodes"]["s"]["stiffness"]
-    assert np.isfinite(float(g)) and float(g) != 0.0
-
-
-# ---------------------------------------------------------------------------
 # Mapped edges, partial params, overrides, edge round trip
 # ---------------------------------------------------------------------------
 
@@ -396,7 +316,7 @@ def test_spec_override_does_not_outlive_its_node():
     gm2.compile()
 
 
-@register_transform("audit_round1_negate")
+@register_transform("negate_for_round_trip")
 def _negate(x):
     return -x
 
@@ -405,33 +325,14 @@ def test_edge_transform_additive_units_round_trip():
     gm = GraphManager()
     gm.add_node(SpringDamperNode("s", 0.01, initial_position=1.0))
     gm.add_node(SpringDamperNode("t", 0.01))
-    gm.add_edge("s", "t", "position", "anchor_position", transform="audit_round1_negate",
+    gm.add_edge("s", "t", "position", "anchor_position", transform="negate_for_round_trip",
                 additive=True, source_units="m", target_units="m")
     gm.compile()
     d = gm.to_dict()
-    assert d["edges"][0]["transform"] == "audit_round1_negate"
+    assert d["edges"][0]["transform"] == "negate_for_round_trip"
     gm2 = GraphManager.from_dict(d, {"SpringDamperNode": SpringDamperNode})
     e = gm2.edges[0]
     assert e.transform is _negate and e.additive and e.source_units == "m" and e.target_units == "m"
     gm2.compile()
     a, b = gm.run_scan(5), gm2.run_scan(5)
     np.testing.assert_array_equal(np.asarray(a["t"]["position"]), np.asarray(b["t"]["position"]))
-
-
-def test_predictor_leaves_integer_fields_alone():
-    class Counter(SimulationNode):
-        def initial_state(self):
-            return {"y": jnp.array(0.0, jnp.float32), "n": jnp.array(0, jnp.int32),
-                    "flag": jnp.array(False)}
-
-        def update(self, s, bi, dt, *, params=None):
-            x = bi.get("x", jnp.array(0.0, jnp.float32))
-            return {"y": s["y"] + dt * (x - s["y"]), "n": s["n"] + 1, "flag": ~s["flag"]}
-
-        def boundary_input_spec(self):
-            return {"x": BoundaryInputSpec(shape=(), description="drive")}
-
-    gm = _coupled(Counter, predictor="quadratic")
-    out = gm.run_scan(6)
-    assert int(out["k"]["n"]) == 6 and out["k"]["n"].dtype == jnp.int32
-    assert bool(out["k"]["flag"]) is False and out["k"]["flag"].dtype == jnp.bool_

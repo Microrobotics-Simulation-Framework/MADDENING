@@ -1,17 +1,15 @@
-"""Audit round 1 (feat/graph-params-sysid): ParamSpec and sysid surfaces.
+"""``ParamSpec`` at the edges of its envelope.
 
-Regression tests adapted from the audit's reproducers.  Each one failed
-before the corresponding fix:
+* ``constrain`` with ``transform="log"`` and a non-zero lower bound, or
+  ``"logit"`` with large bounds, lands strictly inside the open interval
+  and stays re-``unconstrain``-able (a fit's own output must pass
+  ``check_params``);
+* ``check`` / ``check_params`` reject NaN and inf;
+* ``from_dict`` accepts ``bounds: null``;
+* a bounded identity leaf keeps an integer dtype.
 
-* #5  ``constrain`` with ``transform="log"`` and ``lo != 0`` landed exactly
-  ON the strict bound (``8.0 + exp(-15)`` is ``8.0`` in float32), so
-  ``check_params`` rejected the fit's own output and ``unconstrain``
-  returned ``-inf``; same for ``logit`` with large ``|lo|, |hi|``.
-* #10 ``ParamSpec.check`` / ``check_params`` accepted NaN / inf.
-* #13 ``ParamSpec.from_dict({"bounds": null})`` crashed.
-* #14 ``constrain`` promoted an integer bounded identity leaf to float.
-* #9  ``fim`` / ``fit_lm`` with ``noise_std=<pytree>`` crashed because
-  ``jnp.ndim(dict) == 0`` took the scalar branch.
+Originally written from the independent audit of 2026-09-16 (round 1; report and
+reproducers under ``benchmarks/results/audit1/``).
 """
 
 import os
@@ -148,50 +146,3 @@ def test_identity_bounded_int_leaf_keeps_dtype():
 # ---------------------------------------------------------------------------
 # #9: sysid noise_std as a pytree
 # ---------------------------------------------------------------------------
-
-def _pytree_residual(gm):
-    step, ext = gm._compiled_step, gm._default_external_inputs()
-    target = step(gm._state, ext, gm.params)["s"]
-
-    def residual(p):
-        s = step(gm._state, ext, p)["s"]
-        return {"pos": s["position"] - target["position"],
-                "vel": s["velocity"] - target["velocity"]}
-    return residual
-
-
-def test_fim_noise_std_pytree_dict():
-    from maddening.sysid import fim
-    gm = _spring_gm()
-    residual = _pytree_residual(gm)
-    unit = fim(residual, gm.params, mask=gm.trainable_mask(), noise_std=1.0)
-    per = fim(residual, gm.params, mask=gm.trainable_mask(),
-              noise_std={"pos": 0.1, "vel": 1.0})
-    # The velocity residual keeps its weight; the position row is 10x more
-    # informative, so per-leaf noise changes the matrix.
-    assert np.all(np.isfinite(np.asarray(per.fim)))
-    assert not np.allclose(np.asarray(per.fim), np.asarray(unit.fim))
-    # scalar forms that must keep working
-    for sd in (2.0, np.float32(2.0), jnp.float32(2.0)):
-        fim(residual, gm.params, mask=gm.trainable_mask(), noise_std=sd)
-
-
-def test_fit_lm_noise_std_pytree_dict():
-    from maddening.sysid import fit_lm
-    gm = _spring_gm()
-    residual = _pytree_residual(gm)
-    start = jax.tree.map(lambda x: x, gm.params)
-    start["nodes"]["s"]["stiffness"] = jnp.float32(45.0)
-    res = fit_lm(gm, residual, params=start, n_iter=5,
-                 noise_std={"pos": 0.1, "vel": 1.0})
-    gm.check_params(res.params)
-    assert res.losses[-1] <= res.losses[0]
-
-
-def test_fit_lm_never_accepting_a_step_returns_cleanly():
-    """A residual no step can lower: the loop must exit as not converged
-    rather than touch an unset ``step_norm``."""
-    from maddening.sysid import fit_lm
-    gm = _spring_gm()
-    res = fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=4)
-    assert res.converged is False and res.n_iter == 1

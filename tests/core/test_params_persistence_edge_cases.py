@@ -1,19 +1,17 @@
-"""Regression tests for the independent audit of 2026-09-16, round 2.
-Each test failed before its fix (report: benchmarks/results/audit2/).
+"""Calibrated parameters through persistence and the coupling internals.
 
-* ``compute_interface_correction`` takes ``params``: a calibrated
-  diffusivity corrects the interface cells too (both solvers);
-* the REST endpoint: a JSON integer for a float leaf keeps the
-  constructor's Python type, GET returns the live view, and a PUT before
-  the first compile is validated like one after it;
-* ``load_state`` compiles first (multirate step counter survives a
-  load-before-compile), carries mapping weights, and refuses a params
-  leaf of the wrong shape;
-* ``remove_edge`` drops ordinal-key overrides;
+* ``compute_interface_correction`` honours the params pytree (a calibrated
+  diffusivity corrects coupled interface cells, both solvers) and
+  ``HybridNode`` is on its physics node's params contract;
+* ``load_state`` before the first compile equals compile-then-load
+  (multirate step counter included), checkpoints carry mapping weights,
+  and a params leaf of the wrong shape is refused;
+* ``remove_edge`` drops ordinal-key overrides so ``to_dict`` round-trips;
 * Python-float params leaves keep the leaf dtype (no retrace, kept on
-  recompile);
-* logit clamp stays strictly inside a few-ulp-wide interval;
-* ``HybridNode`` is on the params contract of its physics node.
+  recompile); the logit clamp stays inside a few-ulp-wide interval.
+
+Originally written from the independent audit of 2026-09-16 (round 2; report and
+reproducers under ``benchmarks/results/audit2/``).
 """
 
 import os
@@ -25,16 +23,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
-from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
 
-REGISTRY = {"SpringDamperNode": SpringDamperNode}
 
 
 def _spring(compile=True):
@@ -45,9 +40,6 @@ def _spring(compile=True):
     return gm
 
 
-def _client(gm):
-    return TestClient(SimulationServer(node_registry=REGISTRY, graph_manager=gm).create_app(),
-                      raise_server_exceptions=False)
 
 
 # ------------------------------------------------------------ interface correction
@@ -94,45 +86,6 @@ def test_hybrid_node_is_on_its_physics_node_params_contract():
     p = jax.tree.map(lambda x: x, gm.params)
     p["nodes"]["s"]["stiffness"] = jnp.asarray(300.0, jnp.float32)
     assert float(gm.run_scan(3, params=p)["s"]["velocity"]) != base
-
-
-# --------------------------------------------------------------------- REST
-
-def test_put_json_int_keeps_constructor_type_and_next_step_works():
-    gm = _spring()
-    c = _client(gm)
-    assert c.put("/graph/params/s", json={"params": {"stiffness": 40}}).status_code == 200
-    assert type(gm._nodes["s"].node.params["stiffness"]) is float
-    gm.step()
-    gm.check_params()
-    gm._dirty = True
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        gm.compile()
-    assert float(gm.params["nodes"]["s"]["stiffness"]) == 40.0
-
-
-def test_get_params_returns_the_live_view():
-    gm = _spring()
-    c = _client(gm)
-    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(300.0, jnp.float32)
-    assert c.get("/graph/params/s").json()["stiffness"] == pytest.approx(300.0)
-    put = c.put("/graph/params/s", json={"params": {"stiffness": 55.0}}).json()["params"]
-    assert c.get("/graph/params/s").json()["stiffness"] == pytest.approx(put["stiffness"])
-
-
-def test_put_before_first_compile_is_validated_like_after():
-    gm = _spring(compile=False)
-    c = _client(gm)
-    r = c.put("/graph/params/s", json={"params": {"stiffness": -5.0}})
-    assert r.status_code == 400 and "below bound" in r.json()["detail"]
-    r = c.put("/graph/params/s", json={"params": {"stiffness": "x"}})
-    assert r.status_code == 400
-    assert c.put("/graph/params/s", json={"params": {"stiffness": 45}}).status_code == 200
-    gm.compile()
-    gm.check_params()
-    assert float(gm.params["nodes"]["s"]["stiffness"]) == 45.0
-    assert type(gm._nodes["s"].node.params["stiffness"]) is float
 
 
 # --------------------------------------------------------------- checkpoints

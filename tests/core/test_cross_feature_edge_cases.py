@@ -1,6 +1,11 @@
-"""Blind spots found by reviewing tonight's changes against their failure
-modes (not by a failing run).  Each test pins one behaviour a future
-change could silently break."""
+"""Edge cases at the seams between features: integer state leaves inside
+a coupling group under reverse and forward mode through ``lax.scan``,
+subcycled groups with integer leaves, explicit ``accelerated_fields``
+validation, all-false trainable masks, ``fit_lm`` through an IFT group,
+the differentiable sharded CG with an initial guess, mapped edges through
+checkpoints / FMI / sysid, adaptive stepping with mappings, and the
+coupling benchmark script.  Each test pins one behaviour that no single
+feature's own tests would notice breaking."""
 
 import os
 import subprocess

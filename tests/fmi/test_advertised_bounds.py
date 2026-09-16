@@ -1,13 +1,9 @@
-"""Audit round 1 (feat/graph-params-sysid): FMI ``min`` / ``max`` for
-strict bounds.
+"""The FMI ``min`` / ``max`` attributes are the *settable* envelope: for a
+strict (log / logit) bound the description advertises the next
+representable float inside, for an inclusive one the bound itself.
 
-Finding #12: the FMI ``min`` / ``max`` attributes are inclusive, but a
-``log`` / ``logit`` leaf's bound is open, so the sidecar rejected the very
-value the XML advertised (``s.params.stiffness = 0.0`` -> "below bound").
-The model description now advertises the nearest representable value
-inside the interval (never a float32 subnormal, which XLA:CPU flushes to
-zero), so every advertised bound is settable.  Inclusive (identity)
-bounds are unchanged.
+Originally written from the independent audit of 2026-09-16 (round 1; report and
+reproducers under ``benchmarks/results/audit1/``).
 """
 
 import os

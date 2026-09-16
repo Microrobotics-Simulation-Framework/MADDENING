@@ -1,13 +1,15 @@
-"""Regression tests for the independent audit of 2026-09-16, round 4
-(FMU bridge side; report under benchmarks/results/audit4/).
+"""``FmuTcpBridge`` behaves like the graph and survives bad clients.
 
-* an input the importer never set is the advertised zero, not absent
-  (a HeatNode FMU no longer runs adiabatic until the first set), also
-  after ``reset`` and after ``set_state``;
-* a multi-sub-step ``step`` that fails leaves the state untouched;
+* an input the importer never set is the advertised zero (a ``HeatNode``
+  FMU no longer runs adiabatic until the first ``fmi3Set*``), also after
+  ``reset`` and ``set_state``;
+* a multi-sub-step ``step`` that fails leaves state and time untouched;
 * a malformed request gets an error reply instead of a dropped socket;
-* a state blob member larger than the live leaf is refused before it is
-  decompressed; a non-finite time is refused.
+* a state-blob member larger than the live leaf is refused before it is
+  decompressed, and a non-finite time is refused.
+
+Originally written from the independent audit of 2026-09-16 (round 4; report and
+reproducers under ``benchmarks/results/audit4/``).
 """
 
 import base64

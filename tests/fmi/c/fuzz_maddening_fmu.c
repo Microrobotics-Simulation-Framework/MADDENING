@@ -112,11 +112,16 @@ static void one_iteration(unsigned char *buf, size_t cap) {
     case 1: do_set(in, vr, nvr, vals, nvals); break;
     case 2: { fmi3FMUState st = NULL;
               if (fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK) {
-                  size_t sz; fmi3SerializedFMUStateSize(NULL, st, &sz);
-                  fmi3Byte *b = (fmi3Byte *)malloc(sz + 1);
-                  fmi3SerializeFMUState(NULL, st, b, sz);
-                  fmi3FMUState st2; fmi3DeserializeFMUState(NULL, b, sz, &st2);
-                  fmi3FreeFMUState(NULL, &st2); free(b);
+                  size_t sz = 0;
+                  if (fmi3SerializedFMUStateSize(NULL, st, &sz) == fmi3OK) {
+                      fmi3Byte *b = (fmi3Byte *)malloc(sz + 1);
+                      if (fmi3SerializeFMUState(NULL, st, b, sz) == fmi3OK) {
+                          fmi3FMUState st2 = NULL;
+                          if (fmi3DeserializeFMUState(NULL, b, sz, &st2) == fmi3OK)
+                              fmi3FreeFMUState(NULL, &st2);
+                      }
+                      free(b);
+                  }
               }
               fmi3FreeFMUState(NULL, &st); break; }
     case 3: { fmi3Boolean e, t, r; fmi3Float64 l;

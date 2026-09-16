@@ -39,6 +39,29 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **Interface mappings are serialisable** (`MappingSpec`, the "13(a)" half of
+  the deferred mapping-serialisation item).  Every mapping factory
+  (`rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
+  `matrix_mapping`) attaches a `MappingSpec` — kind, hyper-parameters and
+  *references* to its point sets, never the weights — which
+  `GraphManager.to_dict` / `from_dict`, the config helpers and
+  `save_graph_to_usd` / `load_graph_from_usd` (attribute
+  `maddening:mappingSpecJson`) now carry instead of refusing mapped edges.
+  Point references are `{"node": name, "field": key}` (a node's
+  `static_data` or array-valued parameter), `{"asset": "<file>.npy|.npz"}`
+  (relative to the config / stage directory, `base_dir=`; no absolute
+  paths or `..`) or an inline list for at most 64 points; the factories
+  take `source_ref=` / `target_ref=` (`matrix_mapping(asset=)` — an
+  explicit matrix is never inlined).  On load the mapping is rebuilt by
+  the same factory (weights bitwise equal) and registered in
+  `params["mappings"]` as `add_edge(mapping=)` does — which now also
+  accepts a spec directly; a checkpoint loaded afterwards keeps its
+  (possibly trained) weights.  A mapping without a complete spec is
+  refused by the writers with a message naming the argument to pass
+  (`to_dict(strict_mappings=False)` for display; the REST `GET /graph`
+  uses it).  The FMI exporter is unchanged (mapping weights never reach
+  the FMU).  Guide: algorithm_guide/coupling/interface_mapping.md,
+  "Serialisation".
 - **Multi-GPU hardware-session tooling** (local preparation for the
   human-supervised 4xA100 session; nothing here launches a pod).
   `benchmarks/multigpu/run_pod.py` is the pod-side runner: `--goal

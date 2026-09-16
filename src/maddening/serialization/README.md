@@ -49,6 +49,6 @@ gm_restored = from_dict(config, registry)
 
 ## What is / is not serialized
 
-- **Serialized:** node descriptors (type, name, timestep, params), edges, external input specs
-- **Not serialized:** runtime state (JAX arrays), edge transforms (functions), observers, compiled step
+- **Serialized:** node descriptors (type, name, timestep, params), edges (registered transform names, interface mappings as their `MappingSpec` — kind, hyper-parameters and point references; `from_dict(..., base_dir=)` locates `{"asset": ...}` files), external input specs
+- **Not serialized:** runtime state (JAX arrays) and mapping weights (checkpoints carry those), unregistered edge transforms (functions), observers, compiled step
 - After `from_dict`, call `gm.compile()` before running

@@ -187,7 +187,13 @@ def test_describe_has_no_weights_and_validation_errors():
     d = m.describe()
     assert d == {"kind": "rbf", "mode": "consistent", "shape": [3, 5],
                  "kernel": "multiquadric", "epsilon": 2.0, "polynomial": True,
-                 "ridge": 1e-8}
+                 "ridge": 1e-8,
+                 # small point sets are inlined into the spec; never the weights
+                 "points": {"source_points": {"inline": [0.0, 0.25, 0.5, 0.75, 1.0],
+                                              "dtype": "float64"},
+                            "target_points": {"inline": [0.0, 0.5, 1.0],
+                                              "dtype": "float64"}}}
+    assert "H" not in d and "weights" not in d
     with pytest.raises(ValueError, match="Unknown kernel"):
         rbf_mapping(np.linspace(0, 1, 5), np.linspace(0, 1, 3), kernel="cubic")
     with pytest.raises(ValueError, match="mode="):

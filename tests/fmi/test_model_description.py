@@ -7,6 +7,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
 
+from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.fmi.model_description import (
     FMIVariable,
@@ -170,3 +171,22 @@ class TestStabilityTagging:
         from maddening.core.compliance.metadata import StabilityLevel
         assert build_model_description._stability_level == \
             StabilityLevel.EVOLVING
+
+
+def test_interface_mapping_on_an_edge_leaves_the_model_description_unchanged(
+        bouncing_ball_graph):
+    """Mapping weights are graph-internal (``params["mappings"]``), not
+    FMU variables: the exported XML is identical with and without one."""
+    plain = build_model_description(bouncing_ball_graph, model_name="m").to_xml()
+
+    gm = GraphManager()
+    gm.add_node(BallNode(name="ball", timestep=1e-2,
+                         initial_position=1.0, initial_velocity=0.0))
+    gm.add_node(TableNode(name="table", timestep=1e-2))
+    gm.add_edge("table", "ball", "position", "table_position",
+                mapping=matrix_mapping([[1.0]]))
+    gm.compile()
+    assert gm.params["mappings"]           # the weights exist in the graph...
+    mapped = build_model_description(gm, model_name="m").to_xml()
+    assert mapped == plain                 # ...and never reach the FMU interface
+

@@ -147,6 +147,8 @@ def test_fmpy_drives_the_compiled_fmu_against_the_graph(tmp_path):
             output=["ball.position", "spring.position", "spring.params.stiffness"],
         )
     assert bridge.requests_served > 30
+    # the wrapper negotiated protocol 2: get replies and set requests were binary frames
+    assert bridge.binary_frames_served > 20 and bridge.binary_frames_received > 0
 
     ref = _graph()
     p = ref.params

@@ -6,9 +6,11 @@ form ``node_name/field_name``.  Internal multi-rate metadata lives
 under the ``_meta/`` prefix.  JAX arrays are converted to NumPy on
 save and back to JAX on load.
 
-v0.2 #8 additions: integrity manifest, ``save_state_with_manifest``,
-``load_state_with_manifest``, and ``download_and_load_state`` for the
-``RESUME_FROM_URL`` resume path.
+v0.2 #8 additions: integrity manifest, ``save_state_with_manifest``
+and ``load_state_with_manifest``.  The ``RESUME_FROM_URL`` transport
+(``download_and_load_state``) lives in :mod:`maddening.cloud.resume`
+since v0.4.0; the alias kept here is deprecated and removed in 1.0.
+This module stays dependency-free (stdlib + NumPy + JAX only).
 """
 
 from __future__ import annotations
@@ -16,8 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -467,111 +467,25 @@ def download_and_load_state(
     dest_dir: Optional[str | Path] = None,
     skip_integrity_check: bool = False,
 ) -> dict:
-    """Download a checkpoint + manifest from *url* and load it.
+    """Deprecated alias for :func:`maddening.cloud.resume.download_and_load_state`.
 
-    Supported URL schemes:
-      * ``file://`` — local file path
-      * ``http://`` / ``https://`` — HTTP GET
-      * ``s3://``, ``gs://`` / ``gcs://``, ``az://`` / ``abfs://`` /
-        ``azure://`` (and any other ``fsspec`` protocol, e.g. ``memory://``)
-        — via ``fsspec`` (C3, v0.4.0); install the matching backend
-        (``s3fs``, ``gcsfs``, ``adlfs``).  Credentials come from the
-        backend's usual environment / config.
-
-    A manifest at ``<url>.manifest.json`` is downloaded alongside the
-    .npz so the integrity check can run without a side channel.
-
-    Returns the manifest dict.
+    The resume-from-URL transport moved to the cloud package in v0.4.0;
+    this alias forwards to it and emits a :class:`DeprecationWarning`.
+    It is removed in 1.0.  The import of the cloud package is deferred
+    to call time so this core module never imports ``maddening.cloud``
+    (or ``fsspec``) at import time.
     """
-    import tempfile as _tempfile
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("file", "http", "https", "") and not _is_fsspec_scheme(parsed.scheme):
-        raise ValueError(
-            f"Unsupported URL scheme {parsed.scheme!r}; expected file://, "
-            "http://, https://, or an fsspec protocol (s3://, gs://, az://, ...)"
-        )
+    import warnings
 
-    if dest_dir is None:
-        # Per-call temp dir avoids cross-call leakage when multiple
-        # downloads target the same filename.
-        dest_dir = Path(_tempfile.mkdtemp(prefix="maddening_resume_"))
-    else:
-        dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    # Local filename = last URL path component.
-    fname = Path(parsed.path).name or "checkpoint.npz"
-    local_npz = dest_dir / fname
-    local_manifest = local_npz.with_suffix(local_npz.suffix + ".manifest.json")
-
-    _fetch(url, local_npz)
-    # The manifest is optional in skip_integrity mode; otherwise required.
-    try:
-        _fetch(url + ".manifest.json", local_manifest)
-    except Exception:
-        if not skip_integrity_check:
-            raise
-
-    return load_state_with_manifest(
-        graph_manager, local_npz,
-        skip_integrity_check=skip_integrity_check,
+    warnings.warn(
+        "maddening.core.simulation.checkpoint.download_and_load_state moved to "
+        "maddening.cloud.resume; the alias is removed in 1.0",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    from maddening.cloud.resume import download_and_load_state as _impl
 
-
-def _fetch(url: str, dest: Path) -> None:
-    """Copy *url* contents into *dest*.
-
-    Pure-stdlib so we don't pull in another HTTP dep.  Used by
-    :func:`download_and_load_state`.
-    """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme in ("file", ""):
-        # file:///path/to/x or /path/to/x
-        src = Path(parsed.path) if parsed.scheme else Path(url)
-        if not src.exists():
-            raise FileNotFoundError(f"file:// source not found: {src}")
-        dest.write_bytes(src.read_bytes())
-        return
-    if parsed.scheme in ("http", "https"):
-        with urllib.request.urlopen(url) as response:  # noqa: S310 — trusted
-            dest.write_bytes(response.read())
-        return
-    if _is_fsspec_scheme(parsed.scheme):
-        fs, path = _fsspec_open(url)
-        with fs.open(path, "rb") as f:
-            dest.write_bytes(f.read())
-        return
-    raise ValueError(f"unsupported URL scheme: {parsed.scheme}")
-
-
-_FSSPEC_SCHEMES = {"s3", "s3a", "gs", "gcs", "az", "abfs", "abfss", "azure", "adl", "memory"}
-_FSSPEC_BACKENDS = {"s3": "s3fs", "s3a": "s3fs", "gs": "gcsfs", "gcs": "gcsfs",
-                    "az": "adlfs", "abfs": "adlfs", "abfss": "adlfs", "azure": "adlfs",
-                    "adl": "adlfs"}
-
-
-def _is_fsspec_scheme(scheme: str) -> bool:
-    return scheme in _FSSPEC_SCHEMES
-
-
-def _fsspec_open(url: str):
-    """``(filesystem, path)`` for an fsspec URL, with actionable errors."""
-    scheme = urllib.parse.urlparse(url).scheme
-    try:
-        import fsspec  # noqa: PLC0415
-    except ImportError as e:
-        raise ImportError(
-            f"{scheme}:// checkpoint URLs need fsspec"
-            + (f" and {_FSSPEC_BACKENDS[scheme]}" if scheme in _FSSPEC_BACKENDS else "")
-            + f":  pip install fsspec {_FSSPEC_BACKENDS.get(scheme, '')}".rstrip()
-        ) from e
-    # "azure://" is not an fsspec protocol name; adlfs registers "az" / "abfs".
-    if scheme == "azure":
-        url = "az://" + url[len("azure://"):]
-    try:
-        fs, path = fsspec.core.url_to_fs(url)
-    except (ImportError, ValueError) as e:
-        raise ImportError(
-            f"no fsspec backend for {scheme}://; install "
-            f"{_FSSPEC_BACKENDS.get(scheme, 'the matching fsspec backend')}"
-        ) from e
-    return fs, path
+    return _impl(
+        graph_manager, url,
+        dest_dir=dest_dir, skip_integrity_check=skip_integrity_check,
+    )

@@ -1,8 +1,9 @@
 /*
  * Fuzz harness for the FMU C wrapper's untrusted-input surface: the
- * framed reply from the sidecar (length header + JSON body), the JSON
- * number parser, and the value-reference / value arrays the importer
- * hands in.  Each iteration feeds one fuzzed reply through a socketpair
+ * framed reply from the sidecar (length header + JSON body, or a
+ * binary-flagged frame with a random header-length / header / raw
+ * combination), the JSON number parser, the binary header parser, and
+ * the value-reference / value arrays the importer hands in.  Each iteration feeds one fuzzed reply through a socketpair
  * fake server into bridge_call / parse_values / the getters and the FMU
  * state path; memory errors are caught by ASan/UBSan (run via
  * tests/fmi/test_c_unit.py).  A deterministic xorshift PRNG makes every
@@ -32,10 +33,10 @@ static void null_logger(fmi3InstanceEnvironment env, fmi3Status st, fmi3String c
  * and no per-thread stacks for the sanitizers to track (a threaded
  * variant reached >7 GB RSS under libFuzzer on a CI runner). */
 static void preload_reply(int srv, const unsigned char *body, size_t len,
-                          size_t advertised, int close_early) {
+                          size_t advertised, int flag, int close_early) {
     if (close_early) { sock_close(srv); return; }
-    unsigned char h2[4] = { (unsigned char)(advertised >> 24), (unsigned char)(advertised >> 16),
-                            (unsigned char)(advertised >> 8), (unsigned char)advertised };
+    unsigned char h2[4];
+    put_be32(h2, (unsigned long)advertised | (flag ? FRAME_BINARY : 0ul));
     send_all(srv, (const char *)h2, 4);
     send_all(srv, (const char *)body, len);
     sock_close(srv);          /* the client's request is discarded; a short
@@ -48,8 +49,63 @@ static const char *const PIECES[] = {
     "\"token\":\"", "\\u0000", "\n", "[", "]]", ",,", "1.", ".5", "0x10", "+3",
 };
 
-static size_t build_reply(unsigned char *out, size_t cap) {
+static const char *const BIN_PIECES[] = {
+    "{\"ok\":true", "{\"ok\":false", ",\"n\":", "0", "1", "2", "7", "16", "4294967296", "-1", "1e3", " ",
+    ",\"dtype\":\"f64\"", ",\"dtype\":\"f32\"", ",\"error\":\"", "\"", "}", "{", "99999999999999999999",
+    ",\"values\":[1]", ",\"state\":\"QUJDRA==\"", "\\u0000", ",",
+};
+
+/* A binary payload: [u32 header_len][header][raw].  The header is built
+ * from JSON-ish pieces (or is a consistent {"ok":true,"n":N,...} that is
+ * then mutated); header_len is right most of the time, sometimes larger
+ * than the payload, sometimes past the header cap; the raw part is
+ * random bytes whose length only sometimes agrees with N. */
+static size_t build_binary_reply(unsigned char *out, size_t cap) {
+    char hdr[512];
+    size_t hl = 0;
+    if (rnd() % 2) {
+        size_t k = rnd() % 12;
+        for (size_t i = 0; i < k; ++i) {
+            const char *pc = BIN_PIECES[rnd() % (sizeof BIN_PIECES / sizeof *BIN_PIECES)];
+            size_t l = strlen(pc);
+            if (hl + l >= sizeof hdr) break;
+            memcpy(hdr + hl, pc, l); hl += l;
+        }
+    } else {
+        unsigned long nv = (unsigned long)(rnd() % 20);
+        const char *kind = (rnd() % 4 == 0) ? "" : ",\"dtype\":\"f64\"";
+        hl = (size_t)snprintf(hdr, sizeof hdr, "{\"ok\":true,\"n\":%lu%s}", nv, kind);
+        size_t flips = rnd() % 3;
+        for (size_t i = 0; i < flips && hl; ++i) hdr[rnd() % hl] = (char)rnd();
+    }
+    size_t raw = rnd() % 200;
+    if (rnd() % 4 == 0) raw = 8 * (rnd() % 20);            /* whole doubles */
+    if (4 + hl + raw > cap) raw = cap - 4 - hl;
+    unsigned long announced = (unsigned long)hl;
+    switch (rnd() % 8) {
+    case 0: announced = (unsigned long)(hl + raw + 1 + rnd() % 64); break;   /* past the payload */
+    case 1: announced = HDR_MAX + rnd() % 8; break;                          /* past the cap */
+    case 2: announced = (unsigned long)rnd(); break;                         /* anything */
+    default: break;
+    }
+    put_be32(out, announced);
+    memcpy(out + 4, hdr, hl);
+    for (size_t i = 0; i < raw; ++i) out[4 + hl + i] = (unsigned char)rnd();
+    return 4 + hl + raw;
+}
+
+static size_t build_reply(unsigned char *out, size_t cap, int *flag) {
     size_t n = 0;
+    *flag = 0;
+    if (rnd() % 3 == 0) {
+        *flag = 1;
+        if (rnd() % 8 == 0) {                        /* a JSON body under the binary flag */
+            n = rnd() % 64;
+            for (size_t i = 0; i < n; ++i) out[i] = (unsigned char)rnd();
+            return n;
+        }
+        return build_binary_reply(out, cap);
+    }
     switch (rnd() % 4) {
     case 0: {                                   /* random bytes */
         n = rnd() % (cap / 8);
@@ -89,7 +145,8 @@ static size_t build_reply(unsigned char *out, size_t cap) {
 }
 
 static void one_iteration(unsigned char *buf, size_t cap) {
-    size_t n = build_reply(buf, cap);
+    int flag;
+    size_t n = build_reply(buf, cap, &flag);
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) return;
     /* Bound the reply so it always fits the socket buffer un-read. */
@@ -97,17 +154,28 @@ static void one_iteration(unsigned char *buf, size_t cap) {
     setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof bufsz);
     setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof bufsz);
     size_t advertised = (rnd() % 8 == 0) ? n + rnd() % 64 : n;   /* sometimes lie about the length */
-    preload_reply(sv[1], buf, n, advertised, (rnd() % 16 == 0));
+    if (flag && rnd() % 32 == 0) advertised = FRAME_MAX_BINARY + rnd() % 1024;  /* over the cap */
+    preload_reply(sv[1], buf, n, advertised, flag, (rnd() % 16 == 0));
 
     Instance *in = (Instance *)calloc(1, sizeof *in);
     in->sock = sv[0]; in->log = null_logger;
+    in->binary = (int)(rnd() % 2);                 /* half the runs negotiated protocol 2 */
     fmi3ValueReference vr[8]; double vals[16];
     size_t nvr = rnd() % 8, nvals = rnd() % 16;
     for (size_t i = 0; i < 8; ++i) vr[i] = (fmi3ValueReference)rnd();
     for (size_t i = 0; i < 16; ++i) vals[i] = (double)(int64_t)rnd() / 1e6;
-    switch (rnd() % 5) {
+    switch (rnd() % 6) {
     case 0: do_get(in, vr, nvr, vals, nvals); break;
     case 1: do_set(in, vr, nvr, vals, nvals); break;
+    case 5: { /* set_state with importer-supplied bytes of either encoding */
+              unsigned char blob[64]; size_t bl = rnd() % 64;
+              for (size_t i = 0; i < bl; ++i) blob[i] = (rnd() % 2) ? (unsigned char)rnd() : 'A';
+              fmi3FMUState st = NULL;
+              if (fmi3DeserializeFMUState(NULL, blob, bl, &st) == fmi3OK) {
+                  fmi3SetFMUState((fmi3Instance)in, st);
+                  fmi3FreeFMUState(NULL, &st);
+              }
+              break; }
     case 2: { fmi3FMUState st = NULL;
               if (fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK) {
                   size_t sz = 0;

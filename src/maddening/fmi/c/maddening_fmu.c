@@ -2,10 +2,19 @@
  * MADDENING FMU C wrapper (FMI 3.0 co-simulation).
  *
  * The FMU binary owns no simulation state: every FMI call is marshalled
- * into a small JSON message and forwarded over a TCP socket to a Python
+ * into a small message and forwarded over a TCP socket to a Python
  * sidecar (maddening.fmi.tcp_bridge.FmuTcpBridge) that holds the
  * JAX-JITted graph.  Wire format: 4-byte big-endian length prefix + one
- * UTF-8 JSON object, both directions.
+ * frame, both directions.  Bit 31 of the prefix marks a *binary* frame
+ * ("[u32 BE header_len][header JSON][raw bytes]"), the low 31 bits are
+ * the payload length; a frame without the bit is one UTF-8 JSON object.
+ *
+ * The wrapper offers protocol 2 at hello ({"op":"hello","protocol":2,
+ * "binary":true}).  A bridge that answers with "protocol":2 and
+ * "binary":true then gets bulk values as raw little-endian float64
+ * (set requests, get replies) and FMU-state blobs as raw bytes (no
+ * base64, no %.17g / strtod).  A bridge whose hello reply lacks
+ * "protocol" is protocol 1: everything stays JSON, as before.
  *
  * The endpoint is read from "<resourcePath>/endpoint.txt" ("host:port"),
  * or from the MADDENING_FMU_ENDPOINT environment variable.
@@ -48,6 +57,10 @@
 
 #define MADDENING_FMU_VERSION "0.4.0-dev"
 #define REQ_CAP (1u << 20)
+#define FRAME_BINARY 0x80000000ul            /* bit 31 of the length prefix */
+#define FRAME_LEN_MASK 0x7FFFFFFFul
+#define FRAME_MAX_BINARY (64ul * 1024ul * 1024ul)   /* the bridge's frame limit */
+#define HDR_MAX 4096                         /* a binary reply's JSON header */
 
 typedef struct {
     sock_t sock;
@@ -60,6 +73,11 @@ typedef struct {
     size_t req_cap;
     char *resp;     /* last response (NUL-terminated) */
     size_t resp_cap;
+    int binary;     /* hello negotiated protocol 2 with binary frames */
+    int resp_binary;       /* the last reply was a binary frame */
+    char hdr[HDR_MAX];     /* its JSON header, NUL-terminated */
+    const char *raw;       /* its raw part (points into resp) */
+    size_t raw_len;
 } Instance;
 
 /* ------------------------------------------------------------------ util */
@@ -97,15 +115,55 @@ static int recv_all(sock_t s, char *buf, size_t n) {
     return 0;
 }
 
-/* Send `req` (JSON text) and store the JSON reply in in->resp.  Returns
- * fmi3OK when the reply carries "ok":true, fmi3Error otherwise (with the
- * server's error text logged). */
-static fmi3Status bridge_call(Instance *in, const char *req) {
+/* Wire order for binary frames is little-endian float64; the host
+ * converts only if it is big-endian (a plain memcpy everywhere else). */
+static int host_is_little_endian(void) {
+    unsigned x = 1u;
+    return *(const unsigned char *)&x == 1u;
+}
+
+static void f64_from_le(double *out, const unsigned char *src, size_t n) {
+    memcpy(out, src, n * sizeof(double));
+    if (!host_is_little_endian()) {
+        unsigned char *p = (unsigned char *)out;
+        for (size_t i = 0; i < n; ++i, p += 8)
+            for (size_t j = 0; j < 4; ++j) { unsigned char t = p[j]; p[j] = p[7 - j]; p[7 - j] = t; }
+    }
+}
+
+static void f64_to_le(unsigned char *dst, const double *src, size_t n) {
+    memcpy(dst, src, n * sizeof(double));
+    if (!host_is_little_endian()) {
+        for (size_t i = 0; i < n; ++i, dst += 8)
+            for (size_t j = 0; j < 4; ++j) { unsigned char t = dst[j]; dst[j] = dst[7 - j]; dst[7 - j] = t; }
+    }
+}
+
+static void put_be32(unsigned char *p, unsigned long v) {
+    p[0] = (unsigned char)(v >> 24); p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);  p[3] = (unsigned char)v;
+}
+
+static unsigned long get_be32(const unsigned char *p) {
+    return ((unsigned long)p[0] << 24) | ((unsigned long)p[1] << 16)
+         | ((unsigned long)p[2] << 8) | (unsigned long)p[3];
+}
+
+/* Send one frame (`n` bytes of `req`; `binary` sets bit 31 of the
+ * prefix) and store the reply in in->resp.  A JSON reply must carry
+ * "ok":true.  A binary reply is split: its JSON header is copied,
+ * NUL-terminated, into in->hdr (which must carry "ok":true) and
+ * in->raw / in->raw_len point at the raw part inside in->resp.  Returns
+ * fmi3OK or fmi3Error (with the server's error text logged). */
+static fmi3Status bridge_xfer(Instance *in, const char *req, size_t n, int binary) {
     unsigned char head[4];
-    size_t n = strlen(req);
-    head[0] = (unsigned char)(n >> 24); head[1] = (unsigned char)(n >> 16);
-    head[2] = (unsigned char)(n >> 8);  head[3] = (unsigned char)n;
+    in->resp_binary = 0; in->raw = NULL; in->raw_len = 0; in->hdr[0] = '\0';
     if (in->resp) in->resp[0] = '\0';
+    if (n > FRAME_LEN_MASK) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: request exceeds the frame size");
+        return fmi3Error;
+    }
+    put_be32(head, (unsigned long)n | (binary ? FRAME_BINARY : 0ul));
     if (send_all(in->sock, (const char *)head, 4) || send_all(in->sock, req, n)) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: send failed");
         return fmi3Error;
@@ -114,8 +172,14 @@ static fmi3Status bridge_call(Instance *in, const char *req) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: recv failed");
         return fmi3Error;
     }
-    size_t m = ((size_t)head[0] << 24) | ((size_t)head[1] << 16)
-             | ((size_t)head[2] << 8) | (size_t)head[3];
+    unsigned long word = get_be32(head);
+    int reply_binary = (word & FRAME_BINARY) != 0;
+    size_t m = (size_t)(word & FRAME_LEN_MASK);
+    if (reply_binary && m > FRAME_MAX_BINARY) {
+        /* the peer is out of step with us; never allocate for it */
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply exceeds the frame limit");
+        return fmi3Error;
+    }
     if (m + 1 > in->resp_cap) {
         char *p = (char *)realloc(in->resp, m + 1);
         if (!p) return fmi3Fatal;
@@ -131,11 +195,79 @@ static fmi3Status bridge_call(Instance *in, const char *req) {
         return fmi3Error;
     }
     in->resp[m] = '\0';
-    if (strstr(in->resp, "\"ok\":true") == NULL) {
-        const char *e = strstr(in->resp, "\"error\":\"");
-        inst_log(in, fmi3Error, "logStatusError", e ? e + 9 : in->resp);
+    if (!reply_binary) {
+        if (strstr(in->resp, "\"ok\":true") == NULL) {
+            const char *e = strstr(in->resp, "\"error\":\"");
+            inst_log(in, fmi3Error, "logStatusError", e ? e + 9 : in->resp);
+            return fmi3Error;
+        }
+        return fmi3OK;
+    }
+    /* binary: [u32 BE header_len][header JSON][raw]; nothing is trusted */
+    if (m < 4) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply too short");
         return fmi3Error;
     }
+    unsigned long hl = get_be32((const unsigned char *)in->resp);
+    if (hl > m - 4 || hl >= sizeof in->hdr) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply header is malformed");
+        return fmi3Error;
+    }
+    memcpy(in->hdr, in->resp + 4, hl);
+    in->hdr[hl] = '\0';
+    in->raw = in->resp + 4 + hl;
+    in->raw_len = m - 4 - hl;
+    in->resp_binary = 1;
+    if (strstr(in->hdr, "\"ok\":true") == NULL) {
+        const char *e = strstr(in->hdr, "\"error\":\"");
+        inst_log(in, fmi3Error, "logStatusError", e ? e + 9 : in->hdr);
+        return fmi3Error;
+    }
+    return fmi3OK;
+}
+
+/* Send `req` (JSON text) as a JSON frame. */
+static fmi3Status bridge_call(Instance *in, const char *req) {
+    return bridge_xfer(in, req, strlen(req), 0);
+}
+
+/* "n":<count> of the last binary reply's header; -1 if absent or not a
+ * plain non-negative decimal. */
+static int hdr_count(const Instance *in, size_t *count) {
+    const char *p = strstr(in->hdr, "\"n\":");
+    if (!p) return -1;
+    p += 4;
+    while (*p == ' ') ++p;
+    if (*p < '0' || *p > '9') return -1;
+    char *end;
+    errno = 0;
+    unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || errno == ERANGE || v > (unsigned long long)FRAME_MAX_BINARY) return -1;
+    *count = (size_t)v;
+    return 0;
+}
+
+/* The raw doubles of a binary get reply: the header's count must match
+ * the raw length exactly and cover the caller's array. */
+static fmi3Status parse_binary_values(Instance *in, double *out, size_t n) {
+    size_t have;
+    if (hdr_count(in, &have)) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply has no valid count");
+        return fmi3Error;
+    }
+    if (strstr(in->hdr, "\"dtype\":\"f64\"") == NULL) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply is not float64");
+        return fmi3Error;
+    }
+    if (have > in->raw_len / sizeof(double) || have * sizeof(double) != in->raw_len) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary reply length mismatch");
+        return fmi3Error;
+    }
+    if (have < n) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: too few values in reply");
+        return fmi3Error;
+    }
+    if (n > 0) f64_from_le(out, (const unsigned char *)in->raw, n);
     return fmi3OK;
 }
 
@@ -179,22 +311,40 @@ static int req_reserve(Instance *in, size_t need) {
     return 0;
 }
 
-/* Build {"op":"set","vr":[..],"values":[..]} from any numeric width. */
+/* Build a set request from any numeric width: a binary frame
+ * ({"op":"set","vr":[..],"n":N,"dtype":"f64"} + N raw little-endian
+ * doubles) after a protocol-2 hello, else the JSON
+ * {"op":"set","vr":[..],"values":[..]} with %.17g text. */
 static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr,
                          const double values[], size_t nvalues) {
+    if (in->binary && nvalues > FRAME_MAX_BINARY / sizeof(double)) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: set exceeds the frame limit");
+        return fmi3Error;
+    }
+    for (size_t i = 0; i < nvalues; ++i) {
+        if (isnan(values[i]) || isinf(values[i])) {
+            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: non-finite value");
+            return fmi3Error;
+        }
+    }
+    if (in->binary) {
+        if (req_reserve(in, 4 + 96 + 24 * nvr + sizeof(double) * nvalues)) return fmi3Fatal;
+        char *h = in->req + 4;
+        char *w = h;
+        w += sprintf(w, "{\"op\":\"set\",\"vr\":[");
+        for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
+        w += sprintf(w, "],\"n\":%lu,\"dtype\":\"f64\"}", (unsigned long)nvalues);
+        size_t hl = (size_t)(w - h);
+        put_be32((unsigned char *)in->req, (unsigned long)hl);
+        f64_to_le((unsigned char *)w, values, nvalues);
+        return bridge_xfer(in, in->req, 4 + hl + sizeof(double) * nvalues, 1);
+    }
     if (req_reserve(in, 64 + 24 * nvr + 32 * nvalues)) return fmi3Fatal;
     char *w = in->req;
     w += sprintf(w, "{\"op\":\"set\",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "],\"values\":[");
-    for (size_t i = 0; i < nvalues; ++i) {
-        double v = values[i];
-        if (isnan(v) || isinf(v)) {
-            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: non-finite value");
-            return fmi3Error;
-        }
-        w += sprintf(w, "%s%.17g", i ? "," : "", v);
-    }
+    for (size_t i = 0; i < nvalues; ++i) w += sprintf(w, "%s%.17g", i ? "," : "", values[i]);
     sprintf(w, "]}");
     return bridge_call(in, in->req);
 }
@@ -208,7 +358,19 @@ static fmi3Status do_get(Instance *in, const fmi3ValueReference vr[], size_t nvr
     sprintf(w, "]}");
     fmi3Status st = bridge_call(in, in->req);
     if (st != fmi3OK) return st;
+    if (in->resp_binary) return parse_binary_values(in, out, nvalues);
     return parse_values(in, out, nvalues);
+}
+
+/* A hello reply negotiates binary frames when it is a JSON frame that
+ * carries "protocol" >= 2 and "binary":true; anything else (an older
+ * bridge, in particular) leaves the instance on JSON. */
+static int hello_negotiated_binary(const Instance *in) {
+    if (in->resp == NULL || in->resp_binary) return 0;
+    const char *p = strstr(in->resp, "\"protocol\":");
+    if (!p) return 0;
+    long v = strtol(p + 11, NULL, 10);
+    return v >= 2 && strstr(in->resp, "\"binary\":true") != NULL;
 }
 
 static int read_endpoint(fmi3String resource_path, char *host, size_t hostcap, int *port) {
@@ -317,9 +479,10 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: cannot connect to sidecar");
         free(in); return NULL;
     }
-    if (bridge_call(in, "{\"op\":\"hello\"}") != fmi3OK) {
+    if (bridge_call(in, "{\"op\":\"hello\",\"protocol\":2,\"binary\":true}") != fmi3OK) {
         sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
     }
+    in->binary = hello_negotiated_binary(in);
     if (instantiationToken && *instantiationToken) {
         char needle[300];
         snprintf(needle, sizeof needle, "\"token\":\"%s\"", instantiationToken);
@@ -490,7 +653,8 @@ FMI3_Export fmi3Status fmi3GetVariableDependencies(
     return fmi3OK;
 }
 
-/* ---- FMU state: an opaque base64 blob produced by the sidecar ---- */
+/* ---- FMU state: an opaque blob produced by the sidecar (raw npz bytes
+ * on the binary protocol, base64 text on JSON) ---- */
 
 typedef struct { char *blob; size_t n; } FmuState;
 
@@ -499,6 +663,20 @@ FMI3_Export fmi3Status fmi3GetFMUState(fmi3Instance instance, fmi3FMUState *FMUS
     if (!in) return fmi3Error;
     if (bridge_call(in, "{\"op\":\"get_state\"}") != fmi3OK) return fmi3Error;
     if (in->resp == NULL) return fmi3Error;
+    if (in->resp_binary) {
+        size_t n;
+        if (hdr_count(in, &n) || n != in->raw_len) {
+            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: binary state length mismatch");
+            return fmi3Error;
+        }
+        FmuState *st = (FmuState *)malloc(sizeof *st);
+        if (!st) return fmi3Fatal;
+        st->blob = (char *)malloc(n + 1);
+        if (!st->blob) { free(st); return fmi3Fatal; }
+        memcpy(st->blob, in->raw, n); st->blob[n] = '\0'; st->n = n;
+        *FMUState = st;
+        return fmi3OK;
+    }
     const char *p = strstr(in->resp, "\"state\":\"");
     if (!p) return fmi3Error;
     p += 9;
@@ -517,6 +695,22 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
     Instance *in = (Instance *)instance;
     FmuState *st = (FmuState *)FMUState;
     if (!in || !st) return fmi3Error;
+    if (in->binary) {
+        /* length-delimited raw bytes: nothing the importer supplies can
+         * break the framing, the bridge validates the archive itself */
+        if (st->n > FRAME_MAX_BINARY) {
+            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: FMU state exceeds the frame limit");
+            return fmi3Error;
+        }
+        char hdr[64];
+        int hl = snprintf(hdr, sizeof hdr, "{\"op\":\"set_state\",\"n\":%lu}", (unsigned long)st->n);
+        if (hl <= 0 || (size_t)hl >= sizeof hdr) return fmi3Error;
+        if (req_reserve(in, 4 + (size_t)hl + st->n)) return fmi3Fatal;
+        put_be32((unsigned char *)in->req, (unsigned long)hl);
+        memcpy(in->req + 4, hdr, (size_t)hl);
+        memcpy(in->req + 4 + hl, st->blob, st->n);
+        return bridge_xfer(in, in->req, 4 + (size_t)hl + st->n, 1);
+    }
     /* The blob is embedded verbatim in a JSON string: only the base64
      * alphabet the bridge produces is allowed, so importer-supplied bytes
      * (fmi3DeserializeFMUState) can never break the request framing. */

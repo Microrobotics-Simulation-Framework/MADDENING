@@ -50,11 +50,79 @@ and unit from the target node's `boundary_input_spec`); parameters are
 parameter goes through the sidecar's bounds check, so an importer cannot
 drive the graph with a constant it declares invalid.
 
-**Transport.**  Each message is a 4-byte big-endian length followed by one
-JSON object (`{"op": "set"|"get"|"step"|"get_state"|"set_state"|"reset"|
-"terminate"|"hello", ...}`); see `maddening.fmi.tcp_bridge` for the exact
-schema.  Nothing but libc is required on the importer's side, which is why
-ZMQ is not used for the FMU path.
+**Transport.**  Each message is a 4-byte big-endian length prefix followed
+by one frame: a JSON object (`{"op": "set"|"get"|"step"|"get_state"|
+"set_state"|"reset"|"terminate"|"hello", ...}`) or, once negotiated, a
+*binary* frame for bulk payloads; see "Wire protocol" below and
+`maddening.fmi.tcp_bridge` for the exact schema.  Nothing but libc is
+required on the importer's side, which is why ZMQ is not used for the FMU
+path.
+
+## Wire protocol
+
+```
+ length prefix (4 bytes, big-endian)          payload
+ ┌─┬───────────────────────────────┐
+ │0│      payload length (31 bit)  │  one UTF-8 JSON object        (JSON frame)
+ └─┴───────────────────────────────┘
+ ┌─┬───────────────────────────────┐  ┌────────────┬─────────────┬───────────┐
+ │1│      payload length (31 bit)  │  │ header_len │ header JSON │ raw bytes │  (binary frame)
+ └─┴───────────────────────────────┘  │  u32 BE    │             │           │
+                                      └────────────┴─────────────┴───────────┘
+```
+
+Bit 31 of the prefix marks a binary frame; the low 31 bits are the payload
+length (64 MiB limit either way).  A binary payload is a short JSON
+*header* carrying `op` and metadata, then the *raw* data, so bulk values
+and FMU-state blobs never pass through JSON text (no `%.17g` / `strtod`,
+no base64):
+
+| message                | header                                          | raw part                    |
+|------------------------|-------------------------------------------------|-----------------------------|
+| `set` request          | `{"op":"set","vr":[..],"n":N,"dtype":"f64"}`    | N little-endian float64     |
+| `get` reply            | `{"ok":true,"n":N,"dtype":"f64"}`               | N little-endian float64     |
+| `set_state` request    | `{"op":"set_state","n":L}`                      | L bytes of `npz`            |
+| `get_state` reply      | `{"ok":true,"n":L}`                             | L bytes of `npz`            |
+
+Everything else (`hello`, `get` *requests*, `step`, `reset`, `terminate`,
+every error reply) is a JSON frame.
+
+**Negotiation.**  The C wrapper opens with
+`{"op":"hello","protocol":2,"binary":true}`.  A bridge of this version
+answers `{"ok":true, ..., "protocol":2, "binary":true}` and, for that
+connection only, sends `get` / `get_state` replies as binary frames and
+accepts binary `set` / `set_state` requests.  A client whose hello lacks
+`protocol` (or says `protocol: 1`, or omits `binary: true`) gets the
+protocol-1 behaviour: JSON everywhere, byte for byte what v0.3.0 spoke.
+A client announcing a protocol the bridge does not know is refused at
+hello with a clear error.  Conversely, the new wrapper against an older
+bridge (a hello reply without `protocol`) falls back to JSON for every
+message.  The bridge counts what it did in `binary_frames_served` (binary
+replies) and `binary_frames_received` (well-formed binary requests).
+
+**Float64 only.**  The FMU's variable surface is Float64 (the wrapper
+widens every FMI width, `fmi3GetFloat32` included, to `double`), so the
+wire carries float64 only: a float32 output is widened on the way out and
+a float32 input narrowed by the bridge on the way in.  Wire order is
+little-endian; the C side converts only on a big-endian host (a `memcpy`
+everywhere else).
+
+**Robustness.**  Nothing in a binary frame is trusted: the bridge checks
+`header_len` against the payload, `n` against the raw length, the dtype,
+the value references, bounds, read-only-ness and the state archive exactly
+as for JSON, and answers a malformed frame with an error reply rather
+than dropping the instance; the C side checks the header count against
+the raw length and against the caller's array before any `memcpy`, and
+refuses a flagged length over the limit before allocating for it.  The
+serialized FMU state is opaque to the importer; its encoding (raw `npz`
+on protocol 2, base64 text on protocol 1) is that of the connection it
+came from, so a state serialized under one protocol must be restored
+under the same one.
+
+**Why.**  A `get` of a 10^6-element field costs ~2.3 s as JSON text
+(~18 bytes per value plus `json.loads`) and ~27 ms as a binary frame
+(8 bytes per value) over loopback, measured by
+`tests/fmi/test_binary_frames.py::test_million_element_get_binary_is_faster_than_json`.
 
 ## Why TCP + JSON, and when ZMQ would be worth it
 
@@ -90,8 +158,11 @@ The trade-off, recorded so the choice can be revisited deliberately:
 many FMU instances against one sidecar process (then `ROUTER` on the
 Python side, still TCP framing in C), or a deployment where the sidecar
 restarts and instances must survive it (then reconnect logic, which
-ZMQ gives for free).  The payload format would not change either way,
-so the C wrapper's request builder and reply parser carry over.
+ZMQ gives for free).  The frame payloads (JSON objects and the binary
+header + raw layout above) would not change either way, so the C
+wrapper's request builder and reply parser carry over; only the 4-byte
+length prefix would be replaced by ZMQ's own message framing (the binary
+flag would move into the header).
 
 ## Multi-rate graphs: clocks
 

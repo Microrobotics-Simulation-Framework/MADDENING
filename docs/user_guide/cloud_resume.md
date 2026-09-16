@@ -107,7 +107,7 @@ accept:
 | `http://…/snap.npz` | HTTP GET via the stdlib `urllib`.  No auth headers (yet); use a presigned URL if you need them. |
 | `https://…/snap.npz` | Same as `http://` over TLS. |
 | Bare path (`/path/to/snap.npz`) | Treated as `file://`. |
-| `s3://`, `gs://`, `azure://` | **Not yet wired** — call out to your orchestrator's CLI (`aws s3 cp`, `gsutil cp`) and present a presigned `https://` URL instead. |
+| `s3://`, `gs://`, `az://` / `abfs://` / `azure://`, `memory://`, any other fsspec protocol | Read through [fsspec](https://filesystem-spec.readthedocs.io/) (v0.4.0).  Install `fsspec` plus the backend for the scheme (`s3fs`, `gcsfs`, `adlfs`); a missing backend raises an `ImportError` naming the package to install.  Credentials come from the backend's usual environment (e.g. `AWS_*` variables). |
 
 ## What's still on you, the orchestrator
 
@@ -126,11 +126,11 @@ The MADDENING layer deliberately stops at "write the local file" and
   all support short-lived URLs; pass that as `RESUME_FROM_URL` on
   the relaunch.
 
-When MADDENING grows native `s3://` / `gs://` support (evaluated and
-deferred for v0.3.0 — slipped to v0.4 unless MICROROBOTICA Light
-needs it sooner; see `plans/MADDENING_v0.3.0_PLAN.md` §C3), this
-whole layer collapses to one `RESUME_FROM_URL` and the
-orchestrator's CLI calls go away.
+With the fsspec schemes (v0.4.0) the upload/presign steps are
+optional: an orchestrator that can grant the pod bucket credentials
+hands over one `RESUME_FROM_URL=s3://…` and the CLI calls go away.
+The local-file-plus-presigned-URL pattern above still works and needs
+no extra dependencies.
 
 ## The full preempt-resume contract
 
@@ -202,8 +202,9 @@ against a `_FakeCloudSession` + local tempfile.  What's
 *not* yet covered:
 
 * End-to-end RunPod spot preemption (requires real credentials).
-* `s3://` / `gs://` / `azure://` URL schemes (orchestrator's
-  problem until the cloud-storage abstraction lands).
+* `s3://` / `gs://` / `az://` against real buckets (the fsspec path is
+  exercised with the in-memory `memory://` filesystem only; the
+  backends themselves are third-party).
 * Multi-snapshot lifecycle (last-N retention, garbage collection).
 
 For the first two, the trade-off is: until you wire them, your

@@ -120,3 +120,24 @@ def test_perfetto_export_carries_iteration_stats():
     ev = [e for e in d["traceEvents"] if e["name"] == "coupling_overhead"][0]
     assert ev["args"]["method"] == "measured"
     assert ev["args"]["iteration_stats"]["a+b"]["mean"] == 4.0
+
+
+def test_profile_multirate_graph_with_coupling():
+    """Multi-rate resets the step counter in ``_meta``; the profiler's
+    reset-to-initial and the one-iteration variant must both keep the
+    ``_meta`` structure valid, and the report must be complete."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("a", 0.01, initial_position=0.0))
+    gm.add_node(SpringDamperNode("b", 0.01, initial_position=3.0))
+    gm.add_node(SpringDamperNode("slow", 0.02, initial_position=1.0))   # graph-level 2x rate
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.add_edge("b", "a", "position", "anchor_position")
+    gm.add_edge("b", "slow", "position", "anchor_position")
+    gm.add_coupling_group(["a", "b"], max_iterations=15, tolerance=1e-8)
+    gm.compile()
+    assert gm._is_multirate
+    rep = profile_graph(gm, n_steps=8, n_warmup=1)
+    assert rep.coupling_overhead_method == "measured"
+    assert "a+b" in rep.coupling_iter_stats
+    assert "step_count" in gm._state["_meta"]
+    gm.step()   # still steps after profiling

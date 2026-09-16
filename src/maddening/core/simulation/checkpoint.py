@@ -429,6 +429,11 @@ def download_and_load_state(
     Supported URL schemes:
       * ``file://`` — local file path
       * ``http://`` / ``https://`` — HTTP GET
+      * ``s3://``, ``gs://`` / ``gcs://``, ``az://`` / ``abfs://`` /
+        ``azure://`` (and any other ``fsspec`` protocol, e.g. ``memory://``)
+        — via ``fsspec`` (C3, v0.4.0); install the matching backend
+        (``s3fs``, ``gcsfs``, ``adlfs``).  Credentials come from the
+        backend's usual environment / config.
 
     A manifest at ``<url>.manifest.json`` is downloaded alongside the
     .npz so the integrity check can run without a side channel.
@@ -437,10 +442,10 @@ def download_and_load_state(
     """
     import tempfile as _tempfile
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("file", "http", "https", ""):
+    if parsed.scheme not in ("file", "http", "https", "") and not _is_fsspec_scheme(parsed.scheme):
         raise ValueError(
-            f"Unsupported URL scheme {parsed.scheme!r}; "
-            "expected file://, http://, or https://"
+            f"Unsupported URL scheme {parsed.scheme!r}; expected file://, "
+            "http://, https://, or an fsspec protocol (s3://, gs://, az://, ...)"
         )
 
     if dest_dir is None:
@@ -487,4 +492,43 @@ def _fetch(url: str, dest: Path) -> None:
         with urllib.request.urlopen(url) as response:  # noqa: S310 — trusted
             dest.write_bytes(response.read())
         return
+    if _is_fsspec_scheme(parsed.scheme):
+        fs, path = _fsspec_open(url)
+        with fs.open(path, "rb") as f:
+            dest.write_bytes(f.read())
+        return
     raise ValueError(f"unsupported URL scheme: {parsed.scheme}")
+
+
+_FSSPEC_SCHEMES = {"s3", "s3a", "gs", "gcs", "az", "abfs", "abfss", "azure", "adl", "memory"}
+_FSSPEC_BACKENDS = {"s3": "s3fs", "s3a": "s3fs", "gs": "gcsfs", "gcs": "gcsfs",
+                    "az": "adlfs", "abfs": "adlfs", "abfss": "adlfs", "azure": "adlfs",
+                    "adl": "adlfs"}
+
+
+def _is_fsspec_scheme(scheme: str) -> bool:
+    return scheme in _FSSPEC_SCHEMES
+
+
+def _fsspec_open(url: str):
+    """``(filesystem, path)`` for an fsspec URL, with actionable errors."""
+    scheme = urllib.parse.urlparse(url).scheme
+    try:
+        import fsspec  # noqa: PLC0415
+    except ImportError as e:
+        raise ImportError(
+            f"{scheme}:// checkpoint URLs need fsspec"
+            + (f" and {_FSSPEC_BACKENDS[scheme]}" if scheme in _FSSPEC_BACKENDS else "")
+            + f":  pip install fsspec {_FSSPEC_BACKENDS.get(scheme, '')}".rstrip()
+        ) from e
+    # "azure://" is not an fsspec protocol name; adlfs registers "az" / "abfs".
+    if scheme == "azure":
+        url = "az://" + url[len("azure://"):]
+    try:
+        fs, path = fsspec.core.url_to_fs(url)
+    except (ImportError, ValueError) as e:
+        raise ImportError(
+            f"no fsspec backend for {scheme}://; install "
+            f"{_FSSPEC_BACKENDS.get(scheme, 'the matching fsspec backend')}"
+        ) from e
+    return fs, path

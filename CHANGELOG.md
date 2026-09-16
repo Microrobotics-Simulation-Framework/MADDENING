@@ -273,6 +273,16 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   per declared input on every call (~1.5 ms/step on GPU for a graph with
   external inputs stepped without explicit inputs); the zero arrays are
   now allocated once per compile and shared (outer dicts stay fresh).
+- Differentiating through `lax.scan` over a coupled step failed when a
+  node in the coupling group had an integer / boolean state leaf
+  (`UnexpectedTracerError` in reverse mode, a missing constant handler
+  in forward mode): `closure_convert` hoisted the leaf as an integer
+  constant of the IFT `custom_jvp`, which JAX cannot linearise under a
+  scan.  The solver now captures float32 images of non-float leaves
+  before `closure_convert` and restores their dtype inside, and keeps
+  such fields out of the fixed-point vector altogether (they are
+  recomputed from the pre-step state on every pass).  Found by a
+  blind-spot test; reproduced outside MADDENING first.
 - `unflatten_coupled_state` returned every field as float32, so an
   integer / boolean leaf of a node inside a coupling group came back as
   float after each step (semantic drift, and a retrace of the jitted

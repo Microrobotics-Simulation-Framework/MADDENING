@@ -52,3 +52,4 @@ anomalies:
     workaround: "Manually verify CFL condition: dt * alpha / dx^2 < 0.5"
     resolution_status: "open"
     github_issue: null
+

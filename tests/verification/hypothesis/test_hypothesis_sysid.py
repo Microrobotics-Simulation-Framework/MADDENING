@@ -501,3 +501,44 @@ class TestFIM:
         sub = {k: gm.params["nodes"]["s"][k] for k in names}
         with pytest.raises(ValueError, match="scale"):
             fim(_residual_fn(gm, obs, gm.params, names), sub, scale="absolute")
+
+
+# ---------------------------------------------------------------------------
+# Multiple shooting (blind-spot review 2026-09-16)
+# ---------------------------------------------------------------------------
+
+
+class TestMultipleShooting:
+
+    @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st)
+    @settings(max_examples=25, deadline=None)
+    def test_seeded_window_states_reproduce_teacher_forcing(self, single, truth, init, tiling):
+        """With ``init_window_states`` (the measured window starts) and any
+        continuity weight, multiple shooting equals the teacher-forced loss
+        at the truth (both ~0) and its window-state gradient is finite —
+        for every tiling incl. ``sample_every=2``."""
+        from maddening.sysid import init_window_states
+        gm = single
+        n_steps, sample_every, window = tiling
+        note(f"truth={truth} init={init} tiling={tiling}")
+        p_truth = _with_params(gm, "s", truth)
+        _set_state(gm, "s", init["position"], init["velocity"])
+        obs = _observe(gm, n_steps, p_truth, sample_every)
+        ws = init_window_states(obs, window)
+        assert ws["s"]["position"].shape == ((n_steps // sample_every) // window,)
+        ms = jax.jit(lambda p, w: windowed_loss(
+            gm, p, obs, obs_fn=lambda h: h["s"]["position"], window=window,
+            sample_every=sample_every, window_states=w, continuity_weight=0.7))
+        tf = jax.jit(lambda p: windowed_loss(
+            gm, p, obs, obs_fn=lambda h: h["s"]["position"], window=window,
+            sample_every=sample_every))
+        scale = _sum_sq(obs["s"]["position"])
+        a, b = float(ms(p_truth, ws)), float(tf(p_truth))
+        assert 0.0 <= a <= 1e-9 * (1.0 + scale) and abs(a - b) <= 1e-9 * (1.0 + scale), (a, b)
+        g = jax.grad(lambda w: ms(p_truth, w))(ws)
+        assert _finite_tree(g)
+        # moving one window start off the data costs something
+        if ws["s"]["position"].shape[0] > 1:
+            bad = jax.tree.map(lambda x: x, ws)
+            bad["s"]["position"] = bad["s"]["position"].at[1].add(0.3)
+            assert float(ms(p_truth, bad)) > 0.0

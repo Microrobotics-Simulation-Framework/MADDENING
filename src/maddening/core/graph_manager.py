@@ -736,7 +736,25 @@ def _run_coupled_block_impl(
 
     # Save the initial state for each node at the beginning of
     # the timestep -- this is what we always integrate FROM.
-    initial_node_states = {nn: new_state[nn] for nn in group_node_names}
+    # Float32 *images* of the pre-step states: ``one_pass`` closes over
+    # them, and an integer / boolean leaf hoisted by ``closure_convert``
+    # into the IFT custom_jvp's constants cannot be linearised under a
+    # ``lax.scan`` (see ``_run_ift_forward``).  ``_pre(nn)`` restores the
+    # dtypes at the point of use; exact for |value| < 2**24.
+    _init_dtypes = {nn: {f: v.dtype for f, v in new_state[nn].items()} for nn in group_node_names}
+    initial_node_states = {
+        nn: {
+            f: (v if jnp.issubdtype(v.dtype, jnp.floating) else v.astype(jnp.float32))
+            for f, v in new_state[nn].items()
+        }
+        for nn in group_node_names
+    }
+
+    def _pre(nn):
+        return {
+            f: (v if v.dtype == _init_dtypes[nn][f] else v.astype(_init_dtypes[nn][f]))
+            for f, v in initial_node_states[nn].items()
+        }
 
     def _get_dt(nn):
         spec = nodes[nn]
@@ -857,7 +875,7 @@ def _run_coupled_block_impl(
     def _run_substeps(nn, n_substeps, sub_dt, s_prev, s_cur,
                        flux_s=None, s_prev_prev=None):
         """Run n_substeps sub-steps for a fast node using lax.scan."""
-        init_sub_state = initial_node_states[nn]
+        init_sub_state = _pre(nn)
 
         def substep_body(sub_state, sub_idx):
             alpha = (sub_idx + 1.0) / n_substeps
@@ -910,7 +928,7 @@ def _run_coupled_block_impl(
                 # Interface overrides already applied per sub-step
             else:
                 bi = _resolve_boundary(nn, s, flux_s)
-                pre = initial_node_states[nn]
+                pre = _pre(nn)
                 s[nn] = _node_update(nodes[nn], pre, bi, _get_dt(nn), _np(nn))
                 s[nn] = _apply_interface_overrides(
                     s[nn], pre, bi, _get_dt(nn), nodes[nn].node,
@@ -948,7 +966,7 @@ def _run_coupled_block_impl(
             else:
                 # Optionally place computation on assigned device
                 bi = _resolve_boundary(nn, latest_results, flux_s)
-                pre = initial_node_states[nn]
+                pre = _pre(nn)
                 if multigpu_device_map is not None and nn in multigpu_device_map:
                     dev_idx = multigpu_device_map[nn]
                     devices = jax.devices()
@@ -1108,16 +1126,61 @@ def _run_coupled_block_impl(
             # entries of ``template_state`` — into an explicit
             # ``consts`` pytree, so the IFT rule propagates
             # derivatives through them.
+            # Only floating fields live in the fixed-point vector.  An
+            # integer / boolean field (a counter, a flag) is recomputed
+            # from the pre-step state on every pass, so its first-pass
+            # value is already the converged one; keeping it out avoids
+            # float<->int casts in the loop and float0 tangents in the
+            # IFT rule (which leaked tracers under reverse mode through
+            # a scan).
+            float_fields = {
+                nn: tuple(
+                    f for f in sorted(template_state[nn])
+                    if jnp.issubdtype(template_state[nn][f].dtype, jnp.floating)
+                )
+                for nn in group_node_names
+            }
+
+            # ``jax.closure_convert`` hoists every tracer ``_step_flat``
+            # touches into the custom_jvp's constants.  An *integer or
+            # boolean* constant there breaks JAX's linearisation of the
+            # rule under a ``lax.scan`` (UnexpectedTracerError in reverse
+            # mode, a missing constant handler in forward mode; reproduced
+            # on JAX 0.10 / 0.11 with a bare custom_jvp + closure_convert).
+            # So the closure only ever sees float32 *images* of such
+            # leaves, restored to their dtype inside; exact for counters
+            # and flags (|value| < 2**24).
+            def _is_float(v):
+                return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
+
+            leaf_dtypes = {
+                k: {f: v.dtype for f, v in d.items()}
+                for k, d in template_state.items() if isinstance(d, dict)
+            }
+            template_img = {
+                k: ({f: (v if _is_float(v) else v.astype(jnp.float32)) for f, v in d.items()}
+                    if isinstance(d, dict) else d)
+                for k, d in template_state.items()
+            }
+
             def _flatten_full(s):
-                return flatten_coupled_state(s, group_node_names)
+                return flatten_coupled_state(s, group_node_names, fields=float_fields)
 
             def _embed(x_full):
                 part = unflatten_coupled_state(
-                    x_full, template_state, group_node_names,
+                    x_full, template_img, group_node_names, fields=float_fields,
                 )
-                s = {k: v for k, v in template_state.items()}
+                s = {}
+                for k, d in template_img.items():
+                    if isinstance(d, dict):
+                        s[k] = {
+                            f: (v if v.dtype == leaf_dtypes[k][f] else v.astype(leaf_dtypes[k][f]))
+                            for f, v in d.items()
+                        }
+                    else:
+                        s[k] = d
                 for nn in group_node_names:
-                    s[nn] = part[nn]
+                    s[nn] = {**s[nn], **part[nn]}
                 return s
 
             def _step_flat(x_full):
@@ -1140,7 +1203,7 @@ def _run_coupled_block_impl(
                 # of the same structure, restricted to those fields.
                 idx_state = unflatten_coupled_state(
                     np.arange(int(x0_full.shape[0]), dtype=np.int32),
-                    template_state, group_node_names,
+                    template_img, group_node_names, fields=float_fields,
                 )
                 # Pure numpy: the same node/field order as
                 # ``flatten_coupled_state(..., fields=accel_fields)``,
@@ -1149,6 +1212,7 @@ def _run_coupled_block_impl(
                     np.ravel(np.asarray(idx_state[nn][fld]))
                     for nn in group_node_names if nn in accel_fields
                     for fld in sorted(accel_fields[nn])
+                    if fld in float_fields[nn]
                 ]
                 sub_idx = tuple(int(i) for i in np.concatenate(parts))
             else:
@@ -2425,6 +2489,26 @@ class GraphManager:
                         0, dtype=jnp.int32
                     )
             self._state[_META_KEY] = meta
+
+        # Explicit accelerated_fields must name state fields of the group's
+        # nodes (a boundary flux is not a state field; use the default,
+        # which maps a flux edge to the producer's state fields).
+        for g in self._coupling_groups:
+            if g.accelerated_fields is None:
+                continue
+            for nn, fields in g.accelerated_fields.items():
+                if nn not in self._nodes or nn not in g.nodes:
+                    raise ValueError(
+                        f"accelerated_fields names node {nn!r}, not in coupling "
+                        f"group {sorted(g.nodes)}"
+                    )
+                have = set(self._state.get(nn, {}).keys())
+                bad = [f for f in fields if f not in have]
+                if bad:
+                    raise ValueError(
+                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
+                        f"of {nn!r} (state fields: {sorted(have)})"
+                    )
 
         # Persistent XLA cache, if the user asked for one via the env var
         # (see maddening.core.simulation.compile_cache).

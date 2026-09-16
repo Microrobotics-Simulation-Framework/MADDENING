@@ -195,3 +195,56 @@ def test_mapping_weights_frozen_by_default_and_opt_in_trainable():
     assert gm.param_spec_overrides()[C2F]["H"].description == "learned edge"
     with pytest.raises(KeyError, match="no weight 'W'"):
         gm.set_param_spec(C2F, "W", ParamSpec())
+
+
+# ---------------------------------------------------------------------------
+# Property: a mapped edge equals the closure transform for random interfaces
+# ---------------------------------------------------------------------------
+
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+
+@given(seed=st.integers(0, 2**31), n_c=st.integers(3, 10), n_f=st.integers(3, 14),
+       kernel=st.sampled_from(["gaussian", "thin_plate_spline", "multiquadric"]),
+       coupled=st.booleans())
+@settings(max_examples=12, deadline=None)
+def test_mapped_edge_equals_closure_for_random_interfaces(seed, n_c, n_f, kernel, coupled):
+    rng = np.random.default_rng(seed)
+    xc = np.sort(rng.uniform(0, 1, n_c)); xf = np.sort(rng.uniform(0, 1, n_f))
+    eps = 1.0 / max(np.diff(xc).mean(), 1e-3) if n_c > 1 else 1.0
+
+    def build(use_closure):
+        rng = np.random.default_rng(seed + 1)   # same states for both builds
+        gm = GraphManager()
+        gm.add_node(HeatNode("c", 1e-4, n_cells=n_c, thermal_diffusivity=0.1,
+                             initial_temperature=300.0))
+        gm.add_node(HeatNode("f", 1e-4, n_cells=n_f, thermal_diffusivity=0.1,
+                             initial_temperature=350.0))
+        if use_closure:
+            gm.add_edge("c", "f", "temperature", "heat_source",
+                        transform=rbf_interpolation(xc.reshape(-1, 1), xf.reshape(-1, 1),
+                                                    epsilon=eps, kernel=kernel))
+            gm.add_edge("f", "c", "temperature", "heat_source",
+                        transform=rbf_interpolation(xf.reshape(-1, 1), xc.reshape(-1, 1),
+                                                    epsilon=eps, kernel=kernel))
+        else:
+            gm.add_edge("c", "f", "temperature", "heat_source",
+                        mapping=rbf_mapping(xc, xf, epsilon=eps, kernel=kernel))
+            gm.add_edge("f", "c", "temperature", "heat_source",
+                        mapping=rbf_mapping(xf, xc, epsilon=eps, kernel=kernel))
+        if coupled:
+            gm.add_coupling_group(["c", "f"], max_iterations=20, tolerance=1e-8)
+        gm.compile()
+        gm.set_node_state("c", {"temperature": jnp.asarray(300 + 40 * rng.random(n_c), jnp.float32)})
+        gm.set_node_state("f", {"temperature": jnp.asarray(350 - 30 * rng.random(n_f), jnp.float32)})
+        return gm
+
+    a = build(False)
+    b = build(True)
+    fa, fb = a.run_scan(5), b.run_scan(5)
+    for n in ("c", "f"):
+        np.testing.assert_allclose(np.asarray(fa[n]["temperature"]),
+                                   np.asarray(fb[n]["temperature"]), rtol=1e-5, atol=1e-4)
+    assert set(a.params["mappings"]) == {C2F.replace("coarse", "c").replace("fine", "f"),
+                                          F2C.replace("coarse", "c").replace("fine", "f")}

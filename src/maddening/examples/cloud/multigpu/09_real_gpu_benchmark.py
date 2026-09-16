@@ -29,7 +29,7 @@ from maddening.cloud.launcher import (
 
 INSTALL_CMD = (
     "pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6" "numpy>=1.24" "pyyaml>=6.0"'
+    ' "jax[cuda12]>=0.10,<0.13" "numpy>=1.24" "pyyaml>=6.0"'
     " && [ -d ~/sky_workdir/src ]"
     " && pip install -q --root-user-action=ignore -e ~/sky_workdir"
     " ; echo INSTALL_DONE"

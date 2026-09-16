@@ -55,7 +55,7 @@ GSTREAMER_INSTALL = (
 # Python deps (must use python3 = python3.10 for gi bindings)
 PIP_INSTALL = (
     "python3 -m pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6"'
+    ' "jax[cuda12]>=0.10,<0.13"'
     ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
     ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
     ' "PyGObject>=3.42" "Pillow>=9.0"'

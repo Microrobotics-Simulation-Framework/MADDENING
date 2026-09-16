@@ -39,6 +39,31 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **Multi-GPU hardware-session tooling** (local preparation for the
+  human-supervised 4xA100 session; nothing here launches a pod).
+  `benchmarks/multigpu/run_pod.py` is the pod-side runner: `--goal
+  exchange` times `all_to_all` vs `ppermute` unstructured halo exchanges
+  at 1e5-1e6 cells (warmup + repeats, min/median, bytes from
+  `exchange_traffic()`, bit-identity), `--goal forward` runs a
+  `ShardedUnstructuredNode` at 1e6 cells on a real mesh (`--mesh
+  edges.npz`) or a synthetic one against the unsharded node, `--goal
+  gradient` reports sharded-vs-unsharded gradient parity through a
+  rollout and the preconditioned `sharded_cg`; each goal writes one JSON
+  under `--out`, `--summarise DIR` prints the ranking table and the
+  ppermute-vs-all_to_all recommendation (only real-GPU points at >= 1e5
+  cells decide), and `--dry-run` proves the whole script on CPU virtual
+  devices (`tests/cloud/multigpu/test_run_pod_dry_run.py`, slow lane).
+  `benchmarks/multigpu/README.md` is the session runbook (launch by
+  hand with `CloudLauncher`/SkyPilot, copy-back, stop the pod).  The
+  `tests/cloud/multigpu` conftest now forces virtual host devices only
+  when no accelerator is about to be used (`JAX_PLATFORMS` naming
+  cuda/gpu/rocm/tpu, or unset with a CUDA jaxlib plugin + `nvidia-smi`
+  GPU + visible devices, leaves `XLA_FLAGS` alone; `MADDENING_VIRTUAL_DEVICES=N`
+  overrides either way; `tests/cloud/multigpu/test_conftest_device_policy.py`),
+  so on a GPU pod with `JAX_PLATFORMS=cuda` the multi-device tests run on
+  the GPUs instead of 16 virtual CPUs.  The cloud examples' install
+  command pinned `jax[cuda12]>=0.4,<0.6` (uninstallable next to this
+  package); they now use the `pyproject` range `>=0.10,<0.13`.
 - **FMU sidecar protocol 2: binary frames for bulk payloads.**  Bit 31 of
   the 4-byte length prefix marks a binary frame (`[u32 BE header_len]
   [header JSON][raw bytes]`); after a `{"op":"hello","protocol":2,

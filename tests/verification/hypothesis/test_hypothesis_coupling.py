@@ -70,7 +70,10 @@ class TestL2NormProperties:
         norm_ac = float(coupling_residual_l2(s_a, s_c, ["node"]))
         norm_ab = float(coupling_residual_l2(s_a, s_b, ["node"]))
         norm_bc = float(coupling_residual_l2(s_b, s_c, ["node"]))
-        assert norm_ac <= norm_ab + norm_bc + 1e-4, (
+        # float32 norms: the triangle inequality holds up to a few ulps
+        # of the larger side (CI hit 2048.2896 > 1024.2894 + 1024.0).
+        slack = 1e-4 + 4 * np.finfo(np.float32).eps * (norm_ab + norm_bc)
+        assert norm_ac <= norm_ab + norm_bc + slack, (
             f"Triangle violated: {norm_ac} > {norm_ab} + {norm_bc}"
         )
 

@@ -71,9 +71,17 @@ static void inst_log(Instance *in, fmi3Status status, const char *category,
     }
 }
 
+/* A sidecar that went away must surface as fmi3Error from the next call,
+ * never as SIGPIPE killing the importer's process. */
+#ifdef MSG_NOSIGNAL
+#  define SEND_FLAGS MSG_NOSIGNAL
+#else
+#  define SEND_FLAGS 0
+#endif
+
 static int send_all(sock_t s, const char *buf, size_t n) {
     while (n > 0) {
-        ssize_t k = send(s, buf, n, 0);
+        ssize_t k = send(s, buf, n, SEND_FLAGS);
         if (k <= 0) return -1;
         buf += k; n -= (size_t)k;
     }
@@ -248,6 +256,9 @@ static sock_t connect_endpoint(const char *host, int port) {
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == SOCK_INVALID) continue;
+#ifdef SO_NOSIGPIPE
+        { int one = 1; setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#endif
         if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
         sock_close(s); s = SOCK_INVALID;
     }

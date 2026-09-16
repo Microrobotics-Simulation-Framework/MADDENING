@@ -41,13 +41,21 @@ def _child(cache_dir):
 
 
 @pytest.mark.slow
+def _entries(cache_dir):
+    return sorted(p.name for p in cache_dir.rglob("*") if p.is_file())
+
+
 def test_second_process_hits_the_persistent_cache(tmp_path):
     cold, cold_scan = _child(tmp_path)
-    assert any(tmp_path.iterdir()), "no cache entries were written"
+    entries = _entries(tmp_path)
+    assert entries, "no cache entries were written"
     warm, warm_scan = _child(tmp_path)
-    # A cache hit skips XLA compilation: comfortably faster than cold.
-    assert warm < 0.6 * cold, (cold, warm)
-    assert warm_scan < 0.6 * cold_scan, (cold_scan, warm_scan)
+    # The proof of a hit is that the second process compiled nothing new:
+    # the cache holds exactly the entries the first one wrote.  (A wall-
+    # clock ratio was the old check; it is unreliable under CPU load.)
+    assert _entries(tmp_path) == entries, "the warm process added cache entries"
+    # and a hit is never slower than a cold compile
+    assert warm <= cold and warm_scan <= cold_scan, (cold, warm, cold_scan, warm_scan)
 
 
 def test_enable_is_idempotent_and_expands_user(tmp_path, monkeypatch):

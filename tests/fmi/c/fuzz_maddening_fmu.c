@@ -14,7 +14,6 @@
 
 #include "../../../src/maddening/fmi/c/maddening_fmu.c"
 
-#include <pthread.h>
 #include <stdint.h>
 
 static uint64_t g_rng = 88172645463325252ULL;
@@ -27,23 +26,20 @@ static void null_logger(fmi3InstanceEnvironment env, fmi3Status st, fmi3String c
     (void)env; (void)st; (void)cat; (void)msg;
 }
 
-typedef struct { int s; const unsigned char *body; size_t len; size_t advertised; int close_early; } Srv;
-
-static void *serve_one(void *p) {
-    Srv *a = (Srv *)p;
-    unsigned char head[4];
-    if (recv_all(a->s, (char *)head, 4)) { sock_close(a->s); return NULL; }
-    size_t n = ((size_t)head[0] << 24) | ((size_t)head[1] << 16) | ((size_t)head[2] << 8) | head[3];
-    char *req = (char *)malloc(n + 1);
-    if (recv_all(a->s, req, n)) { free(req); sock_close(a->s); return NULL; }
-    free(req);
-    if (a->close_early) { sock_close(a->s); return NULL; }
-    unsigned char h2[4] = { (unsigned char)(a->advertised >> 24), (unsigned char)(a->advertised >> 16),
-                            (unsigned char)(a->advertised >> 8), (unsigned char)a->advertised };
-    send_all(a->s, (const char *)h2, 4);
-    send_all(a->s, (const char *)a->body, a->len);
-    sock_close(a->s);
-    return NULL;
+/* The fake sidecar's reply is written into the socketpair *before* the
+ * client runs (a request + reply of at most 64 KiB fits the socket
+ * buffers), so no thread is needed per iteration: deterministic, fast,
+ * and no per-thread stacks for the sanitizers to track (a threaded
+ * variant reached >7 GB RSS under libFuzzer on a CI runner). */
+static void preload_reply(int srv, const unsigned char *body, size_t len,
+                          size_t advertised, int close_early) {
+    if (close_early) { sock_close(srv); return; }
+    unsigned char h2[4] = { (unsigned char)(advertised >> 24), (unsigned char)(advertised >> 16),
+                            (unsigned char)(advertised >> 8), (unsigned char)advertised };
+    send_all(srv, (const char *)h2, 4);
+    send_all(srv, (const char *)body, len);
+    sock_close(srv);          /* the client's request is discarded; a short
+                                 frame then surfaces as a failed recv */
 }
 
 static const char *const PIECES[] = {
@@ -82,7 +78,7 @@ static size_t build_reply(unsigned char *out, size_t cap) {
         break;
     }
     default: {                                  /* long run */
-        n = 1000 + rnd() % 60000;
+        n = 1000 + rnd() % 30000;
         if (n > cap) n = cap;
         memset(out, (int)('0' + rnd() % 10), n);
         memcpy(out, "{\"ok\":true,\"values\":[", 22);
@@ -94,12 +90,14 @@ static size_t build_reply(unsigned char *out, size_t cap) {
 
 static void one_iteration(unsigned char *buf, size_t cap) {
     size_t n = build_reply(buf, cap);
-    Srv a; int sv[2];
+    int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) return;
-    a.s = sv[1]; a.body = buf; a.len = n;
-    a.advertised = (rnd() % 8 == 0) ? n + rnd() % 64 : n;   /* sometimes lie about the length */
-    a.close_early = (rnd() % 16 == 0);
-    pthread_t th; pthread_create(&th, NULL, serve_one, &a);
+    /* Bound the reply so it always fits the socket buffer un-read. */
+    int bufsz = 1 << 17;
+    setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof bufsz);
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof bufsz);
+    size_t advertised = (rnd() % 8 == 0) ? n + rnd() % 64 : n;   /* sometimes lie about the length */
+    preload_reply(sv[1], buf, n, advertised, (rnd() % 16 == 0));
 
     Instance *in = (Instance *)calloc(1, sizeof *in);
     in->sock = sv[0]; in->log = null_logger;
@@ -129,7 +127,6 @@ static void one_iteration(unsigned char *buf, size_t cap) {
               break; }
     default: bridge_call(in, "{\"op\":\"hello\"}"); parse_values(in, vals, nvals); break;
     }
-    pthread_join(th, NULL);
     sock_close(sv[0]);
     free(in->req); free(in->resp); free(in);
 }

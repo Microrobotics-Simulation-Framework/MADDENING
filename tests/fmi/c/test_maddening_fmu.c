@@ -184,6 +184,14 @@ static void test_bridge_call_paths(void) {
     Instance *dead = fake_instance(SOCK_INVALID);
     CHECK(bridge_call(dead, "{}") == fmi3Error);
     free_instance(dead);
+    /* the peer is gone before we send: EPIPE -> fmi3Error, not SIGPIPE */
+    int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    sock_close(sv[1]);
+    Instance *gone = fake_instance(sv[0]);
+    g_log_calls = 0;
+    CHECK(bridge_call(gone, "{\"op\":\"hello\"}") == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "send failed") != NULL);
+    sock_close(sv[0]); free_instance(gone);
 }
 
 /* --------------------------------------------------- get / set / step */

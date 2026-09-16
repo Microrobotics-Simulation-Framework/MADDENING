@@ -356,6 +356,16 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **FMU wrapper survives a sidecar that goes away.**  A `send()` to a
+  closed peer raised SIGPIPE and killed the importer's whole process;
+  sends now use `MSG_NOSIGNAL` (`SO_NOSIGPIPE` on macOS) and the call
+  returns `fmi3Error` (unit-tested against a closed socketpair).  Found
+  when the fuzz harness went thread-free: it preloads the fake reply
+  into the socket instead of spawning a thread per iteration, which is
+  what made the libFuzzer campaign reach 7.5 GB RSS and get OOM-killed on
+  the CI runner; the campaign now runs with `-rss_limit_mb=1024`.  The
+  cross-process persistent-cache test proves a hit by the cache
+  directory gaining no entries rather than by a wall-clock ratio.
 - **Independent audit, round 3** (FMU bridge / wrapper / exchange;
   regression tests in `tests/fmi/test_audit_round3.py`).  A
   communication step that is not a whole multiple of the master timestep

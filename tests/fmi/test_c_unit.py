@@ -203,8 +203,12 @@ def test_libfuzzer_short_campaign(tmp_path):
         pytest.skip(f"clang cannot build libFuzzer targets here: {proc.stderr[-500:]}")
     corpus = tmp_path / "corpus"
     corpus.mkdir()
+    # -rss_limit_mb makes a memory blow-up a clean libFuzzer failure
+    # instead of an OOM-killed CI job; the harness is thread-free and
+    # sits around 40 MB.
     proc = subprocess.run([str(exe), str(corpus), "-max_total_time=20", "-max_len=4096",
-                           "-timeout=10"], capture_output=True, text=True, timeout=300,
+                           "-timeout=10", "-rss_limit_mb=1024"], capture_output=True,
+                          text=True, timeout=300,
                           env={**os.environ, **SAN_ENV, "ASAN_OPTIONS": "detect_leaks=1"})
     assert proc.returncode == 0, proc.stderr[-6000:]
     assert "Done" in proc.stderr or "DONE" in proc.stderr or "NEW" in proc.stderr, proc.stderr[-2000:]

@@ -62,6 +62,16 @@ All three share the same substrate:
   -1.
 * `StaticArray` carries the per-array sharding policy via
   `replication=` (`"replicate"` / `"shard"` / `"partition"`).
+* Boundary inputs are classified by shape.  A **grid-shaped** input (on
+  the stencil path: same extent as the state fields on every sharded
+  spatial axis, e.g. an LBM per-cell `body_force` map or a
+  `wall_mask_update`; on the unstructured path: leading axis of length
+  `n_devices * n_local_max` in partition layout, i.e. what
+  `partition_value` produces) is sharded and halo/ghost-padded exactly
+  like a state field, so `update_padded` receives it at the padded local
+  shape.  Everything else (a scalar pressure, a uniform `(D,)` force
+  vector) is replicated to every shard.  The unstructured wrapper refuses
+  a per-cell input given in *global* cell order rather than misreading it.
 
 ## Partition-assignment handoff (unstructured path)
 

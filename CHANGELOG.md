@@ -278,6 +278,15 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Grid-shaped boundary inputs on sharded nodes.**  `ShardedStencilNode`
+  replicated every boundary input, so a per-cell field (an LBM
+  `body_force` map, a `wall_mask_update`) reached each shard at its global
+  shape and broke `update_padded` (or silently mismatched); a sharded LBM
+  could only take a uniform force vector.  Grid-shaped inputs are now
+  sharded and halo-padded like state, on both the stencil and the
+  unstructured path (partition-layout inputs; global-order ones are
+  refused with a pointer to `partition_value`).  `verify_node` now passes
+  its full battery on a `ShardedStencilNode`, which is how this was found.
 
 - **Every run compiled the step three times.**  Leaves seeded as
   `jnp.array(0.0)` (nodes' initial states and MADDENING's own coupling

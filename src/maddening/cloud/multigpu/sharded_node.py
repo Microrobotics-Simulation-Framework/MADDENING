@@ -17,6 +17,7 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 
 from __future__ import annotations
 
+import functools
 import inspect
 import warnings
 from typing import Any, Optional
@@ -388,16 +389,28 @@ class ShardedStencilNode(SimulationNode):
                 out = jnp.concatenate([left_halo, out, right_halo], axis=sa)
             return out
 
-        def _local_update(local_state, local_bi, local_dt, local_static, local_params):
+        def _pad_like_state(arr):
+            arr2 = _pad_replicated(arr)
+            if exchange_axes and field_needs_halo(arr):
+                arr2 = halo_exchange(
+                    arr2, mesh=mesh, axes=exchange_axes, boundary=boundary,
+                )
+            return arr2
+
+        def _local_update(local_state, local_bi, local_dt, local_static,
+                          local_params, *, grid_bi=frozenset()):
             # 1. Halo-pad state.
-            padded = {}
-            for f, arr in local_state.items():
-                arr2 = _pad_replicated(arr)
-                if exchange_axes and field_needs_halo(arr):
-                    arr2 = halo_exchange(
-                        arr2, mesh=mesh, axes=exchange_axes, boundary=boundary,
-                    )
-                padded[f] = arr2
+            padded = {f: _pad_like_state(arr) for f, arr in local_state.items()}
+
+            # 1b. Grid-shaped boundary inputs (a per-cell body force, a
+            #     wall-mask update) arrive as this shard's slice and are
+            #     padded exactly like a state field, so the inner sees
+            #     them at the padded local shape it expects.  Everything
+            #     else (scalars, a uniform (D,) vector) is replicated.
+            local_bi = {
+                k: (_pad_like_state(v) if k in grid_bi else v)
+                for k, v in local_bi.items()
+            }
 
             # 2. Halo-pad sharded statics (boundary="edge").
             padded_static: dict[str, Any] = {}
@@ -497,7 +510,11 @@ class ShardedStencilNode(SimulationNode):
             return fn
 
         state_specs = {f: self._spec_for_field(arr) for f, arr in state.items()}
-        bi_specs = {k: P() for k in boundary_inputs}
+        grid_bi = self._grid_shaped_boundary_inputs(state, boundary_inputs)
+        bi_specs = {
+            k: (self._spec_for_field(jnp.asarray(v)) if k in grid_bi else P())
+            for k, v in boundary_inputs.items()
+        }
         static_specs = {
             k: self._spec_for_static_key(k, arr)
             for k, arr in static.items()
@@ -514,7 +531,7 @@ class ShardedStencilNode(SimulationNode):
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(
-            self._local_update_fn,
+            functools.partial(self._local_update_fn, grid_bi=grid_bi),
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
@@ -580,6 +597,31 @@ class ShardedStencilNode(SimulationNode):
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+
+    def _grid_shaped_boundary_inputs(
+        self, state: dict, boundary_inputs: dict,
+    ) -> frozenset[str]:
+        """Names of the boundary inputs that are per-cell fields.
+
+        A boundary input is grid-shaped when, on every sharded spatial
+        axis, it has the same (global) extent as the state fields.  Those
+        are sharded and halo-padded like state; anything else (a scalar
+        pressure, a uniform ``(D,)`` force vector) is replicated.
+        """
+        ref: dict[int, int] = {}
+        for spatial_axis in self._axis_map.values():
+            for arr in state.values():
+                if spatial_axis < arr.ndim:
+                    ref[spatial_axis] = int(arr.shape[spatial_axis])
+                    break
+        if not ref:
+            return frozenset()
+        out = set()
+        for k, v in boundary_inputs.items():
+            shape = tuple(jnp.shape(v))
+            if all(sa < len(shape) and shape[sa] == n for sa, n in ref.items()):
+                out.add(k)
+        return frozenset(out)
 
     def _spec_for_field(self, arr: jax.Array) -> P:
         """PartitionSpec for a single state field array.

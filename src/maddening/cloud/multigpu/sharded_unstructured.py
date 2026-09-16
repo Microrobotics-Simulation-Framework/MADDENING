@@ -36,11 +36,13 @@ in v0.3.0 — surface a breaking change here, not in v0.4.0.
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -302,7 +304,11 @@ class ShardedUnstructuredNode(SimulationNode):
             return cached
 
         state_specs = {k: P(self._mesh_axis) for k in state}
-        bi_specs = {k: P() for k in boundary_inputs}
+        cell_bi = self._cell_boundary_inputs(boundary_inputs)
+        bi_specs = {
+            k: (P(self._mesh_axis) if k in cell_bi else P())
+            for k in boundary_inputs
+        }
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
         axes_decl = dict(getattr(self._inner, "domain_integral_axes", dict)())
@@ -313,7 +319,7 @@ class ShardedUnstructuredNode(SimulationNode):
             else:
                 out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
 
-        local_fn = self._build_local_update()
+        local_fn = functools.partial(self._build_local_update(), cell_bi=cell_bi)
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(
@@ -326,6 +332,37 @@ class ShardedUnstructuredNode(SimulationNode):
         self._sharded_cache[key] = fn
         return fn
 
+    def _cell_boundary_inputs(self, boundary_inputs: dict) -> frozenset[str]:
+        """Names of the boundary inputs that are per-cell fields.
+
+        A per-cell boundary input is laid out like this wrapper's state:
+        leading axis of length ``n_devices * n_local_max`` in partition
+        order (what :meth:`initial_state` produces, and what
+        :func:`partition_value` gives for a global-order array).  It is
+        sharded and ghost-exchanged like a state field, so the inner sees
+        ``n_local_max + n_ghost_max`` rows.  Scalars and anything else are
+        replicated.  A global-order array (leading axis ``n_global_cells``)
+        is refused rather than silently misread.
+        """
+        n_layout = self._layout.n_devices * self._layout.n_local_max
+        n_global = int(np.asarray(self._layout.partition_assignment).size)
+        out = set()
+        for k, v in boundary_inputs.items():
+            shape = tuple(jnp.shape(v))
+            if not shape:
+                continue
+            if shape[0] == n_layout:
+                out.add(k)
+            elif shape[0] == n_global:
+                raise ValueError(
+                    f"boundary input {k!r} has leading axis {n_global} (global "
+                    f"cell order); ShardedUnstructuredNode expects per-cell "
+                    f"inputs in partition layout ({n_layout} rows) -- run it "
+                    "through partition_value(value=..., layout=...) and reshape "
+                    f"to ({n_layout}, ...) first."
+                )
+        return frozenset(out)
+
     def _build_local_update(self):
         inner = self._inner
         layout = self._layout
@@ -337,7 +374,8 @@ class ShardedUnstructuredNode(SimulationNode):
 
         accepts_params = "params" in inspect.signature(inner.update_padded).parameters
 
-        def _local_update(local_state, local_bi, local_dt, local_static, local_params):
+        def _local_update(local_state, local_bi, local_dt, local_static,
+                          local_params, *, cell_bi=frozenset()):
             # Strip the leading device dimension that shard_map already
             # collapsed for us — local arrays now have shape (n_local_max, *).
 
@@ -347,6 +385,13 @@ class ShardedUnstructuredNode(SimulationNode):
                 padded_state[k] = exchange_unstructured(
                     arr, layout=layout, mesh_axis=mesh_axis,
                 )
+            # 1b. Per-cell boundary inputs get the same ghost exchange so
+            #     the inner reads them at the padded local shape.
+            local_bi = {
+                k: (exchange_unstructured(v, layout=layout, mesh_axis=mesh_axis)
+                    if k in cell_bi else v)
+                for k, v in local_bi.items()
+            }
 
             # 2. Halo-exchange each partitioned static.
             padded_static = {}

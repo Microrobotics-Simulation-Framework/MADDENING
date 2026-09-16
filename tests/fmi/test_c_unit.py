@@ -156,6 +156,8 @@ print("RESULT " + json.dumps(out))
                               capture_output=True, text=True, env=env, timeout=600)
     assert proc.returncode == 0, f"exit {proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\nstderr:\n{proc.stderr[-6000:]}"
     assert "AddressSanitizer" not in proc.stderr and "runtime error" not in proc.stderr, proc.stderr[-6000:]
+    # the sanitized wrapper negotiated protocol 2: bulk traffic went raw
+    assert bridge.binary_frames_served > 0 and bridge.binary_frames_received > 0
     line = next(l for l in proc.stdout.splitlines() if l.startswith("RESULT "))
     got = json.loads(line[7:])
     ref = _graph()

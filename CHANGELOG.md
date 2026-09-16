@@ -55,6 +55,15 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `ValueError`; any flagged frame after a binary hello gets exactly one
   reply and the connection keeps serving) cover it; user guide: "Wire
   protocol" in `fmu_export.md`.
+- **Static type checking (phase 1, non-blocking).**  `pyrightconfig.json`
+  (basic mode, `src/maddening` only, optional extras' imports downgraded to
+  warnings), `pyright` in the `ci`/`dev` extras, a `typecheck` CI job that
+  runs with `continue-on-error` and writes the error count to the step
+  summary, and `scripts/typing_baseline.py`, which summarises a pyright run
+  per rule and per file.  The measured baseline and the phase-2 plan (annotate
+  the `STABLE` surface after the 0.4.0 API freeze, ship `py.typed`, make the
+  check blocking on that surface) are in `docs/developer_guide/typing.md`.
+  No source annotations changed.
 - **Per-neighbour unstructured halo exchange** (v0.4.0 plan hard gate,
   the hardware-independent part).  `exchange_unstructured(...,
   method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`

@@ -179,6 +179,9 @@ ci = [
     "lineax>=0.0.7",
     # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
+    # Static type check (non-blocking `typecheck` CI job; see
+    # docs/developer_guide/typing.md).  Same floor as the dev extra.
+    "pyright>=1.1.414",
 ]
 
 # Property-based node verification (user-facing).
@@ -195,6 +198,9 @@ dev = [
     "httpx2>=2.0",
     "fmpy>=0.3",
     "lineax>=0.0.7",
+    # `pyright` / `python scripts/typing_baseline.py` -- phase-1 typing
+    # policy is non-blocking (docs/developer_guide/typing.md).
+    "pyright>=1.1.414",
     "maddening[all]",
 ]
 

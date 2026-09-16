@@ -28,6 +28,44 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **Per-neighbour unstructured halo exchange** (v0.4.0 plan hard gate,
+  the hardware-independent part).  `exchange_unstructured(...,
+  method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`
+  send one `lax.ppermute` per *communicating cyclic shift*, each sized to
+  that shift's largest message, instead of one dense
+  `(n_devices, n_ghost_max)` `all_to_all` payload to every shard; results
+  are bit-identical (random partitions, gradients, a 10^5-cell ring in
+  the slow lane).  `exchange_traffic(layout)` reports cells moved per
+  shard for both transports and the useful count, so the transport can
+  be chosen from the partition before any GPU time is spent (a ring on 4
+  shards: 2 cells vs 8).  The default stays `all_to_all`; the NCCL
+  timings that decide the default need a real multi-GPU host.
+- **FMU C wrapper, TCP/JSON bridge and packaging** (v0.4.0 plan hard
+  gate).  `src/maddening/fmi/c/maddening_fmu.c` implements the FMI 3.0
+  co-simulation entry points (instantiate / initialise / `DoStep` /
+  `Get`/`Set` for every numeric type / FMU state get, set, serialize /
+  reset / terminate; model exchange and scheduled execution refuse) with
+  nothing but libc: every call is forwarded as a length-prefixed JSON
+  message over TCP to `maddening.fmi.tcp_bridge.FmuTcpBridge`, which maps
+  value references onto the sidecar's inputs, outputs and parameters and
+  runs the master-step loop.  `maddening.fmi.package.build_fmu_binary`
+  compiles the wrapper against the vendored (BSD-2) FMI 3.0 headers and
+  `write_fmu` packages `modelDescription.xml`, the binary and
+  `resources/endpoint.txt` into a `.fmu`; `build_model_description(...,
+  model_identifier=)` emits the `<CoSimulation>` element.  Verified end
+  to end: FMPy `simulate_fmu` drives the compiled FMU through the bridge
+  and reproduces `gm.run_scan` with a set parameter and a driven input.
+  ZMQ is not required; a ZMQ transport can carry the same payloads later.
+- **Multi-clock FMU export.**  `build_model_description(multi_clock=True)`
+  emits one FMI 3.0 `<Clock>` (`intervalVariability="constant"`,
+  `intervalDecimal=<dt>`) per distinct node timestep among the exported
+  nodes and tags every exported output and external input with its node's
+  clock (`clocks=` attribute, `variability="discrete"`; clocked outputs
+  are not initial unknowns), so an importer knows a node on a coarser rate
+  only changes on its ticks.  Clocks are `clock_<k>` in order of
+  increasing interval; the fastest equals the default step size.  Off by
+  default: the single-clock surface is unchanged.  Validated with FMPy
+  (`validate=True, validate_model_structure=True`).
 
 - **Graph parameter pytree** — the compiled step is now
   `step_fn(state, external_inputs, params)`.  `GraphManager.params`
@@ -278,6 +316,85 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export of a real graph had no inputs and a wrong step size.**
+  `build_model_description` looked for a `_external_input_specs` dict a
+  `GraphManager` never had, so external inputs were silently omitted, and
+  read a `_master_timestep` attribute that does not exist, so the default
+  experiment step was always 1e-3.  Inputs now come from the graph's
+  external-input list as `<node>.<field>` (description / unit from the
+  target's `boundary_input_spec`), and the step size is the graph's base
+  timestep (fastest node).
+- **Flux edges honour the params pytree** (audit round 1, HIGH).
+  `compute_boundary_fluxes` gained the same keyword-only `params` as
+  `update`; the graph passes the node's `gm.params` entry on every flux
+  evaluation (Gauss-Seidel, Jacobi, uncoupled and IFT paths), so a
+  calibrated stiffness / diffusivity changes the force or heat flux an
+  edge *delivers* and the gradient through a flux consumer is correct.
+  `SpringDamperNode`, `HeatNode`, `HeartPumpNode`, `LBMNode` and
+  `HybridNode` migrated; `verify_node`'s params checks now cover fluxes
+  and fail a producer that takes `params` in `update` only.
+- **`compile()` keeps calibrated params** (audit round 1, HIGH).  Every
+  recompile used to overwrite `gm.params` with the constructor snapshot,
+  so adding an edge / external input, replacing a node, a REST write on a
+  legacy node or the profiler's one-iteration variant silently discarded
+  a fit.  Live leaves whose node/key/shape/dtype still exist are carried
+  over (`_merge_live_params`; a dropped leaf warns), `gm.reset_params()`
+  is the explicit way back, and `load_state` on a not-yet-compiled graph
+  compiles first instead of dropping the checkpoint's params.
+- **Non-float leaves in coupled graphs are bit-exact** (audit round 1,
+  HIGH).  The float32 images that carry integer / boolean leaves through
+  the IFT closure were exact only below 2**24: `uint32` / `int32` values
+  above that were corrupted and typed PRNG keys crashed at trace time.
+  Images are now 16-bit limbs (`float_image` / `from_float_image` in
+  `coupling.acceleration`), keys travel as their uint32 data, and the
+  coupling norms and the predictor act on floating fields only (a counter
+  or flag keeps its first-pass value instead of being extrapolated).
+- **A partial params pytree** through `gm.step` / `run` / `run_scan` is
+  completed from the *live* `gm.params` (a missing node or key used to
+  fall back to the constructor constant); the raw compiled step refuses
+  an incomplete pytree with a message pointing at the wrappers.
+- **Two mapped edges on one field pair** (two additive contributions)
+  used to share a single `params["mappings"]` slot, the first silently
+  using the second's weights; each now gets its own slot via
+  `EdgeSpec.ordinal` (`"a.v->b.inp"`, `"a.v->b.inp#1"`).
+- `set_param_spec` overrides no longer outlive `remove_node` /
+  `remove_edge` (a stale one broke `to_dict` -> `from_dict`); edge
+  `transform` (registered name), `additive` and units now survive the
+  config round trip.
+- **`ParamSpec` edge cases** (audit round 1).  `constrain` with
+  `transform="log"` and `lo != 0` could land exactly *on* the open bound
+  (`8.0 + exp(-15)` is `8.0` in float32), so `check_params` rejected the
+  fit's own output and `unconstrain` returned `-inf`; the clamp is now
+  relative to the bound (a few ulps of `lo` / `hi`), for `logit` too.
+  `ParamSpec.check` / `check_params` reject NaN and `±inf` (NaN used to
+  pass every bounds comparison).  `ParamSpec.from_dict({"bounds": null})`
+  no longer crashes.  A bounded identity leaf keeps its dtype through
+  `constrain` (integer weights were promoted to float32).
+- **`PUT /graph/params/{node}`** validates dtype coercion, shape,
+  finiteness and bounds for every key *before* writing anything: a string
+  or `null` for a live float is a 400 naming the key (was a 500), and
+  `NaN` / `Infinity` are refused (NaN used to be written into
+  `gm.params` and `node.params` before the response failed).
+- **`sysid.fim` / `fit_lm` with `noise_std` as a pytree** (documented,
+  per-leaf sigma matching the residual structure) crashed because
+  `jnp.ndim(dict) == 0` took the scalar branch; the scalar branch is now
+  keyed on real numbers and 0-d arrays only.
+- **FMI `min` / `max` for open bounds.**  A `log` / `logit` leaf's bound
+  is strict, but the FMI attributes are inclusive, so the sidecar refused
+  the very value the XML advertised.  The model description now advertises
+  the nearest representable float32 inside the interval (the smallest
+  normal for a zero bound — its subnormal neighbour is flushed to zero on
+  XLA:CPU), so every advertised bound is settable.  Inclusive bounds are
+  unchanged.
+- **Sharded boundary-input heuristic and `HeatNode` params.**
+  `ShardedStencilNode` classified an `(n,)` input on an `n x n` grid
+  sharded on axis 0 as grid-shaped (only the sharded axis's extent was
+  compared), sharded and halo-padded it and broke the inner
+  `update_padded`; the input must now match the full leading grid shape.
+  `HeatNode.update_padded` takes `params=` like `update`, so a
+  `ShardedStencilNode(HeatNode)` reports `accepts_params()` and is
+  calibratable / differentiable like the unsharded node.
+
 - **Grid-shaped boundary inputs on sharded nodes.**  `ShardedStencilNode`
   replicated every boundary input, so a per-cell field (an LBM
   `body_force` map, a `wall_mask_update`) reached each shard at its global

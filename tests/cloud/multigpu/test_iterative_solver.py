@@ -477,3 +477,42 @@ class TestPreconditioned:
         g_sh = jax.device_get(jax.grad(loss_sh)(b))
         g_ref = jax.device_get(jax.grad(loss_ref)(b))
         assert jnp.allclose(jnp.asarray(g_sh), jnp.asarray(g_ref), rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.slow
+class TestGradientParityAtScale:
+    """The v0.4.0 plan's gradient-parity gate at real-mesh size, the half
+    that runs on CPU-virtual devices: 10^5 DOF over 4 shards, reverse and
+    forward mode through the differentiable, Jacobi-preconditioned CG,
+    against the unsharded reference."""
+
+    def test_grad_and_jvp_through_sharded_cg_at_1e5_dof(self):
+        mesh = _make_4_device_mesh()
+        n_per_shard = 25_000
+        n = n_per_shard * 4
+        matvec_ref = _laplacian_1d_matvec_unsharded(n)
+        matvec_sh = _laplacian_1d_matvec_sharded(mesh, n_per_shard)
+        pc = jacobi_preconditioner(jnp.full((n,), 2.0, jnp.float32))
+        kw = dict(max_iters=3000, rtol=1e-6, atol=1e-8, backend="loop",
+                  preconditioner=pc, differentiable=True)
+        # a smooth right-hand side keeps the CG iteration count moderate
+        b = jnp.sin(jnp.linspace(0.0, 6.0, n, dtype=jnp.float32)) + 0.1
+
+        def loss_sh(b):
+            return jnp.sum(sharded_cg(matvec_sh, b, mesh=mesh, in_specs=P("devices"), **kw).value ** 2)
+
+        def loss_ref(b):
+            return jnp.sum(sharded_cg(matvec_ref, b, **kw).value ** 2)
+
+        g_sh = np.asarray(jax.device_get(jax.grad(loss_sh)(b)))
+        g_ref = np.asarray(jax.device_get(jax.grad(loss_ref)(b)))
+        scale = np.max(np.abs(g_ref))
+        assert scale > 0
+        np.testing.assert_allclose(g_sh / scale, g_ref / scale, rtol=1e-3, atol=1e-3)
+        v = jnp.ones_like(b)
+        _, t_sh = jax.jvp(lambda bb: sharded_cg(matvec_sh, bb, mesh=mesh, in_specs=P("devices"),
+                                                **kw).value, (b,), (v,))
+        _, t_ref = jax.jvp(lambda bb: sharded_cg(matvec_ref, bb, **kw).value, (b,), (v,))
+        t_sh, t_ref = np.asarray(jax.device_get(t_sh)), np.asarray(jax.device_get(t_ref))
+        s2 = np.max(np.abs(t_ref))
+        np.testing.assert_allclose(t_sh / s2, t_ref / s2, rtol=1e-3, atol=1e-3)

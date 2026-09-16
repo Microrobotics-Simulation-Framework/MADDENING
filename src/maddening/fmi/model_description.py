@@ -24,8 +24,11 @@ What's deferred:
   central registry — FMPy round-trips this fine, but a strict
   importer might prefer the registry form).
 * ``<TypeDefinitions>`` — added if/when a consumer asks.
-* Multi-clock ``<ClockType>`` definitions (designed-in but not
-  emitted by default — v0.3.0 ships single-clock per A1).
+* ``<TypeDefinitions>``-level ``<ClockType>``; clocks are emitted as
+  ``<Clock>`` variables (``build_model_description(multi_clock=True)``:
+  one constant-interval clock per distinct node timestep, every output
+  / input of a node tagged with its clock, off by default so the
+  single-clock v0.3.0 surface is unchanged).
 """
 
 from __future__ import annotations
@@ -62,6 +65,9 @@ _DTYPE_TO_FMI_TYPE = {
     "bool": "Boolean",
     "bool_": "Boolean",
 }
+
+# ``dtype="clock"`` marks an FMI 3.0 ``<Clock>`` variable (no value type).
+_CLOCK_DTYPE = "clock"
 
 _CAUSALITIES = {
     "input", "output", "parameter", "local",
@@ -100,6 +106,13 @@ class FMIVariable:
         Initial value as the XML ``start`` attribute text (FMI 3.0
         requires one for ``parameter`` and ``input`` causality; arrays
         are space-separated in row-major order).
+    clocks : tuple of int, optional
+        Value references of the ``<Clock>`` variables this variable is
+        clocked by (FMI 3.0 ``clocks`` attribute).  A clocked variable
+        changes only when one of its clocks ticks.
+    interval_decimal : float, optional
+        For ``dtype="clock"`` only: the constant tick interval in
+        seconds (``intervalVariability="constant"``).
     min, max : float, optional
         Declared bounds (the XML ``min`` / ``max`` attributes).  For
         graph parameters these come from :class:`ParamSpec.bounds`, so
@@ -116,6 +129,12 @@ class FMIVariable:
     start: Optional[str] = None
     min: Optional[float] = None
     max: Optional[float] = None
+    clocks: tuple[int, ...] = ()
+    interval_decimal: Optional[float] = None
+
+    @property
+    def is_clock(self) -> bool:
+        return self.dtype == _CLOCK_DTYPE
 
     def __post_init__(self) -> None:
         if self.causality not in _CAUSALITIES:
@@ -128,11 +147,15 @@ class FMIVariable:
                 f"FMIVariable.variability={self.variability!r} not in "
                 f"{sorted(_VARIABILITIES)}",
             )
-        if self.dtype not in _DTYPE_TO_FMI_TYPE:
+        if self.dtype != _CLOCK_DTYPE and self.dtype not in _DTYPE_TO_FMI_TYPE:
             raise ValueError(
                 f"FMIVariable.dtype={self.dtype!r} not in "
                 f"{sorted(_DTYPE_TO_FMI_TYPE)}",
             )
+        if self.dtype == _CLOCK_DTYPE and self.interval_decimal is None:
+            raise ValueError("a clock variable needs interval_decimal")
+        if self.dtype == _CLOCK_DTYPE and self.clocks:
+            raise ValueError("a clock cannot itself be clocked")
 
 
 @dataclass
@@ -177,6 +200,13 @@ class ModelDescription:
     default_stop_time: float = 1.0
     default_step_size: float = 1.0e-3
     default_tolerance: float = 1.0e-6
+    # ``modelIdentifier`` of the FMU binary (``binaries/<platform>/<id>.so``).
+    # ``None`` emits no <CoSimulation> element (description-only FMU).
+    co_simulation_model_identifier: Optional[str] = None
+
+    def clocks(self) -> list[FMIVariable]:
+        """The ``<Clock>`` variables (empty for a single-clock FMU)."""
+        return [v for v in self.variables if v.is_clock]
 
     def to_xml(self) -> str:
         """Serialize this description to an FMI 3.0 ``modelDescription.xml``
@@ -188,6 +218,19 @@ class ModelDescription:
             "instantiationToken": self.instantiation_token,
             "generationTool": self.generation_tool,
         })
+
+        # <CoSimulation> — the interface type the binary implements (FMI
+        # 3.0 §2.4.2; must precede UnitDefinitions).  The MADDENING C
+        # wrapper is a plain fixed-step co-simulation slave that can
+        # save / restore / serialize its (sidecar-held) state.
+        if self.co_simulation_model_identifier:
+            ET.SubElement(root, "CoSimulation", attrib={
+                "modelIdentifier": self.co_simulation_model_identifier,
+                "canGetAndSetFMUState": "true",
+                "canSerializeFMUState": "true",
+                "canHandleVariableCommunicationStepSize": "true",
+                "hasEventMode": "false",
+            })
 
         # <UnitDefinitions> — FMI 3.0 requires every referenced unit to
         # appear here.  Emit one <Unit> per distinct unit string used
@@ -209,7 +252,6 @@ class ModelDescription:
         # <ModelVariables>
         mv = ET.SubElement(root, "ModelVariables")
         for var in self.variables:
-            fmi_type = _DTYPE_TO_FMI_TYPE[var.dtype]
             attrib = {
                 "name": var.name,
                 "valueReference": str(var.value_reference),
@@ -218,6 +260,16 @@ class ModelDescription:
             }
             if var.description:
                 attrib["description"] = var.description
+            if var.is_clock:
+                # FMI 3.0 §2.2.9: a Clock has no value type; a constant
+                # interval is declared inline.
+                attrib["intervalVariability"] = "constant"
+                attrib["intervalDecimal"] = repr(float(var.interval_decimal))
+                ET.SubElement(mv, "Clock", attrib=attrib)
+                continue
+            if var.clocks:
+                attrib["clocks"] = " ".join(str(c) for c in var.clocks)
+            fmi_type = _DTYPE_TO_FMI_TYPE[var.dtype]
             v_el = ET.SubElement(mv, fmi_type, attrib=attrib)
             if var.unit:
                 v_el.set("unit", var.unit)
@@ -243,8 +295,11 @@ class ModelDescription:
                     "valueReference": str(var.value_reference),
                 })
         for var in self.variables:
+            # A clocked variable is not an initial unknown (FMI 3.0: its
+            # value is defined by the clock's first tick, not by
+            # initialisation); fmpy's structure validation enforces this.
             if var.variability in ("continuous", "discrete") and \
-                    var.causality in ("output", "local"):
+                    var.causality in ("output", "local") and not var.clocks:
                 ET.SubElement(ms, "InitialUnknown", attrib={
                     "valueReference": str(var.value_reference),
                 })
@@ -284,6 +339,65 @@ def _ensure_stable_only_or_opt_in(
     return False
 
 
+def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
+    """``ParamSpec.bounds[side]`` as the FMI ``min`` / ``max`` attribute.
+
+    FMI's ``min`` / ``max`` are inclusive, but a ``log`` / ``logit``
+    leaf's bound is *open* (``p > lo`` strictly -- ``ParamSpec.check``
+    and therefore the sidecar refuse ``p == lo``).  Advertise the
+    nearest representable value inside the interval instead, so every
+    value the XML declares settable is accepted by ``set_params``.  A
+    zero bound's neighbour is a float32 subnormal, which XLA:CPU flushes
+    to zero (``jnp.asarray(1e-45) <= 0.0`` is ``True``), so the margin
+    is never smaller than the smallest normal.
+    """
+    if spec is None:
+        return None
+    b = spec.bounds[side]
+    if b is None:
+        return None
+    if spec.transform not in ("log", "logit"):
+        return b
+    try:
+        dt = np.dtype(dtype)
+        if not np.issubdtype(dt, np.floating):
+            dt = np.dtype(np.float32)
+    except TypeError:
+        dt = np.dtype(np.float32)
+    fi = np.finfo(dt)
+    towards = dt.type(np.inf) if side == 0 else dt.type(-np.inf)
+    m = np.nextafter(dt.type(b), towards)
+    if abs(m) < fi.tiny:
+        m = dt.type(fi.tiny if side == 0 else -fi.tiny)
+    return float(m)
+
+
+@dataclass(frozen=True)
+class _ExtView:
+    """Duck-typed view of an external input for the builder."""
+    target_node: str
+    target_field: str
+    shape: tuple
+    dtype: Any
+    description: str = ""
+    expected_units: str = ""
+
+
+def _master_timestep(graph_manager: Any) -> float:
+    """The graph's base (fastest) timestep: ``_base_dt`` when compile()
+    set it, else the smallest node timestep; 1e-3 for an empty graph."""
+    base = getattr(graph_manager, "_base_dt", None)
+    if base:
+        return float(base)
+    nodes = getattr(graph_manager, "_nodes", {}) or {}
+    dts = [
+        float(getattr(spec, "timestep", getattr(getattr(spec, "node", spec), "delta_t", 0.0)))
+        for spec in nodes.values()
+    ]
+    dts = [dt for dt in dts if dt > 0]
+    return min(dts) if dts else 1.0e-3
+
+
 def _deterministic_token(parts: Iterable[str]) -> str:
     """Build a stable, GUID-shaped token from a list of strings.
 
@@ -312,6 +426,8 @@ def build_model_description(
     include_evolving: bool = False,
     default_step_size: Optional[float] = None,
     include_parameters: bool = True,
+    multi_clock: bool = False,
+    model_identifier: Optional[str] = None,
 ) -> ModelDescription:
     """Build an FMI 3.0 :class:`ModelDescription` from a ``GraphManager``.
 
@@ -348,6 +464,20 @@ def build_model_description(
         the graph parameter pytree, so an importer that sets one changes
         the next step without a recompile, and the FMU's directional
         derivatives with respect to them are the real ``jax.jvp``.
+    multi_clock : bool, default False
+        Emit one FMI 3.0 ``<Clock>`` (``intervalVariability="constant"``)
+        per distinct node timestep among the exported nodes, and tag every
+        exported output and external input with the clock of its node
+        (``clocks=`` attribute, ``variability="discrete"``): an importer
+        then knows that a node on a 10x coarser rate only changes every
+        10th master step.  Clocks are named ``clock_<k>`` in order of
+        increasing interval; the fastest one equals the default step
+        size.  Off by default (single-clock, every output continuous),
+        so existing FMUs are unchanged.
+    model_identifier : str, optional
+        Emit a ``<CoSimulation modelIdentifier=...>`` element naming the
+        FMU binary (``maddening.fmi.package`` uses ``"maddening_fmu"``).
+        ``None`` (default) emits a description-only document.
 
     Returns
     -------
@@ -356,7 +486,38 @@ def build_model_description(
     # Inputs: read external-input edges from the graph manager.  The
     # graph manager exposes them via ``_external_input_specs`` (an
     # internal dict) — we accept a duck-typed view for tests.
-    ext_specs = getattr(graph_manager, "_external_input_specs", {})
+    ext_specs = getattr(graph_manager, "_external_input_specs", None)
+    if ext_specs is None:
+        # A real GraphManager keeps ``_external_inputs`` (a list of
+        # ExternalInputSpec); key them ``<node>.<field>`` -- unique, and
+        # the same convention as outputs -- and borrow description /
+        # units from the target node's boundary_input_spec().
+        ext_specs = {}
+        for ei in getattr(graph_manager, "_external_inputs", None) or []:
+            target = getattr(ei, "target_node", None)
+            fld = getattr(ei, "target_field", None)
+            if target is None or fld is None:
+                continue
+            node_spec = (getattr(graph_manager, "_nodes", {}) or {}).get(target)
+            node = getattr(node_spec, "node", node_spec)
+            bis = {}
+            try:
+                bis = node.boundary_input_spec() if node is not None else {}
+            except Exception:  # noqa: BLE001 - descriptor is advisory
+                bis = {}
+            declared = bis.get(fld)
+            raw_dtype = getattr(ei, "dtype", "float32")
+            try:
+                dtype_name = np.dtype(raw_dtype).name       # jnp.float32 -> "float32"
+            except TypeError:
+                dtype_name = str(raw_dtype)
+            ext_specs[f"{target}.{fld}"] = _ExtView(
+                target_node=target, target_field=fld,
+                shape=tuple(getattr(ei, "shape", ()) or ()),
+                dtype=dtype_name,
+                description=getattr(declared, "description", "") or "",
+                expected_units=getattr(declared, "expected_units", "") or "",
+            )
     selected_input_keys = (
         set(selected_inputs) if selected_inputs is not None
         else set(ext_specs.keys())
@@ -380,6 +541,42 @@ def build_model_description(
     ))
     next_vr += 1
 
+    # ----- Clocks (multi-rate export) -----
+    nodes = getattr(graph_manager, "_nodes", {})
+    clock_vr_of_dt: dict[float, int] = {}
+    node_clock: dict[str, int] = {}
+    if multi_clock:
+        dts: dict[float, list[str]] = {}
+        for node_name, node_spec in nodes.items():
+            node = getattr(node_spec, "node", node_spec)
+            cls_name = f"{type(node).__module__}.{type(node).__name__}"
+            if not _ensure_stable_only_or_opt_in(cls_name, include_evolving):
+                continue
+            dt = float(getattr(node_spec, "timestep", getattr(node, "delta_t", 0.0)))
+            dts.setdefault(dt, []).append(node_name)
+        for k, dt in enumerate(sorted(dts)):
+            variables.append(FMIVariable(
+                name=f"clock_{k}",
+                value_reference=next_vr,
+                dtype=_CLOCK_DTYPE,
+                causality="input",
+                variability="discrete",
+                description=(
+                    f"Rate {dt!r} s: ticks when nodes "
+                    f"{', '.join(sorted(dts[dt]))} update."
+                ),
+                interval_decimal=dt,
+            ))
+            clock_vr_of_dt[dt] = next_vr
+            for n in dts[dt]:
+                node_clock[n] = next_vr
+            next_vr += 1
+
+    def _clocked(node_name: str) -> tuple[tuple[int, ...], str]:
+        """``(clocks, variability)`` for a variable owned by ``node_name``."""
+        vr = node_clock.get(node_name)
+        return ((vr,), "discrete") if vr is not None else ((), "continuous")
+
     # ----- Inputs -----
     for ext_key, ext_spec in ext_specs.items():
         if ext_key not in selected_input_keys:
@@ -389,20 +586,25 @@ def build_model_description(
             dtype = getattr(dtype, "name", str(dtype))
         shape = tuple(getattr(ext_spec, "shape", ()) or ())
         unit = getattr(ext_spec, "expected_units", "") or ""
+        clocks, variability = _clocked(str(getattr(ext_spec, "target_node", "")))
+        # FMI 3.0 requires a start value on every input; the graph's own
+        # default for an unset external input is zero, so advertise that.
+        n_elems = int(np.prod(shape)) if shape else 1
         variables.append(FMIVariable(
             name=ext_key,
             value_reference=next_vr,
             dtype=dtype,
             causality="input",
-            variability="continuous",
+            variability=variability,
             description=getattr(ext_spec, "description", "") or "",
             unit=unit,
             shape=shape or None,
+            clocks=clocks,
+            start=" ".join(["0.0"] * n_elems),
         ))
         next_vr += 1
 
     # ----- Outputs -----
-    nodes = getattr(graph_manager, "_nodes", {})
     selected_output_set = (
         set((n, f) for (n, f) in (selected_outputs or []))
     )
@@ -421,15 +623,17 @@ def build_model_description(
             initial = node.initial_state()[field_name]
             dtype = str(getattr(initial, "dtype", "float32"))
             shape = tuple(getattr(initial, "shape", ()) or ())
+            clocks, variability = _clocked(node_name)
             variables.append(FMIVariable(
                 name=f"{node_name}.{field_name}",
                 value_reference=next_vr,
                 dtype=dtype,
                 causality="output",
-                variability="continuous",
+                variability=variability,
                 description=f"State field {field_name!r} of node "
                             f"{node_name!r}",
                 shape=shape or None,
+                clocks=clocks,
             ))
             next_vr += 1
 
@@ -474,16 +678,14 @@ def build_model_description(
                     unit=(spec.units if spec is not None else "") or "",
                     shape=shape or None,
                     start=start,
-                    min=(spec.bounds[0] if spec is not None else None),
-                    max=(spec.bounds[1] if spec is not None else None),
+                    min=_advertised_bound(spec, 0, dtype),
+                    max=_advertised_bound(spec, 1, dtype),
                 ))
                 next_vr += 1
 
     # ----- Defaults -----
     if default_step_size is None:
-        default_step_size = float(
-            getattr(graph_manager, "_master_timestep", 1.0e-3) or 1.0e-3
-        )
+        default_step_size = _master_timestep(graph_manager)
 
     # Deterministic instantiationToken — depends on the schema, so
     # the FMU loader refuses mismatched schemas at instantiation.
@@ -498,6 +700,7 @@ def build_model_description(
         instantiation_token=token,
         variables=variables,
         default_step_size=default_step_size,
+        co_simulation_model_identifier=model_identifier,
     )
 
 

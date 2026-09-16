@@ -73,6 +73,22 @@ All three share the same substrate:
   vector) is replicated to every shard.  The unstructured wrapper refuses
   a per-cell input given in *global* cell order rather than misreading it.
 
+## Halo-exchange transport (unstructured path)
+
+`exchange_unstructured` has two transports that return bit-identical
+slabs.  `method="all_to_all"` (default) packs one `(n_devices,
+n_ghost_max)` payload per shard and issues a single `lax.all_to_all`, so
+every shard sends `n_devices * n_ghost_max` cells whether or not it
+neighbours the receiver.  `method="ppermute"` issues one `lax.ppermute`
+per cyclic shift that actually carries cells, sized to that shift's
+largest message; a partition where shards talk to few neighbours moves a
+fraction of the cells.  `ShardedUnstructuredNode(..., exchange=...)`
+selects it per node, and `exchange_traffic(layout)` gives the cells
+moved per shard for both, plus the useful count, straight from the
+layout.  Which transport is *faster* under NCCL is hardware-dependent
+and is measured in the real multi-GPU session; the correctness and the
+byte counts are settled here.
+
 ## Partition-assignment handoff (unstructured path)
 
 The contract for unstructured sharding has **three** participants:

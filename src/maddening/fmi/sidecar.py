@@ -34,10 +34,12 @@ Reference implementation
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 The Python sidecar lives in this module as :class:`FmuSidecar`.  The
-C wrapper that ships in the FMU itself is out of scope for v0.3.0
-(it's a v0.4.0 / MIME v0.5.0 deliverable).  Tests can call the
-sidecar directly without going through a real ZMQ socket — see
-``tests/fmi/test_sidecar.py``.
+C wrapper that ships in the FMU (``maddening/fmi/c/maddening_fmu.c``)
+talks to it through :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, a
+TCP transport carrying length-prefixed JSON (no libzmq needed on the
+importer's side); the pickle protocol below stays for in-process use
+and Python clients.  Tests can call the sidecar directly without a
+socket — see ``tests/fmi/test_sidecar.py``.
 """
 
 from __future__ import annotations

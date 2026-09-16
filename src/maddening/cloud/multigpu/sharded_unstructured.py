@@ -106,6 +106,11 @@ class ShardedUnstructuredNode(SimulationNode):
         1-D JAX device mesh.
     layout : UnstructuredPartitionLayout
         Pre-computed partition / ghost / send-recv tables.
+    exchange : {"all_to_all", "ppermute"}, optional
+        Halo-exchange transport (see :func:`exchange_unstructured`):
+        one dense ``all_to_all`` (default) or one ``ppermute`` per
+        communicating cyclic shift, which moves far fewer cells when each
+        shard has few neighbours.  Results are bit-identical.
     mesh_axis : str, optional
         The name of the mesh axis to shard along.  Defaults to
         ``"devices"``.  Must match ``mesh.axis_names``.
@@ -125,6 +130,7 @@ class ShardedUnstructuredNode(SimulationNode):
         layout: UnstructuredPartitionLayout,
         *,
         mesh_axis: str = "devices",
+        exchange: str = "all_to_all",
     ) -> None:
         if mesh_axis not in mesh.axis_names:
             raise ValueError(
@@ -167,10 +173,16 @@ class ShardedUnstructuredNode(SimulationNode):
                 sharded_static[k] = v
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
+        if exchange not in ("all_to_all", "ppermute"):
+            raise ValueError(
+                f"ShardedUnstructuredNode: exchange must be 'all_to_all' or "
+                f"'ppermute', got {exchange!r}"
+            )
         self._inner = node
         self._mesh = mesh
         self._mesh_axis = mesh_axis
         self._layout = layout
+        self._exchange = exchange
         self._sharded_static = sharded_static
         # Cached compiled fns keyed by the input signature.
         self._sharded_cache: dict[Any, Any] = {}
@@ -367,6 +379,7 @@ class ShardedUnstructuredNode(SimulationNode):
         inner = self._inner
         layout = self._layout
         mesh_axis = self._mesh_axis
+        exchange = self._exchange
         n_local_max = layout.n_local_max
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
@@ -383,12 +396,12 @@ class ShardedUnstructuredNode(SimulationNode):
             padded_state = {}
             for k, arr in local_state.items():
                 padded_state[k] = exchange_unstructured(
-                    arr, layout=layout, mesh_axis=mesh_axis,
+                    arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
             # 1b. Per-cell boundary inputs get the same ghost exchange so
             #     the inner reads them at the padded local shape.
             local_bi = {
-                k: (exchange_unstructured(v, layout=layout, mesh_axis=mesh_axis)
+                k: (exchange_unstructured(v, layout=layout, mesh_axis=mesh_axis, method=exchange)
                     if k in cell_bi else v)
                 for k, v in local_bi.items()
             }
@@ -397,7 +410,7 @@ class ShardedUnstructuredNode(SimulationNode):
             padded_static = {}
             for k, arr in local_static.items():
                 padded_static[k] = exchange_unstructured(
-                    arr, layout=layout, mesh_axis=mesh_axis,
+                    arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
 
             # 3. shard_info — traced offset for nodes that want a per-shard tag.
@@ -439,6 +452,7 @@ class ShardedUnstructuredNode(SimulationNode):
         d["sharded"] = True
         d["sharding"] = "unstructured"
         d["n_devices"] = self._layout.n_devices
+        d["exchange"] = self._exchange
         return d
 
 

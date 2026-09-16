@@ -76,14 +76,24 @@ from maddening.fmi.model_description import (
     ModelDescription,
     build_model_description,
 )
+from maddening.fmi.package import (
+    MODEL_IDENTIFIER,
+    build_fmu_binary,
+    write_fmu,
+)
+from maddening.fmi.tcp_bridge import FmuTcpBridge
 
 __all__ = [
     "DirectionalDerivativeKind",
     "FMIVariable",
     "FMUState",
+    "FmuTcpBridge",
+    "MODEL_IDENTIFIER",
     "ModelDescription",
+    "build_fmu_binary",
     "build_model_description",
     "deserialize_fmu_state",
     "get_directional_derivative",
     "serialize_fmu_state",
+    "write_fmu",
 ]

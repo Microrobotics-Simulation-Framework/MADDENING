@@ -285,8 +285,17 @@ def exchange_unstructured(
     *,
     layout: UnstructuredPartitionLayout,
     mesh_axis: str,
+    method: str = "all_to_all",
 ) -> jax.Array:
-    """Sparse halo exchange — fetch each shard's ghost cells via all_to_all.
+    """Sparse halo exchange — fetch each shard's ghost cells.
+
+    ``method="all_to_all"`` (default) sends one dense
+    ``(n_devices, n_ghost_max)`` payload from every shard to every other
+    shard in a single ``lax.all_to_all``; ``method="ppermute"`` sends one
+    ``lax.ppermute`` per *cyclic shift* that actually carries cells,
+    sized to that shift's largest message, so a partition whose shards
+    only talk to a few neighbours moves a fraction of the bytes (see
+    :func:`exchange_traffic`).  Both return bit-identical slabs.
 
     Must be called INSIDE ``shard_map`` with ``mesh_axis`` matching the
     sharded axis name.  ``local`` is the per-shard slab of length
@@ -310,6 +319,10 @@ def exchange_unstructured(
         ``layout.ghost_global_ids[<this device>]`` order).  Trailing
         unused ghost slots are zero-filled.
     """
+    if method == "ppermute":
+        return _exchange_ppermute(local, layout=layout, mesh_axis=mesh_axis)
+    if method != "all_to_all":
+        raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
     n_devices = layout.n_devices
     n_ghost_max = layout.n_ghost_max
     # Convert tracing-safe numpy arrays to traced jnp arrays.
@@ -379,6 +392,83 @@ def exchange_unstructured(
     ghost = jnp.where(valid, ghost, jnp.zeros_like(ghost))
 
     return jnp.concatenate([local, ghost], axis=0)
+
+
+def _build_shift_tables(layout: UnstructuredPartitionLayout) -> list[dict]:
+    """Per cyclic shift ``s`` (device ``i`` sends to ``(i + s) % D``): the
+    local indices to pack, the receiver's ghost slots to scatter into, and
+    the per-source counts.  Shifts that carry nothing are omitted, so the
+    traced exchange issues one ``ppermute`` per *communicating* shift.
+
+    ``send_idx[i, k]``  local index on device ``i`` of its k-th cell for
+    ``(i+s) % D`` (0 past the count);  ``recv_slot[d, k]`` ghost slot on
+    device ``d`` of the k-th cell received from ``(d - s) % D``
+    (``n_ghost_max`` -- a scratch slot -- past the count).
+    """
+    cached = getattr(layout, "_shift_tables_cache", None)
+    if cached is not None:
+        return cached
+    D = layout.n_devices
+    K = layout.n_ghost_max
+    slot_of = [
+        {int(g): j for j, g in enumerate(layout.ghost_global_ids[d])} for d in range(D)
+    ]
+    tables: list[dict] = []
+    for s in range(1, D):
+        counts = np.array([int(layout.send_counts[i, (i + s) % D]) for i in range(D)],
+                          dtype=np.int32)
+        k_s = int(counts.max()) if D > 1 else 0
+        if k_s == 0:
+            continue
+        send_idx = np.zeros((D, k_s), dtype=np.int32)
+        recv_slot = np.full((D, k_s), K, dtype=np.int32)
+        for i in range(D):
+            dst = (i + s) % D
+            n = int(counts[i])
+            loc = layout.send_indices[i, dst, :n]
+            send_idx[i, :n] = loc
+            gids = layout.local_global_ids[i][loc]
+            recv_slot[dst, :n] = [slot_of[dst][int(g)] for g in gids]
+        tables.append({"shift": s, "send_idx": send_idx, "recv_slot": recv_slot,
+                       "counts": counts, "k": k_s})
+    object.__setattr__(layout, "_shift_tables_cache", tables)
+    return tables
+
+
+def _exchange_ppermute(
+    local: jax.Array, *, layout: UnstructuredPartitionLayout, mesh_axis: str,
+) -> jax.Array:
+    D = layout.n_devices
+    K = layout.n_ghost_max
+    trailing = local.shape[1:]
+    me = lax.axis_index(mesh_axis)
+    # Scratch row K absorbs padded entries; dropped at the end.
+    ghost = jnp.zeros((K + 1,) + trailing, dtype=local.dtype)
+    for t in _build_shift_tables(layout):
+        s = t["shift"]
+        send_idx = jnp.asarray(t["send_idx"])[me]                # (k_s,)
+        payload = jnp.take(local, send_idx, axis=0)             # (k_s, ...)
+        recv = lax.ppermute(payload, mesh_axis, perm=[(i, (i + s) % D) for i in range(D)])
+        slots = jnp.asarray(t["recv_slot"])[me]                  # (k_s,)
+        ghost = ghost.at[slots].set(recv)
+    ghost = ghost[:K]
+    return jnp.concatenate([local, ghost], axis=0)
+
+
+@stability(StabilityLevel.EVOLVING)
+def exchange_traffic(layout: UnstructuredPartitionLayout) -> dict[str, int]:
+    """Cells moved per shard and per exchange for each method (multiply
+    by the per-cell payload for bytes) -- the hardware-independent part
+    of the v0.4.0 ``all_to_all`` performance question."""
+    D, K = layout.n_devices, layout.n_ghost_max
+    shifts = _build_shift_tables(layout)
+    useful = int(np.asarray(layout.send_counts).sum()) // max(D, 1)
+    return {
+        "all_to_all": D * K,
+        "ppermute": int(sum(t["k"] for t in shifts)),
+        "useful": useful,
+        "ppermute_messages": len(shifts),
+    }
 
 
 def _build_ghost_source_table(
@@ -487,6 +577,7 @@ def gather_value(
 __all__ = [
     "UnstructuredPartitionLayout",
     "build_unstructured_partition",
+    "exchange_traffic",
     "exchange_unstructured",
     "partition_value",
     "gather_value",

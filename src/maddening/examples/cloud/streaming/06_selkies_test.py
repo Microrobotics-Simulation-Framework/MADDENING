@@ -207,7 +207,7 @@ def main():
     print("\nInstalling Python deps via SSH (targeting python3.10)...")
     result = job.ssh_run(
         "python3 -m pip install -q --root-user-action=ignore"
-        ' "jax[cuda12]>=0.4,<0.6" "fastapi>=0.100" "uvicorn>=0.20"'
+        ' "jax[cuda12]>=0.10,<0.13" "fastapi>=0.100" "uvicorn>=0.20"'
         ' "websockets>=11.0" "numpy>=1.24" "pyyaml>=6.0"'
         " && [ -d ~/sky_workdir/src ] && python3 -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
         " ; echo BASE_INSTALL_DONE",

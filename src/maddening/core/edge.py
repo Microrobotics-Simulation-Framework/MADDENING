@@ -55,6 +55,10 @@ class EdgeSpec:
             "target_field": self.target_field,
         }
         if self.mapping is not None:
+            # A factory-built mapping describes itself as its MappingSpec
+            # (kind, hyper-parameters, point references, shape -- never
+            # the weights), which from_dict rebuilds; anything else can
+            # only be named.  GraphManager.to_dict checks completeness.
             describe = getattr(self.mapping, "describe", None)
             d["mapping"] = describe() if callable(describe) else {
                 "kind": getattr(self.mapping, "kind", type(self.mapping).__name__),

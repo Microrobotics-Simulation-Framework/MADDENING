@@ -30,7 +30,7 @@ from maddening.cloud.launcher import (
 # Reuse the server setup from 04_server_test
 INSTALL_CMD = (
     "pip install -q --root-user-action=ignore"
-    ' "jax[cuda12]>=0.4,<0.6"'
+    ' "jax[cuda12]>=0.10,<0.13"'
     ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
     ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
     " && [ -d ~/sky_workdir/src ] && pip install -q --root-user-action=ignore -e ~/sky_workdir"

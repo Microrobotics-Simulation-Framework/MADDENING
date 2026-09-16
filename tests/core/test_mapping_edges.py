@@ -160,23 +160,20 @@ def test_conservative_projection_edge_preserves_integral():
     assert np.sum(v * np.diff(sb)) == pytest.approx(np.sum(out * np.diff(tb)), abs=1e-5)
 
 
-def test_serialisation_of_mapped_edges():
+def test_serialisation_of_mapped_edges_round_trips_without_weights():
+    """``to_dict`` writes the MappingSpec (never ``H``); ``from_dict``
+    rebuilds the same weights and registers the ``params['mappings']``
+    slot.  Detailed coverage: tests/core/test_mapping_spec_serialisation.py."""
     gm = _two_rods()
     d = gm.to_dict()
     e = d["edges"][0]
     assert e["mapping"]["kind"] == "rbf" and e["mapping"]["shape"] == [N_FINE, N_COARSE]
-    assert "H" not in str(e["mapping"])
-    with pytest.raises(ValueError, match="mapping"):
-        GraphManager.from_dict(d, {"HeatNode": HeatNode})
-
-
-def test_usd_save_refuses_mapped_edges():
-    pxr = pytest.importorskip("pxr")
-    from maddening.usd.serialization import save_graph_to_usd
-
-    gm = _two_rods()
-    with pytest.raises(ValueError, match="mapping"):
-        save_graph_to_usd(gm, pxr.Usd.Stage.CreateInMemory())
+    assert "H" not in e["mapping"] and "points" in e["mapping"]
+    gm2 = GraphManager.from_dict(d, {"HeatNode": HeatNode})
+    gm2.compile()
+    assert set(gm2.params["mappings"]) == {C2F, F2C}
+    np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][C2F]["H"]),
+                                  np.asarray(gm.params["mappings"][C2F]["H"]))
 
 
 def test_mapping_weights_frozen_by_default_and_opt_in_trainable():

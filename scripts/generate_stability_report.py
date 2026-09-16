@@ -24,21 +24,47 @@ SRC = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 # Surfaces we want enumerated.  Importing them ensures @stability fires.
-import maddening  # noqa: F401
-import maddening.core.graph_manager  # noqa: F401
-import maddening.core.node  # noqa: F401
-import maddening.core.edge  # noqa: F401
-import maddening.core.static_data  # noqa: F401
-import maddening.core.coupling  # noqa: F401
-import maddening.cloud.multigpu.sharded_node  # noqa: F401
-import maddening.cloud.multigpu.sharded_unstructured  # noqa: F401
-import maddening.cloud.multigpu.iterative_solver  # noqa: F401
-import maddening.cloud.providers  # noqa: F401
-import maddening.api.binary_encoder  # noqa: F401
-import maddening.nodes  # noqa: F401
-import maddening.surrogates  # noqa: F401
-import maddening.usd.live_stage  # noqa: F401
-import maddening.fmi  # noqa: F401
+# ``tests/compliance/test_stability.py`` checks that importing this list
+# reaches every module under ``src/maddening`` that uses ``@stability(``,
+# so a newly tagged module that is missing here fails CI instead of
+# silently dropping out of the report.
+STABILITY_MODULES: tuple[str, ...] = (
+    "maddening",
+    "maddening.core.graph_manager",
+    "maddening.core.node",
+    "maddening.core.edge",
+    "maddening.core.static_data",
+    "maddening.core.coupling",
+    "maddening.core.coupling.mapping",
+    "maddening.core.params",
+    "maddening.core.solver_utils",
+    "maddening.core.simulation.compile_cache",
+    "maddening.core.simulation.profiler",
+    "maddening.cloud.multigpu.sharded_node",
+    "maddening.cloud.multigpu.sharded_unstructured",
+    "maddening.cloud.multigpu.halo_unstructured",
+    "maddening.cloud.multigpu.iterative_solver",
+    "maddening.cloud.providers",
+    "maddening.cloud.resume",
+    "maddening.api.binary_encoder",
+    "maddening.nodes",
+    "maddening.surrogates",
+    "maddening.surrogates.training.trainer",
+    "maddening.sysid",
+    "maddening.usd.live_stage",
+    "maddening.fmi",
+)
+
+
+def import_stability_surfaces() -> None:
+    """Import every module in :data:`STABILITY_MODULES` (fires ``@stability``)."""
+    import importlib
+
+    for name in STABILITY_MODULES:
+        importlib.import_module(name)
+
+
+import_stability_surfaces()
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import (

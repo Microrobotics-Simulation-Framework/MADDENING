@@ -1,6 +1,12 @@
 """Tests for the @stability decorator and generate_stability_report()."""
 
+import ast
 import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from maddening.core.compliance.metadata import StabilityLevel
@@ -83,6 +89,7 @@ class TestStabilityDecorator:
         import maddening.cloud.multigpu.sharded_node  # noqa: F401
         import maddening.api.binary_encoder  # noqa: F401
         import maddening.cloud.providers  # noqa: F401
+        import maddening.cloud.resume  # noqa: F401
 
         stable_required = {
             "maddening.core.graph_manager.GraphManager",
@@ -95,6 +102,9 @@ class TestStabilityDecorator:
         evolving_required = {
             "maddening.api.binary_encoder.BinaryStateEncoder",
             "maddening.cloud.providers.CloudProvider",
+            # v0.4.0: the resume-from-URL transport moved to the cloud package
+            # and was tagged there (it had no tag in the core module).
+            "maddening.cloud.resume.download_and_load_state",
         }
 
         for name in stable_required:
@@ -123,3 +133,70 @@ class TestStabilityReport:
         report = generate_stability_report()
         assert "ReportTestClass" in report
         assert "stable" in report
+
+
+class TestStabilityReportGeneratorCoverage:
+    """``scripts/generate_stability_report.py`` must reach every tagged module.
+
+    The registry is populated at import time, so a ``@stability``-tagged
+    module the generator never imports silently drops out of the report
+    (the v0.4.0 ``maddening.cloud.resume`` tag went missing that way).
+    The generator's module list is compared against a grep of the source
+    tree in a fresh interpreter so in-process imports from other tests
+    cannot mask a gap.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    SCRIPT = REPO_ROOT / "scripts" / "generate_stability_report.py"
+    SRC = REPO_ROOT / "src"
+
+    def _modules_using_stability(self) -> set[str]:
+        pattern = re.compile(r"^\s*@stability\(", re.M)
+        found = set()
+        for path in (self.SRC / "maddening").rglob("*.py"):
+            if pattern.search(path.read_text(encoding="utf-8")):
+                rel = path.relative_to(self.SRC).with_suffix("")
+                parts = list(rel.parts)
+                if parts[-1] == "__init__":
+                    parts.pop()
+                found.add(".".join(parts))
+        return found
+
+    def test_generator_module_list_covers_every_module_using_stability(self):
+        tagged = self._modules_using_stability()
+        assert "maddening.cloud.resume" in tagged  # sanity: the grep sees the tag
+        code = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('gen', {str(self.SCRIPT)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "mod.import_stability_surfaces()\n"
+            "print(repr(sorted(m for m in sys.modules if m.startswith('maddening'))))\n"
+        )
+        env = dict(os.environ, JAX_PLATFORMS="cpu")
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, check=True, env=env,
+        )
+        imported = set(ast.literal_eval(out.stdout.strip().splitlines()[-1]))
+        missing = sorted(tagged - imported)
+        assert not missing, (
+            "modules using @stability that scripts/generate_stability_report.py "
+            f"never imports (add them to STABILITY_MODULES): {missing}"
+        )
+
+    def test_resume_transport_is_registered_evolving_by_generator(self):
+        code = (
+            "import importlib.util\n"
+            f"spec = importlib.util.spec_from_file_location('gen', {str(self.SCRIPT)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "from maddening.core.compliance.stability import _STABILITY_REGISTRY\n"
+            "print(_STABILITY_REGISTRY['maddening.cloud.resume.download_and_load_state'].value)\n"
+        )
+        env = dict(os.environ, JAX_PLATFORMS="cpu")
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, check=True, env=env,
+        )
+        assert out.stdout.strip().splitlines()[-1] == "evolving"

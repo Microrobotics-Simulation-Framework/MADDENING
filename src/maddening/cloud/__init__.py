@@ -20,6 +20,10 @@ Mock implementations (zero deps, for testing)::
 GStreamer streaming (requires PyGObject + GStreamer)::
 
     SelkiesSession
+
+Resume-from-URL transport (fsspec only for cloud-storage schemes)::
+
+    download_and_load_state
 """
 
 # Eagerly import pure-Python types (stdlib only, no deps)
@@ -93,6 +97,8 @@ def __getattr__(name: str):
         "GroupFailureMode": "maddening.cloud.group",
         "SubgraphSpec": "maddening.cloud.group",
         "Coordinator": "maddening.cloud.multigpu.coordinator",
+        # Resume-from-URL transport (imports JAX via core checkpoint)
+        "download_and_load_state": "maddening.cloud.resume",
     }
     if name in _lazy:
         import importlib
@@ -144,4 +150,5 @@ __all__ = [
     "AWSProvider",
     "GCPProvider",
     "PROVIDERS",
+    "download_and_load_state",
 ]

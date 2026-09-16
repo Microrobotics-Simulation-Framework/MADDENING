@@ -11,6 +11,14 @@ the sidecar manifest landed in v0.2 #8.  See
 {func}`maddening.cloud.entrypoint.make_preempt_snapshot_hook`.
 ```
 
+```{versionchanged} v0.4.0
+`download_and_load_state` moved to {mod}`maddening.cloud.resume`
+(URL transport is a deployment concern; the core checkpoint module
+stays dependency-free).  The old
+`maddening.core.simulation.checkpoint.download_and_load_state` import
+still works but emits a `DeprecationWarning` and is removed in 1.0.
+```
+
 Spot VMs are cheap and disposable — until the cloud provider yanks
 yours at 30 seconds' notice and your simulation state vapourises.
 v0.2 wires up three things so that doesn't happen:
@@ -90,7 +98,7 @@ below for the upload step and why MADDENING doesn't do it for you.
 ## Supported URL schemes
 
 `RESUME_FROM_URL` and the underlying
-{func}`maddening.core.simulation.checkpoint.download_and_load_state`
+{func}`maddening.cloud.resume.download_and_load_state`
 accept:
 
 | Scheme | Behaviour |
@@ -99,7 +107,7 @@ accept:
 | `http://…/snap.npz` | HTTP GET via the stdlib `urllib`.  No auth headers (yet); use a presigned URL if you need them. |
 | `https://…/snap.npz` | Same as `http://` over TLS. |
 | Bare path (`/path/to/snap.npz`) | Treated as `file://`. |
-| `s3://`, `gs://`, `azure://` | **Not yet wired** — call out to your orchestrator's CLI (`aws s3 cp`, `gsutil cp`) and present a presigned `https://` URL instead. |
+| `s3://`, `gs://`, `az://` / `abfs://` / `azure://`, `memory://`, any other fsspec protocol | Read through [fsspec](https://filesystem-spec.readthedocs.io/) (v0.4.0).  Install `fsspec` plus the backend for the scheme (`s3fs`, `gcsfs`, `adlfs`); a missing backend raises an `ImportError` naming the package to install.  Credentials come from the backend's usual environment (e.g. `AWS_*` variables). |
 
 ## What's still on you, the orchestrator
 
@@ -118,11 +126,11 @@ The MADDENING layer deliberately stops at "write the local file" and
   all support short-lived URLs; pass that as `RESUME_FROM_URL` on
   the relaunch.
 
-When MADDENING grows native `s3://` / `gs://` support (evaluated and
-deferred for v0.3.0 — slipped to v0.4 unless MICROROBOTICA Light
-needs it sooner; see `plans/MADDENING_v0.3.0_PLAN.md` §C3), this
-whole layer collapses to one `RESUME_FROM_URL` and the
-orchestrator's CLI calls go away.
+With the fsspec schemes (v0.4.0) the upload/presign steps are
+optional: an orchestrator that can grant the pod bucket credentials
+hands over one `RESUME_FROM_URL=s3://…` and the CLI calls go away.
+The local-file-plus-presigned-URL pattern above still works and needs
+no extra dependencies.
 
 ## The full preempt-resume contract
 
@@ -136,7 +144,7 @@ orchestrator's CLI calls go away.
 5. **(orchestrator)** relaunches the VM with `RESUME_FROM_URL=...`.
 6. New VM's entrypoint reads `RESUME_FROM_URL` and calls
    {func}`~maddening.cloud.entrypoint.resume_from_url` →
-   {func}`~maddening.core.simulation.checkpoint.download_and_load_state`.
+   {func}`~maddening.cloud.resume.download_and_load_state`.
 7. `download_and_load_state` fetches the `.npz` + `.manifest.json`
    into a per-call temp dir (so concurrent resumes don't collide),
    then calls `load_state_with_manifest` which verifies the hash
@@ -155,9 +163,7 @@ the manifest didn't apply.
 For one-off loads of pre-v0.2 checkpoints that don't have a manifest:
 
 ```python
-from maddening.core.simulation.checkpoint import (
-    download_and_load_state,
-)
+from maddening.cloud.resume import download_and_load_state
 download_and_load_state(
     gm, url, skip_integrity_check=True,
 )
@@ -189,17 +195,20 @@ garbage.
 ## Test coverage and what's deferred
 
 The file:// path is fully unit-covered in
-`tests/cloud/test_preempt_checkpoint.py` — every codepath above
-runs against a `_FakeCloudSession` + local tempfile.  What's
+`tests/cloud/test_resume.py` (URL transport, including the fsspec
+`memory://` round trip) and `tests/cloud/test_preempt_checkpoint.py`
+(snapshot hook + entry-point helper) — every codepath above runs
+against a `_FakeCloudSession` + local tempfile.  What's
 *not* yet covered:
 
 * End-to-end RunPod spot preemption (requires real credentials).
-* `s3://` / `gs://` / `azure://` URL schemes (orchestrator's
-  problem until the cloud-storage abstraction lands).
+* `s3://` / `gs://` / `az://` against real buckets (the fsspec path is
+  exercised with the in-memory `memory://` filesystem only; the
+  backends themselves are third-party).
 * Multi-snapshot lifecycle (last-N retention, garbage collection).
 
-For the first two, the trade-off is: until you wire them, your
-orchestrator does the upload step explicitly with a CLI call.  The
-MADDENING contract is "write local file → orchestrator handles
-transport → entrypoint reads URL"; everything else is a
-nice-to-have (slipped to v0.4+ per the v0.3.0 plan §C3).
+The MADDENING contract is "write local file → orchestrator handles
+transport → entrypoint reads URL".  Whether the transport is a
+presigned `https://` URL or a bucket URL read through fsspec is the
+orchestrator's choice; retention and garbage collection stay outside
+the package.

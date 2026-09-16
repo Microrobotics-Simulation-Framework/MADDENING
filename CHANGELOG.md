@@ -28,6 +28,29 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **`AdaptiveNode` base class** (`maddening.nodes.adaptive`, `@stability(STABLE)`,
+  `MADD-NODE-009`): the frozen-active-set adjoint pattern for adaptive solvers.
+  A subclass supplies `compute_active_set` (any fixed-shape `jnp` selection
+  rule) and `solve_frozen` (the masked solve, through `ift_linear_solve`); the
+  base class wires them into a JAX-traceable `update` over a padded `(c, mask)`
+  state — adaptivity changes which mask entries are true, never an array
+  shape, so the step runs under `jit` / `lax.scan` unchanged — commits the
+  selection under `stop_gradient`, and zeroes coefficients off the mask.
+  `jax.grad` through the node is the exact frozen-set adjoint on every region
+  where the active set is constant (verified against finite differences and
+  dense sub-block solves to 1e-6).  Physical parameters live in the graph
+  parameter pytree with the subclass's `ParamSpec`s, so `fit` / `fim` reach
+  them.  Palais-trap diagnostics from the design spike: `blindness_ratio`,
+  `is_trapped_at`, `symmetry_break` (anisotropic step along the full-basis
+  gradient, trainable leaves only), a cold-start gate in `initial_state`
+  (`AdaptiveNodeBlindnessError`) and `cold_start()` with one automatic escape;
+  constants `blindness_threshold = 0.7`, `blindness_break_delta = 0.05`,
+  `D_threshold = 5` as documented class attributes.  Algorithm guide
+  (`docs/algorithm_guide/nodes/adaptive_node.md`), authoring guide
+  (`docs/developer_guide/adaptive_node.md`), benchmark `MADD-VER-004`
+  (Green's-function reference for `-u'' + u = f`).  `ift_linear_solve` is
+  promoted from `EXPERIMENTAL` to `STABLE` with its signature unchanged, as
+  its v0.3.1 docstring promised.  The wavelet subclass stays post-1.0.
 - **Per-neighbour unstructured halo exchange** (v0.4.0 plan hard gate,
   the hardware-independent part).  `exchange_unstructured(...,
   method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`

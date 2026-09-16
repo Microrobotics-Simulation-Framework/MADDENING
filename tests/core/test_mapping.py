@@ -158,7 +158,10 @@ def test_apply_T_is_the_adjoint(seed, n_src, n_tgt):
     w = jnp.asarray(rng.normal(size=n_tgt), jnp.float32)
     lhs = float(jnp.dot(m.apply(v), w))
     rhs = float(jnp.dot(v, m.apply_T(w)))
-    assert np.isclose(lhs, rhs, rtol=1e-4, atol=1e-5)
+    # Both sides are float32 sums of O(n) products that can nearly
+    # cancel, so the tolerance scales with the terms, not the result.
+    scale = float(jnp.linalg.norm(m.apply(v)) * jnp.linalg.norm(w)) + 1e-6
+    assert abs(lhs - rhs) <= 1e-5 * scale, (lhs, rhs, scale)
     # and matches what JAX's transpose of ``apply`` gives
     _, vjp = jax.vjp(m.apply, v)
     np.testing.assert_allclose(np.asarray(vjp(w)[0]), np.asarray(m.apply_T(w)), rtol=1e-5)

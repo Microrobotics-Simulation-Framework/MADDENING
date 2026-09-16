@@ -127,6 +127,20 @@ res.params["nodes"]["spring"]      # physical values, inside bounds
 res.losses                         # per-iteration loss
 ```
 
+`fit_lm` is the Gauss–Newton alternative: it reuses the `jacfwd`
+sensitivities `fim` computes, so with a handful of parameters it
+converges in a few iterations where Adam needs hundreds; give it a
+residual function rather than a scalar loss, and `noise_std` (a scalar or
+a per-leaf σ, also accepted by `fim`) to weight the residual so the
+Cramér–Rao bound comes out in the parameters' own units.
+
+For noisy data, `fit_multiple_shooting` replaces teacher forcing with
+free per-window initial states and a continuity penalty
+(`windowed_loss(..., window_states=, continuity_weight=)`), so the
+optimum is one continuous trajectory rather than windows each seeded
+with measurement error.  All three fitters emit a `"fit_progress"` event
+to `gm.add_observer` callbacks every `notify_every` iterations.
+
 `fit` runs Adam in the unconstrained coordinates under the trainable
 mask, so positive constants stay positive and frozen leaves are returned
 bit-identical.  Gradients through the whole graph come from a single

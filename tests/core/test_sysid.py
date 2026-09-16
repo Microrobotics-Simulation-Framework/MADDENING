@@ -237,3 +237,144 @@ def test_fim_mask_restricts_to_selected_leaves(spring):
     with pytest.raises(ValueError, match="selects no parameters"):
         fim(residual_full, gm.params, mask=jax.tree.map(lambda _: False, gm.params))
     gm._param_spec_overrides.clear()  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Items 9-11: multiple shooting, noise model + LM, progress events
+# ---------------------------------------------------------------------------
+
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+from maddening.sysid import (  # noqa: E402
+    fit_lm, fit_multiple_shooting, init_window_states,
+)
+
+
+def test_init_window_states_shape_and_values(spring):
+    gm, obs = spring
+    ws = init_window_states(obs, WINDOW)
+    n_w = N_STEPS // WINDOW
+    assert ws["s"]["position"].shape == (n_w,)
+    np.testing.assert_array_equal(np.asarray(ws["s"]["position"]),
+                                  np.asarray(obs["s"]["position"][: n_w * WINDOW : WINDOW]))
+    with pytest.raises(ValueError, match="must divide"):
+        init_window_states(obs, 7)
+
+
+def test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps(spring):
+    gm, obs = spring
+    ws = init_window_states(obs, WINDOW)
+    loss = jax.jit(lambda p, w: windowed_loss(
+        gm, p, obs, obs_fn=lambda h: h["s"]["position"], window=WINDOW,
+        window_states=w, continuity_weight=1.0))
+    assert float(loss(gm.params, ws)) < 1e-9
+    # A wrong free start on window 1 costs both data misfit and continuity.
+    bad = jax.tree.map(lambda x: x, ws)
+    bad["s"]["position"] = bad["s"]["position"].at[1].add(0.5)
+    assert float(loss(gm.params, bad)) > 1e-2
+    # the continuity term alone (data term unaffected by a moved *end*):
+    g = jax.grad(lambda w: loss(gm.params, w))(ws)
+    assert bool(jnp.all(jnp.isfinite(g["s"]["position"])))
+    with pytest.raises(ValueError, match="leading axis"):
+        windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW, window_states=jax.tree.map(lambda x: x[:2], ws))
+
+
+def test_fit_multiple_shooting_recovers_from_noisy_window_starts(spring):
+    """With noise on the observations, teacher forcing seeds every window
+    with the noisy state; multiple shooting lets the starts move."""
+    gm, obs = spring
+    rng = np.random.default_rng(0)
+    noisy = jax.tree.map(lambda x: x + jnp.asarray(rng.normal(0, 0.01, x.shape), x.dtype), obs)
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False))
+    gm.set_param_spec("s", "rest_length", ParamSpec(trainable=False))
+    res, ws = fit_multiple_shooting(
+        gm, noisy, obs_fn=lambda h: h["s"]["position"], window=WINDOW,
+        params=_perturbed(gm, 1.3, 1.5), continuity_weight=1.0, n_iter=250, lr=0.1,
+        lr_states=0.01,
+    )
+    k = float(res.params["nodes"]["s"]["stiffness"])
+    assert abs(k - K_TRUE) / K_TRUE < 0.05, k
+    assert ws["s"]["position"].shape == (N_STEPS // WINDOW,)
+    assert res.losses[-1] < res.losses[0]
+    gm._param_spec_overrides.clear()  # noqa: SLF001
+
+
+def test_fim_noise_std_scales_information(spring):
+    gm, obs = spring
+    names = ("stiffness", "damping")
+    sub = {n: gm.params["nodes"]["s"][n] for n in names}
+    base = fim(_residual_fn(gm, obs, names), sub)
+    scaled = fim(_residual_fn(gm, obs, names), sub, noise_std=2.0)
+    np.testing.assert_allclose(np.asarray(scaled.fim), np.asarray(base.fim) / 4.0, rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(scaled.crb), np.asarray(base.crb) * 4.0, rtol=1e-4)
+    # per-leaf pytree sigma (residual is a single array here)
+    per = fim(_residual_fn(gm, obs, names), sub, noise_std=jnp.full((N_STEPS,), 2.0))
+    np.testing.assert_allclose(np.asarray(per.fim), np.asarray(scaled.fim), rtol=1e-5)
+
+
+def _full_residual(gm, obs):
+    step_fn = gm._build_step_fn()
+    ext = gm._default_external_inputs()
+    init = jax.tree.map(lambda x: x[0], obs)
+    truth = obs["s"]["position"][1:]
+
+    def residual(p):
+        def body(s, _):
+            s = step_fn(s, ext, p)
+            return s, s["s"]["position"]
+        return jax.lax.scan(body, init, None, length=N_STEPS)[1] - truth
+    return residual
+
+
+@given(kf=st.floats(0.5, 2.0), cf=st.floats(0.5, 2.0))
+@settings(max_examples=8, deadline=None)
+def test_fit_lm_recovers_k_c_in_few_iterations(kf, cf):
+    gm = _spring_gm()
+    obs = _observations(gm)
+    for key in ("mass", "rest_length"):
+        gm.set_param_spec("s", key, ParamSpec(trainable=False))
+    res = fit_lm(gm, _full_residual(gm, obs), params=_perturbed(gm, kf, cf), n_iter=30,
+                 tol=1e-10)
+    s = res.params["nodes"]["s"]
+    assert abs(float(s["stiffness"]) - K_TRUE) / K_TRUE < 0.02, float(s["stiffness"])
+    assert abs(float(s["damping"]) - C_TRUE) / C_TRUE < 0.05, float(s["damping"])
+    assert res.n_iter <= 30 and res.losses[-1] <= res.losses[0]
+    assert float(s["mass"]) == 1.0
+
+
+def test_fit_lm_beats_adam_at_equal_budget(spring):
+    gm, obs = spring
+    for key in ("mass", "rest_length"):
+        gm.set_param_spec("s", key, ParamSpec(trainable=False))
+    start = _perturbed(gm, 1.5, 2.5)
+    lm = fit_lm(gm, _full_residual(gm, obs), params=start, n_iter=15)
+    adam = fit(gm, _loss_fn(gm, obs), params=start, n_iter=15, lr=0.1)
+    k_lm = float(lm.params["nodes"]["s"]["stiffness"])
+    k_adam = float(adam.params["nodes"]["s"]["stiffness"])
+    assert abs(k_lm - K_TRUE) < abs(k_adam - K_TRUE)
+    gm._param_spec_overrides.clear()  # noqa: SLF001
+
+
+def test_fit_progress_events_reach_observers(spring):
+    from maddening.core.graph_manager import EVENT_FIT_PROGRESS
+
+    gm, obs = spring
+    seen = []
+    gm.add_observer(lambda ev, data: seen.append((ev, data)) if ev == EVENT_FIT_PROGRESS else None)
+    fit(gm, _loss_fn(gm, obs), params=_perturbed(gm, 1.2, 1.0), n_iter=6, lr=0.1,
+        notify_every=2)
+    gm._observers.clear()  # noqa: SLF001
+    its = [d["iteration"] for _, d in seen]
+    assert its == [2, 4, 6]
+    assert all(d["method"] == "adam" and d["n_iter"] == 6 for _, d in seen)
+    assert all(np.isfinite(d["loss"]) and "s" in d["params"]["nodes"] for _, d in seen)
+    # notify_every=0 disables; fit_lm reports method "lm"
+    seen.clear()
+    gm.add_observer(lambda ev, data: seen.append(data["method"]) if ev == EVENT_FIT_PROGRESS else None)
+    fit(gm, _loss_fn(gm, obs), n_iter=2, notify_every=0)
+    assert seen == []
+    fit_lm(gm, _full_residual(gm, obs), n_iter=2)
+    gm._observers.clear()  # noqa: SLF001
+    assert seen == ["lm", "lm"]

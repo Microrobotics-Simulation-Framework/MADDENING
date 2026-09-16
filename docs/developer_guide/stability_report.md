@@ -28,6 +28,11 @@ import time.  Levels:
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
 | `maddening.core.node.SimulationNode` | stable |
+| `maddening.core.params.ParamSpec` | evolving |
+| `maddening.core.params.check_bounds` | evolving |
+| `maddening.core.params.constrain` | evolving |
+| `maddening.core.params.trainable_mask` | evolving |
+| `maddening.core.params.unconstrain` | evolving |
 | `maddening.core.static_data.StaticArray` | stable |
 | `maddening.fmi.directional_derivatives.get_directional_derivative` | evolving |
 | `maddening.fmi.fmu_state.deserialize_fmu_state` | evolving |
@@ -48,4 +53,4 @@ import time.  Levels:
 | `maddening.surrogates.node.SurrogateNode` | experimental |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*29 API surfaces registered.*
+*34 API surfaces registered.*

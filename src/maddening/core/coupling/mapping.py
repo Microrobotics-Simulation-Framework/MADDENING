@@ -37,6 +37,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 _KERNELS = ("gaussian", "multiquadric", "inverse_multiquadric", "thin_plate_spline")
 _MODES = ("consistent", "conservative")
 
@@ -70,6 +73,7 @@ class Mapping(Protocol):
     def apply_T(self, field, weights: Optional[dict] = None, geom=None): ...
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True, eq=False)
 class StaticLinearMapping:
     """``target = H @ source`` with a fixed dense matrix.
@@ -165,6 +169,7 @@ def _out_dtype(*arrays):
     return jnp.float32
 
 
+@stability(StabilityLevel.EVOLVING)
 def rbf_matrix(
     source_points,
     target_points,
@@ -225,6 +230,7 @@ def rbf_matrix(
     return jnp.asarray(H, dtype=dtype)
 
 
+@stability(StabilityLevel.EVOLVING)
 def rbf_mapping(
     source_points,
     target_points,
@@ -271,6 +277,7 @@ def _nn_matrix(source_points, target_points) -> jnp.ndarray:
     return jnp.asarray(H)
 
 
+@stability(StabilityLevel.EVOLVING)
 def nearest_neighbor_mapping(
     source_points, target_points, *, mode: str = "consistent",
 ) -> StaticLinearMapping:
@@ -289,6 +296,7 @@ def nearest_neighbor_mapping(
     return StaticLinearMapping(H, kind="nearest_neighbor", mode=mode)
 
 
+@stability(StabilityLevel.EVOLVING)
 def projection_1d_mapping(source_boundaries, target_boundaries) -> StaticLinearMapping:
     """Cell-average projection between two 1D grids (integral-preserving).
 
@@ -308,6 +316,7 @@ def projection_1d_mapping(source_boundaries, target_boundaries) -> StaticLinearM
                                mode="conservative")
 
 
+@stability(StabilityLevel.EVOLVING)
 def matrix_mapping(H, *, mode: str = "consistent", kind: str = "matrix") -> StaticLinearMapping:
     """Wrap a precomputed matrix (e.g. supermesh weights built offline)."""
     return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode)

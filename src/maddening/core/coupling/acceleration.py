@@ -226,11 +226,20 @@ def unflatten_coupled_state(
             field_list = sorted(template[nn].keys())
         result[nn] = {}
         for field in field_list:
-            shape = template[nn][field].shape
+            tmpl = template[nn][field]
+            shape = tmpl.shape
             size = 1
             for s in shape:
                 size *= s
-            result[nn][field] = flat[offset:offset + size].reshape(shape)
+            part = flat[offset:offset + size].reshape(shape)
+            # The flat vector is floating; restore the field's own dtype
+            # so an integer / boolean leaf (a step counter, a flag) does
+            # not come back as float32 after a coupled step — which is
+            # both a semantic drift and a retrace of the jitted step.
+            dtype = getattr(tmpl, "dtype", None)
+            if dtype is not None and part.dtype != dtype:
+                part = part.astype(dtype)
+            result[nn][field] = part
             offset += size
     return result
 

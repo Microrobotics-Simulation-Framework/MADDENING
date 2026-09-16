@@ -34,9 +34,13 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 _TRANSFORMS = (None, "log", "logit")
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class ParamSpec:
     """Metadata for one leaf of the graph parameter pytree.
@@ -176,11 +180,13 @@ def _map_with_specs(fn, params: dict, specs: dict):
     return jax.tree_util.tree_unflatten(treedef, out)
 
 
+@stability(StabilityLevel.EVOLVING)
 def trainable_mask(params: dict, specs: dict) -> dict:
     """``params``-shaped pytree of Python bools from the specs."""
     return _map_with_specs(lambda s, _: s.trainable, params, specs)
 
 
+@stability(StabilityLevel.EVOLVING)
 def unconstrain(params: dict, specs: dict) -> dict:
     """Map every trainable leaf to optimiser coordinates."""
     return _map_with_specs(
@@ -188,6 +194,7 @@ def unconstrain(params: dict, specs: dict) -> dict:
     )
 
 
+@stability(StabilityLevel.EVOLVING)
 def constrain(u: dict, specs: dict) -> dict:
     """Inverse of :func:`unconstrain` (with clipping for bounded identity
     leaves); non-trainable leaves pass through."""
@@ -196,6 +203,7 @@ def constrain(u: dict, specs: dict) -> dict:
     )
 
 
+@stability(StabilityLevel.EVOLVING)
 def check_bounds(params: dict, specs: dict) -> None:
     """Raise ``ValueError`` naming the first leaf outside its bounds."""
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:

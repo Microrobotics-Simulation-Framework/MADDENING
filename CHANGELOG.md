@@ -39,6 +39,29 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **`AdaptiveNode` base class** (`maddening.nodes.adaptive`, `@stability(STABLE)`,
+  `MADD-NODE-009`): the frozen-active-set adjoint pattern for adaptive solvers.
+  A subclass supplies `compute_active_set` (any fixed-shape `jnp` selection
+  rule) and `solve_frozen` (the masked solve, through `ift_linear_solve`); the
+  base class wires them into a JAX-traceable `update` over a padded `(c, mask)`
+  state — adaptivity changes which mask entries are true, never an array
+  shape, so the step runs under `jit` / `lax.scan` unchanged — commits the
+  selection under `stop_gradient`, and zeroes coefficients off the mask.
+  `jax.grad` through the node is the exact frozen-set adjoint on every region
+  where the active set is constant (verified against finite differences and
+  dense sub-block solves to 1e-6).  Physical parameters live in the graph
+  parameter pytree with the subclass's `ParamSpec`s, so `fit` / `fim` reach
+  them.  Palais-trap diagnostics from the design spike: `blindness_ratio`,
+  `is_trapped_at`, `symmetry_break` (anisotropic step along the full-basis
+  gradient, trainable leaves only), a cold-start gate in `initial_state`
+  (`AdaptiveNodeBlindnessError`) and `cold_start()` with one automatic escape;
+  constants `blindness_threshold = 0.7`, `blindness_break_delta = 0.05`,
+  `D_threshold = 5` as documented class attributes.  Algorithm guide
+  (`docs/algorithm_guide/nodes/adaptive_node.md`), authoring guide
+  (`docs/developer_guide/adaptive_node.md`), benchmark `MADD-VER-004`
+  (Green's-function reference for `-u'' + u = f`).  `ift_linear_solve` is
+  promoted from `EXPERIMENTAL` to `STABLE` with its signature unchanged, as
+  its v0.3.1 docstring promised.  The wavelet subclass stays post-1.0.
 - **Interface mappings are serialisable** (`MappingSpec`, the "13(a)" half of
   the deferred mapping-serialisation item).  Every mapping factory
   (`rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
@@ -506,6 +529,40 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `FmuTcpBridge.handle` accepts the dict `recv_message` returns for a
   binary frame.  Docs: the "Wire protocol" section states the send-side
   behaviour and that the protocol-1 hello reply gains two keys.
+- **Type-check job: a broken pyright run can no longer look like a result**
+  (independent audit of the phase-1 typing merge; report under
+  `benchmarks/results/audit_typing-pep561/`, regression tests in
+  `tests/test_typing_baseline.py` against a fake pyright executable).
+  `scripts/typing_baseline.py` now exits 2 (*infrastructure failure*,
+  distinct from 1 = errors found) and prints no table when pyright is
+  missing (an actionable hint instead of a `FileNotFoundError`
+  traceback), exits with a code other than 0/1 (3 = unparsable
+  `pyrightconfig.json`, which used to be flattened to "errors present"),
+  does not produce JSON, analysed zero files (a missing `include` path
+  gives a valid empty document, exit 0 and a stderr-only message, which
+  used to pass `--fail-on-errors` silently), or did not resolve the core
+  imports `jax`/`numpy`/`yaml` or more than `--max-missing-imports`
+  (default 40) imports: a wrong interpreter *lowers* the count (395 -> 230
+  in the audit) with nothing on stderr.  pyright's stderr is always
+  forwarded; a `--pythonpath` given after `--` is checked to exist and
+  import numpy before pyright runs; Markdown file cells are code spans
+  (`__init__.py` rendered as emphasis) with pipes escaped; `--help` says
+  that pyright's own flags go after `--`.  The CI `typecheck` job is two
+  steps: *Run pyright* fails the job on an infrastructure failure and
+  writes the step summary only when there is a table; *Report error
+  count* keeps `continue-on-error` in phase 1 and emits the count as a
+  workflow warning.  `pyright` is pinned to `1.1.414` in the `ci` extra
+  (the baseline is tied to it; `dev` keeps the floor).  The `changes`
+  gate treats an empty diff as code (logged explicitly), diffs with
+  `--no-renames` so a rename out of a code path lists both paths, and
+  reads file names line by line (paths with spaces); the on-purpose
+  nested-match semantics of `docs/*` and `*.md` are documented in the
+  job.  `docs/developer_guide/typing.md` carries the measured numbers:
+  33 STABLE-module errors across 7 modules (`fmi/model_description.py`
+  was omitted), tier 1 83 / tier 2 312 (was "~140 / ~250"), and the
+  script's exit-code contract.  Phase-2 scope is unchanged: two tiers,
+  tier 1 blocking at zero errors, tier 2 every public signature
+  annotated with bodies ratcheted.
 - **Independent audit, round 4** (residue across rounds 1-3; report under
   `benchmarks/results/audit4/`, regression tests in
   `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).

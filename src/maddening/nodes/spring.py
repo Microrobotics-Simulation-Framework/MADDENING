@@ -193,12 +193,16 @@ class SpringDamperNode(SimulationNode):
             ),
         }
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        # Same constants as ``update``: a calibrated stiffness must change
+        # the force this node delivers over a flux edge, not only its own
+        # integration.
+        p = self.params if params is None else {**self.params, **params}
         anchor = boundary_inputs.get(
             "anchor_position", jnp.array(0.0, dtype=jnp.float32)
         )
-        k = self.params["stiffness"]
-        c = self.params["damping"]
-        rest = self.params["rest_length"]
+        k = p["stiffness"]
+        c = p["damping"]
+        rest = p["rest_length"]
         force = -k * (state["position"] - anchor - rest) - c * state["velocity"]
         return {"spring_force": force}

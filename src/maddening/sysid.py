@@ -34,6 +34,7 @@ Usage::
 
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -319,6 +320,30 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
     return np.asarray(idx)
 
 
+def _inverse_noise_std(noise_std, residual):
+    """``1 / sigma`` flattened like ``ravel_pytree(residual)``, or ``None``.
+
+    A real number or a 0-d array is one sigma for every residual entry;
+    anything else must be a pytree matching ``residual`` (per-leaf sigma,
+    scalar or broadcastable to the leaf).  ``jnp.ndim`` cannot tell the
+    two apart -- it reports ``0`` for a dict -- so the scalar branch is
+    keyed on the type.
+    """
+    if noise_std is None:
+        return None
+    flat_r = ravel_pytree(residual)[0]
+    is_scalar = isinstance(noise_std, numbers.Real) or (
+        isinstance(noise_std, (np.ndarray, jax.Array)) and noise_std.ndim == 0
+    )
+    if is_scalar:
+        return 1.0 / jnp.asarray(noise_std, dtype=flat_r.dtype)
+    sig = jax.tree.map(
+        lambda leaf, sd: jnp.broadcast_to(jnp.asarray(sd, dtype=leaf.dtype), jnp.shape(leaf)),
+        residual, noise_std,
+    )
+    return 1.0 / ravel_pytree(sig)[0]
+
+
 @stability(StabilityLevel.EVOLVING)
 def fim(
     residual_fn: Callable[[dict], Any],
@@ -366,16 +391,7 @@ def fim(
     flat, unravel = ravel_pytree(params)
     idx = _masked_indices(params, mask)
     r0 = residual_fn(params)
-    if noise_std is None:
-        inv_sigma = None
-    elif isinstance(noise_std, (int, float)) or jnp.ndim(noise_std) == 0:
-        inv_sigma = 1.0 / jnp.asarray(noise_std, dtype=ravel_pytree(r0)[0].dtype)
-    else:
-        sig = jax.tree.map(
-            lambda leaf, sd: jnp.broadcast_to(jnp.asarray(sd, dtype=leaf.dtype), jnp.shape(leaf)),
-            r0, noise_std,
-        )
-        inv_sigma = 1.0 / ravel_pytree(sig)[0]
+    inv_sigma = _inverse_noise_std(noise_std, r0)
 
     def _r(theta):
         full = theta if idx is None else flat.at[idx].set(theta)
@@ -596,16 +612,7 @@ def fit_lm(
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
 
     r_probe = residual_fn(gm.constrain(u0))
-    if noise_std is None:
-        inv_sigma = None
-    elif isinstance(noise_std, (int, float)) or jnp.ndim(noise_std) == 0:
-        inv_sigma = 1.0 / jnp.asarray(noise_std, dtype=ravel_pytree(r_probe)[0].dtype)
-    else:
-        sig = jax.tree.map(
-            lambda leaf, sd: jnp.broadcast_to(jnp.asarray(sd, dtype=leaf.dtype), jnp.shape(leaf)),
-            r_probe, noise_std,
-        )
-        inv_sigma = 1.0 / ravel_pytree(sig)[0]
+    inv_sigma = _inverse_noise_std(noise_std, r_probe)
 
     def _residual(th):
         p = gm.constrain(unravel(flat_u.at[idx].set(th)))
@@ -644,6 +651,7 @@ def fit_lm(
             break
         # Try a step; shrink lambda on success, grow it (and retry) on failure.
         accepted = False
+        step_norm = float("inf")   # only meaningful once a step is accepted
         for _ in range(12):
             cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype))
             r_new = residual_only(cand)

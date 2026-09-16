@@ -1015,9 +1015,11 @@ class LBMNode(SimulationNode):
         )
 
     def compute_boundary_fluxes(
-        self, state: dict, boundary_inputs: dict, dt: float,
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
     ) -> dict:
-        """Expose average pressure at the outlet face for coupling."""
+        """Expose average pressure at the outlet face for coupling.
+
+        Reads no constants, so ``params`` is accepted for the contract only."""
         pressure = state["pressure"]
         outlet_axis, outlet_side = _FACE_MAP[self._outlet_face]
 

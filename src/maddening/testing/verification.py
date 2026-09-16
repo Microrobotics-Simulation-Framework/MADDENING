@@ -36,6 +36,8 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import inspect
+
 import numpy as np
 
 from maddening.testing.strategies import (
@@ -264,6 +266,40 @@ def node_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     return _run("gradient_finite", inputs, body, **kw)
 
 
+_NO_PARAMS = object()
+
+
+def _produces_fluxes(node) -> bool:
+    from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
+    return type(node).compute_boundary_fluxes is not _Base.compute_boundary_fluxes
+
+
+def _flux_accepts_params(node) -> bool:
+    try:
+        return "params" in inspect.signature(node.compute_boundary_fluxes).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _outputs(node, state, bi, dt, params=_NO_PARAMS):
+    """``update`` outputs plus (namespaced) boundary fluxes, both under
+    the same params contract, so the params checks see what a flux edge
+    delivers, not only what the node integrates."""
+    if params is _NO_PARAMS:
+        out = dict(node.update(state, bi, dt))
+        if _produces_fluxes(node):
+            out.update({f"flux:{k}": v for k, v in node.compute_boundary_fluxes(state, bi, dt).items()})
+        return out
+    out = dict(node.update(state, bi, dt, params=params))
+    if _produces_fluxes(node):
+        if _flux_accepts_params(node):
+            fl = node.compute_boundary_fluxes(state, bi, dt, params=params)
+        else:
+            fl = node.compute_boundary_fluxes(state, bi, dt)
+        out.update({f"flux:{k}": v for k, v in fl.items()})
+    return out
+
+
 def _node_accepts_params(node) -> bool:
     probe = getattr(node, "accepts_params", None)
     return bool(probe()) if callable(probe) else False
@@ -296,11 +332,22 @@ def node_params_consistent(
     node = inputs.node
     if not _node_accepts_params(node):
         return _skip_no_params("params_consistent")
+    if _produces_fluxes(node) and not _flux_accepts_params(node):
+        return VerificationResult(
+            "params_consistent", "FAIL",
+            detail=(
+                "update() takes params but compute_boundary_fluxes() does not: "
+                "a calibrated constant would change the node's integration but "
+                "not the flux it delivers over an edge.  Declare "
+                "compute_boundary_fluxes(self, state, boundary_inputs, dt, *, "
+                "params=None) and read constants from params."
+            ),
+        )
     injected = node.params_pytree()
 
     def body(state, bi, dt):
-        a = node.update(state, bi, dt)
-        b = node.update(state, bi, dt, params=injected)
+        a = _outputs(node, state, bi, dt)
+        b = _outputs(node, state, bi, dt, params=injected)
         assert set(a) == set(b), f"key mismatch: {sorted(set(a) ^ set(b))}"
         for f in a:
             x, y = _to_np(a[f]), _to_np(b[f])
@@ -332,7 +379,7 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
 
     def body(state, bi, dt):
         def loss(p):
-            out = node.update(state, bi, dt, params=p)
+            out = _outputs(node, state, bi, dt, params=p)
             return sum(jnp.sum(v) for v in out.values()
                        if jnp.issubdtype(v.dtype, jnp.floating))
 
@@ -372,7 +419,7 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
 
     def body(state, bi, dt):
         def loss(p):
-            out = node.update(state, bi, dt, params=p)
+            out = _outputs(node, state, bi, dt, params=p)
             return sum(jnp.sum(v) for v in out.values()
                        if jnp.issubdtype(v.dtype, jnp.floating))
 

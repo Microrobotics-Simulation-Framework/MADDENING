@@ -603,23 +603,41 @@ class ShardedStencilNode(SimulationNode):
     ) -> frozenset[str]:
         """Names of the boundary inputs that are per-cell fields.
 
-        A boundary input is grid-shaped when, on every sharded spatial
-        axis, it has the same (global) extent as the state fields.  Those
-        are sharded and halo-padded like state; anything else (a scalar
-        pressure, a uniform ``(D,)`` force vector) is replicated.
+        A boundary input is grid-shaped when it has at least ``rank``
+        dimensions and its leading ``rank`` dims equal the state fields'
+        grid dims.  Those are sharded and halo-padded like state; anything
+        else (a scalar pressure, a uniform ``(D,)`` force vector, a
+        per-column profile along an unsharded axis) is replicated.
+
+        The grid rank is bracketed by what the inner node declares --
+        at least ``max(spatial axes in axis_map, halo_width keys) + 1``
+        -- and by the state itself: no grid field can have fewer dims
+        than the grid, so the smallest state field's ``ndim`` is an upper
+        bound.  We take the larger of the two.  Matching only the sharded
+        axes' extents (the previous rule) let an ``(n,)`` input on an
+        ``n x n`` grid through by coincidence; requiring the full leading
+        shape rules that out.  The residual ambiguity (every state field
+        carries component dims *and* the grid has undeclared spatial
+        axes) cannot be resolved from shapes alone.
         """
-        ref: dict[int, int] = {}
-        for spatial_axis in self._axis_map.values():
-            for arr in state.values():
-                if spatial_axis < arr.ndim:
-                    ref[spatial_axis] = int(arr.shape[spatial_axis])
-                    break
-        if not ref:
+        halo = self._inner.halo_width()
+        declared = list(self._axis_map.values()) + list(halo.keys())
+        if not declared:
             return frozenset()
+        rank_lb = max(int(a) for a in declared) + 1
+        integrals = set(self._inner.domain_integral_fields())
+        grid_fields = [
+            arr for k, arr in state.items()
+            if k not in integrals and jnp.ndim(arr) >= rank_lb
+        ]
+        if not grid_fields:
+            return frozenset()
+        rank = max(rank_lb, min(int(jnp.ndim(a)) for a in grid_fields))
+        ref = tuple(int(n) for n in jnp.shape(grid_fields[0])[:rank])
         out = set()
         for k, v in boundary_inputs.items():
             shape = tuple(jnp.shape(v))
-            if all(sa < len(shape) and shape[sa] == n for sa, n in ref.items()):
+            if len(shape) >= rank and tuple(shape[:rank]) == ref:
                 out.add(k)
         return frozenset(out)
 

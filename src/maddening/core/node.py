@@ -548,7 +548,7 @@ class SimulationNode(ABC):
         return {}
 
     def compute_boundary_fluxes(
-        self, state: dict, boundary_inputs: dict, dt: float
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
     ) -> dict:
         """Compute flux quantities at coupling interfaces.
 
@@ -558,6 +558,14 @@ class SimulationNode(ABC):
 
         Must be JAX-traceable (pure function).
         Default: empty dict (no fluxes).
+
+        A node that takes ``params`` in :meth:`update` must take it here
+        too and read its constants from it (``{**self.params, **params}``):
+        the graph passes the node's entry of ``GraphManager.params`` on
+        every flux evaluation, so a calibrated stiffness changes the
+        force a flux edge delivers, not only the node's own integration.
+        A node that declares no ``params`` keyword here is called with
+        the 3-argument form and its fluxes use the constructor constants.
         """
         return {}
 

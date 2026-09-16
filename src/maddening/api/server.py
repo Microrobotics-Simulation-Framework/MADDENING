@@ -375,6 +375,11 @@ class SimulationServer:
             available = sorted(set(node.params) | set(live))
             # Validate everything before mutating anything: an
             # out-of-bounds slider value is a 400 here, not a NaN later.
+            # Every check a live leaf needs (dtype coercion, shape,
+            # finiteness, bounds) runs in this first loop; the second
+            # loop only writes, so a 400 on the third key of a request
+            # leaves the first two untouched too.
+            staged: dict[str, Any] = {}
             for key, value in req.params.items():
                 if key not in node.params and key not in live:
                     raise HTTPException(
@@ -382,24 +387,35 @@ class SimulationServer:
                         detail=f"Unknown param '{key}' for node '{node_name}'. "
                                f"Available: {available}",
                     )
+                if key not in live or isinstance(value, bool):
+                    continue
+                try:
+                    new = jnp.asarray(value, dtype=live[key].dtype)
+                except (TypeError, ValueError) as exc:
+                    # A string for a float, ``null``, a ragged list, ...
+                    raise HTTPException(status_code=400, detail=f"{key}: {exc}")
+                if new.shape != live[key].shape:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{key}: expected shape {live[key].shape}, got {new.shape}",
+                    )
+                # NaN passes every bounds comparison; reject it here so it
+                # is never written into gm.params (a recompile would bake
+                # it into the step).
+                if not bool(jnp.all(jnp.isfinite(new))):
+                    raise HTTPException(
+                        status_code=400, detail=f"{key}: value must be finite, got {value!r}",
+                    )
                 spec = specs.get(key)
-                if spec is not None and key in live and not isinstance(value, bool):
+                if spec is not None:
                     try:
-                        spec.check(jnp.asarray(value), name=key)
+                        spec.check(new, name=key)
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc))
+                staged[key] = new
             for key, value in req.params.items():
-                if key in live and not isinstance(value, bool):
-                    try:
-                        new = jnp.asarray(value, dtype=live[key].dtype)
-                    except (TypeError, ValueError) as exc:
-                        raise HTTPException(status_code=400, detail=f"{key}: {exc}")
-                    if new.shape != live[key].shape:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"{key}: expected shape {live[key].shape}, got {new.shape}",
-                        )
-                    live[key] = new
+                if key in staged:
+                    live[key] = staged[key]
                     if key in node.params:
                         node.params[key] = value
                 else:

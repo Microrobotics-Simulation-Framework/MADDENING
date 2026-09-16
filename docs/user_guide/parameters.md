@@ -59,11 +59,42 @@ are **not** in `gm.params`.  `gm.nodes_without_params()` lists them, and
 passing an entry for such a node (or a misspelled key) is a `ValueError`,
 not a silently ignored leaf.
 
+A node that exposes boundary fluxes takes `params` there too and reads
+the same constants from it:
+
+```python
+def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+    p = self.params if params is None else {**self.params, **params}
+    ...
+```
+
+The graph passes the node's entry on every flux evaluation, so a
+calibrated stiffness changes the force a flux edge *delivers*, not only
+the node's own integration.  A flux producer whose `update` takes
+`params` but whose `compute_boundary_fluxes` does not is exactly the
+trap the 2026-09 audit found; `verify_node` now fails it.
+
 `verify_node` checks the contract for you: `params_consistent` (injected
-params reproduce the baked step), `params_gradient_finite`, and
-`params_effective` (every trainable leaf actually influences the output —
-the check that catches a constant still read from `self.params`).  See
-[verification](../developer_guide/verification.md).
+params reproduce the baked step *and* fluxes), `params_gradient_finite`, and
+`params_effective` (every trainable leaf actually influences the outputs,
+fluxes included — the check that catches a constant still read from
+`self.params`).  See [verification](../developer_guide/verification.md).
+
+### Live values, recompiles and partial pytrees
+
+`gm.params` is populated by `compile()` and **survives a recompile**: a
+calibrated leaf whose node, key, shape and dtype still exist is carried
+over when you add an edge or an external input, replace a node, or the
+profiler recompiles behind your back.  Leaves that no longer fit are
+dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
+way back to the constructor snapshot.  A checkpoint loaded before the
+first compile compiles the graph so its params are not lost.
+
+A *partial* pytree passed to `gm.step(params=...)` / `gm.run_scan` /
+`gm.run` is completed from the **live** `gm.params` (a missing node or
+key keeps its calibrated value, not its constructor constant).  The raw
+compiled step (`gm._compiled_step`, what the FMI sidecar calls) refuses
+an incomplete pytree instead of guessing.
 
 ## `ParamSpec`: what an optimiser may do
 
@@ -178,7 +209,9 @@ continuing.
 
 Edges with an interface `mapping` keep their weights under
 `gm.params["mappings"]["<src>.<field>-><tgt>.<field>"]`, with the same
-traced-input semantics as node constants.  They are `trainable=False`
+traced-input semantics as node constants.  A second mapped edge on the
+same field pair (two additive contributions) gets its own slot,
+`"...#1"`, `"...#2"`, so the two never share weights.  They are `trainable=False`
 by default (an interface operator is geometry, not a physical constant);
 a learned edge opts in with `gm.set_param_spec(edge.key, "H", ParamSpec())`.
 See the [interface mapping guide](../algorithm_guide/coupling/interface_mapping.md).

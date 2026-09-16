@@ -93,7 +93,8 @@ class ParamSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ParamSpec":
-        lo, hi = d.get("bounds", (None, None))
+        # ``bounds`` may be serialised as JSON ``null`` (unbounded).
+        lo, hi = d.get("bounds") or (None, None)
         return cls(
             trainable=bool(d.get("trainable", True)),
             bounds=(None if lo is None else float(lo), None if hi is None else float(hi)),
@@ -123,24 +124,55 @@ class ParamSpec:
         # or 1 in float32 for |u| beyond ~17-88, which would put the
         # value *on* a strict bound (or at inf) and make the inverse map
         # non-finite.  Clamp to the representable interior, so the round
-        # trip stays finite for any optimiser coordinates.
+        # trip stays finite for any optimiser coordinates.  The margin
+        # is *relative to the bound*: ``lo + tiny`` is ``lo`` again in
+        # float32 for any ``lo != 0`` (the audit's ``8.0 + exp(-15)``
+        # case), so the clamp must be a few ulps of ``lo`` / ``hi`` wide
+        # or ``check`` rejects the fit's own output and ``unconstrain``
+        # returns ``-inf``.
+        floating = jnp.issubdtype(u.dtype, jnp.floating)
+        fi = jnp.finfo(u.dtype if floating else jnp.float32)
         if self.transform == "log":
-            fi = jnp.finfo(u.dtype if jnp.issubdtype(u.dtype, jnp.floating) else jnp.float32)
-            return self._lo() + jnp.clip(jnp.exp(u), fi.tiny, fi.max)
+            lo = self._lo()
+            # ``2 * eps * |lo|`` is 2-4 ulps of ``lo`` (>= 1 ulp is what
+            # makes ``lo + m > lo`` exact); ``tiny`` keeps the lo == 0
+            # floor at the smallest normal, as before.
+            m = max(float(fi.tiny), 2.0 * float(fi.eps) * abs(lo))
+            return lo + jnp.clip(jnp.exp(u), m, fi.max)
         if self.transform == "logit":
             lo, hi = (float(b) for b in self.bounds)
-            eps = jnp.finfo(u.dtype).eps if jnp.issubdtype(u.dtype, jnp.floating) else 1e-7
-            t = jnp.clip(jax.nn.sigmoid(u), eps, 1.0 - eps)
-            return lo + (hi - lo) * t
+            # Clip the *result* (not the sigmoid) so rounding in
+            # ``lo + (hi - lo) * t`` cannot land on a bound either: with
+            # ``m >= 4 ulp`` of every quantity involved, ``p - lo`` and
+            # ``hi - lo`` round to distinct floats and the inverse
+            # ``log(t) - log1p(-t)`` stays finite.
+            # An interval only a few ulps wide (``(1e6, 1e6 + 0.1)`` in
+            # float32) has no interior to clamp to; cap the margin so the
+            # clip never inverts, and let ``check`` report such a value.
+            m = 4.0 * float(fi.eps) * max(abs(lo), abs(hi), hi - lo)
+            m = min(m, 0.25 * (hi - lo))
+            p = lo + (hi - lo) * jax.nn.sigmoid(u)
+            return jnp.clip(p, lo + m, hi - m)
         lo, hi = self.bounds
         if lo is not None or hi is not None:
-            return jnp.clip(u, lo, hi)
+            # Python-float bounds would promote an integer leaf (integer
+            # matrix-mapping weights made trainable) to float; a leaf's
+            # dtype is part of the pytree contract, so keep it.
+            return jnp.clip(u, lo, hi).astype(u.dtype)
         return u
 
     def check(self, p, *, name: str = "param") -> None:
-        """Raise ``ValueError`` if a concrete value violates ``bounds``."""
+        """Raise ``ValueError`` if a concrete value is non-finite or
+        violates ``bounds``.
+
+        NaN compares ``False`` against every bound, so it would pass a
+        pure comparison check and only surface as a NaN state later;
+        ``inf`` is likewise never a usable constant.
+        """
         lo, hi = self.bounds
         v = jnp.asarray(p)
+        if jnp.issubdtype(v.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(v))):
+            raise ValueError(f"{name}={v} is not finite")
         strict = self.transform in ("log", "logit")
         if lo is not None:
             bad = bool(jnp.any(v <= lo)) if strict else bool(jnp.any(v < lo))

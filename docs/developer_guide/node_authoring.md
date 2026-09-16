@@ -309,10 +309,11 @@ Each entry maps a boundary input name to a `BoundaryInputSpec` with:
 Override `compute_boundary_fluxes()` to expose derived quantities (forces, heat fluxes) that other nodes can consume via {term}`edges <Edge>`. Flux fields are NOT part of state — they are computed on-the-fly.
 
 ```python
-def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+    p = self.params if params is None else {**self.params, **params}
     T = state["temperature"]
-    dx = self.params["length"] / self.params["n_cells"]
-    alpha = self.params["thermal_diffusivity"]
+    dx = p["length"] / p["n_cells"]
+    alpha = p["thermal_diffusivity"]
     return {
         "left_heat_flux": -alpha * (T[1] - T[0]) / dx,
         "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx,
@@ -324,6 +325,11 @@ Requirements:
 - Return a dict of JAX arrays
 - Keys become available as `source_field` on edges
 - Called automatically after each node update during edge resolution
+- If `update` takes `params`, take it here too and read the same
+  constants from it: the graph passes the node's `gm.params` entry on
+  every flux evaluation, so a calibrated constant changes the flux the
+  edge delivers.  `verify_node`'s `params_consistent` fails a flux
+  producer that forgets this.
 
 ## Additive vs Replacive Inputs
 

@@ -23,6 +23,14 @@ from typing import Any, Callable, Optional
 from maddening.core.node import SimulationNode
 
 
+def _accepts_params(fn) -> bool:
+    import inspect  # noqa: PLC0415
+    try:
+        return "params" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class HybridNode(SimulationNode):
     """A physics node augmented with an additive correction function.
 
@@ -77,7 +85,11 @@ class HybridNode(SimulationNode):
     def boundary_input_spec(self):
         return self.physics_node.boundary_input_spec()
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        if params is not None and _accepts_params(self.physics_node.compute_boundary_fluxes):
+            return self.physics_node.compute_boundary_fluxes(
+                state, boundary_inputs, dt, params=params,
+            )
         return self.physics_node.compute_boundary_fluxes(
             state, boundary_inputs, dt
         )

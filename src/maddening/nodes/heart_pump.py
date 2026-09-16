@@ -284,8 +284,10 @@ class HeartPumpNode(SimulationNode):
             ),
         }
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
-        """Expose arterial pressure as inlet_pressure for downstream coupling."""
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        """Expose arterial pressure as inlet_pressure for downstream coupling.
+
+        Reads no constants, so ``params`` is accepted for the contract only."""
         return {
             "inlet_pressure": state["arterial_pressure"],
         }

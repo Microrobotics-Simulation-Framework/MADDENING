@@ -208,6 +208,13 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
 
     # Restore graph parameters for nodes/keys the current graph knows;
     # unknown ones are ignored (a node may have stopped accepting params).
+    # ``gm.params`` is only populated by compile(): a checkpoint loaded
+    # before the first compile would otherwise drop its params silently.
+    if param_keys and (
+        getattr(graph_manager, "_dirty", False)
+        or getattr(graph_manager, "_compiled_step", None) is None
+    ):
+        graph_manager.compile()
     current_params = graph_manager.params.get("nodes", {})
     for node_name, saved in param_keys.items():
         if node_name in current_params:

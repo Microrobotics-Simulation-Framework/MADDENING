@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 # trigger the lineax import path.
 
 from maddening.core.coupling import CouplingGroup
+from maddening.core.coupling.acceleration import (
+    float_fields_of,
+    state_float_image,
+    state_from_float_image,
+)
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
@@ -69,6 +74,31 @@ class _NodeSpec:
     # call (traced, differentiable).  Nodes that don't opt in keep the
     # 3-argument contract and read constants from ``self.params``.
     accepts_params: bool = False
+    # Same for ``compute_boundary_fluxes``: a flux producer that reads
+    # its constants from ``params`` gets the node's pytree entry on
+    # every flux evaluation (a calibrated stiffness changes the force a
+    # flux edge delivers).
+    flux_accepts_params: bool = False
+
+
+def _flux_accepts_params(node: SimulationNode) -> bool:
+    fn = getattr(node, "compute_boundary_fluxes", None)
+    if fn is None:
+        return False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return "params" in sig.parameters
+
+
+def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
+    """``spec.node.compute_boundary_fluxes`` with the params contract."""
+    if spec.flux_accepts_params and node_params is not None:
+        return spec.node.compute_boundary_fluxes(
+            state, boundary_inputs, dt, params=node_params,
+        )
+    return spec.node.compute_boundary_fluxes(state, boundary_inputs, dt)
 
 
 def _update_accepts_params(node: SimulationNode) -> bool:
@@ -737,24 +767,19 @@ def _run_coupled_block_impl(
     # Save the initial state for each node at the beginning of
     # the timestep -- this is what we always integrate FROM.
     # Float32 *images* of the pre-step states: ``one_pass`` closes over
-    # them, and an integer / boolean leaf hoisted by ``closure_convert``
-    # into the IFT custom_jvp's constants cannot be linearised under a
-    # ``lax.scan`` (see ``_run_ift_forward``).  ``_pre(nn)`` restores the
-    # dtypes at the point of use; exact for |value| < 2**24.
-    _init_dtypes = {nn: {f: v.dtype for f, v in new_state[nn].items()} for nn in group_node_names}
-    initial_node_states = {
-        nn: {
-            f: (v if jnp.issubdtype(v.dtype, jnp.floating) else v.astype(jnp.float32))
-            for f, v in new_state[nn].items()
-        }
-        for nn in group_node_names
-    }
+    # them, and an integer / boolean / PRNG-key leaf hoisted by
+    # ``closure_convert`` into the IFT custom_jvp's constants cannot be
+    # linearised under a ``lax.scan`` (see ``_run_ift_forward``).  The
+    # images are bit-exact for every supported dtype (wide integers
+    # travel as 16-bit limbs, keys as their uint32 data); ``_pre(nn)``
+    # restores the leaves at the point of use.
+    _init_imgs, _init_metas = {}, {}
+    for nn in group_node_names:
+        _init_imgs[nn], _init_metas[nn] = state_float_image(new_state[nn])
+    initial_node_states = _init_imgs
 
     def _pre(nn):
-        return {
-            f: (v if v.dtype == _init_dtypes[nn][f] else v.astype(_init_dtypes[nn][f]))
-            for f, v in initial_node_states[nn].items()
-        }
+        return state_from_float_image(initial_node_states[nn], _init_metas[nn])
 
     def _get_dt(nn):
         spec = nodes[nn]
@@ -915,8 +940,8 @@ def _run_coupled_block_impl(
                 for nn in group_node_names:
                     if nn in flux_producing_nodes:
                         bi0 = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
-                        flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
-                            latest_results[nn], bi0, _get_dt(nn)
+                        flux_s[nn] = _node_fluxes(
+                            nodes[nn], latest_results[nn], bi0, _get_dt(nn), _np(nn),
                         )
         for nn in group_node_names:
             if use_subcycling and group_dividers[nn] > 1:
@@ -937,8 +962,8 @@ def _run_coupled_block_impl(
             # Compute fluxes for this node
             if nn in flux_producing_nodes:
                 bi_for_flux = _resolve_boundary(nn, s, flux_s)
-                flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
-                    s[nn], bi_for_flux, _get_dt(nn)
+                flux_s[nn] = _node_fluxes(
+                    nodes[nn], s[nn], bi_for_flux, _get_dt(nn), _np(nn),
                 )
         return s
 
@@ -950,8 +975,8 @@ def _run_coupled_block_impl(
             for nn in group_node_names:
                 if nn in flux_producing_nodes:
                     bi = _resolve_boundary(nn, latest_results)
-                    flux_s[nn] = nodes[nn].node.compute_boundary_fluxes(
-                        latest_results[nn], bi, _get_dt(nn)
+                    flux_s[nn] = _node_fluxes(
+                        nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
                     )
 
         results = {}
@@ -1147,21 +1172,16 @@ def _run_coupled_block_impl(
             # rule under a ``lax.scan`` (UnexpectedTracerError in reverse
             # mode, a missing constant handler in forward mode; reproduced
             # on JAX 0.10 / 0.11 with a bare custom_jvp + closure_convert).
-            # So the closure only ever sees float32 *images* of such
-            # leaves, restored to their dtype inside; exact for counters
-            # and flags (|value| < 2**24).
-            def _is_float(v):
-                return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
-
-            leaf_dtypes = {
-                k: {f: v.dtype for f, v in d.items()}
-                for k, d in template_state.items() if isinstance(d, dict)
-            }
-            template_img = {
-                k: ({f: (v if _is_float(v) else v.astype(jnp.float32)) for f, v in d.items()}
-                    if isinstance(d, dict) else d)
-                for k, d in template_state.items()
-            }
+            # So the closure only ever sees bit-exact float32 *images*
+            # of such leaves (``float_image``: 16-bit limbs for wide
+            # integers, uint32 data for PRNG keys), restored inside.
+            leaf_metas: dict = {}
+            template_img: dict = {}
+            for k, d in template_state.items():
+                if isinstance(d, dict):
+                    template_img[k], leaf_metas[k] = state_float_image(d)
+                else:
+                    template_img[k] = d
 
             def _flatten_full(s):
                 return flatten_coupled_state(s, group_node_names, fields=float_fields)
@@ -1173,10 +1193,7 @@ def _run_coupled_block_impl(
                 s = {}
                 for k, d in template_img.items():
                     if isinstance(d, dict):
-                        s[k] = {
-                            f: (v if v.dtype == leaf_dtypes[k][f] else v.astype(leaf_dtypes[k][f]))
-                            for f, v in d.items()
-                        }
+                        s[k] = state_from_float_image(d, leaf_metas[k])
                     else:
                         s[k] = d
                 for nn in group_node_names:
@@ -1536,14 +1553,17 @@ def _run_coupled_block_impl(
                 # Linear: x_pred = 2*x_n - x_{n-1}
                 x_pred = 2.0 * x_n - x_nm1
 
-            # Only apply if we have at least 2 stored states
+            # Only apply if we have at least 2 stored states.  Only the
+            # floating fields are extrapolated; a counter or flag keeps
+            # its first-pass value.
             has_history = pred_count >= 2
-            x_cur = flatten_coupled_state(new_state, group_node_names)
+            pred_fields = float_fields_of(new_state, group_node_names)
+            x_cur = flatten_coupled_state(new_state, group_node_names, fields=pred_fields)
             x_use = jnp.where(has_history, x_pred, x_cur)
 
             # Unflatten and update new_state with predicted values
             predicted = unflatten_coupled_state(
-                x_use, new_state, group_node_names
+                x_use, new_state, group_node_names, fields=pred_fields,
             )
             new_state = {k: v for k, v in new_state.items()}
             for nn in group_node_names:
@@ -1566,7 +1586,9 @@ def _run_coupled_block_impl(
     # Store predictor history in _meta
     # ------------------------------------------------------------------
     if use_predictor:
-        converged_flat = flatten_coupled_state(result, group_node_names)
+        converged_flat = flatten_coupled_state(
+            result, group_node_names, fields=float_fields_of(result, group_node_names),
+        )
         result.setdefault(_META_KEY, {})
         meta_update = dict(result.get(_META_KEY, {}))
 
@@ -1674,8 +1696,66 @@ class GraphManager:
             },
         }
 
+    @staticmethod
+    def _merge_live_params(fresh: dict, live: Optional[dict]) -> dict:
+        """``fresh`` (constructor snapshot) with every leaf of ``live`` that
+        still fits written over it; leaves that no longer fit warn."""
+        if not live:
+            return fresh
+        dropped = []
+        for section in ("nodes", "mappings"):
+            fresh_sec = fresh.setdefault(section, {})
+            for owner, leaves in (live.get(section) or {}).items():
+                if owner not in fresh_sec:
+                    if leaves:
+                        dropped.append(f"{section}[{owner!r}]")
+                    continue
+                for key, value in leaves.items():
+                    base = fresh_sec[owner].get(key)
+                    if base is None:
+                        dropped.append(f"{section}[{owner!r}][{key!r}]")
+                        continue
+                    v = jnp.asarray(value)
+                    if v.shape != jnp.shape(base) or v.dtype != jnp.asarray(base).dtype:
+                        dropped.append(f"{section}[{owner!r}][{key!r}] (shape/dtype changed)")
+                        continue
+                    fresh_sec[owner][key] = v
+        if dropped:
+            warnings.warn(
+                "compile() dropped live gm.params leaves that no longer fit "
+                f"the graph: {dropped}", RuntimeWarning, stacklevel=3,
+            )
+        return fresh
+
+    def reset_params(self) -> None:
+        """Discard live/calibrated values: ``gm.params`` becomes the
+        constructor snapshot again (no recompile needed)."""
+        self.params = self._snapshot_params()
+
     def _params_or_default(self, params):
-        return self.params if params is None else params
+        """``gm.params`` when ``params`` is None; otherwise ``params``
+        completed from ``gm.params``: a node or key the caller left out
+        keeps its *live* value (not the constructor constant), so a
+        partial pytree means "override these" and nothing else."""
+        if params is None:
+            return self.params
+        if not isinstance(params, dict):
+            return params                  # let _validate_params complain
+        out = {}
+        for section in ("nodes", "mappings"):
+            live_sec = self.params.get(section, {})
+            given = params.get(section, {}) or {}
+            merged = {owner: dict(leaves) for owner, leaves in live_sec.items()}
+            for owner, leaves in given.items():
+                if owner in merged and isinstance(leaves, dict):
+                    merged[owner] = {**merged[owner], **leaves}
+                else:
+                    merged[owner] = leaves      # unknown owner: validation reports it
+            out[section] = merged
+        for k, v in params.items():
+            if k not in ("nodes", "mappings"):
+                out[k] = v
+        return out
 
     def _validate_params(self, params: dict) -> None:
         """Reject a ``params`` pytree that names something the step cannot
@@ -1717,8 +1797,36 @@ class GraphManager:
                     f"{sorted(unknown)}; {type(spec.node).__name__}.params_pytree() "
                     f"exposes {sorted(known)}"
                 )
+            missing = known - set(node_params)
+            if missing:
+                raise ValueError(
+                    f"params['nodes'][{node_name!r}] is missing key(s) "
+                    f"{sorted(missing)}.  The compiled step needs a complete "
+                    "pytree (a missing leaf would silently fall back to the "
+                    "constructor constant); pass a partial tree through "
+                    "gm.step / gm.run_scan(params=...), which completes it "
+                    "from the live gm.params."
+                )
+        absent = [
+            n for n, sp in self._nodes.items() if sp.accepts_params and n not in nodes
+        ]
+        if absent:
+            raise ValueError(
+                f"params['nodes'] is missing node(s) {sorted(absent)}.  The "
+                "compiled step needs a complete pytree (a missing node would "
+                "silently use its constructor constants); pass a partial tree "
+                "through gm.step / gm.run_scan(params=...), which completes it "
+                "from the live gm.params."
+            )
         mapped = {e.key: e for e in self._edges if e.mapping is not None}
-        for key, weights in params.get("mappings", {}).items():
+        given_maps = params.get("mappings", {}) or {}
+        absent_maps = sorted(set(mapped) - set(given_maps))
+        if absent_maps:
+            raise ValueError(
+                f"params['mappings'] is missing edge(s) {absent_maps}; pass a "
+                "partial tree through gm.step / gm.run_scan(params=...)."
+            )
+        for key, weights in given_maps.items():
             edge = mapped.get(key)
             if edge is None:
                 raise ValueError(
@@ -1867,6 +1975,7 @@ class GraphManager:
             update_fn=node.update,
             timestep=node.delta_t,
             accepts_params=_update_accepts_params(node),
+            flux_accepts_params=_flux_accepts_params(node),
         )
         self._nodes[node.name] = spec
         self._state[node.name] = node.initial_state()
@@ -1914,9 +2023,21 @@ class GraphManager:
             transform = resolve_transform(transform)
         if mapping is not None:
             self._check_mapping_shapes(source, source_field, target, target_field, mapping)
+        ordinal = 0
+        if mapping is not None:
+            # Mapping weights live in params["mappings"][edge.key]; a
+            # second mapped edge on the same field pair (two additive
+            # contributions, say) gets its own slot via the ordinal
+            # instead of silently sharing -- and using -- the other's
+            # weights.
+            base = f"{source}.{source_field}->{target}.{target_field}"
+            ordinal = sum(
+                1 for e in self._edges
+                if e.mapping is not None and e.key.split("#")[0] == base
+            )
         edge = EdgeSpec(source, target, source_field, target_field,
                         transform, additive, source_units, target_units,
-                        mapping=mapping)
+                        mapping=mapping, ordinal=ordinal)
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
@@ -2016,6 +2137,18 @@ class GraphManager:
         self._external_inputs = [
             e for e in self._external_inputs if e.target_node != name
         ]
+        # ParamSpec overrides for the node and for mapped edges that
+        # touched it would otherwise survive and break to_dict/from_dict;
+        # its live params entry is discarded on purpose (an intentional
+        # removal / replacement must not warn at the next compile).
+        self._param_spec_overrides.pop(name, None)
+        for key in list(self._param_spec_overrides):
+            if key.startswith(f"{name}.") or f"->{name}." in key:
+                self._param_spec_overrides.pop(key, None)
+        self.params.get("nodes", {}).pop(name, None)
+        for key in list(self.params.get("mappings", {})):
+            if key.startswith(f"{name}.") or f"->{name}." in key:
+                self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_NODE_REMOVED, name)
 
@@ -2037,6 +2170,10 @@ class GraphManager:
                 and e.target_field == edge.target_field
             )
         ]
+        self._param_spec_overrides.pop(edge.key, None)
+        for key in list(self.params.get("mappings", {})):
+            if key.split("#")[0] == edge.key:
+                self.params["mappings"].pop(key, None)
         self._dirty = True
         self._notify(EVENT_EDGE_REMOVED, edge)
 
@@ -2485,7 +2622,10 @@ class GraphManager:
                         flatten_coupled_state as _fcs_pred,
                     )
                     group_names_pred = list(g.nodes)
-                    flat0 = _fcs_pred(self._state, group_names_pred)
+                    flat0 = _fcs_pred(
+                        self._state, group_names_pred,
+                        fields=float_fields_of(self._state, group_names_pred),
+                    )
                     n_pred = 3 if g.predictor == "quadratic" else 2
                     for pi in range(n_pred):
                         meta[f"coupling_{key}_pred_{pi}"] = flat0
@@ -2533,7 +2673,12 @@ class GraphManager:
 
         # Snapshot the differentiable parameters before building the
         # step so the closure default (``params=None``) is this snapshot.
-        self.params = self._snapshot_params()
+        # Live values survive a recompile: a calibrated leaf whose
+        # node/key/shape/dtype still exist is carried over (adding an
+        # edge or an external input must not discard a fit); anything
+        # that no longer fits is dropped with a warning.  ``reset_params``
+        # restores the constructor values on purpose.
+        self.params = self._merge_live_params(self._snapshot_params(), self.params)
         baked = self.nodes_without_params()
         if baked:
             logger.info(
@@ -2843,8 +2988,9 @@ class GraphManager:
             # Compute fluxes for this node if it produces them
             from maddening.core.node import SimulationNode as _SimBase
             if type(spec.node).compute_boundary_fluxes is not _SimBase.compute_boundary_fluxes:
-                fluxes = spec.node.compute_boundary_fluxes(
-                    new_node_state, boundary_inputs, spec.timestep
+                fluxes = _node_fluxes(
+                    spec, new_node_state, boundary_inputs, spec.timestep,
+                    node_params.nodes.get(node_name),
                 )
                 if fluxes:
                     flux_state[node_name] = fluxes
@@ -3839,6 +3985,10 @@ class GraphManager:
                 target=ed["target_node"],
                 source_field=ed["source_field"],
                 target_field=ed["target_field"],
+                transform=ed.get("transform"),          # registered name
+                additive=bool(ed.get("additive", False)),
+                source_units=ed.get("source_units"),
+                target_units=ed.get("target_units"),
             )
         for ei in config.get("external_inputs", []):
             gm.add_external_input(

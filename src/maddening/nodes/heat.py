@@ -376,6 +376,7 @@ class HeatNode(SimulationNode):
         *,
         static_padded: dict | None = None,
         shard_info: dict | None = None,
+        params=None,
     ) -> dict:
         """Sharded update from a halo-padded temperature field.
 
@@ -393,6 +394,11 @@ class HeatNode(SimulationNode):
         For non-zero Dirichlet temperatures or per-shard BC overrides,
         plug into the coupling system (M8) rather than this primitive.
         Non-uniform grids are not yet supported under sharding.
+
+        Same params contract as :meth:`update`: ``thermal_diffusivity``
+        and ``length`` come from the injected ``params`` when the
+        (sharded) graph supplies them, so a ``ShardedStencilNode``
+        wrapping a HeatNode is calibratable like the unsharded node.
         """
         if self._is_nonuniform:
             raise NotImplementedError(
@@ -403,10 +409,11 @@ class HeatNode(SimulationNode):
         T_pad = state_padded["temperature"]
         halo = int(self.halo_width()[0])
         if halo == 0:
-            return self.update(state_padded, boundary_inputs, dt)
+            return self.update(state_padded, boundary_inputs, dt, params=params)
 
-        alpha = self.params["thermal_diffusivity"]
-        L = self.params["length"]
+        p = self.params if params is None else {**self.params, **params}
+        alpha = p["thermal_diffusivity"]
+        L = p["length"]
         n_global = self.params["n_cells"]
         dx = L / n_global
         stencil_order = self.params.get("stencil_order", 2)
@@ -571,15 +578,17 @@ class HeatNode(SimulationNode):
             ),
         }
 
-    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        # Same constants as ``update`` (see SpringDamperNode).
+        p = self.params if params is None else {**self.params, **params}
         T = state["temperature"]
-        alpha = self.params["thermal_diffusivity"]
+        alpha = p["thermal_diffusivity"]
         if self._is_nonuniform:
             x = self._grid_x
             dx_left = x[1] - x[0]
             dx_right = x[-1] - x[-2]
         else:
-            dx_left = self.params["length"] / self.params["n_cells"]
+            dx_left = p["length"] / p["n_cells"]
             dx_right = dx_left
         return {
             "left_heat_flux": -alpha * (T[1] - T[0]) / dx_left,

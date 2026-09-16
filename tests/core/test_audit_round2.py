@@ -237,11 +237,11 @@ def test_remove_edge_drops_ordinal_overrides_and_round_trips():
 def test_python_float_params_leaves_do_not_retrace_and_survive_recompile():
     gm = _spring()
     gm.step()
-    n0 = gm._compiled_step._cache_size()
+    n0 = gm.trace_count
     gm.step(params={"nodes": {"s": {"stiffness": 31.0}}})
     gm.params["nodes"]["s"]["stiffness"] = 32.0
     gm.step()
-    assert gm._compiled_step._cache_size() == n0
+    assert gm.trace_count == n0
     gm._dirty = True
     with warnings.catch_warnings():
         warnings.simplefilter("error")

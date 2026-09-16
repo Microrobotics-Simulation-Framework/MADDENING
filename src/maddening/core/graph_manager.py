@@ -1764,6 +1764,13 @@ class GraphManager:
                     elif getattr(v, "weak_type", False):
                         leaves[key] = v.astype(v.dtype)
 
+    @property
+    def trace_count(self) -> int:
+        """How many times the compiled step has been traced since the
+        last ``compile()`` (0 before the first step; more than 1 after
+        steady state means the step is being retraced)."""
+        return int(getattr(self, "_n_traces", 0))
+
     def reset_params(self) -> None:
         """Discard live/calibrated values: ``gm.params`` becomes the
         constructor snapshot again (no recompile needed)."""
@@ -2757,7 +2764,19 @@ class GraphManager:
             )
 
         step_fn = self._build_step_fn()
-        self._compiled_step = jax.jit(step_fn)
+        # Count Python-level traces of the step: a robust, JAX-version-
+        # independent retrace probe (the jit object's C++ cache count is
+        # not comparable across versions).  ``trace_count`` is 0 right
+        # after compile() and 1 after the first step of a well-behaved
+        # graph; a growing count means something in the call signature
+        # (weak types, dtypes, params structure) keeps changing.
+        self._n_traces = 0
+
+        def _counted_step(full_state, external_inputs, params=None):
+            self._n_traces += 1
+            return step_fn(full_state, external_inputs, params)
+
+        self._compiled_step = jax.jit(_counted_step)
 
         # Snapshot static_data hashes so we can detect drift.
         self._static_data_hashes = {

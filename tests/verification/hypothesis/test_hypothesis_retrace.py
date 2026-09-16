@@ -91,7 +91,7 @@ def test_step_traces_once_over_random_graphs(kinds, couple, multirate, seed):
     assert all(not getattr(l, "weak_type", False) for l in jax.tree.leaves(gm._state))
     for _ in range(4):
         gm.step()
-    assert gm._compiled_step._cache_size() == 1
+    assert gm.trace_count == 1
     # Weak-typed values handed in later are normalised too.
     for name in gm.node_names:
         s = gm.get_node_state(name)
@@ -100,7 +100,7 @@ def test_step_traces_once_over_random_graphs(kinds, couple, multirate, seed):
             jnp.issubdtype(x.dtype, jnp.floating) else x, s))
     for _ in range(3):
         gm.step()
-    assert gm._compiled_step._cache_size() == 1
+    assert gm.trace_count == 1
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(gm._state)
                if jnp.issubdtype(x.dtype, jnp.floating))
 

@@ -144,23 +144,23 @@ def test_remove_node_drops_ordinal_mapping_slots_and_overrides():
 def test_python_float_params_leaf_does_not_retrace_the_step():
     gm = _gm()
     gm.step()
-    n0 = gm._compiled_step._cache_size()
+    n0 = gm.trace_count
     gm.step(params={"nodes": {"s": {"stiffness": 31.0}}})
     gm.step(params={"nodes": {"s": {"stiffness": 32.0}}})
     gm.step()
-    n1 = gm._compiled_step._cache_size()
+    n1 = gm.trace_count
     assert n1 == n0, (n0, n1)
 
 
 def test_user_assigned_python_float_in_gm_params_does_not_retrace():
     gm = _gm()
     gm.step()
-    n0 = gm._compiled_step._cache_size()
+    n0 = gm.trace_count
     gm.params["nodes"]["s"]["stiffness"] = 31.0
     gm.step()
     gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(32.0, jnp.float32)
     gm.step()
-    n1 = gm._compiled_step._cache_size()
+    n1 = gm.trace_count
     assert n1 == n0, (n0, n1)
 
 

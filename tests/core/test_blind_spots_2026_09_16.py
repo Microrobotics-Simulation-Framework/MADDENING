@@ -59,7 +59,7 @@ def test_int_leaf_in_coupling_group_keeps_dtype_single_step_grad_and_jvp(group_k
     for _ in range(3):
         gm.step()
     assert gm._state["c"]["n"].dtype == jnp.int32 and int(gm._state["c"]["n"]) == 3
-    assert gm._compiled_step._cache_size() == 1
+    assert gm.trace_count == 1
     step = gm._build_step_fn()
     ext = gm._default_external_inputs()
 

@@ -61,7 +61,7 @@ def test_sharded_lbm_exposes_viscosity_and_matches_unsharded():
     sh.step(params=p_sh)
     p_sh["nodes"]["lbm"]["viscosity"] = jnp.float32(0.08)
     sh.step(params=p_sh)
-    assert sh._compiled_step._cache_size() == 1
+    assert sh.trace_count == 1
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")

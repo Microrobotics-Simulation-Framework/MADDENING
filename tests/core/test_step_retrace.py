@@ -34,7 +34,7 @@ class WeakSeed(SimulationNode):
 
 
 def _cache_size(gm):
-    return gm._compiled_step._cache_size()
+    return gm.trace_count
 
 
 def test_weak_typed_seed_state_traces_once():

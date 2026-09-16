@@ -2084,6 +2084,8 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
+        its dict form) is rebuilt first with :meth:`point_resolver`.
 
         The *transform* parameter accepts either a callable or a
         string name registered via ``@register_transform``.  String
@@ -2103,6 +2105,14 @@ class GraphManager:
             from maddening.core.transforms import resolve_transform
             transform = resolve_transform(transform)
         if mapping is not None:
+            from maddening.core.coupling.mapping_spec import MappingSpec  # noqa: PLC0415
+            if isinstance(mapping, (MappingSpec, dict)):
+                # A spec (or its dict form, as written by to_dict): rebuild
+                # the mapping from this graph's node fields; asset paths
+                # are relative to the working directory.
+                if isinstance(mapping, dict):
+                    mapping = MappingSpec.from_dict(mapping)
+                mapping = mapping.build(self.point_resolver())
             self._check_mapping_shapes(source, source_field, target, target_field, mapping)
         ordinal = 0
         if mapping is not None:
@@ -2122,6 +2132,13 @@ class GraphManager:
         self._edges.append(edge)
         self._dirty = True
         self._notify(EVENT_EDGE_ADDED, edge)
+
+    def point_resolver(self, base_dir=None) -> Callable[[dict], Any]:
+        """``resolve_points`` for :meth:`MappingSpec.build`: node-field
+        references are looked up in this graph's nodes, asset paths are
+        relative to ``base_dir`` (the working directory when ``None``)."""
+        from maddening.core.coupling.mapping_spec import make_point_resolver  # noqa: PLC0415
+        return make_point_resolver(self, base_dir)
 
     def _check_mapping_shapes(self, source, source_field, target, target_field, mapping):
         for attr in ("apply", "params_pytree", "n_source", "n_target"):
@@ -4041,14 +4058,30 @@ class GraphManager:
     # Serialization
     # ------------------------------------------------------------------
 
-    def to_dict(self) -> dict:
+    def to_dict(self, *, strict_mappings: bool = True) -> dict:
         """Serialise the graph structure (not runtime state).
 
         Node ``params`` are the *effective* values — the constructor
         arguments with the live :attr:`params` written over them (see
         :meth:`effective_node_params`) — and ``param_specs`` carries the
-        graph's :meth:`set_param_spec` overrides.
+        graph's :meth:`set_param_spec` overrides.  An edge's interface
+        mapping is written as its
+        :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (kind,
+        hyper-parameters, point references — never the weights, which
+        checkpoints carry).  With ``strict_mappings`` (the default) a
+        mapping that cannot be rebuilt from a config — no spec, or a
+        point set neither referenced nor small enough to inline — is a
+        ``ValueError`` naming the ``source_ref=`` / ``target_ref=`` /
+        ``asset=`` argument to pass; ``strict_mappings=False`` writes
+        whatever the mapping describes, for display.
         """
+        if strict_mappings:
+            from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+                check_mapping_serialisable,
+            )
+            for e in self._edges:
+                if e.mapping is not None:
+                    check_mapping_serialisable(e.mapping, edge_key=e.key)
         nodes = []
         for name, spec in self._nodes.items():
             d = spec.node.to_dict()
@@ -4078,11 +4111,19 @@ class GraphManager:
         cls,
         config: dict,
         node_registry: dict[str, type],
+        *,
+        base_dir=None,
     ) -> "GraphManager":
         """Reconstruct a GraphManager from a serialised config.
 
         *node_registry* maps node type names (e.g. ``"BallNode"``) to
-        the corresponding class.
+        the corresponding class.  Edge mappings are rebuilt from their
+        ``MappingSpec`` (node-field references resolve against the
+        nodes just created; ``{"asset": ...}`` paths are relative to
+        ``base_dir``, the directory the config was read from — the
+        working directory when ``None``) and registered in
+        ``params["mappings"]`` exactly as ``add_edge(mapping=)`` does.
+        A checkpoint loaded afterwards overwrites the rebuilt weights.
         """
         gm = cls()
         for nd in config["nodes"]:
@@ -4092,15 +4133,11 @@ class GraphManager:
         for node_name, overrides in config.get("param_specs", {}).items():
             for key, spec_dict in overrides.items():
                 gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
+        resolve = gm.point_resolver(base_dir)
         for ed in config["edges"]:
-            if "mapping" in ed:
-                raise ValueError(
-                    f"edge {ed['source_node']}.{ed['source_field']} -> "
-                    f"{ed['target_node']}.{ed['target_field']} was saved with an "
-                    f"interface mapping ({ed['mapping']}); rebuilding mappings "
-                    "from a config (MappingSpec) is not implemented yet — add "
-                    "the edge with mapping= after from_dict."
-                )
+            mapping = None
+            if ed.get("mapping") is not None:
+                mapping = gm._rebuild_mapping(ed, resolve)
             gm.add_edge(
                 source=ed["source_node"],
                 target=ed["target_node"],
@@ -4110,6 +4147,7 @@ class GraphManager:
                 additive=bool(ed.get("additive", False)),
                 source_units=ed.get("source_units"),
                 target_units=ed.get("target_units"),
+                mapping=mapping,
             )
         for ei in config.get("external_inputs", []):
             gm.add_external_input(
@@ -4118,6 +4156,27 @@ class GraphManager:
                 shape=tuple(ei.get("shape", ())),
             )
         return gm
+
+    @staticmethod
+    def _rebuild_mapping(edge_dict: dict, resolve_points) -> Any:
+        """The mapping of a serialised edge, rebuilt from its spec dict and
+        checked against the ``shape`` recorded with it."""
+        from maddening.core.coupling.mapping_spec import MappingSpec  # noqa: PLC0415
+        where = (f"edge {edge_dict['source_node']}.{edge_dict['source_field']} -> "
+                 f"{edge_dict['target_node']}.{edge_dict['target_field']}")
+        d = edge_dict["mapping"]
+        try:
+            mapping = MappingSpec.from_dict(d).build(resolve_points)
+        except ValueError as exc:
+            raise ValueError(f"{where}: cannot rebuild interface mapping: {exc}") from exc
+        shape = d.get("shape")
+        if shape is not None and [mapping.n_target, mapping.n_source] != list(shape):
+            raise ValueError(
+                f"{where}: rebuilt mapping has shape "
+                f"{[mapping.n_target, mapping.n_source]} but the config recorded "
+                f"{list(shape)}; the referenced point sets changed"
+            )
+        return mapping
 
     # ------------------------------------------------------------------
     # Checkpoint / restore

@@ -19,6 +19,11 @@ Factories:
   grids (conservative by construction),
 * :func:`matrix_mapping` — bring your own matrix.
 
+Every factory attaches a :class:`~maddening.core.coupling.mapping_spec.MappingSpec`
+(kind, hyper-parameters, *references* to the point sets — never the
+weights) so a graph config or USD stage can rebuild the mapping; see
+:mod:`maddening.core.coupling.mapping_spec`.
+
 Modes follow preCICE.  ``"consistent"`` transfers a *value* field
 (temperature, displacement): ``H @ v`` interpolates.  ``"conservative"``
 transfers an *integral* quantity (force, heat flow) such that the total
@@ -39,6 +44,11 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.mapping_spec import (
+    MappingSpec,
+    normalise_point_reference,
+    reference_for_array,
+)
 
 _KERNELS = ("gaussian", "multiquadric", "inverse_multiquadric", "thin_plate_spline")
 _MODES = ("consistent", "conservative")
@@ -88,6 +98,9 @@ class StaticLinearMapping:
     kind: str = "matrix"
     mode: str = "consistent"
     meta: dict = None  # type: ignore[assignment]  # hyper-parameters, for describe()
+    # How the mapping was built (set by the factories); ``None`` for a
+    # hand-constructed instance, which then cannot be serialised.
+    spec: Optional[MappingSpec] = None
 
     def __post_init__(self):
         H = jnp.asarray(self.H)
@@ -119,11 +132,19 @@ class StaticLinearMapping:
         return self._matrix(weights).T @ field
 
     def describe(self) -> dict:
-        """Kind, mode, shape and hyper-parameters (never the weights)."""
-        return {
+        """Kind, mode, shape and hyper-parameters (never the weights).
+
+        With a :attr:`spec` the dict is that spec's ``to_dict()`` plus
+        ``shape`` — what ``EdgeSpec.to_dict`` writes and
+        ``MappingSpec.from_dict`` reads back.
+        """
+        d = {
             "kind": self.kind, "mode": self.mode,
             "shape": [self.n_target, self.n_source], **self.meta,
         }
+        if self.spec is not None:
+            d.update(self.spec.to_dict())
+        return d
 
     def __repr__(self) -> str:
         return (f"StaticLinearMapping({self.kind}, {self.mode}, "
@@ -240,6 +261,8 @@ def rbf_mapping(
     polynomial: bool = True,
     ridge: float = 1e-8,
     mode: str = "consistent",
+    source_ref=None,
+    target_ref=None,
 ) -> StaticLinearMapping:
     """RBF mapping from ``source_points`` to ``target_points``.
 
@@ -249,6 +272,13 @@ def rbf_mapping(
     the source (a total force) is summed identically over the target —
     exactly when the reverse interpolant reproduces constants, i.e. with
     ``polynomial=True``.
+
+    ``source_ref`` / ``target_ref`` say where the points come from for
+    serialisation (``{"node": name, "field": key}`` or
+    ``{"asset": "file.npy"}``, see
+    :mod:`~maddening.core.coupling.mapping_spec`); without them a set of
+    at most ``INLINE_POINT_LIMIT`` points is inlined into the spec and a
+    larger one leaves the mapping unserialisable.
     """
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
@@ -259,7 +289,11 @@ def rbf_mapping(
         H = rbf_matrix(target_points, source_points, **kw).T
     meta = dict(kernel=kernel, epsilon=float(epsilon), polynomial=bool(polynomial),
                 ridge=float(ridge))
-    return StaticLinearMapping(H, kind="rbf", mode=mode, meta=meta)
+    spec = MappingSpec("rbf", {**meta, "mode": mode}, {
+        "source_points": reference_for_array(source_points, source_ref, name="source_points"),
+        "target_points": reference_for_array(target_points, target_ref, name="target_points"),
+    })
+    return StaticLinearMapping(H, kind="rbf", mode=mode, meta=meta, spec=spec)
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +314,14 @@ def _nn_matrix(source_points, target_points) -> jnp.ndarray:
 @stability(StabilityLevel.EVOLVING)
 def nearest_neighbor_mapping(
     source_points, target_points, *, mode: str = "consistent",
+    source_ref=None, target_ref=None,
 ) -> StaticLinearMapping:
     """Nearest-neighbour mapping (a 0/1 selection matrix).
 
     ``"conservative"`` is the transpose of the reverse selection: each
     source value is *added* to the target point nearest to it, so the
-    total is preserved exactly.
+    total is preserved exactly.  ``source_ref`` / ``target_ref`` as in
+    :func:`rbf_mapping`.
     """
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
@@ -293,14 +329,22 @@ def nearest_neighbor_mapping(
         H = _nn_matrix(source_points, target_points)
     else:
         H = _nn_matrix(target_points, source_points).T
-    return StaticLinearMapping(H, kind="nearest_neighbor", mode=mode)
+    spec = MappingSpec("nearest_neighbor", {"mode": mode}, {
+        "source_points": reference_for_array(source_points, source_ref, name="source_points"),
+        "target_points": reference_for_array(target_points, target_ref, name="target_points"),
+    })
+    return StaticLinearMapping(H, kind="nearest_neighbor", mode=mode, spec=spec)
 
 
 @stability(StabilityLevel.EVOLVING)
-def projection_1d_mapping(source_boundaries, target_boundaries) -> StaticLinearMapping:
+def projection_1d_mapping(
+    source_boundaries, target_boundaries, *, source_ref=None, target_ref=None,
+) -> StaticLinearMapping:
     """Cell-average projection between two 1D grids (integral-preserving).
 
-    ``P[i, j] = |target_i ∩ source_j| / |target_i|``.
+    ``P[i, j] = |target_i ∩ source_j| / |target_i|``.  ``source_ref`` /
+    ``target_ref`` reference the boundary arrays for serialisation, as
+    in :func:`rbf_mapping`.
     """
     sb = np.asarray(source_boundaries, dtype=np.float64)
     tb = np.asarray(target_boundaries, dtype=np.float64)
@@ -312,18 +356,41 @@ def projection_1d_mapping(source_boundaries, target_boundaries) -> StaticLinearM
             overlap = min(hi_t, sb[j + 1]) - max(lo_t, sb[j])
             if overlap > 0:
                 P[i, j] = overlap / (hi_t - lo_t)
+    spec = MappingSpec("projection_1d", {}, {
+        "source_boundaries": reference_for_array(
+            source_boundaries, source_ref, name="source_boundaries"),
+        "target_boundaries": reference_for_array(
+            target_boundaries, target_ref, name="target_boundaries"),
+    })
     return StaticLinearMapping(jnp.asarray(P, jnp.float32), kind="projection_1d",
-                               mode="conservative")
+                               mode="conservative", spec=spec)
 
 
 @stability(StabilityLevel.EVOLVING)
-def matrix_mapping(H, *, mode: str = "consistent", kind: str = "matrix") -> StaticLinearMapping:
-    """Wrap a precomputed matrix (e.g. supermesh weights built offline)."""
-    return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode)
+def matrix_mapping(
+    H, *, mode: str = "consistent", kind: str = "matrix", asset: Optional[str] = None,
+) -> StaticLinearMapping:
+    """Wrap a precomputed matrix (e.g. supermesh weights built offline).
+
+    A matrix is never inlined into a config: to make the mapping
+    serialisable pass ``asset="<file>.npy"`` (a path relative to the
+    directory the config / USD stage is saved in) and save ``H`` there
+    with ``numpy.save``; ``from_dict`` / ``load_graph_from_usd`` read it
+    back from ``base_dir``.  Without ``asset`` the mapping works but
+    ``GraphManager.to_dict`` and the USD writer refuse it.  ``kind`` is
+    a free label (recorded as the spec's ``label``).
+    """
+    hyper = {"mode": mode} if kind == "matrix" else {"mode": mode, "label": kind}
+    ref = None if asset is None else normalise_point_reference(asset, name="H")
+    if ref is not None and "asset" not in ref:
+        raise ValueError("matrix_mapping: asset= must name a .npy/.npz file")
+    spec = MappingSpec("matrix", hyper, {"H": ref})
+    return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode, spec=spec)
 
 
 __all__ = [
     "Mapping",
+    "MappingSpec",
     "StaticLinearMapping",
     "matrix_mapping",
     "nearest_neighbor_mapping",

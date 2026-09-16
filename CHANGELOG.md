@@ -39,6 +39,52 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **`AdaptiveNode` base class** (`maddening.nodes.adaptive`, `@stability(STABLE)`,
+  `MADD-NODE-009`): the frozen-active-set adjoint pattern for adaptive solvers.
+  A subclass supplies `compute_active_set` (any fixed-shape `jnp` selection
+  rule) and `solve_frozen` (the masked solve, through `ift_linear_solve`); the
+  base class wires them into a JAX-traceable `update` over a padded `(c, mask)`
+  state — adaptivity changes which mask entries are true, never an array
+  shape, so the step runs under `jit` / `lax.scan` unchanged — commits the
+  selection under `stop_gradient`, and zeroes coefficients off the mask.
+  `jax.grad` through the node is the exact frozen-set adjoint on every region
+  where the active set is constant (verified against finite differences and
+  dense sub-block solves to 1e-6).  Physical parameters live in the graph
+  parameter pytree with the subclass's `ParamSpec`s, so `fit` / `fim` reach
+  them.  Palais-trap diagnostics from the design spike: `blindness_ratio`,
+  `is_trapped_at`, `symmetry_break` (anisotropic step along the full-basis
+  gradient, trainable leaves only), a cold-start gate in `initial_state`
+  (`AdaptiveNodeBlindnessError`) and `cold_start()` with one automatic escape;
+  constants `blindness_threshold = 0.7`, `blindness_break_delta = 0.05`,
+  `D_threshold = 5` as documented class attributes.  Algorithm guide
+  (`docs/algorithm_guide/nodes/adaptive_node.md`), authoring guide
+  (`docs/developer_guide/adaptive_node.md`), benchmark `MADD-VER-004`
+  (Green's-function reference for `-u'' + u = f`).  `ift_linear_solve` is
+  promoted from `EXPERIMENTAL` to `STABLE` with its signature unchanged, as
+  its v0.3.1 docstring promised.  The wavelet subclass stays post-1.0.
+- **Interface mappings are serialisable** (`MappingSpec`, the "13(a)" half of
+  the deferred mapping-serialisation item).  Every mapping factory
+  (`rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
+  `matrix_mapping`) attaches a `MappingSpec` — kind, hyper-parameters and
+  *references* to its point sets, never the weights — which
+  `GraphManager.to_dict` / `from_dict`, the config helpers and
+  `save_graph_to_usd` / `load_graph_from_usd` (attribute
+  `maddening:mappingSpecJson`) now carry instead of refusing mapped edges.
+  Point references are `{"node": name, "field": key}` (a node's
+  `static_data` or array-valued parameter), `{"asset": "<file>.npy|.npz"}`
+  (relative to the config / stage directory, `base_dir=`; no absolute
+  paths or `..`) or an inline list for at most 64 points; the factories
+  take `source_ref=` / `target_ref=` (`matrix_mapping(asset=)` — an
+  explicit matrix is never inlined).  On load the mapping is rebuilt by
+  the same factory (weights bitwise equal) and registered in
+  `params["mappings"]` as `add_edge(mapping=)` does — which now also
+  accepts a spec directly; a checkpoint loaded afterwards keeps its
+  (possibly trained) weights.  A mapping without a complete spec is
+  refused by the writers with a message naming the argument to pass
+  (`to_dict(strict_mappings=False)` for display; the REST `GET /graph`
+  uses it).  The FMI exporter is unchanged (mapping weights never reach
+  the FMU).  Guide: algorithm_guide/coupling/interface_mapping.md,
+  "Serialisation".
 - **Multi-GPU hardware-session tooling** (local preparation for the
   human-supervised 4xA100 session; nothing here launches a pod).
   `benchmarks/multigpu/run_pod.py` is the pod-side runner: `--goal

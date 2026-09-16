@@ -287,7 +287,9 @@ class SimulationServer:
 
         @app.get("/graph", tags=["graph"])
         def get_graph():
-            data = self.gm.to_dict()
+            # Display, not persistence: a mapping without point references
+            # is shown as far as it describes itself rather than refused.
+            data = self.gm.to_dict(strict_mappings=False)
             data["active_surrogates"] = list(self._active_surrogates)
             return data
 

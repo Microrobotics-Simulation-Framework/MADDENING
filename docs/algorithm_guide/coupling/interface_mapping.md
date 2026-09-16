@@ -112,13 +112,71 @@ construction, not a broadcast surprise inside the jit.
 
 ## Serialisation
 
-`gm.to_dict()` records `mapping.describe()` (kind, mode, shape,
-hyper-parameters — never the weights); `from_dict` and `save_graph_to_usd`
-refuse a mapped edge for now.  Registry serialisation of a `MappingSpec`
-(kind + hyper-parameters + point-source references, rebuilt on load) is
-planned with the USD read path in 0.5.0, together with matrix-free
-mappings for moving interfaces (`geom`), Wendland / partition-of-unity
-sparsity, and scaled-consistent / nearest-projection variants.
+A mapping is written to a config (`gm.to_dict()`, JSON / YAML) or a USD
+stage (`save_graph_to_usd`, attribute `maddening:mappingSpecJson`) as its
+**`MappingSpec`** — the recipe, never the weights:
+
+```json
+"mapping": {"kind": "rbf", "mode": "conservative", "shape": [12, 6],
+            "kernel": "thin_plate_spline", "epsilon": 2.0,
+            "polynomial": true, "ridge": 1e-8,
+            "points": {"source_points": {"node": "fluid", "field": "grid_x"},
+                       "target_points": {"asset": "solid_points.npy"}}}
+```
+
+`kind` names the factory, the flat keys are its hyper-parameters
+(`shape` is informational and checked on reload), and `points` maps each
+array argument of the factory (`source_points` / `target_points`,
+`source_boundaries` / `target_boundaries`, `H`) to a **point reference**.
+Every factory attaches the spec to the mapping it returns
+(`mapping.spec`, `mapping.describe()`); `GraphManager.from_dict` and
+`load_graph_from_usd` rebuild the mapping by calling the same factory on
+the resolved points (`MappingSpec.build(resolve_points)`), so the rebuilt
+`H` is bitwise equal to the original, and register it in
+`params["mappings"]` exactly as `add_edge(mapping=)` does.  `add_edge`
+also accepts a `MappingSpec` (or its dict) directly.
+
+### Point references
+
+| reference | resolves to |
+|-----------|-------------|
+| `{"node": "<name>", "field": "<key>"}` | the node's `static_data[key]` (a `StaticArray` is unwrapped) or, failing that, an array-valued constructor parameter `node.params[key]` — e.g. `{"node": "rod", "field": "grid_x"}` for a `HeatNode` |
+| `{"asset": "<path>.npy"}`, `{"asset": "<path>.npz", "key": "<member>"}` | a NumPy file, **relative to the directory the config / stage lives in** (`from_dict(..., base_dir=)`; `load_graph_from_usd` defaults to the stage file's directory).  Absolute paths and `..` are refused. |
+| `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) of them |
+
+Tell the factory where its points came from with `source_ref=` /
+`target_ref=` (and `matrix_mapping(H, asset="H.npy")` for an explicit
+matrix, which is never inlined — save it yourself with `numpy.save` next
+to the config):
+
+```python
+gm.add_edge("fluid", "solid", "traction", "force",
+            mapping=rbf_mapping(fluid_pts, solid_pts, mode="conservative",
+                                source_ref={"node": "fluid", "field": "grid_x"},
+                                target_ref={"asset": "solid_points.npy"}))
+```
+
+Without a reference, a set of at most 64 points is inlined automatically;
+a larger one leaves the mapping usable but **not serialisable**:
+`gm.to_dict()` and `save_graph_to_usd` refuse with a message naming the
+argument to pass (`gm.to_dict(strict_mappings=False)` still describes it,
+for display — the REST `GET /graph` uses that).  A hand-built
+`StaticLinearMapping` or a custom `Mapping` object has no spec and is
+refused the same way.
+
+### Weights: config vs checkpoint
+
+The config carries the recipe; a checkpoint (`save_state`) carries the
+actual `params["mappings"]` weights, which may have been trained by
+`sysid` or edited.  Loading a config rebuilds the geometric weights; a
+checkpoint loaded afterwards overwrites them — **the checkpoint wins**
+(`tests/core/test_mapping_spec_serialisation.py`).  The FMI exporter
+never exposes mapping weights, so the exported `modelDescription.xml`
+is identical with and without a mapping on an edge.
+
+Still planned for 0.5.0: matrix-free mappings for moving interfaces
+(`geom`), Wendland / partition-of-unity sparsity, and
+scaled-consistent / nearest-projection variants.
 
 ## Legacy closures
 

@@ -56,12 +56,35 @@ STABILITY_MODULES: tuple[str, ...] = (
 )
 
 
-def import_stability_surfaces() -> None:
-    """Import every module in :data:`STABILITY_MODULES` (fires ``@stability``)."""
+#: Modules from :data:`STABILITY_MODULES` that could not be imported because
+#: an optional dependency is absent (``{module: reason}``).  Filled by
+#: :func:`import_stability_surfaces`.  A report generated with a non-empty
+#: map is incomplete; :func:`main` refuses to write one unless told to.
+SKIPPED_MODULES: dict[str, str] = {}
+
+
+def import_stability_surfaces() -> dict[str, str]:
+    """Import every module in :data:`STABILITY_MODULES` (fires ``@stability``).
+
+    A module whose *optional* dependency is missing (``usd-core`` for
+    ``maddening.usd.live_stage``, say) is recorded in :data:`SKIPPED_MODULES`
+    instead of aborting the import, so the script and the compliance tests
+    that load it work in environments without every extra.  Any other
+    failure propagates: a broken module must not silently vanish from the
+    report.  Returns the skipped map.
+    """
     import importlib
 
+    SKIPPED_MODULES.clear()
     for name in STABILITY_MODULES:
-        importlib.import_module(name)
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:                       # ModuleNotFoundError included
+            missing = getattr(exc, "name", None)
+            if missing is not None and missing.startswith("maddening"):
+                raise                                    # our own module is broken
+            SKIPPED_MODULES[name] = str(exc)
+    return dict(SKIPPED_MODULES)
 
 
 import_stability_surfaces()
@@ -95,7 +118,25 @@ import time.  Levels:
 """
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--allow-missing-optional", action="store_true",
+                    help="write the report even if modules were skipped for a "
+                         "missing optional dependency (the report is then incomplete; "
+                         "the release gate runs without this flag)")
+    args = ap.parse_args(argv)
+
+    if SKIPPED_MODULES:
+        for name, why in SKIPPED_MODULES.items():
+            print(f"skipped {name}: {why}", file=sys.stderr)
+        if not args.allow_missing_optional:
+            print(f"{len(SKIPPED_MODULES)} module(s) skipped for missing optional "
+                  "dependencies; install the extras or pass --allow-missing-optional "
+                  "to write an incomplete report", file=sys.stderr)
+            return 2
+
     out_dir = REPO_ROOT / "docs" / "developer_guide"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "stability_report.md"

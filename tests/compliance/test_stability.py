@@ -162,28 +162,81 @@ class TestStabilityReportGeneratorCoverage:
                 found.add(".".join(parts))
         return found
 
+    def _listed_modules(self) -> set[str]:
+        """``STABILITY_MODULES`` read statically (no import, no optional deps)."""
+        tree = ast.parse(self.SCRIPT.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "STABILITY_MODULES":
+                return set(ast.literal_eval(node.value))
+        raise AssertionError("STABILITY_MODULES not found in the generator")
+
     def test_generator_module_list_covers_every_module_using_stability(self):
+        """Static check: every module under src/maddening that uses
+        ``@stability(`` is listed in the generator, so a newly tagged
+        module cannot silently drop out of the report.  Static, so it holds
+        in environments without every optional extra."""
         tagged = self._modules_using_stability()
         assert "maddening.cloud.resume" in tagged  # sanity: the grep sees the tag
+        listed = self._listed_modules()
+        # a listed package covers the modules whose tag is re-exported via its
+        # __init__ only when the package itself is the tagged module; require
+        # each tagged module (or one of its parent packages) to be listed
+        missing = sorted(
+            m for m in tagged
+            if not any(m == p or m.startswith(p + ".") for p in listed)
+        )
+        assert not missing, (
+            "modules using @stability that scripts/generate_stability_report.py "
+            f"never imports (add them to STABILITY_MODULES): {missing}"
+        )
+
+    def test_generator_imports_every_listed_module_or_records_why(self):
+        """Loading the generator in a fresh interpreter imports every listed
+        module, except those whose optional dependency is absent, which are
+        recorded in SKIPPED_MODULES with the reason (never silently dropped)."""
         code = (
             "import importlib.util, sys\n"
             f"spec = importlib.util.spec_from_file_location('gen', {str(self.SCRIPT)!r})\n"
             "mod = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(mod)\n"
-            "mod.import_stability_surfaces()\n"
-            "print(repr(sorted(m for m in sys.modules if m.startswith('maddening'))))\n"
+            "imported = sorted(m for m in sys.modules if m.startswith('maddening'))\n"
+            "print(repr((imported, dict(mod.SKIPPED_MODULES))))\n"
         )
         env = dict(os.environ, JAX_PLATFORMS="cpu")
-        out = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True, text=True, check=True, env=env,
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, env=env)
+        assert out.returncode == 0, out.stderr[-3000:]
+        imported, skipped = ast.literal_eval(out.stdout.strip().splitlines()[-1])
+        imported = set(imported)
+        for name in self._listed_modules():
+            assert name in imported or name in skipped, name
+        # a skip is only ever for an optional third-party dependency; the
+        # generator re-raises when the missing module is one of ours
+        for name, why in skipped.items():
+            assert why, name
+
+    def test_generator_refuses_an_incomplete_report_unless_told_otherwise(self, tmp_path, monkeypatch):
+        """With a module skipped for a missing optional dependency, ``main()``
+        exits 2 and writes nothing unless ``--allow-missing-optional``."""
+        code = (
+            "import importlib.util, sys, pathlib\n"
+            f"spec = importlib.util.spec_from_file_location('gen', {str(self.SCRIPT)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "mod.SKIPPED_MODULES['maddening.fake'] = \"No module named 'fakedep'\"\n"
+            f"mod.REPO_ROOT = pathlib.Path({str(tmp_path)!r})\n"
+            "rc1 = mod.main([])\n"
+            "exists1 = (mod.REPO_ROOT / 'docs' / 'developer_guide' / 'stability_report.md').exists()\n"
+            "rc2 = mod.main(['--allow-missing-optional'])\n"
+            "exists2 = (mod.REPO_ROOT / 'docs' / 'developer_guide' / 'stability_report.md').exists()\n"
+            "print(repr((rc1, exists1, rc2, exists2)))\n"
         )
-        imported = set(ast.literal_eval(out.stdout.strip().splitlines()[-1]))
-        missing = sorted(tagged - imported)
-        assert not missing, (
-            "modules using @stability that scripts/generate_stability_report.py "
-            f"never imports (add them to STABILITY_MODULES): {missing}"
-        )
+        env = dict(os.environ, JAX_PLATFORMS="cpu")
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, env=env)
+        assert out.returncode == 0, out.stderr[-3000:]
+        assert ast.literal_eval(out.stdout.strip().splitlines()[-1]) == (2, False, 0, True)
+        assert "skipped maddening.fake" in out.stderr
 
     def test_resume_transport_is_registered_evolving_by_generator(self):
         code = (

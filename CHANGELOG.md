@@ -372,6 +372,40 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **Type-check job: a broken pyright run can no longer look like a result**
+  (independent audit of the phase-1 typing merge; report under
+  `benchmarks/results/audit_typing-pep561/`, regression tests in
+  `tests/test_typing_baseline.py` against a fake pyright executable).
+  `scripts/typing_baseline.py` now exits 2 (*infrastructure failure*,
+  distinct from 1 = errors found) and prints no table when pyright is
+  missing (an actionable hint instead of a `FileNotFoundError`
+  traceback), exits with a code other than 0/1 (3 = unparsable
+  `pyrightconfig.json`, which used to be flattened to "errors present"),
+  does not produce JSON, analysed zero files (a missing `include` path
+  gives a valid empty document, exit 0 and a stderr-only message, which
+  used to pass `--fail-on-errors` silently), or did not resolve the core
+  imports `jax`/`numpy`/`yaml` or more than `--max-missing-imports`
+  (default 40) imports: a wrong interpreter *lowers* the count (395 -> 230
+  in the audit) with nothing on stderr.  pyright's stderr is always
+  forwarded; a `--pythonpath` given after `--` is checked to exist and
+  import numpy before pyright runs; Markdown file cells are code spans
+  (`__init__.py` rendered as emphasis) with pipes escaped; `--help` says
+  that pyright's own flags go after `--`.  The CI `typecheck` job is two
+  steps: *Run pyright* fails the job on an infrastructure failure and
+  writes the step summary only when there is a table; *Report error
+  count* keeps `continue-on-error` in phase 1 and emits the count as a
+  workflow warning.  `pyright` is pinned to `1.1.414` in the `ci` extra
+  (the baseline is tied to it; `dev` keeps the floor).  The `changes`
+  gate treats an empty diff as code (logged explicitly), diffs with
+  `--no-renames` so a rename out of a code path lists both paths, and
+  reads file names line by line (paths with spaces); the on-purpose
+  nested-match semantics of `docs/*` and `*.md` are documented in the
+  job.  `docs/developer_guide/typing.md` carries the measured numbers:
+  33 STABLE-module errors across 7 modules (`fmi/model_description.py`
+  was omitted), tier 1 83 / tier 2 312 (was "~140 / ~250"), and the
+  script's exit-code contract.  Phase-2 scope is unchanged: two tiers,
+  tier 1 blocking at zero errors, tier 2 every public signature
+  annotated with bodies ratcheted.
 - **Independent audit, round 4** (residue across rounds 1-3; report under
   `benchmarks/results/audit4/`, regression tests in
   `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).

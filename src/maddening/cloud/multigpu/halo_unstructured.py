@@ -325,6 +325,12 @@ def exchange_unstructured(
         raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
     n_devices = layout.n_devices
     n_ghost_max = layout.n_ghost_max
+    if n_ghost_max == 0:
+        # No shard needs any ghost cell (one device, or edge-disjoint
+        # shards): the slab is the local block plus an empty ghost tail.
+        return jnp.concatenate(
+            [local, jnp.zeros((0,) + local.shape[1:], dtype=local.dtype)], axis=0,
+        )
     # Convert tracing-safe numpy arrays to traced jnp arrays.
     send_indices = jnp.asarray(layout.send_indices)   # (D, D, n_ghost_max)
     send_counts = jnp.asarray(layout.send_counts)     # (D, D)

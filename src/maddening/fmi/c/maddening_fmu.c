@@ -356,7 +356,10 @@ FMI3_Export fmi3Status fmi3ExitInitializationMode(fmi3Instance instance) {
     return instance ? fmi3OK : fmi3Error;
 }
 
-FMI3_Export fmi3Status fmi3EnterEventMode(fmi3Instance instance) { (void)instance; return fmi3OK; }
+FMI3_Export fmi3Status fmi3EnterEventMode(fmi3Instance instance) {
+    /* modelDescription advertises hasEventMode="false" */
+    (void)instance; return fmi3Error;
+}
 
 FMI3_Export fmi3Status fmi3Terminate(fmi3Instance instance) {
     Instance *in = (Instance *)instance;
@@ -677,9 +680,10 @@ FMI3_Export fmi3Status fmi3DoStep(
     fmi3Boolean *eventHandlingNeeded, fmi3Boolean *terminateSimulation,
     fmi3Boolean *earlyReturn, fmi3Float64 *lastSuccessfulTime) {
     (void)noSetFMUStatePriorToCurrentPoint;
+    *eventHandlingNeeded = fmi3False; *terminateSimulation = fmi3False; *earlyReturn = fmi3False;
     Instance *in = (Instance *)instance;
-    if (!in) return fmi3Error;
-    if (req_reserve(in, 128)) return fmi3Fatal;
+    if (!in) { *lastSuccessfulTime = 0.0; return fmi3Error; }
+    if (req_reserve(in, 128)) { *lastSuccessfulTime = in->time; return fmi3Fatal; }
     sprintf(in->req, "{\"op\":\"step\",\"t\":%.17g,\"dt\":%.17g}",
             currentCommunicationPoint, communicationStepSize);
     fmi3Status st = bridge_call(in, in->req);

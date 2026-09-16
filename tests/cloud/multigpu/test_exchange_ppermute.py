@@ -188,3 +188,29 @@ def test_million_cell_ring_both_transports_bit_identical():
     np.testing.assert_array_equal(np.asarray(dense), np.asarray(sparse))
     assert exchange_traffic(layout) == {"all_to_all": 8, "ppermute": 2, "useful": 2,
                                         "ppermute_messages": 2}
+
+
+@pytest.mark.parametrize("method", ["all_to_all", "ppermute"])
+@pytest.mark.parametrize("case", ["one_device", "edge_disjoint_shards"])
+def test_exchange_with_no_ghost_cells_at_all(method, case):
+    """audit round 3: the default transport raised IndexError whenever no
+    shard needed any ghost (n_ghost_max == 0)."""
+    if case == "one_device":
+        n, ndev = 6, 1
+        pa = np.zeros(n, np.int32)
+        edges = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
+    else:
+        n, ndev = 8, 2
+        pa = np.array([0, 0, 0, 0, 1, 1, 1, 1], np.int32)
+        edges = np.array([[0, 1], [1, 2], [2, 3], [4, 5], [5, 6], [6, 7]], dtype=np.int32)
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=ndev)
+    assert layout.n_ghost_max == 0
+    mesh = create_device_mesh(shape=(ndev,))
+    x = jnp.arange(ndev * layout.n_local_max, dtype=jnp.float32)
+
+    def local(v):
+        return exchange_unstructured(v, layout=layout, mesh_axis="devices", method=method)
+
+    out = jax.jit(shard_map(local, mesh=mesh, in_specs=P("devices"), out_specs=P("devices")))(x)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(x))
+    assert exchange_traffic(layout)["all_to_all"] == 0

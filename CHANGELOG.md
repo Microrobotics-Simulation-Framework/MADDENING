@@ -344,7 +344,32 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   green; aggregation test confirms shape + dtype errors raise in one
   `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
+### Security
+- **FMU bridge no longer unpickles importer bytes** (independent audit
+  round 3, CRITICAL).  `FmuTcpBridge` `set_state` used `pickle.loads` on
+  the base64 payload an importer hands to `fmi3SetFMUState`, i.e. remote
+  code execution for anyone able to reach the bridge port.  The FMU-state
+  blob is now an arrays-only `npz` (`allow_pickle=False`) carrying the
+  schema token, time, inputs, states and params; on `set_state` the
+  token, key set and every shape are validated before anything is
+  written.  The pickle-based `FmuSidecar.handle` wire protocol is for
+  trusted in-process / Python clients only and is documented as such.
+
 ### Fixed
+- **Independent audit, round 3** (FMU bridge / wrapper / exchange;
+  regression tests in `tests/fmi/test_audit_round3.py`).  A
+  communication step that is not a whole multiple of the master timestep
+  is refused instead of silently snapping the physics while reporting
+  `t + h` (the FMU now advertises a fixed communication step); a `set`
+  request is atomic across parameters and inputs (a rejected parameter
+  no longer leaves an already-applied input behind) and refuses
+  non-finite inputs; a second FMU instance on one bridge gets a clear
+  error instead of blocking; `fmi3DoStep` initialises its output flags
+  on the error path and `fmi3EnterEventMode` refuses, matching
+  `hasEventMode="false"`; `exchange_unstructured(method="all_to_all")`
+  no longer raises when no shard needs a ghost cell (one device,
+  edge-disjoint shards).  Also: the two Hypothesis integrator-order
+  tests run under `jax.experimental.enable_x64()` instead of skipping.
 - **FMU C wrapper, found by its own fuzz/sanitizer tests.**  A failed
   instantiation after the `hello` exchange (token mismatch) leaked the
   reply buffer; a failed or partial reply receive left a freshly grown

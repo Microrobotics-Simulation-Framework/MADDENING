@@ -228,7 +228,10 @@ class ModelDescription:
                 "modelIdentifier": self.co_simulation_model_identifier,
                 "canGetAndSetFMUState": "true",
                 "canSerializeFMUState": "true",
-                "canHandleVariableCommunicationStepSize": "true",
+                # the bridge advances whole master steps only (a
+                # communication step must be a multiple of the default
+                # step size); see FmuTcpBridge.handle("step")
+                "canHandleVariableCommunicationStepSize": "false",
                 "hasEventMode": "false",
             })
 

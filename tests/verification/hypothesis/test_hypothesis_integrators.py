@@ -123,9 +123,11 @@ class TestFiniteOutput:
 class TestOrderVerification:
     """Halving dt should reduce error by ~2^order for smooth problems.
 
-    These tests require float64 precision to observe the expected
-    convergence rates (float32 noise dominates at the error levels
-    being compared).
+    These tests need float64 precision to observe the expected
+    convergence rates (float32 noise dominates at the error levels being
+    compared), so they enable ``jax_enable_x64`` for their body (and
+    restore it) instead of skipping when the process is float32, which
+    is every run of the suite locally and in CI.
     """
 
     @given(x=st.floats(min_value=0.1, max_value=10.0,
@@ -133,9 +135,16 @@ class TestOrderVerification:
     @settings(max_examples=100)
     def test_euler_first_order(self, x):
         import jax
-        if not jax.config.jax_enable_x64:
-            pytest.skip("Requires float64 for order verification")
+        was = bool(jax.config.jax_enable_x64)
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self._euler_order_body(x)
+        finally:
+            jax.config.update("jax_enable_x64", was)
+
+    def _euler_order_body(self, x):
         state = {"x": jnp.array(x, dtype=jnp.float64)}
+        assert state["x"].dtype == jnp.float64
         dt = 0.01
         out_dt = euler_step(_linear_derivs, state, {}, dt)
         s_half = euler_step(_linear_derivs, state, {}, dt / 2)
@@ -154,9 +163,16 @@ class TestOrderVerification:
     @settings(max_examples=100)
     def test_rk4_fourth_order(self, x):
         import jax
-        if not jax.config.jax_enable_x64:
-            pytest.skip("Requires float64 for order verification")
+        was = bool(jax.config.jax_enable_x64)
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self._rk4_order_body(x)
+        finally:
+            jax.config.update("jax_enable_x64", was)
+
+    def _rk4_order_body(self, x):
         state = {"x": jnp.array(x, dtype=jnp.float64)}
+        assert state["x"].dtype == jnp.float64
         dt = 0.01
         out_dt = rk4_step(_linear_derivs, state, {}, dt)
         s1 = rk4_step(_linear_derivs, state, {}, dt / 2)

@@ -11,6 +11,14 @@ the sidecar manifest landed in v0.2 #8.  See
 {func}`maddening.cloud.entrypoint.make_preempt_snapshot_hook`.
 ```
 
+```{versionchanged} v0.4.0
+`download_and_load_state` moved to {mod}`maddening.cloud.resume`
+(URL transport is a deployment concern; the core checkpoint module
+stays dependency-free).  The old
+`maddening.core.simulation.checkpoint.download_and_load_state` import
+still works but emits a `DeprecationWarning` and is removed in 1.0.
+```
+
 Spot VMs are cheap and disposable — until the cloud provider yanks
 yours at 30 seconds' notice and your simulation state vapourises.
 v0.2 wires up three things so that doesn't happen:
@@ -90,7 +98,7 @@ below for the upload step and why MADDENING doesn't do it for you.
 ## Supported URL schemes
 
 `RESUME_FROM_URL` and the underlying
-{func}`maddening.core.simulation.checkpoint.download_and_load_state`
+{func}`maddening.cloud.resume.download_and_load_state`
 accept:
 
 | Scheme | Behaviour |
@@ -136,7 +144,7 @@ orchestrator's CLI calls go away.
 5. **(orchestrator)** relaunches the VM with `RESUME_FROM_URL=...`.
 6. New VM's entrypoint reads `RESUME_FROM_URL` and calls
    {func}`~maddening.cloud.entrypoint.resume_from_url` →
-   {func}`~maddening.core.simulation.checkpoint.download_and_load_state`.
+   {func}`~maddening.cloud.resume.download_and_load_state`.
 7. `download_and_load_state` fetches the `.npz` + `.manifest.json`
    into a per-call temp dir (so concurrent resumes don't collide),
    then calls `load_state_with_manifest` which verifies the hash
@@ -155,9 +163,7 @@ the manifest didn't apply.
 For one-off loads of pre-v0.2 checkpoints that don't have a manifest:
 
 ```python
-from maddening.core.simulation.checkpoint import (
-    download_and_load_state,
-)
+from maddening.cloud.resume import download_and_load_state
 download_and_load_state(
     gm, url, skip_integrity_check=True,
 )
@@ -189,8 +195,10 @@ garbage.
 ## Test coverage and what's deferred
 
 The file:// path is fully unit-covered in
-`tests/cloud/test_preempt_checkpoint.py` — every codepath above
-runs against a `_FakeCloudSession` + local tempfile.  What's
+`tests/cloud/test_resume.py` (URL transport, including the fsspec
+`memory://` round trip) and `tests/cloud/test_preempt_checkpoint.py`
+(snapshot hook + entry-point helper) — every codepath above runs
+against a `_FakeCloudSession` + local tempfile.  What's
 *not* yet covered:
 
 * End-to-end RunPod spot preemption (requires real credentials).

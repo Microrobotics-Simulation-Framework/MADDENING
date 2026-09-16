@@ -11,6 +11,17 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Changed
 
+- **Resume-from-URL transport moved to `maddening.cloud.resume`.**
+  `download_and_load_state` (with its `file://` / `http(s)://` / fsspec
+  fetch helpers) now lives in the cloud package, where deployment concerns
+  such as storage backends and credentials belong; the core
+  `maddening.core.simulation.checkpoint` module keeps only the local
+  save/load/manifest functions and imports neither `maddening.cloud` nor
+  `fsspec`.  `maddening.cloud.download_and_load_state` is exported lazily
+  like the other cloud names.  The old
+  `maddening.core.simulation.checkpoint.download_and_load_state` import still
+  works as a forwarding alias that emits a `DeprecationWarning`; the alias is
+  removed in 1.0.  Behaviour, signature and errors are unchanged.
 - **Coupling groups now default to the early-exit solver** (`CouplingGroup.solver="ift"`).
   The fixed-point iteration is a `jax.lax.while_loop` that exits as soon as the
   group's convergence norm meets its threshold, for every `acceleration`,

@@ -153,7 +153,7 @@ all = [
 # closes the v0.2.1 StarletteDeprecationWarning loop (see C5 in
 # plans/MADDENING_v0.3.0_PLAN.md).
 ci = [
-    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/core/test_checkpoint_cloud_urls.py)
+    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/cloud/test_resume.py)
     "pytest>=7.0",
     "httpx>=0.24",
     "httpx2>=2.0",
@@ -189,7 +189,7 @@ verify = [
 
 # Development / testing (full -- requires display server for viz3d/gpu-viz)
 dev = [
-    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/core/test_checkpoint_cloud_urls.py)
+    "fsspec>=2023.1",   # cloud checkpoint URLs (tests/cloud/test_resume.py)
     "pytest>=7.0",
     "httpx>=0.24",
     "httpx2>=2.0",

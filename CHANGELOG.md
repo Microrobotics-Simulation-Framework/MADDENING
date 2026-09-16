@@ -315,6 +315,35 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - The stelling formal-verification suite, CI job and `stelling` dependency.
   The `[verify]` extra now only pulls `hypothesis`.
 
+### Verification
+- **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
+  `tests/fmi/c/`): a unit-test binary that includes the wrapper source
+  (framing, JSON number parsing, endpoint discovery, every FMI entry
+  point against a fake sidecar on a socketpair and a loopback listener),
+  built plain and with `-fsanitize=address,undefined`; a deterministic
+  fuzz harness for the reply surface (3 seeds x 3000 iterations in the
+  fast lane, 60k in the slow lane, also exported as a libFuzzer target);
+  the unit and fuzz binaries under valgrind memcheck; a short
+  coverage-guided libFuzzer campaign with clang; FMPy driving an ASan
+  build in a subprocess against a normal and a hostile bridge; FMPy's
+  low-level FMI 3 API with two instances (params before initialisation,
+  FMU state get/set/serialize, reset, terminate); `validate_fmu` on the
+  packaged FMU; and a warning-free `-std=c11 -pedantic` build.  CI
+  installs valgrind and clang so all of it runs there; each part
+  self-skips where its tool is missing.
+- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
+  via `-m "not slow"`).  Slow-marked tests deferred to a longer
+  pre-release pass.
+- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
+  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
+  on the `lax.psum` integral), 50-step multi-step convergence,
+  construction-time validation (`shard_axis` must match the wrapper's
+  spatial axes; nodes with sharded statics must accept `static_padded`
+  on `update_padded`), `shard_info` delivery.
+- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
+  green; aggregation test confirms shape + dtype errors raise in one
+  `ExceptionGroup` alongside a `UnitMismatchWarning`.
+
 ### Fixed
 - **FMU C wrapper, found by its own fuzz/sanitizer tests.**  A failed
   instantiation after the `hello` exchange (token mismatch) leaked the
@@ -722,33 +751,6 @@ change; the aliases are removed in v0.3.
   builtins on Python 3.10.
 
 ### Verification
-- **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
-  `tests/fmi/c/`): a unit-test binary that includes the wrapper source
-  (framing, JSON number parsing, endpoint discovery, every FMI entry
-  point against a fake sidecar on a socketpair and a loopback listener),
-  built plain and with `-fsanitize=address,undefined`; a deterministic
-  fuzz harness for the reply surface (3 seeds x 3000 iterations in the
-  fast lane, 60k in the slow lane, also exported as a libFuzzer target);
-  the unit and fuzz binaries under valgrind memcheck; a short
-  coverage-guided libFuzzer campaign with clang; FMPy driving an ASan
-  build in a subprocess against a normal and a hostile bridge; FMPy's
-  low-level FMI 3 API with two instances (params before initialisation,
-  FMU state get/set/serialize, reset, terminate); `validate_fmu` on the
-  packaged FMU; and a warning-free `-std=c11 -pedantic` build.  CI
-  installs valgrind and clang so all of it runs there; each part
-  self-skips where its tool is missing.
-- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
-  via `-m "not slow"`).  Slow-marked tests deferred to a longer
-  pre-release pass.
-- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
-  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
-  on the `lax.psum` integral), 50-step multi-step convergence,
-  construction-time validation (`shard_axis` must match the wrapper's
-  spatial axes; nodes with sharded statics must accept `static_padded`
-  on `update_padded`), `shard_info` delivery.
-- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
-  green; aggregation test confirms shape + dtype errors raise in one
-  `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ## [0.2.0] - 2026-05-20
 

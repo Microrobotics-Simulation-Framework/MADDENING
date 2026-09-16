@@ -337,9 +337,20 @@ def load_graph_from_usd(
             overrides_attr = child.GetAttribute("maddening:paramSpecOverridesJson")
             overrides_json = overrides_attr.Get() if overrides_attr else None
             if overrides_json:
+                import warnings  # noqa: PLC0415
+
                 from maddening.core.params import ParamSpec  # noqa: PLC0415
                 for key, spec_dict in json.loads(overrides_json).items():
-                    gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
+                    try:
+                        gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
+                    except (KeyError, ValueError) as exc:
+                        # The node class changed since the stage was
+                        # written (parameter renamed, node no longer takes
+                        # params): keep loading, say what was dropped.
+                        warnings.warn(
+                            f"ignoring ParamSpec override {node_name}.{key} from "
+                            f"the USD stage: {exc}", RuntimeWarning, stacklevel=2,
+                        )
 
     # --- Edges ---
     edges_prim = stage.GetPrimAtPath(root_path + "/edges")

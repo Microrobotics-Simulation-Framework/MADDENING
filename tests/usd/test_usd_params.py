@@ -48,3 +48,24 @@ def test_calibrated_params_and_overrides_round_trip():
     a, b = gm.run_scan(20), gm2.run_scan(20)
     np.testing.assert_allclose(np.asarray(a["t"]["position"]),
                                np.asarray(b["t"]["position"]), rtol=1e-6)
+
+
+def test_stale_override_on_load_warns_instead_of_failing():
+    """A ParamSpec override for a parameter the node class no longer has
+    must not make the whole stage unloadable."""
+    import warnings
+
+    gm = _gm()
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False))
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    prim = stage.GetPrimAtPath("/Simulation/nodes/s")
+    prim.GetAttribute("maddening:paramSpecOverridesJson").Set(
+        json.dumps({"renamed_away": ParamSpec(trainable=False).to_dict(),
+                    "mass": ParamSpec(trainable=False).to_dict()}))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        gm2 = load_graph_from_usd(stage)
+    assert any("renamed_away" in str(x.message) for x in w)
+    gm2.compile()
+    assert gm2.param_specs()["nodes"]["s"]["mass"].trainable is False

@@ -1833,6 +1833,12 @@ class GraphManager:
         live = self._params_or_default(params).get("nodes", {}).get(name, {})
         snapshot = spec.node.params_pytree()
         for key, value in live.items():
+            # Only constructor params can be written back; a derived leaf
+            # (a surrogate's ``weights['scale']``) is not a constructor
+            # argument and would break reconstruction.  Checkpoints carry
+            # those.
+            if key not in spec.node.params:
+                continue
             # Only overlay a leaf that actually changed: the pytree holds
             # float32 promotions of the constructor floats (0.05 ->
             # 0.05000000074505806), and an uncalibrated constant should

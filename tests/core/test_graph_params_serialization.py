@@ -68,3 +68,37 @@ def test_to_dict_from_dict_round_trip_calibrated_values_and_overrides():
 
 def test_no_overrides_means_no_param_specs_key():
     assert "param_specs" not in _gm().to_dict()
+
+
+def test_effective_params_skip_derived_pytree_leaves():
+    """A leaf of params_pytree that is not a constructor param (surrogate
+    weights) must not be written back as a constructor kwarg."""
+    from maddening.core.node import SimulationNode
+
+    class Weighted(SimulationNode):
+        def __init__(self, name, timestep, scale=1.0):
+            super().__init__(name, timestep, scale=scale)
+            self._w = jnp.asarray([1.0, 2.0], jnp.float32)
+
+        def params_pytree(self):
+            return {**super().params_pytree(), "weights['w']": self._w}
+
+        def initial_state(self):
+            return {"x": jnp.zeros(2, jnp.float32)}
+
+        def update(self, s, bi, dt, *, params=None):
+            p = self.params if params is None else {**self.params, **params}
+            w = self._w if params is None else params["weights['w']"]
+            return {"x": s["x"] + dt * w * p["scale"]}
+
+    gm = GraphManager()
+    gm.add_node(Weighted("n", 0.1, scale=2.0))
+    gm.compile()
+    gm.params["nodes"]["n"]["weights['w']"] = jnp.asarray([5.0, 6.0], jnp.float32)
+    gm.params["nodes"]["n"]["scale"] = jnp.asarray(3.0, jnp.float32)
+    eff = gm.effective_node_params("n")
+    assert eff == {"scale": 3.0}
+    d = gm.to_dict()
+    gm2 = GraphManager.from_dict(d, {"Weighted": Weighted})
+    gm2.compile()
+    assert float(gm2.params["nodes"]["n"]["scale"]) == 3.0

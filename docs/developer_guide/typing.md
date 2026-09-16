@@ -8,7 +8,7 @@ whole-tree cleanliness.
 | Phase | When | What |
 |---|---|---|
 | **1 (current)** | v0.4.0 development | `pyrightconfig.json` in *basic* mode over `src/maddening`; a `typecheck` CI job that is **visible but non-blocking**; the baseline below.  No source annotations are changed in this phase. |
-| **2** | after the 0.4.0 API freeze | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (see the [stability report](stability_report.md); 19 STABLE-tagged surfaces in 12 modules at the time of writing) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) is a ratchet whose error count may not rise above the recorded baseline. |
+| **2** | after the 0.4.0 API freeze | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (see the [stability report](stability_report.md); 19 STABLE-tagged surfaces in 12 modules at the time of writing) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) gets every public signature annotated, so a `py.typed` package never exposes an `Any`-returning public call, while its module bodies are only ratcheted: the error count may not rise above the recorded baseline. |
 
 Whole-tree cleanliness is explicitly *not* a goal of either phase.
 
@@ -149,7 +149,8 @@ return annotation, 235 parameters annotated as bare `dict` (the phase-2
    the STABLE list is the contract that must be *right*, the tier-1
    packages are the scope that must be *clean*.
 2. Annotate tier 1 (`feat/typing-core`, `feat/typing-nodes`,
-   `feat/typing-fmi-cloud`); introduce `TypedDict`s for the recurring bare
+   `feat/typing-fmi-cloud`) and every public signature in tier 2 (the
+   bodies there stay as they are); introduce `TypedDict`s for the recurring bare
    `dict` shapes (node `state`, `boundary_inputs`, `static_data`,
    `gm.params` sections, spec maps) and use them in the internals too.
 3. Add `if TYPE_CHECKING:` re-exports for public names behind lazy

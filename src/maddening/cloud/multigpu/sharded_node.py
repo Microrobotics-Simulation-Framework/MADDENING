@@ -113,6 +113,16 @@ class ShardedPointwiseNode(SimulationNode):
 
 
 @stability(StabilityLevel.STABLE)
+def _params_signature(params) -> tuple:
+    """Cache-key component for a params pytree (structure + shapes)."""
+    if not params:
+        return ()
+    return tuple(
+        (jax.tree_util.keystr(path), tuple(jnp.shape(leaf)), str(jnp.asarray(leaf).dtype))
+        for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]
+    )
+
+
 class ShardedStencilNode(SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 
@@ -225,6 +235,10 @@ class ShardedStencilNode(SimulationNode):
         self._inner_accepts_shard_info = (
             "shard_info" in params or has_var_kw
         )
+        # Graph parameter contract on the sharded path: an inner
+        # ``update_padded(..., params=None)`` receives the node's entry of
+        # ``GraphManager.params`` (replicated across shards).
+        self._inner_accepts_params = "params" in params
         if self._sharded_static and not self._inner_accepts_static_padded:
             raise ValueError(
                 f"{type(node).__name__} declares sharded static_data "
@@ -279,6 +293,17 @@ class ShardedStencilNode(SimulationNode):
         """Proxy to the wrapped node's declaration."""
         return self._inner.domain_integral_fields()
 
+    # -- graph parameter contract (proxied to the inner node) -----------
+
+    def accepts_params(self) -> bool:
+        return self._inner_accepts_params
+
+    def params_pytree(self) -> dict:
+        return self._inner.params_pytree() if self._inner_accepts_params else {}
+
+    def param_specs(self) -> dict:
+        return self._inner.param_specs() if self._inner_accepts_params else {}
+
     def domain_integral_axes(self) -> dict[str, tuple[str, ...]]:
         """Proxy to the wrapped node's declaration."""
         return dict(getattr(self._inner, "domain_integral_axes", dict)())
@@ -325,6 +350,7 @@ class ShardedStencilNode(SimulationNode):
         integral_reduction = {k: self._integral_reduction(k) for k in integrals}
         accepts_static_padded = self._inner_accepts_static_padded
         accepts_shard_info = self._inner_accepts_shard_info
+        accepts_params = self._inner_accepts_params
         mesh_axis_tup = tuple(mesh.axis_names)
 
         # Pre-compute per-static halo-exchange descriptors. A sharded
@@ -362,7 +388,7 @@ class ShardedStencilNode(SimulationNode):
                 out = jnp.concatenate([left_halo, out, right_halo], axis=sa)
             return out
 
-        def _local_update(local_state, local_bi, local_dt, local_static):
+        def _local_update(local_state, local_bi, local_dt, local_static, local_params):
             # 1. Halo-pad state.
             padded = {}
             for f, arr in local_state.items():
@@ -411,6 +437,8 @@ class ShardedStencilNode(SimulationNode):
                 extra_kwargs["static_padded"] = padded_static
             if accepts_shard_info and shard_info:
                 extra_kwargs["shard_info"] = shard_info
+            if accepts_params and local_params:
+                extra_kwargs["params"] = local_params
             new_padded = inner.update_padded(
                 padded, local_bi, local_dt, **extra_kwargs
             )
@@ -455,13 +483,14 @@ class ShardedStencilNode(SimulationNode):
         ))
 
     def _get_sharded_fn(
-        self, state: dict, boundary_inputs: dict, static: dict
+        self, state: dict, boundary_inputs: dict, static: dict, params=None,
     ):
         key = (
             self._state_signature(state),
             self._bi_signature(boundary_inputs),
             self._static_signature(static),
             self._inner.static_data_hash(),
+            _params_signature(params),
         )
         fn = self._sharded_cache.get(key)
         if fn is not None:
@@ -483,10 +512,11 @@ class ShardedStencilNode(SimulationNode):
             _, unreduced = self._integral_reduction(k)
             out_specs[k] = P(*unreduced) if unreduced else P()
 
+        params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(
             self._local_update_fn,
             mesh=self._mesh,
-            in_specs=(state_specs, bi_specs, P(), static_specs),
+            in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
         )
         # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
@@ -515,7 +545,9 @@ class ShardedStencilNode(SimulationNode):
             out[k] = jax.device_put(arr, sharding)
         return out
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Halo-pad every state field, call ``update_padded``, strip halos.
 
         Sharded spatial axes get halo cells from neighbour shards via
@@ -536,12 +568,13 @@ class ShardedStencilNode(SimulationNode):
         signature and cached so repeated steps hit JAX's compile cache.
         """
         static_materialised = self._materialise_sharded_statics()
-        fn = self._get_sharded_fn(state, boundary_inputs, static_materialised)
+        fn = self._get_sharded_fn(state, boundary_inputs, static_materialised, params)
         return fn(
             state,
             boundary_inputs,
             jnp.asarray(dt, dtype=jnp.float32),
             static_materialised,
+            params if params else {},
         )
 
     # ------------------------------------------------------------------

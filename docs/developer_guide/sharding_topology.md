@@ -49,6 +49,10 @@ All three share the same substrate:
   `lax.psum`-ed across the mesh — or across the subset of mesh axes
   `domain_integral_axes()` names for them, keeping a leading axis per
   unreduced mesh axis; other keys raise.
+* Both wrappers take part in the graph parameter contract: if the inner
+  node's `update_padded` accepts `params`, the wrapper exposes the inner
+  `params_pytree()` and hands the node's entry of `gm.params` (replicated
+  to every shard) to `update_padded(..., params=)`.
 * The sharded Krylov solvers (`sharded_cg` / `sharded_gmres`) take a
   `preconditioner=` (`jacobi_preconditioner`, `block_jacobi_preconditioner`
   ship) and `differentiable=True`, which routes the solve through

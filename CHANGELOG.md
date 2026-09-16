@@ -205,6 +205,16 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 - Hypothesis property over random graphs of built-in nodes: the compiled
   step must trace exactly once across steps and after `set_node_state`
   (`test_hypothesis_retrace.py`).
+- **Graph params on the sharded path.**  `ShardedStencilNode` and
+  `ShardedUnstructuredNode` now take part in the graph parameter contract
+  when the wrapped node's `update_padded` accepts `params`: the wrapper
+  reports `accepts_params()` / `params_pytree()` / `param_specs()` from the
+  inner node, and the node's entry of `gm.params` is replicated to every
+  shard and handed to `update_padded(..., params=)` (the params signature
+  is part of the shard_map cache key).  `LBMNode.update_padded` reads
+  `viscosity` from the injected params, so a sharded LBM graph is
+  calibratable and matches the unsharded graph for the same params;
+  previously the sharded path silently ignored `gm.params`.
 - REST `PUT /graph/params/{node}` validates values against the node's
   `ParamSpec` bounds before writing anything (400 with the offending leaf).
 - `maddening.testing.strategies.node_states` samples bool / integer state

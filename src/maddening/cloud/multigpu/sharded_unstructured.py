@@ -45,6 +45,7 @@ from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
+from maddening.cloud.multigpu.sharded_node import _params_signature
 from maddening.cloud.multigpu.halo_unstructured import (
     UnstructuredPartitionLayout,
     exchange_unstructured,
@@ -243,14 +244,27 @@ class ShardedUnstructuredNode(SimulationNode):
     # -----------------------------------------------------------------
     # Pure-Python update plumbing (for tests / single-shard verification)
     # -----------------------------------------------------------------
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def accepts_params(self) -> bool:
+        return "params" in inspect.signature(self._inner.update_padded).parameters
+
+    def params_pytree(self) -> dict:
+        return self._inner.params_pytree() if self.accepts_params() else {}
+
+    def param_specs(self) -> dict:
+        return self._inner.param_specs() if self.accepts_params() else {}
+
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
         """Run one step under sharding.
 
         The wrapper compiles a shard_map'd implementation per
-        (state_signature, bi_signature, static_signature) tuple and
-        dispatches.
+        (state_signature, bi_signature, static_signature, params
+        signature) tuple and dispatches.  ``params`` (the node's entry of
+        ``GraphManager.params``) is replicated to every shard and handed
+        to an inner ``update_padded(..., params=)``.
         """
-        fn = self._get_sharded_fn(state, boundary_inputs)
+        fn = self._get_sharded_fn(state, boundary_inputs, params)
         # Collect the per-partition static arrays from the inner node.
         static_partitioned = {}
         for k, sa in self._sharded_static.items():
@@ -264,12 +278,13 @@ class ShardedUnstructuredNode(SimulationNode):
                     + per_shard.shape[2:]
                 )), sharding,
             )
-        return fn(state, boundary_inputs, jnp.asarray(dt), static_partitioned)
+        return fn(state, boundary_inputs, jnp.asarray(dt), static_partitioned,
+                  params if params else {})
 
     # -----------------------------------------------------------------
     # Internals
     # -----------------------------------------------------------------
-    def _get_sharded_fn(self, state, boundary_inputs):
+    def _get_sharded_fn(self, state, boundary_inputs, params=None):
         key = (
             tuple(sorted((k, tuple(a.shape), str(a.dtype))
                          for k, a in state.items())),
@@ -280,6 +295,7 @@ class ShardedUnstructuredNode(SimulationNode):
                           str(self._sharded_static[k].value.dtype))
                          for k in self._sharded_static)),
             self._inner.static_data_hash(),
+            _params_signature(params),
         )
         cached = self._sharded_cache.get(key)
         if cached is not None:
@@ -299,10 +315,11 @@ class ShardedUnstructuredNode(SimulationNode):
 
         local_fn = self._build_local_update()
 
+        params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(
             local_fn,
             mesh=self._mesh,
-            in_specs=(state_specs, bi_specs, P(), static_specs),
+            in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
         )
         fn = jax.jit(sm)
@@ -318,7 +335,9 @@ class ShardedUnstructuredNode(SimulationNode):
         integrals = set(inner.domain_integral_fields())
         integral_axes = dict(getattr(inner, 'domain_integral_axes', dict)())
 
-        def _local_update(local_state, local_bi, local_dt, local_static):
+        accepts_params = "params" in inspect.signature(inner.update_padded).parameters
+
+        def _local_update(local_state, local_bi, local_dt, local_static, local_params):
             # Strip the leading device dimension that shard_map already
             # collapsed for us — local arrays now have shape (n_local_max, *).
 
@@ -341,10 +360,11 @@ class ShardedUnstructuredNode(SimulationNode):
             shard_info = {0: (idx * n_local_max, n_local_max)}
 
             # 4. Dispatch.
+            extra = {"params": local_params} if (accepts_params and local_params) else {}
             new = inner.update_padded(
                 padded_state, local_bi, local_dt,
                 static_padded=(padded_static or None),
-                shard_info=shard_info,
+                shard_info=shard_info, **extra,
             )
 
             # 5. Classify outputs.

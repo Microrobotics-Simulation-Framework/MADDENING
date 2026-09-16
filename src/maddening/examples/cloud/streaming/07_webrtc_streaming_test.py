@@ -9,6 +9,17 @@ is reachable, then prints the URL for manual browser testing.
 Also profiles rendering performance (matplotlib render time vs
 GStreamer encode/push overhead) to quantify streaming cost.
 
+Interpreter note (read before running).  The server script imports JAX
+and the gi (GStreamer) bindings in one process.  On ``runpod/base`` the
+system ``python3`` is 3.10 and owns the apt ``python3-gi`` bindings, but
+MADDENING requires Python >= 3.11 and ``jax>=0.10`` requires >= 3.11
+(0.11+: >= 3.12), so the install command cannot resolve under 3.10.  The
+example therefore runs under ``PYTHON`` (3.12, the interpreter the pod's
+``pip`` targets) and builds PyGObject for it with pip (``< 3.51``: 3.51+
+needs girepository-2.0, which the 22.04-based image lacks) against the
+apt ``libgirepository1.0-dev`` headers; the apt ``python3-gi`` package is
+kept only for the GIR typelibs it pulls in.
+
 Usage:
     python 07_webrtc_streaming_test.py
     python 07_webrtc_streaming_test.py --gpu RTX4090
@@ -32,11 +43,17 @@ from maddening.cloud.launcher import (
 )
 
 
-# GStreamer system packages (from 06_selkies_test.py findings)
+# The interpreter that runs JAX + MADDENING + the gi bindings on the VM
+# (see the module docstring: 3.10 cannot install either any more).
+PYTHON = "python3.12"
+
+# GStreamer system packages (from 06_selkies_test.py findings), plus the
+# headers and compiler a pip build of PyGObject for PYTHON needs
 GSTREAMER_INSTALL = (
     "export DEBIAN_FRONTEND=noninteractive"
     " && apt-get update -qq"
     " && apt-get install -y -qq"
+    f" {PYTHON}-dev build-essential pkg-config libcairo2-dev"
     " gstreamer1.0-plugins-base"
     " gstreamer1.0-plugins-good"
     " gstreamer1.0-plugins-bad"
@@ -52,14 +69,14 @@ GSTREAMER_INSTALL = (
     " && echo GST_INSTALL_DONE"
 )
 
-# Python deps (must use python3 = python3.10 for gi bindings)
+# Python deps, all into PYTHON (PyGObject is built from source for it)
 PIP_INSTALL = (
-    "python3 -m pip install -q --root-user-action=ignore"
+    f"{PYTHON} -m pip install -q --root-user-action=ignore"
     ' "jax[cuda12]>=0.10,<0.13"'
     ' "fastapi>=0.100" "uvicorn>=0.20" "websockets>=11.0"'
     ' "numpy>=1.24" "pyyaml>=6.0" "rich>=12.0" "matplotlib>=3.5" "pyzmq>=25.0"'
-    ' "PyGObject>=3.42" "Pillow>=9.0"'
-    " && [ -d ~/sky_workdir/src ] && python3 -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
+    ' "pycairo>=1.20" "PyGObject>=3.42,<3.51" "Pillow>=9.0"'
+    f" && [ -d ~/sky_workdir/src ] && {PYTHON} -m pip install -q --root-user-action=ignore -e ~/sky_workdir"
     " ; echo PIP_INSTALL_DONE"
 )
 
@@ -315,14 +332,14 @@ def main():
     result = job.ssh_run(GSTREAMER_INSTALL, timeout=120, capture=True)
     print(f"  {(result.stdout or '').strip().split(chr(10))[-1]}")
 
-    print("Installing Python deps (python3.10 for gi bindings)...")
+    print(f"Installing Python deps into {PYTHON} (PyGObject built for it)...")
     result = job.ssh_run(PIP_INSTALL, timeout=300, capture=True)
     print(f"  {(result.stdout or '').strip().split(chr(10))[-1]}")
 
     # --- Verify GPU + imports ---
     print("\nVerifying GPU + imports...")
     result = job.ssh_run(
-        'python3 -c "import jax; print(jax.devices()); '
+        f'{PYTHON} -c "import jax; print(jax.devices()); '
         'from maddening.cloud.selkies_session import SelkiesSession; '
         'from maddening.api.frame_renderer import ServerFrameRenderer; '
         'print(\'ALL OK\')"',
@@ -338,7 +355,7 @@ def main():
     # --- Upload and run server script ---
     print("\nStarting WebRTC server (with performance profiling)...")
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/webrtc_server.py", check=True)
-    job.ssh_run_background("python3 /tmp/webrtc_server.py")
+    job.ssh_run_background(f"{PYTHON} /tmp/webrtc_server.py")
 
     # --- Wait for perf results (server profiles before starting uvicorn) ---
     print("Waiting for profiling to complete...")

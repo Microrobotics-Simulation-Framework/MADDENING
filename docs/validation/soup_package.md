@@ -13,8 +13,8 @@
 | Release Date | 2025-03-01 |
 | Licence | LGPL-3.0-or-later |
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
-| Python Version | >=3.10 |
-| Primary Dependencies | JAX >=0.4, jaxlib >=0.4, NumPy >=1.24 |
+| Python Version | >=3.11 |
+| Primary Dependencies | JAX >=0.10,<0.13, jaxlib >=0.10,<0.13, NumPy >=1.24 |
 | Build System | hatchling |
 | Install | `pip install maddening` |
 

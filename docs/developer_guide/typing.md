@@ -8,7 +8,7 @@ whole-tree cleanliness.
 | Phase | When | What |
 |---|---|---|
 | **1 (current)** | v0.4.0 development | `pyrightconfig.json` in *basic* mode over `src/maddening`; a `typecheck` CI job that is **visible but non-blocking**; the baseline below.  No source annotations are changed in this phase. |
-| **2** | after the 0.4.0 API freeze | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (see the [stability report](stability_report.md); 19 STABLE-tagged surfaces in 12 modules at the time of writing), replace bare `dict` parameters on that surface with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking on the STABLE surface only** (an `include` list of those modules, or a per-file `# pyright: strict` header).  EVOLVING / EXPERIMENTAL surfaces stay non-blocking. |
+| **2** | after the 0.4.0 API freeze | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (see the [stability report](stability_report.md); 19 STABLE-tagged surfaces in 12 modules at the time of writing) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) is a ratchet whose error count may not rise above the recorded baseline. |
 
 Whole-tree cleanliness is explicitly *not* a goal of either phase.
 
@@ -67,7 +67,15 @@ Of the 395 basic-mode errors, **30 are in the 12 modules that define a
 STABLE surface** (`core/graph_manager.py` 20, `core/edge.py` 3,
 `cloud/multigpu/iterative_solver.py` 3, `cloud/multigpu/sharded_unstructured.py` 2,
 `cloud/multigpu/sharded_node.py` 1, `nodes/heat.py` 1); that is the phase-2
-workload before annotation starts, not the whole-tree figure.
+workload for the public contract.  The tier-1 packages (`core`, `nodes`,
+`fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) hold
+roughly 140 of the 395; the remaining ~250 are in `viz`, `usd`, `api` and
+`surrogates`, mostly `reportOptionalMemberAccess` / `reportAttributeAccessIssue`
+against optional or untyped third-party libraries (pxr, pygfx, matplotlib,
+fastapi extras), which is why those packages are ratcheted rather than
+cleaned.  Decided 2026-09-16: whole-tree strictness is not the goal, but
+the internals that refactors move through are, because pyright catches
+broken call sites there just as it does on the public surface.
 
 ### Diagnostics by rule (basic)
 
@@ -137,14 +145,18 @@ return annotation, 235 parameters annotated as bare `dict` (the phase-2
 
 ## Phase 2 checklist
 
-1. After the 0.4.0 API freeze, regenerate the [stability report](stability_report.md)
-   and take the STABLE list as the scope.
-2. Annotate those modules; introduce `TypedDict`s for the recurring bare
-   `dict` shapes on that surface only.
-3. Add `if TYPE_CHECKING:` re-exports for STABLE names behind lazy
+1. After the 0.4.0 API freeze, regenerate the [stability report](stability_report.md);
+   the STABLE list is the contract that must be *right*, the tier-1
+   packages are the scope that must be *clean*.
+2. Annotate tier 1 (`feat/typing-core`, `feat/typing-nodes`,
+   `feat/typing-fmi-cloud`); introduce `TypedDict`s for the recurring bare
+   `dict` shapes (node `state`, `boundary_inputs`, `static_data`,
+   `gm.params` sections, spec maps) and use them in the internals too.
+3. Add `if TYPE_CHECKING:` re-exports for public names behind lazy
    `__getattr__` tables.
 4. Add `src/maddening/py.typed` and the hatch `force-include` entry for it.
-5. Flip the CI step for the STABLE module list to blocking (drop
-   `continue-on-error`, keep `--fail-on-errors`); the rest of the tree
-   stays advisory.  Record the new baseline with
+5. `chore/py-typed`: make the tier-1 run blocking (drop
+   `continue-on-error`, keep `--fail-on-errors`) and add the tier-2
+   ratchet (`scripts/typing_baseline.py` compares the count against a
+   committed baseline and fails on growth).  Record the new baseline with
    `python scripts/typing_baseline.py --markdown` here.

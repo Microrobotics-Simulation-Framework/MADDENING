@@ -22,6 +22,7 @@ from hypothesis import strategies as st
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import fim, observations_from_history, windowed_loss
+from tests.conftest import EXAMPLES_COSTLY
 
 DT = 0.01
 REST = 1.0
@@ -158,7 +159,7 @@ class TestWindowedLoss:
 
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st,
            factor=perturb_st)
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_at_truth_nonneg_and_finite_elsewhere(
         self, single, truth, init, tiling, factor,
     ):
@@ -204,7 +205,7 @@ class TestWindowedLoss:
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[2] == t[0] // t[1]]),
            factor=perturb_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_single_window_equals_direct_trajectory_loss(
         self, single, truth, init, tiling, factor,
     ):
@@ -244,10 +245,13 @@ class TestWindowedLoss:
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[1] == 1 and t[0] <= 60]),
            factor=perturb_st)
-    # Explicit cap: an example builds an IFT-coupled group, runs a
-    # rollout, and differentiates a windowed loss through it -- one JAX
-    # compile per (tiling, shape) draw.  30 matches the sibling
-    # coupled-group properties in this class.
+    # Absolute, not ``EXAMPLES_COSTLY``: an example builds an IFT-coupled
+    # group, runs a rollout and differentiates a windowed loss through
+    # it -- one JAX compile per (tiling, shape) draw, measured at 3.6 s
+    # an example, the most expensive property in the tree.  At the
+    # costly tier the ``ci`` profile would spend five minutes here
+    # alone, so the depth stays pinned and ``ci`` buys its extra search
+    # from the cheaper properties around it.
     @settings(max_examples=30, deadline=None)
     def test_mask_unconverged_through_coupled_group(
         self, coupled, truth, init, tiling, factor,
@@ -343,7 +347,7 @@ def _residual_fn(gm, obs, base_params, names, node="s", n_steps=None,
 class TestFIM:
 
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_symmetric_psd_sorted_orthonormal_cond(self, single, truth, init, n):
         """Structural properties of the report for the (k, c) pair."""
         gm = single
@@ -376,7 +380,7 @@ class TestFIM:
         assert 0.0 < weight <= 1.0 + 1e-6
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_identifiable_pair_finite_cond_and_crb(self, single, truth, init, n):
         """Position data on a moving spring identifies (k, c): finite
         condition number, finite CRB."""
@@ -394,7 +398,7 @@ class TestFIM:
         assert bool(jnp.all(rep.crb > 0.0)), rep.crb
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
         self, single, truth, init, n,
     ):
@@ -425,7 +429,7 @@ class TestFIM:
         assert proj > 0.98, (proj, ev / ev[-1], V[:, 0])
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_valued_parameter_is_exact_null_direction_under_relative_scaling(
         self, single, truth, init, n,
     ):
@@ -450,7 +454,7 @@ class TestFIM:
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st,
            split=_finite(0.1, 0.9))
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_duplicated_parameter_null_direction_is_difference(
         self, single, truth, init, n, split,
     ):
@@ -481,7 +485,7 @@ class TestFIM:
         assert rep.cond == float("inf") or rep.cond > 1e5
 
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_relative_scaling_is_congruence_by_params(self, single, truth, init, n):
         """``F_rel = D F_raw D`` with ``D = diag(params)``."""
         gm = single
@@ -515,7 +519,7 @@ class TestFIM:
 class TestMultipleShooting:
 
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st)
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_seeded_window_states_reproduce_teacher_forcing(self, single, truth, init, tiling):
         """With ``init_window_states`` (the measured window starts) and any
         continuity weight, multiple shooting equals the teacher-forced loss

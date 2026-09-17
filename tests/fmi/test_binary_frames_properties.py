@@ -24,6 +24,7 @@ from maddening.fmi.tcp_bridge import (
     decode_binary, encode_binary, recv_message, send_message, values_of,
 )
 from tests.fmi.test_c_wrapper import _bridge, _graph, _vr
+from tests.conftest import EXAMPLES_CHEAP
 
 _BINARY = 0x80000000
 _HDR = struct.Struct(">I")
@@ -39,7 +40,7 @@ f64_arrays = hnp.arrays(
 
 
 @given(values=f64_arrays)
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_float64_payload_round_trips_bitwise(values):
     """encode -> decode -> frombuffer is the identity on the bit pattern."""
     raw = np.ascontiguousarray(values, dtype="<f8").tobytes()
@@ -60,7 +61,7 @@ deep_headers = st.integers(min_value=1, max_value=50_000).flatmap(
 
 
 @given(payload=st.one_of(st.binary(min_size=0, max_size=2048), deep_headers))
-@settings(max_examples=500, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_any_payload_decodes_consistently_or_raises_value_error(payload):
     """No byte string makes the decoder raise anything but ValueError
     (deep nesting included), and a successful decode is consistent with
@@ -80,7 +81,7 @@ def test_any_payload_decodes_consistently_or_raises_value_error(payload):
                                         st.text(max_size=16), st.lists(st.integers(), max_size=4)),
                               max_size=6),
        raw=st.binary(max_size=256))
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_encode_then_decode_is_the_identity_for_any_json_header(header, raw):
     got_header, got_raw = decode_binary(encode_binary(header, raw))
     assert got_header == json.loads(json.dumps(header)) and got_raw == raw
@@ -154,7 +155,7 @@ def running_bridge():
 
 
 @given(payload=payloads)
-@settings(max_examples=400, deadline=None,
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 def test_every_binary_request_gets_a_reply_and_the_connection_survives(running_bridge, payload):
     """An arbitrary flagged frame after a binary hello yields exactly one
@@ -185,7 +186,7 @@ def test_every_binary_request_gets_a_reply_and_the_connection_survives(running_b
 # --------------------------------------------------------- set: dtype narrowing
 
 @given(value=st.floats(allow_nan=True, allow_infinity=True, allow_subnormal=True, width=64))
-@settings(max_examples=300, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_set_of_any_float64_is_refused_or_reads_back_finite(value):
     """For any float64 the importer sends for a float32 input, either the
     set is refused (the input keeps its value) or the read-back is finite

@@ -10,6 +10,8 @@ import jax.numpy as jnp
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
+from tests.conftest import EXAMPLES_CHEAP
+
 
 DT_MIN = 1e-8
 DT_MAX = 0.1
@@ -45,7 +47,7 @@ class TestDtBoundsProperty:
     """dt_next is always in [dt_min, dt_max] for any valid inputs."""
 
     @given(dt=dt_st, error_norm=error_st)
-    @settings(max_examples=1000)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_dt_next_in_bounds(self, dt, error_norm):
         dt_j = jnp.asarray(dt)
         err_j = jnp.asarray(error_norm)
@@ -61,7 +63,7 @@ class TestFactorBoundsProperty:
     """Growth factor is always in [min_factor, max_factor]."""
 
     @given(dt=dt_st, error_norm=error_st)
-    @settings(max_examples=1000)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_factor_in_bounds(self, dt, error_norm):
         dt_j = jnp.asarray(dt)
         err_j = jnp.asarray(error_norm)
@@ -84,7 +86,7 @@ class TestAcceptanceMonotone:
                              allow_nan=False, allow_infinity=False),
            error_b=st.floats(min_value=0.0, max_value=1.0,
                              allow_nan=False, allow_infinity=False))
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_lower_error_also_accepted(self, dt, error_a, error_b):
         assume(error_a <= error_b)
         dt_j = jnp.asarray(dt)
@@ -100,7 +102,7 @@ class TestZeroErrorMaxGrowth:
     """When error_norm = 0, factor should be max_factor (maximum growth)."""
 
     @given(dt=dt_st)
-    @settings(max_examples=100)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_zero_error_max_factor(self, dt):
         dt_j = jnp.asarray(dt)
         _, factor, accepted = step_size_controller(dt_j, jnp.asarray(0.0))

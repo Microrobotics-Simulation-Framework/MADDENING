@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 
 from maddening.nodes.heat import HeatNode
+from tests.conftest import EXAMPLES_COSTLY
 
 
 class TestHeatConservation:
@@ -21,7 +22,7 @@ class TestHeatConservation:
         diffusivity=st.floats(min_value=0.001, max_value=0.1,
                               allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_flux_conserves_total_heat(self, n_cells, diffusivity):
         node = HeatNode(
             name="h", timestep=0.01, n_cells=n_cells,
@@ -81,7 +82,7 @@ class TestHeatFiniteOutput:
         diffusivity=st.floats(min_value=0.001, max_value=0.1,
                               allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_cfl_safe_produces_finite(self, n_cells, diffusivity):
         node = HeatNode(
             name="h", timestep=0.01, n_cells=n_cells,

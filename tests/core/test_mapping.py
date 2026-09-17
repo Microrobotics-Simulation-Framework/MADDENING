@@ -26,6 +26,7 @@ from maddening.core.coupling.mapping import (
     rbf_mapping,
     rbf_matrix,
 )
+from tests.conftest import EXAMPLES_COSTLY
 
 KERNELS = ("gaussian", "multiquadric", "inverse_multiquadric", "thin_plate_spline")
 
@@ -81,7 +82,7 @@ def test_patch_test_fails_without_polynomial_for_gaussian():
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(4, 16), n_tgt=st.integers(2, 12),
        dim=st.integers(1, 2), kernel=st.sampled_from(KERNELS))
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_patch_property_float64(seed, n_src, n_tgt, dim, kernel):
     """Random clouds, float64: constants and linear fields to 1e-8."""
     prev = jax.config.read("jax_enable_x64")
@@ -121,7 +122,7 @@ def test_conservative_mode_preserves_total(kernel):
 
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(3, 12), n_tgt=st.integers(3, 12))
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_conservation_property_nearest_and_rbf(seed, n_src, n_tgt):
     rng = np.random.default_rng(seed)
     src, tgt = _cloud(rng, n_src, 1), _cloud(rng, n_tgt, 1, spread=0.9)
@@ -150,7 +151,7 @@ def test_projection_1d_matches_closure_and_conserves_integral():
 
 
 @given(seed=st.integers(0, 2**31), n_src=st.integers(2, 10), n_tgt=st.integers(2, 10))
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_apply_T_is_the_adjoint(seed, n_src, n_tgt):
     rng = np.random.default_rng(seed)
     m = matrix_mapping(rng.normal(size=(n_tgt, n_src)).astype(np.float32))

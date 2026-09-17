@@ -11,6 +11,7 @@ from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
 from maddening.core.simulation.integrators import euler_step, heun_step, rk4_step
+from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_STANDARD
 
 
 def _constant_derivs(state, boundary_inputs):
@@ -36,7 +37,7 @@ class TestZeroStepIdentity:
 
     @given(x=st.floats(min_value=-1e4, max_value=1e4,
                        allow_nan=False, allow_infinity=False))
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_euler_zero_dt(self, x):
         assume(abs(x) > 1.18e-38 or x == 0.0)
         state = {"x": jnp.array(x, dtype=jnp.float32)}
@@ -45,7 +46,7 @@ class TestZeroStepIdentity:
 
     @given(x=st.floats(min_value=-1e4, max_value=1e4,
                        allow_nan=False, allow_infinity=False))
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_heun_zero_dt(self, x):
         assume(abs(x) > 1.18e-38 or x == 0.0)
         state = {"x": jnp.array(x, dtype=jnp.float32)}
@@ -54,7 +55,7 @@ class TestZeroStepIdentity:
 
     @given(x=st.floats(min_value=-1e4, max_value=1e4,
                        allow_nan=False, allow_infinity=False))
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_rk4_zero_dt(self, x):
         assume(abs(x) > 1.18e-38 or x == 0.0)
         state = {"x": jnp.array(x, dtype=jnp.float32)}
@@ -68,7 +69,7 @@ class TestConstantDerivativeExact:
     @given(x=st.floats(min_value=-1e3, max_value=1e3,
                        allow_nan=False, allow_infinity=False),
            dt=dt_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_euler_constant(self, x, dt):
         state = {"x": jnp.array(x, dtype=jnp.float32)}
         out = euler_step(_constant_derivs, state, {}, dt)
@@ -80,7 +81,7 @@ class TestConstantDerivativeExact:
     @given(x=st.floats(min_value=-1e3, max_value=1e3,
                        allow_nan=False, allow_infinity=False),
            dt=dt_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_heun_constant(self, x, dt):
         state = {"x": jnp.array(x, dtype=jnp.float32)}
         out = heun_step(_constant_derivs, state, {}, dt)
@@ -90,7 +91,7 @@ class TestConstantDerivativeExact:
     @given(x=st.floats(min_value=-1e3, max_value=1e3,
                        allow_nan=False, allow_infinity=False),
            dt=dt_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_rk4_constant(self, x, dt):
         state = {"x": jnp.array(x, dtype=jnp.float32)}
         out = rk4_step(_constant_derivs, state, {}, dt)
@@ -104,7 +105,7 @@ class TestFiniteOutput:
     @given(x=st.floats(min_value=-1e4, max_value=1e4,
                        allow_nan=False, allow_infinity=False),
            dt=dt_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_euler_finite(self, x, dt):
         state = {"x": jnp.array(x, dtype=jnp.float32)}
         out = euler_step(_linear_derivs, state, {}, dt)
@@ -113,7 +114,7 @@ class TestFiniteOutput:
     @given(x=st.floats(min_value=-1e4, max_value=1e4,
                        allow_nan=False, allow_infinity=False),
            dt=dt_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_rk4_finite(self, x, dt):
         state = {"x": jnp.array(x, dtype=jnp.float32)}
         out = rk4_step(_linear_derivs, state, {}, dt)
@@ -132,7 +133,7 @@ class TestOrderVerification:
 
     @given(x=st.floats(min_value=0.1, max_value=10.0,
                        allow_nan=False, allow_infinity=False))
-    @settings(max_examples=100)
+    @settings(max_examples=EXAMPLES_STANDARD)
     def test_euler_first_order(self, x):
         import jax
         was = bool(jax.config.jax_enable_x64)
@@ -160,7 +161,7 @@ class TestOrderVerification:
 
     @given(x=st.floats(min_value=0.1, max_value=10.0,
                        allow_nan=False, allow_infinity=False))
-    @settings(max_examples=100)
+    @settings(max_examples=EXAMPLES_STANDARD)
     def test_rk4_fourth_order(self, x):
         import jax
         was = bool(jax.config.jax_enable_x64)

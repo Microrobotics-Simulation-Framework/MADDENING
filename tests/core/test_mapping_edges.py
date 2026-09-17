@@ -201,11 +201,13 @@ def test_mapping_weights_frozen_by_default_and_opt_in_trainable():
 from hypothesis import given, settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
+from tests.conftest import EXAMPLES_COSTLY  # noqa: E402
+
 
 @given(seed=st.integers(0, 2**31), n_c=st.integers(3, 10), n_f=st.integers(3, 14),
        kernel=st.sampled_from(["gaussian", "thin_plate_spline", "multiquadric"]),
        coupled=st.booleans())
-@settings(max_examples=12, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_mapped_edge_equals_closure_for_random_interfaces(seed, n_c, n_f, kernel, coupled):
     rng = np.random.default_rng(seed)
     xc = np.sort(rng.uniform(0, 1, n_c)); xf = np.sort(rng.uniform(0, 1, n_f))

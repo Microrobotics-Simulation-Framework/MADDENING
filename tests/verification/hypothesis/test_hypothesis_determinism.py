@@ -18,6 +18,11 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
+from tests.conftest import (
+    EXAMPLES_CHEAP,
+    EXAMPLES_COSTLY,
+    EXAMPLES_STANDARD,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +78,7 @@ class TestRepeatability:
         table_pos=st.floats(min_value=-10, max_value=10,
                             allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=300, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_ball_update_deterministic(self, position, velocity, table_pos):
         """BallNode.update called twice with same args gives same result."""
         node = BallNode(name="b", timestep=0.01, initial_position=0.0)
@@ -99,7 +104,7 @@ class TestRepeatability:
         anchor=st.floats(min_value=-10, max_value=10,
                          allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=300, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_spring_update_deterministic(self, position, velocity, anchor):
         """SpringDamperNode.update called twice gives same result."""
         node = SpringDamperNode(name="s", timestep=0.01, stiffness=50.0)
@@ -118,7 +123,7 @@ class TestRepeatability:
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_heat_update_deterministic(self, seed):
         """HeatNode.update called twice gives same result."""
         rng = np.random.default_rng(seed)
@@ -143,7 +148,7 @@ class TestRepeatability:
         position=st.floats(min_value=-10, max_value=10,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_graph_step_deterministic(self, n_steps, position):
         """GraphManager.step called with same state produces same result."""
         gm1 = GraphManager()
@@ -176,7 +181,7 @@ class TestJITConsistency:
         velocity=st.floats(min_value=-20, max_value=20,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_ball_jit_matches_eager(self, position, velocity):
         """BallNode.update under jit gives same result as eager.
 
@@ -210,7 +215,7 @@ class TestJITConsistency:
         anchor=st.floats(min_value=-5, max_value=5,
                          allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_spring_jit_matches_eager(self, position, velocity, anchor):
         """SpringDamperNode.update under jit gives same result as eager.
 
@@ -236,7 +241,7 @@ class TestJITConsistency:
         )
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=80, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_heat_jit_matches_eager(self, seed):
         """HeatNode.update under jit gives same result as eager.
 
@@ -265,7 +270,7 @@ class TestJITConsistency:
         n_steps=st.integers(min_value=1, max_value=10),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_graph_scan_matches_step_loop(self, n_steps, seed):
         """run_scan should produce the same final state as repeated step().
 
@@ -314,7 +319,7 @@ class TestVmapConsistency:
         batch_size=st.integers(min_value=2, max_value=8),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_ball_vmap_matches_loop(self, batch_size, seed):
         """vmapped BallNode.update matches sequential calls."""
         rng = np.random.default_rng(seed)
@@ -363,7 +368,7 @@ class TestVmapConsistency:
         batch_size=st.integers(min_value=2, max_value=6),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_spring_vmap_matches_loop(self, batch_size, seed):
         """vmapped SpringDamperNode.update matches sequential calls."""
         rng = np.random.default_rng(seed)
@@ -411,7 +416,7 @@ class TestVmapConsistency:
         batch_size=st.integers(min_value=2, max_value=5),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_heat_vmap_matches_loop(self, batch_size, seed):
         """vmapped HeatNode.update matches sequential calls."""
         rng = np.random.default_rng(seed)
@@ -456,7 +461,7 @@ class TestVmapConsistency:
         n_steps=st.integers(min_value=1, max_value=5),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_graph_sweep_matches_individual_runs(self, batch_size, n_steps, seed):
         """GraphManager.run_sweep matches individual run_scan calls."""
         rng = np.random.default_rng(seed)
@@ -523,7 +528,7 @@ class TestNoHiddenState:
         position=st.floats(min_value=-10, max_value=10,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_ball_no_hidden_state(self, n_calls, position):
         """Calling update N times with the SAME state gives the SAME output each time."""
         node = BallNode(name="b", timestep=0.01, gravity=-9.81)
@@ -542,7 +547,7 @@ class TestNoHiddenState:
             )
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_heat_no_hidden_state(self, seed):
         """HeatNode has no hidden mutable state between calls."""
         rng = np.random.default_rng(seed)
@@ -573,7 +578,7 @@ class TestNoHiddenState:
         position=st.floats(min_value=-5, max_value=5,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_graph_restart_from_same_state_deterministic(self, n_steps, position):
         """Re-setting a graph to the same initial state and re-stepping
         must produce the same trajectory."""

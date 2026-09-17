@@ -73,6 +73,57 @@ if HYPOTHESIS_PROFILE not in HYPOTHESIS_PROFILES:
 settings.load_profile(HYPOTHESIS_PROFILE)
 
 
+# ---------------------------------------------------------------------------
+# Depth tiers
+# ---------------------------------------------------------------------------
+# A per-test ``@settings(max_examples=N)`` *overrides* the profile, so a
+# tree full of hand-picked counts leaves ``ci`` no deeper than ``dev``.
+# Measured before these tiers existed, ``tests/verification/hypothesis/``
+# took 707 s under ``dev`` and 721 s under ``ci`` -- 2% apart, for a
+# profile that asks for four times the search.
+#
+# A property that genuinely needs its own cap therefore names a *tier*
+# instead of a number.  A tier is resolved once, here, from whatever
+# profile is active, and is named for what one example COSTS -- which is
+# the only thing the test author can judge.  How deep to search at that
+# cost is the profile's call, not the test's.
+#
+# * ``EXAMPLES_CHEAP`` -- a pure function on scalars or small arrays: no
+#   JAX trace, no graph build, no fresh compile.  A few milliseconds an
+#   example at most, so search several times wider than the baseline.
+# * ``EXAMPLES_STANDARD`` -- the profile's own depth, for the middle
+#   ground: an eager node update on a fixed shape, a call into an
+#   already-compiled step, a constrain/unconstrain round trip.
+# * ``EXAMPLES_COSTLY`` -- a fresh JAX trace and compile, a dense solve
+#   or a ``vjp`` per draw, an optimiser loop, a multi-device
+#   ``shard_map``, a full rollout, a graph built and compiled per draw.
+#   Tens of milliseconds an example and up, so search a fraction as wide.
+#
+# Absolute values remain legal where the number encodes a real
+# constraint -- an exhausted search space, or an example measured in
+# seconds -- and, as before, need a comment saying why.  The house rule's
+# floor of 20 binds the tiers too: ``EXAMPLES_COSTLY`` never resolves
+# below it, however shallow a future profile is.  See
+# ``docs/developer_guide/testing_standards.md``.
+#
+# The tiers are read from the profile loaded above, i.e. from
+# ``MADDENING_HYPOTHESIS_PROFILE``.  A ``--hypothesis-profile`` flag (only
+# available when the Hypothesis plugin is loaded, which the suite
+# normally disables) changes the profile but not the already-resolved
+# tiers, so the report header below prints both.
+EXAMPLES_FLOOR = 20
+
+_PROFILE_EXAMPLES = settings.default.max_examples
+
+#: Cheap per example -- four times the profile (``dev`` 200, ``ci`` 800).
+EXAMPLES_CHEAP = 4 * _PROFILE_EXAMPLES
+#: The profile's own depth (``dev`` 50, ``ci`` 200).
+EXAMPLES_STANDARD = _PROFILE_EXAMPLES
+#: Costly per example -- two fifths of the profile, never below the
+#: house floor (``dev`` 20, ``ci`` 80).
+EXAMPLES_COSTLY = max(EXAMPLES_FLOOR, (2 * _PROFILE_EXAMPLES) // 5)
+
+
 def pytest_report_header(config):
     """Report the active profile even when the Hypothesis plugin is off.
 
@@ -86,6 +137,8 @@ def pytest_report_header(config):
     return (
         f"hypothesis profile: {settings.get_current_profile_name()} "
         f"(max_examples={settings.default.max_examples}, "
+        f"tiers cheap/standard/costly="
+        f"{EXAMPLES_CHEAP}/{EXAMPLES_STANDARD}/{EXAMPLES_COSTLY}, "
         f"database={HYPOTHESIS_DATABASE_DIR})"
     )
 

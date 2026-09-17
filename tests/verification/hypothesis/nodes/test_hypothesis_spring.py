@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 
 from maddening.nodes.spring import SpringDamperNode
 from maddening.testing.strategies import node_states, bounded_dt
+from tests.conftest import EXAMPLES_CHEAP
 
 
 class TestSpringMassValidation:
@@ -36,7 +37,7 @@ class TestSpringEnergyDissipation:
         dt=st.floats(min_value=1e-4, max_value=0.005,
                      allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_energy_non_increasing(self, pos, vel, dt):
         k = 10.0
         m = 1.0
@@ -81,7 +82,7 @@ class TestSpringFiniteOutput:
         ),
         dt=bounded_dt(1e-5, 0.005),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_always_finite(self, state, dt):
         node = SpringDamperNode(
             name="s", timestep=0.01, stiffness=100.0, damping=1.0,

@@ -16,6 +16,7 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_l2,
     coupling_residual_mixed,
 )
+from tests.conftest import EXAMPLES_CHEAP
 
 
 def _make_state(arr):
@@ -36,7 +37,7 @@ class TestL2NormProperties:
     """Algebraic properties of the L2 convergence norm."""
 
     @given(a=float_arrays, b=float_arrays)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_symmetry(self, a, b):
         s_a = _make_state(a)
         s_b = _make_state(b)
@@ -47,14 +48,14 @@ class TestL2NormProperties:
         )
 
     @given(a=float_arrays)
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_identity(self, a):
         s = _make_state(a)
         norm = float(coupling_residual_l2(s, s, ["node"]))
         assert norm == 0.0, f"L2(a, a) = {norm}, expected 0"
 
     @given(a=float_arrays, b=float_arrays)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_non_negative(self, a, b):
         s_a = _make_state(a)
         s_b = _make_state(b)
@@ -62,7 +63,7 @@ class TestL2NormProperties:
         assert norm >= 0.0, f"L2 negative: {norm}"
 
     @given(a=float_arrays, b=float_arrays, c=float_arrays)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_triangle_inequality(self, a, b, c):
         s_a = _make_state(a)
         s_b = _make_state(b)
@@ -82,7 +83,7 @@ class TestMixedNormProperties:
     """Properties of the mixed abs/rel convergence norm."""
 
     @given(a=float_arrays, b=float_arrays)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_symmetry(self, a, b):
         s_a = _make_state(a)
         s_b = _make_state(b)
@@ -93,14 +94,14 @@ class TestMixedNormProperties:
         )
 
     @given(a=float_arrays)
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_identity(self, a):
         s = _make_state(a)
         norm = float(coupling_residual_mixed(s, s, ["node"], 1e-8, 1e-6))
         assert norm == 0.0, f"Mixed(a, a) = {norm}, expected 0"
 
     @given(a=float_arrays, b=float_arrays)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_non_negative(self, a, b):
         s_a = _make_state(a)
         s_b = _make_state(b)

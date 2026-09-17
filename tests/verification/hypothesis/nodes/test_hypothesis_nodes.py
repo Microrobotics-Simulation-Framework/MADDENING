@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 from maddening.testing.strategies import node_states, bounded_dt
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_CHEAP
 
 
 class TestBallNodeProperties:
@@ -35,7 +36,7 @@ class TestBallNodeProperties:
         ),
         dt=bounded_dt(1e-4, 0.05),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_update_returns_finite(self, state, dt):
         out = self.node.update(state, {"table_position": jnp.array(0.0)}, dt)
         for field, val in out.items():
@@ -53,7 +54,7 @@ class TestBallNodeProperties:
         ),
         dt=bounded_dt(1e-4, 0.05),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_update_preserves_structure(self, state, dt):
         out = self.node.update(state, {"table_position": jnp.array(0.0)}, dt)
         assert set(out.keys()) == set(state.keys()), (
@@ -75,7 +76,7 @@ class TestBallNodeProperties:
         ),
         dt=bounded_dt(1e-4, 0.05),
     )
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_update_deterministic(self, state, dt):
         bi = {"table_position": jnp.array(0.0)}
         out1 = self.node.update(state, bi, dt)
@@ -104,7 +105,7 @@ class TestSpringDamperNodeProperties:
         ),
         dt=bounded_dt(1e-4, 0.05),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_update_returns_finite(self, state, dt):
         out = self.node.update(state, {}, dt)
         for field, val in out.items():
@@ -121,7 +122,7 @@ class TestSpringDamperNodeProperties:
         ),
         dt=bounded_dt(1e-4, 0.05),
     )
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_update_preserves_structure(self, state, dt):
         out = self.node.update(state, {}, dt)
         assert set(out.keys()) == set(state.keys())

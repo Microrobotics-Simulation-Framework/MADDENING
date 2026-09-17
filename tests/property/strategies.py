@@ -676,6 +676,11 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
         # carry.  (Its DeprecationWarning is filtered in pyproject.toml.)
         solver=draw(st.sampled_from(COUPLING_SOLVERS)),
         linear_solver=draw(st.sampled_from(COUPLING_LINEAR_SOLVERS)),
+        # ``strict_convergence`` is the one field left at its default, and
+        # visibly so: True turns a group that exits at ``max_iterations``
+        # still unconverged into a runtime error, which no generator can
+        # promise an arbitrary random graph avoids.  Module docstring.
+        strict_convergence=False,
     )
 
 

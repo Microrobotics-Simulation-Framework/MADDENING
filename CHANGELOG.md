@@ -158,6 +158,7 @@ guidance; the itemized changes follow.
 ### Fixed
 - Sharded pointwise nodes honour parameter writes again (`PUT /graph/params`)
 - `POST /surrogate/deactivate` restores every edge field, or changes nothing
+- A `.` in a node name no longer misroutes that node's FMU inputs and outputs
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep

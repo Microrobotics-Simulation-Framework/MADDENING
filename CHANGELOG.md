@@ -9,6 +9,31 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+### Fixed
+
+- **`POST /graph/nodes` no longer answers 500 -- and no longer leaves the
+  graph unreadable -- for a non-finite constructor constant.**  A NaN or
+  infinite parameter survived the constructor and the dry-run trace, the node
+  went into the graph, and only then did the 201 body fail inside Starlette's
+  `allow_nan=False` JSON encoder: the caller saw a 500, and every later
+  `GET /graph` answered 500 for the life of the process.  Such a value is now
+  a 400 naming the parameter (`params.gravity[1]: value must be finite`),
+  exactly as `PUT /graph/state` and `PUT /graph/params` already refuse one.
+- **`PUT /graph/params/{node}` echoes the value it just wrote.**  Before the
+  first `compile()` the endpoint validates against a throwaway probe copy of
+  the node's params pytree, and it used to report *that* copy -- so the reply
+  carried the pre-write value while the very next `GET /graph/params/{node}`
+  carried the new one.
+- **An FMU sidecar `step` with an unusable communication point no longer
+  advances the physics.**  `t` was converted to a float *after* the sub-step
+  loop, so `{"op": "step", "t": <not a number>, "dt": h}` ran the graph,
+  failed on the conversion and answered `ok: false` with the sidecar already
+  advanced and `_time` left behind it -- a silent, permanent desynchronisation
+  between the importer's clock and the state it reads back.  `t` is now parsed
+  and checked for finiteness before anything moves, alongside `dt`.
+  All three were found by the new stateful property machines under
+  `tests/property/`.
+
 ### Known Anomalies
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
@@ -136,6 +161,30 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **Stateful property machines for the two externally driven surfaces**
+  (`tests/property/test_stateful_api.py`,
+  `tests/property/test_stateful_bridge.py`, shared scaffolding in
+  `tests/property/stateful_model.py`).  Two
+  `hypothesis.stateful.RuleBasedStateMachine`s drive *arbitrary* sequences
+  where every earlier test drove a hand-written one.  The REST machine works
+  over a FastAPI `TestClient` -- add and remove nodes and edges, compile,
+  step, run, read and write state and parameters, save and load checkpoints,
+  reset, validate -- interleaved with unknown nodes, wrong field sets, bad
+  dtypes, out-of-bounds and NaN values, and checkpoint paths outside the
+  configured root.  The bridge machine holds one real socket and mixes JSON
+  and binary frames on it: `hello` on both protocols with and without binary,
+  `set`, `get`, `step`, `get_state`, `set_state`, `reset`, `terminate`, and
+  malformed frames of both kinds.  Each checks, after *every* operation,
+  against an in-process model -- a `GraphManager` for the server, a second
+  bridge on the same compiled step for the sidecar: a valid call must succeed
+  and agree with the model, a refused call must be a 4xx (or an error reply)
+  that changes nothing and keeps the connection, and the REST server must
+  never answer 5xx.  The REST machine ends every example by rebuilding a
+  `GraphManager` from the server's own `GET /graph` and replaying its
+  trajectory; the bridge machine checks that a state saved with `get_state`
+  and restored later returns exactly the values captured at save time.  Both
+  leave `max_examples` to the profile and set `stateful_step_count`
+  explicitly (14 and 25), with the reasoning in the test docstring.
 - **`AdaptiveNode` diagnostic surface** (audit follow-up):
   `gradient_capture_ratio` (renamed, re-selects the active set at the
   evaluated parameters), `check_gradient_capture(params=None, *, state=None,

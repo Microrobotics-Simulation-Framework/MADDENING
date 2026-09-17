@@ -24,7 +24,6 @@ from dataclasses import dataclass, fields
 from typing import (
     Any,
     Literal,
-    Mapping,
     Optional,
     Union,
     get_args,
@@ -249,7 +248,7 @@ class CouplingGroup:
             )
 
 
-def coupling_group_kwargs(d: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
+def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
     """Split a serialised group into the ``(nodes, kwargs)`` pair that
     :meth:`~maddening.core.graph_manager.GraphManager.add_coupling_group`
     takes.

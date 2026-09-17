@@ -558,8 +558,12 @@ class SimulationServer:
                 staged[key] = new
             for key, value in req.params.items():
                 if key in staged:
-                    if not probe_only:
-                        live[key] = staged[key]
+                    # After a compile ``live`` *is* gm.params' leaf dict and
+                    # this is the write; before one it is the throwaway probe
+                    # copy, and this only keeps the echo below honest -- it
+                    # used to report the pre-write value, contradicting the
+                    # GET that follows it.
+                    live[key] = staged[key]
                     if key in node.params:
                         # Store the constructor's Python type, never the
                         # raw JSON value: a JSON ``40`` for a float leaf

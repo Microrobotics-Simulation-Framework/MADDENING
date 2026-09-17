@@ -16,14 +16,22 @@ how the per-step numbers are obtained; this page is about what they say.
 Pick the row that matches the *shape* of your graph.  Every recommendation
 is `iteration_mode` / `acceleration` / `convergence_norm`.
 
+One thing to hold on to while reading it: **fewer iterations is not the
+same as a faster step.**  On the small fixtures the whole step is a
+fraction of a millisecond of kernel dispatch, and an accelerator that
+quarters the iteration count can still triple the wall time because its
+own arithmetic is not free.  The table recommends on measured step time
+where the step times are separable and on iteration count where they are
+not, and says which.
+
 | your graph | start with | why |
 |---|---|---|
 | anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.6–1.9x fewer iterations than Jacobi on every shape measured; Aitken costs nothing measurable and removes 30–60% of the remaining iterations |
-| cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | the launch-bound regime: iterations are all that matters and the accelerators' own cost is invisible |
-| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converged at all past the contraction limit; 6 iterations where plain iteration exhausted a cap of 60 |
+| cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: every configuration's step time is within noise of every other, so pick the one with the fewest iterations and the least machinery |
+| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converged at all past the contraction limit, and the one case where IQN also wins on time: 6.0 iterations and 0.34 ms against a cap of 60 exhausted on 96% of steps |
 | one or more nodes with a large state (grids, meshes) | `gauss-seidel` / `aitken` / `interface`, and set `accelerated_fields` before trying IQN | IQN's least-squares runs over every accelerated degree of freedom; on a 2x10⁵-cell interface it cost 80x the plain step |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
-| wide star (independent leaves) | `gauss-seidel` / `iqn-ils` / `interface` | IQN's iteration count barely moves with width (4.9 at 2 leaves, 5.0 at 16) and Aitken's does not either, while the leaves keep adding dispatches |
+| wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 9.2 → 9.6 iterations from 2 to 16 leaves, IQN 4.9 → 5.0) but IQN's step cost is not: 1.55 ms against 0.69 ms at 16 leaves, for 4.6 fewer iterations that the dispatch floor hides |
 | ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
 | fixed point that barely moves between steps | `gauss-seidel` / `aitken` / `interface`; try `iqn-imvj` with `jacobian_reuse` only if the interface is small | reuse does cut iterations (3 → 2) but the quasi-Newton machinery cost 20x the saving here |
 | two subsystems with different shapes | one group each, with its own settings | groups in one graph keep independent schedules, iteration counts and convergence flags |
@@ -104,12 +112,13 @@ consequences.
 * **Nothing here measures Jacobi's parallelism.**  Jacobi's structural
   advantage is that its node updates are independent and can run
   concurrently; on one CPU device they run one after another, exactly
-  like Gauss-Seidel's.  Every Jacobi row in this document is therefore
-  an *upper bound on the iteration count* and a *pessimistic* step time.
-  The one claim that needs a real multi-device run to confirm or refute
-  is whether a wide `star-N` or a sharded grid recovers Jacobi's 1.8x
-  iteration penalty in wall time.  It is the first thing to re-measure
-  on a GPU box.
+  like Gauss-Seidel's.  A Jacobi row's *iteration count* is exact and
+  platform-independent — that is a property of the algorithm — but its
+  *step time* is a pessimistic upper bound, because the concurrency the
+  mode exists for is not available.  The open question, and the first
+  thing to re-measure on a GPU box, is whether a wide `star-N` or a
+  sharded grid recovers Jacobi's 1.8x iteration penalty in wall time.
+  Nothing in this document answers it either way.
 * On the launch-bound fixtures the whole step is 0.1–2 ms and the spread
   between configurations is tens of microseconds — inside the noise.
   **The iteration counts are the reliable signal there**, and the sweep's
@@ -118,8 +127,9 @@ consequences.
 
 ## Where the measurement contradicted the theory
 
-Four expectations that the sweep did not support.  Each was stated before
-the fixtures were built.
+Four expectations that the sweep did not support.  Each was written down
+before the fixtures were built, which is the only reason they count as
+predictions rather than commentary.
 
 **1. The Gauss-Seidel advantage does not widen with chain length.**  The
 expectation was that sequential information flow would let Gauss-Seidel
@@ -229,7 +239,7 @@ step that is 240 times slower.  Two levers, in order:
    auto-detects the fields the group's internal edges *read*, which for
    a grid node coupled on one cell is still the entire grid.
 
-## The four combinations the brief singled out
+## Four combinations that theory says should win
 
 **Jacobi + Aitken.** Wins on two-node pairs (`stiff-pair-0.5`: 12.0 → 3.1,
 matching Gauss-Seidel + Aitken's 3.0) and loses on everything wider or

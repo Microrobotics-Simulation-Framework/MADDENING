@@ -53,3 +53,58 @@ anomalies:
     resolution_status: "open"
     github_issue: null
 
+
+  - anomaly_id: "MADD-ANO-003"
+    title: "AdaptiveNode frozen-set gradient omits a first-order term at active-set switches"
+    description: >
+      The frozen-active-set adjoint of AdaptiveNode differentiates the solve
+      with the active set held fixed, so the returned gradient is exact within
+      an active-set region but ignores the region's dependence on the
+      parameters.  At the parameter values where two candidates swap rank the
+      objective J_frozen has a genuine jump discontinuity (the coefficients
+      and the sensor weights of the two modes differ), so the objective is not
+      locally Lipschitz there and no Clarke subgradient exists -- the returned
+      value is the one-sided derivative of the branch the forward pass
+      selected.  The omitted contribution is first order: integrating the
+      returned gradient over an interval misses the sum of the jumps crossed.
+      Measured on the suite's 1-D sine toy (n_max=256, top-|b| selection,
+      k=16): over theta in [0.40, 0.50] the integral of the returned gradient
+      is -1.5808e-3 against a true objective change of -2.3598e-3, a 33 %
+      shortfall equal to the sum of the 27 jumps crossed in that window.  The
+      error decays with the active-set budget because the coefficient that
+      swaps rank shrinks: on the same problem the jump contribution falls from
+      2.5e-1 of |J| at k=8 to about 1e-8 at k=64 (the spike measured 4e-8).
+      Nothing in the forward pass signals a crossing, and finite differences
+      across one diverge as 1/h rather than disagreeing mildly.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      This is a silent first-order error in a gradient, which is the input to
+      calibration (sysid.fit) and to sensitivity/uncertainty analysis rather
+      than to a forward prediction: the simulated field itself is unaffected,
+      and the frozen solve is exact for the active set it reports.  The risk is
+      that a parameter identified against a discontinuous loss surface (264
+      switches over the bound range of the toy's theta at the graph-integration
+      configuration) converges to a biased value, or that an optimiser stalls,
+      without any error being raised -- and a downstream product could then act
+      on a mis-calibrated model.  Whether that matters depends on whether the
+      downstream product calibrates through an AdaptiveNode at all, on the
+      active-set budget it uses (the error is negligible in the large-budget
+      regime the pattern is designed for), and on whether the calibrated
+      parameters are validated against held-out measurements.  It is not
+      safety relevant for forward simulation at a fixed parameter point.
+    affected_components:
+      - "maddening.nodes.adaptive.base.AdaptiveNode"
+      - "maddening.nodes.adaptive.base.AdaptiveNode.update"
+    affected_versions: "0.4.0"
+    workaround: >
+      Use the largest active-set budget the problem affords (the omitted term
+      decays with it, to ~1e-8 of |J| at k=64 on the reference problem); add
+      hysteresis to the selection rule (add above eps_add, remove below
+      eps_remove < eps_add via the prev mask) to reduce switch chattering; and
+      do not validate a gradient against a finite difference of the
+      mask-recomputing objective, which is not a valid oracle across a switch.
+      Check for a crossing by re-selecting the active set at both ends of a
+      step and comparing the masks.
+    resolution_status: "open"
+    github_issue: null

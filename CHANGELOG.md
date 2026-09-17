@@ -9,7 +9,71 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+### Known Anomalies
+- MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
+  active-set switches -- the frozen-set objective jumps where two candidates
+  swap rank, so no Clarke subgradient exists there and the integral of the
+  returned gradient misses the sum of the jumps crossed (measured: 33 % of the
+  objective change over a 0.1-wide theta window at n_max=256, k=16; ~1e-8 at
+  k=64) (open, context_dependent)
+
 ### Changed
+
+- **`AdaptiveNode` is `@stability(EVOLVING)`, not `STABLE`, and its blindness
+  gate no longer rejects a small active-set budget** (independent audit of the
+  `AdaptiveNode` merge; report under
+  `benchmarks/results/audit_adaptive-node-base/`).  Nothing has shipped, so
+  lowering the promise is free and raising it later would not be:
+  `AdaptiveNode` and `AdaptiveNodeBlindnessError` are now `EVOLVING` and
+  `maddening.core.solver_utils.ift_linear_solve` is back at the
+  `EXPERIMENTAL` it had before that merge.  The 0.4.0 API freeze picks the
+  final level, informed by two open questions now written down in
+  `docs/developer_guide/adaptive_node.md`: whether `ift_linear_solve` should
+  expose `restart` / `max_steps` / `stagnation_iters` and stop leaking
+  `lineax` / `equinox` runtime error types, and whether the three hooks need
+  `boundary_inputs` / `dt` so an adaptive node can be an edge *sink*.
+- **The documentation now states what the gradient is.**  The
+  "one-sided (Clarke) subgradient at the kinks" claim in the module docstring,
+  `NodeMeta` and the algorithm guide was wrong: the frozen-set objective has
+  *jump* discontinuities at active-set switches, so it is not locally
+  Lipschitz there and no Clarke subgradient exists.  The returned gradient is
+  exact *within* an active-set region and ignores the set's dependence on the
+  parameter; across a boundary the objective jumps and gradient-based
+  optimisation sees a first-order error equal to the sum of the jumps crossed
+  (measured on the 1-D sine toy at n_max=256, k=16: the integral of the
+  returned gradient over theta in [0.40, 0.50] is -1.5808e-3 against a true
+  change of -2.3598e-3, a 33 % shortfall equal to the sum of the 27 jumps
+  crossed; negligible with a large basis budget, 4e-8 at k=64 in the spike).
+  Recorded as `MADD-ANO-003` and asserted by
+  `tests/nodes/adaptive/test_active_set_switch.py`.
+- **`blindness_ratio` is now `gradient_capture_ratio`** (the old name is a
+  deprecated alias that warns), because the number measures active-set-budget
+  adequacy rather than a symmetry trap: at a fixed non-symmetric point it is a
+  function of `k` alone (0.16 / 0.57 / 0.85 / 1.00 at k=4/8/16/32, at every
+  `n_max`).  `blindness_threshold` is likewise `gradient_capture_threshold`
+  with a deprecated constructor alias.  The cold-start check
+  (`AdaptiveNode.check_gradient_capture`, new) **warns** on a low ratio,
+  naming the measured value, the threshold and the remedies in order, and
+  raises `AdaptiveNodeBlindnessError` only for the one cause it can establish
+  -- `is_trapped_at` confirming a Palais fixed point -- or under the new
+  opt-in `on_blind="raise"`.  `on_blind="ignore"` skips it entirely.  The
+  message no longer prescribes `cold_start()` / `symmetry_break()` where they
+  make matters worse (measured 0.565 -> 0.060 at a budget-limited point), and
+  the guide's "validated" `K/n_max = 0.016` row is now reachable through the
+  default API.
+- **`n_max` is no longer stored in `AdaptiveNode.params`** (it is structural),
+  and `blindness_gate` / `on_blind` / the diagnostic constants are, so a node
+  survives a config and USD round trip; `params_pytree()` excludes them so a
+  fit never sees them as leaves.  A subclass whose basis size must round-trip
+  declares its own integer parameter for it (see the authoring guide).
+- `AdaptiveNode.compute_active_set` and `solve_frozen` are `@abstractmethod`;
+  `objective` stays concrete because it is optional with the gate off.  The
+  constructor validates `n_max` (a positive whole number -- `2.7` and `"8"`
+  are rejected, an integral float from a JSON round trip is accepted), the
+  diagnostic constants (finite and non-negative) and `dtype` (floating, and
+  enforced on the coefficients when given explicitly); the diagnostics reject
+  a parameter key that is neither a pytree leaf nor a constructor parameter
+  instead of silently ignoring a typo.
 
 - **Resume-from-URL transport moved to `maddening.cloud.resume`.**
   `download_and_load_state` (with its `file://` / `http(s)://` / fsspec
@@ -39,6 +103,15 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **`AdaptiveNode` diagnostic surface** (audit follow-up):
+  `gradient_capture_ratio` (renamed, re-selects the active set at the
+  evaluated parameters), `check_gradient_capture(params=None, *, state=None,
+  on_blind=None)` (runs the cold-start diagnostic at the parameters actually
+  in use and applies the warn / raise / ignore policy), `mask_safe(mask, x,
+  fill)` (the double-`where` guard for an operand that is singular off the
+  active set), and the module-level `set_adaptive_diagnostics(enabled)` /
+  `adaptive_diagnostics_enabled()` switches (also read from
+  `MADDENING_ADAPTIVE_DIAGNOSTICS`).
 - **`AdaptiveNode` base class** (`maddening.nodes.adaptive`, `@stability(STABLE)`,
   `MADD-NODE-009`): the frozen-active-set adjoint pattern for adaptive solvers.
   A subclass supplies `compute_active_set` (any fixed-shape `jnp` selection
@@ -481,6 +554,53 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **`AdaptiveNode` survives a config / USD round trip** (audit A4).
+  `blindness_gate` was not forwarded to `super().__init__`, so it never
+  entered `self.params` and a node deliberately built with the gate off
+  reloaded with it on; `n_max` *was* in `self.params` and was replayed as a
+  constructor keyword, so every subclass following the documented pattern got
+  `TypeError: got multiple values for keyword argument 'n_max'`.  Both are
+  fixed and covered by `tests/nodes/adaptive/test_round_trip.py` and
+  `tests/usd/test_usd_adaptive_node.py`.
+- **The gradient-capture diagnostic evaluates the parameters actually in use**
+  (audit A5).  It no longer reuses `state["mask"]`, which made a state
+  selected at a healthy point report a healthy ratio (1.005) at an exact trap;
+  the active set is re-selected at the evaluated parameters.
+  `check_gradient_capture(gm.params["nodes"][name])` runs the check at a
+  graph's live pytree -- the point `sysid.fit` optimises -- which the
+  constructor-time gate never saw.
+- **`scripts/generate_stability_report.py` imports `maddening.nodes.adaptive`
+  and `maddening.core.solver_utils`** (audit A6), so their `@stability` tags
+  reach the generated report the release gate reads; `tests/compliance/
+  test_stability.py` now fails if either module drops out of that list again.
+  (The committed report is not regenerated here: it is refreshed at release
+  time.)
+- **The `jnp.where` gradient trap is documented, warned about and tested**
+  (audit A9).  Masking the solve output protects the value, not the tangent: a
+  `solve_frozen` that evaluates a singular expression on inactive entries
+  returns a clean forward pass and a `NaN` gradient.  The base class cannot
+  repair it, so it warns when it can see non-finite pre-mask coefficients and
+  offers `AdaptiveNode.mask_safe(mask, operand, fill)`, the inner half of the
+  double-`where` idiom, which the authoring guide now prescribes.
+- **The cold-start diagnostic is evaluated only when it can change the
+  outcome** (audit A13).  It costs two gradient evaluations (8-10x an
+  unguarded `initial_state()`) and `initial_state()` is called from
+  `add_node`, `reset_state`, the profiler, the REST API, the sharded-node
+  paths, the FMI model description and the hypothesis strategies; it is now
+  memoised per instance and parameter point, skipped when the gate is off,
+  when `on_blind="ignore"` or when the node has no trainable leaf, and can be
+  disabled process-wide with `MADDENING_ADAPTIVE_DIAGNOSTICS=0` or
+  `maddening.nodes.adaptive.set_adaptive_diagnostics(False)`.
+- **The adaptive-node suite now visits an active-set switch** (audit A2).
+  `tests/nodes/adaptive/test_active_set_switch.py` bisects a switch and
+  asserts the objective's jump does not vanish as the step shrinks, that
+  central finite differences across it diverge as `1/h` while the returned
+  gradient stays finite, that inside a region the gradient is the derivative
+  of the branch the forward pass selected (checked against a finite difference
+  *of that branch*, with a step verified to cross no switch -- not the
+  exact-baseline pattern the design spike warns against), and that the
+  integral of the gradient plus the crossed jumps reconstructs the objective
+  change.
 - **Type-check job: a broken pyright run can no longer look like a result**
   (independent audit of the phase-1 typing merge; report under
   `benchmarks/results/audit_typing-pep561/`, regression tests in

@@ -5,9 +5,9 @@ bibliography: ../../bibliography.bib
 # AdaptiveNode
 
 **Module**: `maddening.nodes.adaptive`
-**Stability**: stable
+**Stability**: evolving
 **Algorithm ID**: `MADD-NODE-009`
-**Version**: 1.0.0
+**Version**: 1.1.0
 
 ## Summary
 
@@ -48,10 +48,41 @@ $$
 \qquad A_M^{\top} \lambda = \nabla_{c_M} s,
 $$
 
-which is exact on every open region of $\theta$ where $M$ is constant and a
-one-sided (Clarke) subgradient at the kinks where $M$ changes.
+which is exact on every open region of $\theta$ where $M$ is constant.
 
-**Blindness.** Let $G$ be a symmetry group of $(A, b, s)$ with fixed-point set
+**What happens at a region boundary.** The returned gradient ignores the
+dependence of $M$ on $\theta$. Where two candidates swap rank, their
+coefficients $b_k/\lambda_k$ and their sensor weights $\phi_k(x_s)$ differ, so
+$J_{\text{frozen}}$ **jumps**:
+
+$$
+\lim_{\varepsilon \downarrow 0}
+\big[ J_{\text{frozen}}(\theta_s + \varepsilon) - J_{\text{frozen}}(\theta_s - \varepsilon) \big]
+\;\ne\; 0 .
+$$
+
+A discontinuous function is not locally Lipschitz at the discontinuity, so
+**no Clarke subgradient exists there** and the returned value is not one: it is
+the one-sided derivative of the branch the forward pass selected. The
+consequence is *first order*, not second: over an interval the integral of the
+returned gradient misses exactly the jumps it crossed,
+
+$$
+J(b) - J(a) \;=\; \int_a^b \frac{dJ_{\text{frozen}}}{d\theta}\, d\theta
+\;+\; \sum_{\theta_s \in (a,b)} \big[ J(\theta_s^+) - J(\theta_s^-) \big].
+$$
+
+Measured on the 1-D sine toy at $n_{\max} = 256$, top-$|b|$, $K = 16$: over
+$\theta \in [0.40, 0.50]$ the integral of the returned gradient is
+$-1.5808 \times 10^{-3}$ against a true change of $-2.3598 \times 10^{-3}$ — a
+**33 % shortfall**, equal to the sum of the 27 jumps crossed. The omitted term
+decays with the active-set budget, because the coefficient that swaps rank
+shrinks: on the same problem the jump contribution falls from $2.5 \times
+10^{-1}$ of $|J|$ at $K = 8$ to $\sim 10^{-8}$ at $K = 64$ (the spike measured
+$4 \times 10^{-8}$). Registered as anomaly `MADD-ANO-003`; asserted by
+`tests/nodes/adaptive/test_active_set_switch.py`.
+
+**Budget adequacy and blindness.** Let $G$ be a symmetry group of $(A, b, s)$ with fixed-point set
 $\mathrm{Fix}(G)$. If the selection scores modes by a $G$-invariant functional
 of $(A, b)$, then at $\theta_* \in \mathrm{Fix}(G)$ the frozen gradient lies in
 $T_{\theta_*}\mathrm{Fix}(G)$ (Palais' principle of symmetric criticality
@@ -65,6 +96,15 @@ $$
 with $J_{\text{full}}$ the objective on the full basis ($M = $ everything), and
 escapes with the anisotropic step
 $\theta \leftarrow \theta + \delta\, \nabla_\theta J_{\text{full}} / \|\nabla_\theta J_{\text{full}}\|$.
+
+$\rho$ is **not** a symmetry test. It measures how much of the full-basis
+gradient the frozen set reproduces, and it is driven mostly by the active-set
+budget: at a fixed, entirely non-symmetric $\theta = 0.42$ on the 1-D toy it
+measures 0.16 / 0.57 / 0.85 / 1.00 at $K = 4 / 8 / 16 / 32$, identically at
+every $n_{\max}$. A low $\rho$ therefore means *either* too small a budget
+*or* a trap, and only `is_trapped_at` — which perturbs along the escape
+direction and re-selects — separates them. The cold-start check warns for the
+first case and raises only for the second.
 
 ## Discretization
 
@@ -93,15 +133,20 @@ $\theta \leftarrow \theta + \delta\, \nabla_\theta J_{\text{full}} / \|\nabla_\t
 | $c_i = 0$ for $i \notin M$ | `maddening.nodes.adaptive.base.AdaptiveNode.update` | `jnp.where(mask, c, 0)` after every solve (also at cold start) |
 | Cold-start state at the constructor parameters | `maddening.nodes.adaptive.base.AdaptiveNode.initial_state` | Selection with `is_cold_start=True`, solve, blindness gate |
 | $\nabla_\theta J_{\text{full}}$ | `maddening.nodes.adaptive.base.AdaptiveNode.compute_full_basis_gradient` | Default: `jax.grad` of `objective` through `solve_frozen` with an all-true mask |
-| Blindness ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.blindness_ratio` | Sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible |
+| Gradient-capture ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.gradient_capture_ratio` | Active set re-selected at the evaluated $\theta$; sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible. `blindness_ratio` is a deprecated alias |
+| Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | Warns on a low ratio; raises only when `is_trapped_at` confirms a trap or `on_blind="raise"` |
+| Double-`where` guard for a masked operand | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | Sanitises the *input* of an operation that is singular off the active set |
 | Binary trap check | `maddening.nodes.adaptive.base.AdaptiveNode.is_trapped_at` | Re-thresholded finite difference along the escape direction |
 | Escape step $\theta + \delta\, g_{\text{full}}/\|g_{\text{full}}\|$ | `maddening.nodes.adaptive.base.AdaptiveNode.symmetry_break` | Trainable leaves only (`ParamSpec.trainable`) |
 | Gated cold start with one escape attempt | `maddening.nodes.adaptive.base.AdaptiveNode.cold_start` | Raises `AdaptiveNodeBlindnessError` on a persistent trap |
 
 ## Assumptions and Simplifications
 
-1. The active set is locally constant in $\theta$; the frozen gradient is exact
-   on each such region and a subgradient across a change of active set.
+1. The active set is locally constant in $\theta$; the returned gradient is
+   exact on each such region and ignores the set's dependence on $\theta$.
+   Across a change of active set the objective jumps (see *Governing
+   Equations*), so the gradient is neither the derivative nor a subgradient
+   there and first-order methods accumulate the crossed jumps as bias.
 2. `solve_frozen` with every entry of the mask true is the full-basis solve
    (used by the default full-basis gradient).
 3. The objective used by the diagnostics is a scalar function of the solved
@@ -117,34 +162,51 @@ $\theta \leftarrow \theta + \delta\, \nabla_\theta J_{\text{full}} / \|\nabla_\t
 | Parameter | Verified Range | Notes |
 |-----------|---------------|-------|
 | `n_max` | 16 – 256 | Toy problems in the test suite (1-D sine basis, dense SPD system) |
-| Active fraction `K / n_max` | 0.016 – 1.0 | Top-K budgets 4 – 256 of 256 modes; the padded buffer costs `n_max` regardless |
-| Trainable parameters | 1 | The blindness constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `is_trapped_at` between optimiser steps |
-| `blindness_threshold` | 0.7 | Spike round 6; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
+| Active fraction `K / n_max` | 0.016 – 1.0 | Top-K budgets 4 – 256 of 256 modes, all constructible with the default cold-start policy. Below `K / n_max` ≈ 0.1 the gradient-capture ratio falls under the 0.7 threshold and construction *warns* (it is not rejected); the missing first-order term is then percent-level — see the row below |
+| Jump contribution to $dJ/d\theta$ | $2.5\times10^{-1}$ (K=8) → $\sim10^{-8}$ (K=64) | Fraction of $\|J\|$ omitted by the returned gradient per unit $\theta$, 1-D sine toy over $[0.40, 0.42]$. Treat the frozen gradient as trustworthy only in the large-budget end of this range |
+| Trainable parameters | 1 | The diagnostic constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `is_trapped_at` between optimiser steps |
+| `gradient_capture_threshold` | 0.7 | Spike round 6; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
 | `blindness_break_delta` | 0.05 | Spike round 7; escapes the 1-D trap (minimum 0.03) and the 2-D traps tested |
 
 ## Known Limitations and Failure Modes
 
-1. **Kinks.** A gradient step across an active-set change is a subgradient,
-   not the derivative; optimisers that assume smoothness (line searches,
-   quasi-Newton) can stall or oscillate there. Hysteresis in the subclass's
-   selection rule (add above $\varepsilon_{\text{add}}$, remove below
+1. **Jump discontinuities at active-set switches** (`MADD-ANO-003`). A step
+   across an active-set change misses a jump in the objective: the returned
+   gradient is neither the derivative nor a subgradient there, and the
+   objective/gradient pair a line search or quasi-Newton method sees is
+   inconsistent. First-order methods accumulate the sum of the crossed jumps
+   as systematic bias — 33 % of the objective change over a 0.1-wide window at
+   $K = 16$ (see *Governing Equations*), $\sim 10^{-8}$ at $K = 64$.
+   Hysteresis in the subclass's selection rule (add above
+   $\varepsilon_{\text{add}}$, remove below
    $\varepsilon_{\text{remove}} < \varepsilon_{\text{add}}$, using `prev`)
-   reduces chattering; it does not remove the kinks.
+   reduces chattering; it does not remove the jumps. A large active-set budget
+   does shrink them.
 2. **Palais traps.** At a fixed point of the problem's symmetry `jax.grad`
    returns a plausible gradient that is exactly zero in the escape direction;
-   nothing in the forward pass signals this. The cold-start gate catches it
-   at construction; routine monitoring is the caller's policy.
-3. **Non-local bases can produce wrong-sign solutions** when the selection is
+   nothing in the forward pass signals this. The cold-start check catches it
+   at the parameters it is handed — the constructor's, unless you call
+   `check_gradient_capture(gm.params["nodes"][name])` after seeding a graph —
+   and routine monitoring is the caller's policy.
+3. **A low gradient-capture ratio is usually a budget, not a trap.** The ratio
+   cannot distinguish them; `is_trapped_at` can, and `cold_start()` /
+   `symmetry_break()` help only in the trap case (at a budget-limited point
+   the audited case went 0.565 → 0.060).
+4. **Masked operands poison the gradient, not the value.** `solve_frozen` that
+   evaluates a singular expression on inactive entries returns a clean forward
+   pass and a `NaN` gradient; the base class cannot repair it. Use
+   `AdaptiveNode.mask_safe` on the operand.
+5. **Non-local bases can produce wrong-sign solutions** when the selection is
    by source magnitude near a boundary (spike round 4, sine basis with
    top-$|b|$): the active modes' values at the sensor alternate in sign.
    Selecting by solution magnitude ($|b_k/\lambda_k|$) or using a local basis
    avoids it; the base class does not choose for the subclass.
-4. **Cost.** `blindness_ratio` and `symmetry_break` need a full-basis gradient,
+6. **Cost.** `gradient_capture_ratio` and `symmetry_break` need a full-basis gradient,
    the expensive solve adaptivity exists to avoid; the padded buffer costs
    `n_max` memory and FLOPs per step regardless of how many entries are active.
-5. **Abstract.** `AdaptiveNode` cannot be instantiated usefully on its own;
-   `compute_active_set`, `solve_frozen` and (for the diagnostics) `objective`
-   must be supplied.
+7. **Abstract.** `AdaptiveNode` cannot be instantiated at all without
+   `compute_active_set` and `solve_frozen` (both `@abstractmethod`);
+   `objective` stays optional and is needed only by the diagnostics.
 
 ## Stability Conditions
 
@@ -166,11 +228,12 @@ Subclasses may add fields through `extra_initial_state()`.
 
 | Parameter | Type | Default | Units | Description |
 |-----------|------|---------|-------|-------------|
-| `n_max` | int | required | — | Size of the padded basis buffer (structural) |
-| `blindness_threshold` | float | 0.7 | — | Ratio below which a state is blind (class attribute; constructor override) |
+| `n_max` | int | required | — | Size of the padded basis buffer. **Structural and not stored in `self.params`**: a subclass that wants its basis size to survive serialisation declares its own integer parameter for it |
+| `gradient_capture_threshold` | float | 0.7 | — | Ratio below which the active set is judged not to reproduce the full-basis gradient (class attribute; constructor override). `blindness_threshold` is a deprecated alias |
 | `blindness_break_delta` | float | 0.05 | parameter units | `symmetry_break` step size (class attribute; constructor override) |
 | `D_threshold` | int | 5 | — | Trainable-parameter count above which runtime trap monitoring is recommended |
-| `blindness_gate` | bool | True | — | Run the blindness check in `initial_state` |
+| `blindness_gate` | bool | True | — | Run the cold-start diagnostic in `initial_state` (recorded in `self.params`, so it survives a round trip) |
+| `on_blind` | str | `"warn"` | — | `"warn"` / `"raise"` / `"ignore"` policy for a low ratio (recorded in `self.params`) |
 | `dtype` | dtype | canonical float | — | dtype of `c` |
 | subclass `**params` | float / int | — | problem-defined | Physical constants; floats become leaves of the graph parameter pytree with the subclass's `ParamSpec`s |
 
@@ -203,7 +266,15 @@ Subclasses may add fields through `extra_initial_state()`.
   detection and escape), `tests/nodes/adaptive/test_traceability.py` (jit,
   scan, vmap, no gradient leak through the selection),
   `tests/nodes/adaptive/test_graph_integration.py` (GraphManager, params
-  pytree, checkpoint round trip).
+  pytree, checkpoint round trip),
+  `tests/nodes/adaptive/test_active_set_switch.py` (the jump at a switch, the
+  1/h divergence of finite differences across one, the exact in-region
+  gradient against the selected branch, and the integral/jump reconstruction
+  quoted above),
+  `tests/nodes/adaptive/test_masked_gradient_traps.py` (the `jnp.where`
+  gradient trap and `mask_safe`),
+  `tests/nodes/adaptive/test_round_trip.py` and
+  `tests/usd/test_usd_adaptive_node.py` (config and USD reconstruction).
 - Design evidence: `plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md`
   (seven spike rounds behind the constants above).
 
@@ -211,4 +282,5 @@ Subclasses may add fields through `extra_initial_state()`.
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.1.0 | 2026-09-17 | Audit follow-up: jump-discontinuity framing replaces the Clarke/kink claim (`MADD-ANO-003`); `blindness_ratio` renamed `gradient_capture_ratio` (budget adequacy, not symmetry) and the cold-start check warns rather than rejecting unless a trap is established; `n_max` out of `self.params` and the diagnostic settings in it, so a node survives a config / USD round trip; stability lowered to `evolving` pending the 0.4.0 API freeze |
 | 1.0.0 | 2026-09-16 | Initial implementation (frozen-active-set adjoint, blindness diagnostics) |

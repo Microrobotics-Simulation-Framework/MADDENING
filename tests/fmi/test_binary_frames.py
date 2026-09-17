@@ -390,3 +390,121 @@ def test_million_element_get_binary_is_faster_than_json():
     assert 8.0 <= b_bin / n < 8.001                              # 8 bytes per value + a tiny header
     assert b_json / n > 8                                        # JSON text is wider
     assert t_json / t_bin >= 3.0, (t_json, t_bin)
+
+
+# --------------------------------------------------------- limits and robustness
+
+def test_bridge_never_sends_a_frame_over_the_limit(monkeypatch):
+    """A ``get`` / ``get_state`` whose reply would exceed the frame limit
+    (binary or JSON) gets a JSON error reply instead, and the connection
+    stays in sync.  The C wrapper refuses to read a longer frame and
+    drops the connection, so the bridge must never produce one.  The
+    limit is lowered so the plant graph's few values can exceed it."""
+    import maddening.fmi.tcp_bridge as tb
+    gm = _graph()
+    md, bridge = _bridge(gm)
+    pos = _vr(md, "spring.position")
+    monkeypatch.setattr(tb, "_MAX_MESSAGE", 512)
+    with bridge:
+        for binary in (True, False):
+            conn, _ = _connect(bridge, protocol=2 if binary else None)
+            with conn:
+                send_message(conn, {"op": "get", "vr": [pos] * 200})          # 1600 B raw, 800 B JSON
+                flag, body = recv_raw(conn)                                     # <= 512 or it raises
+                assert not flag
+                r = json.loads(body)
+                assert not r["ok"] and "exceeds the 512-byte frame limit" in r["error"], r
+                send_message(conn, {"op": "get", "vr": [pos]})                 # in sync, as negotiated
+                r = recv_message(conn)
+                assert ("raw" in r) is binary and values_of(r).tolist() == [0.5]
+                send_message(conn, {"op": "get_state"})                        # the npz is > 512 B too
+                r = recv_message(conn)
+                assert not r["ok"] and "frame limit" in r["error"], r
+                send_message(conn, {"op": "get", "vr": [pos]})
+                assert values_of(recv_message(conn)).tolist() == [0.5]
+    assert bridge.binary_frames_served == 2                # the two small gets of the binary round
+
+
+def test_deeply_nested_header_is_an_error_reply_not_a_disconnect():
+    """CPython's JSON scanner raises ``RecursionError`` on deep nesting;
+    that must surface as ``ValueError`` from the codec and as an error
+    reply (connection kept) on both the binary and the JSON path."""
+    gm = _graph()
+    md, bridge = _bridge(gm)
+    anchor = _vr(md, "spring.anchor_position")
+    deep = [b"[" * 100_000, b'{"a":' * 50_000, b"[" * 50_000]
+    for text in deep:
+        with pytest.raises(ValueError, match="nested too deeply"):
+            decode_binary(struct.pack(">I", len(text)) + text)
+    with bridge:
+        conn, _ = _connect(bridge)
+        with conn:
+            for text in deep:
+                _send_flagged(conn, struct.pack(">I", len(text)) + text)
+                r = recv_message(conn)
+                assert not r["ok"] and "nested too deeply" in r["error"], r
+            send_message(conn, {"op": "get", "vr": [anchor]})
+            assert values_of(recv_message(conn)).tolist() == [0.0]
+        conn, _ = _connect(bridge, protocol=None)
+        with conn:
+            for text in deep:
+                conn.sendall(struct.pack(">I", len(text)) + text)              # a JSON frame
+                r = recv_message(conn)
+                assert not r["ok"] and "nested too deeply" in r["error"], r
+            send_message(conn, {"op": "get", "vr": [anchor]})
+            assert recv_message(conn) == {"ok": True, "values": [0.0]}
+    # the public reader keeps the same contract
+    a, b = socket.socketpair()
+    with a, b:
+        a.sendall(struct.pack(">I", len(deep[0])) + deep[0])
+        with pytest.raises(ValueError, match="nested too deeply"):
+            recv_message(b)
+
+
+def test_client_hangup_mid_reply_ends_the_connection_quietly():
+    """A ``BrokenPipeError`` from the reply send (the importer died
+    between request and reply) ends the connection loop like an EOF: no
+    exception escapes ``_serve_conn`` and the instance lock is released."""
+    gm = _graph()
+    md, bridge = _bridge(gm)
+    pos = _vr(md, "spring.position")
+    client, server = socket.socketpair()
+    send_message(client, {"op": "hello", "protocol": 2, "binary": True})
+    send_message(client, {"op": "get", "vr": [pos]})
+    send_message(client, {"op": "get_state"})
+    client.close()                                   # every reply send now hits EPIPE
+    bridge._serve_conn(server)                       # in this thread: returns, must not raise
+    assert bridge.requests_served >= 1
+    assert bridge._busy.acquire(blocking=False)      # released in the loop's finally
+    bridge._busy.release()
+    assert server.fileno() == -1                     # the loop closed its end
+
+
+def test_handle_accepts_the_dict_recv_message_returns_for_a_binary_frame():
+    """``recv_message`` yields the header plus ``"raw"`` for a binary frame;
+    ``handle`` takes that dict and validates it exactly as the socket loop
+    does (length against ``n``, dtype, op with a binary form)."""
+    gm = _graph()
+    md, bridge = _bridge(gm)
+    anchor = _vr(md, "spring.anchor_position")
+    a, b = socket.socketpair()
+    with a, b:
+        send_binary(a, {"op": "set", "vr": [anchor], "n": 1, "dtype": "f64"}, _f64([0.25]))
+        req = recv_message(b)
+        assert req["raw"] == _f64([0.25])
+        assert bridge.handle(req) == {"ok": True}
+        assert bridge.handle({"op": "get", "vr": [anchor]})["values"] == [0.25]
+        for bad, needle in (
+            ({**req, "n": 2}, "announces 2 float64 but carries 8"),
+            ({**req, "dtype": "f32"}, "unsupported binary dtype"),
+            ({**req, "raw": "0.25"}, "must be bytes"),
+            ({**req, "op": "get"}, "no binary request form"),
+        ):
+            r = bridge.handle(bad)
+            assert not r["ok"] and "malformed request" in r["error"] and needle in r["error"], (bad, r)
+        assert bridge.handle({"op": "get", "vr": [anchor]})["values"] == [0.25]
+        snap = state_of(bridge.handle({"op": "get_state"}))
+        bridge.handle({"op": "set", "vr": [anchor], "values": [0.75]})
+        send_binary(a, {"op": "set_state", "n": len(snap)}, snap)
+        assert bridge.handle(recv_message(b)) == {"ok": True}
+        assert bridge.handle({"op": "get", "vr": [anchor]})["values"] == [0.25]

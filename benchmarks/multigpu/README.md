@@ -9,7 +9,7 @@ the steps below, done by hand with the existing helpers.
 
 | goal | question | decides |
 |---|---|---|
-| `exchange` | NCCL time of `exchange_unstructured(method="all_to_all")` vs `"ppermute"` at 1e5, 3e5, 1e6 cells on 4 GPUs | whether `ppermute` becomes the default `exchange=` of `ShardedUnstructuredNode` (an API default: change it before the stability freeze or not at all) |
+| `exchange` | NCCL time of `exchange_unstructured(method="all_to_all")` vs `"ppermute"` at 1e5, 3e5, 1e6 cells on 4 GPUs | whether `ppermute` becomes the default `exchange=` of `ShardedUnstructuredNode` (an API default: change it before the stability freeze or not at all).  Only a real-GPU run on **≥ 4 devices** decides (2–3 with `--allow-fewer-devices`, recorded in the JSON; 1 device exchanges nothing and is refused) |
 | `forward` | a 1e6-cell `ShardedUnstructuredNode` forward run on a real unstructured mesh, both transports, checked against the unsharded node | the v0.4.0 "real-mesh size" commitment (`docs/developer_guide/sharding_topology.md`) |
 | `gradient` | `jax.grad` through a sharded rollout (both transports) and through the Jacobi-preconditioned `sharded_cg` at 1e5–1e6 DOF vs the unsharded references | the real-GPU half of the gradient-parity-at-scale gate (the CPU-virtual half is `tests/cloud/multigpu/test_iterative_solver.py::TestGradientParityAtScale`) |
 
@@ -24,9 +24,18 @@ the JSON is copied back.
 ```sh
 cd MADDENING
 JAX_PLATFORMS=cpu python benchmarks/multigpu/run_pod.py --goal all --dry-run --out /tmp/mg-dry
-python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # prints "undecided"
+python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # prints "undecided"; needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
+
+What the timings measure: every timed callable gets inputs that were
+placed on the mesh once, with the `NamedSharding` the compiled
+`shard_map` expects, *outside* the timed region (`input_presharded` in
+the JSON; the runner refuses to time anything else).  An uncommitted
+device-0 array would otherwise be scattered to the mesh on every call
+and charged to both transports equally, compressing the very ratio the
+session measures.  Compile time is reported apart (`compile_s`, pure
+compile, no execution) on the sharded and the unsharded side alike.
 
 If MIME's helix-in-vessel mesh is to be used for `forward`, export it
 now as an `.npz` with `edges` (`(n_edges, 2)` int, cell–cell adjacency,
@@ -86,9 +95,13 @@ python benchmarks/multigpu/run_pod.py --summarise results/multigpu
 ```
 
 `--goal all` does the three in one go (synthetic grid mesh for
-`forward`; add `--mesh` for the real one).  Defaults on GPUs: cells
+`forward`; add `--mesh` for the real one; the file mesh is loaded and
+partitioned once per process, and a supplied `partition` must have
+exactly `--n-devices` non-empty parts).  Defaults on GPUs: cells
 `1e5 3e5 1e6`, 5 warmup + 20 timed repeats per point, 20 steps per timed
-block, `--n-devices 4`.  `--fields N` makes the exchange payload `N`
+block, `--n-devices 4`.  `exchange` refuses to run on 1 device and, on
+2–3 devices, without `--allow-fewer-devices` (which marks the run as
+allowed to decide; a mis-sized pod should be fixed, not accepted).  `--fields N` makes the exchange payload `N`
 float32 per cell (use the state width of the node you care about, e.g.
 5 for a compressible FVM state) — bytes moved scale with it, message
 counts do not.  Re-run `exchange` with `--fields 5 --out
@@ -98,6 +111,11 @@ separately.
 Every run prints one line per measurement, so a hang is visible; the
 JSON is written per goal at the end of that goal.  If a goal fails,
 re-run only that goal.  Everything is deterministic (fixed seeds).
+
+`pytest tests/cloud/multigpu` on the pod runs on 16 *virtual CPU*
+devices unless `JAX_PLATFORMS=cuda` is exported (the root conftest
+defaults to `cpu`); with it and four GPUs the suite uses them and skips
+the tests that need 8/16 devices.
 
 ## 3. Copy back, then stop the pod
 
@@ -129,8 +147,12 @@ and commit it with the summary output pasted into the commit body.
   default, record the numbers in the docs paragraph.
 * **`tie`**: keep `all_to_all` (one collective) unless the byte savings
   (`bytes_total` columns) matter for the target mesh; write that down.
-* **`undecided`**: the directory holds no real-GPU measurement at
-  ≥ 1e5 cells — nothing to decide on.
+* **`undecided`**: no row decides.  A row decides only when it comes
+  from a real accelerator run (not `--dry-run`), has ≥ 1e5 cells, ran on
+  ≥ 4 devices (≥ 2 if that run recorded `allow_fewer_devices`) and has a
+  finite speedup (a 0 ms median is below timer resolution).  The
+  `decides` column of the table and the reason line say what each row
+  lacked.
 
 For `forward`, `parity_x.max_rel` should sit at float32 round-off
 (≤ 1e-5) and both transports should report finite results at 1e6 cells;
@@ -138,29 +160,45 @@ For `forward`, `parity_x.max_rel` should sit at float32 round-off
 static arrays every call) vs `device_step` (the compiled step) shows how
 much of the per-step cost is host-side.  For `gradient`, the rollout
 parity should be ≤ 1e-5 relative and the `sharded_cg` grad/jvp parity
-≤ 1e-3, matching the CPU-virtual gate.
+≤ 1e-3, matching the CPU-virtual gate; the rollout `grad` timings are
+like-for-like (`jax.jit(jax.grad(...))` on both sides, statics placed
+once, compile time in `compile_s`), so "sharded grad is N× the
+unsharded one" is a statement about the compiled step, not about Python.
 
-## Schema of the JSON (schema_version 1)
+## Schema of the JSON (schema_version 2)
 
-Common: `goal`, `dry_run`, `environment` (`hostname`, `timestamp_utc`,
-`python`, `jax`, `jaxlib`, `platform`, `devices`, `device_kinds`,
-`n_devices_visible`, `nvidia_smi`, `xla_flags`, `jax_platforms`,
+Common: `goal`, `dry_run`, `allow_fewer_devices`, `environment`
+(`hostname`, `timestamp_utc`, `python`, `jax`, `jaxlib`, `platform`,
+`devices`, `device_kinds`, `n_devices_visible`, `nvidia_smi` (a list, or
+the string `"skipped (dry run)"`), `xla_flags`, `jax_platforms`,
 `git_commit`), `config` (the CLI namespace), `wall_s`, `results` (one
 entry per cell count).  Timings are `{warmup, repeats, ms: [...],
 min_ms, median_ms, mean_ms}`; parity blocks are `{max_abs, max_rel,
-reference_scale, finite}`.
+reference_scale, finite}`; every `compile_s` is an ahead-of-time compile
+without execution, and `input_presharded` records that the timed inputs
+carried the mesh sharding before the first timed call.
 
 * `exchange.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `fields_per_cell`, `n_local_max`, `n_ghost_max`, `layout_build_s`,
   `traffic_cells_per_shard` (`exchange_traffic()` output),
+  `input_sharding`, `input_presharded`,
   `methods.{all_to_all,ppermute}` = timing + `compile_s`,
   `bytes_per_shard`, `bytes_total`, `messages`, `bandwidth_GBps`;
-  `bit_identical`, `ppermute_speedup_median`, `ppermute_speedup_min`.
+  `bit_identical`, `ppermute_speedup_median` (`null` when the ppermute
+  median is 0), `ppermute_speedup_min`.
 * `forward.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `steps`, `n_local_max`, `n_ghost_max`, `traffic_cells_per_shard`,
-  `methods.<m>` = `compile_s`, `wrapper_step`, `device_step` (timings
-  with `ms_per_step`), `parity_x`, `parity_total`.
+  `methods.<m>` = `compile_s`, `wrapper_first_call_s` (host
+  partitioning of the statics by the public `update()`),
+  `input_presharded`, `wrapper_step`, `device_step` (timings with
+  `ms_per_step`), `parity_x`, `parity_total`.
 * `gradient.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `grad_steps`, `rollout.{unsharded,all_to_all,ppermute}` (`grad`
-  timing, `parity` for the sharded ones), `sharded_cg` (`dof`,
-  `grad_sharded`, `grad_unsharded`, `grad_parity`, `jvp_parity`).
+  timing and `compile_s`; `input_presharded` and `parity` for the
+  sharded ones), `sharded_cg` (`dof`, `input_presharded`,
+  `grad_sharded`, `grad_unsharded`, `compile_s.{sharded,unsharded}`,
+  `grad_parity`, `jvp_parity`).
+
+Schema 1 files (the first dry runs) lack the `compile_s`/`input_presharded`
+keys and carry gradient timings that were not like-for-like; nothing
+under `benchmarks/results/` was written with it.

@@ -72,7 +72,14 @@ path.
 ```
 
 Bit 31 of the prefix marks a binary frame; the low 31 bits are the payload
-length (64 MiB limit either way).  A binary payload is a short JSON
+length.  Frames are limited to 64 MiB in both directions and for both
+kinds: the bridge drops a connection that announces a longer *request*
+(the length is not to be trusted), answers a `get` / `get_state` whose
+*reply* would be longer with a JSON error instead (the connection stays in
+sync; a `get` of more than about 8 M values needs to be split), and the C
+wrapper refuses to read a longer frame of either kind and closes the
+connection, so the instance fails every later call instead of parsing
+stale bytes.  A binary payload is a short JSON
 *header* carrying `op` and metadata, then the *raw* data, so bulk values
 and FMU-state blobs never pass through JSON text (no `%.17g` / `strtod`,
 no base64):
@@ -93,7 +100,9 @@ answers `{"ok":true, ..., "protocol":2, "binary":true}` and, for that
 connection only, sends `get` / `get_state` replies as binary frames and
 accepts binary `set` / `set_state` requests.  A client whose hello lacks
 `protocol` (or says `protocol: 1`, or omits `binary: true`) gets the
-protocol-1 behaviour: JSON everywhere, byte for byte what v0.3.0 spoke.
+protocol-1 behaviour: JSON everywhere, as v0.3.0 spoke it, except that the
+hello reply now also carries `"protocol": 2, "binary": false` (a v0.3.0
+client ignores the extra keys).
 A client announcing a protocol the bridge does not know is refused at
 hello with a clear error.  Conversely, the new wrapper against an older
 bridge (a hello reply without `protocol`) falls back to JSON for every
@@ -110,10 +119,19 @@ everywhere else).
 **Robustness.**  Nothing in a binary frame is trusted: the bridge checks
 `header_len` against the payload, `n` against the raw length, the dtype,
 the value references, bounds, read-only-ness and the state archive exactly
-as for JSON, and answers a malformed frame with an error reply rather
-than dropping the instance; the C side checks the header count against
-the raw length and against the caller's array before any `memcpy`, and
-refuses a flagged length over the limit before allocating for it.  The
+as for JSON (a header nested too deeply for the JSON parser is a malformed
+request like any other), and answers a malformed frame with an error reply
+rather than dropping the instance.  Values are checked in the variable's
+own type: a float32 input set to `1e308` is refused, not stored as `inf`.
+A `set_state` archive is refused from its directory alone, before any
+member is decompressed, unless every member is one the model expects
+(`_token`, `_time`, its state fields, parameters and inputs, all `.npy`)
+and declares no more than the live array it replaces, with a cap on the
+total as well.  The C side checks the header count against the raw length
+and against the caller's array before any `memcpy`, refuses a reply
+length over the limit (binary or JSON) before allocating for it, drops
+the connection on such a reply or on one cut short by the peer, and never
+sends a `set` whose frame, header included, would exceed the limit.  The
 serialized FMU state is opaque to the importer; its encoding (raw `npz`
 on protocol 2, base64 text on protocol 1) is that of the connection it
 came from, so a state serialized under one protocol must be restored

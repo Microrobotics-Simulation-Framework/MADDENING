@@ -12,8 +12,13 @@ jobs:
   # compliance job alone: that job owns the docs checks (citations,
   # implementation mapping, anomaly registry) and the only tests that read
   # docs/ (tests/compliance).  Anything else, including this workflow, runs
-  # every lane.  A push with no usable base (new branch, force-push) counts
-  # as code.
+  # every lane.  A push with no usable base (new branch, force-push) and an
+  # empty diff (a commit and its revert in one push) count as code: the
+  # safe side.  Pattern semantics, on purpose: POSIX `case` `*` matches `/`,
+  # so `docs/*` covers every nested path under docs/ and `*.md` / `*.rst`
+  # match anywhere in the tree, including a README inside src/maddening
+  # (package content, but nothing the test lanes read).  Renames are not
+  # detected, so a rename out of a code path lists the source path too.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -25,6 +30,7 @@ jobs:
 
       - name: Classify changed files
         id: classify
+        shell: bash
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
@@ -44,15 +50,21 @@ jobs:
             echo "no diff base; running every lane"
             echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          changed="$(git diff --name-only "$base" HEAD)"
-          echo "changed files vs $base:"; printf '  %s\n' $changed
+          changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD)"
+          if [ -z "$changed" ]; then
+            echo "empty diff vs $base (nothing changed in the tree); running every lane"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "changed files vs $base:"
           code=false
-          for f in $changed; do
+          while IFS= read -r f; do
             case "$f" in
-              docs/*|plans/*|.claude/*|*.md|*.rst|LICENSE|LICENSE.*|CITATION.cff) ;;
-              *) code=true; break ;;
+              docs/*|plans/*|.claude/*|*.md|*.rst|LICENSE|LICENSE.*|CITATION.cff)
+                echo "  $f  (docs)" ;;
+              *)
+                echo "  $f  (code)"; code=true ;;
             esac
-          done
+          done <<< "$changed"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code lanes needed: $code"
 
@@ -124,10 +136,15 @@ jobs:
     # Phase 1 of the typing policy (docs/developer_guide/typing.md): the
     # pyright run is visible but non-blocking until the 0.4.0 API freeze,
     # after which the STABLE surface is annotated and the check becomes
-    # blocking on that surface.  The step fails when pyright reports
-    # errors so the count is visible, but `continue-on-error` stops it
-    # from failing the workflow; the summary is in the step summary and
-    # the log.
+    # blocking in two tiers (tier 1 at zero errors; tier 2 every public
+    # signature annotated, bodies ratcheted).  Two steps so that a broken
+    # tool never looks like an unchanged count: the first runs pyright and
+    # FAILS THE JOB when the run cannot be trusted (pyright missing, exit
+    # code other than 0/1, no JSON, zero files analysed, core imports
+    # unresolved: exit 2 from scripts/typing_baseline.py); the second
+    # reports the error count and fails under `continue-on-error`, so
+    # the count is visible while the workflow stays green.  The summary
+    # goes to the step summary and the log.
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -148,19 +165,38 @@ jobs:
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
-      - name: Run pyright (non-blocking)
-        continue-on-error: true
+      - name: Run pyright (infrastructure; fails the job)
+        id: pyright
         run: |
           pyright --version
           status=0
           python scripts/typing_baseline.py --markdown --top 15 --fail-on-errors \
             > typing_summary.md || status=$?
           cat typing_summary.md
-          {
-            echo "## pyright (typeCheckingMode from pyrightconfig.json, non-blocking)"
-            cat typing_summary.md
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+          if [ -s typing_summary.md ]; then
+            {
+              echo "## pyright (typeCheckingMode from pyrightconfig.json, non-blocking in phase 1)"
+              cat typing_summary.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0|1) ;;
+            *) echo "::error title=pyright::type check did not complete (exit $status); see the log"
+               exit "$status" ;;
+          esac
+
+      - name: Report error count (non-blocking in phase 1)
+        continue-on-error: true
+        env:
+          STATUS: ${{ steps.pyright.outputs.status }}
+        run: |
+          if [ "$STATUS" = "0" ]; then
+            echo "pyright: no errors"; exit 0
+          fi
+          n="$(sed -n 's/^files analysed:.*; errors: \([0-9]*\);.*/\1/p' typing_summary.md)"
+          echo "::warning title=pyright::${n:-?} type errors in src/maddening (phase 1: visible, non-blocking)"
+          exit 1
 
   compliance:
     runs-on: ubuntu-latest

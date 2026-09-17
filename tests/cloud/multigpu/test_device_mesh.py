@@ -1,15 +1,10 @@
 """Tests for device mesh creation."""
 
-import os
-
+import jax
 import pytest
 
-# Try to force 2 CPU devices. This only works if set BEFORE JAX is first
-# imported.  In CI (GitHub Actions), JAX may already be imported by conftest,
-# so this may be a no-op — tests that need 2 devices skip gracefully.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
-
-import jax
+# The device count is the conftest's business (tests/cloud/multigpu/conftest.py);
+# tests that need more devices than are visible skip.
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 
 _HAS_2_DEVICES = len(jax.devices()) >= 2

@@ -52,11 +52,19 @@ def test_float64_payload_round_trips_bitwise(values):
     assert np.array_equal(back.view(np.uint64), values.view(np.uint64))
 
 
-@given(payload=st.binary(min_size=0, max_size=2048))
+# Headers nested deeper than CPython's JSON scanner can recurse: the
+# scanner raises RecursionError, which the codec must turn into ValueError.
+deep_headers = st.integers(min_value=1, max_value=50_000).flatmap(
+    lambda d: st.sampled_from([b"[" * d, b'{"a":' * d, b"[" * d + b"]" * d])
+).map(lambda text: _HDR.pack(len(text)) + text)
+
+
+@given(payload=st.one_of(st.binary(min_size=0, max_size=2048), deep_headers))
 @settings(max_examples=500, deadline=None)
 def test_any_payload_decodes_consistently_or_raises_value_error(payload):
-    """No byte string makes the decoder raise anything but ValueError, and
-    a successful decode is consistent with the bytes it came from."""
+    """No byte string makes the decoder raise anything but ValueError
+    (deep nesting included), and a successful decode is consistent with
+    the bytes it came from."""
     try:
         header, raw = decode_binary(payload)
     except ValueError:
@@ -135,7 +143,7 @@ def _structured_requests():
     return st.builds(encode_binary, header, raw)
 
 
-payloads = st.one_of(st.binary(max_size=512), st.deferred(_structured_requests))
+payloads = st.one_of(st.binary(max_size=512), st.deferred(_structured_requests), deep_headers)
 
 
 @pytest.fixture(scope="module")
@@ -172,3 +180,24 @@ def test_every_binary_request_gets_a_reply_and_the_connection_survives(running_b
     thread.join(timeout=30)
     assert not thread.is_alive()
     bridge.handle({"op": "reset"})            # any accepted set must not leak into the next example
+
+
+# --------------------------------------------------------- set: dtype narrowing
+
+@given(value=st.floats(allow_nan=True, allow_infinity=True, allow_subnormal=True, width=64))
+@settings(max_examples=300, deadline=None)
+def test_set_of_any_float64_is_refused_or_reads_back_finite(value):
+    """For any float64 the importer sends for a float32 input, either the
+    set is refused (the input keeps its value) or the read-back is finite
+    and within float32 rounding of what was sent: narrowing happens
+    before the finiteness check, so 1e308 can no longer become inf."""
+    bridge, vrs = _bridge_and_vrs()
+    anchor = vrs["anchor"]
+    bridge.handle({"op": "reset"})
+    r = bridge.handle({"op": "set", "vr": [anchor], "values": [value]})
+    (got,) = bridge.handle({"op": "get", "vr": [anchor]})["values"]
+    assert np.isfinite(got)
+    if r["ok"]:
+        assert np.float32(value) == np.float32(got) and np.isfinite(np.float32(value))
+    else:
+        assert got == 0.0 and ("finite" in r["error"] or "does not fit" in r["error"]), r

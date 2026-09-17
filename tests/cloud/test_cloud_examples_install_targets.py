@@ -85,6 +85,13 @@ _STALE = re.compile(r">=0\.4,<0\.6|jax==0\.4|cuda11|JAX >=0\.4|jax(?:lib)?>=0\.4
 _SCAN = ("src", "docker", "docs", "benchmarks/multigpu", "pyproject.toml", "README.md")
 
 
+#: Historical records quote old pins on purpose — a release note explaining
+#: that a stale pin was corrected has to name the pin it corrected.  Scanning
+#: them turns "we fixed this" into a failure, so they are excluded by path
+#: rather than by trying to tell prose from a dependency declaration.
+_HISTORY = ("docs/release_notes/", "CHANGELOG.md")
+
+
 def test_no_stale_jax_pins_in_tree():
     offenders = []
     for top in _SCAN:
@@ -97,6 +104,9 @@ def test_no_stale_jax_pins_in_tree():
             try:
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
+                continue
+            rel = path.relative_to(_ROOT).as_posix()
+            if any(rel.startswith(h) for h in _HISTORY):
                 continue
             for lineno, line in enumerate(text.splitlines(), 1):
                 if _STALE.search(line):

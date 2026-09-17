@@ -86,6 +86,14 @@ def load_registry() -> tuple[dict[str, Any], dict[str, str]]:
     apart: a module missing from ``STABILITY_MODULES`` is invisible to both,
     and ``tests/compliance/test_stability.py`` already fails on that.
 
+    Only keys under ``maddening.`` are returned.  The registry is a process
+    global, and ``@stability`` fires wherever it is applied — including on
+    the throwaway classes ``tests/compliance/test_stability.py`` defines
+    inside its test functions.  Run in a fresh interpreter that never
+    happens, but this function is also called in-process from the tests,
+    and a surface named ``tests.compliance.<...>.<locals>.MyClass`` is not
+    something the package promises.
+
     Returns
     -------
     tuple of (dict, dict)
@@ -101,7 +109,9 @@ def load_registry() -> tuple[dict[str, Any], dict[str, str]]:
     from maddening.core.compliance.stability import (  # noqa: PLC0415
         _STABILITY_REGISTRY,
     )
-    return dict(_STABILITY_REGISTRY), dict(module.SKIPPED_MODULES)
+    registry = {name: level for name, level in _STABILITY_REGISTRY.items()
+                if name.startswith("maddening.")}
+    return registry, dict(module.SKIPPED_MODULES)
 
 
 def resolve(full_name: str) -> Any:

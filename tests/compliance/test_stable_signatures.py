@@ -74,6 +74,22 @@ class TestTheTreeMatchesTheSnapshot:
         recorded = set(json.loads(SNAPSHOT.read_text())["surfaces"])
         assert recorded == expected
 
+    def test_a_tag_applied_outside_the_package_is_ignored(self, guard):
+        """``@stability`` writes to a process-global registry, and
+        ``tests/compliance/test_stability.py`` applies it to throwaway classes
+        defined inside its test functions.  Those are not surfaces the package
+        promises, and they cannot even be resolved by name."""
+        from maddening.core.compliance.metadata import StabilityLevel
+        from maddening.core.compliance.stability import stability
+
+        @stability(StabilityLevel.STABLE)
+        class NotAPublicSurface:
+            pass
+
+        registry, _ = guard.load_registry()
+        assert not [name for name in registry if "NotAPublicSurface" in name]
+        assert all(name.startswith("maddening.") for name in registry)
+
     def test_every_recorded_surface_carries_its_module_and_kind(self):
         surfaces = json.loads(SNAPSHOT.read_text())["surfaces"]
         assert surfaces, "the snapshot records no surfaces at all"

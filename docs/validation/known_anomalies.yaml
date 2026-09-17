@@ -108,3 +108,66 @@ anomalies:
       step and comparing the masks.
     resolution_status: "open"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-004"
+    title: "A coupling group's converged flag is a residual test, not a bound on the distance to the fixed point"
+    description: >
+      CouplingGroup.tolerance is compared against the group's convergence
+      norm of F(x) - x, so converged=True says the last two passes changed
+      the state by less than the threshold, not that the state is within
+      the threshold of the fixed point.  The two differ by the
+      amplification 1/|1 - lambda| of the slowest mode of dF/dx, which the
+      library neither measures nor reports.  An acceleration widens the
+      gap systematically: Aitken and IQN choose the step that annihilates
+      whichever modes dominate the residual, which is what makes them
+      fast and which leaves the remaining error in exactly the mode where
+      |1 - lambda| is smallest.  Measured on the coupling audit's
+      heterogeneous fixture (a 60 000-cell heat grid coupled to four
+      scalar probes, Jacobi, global L2 norm, tolerance 1e-4):
+      acceleration="aitken" reported converged at a state 15-31x its own
+      tolerance from a separately converged reference, where plain
+      Gauss-Seidel on the same fixture held a ratio of 0.32 across ten
+      decades of residual.  Two defects that turned that amplification
+      into an unbounded one are fixed in 0.4.0 -- Aitken's first pass of
+      every timestep relaxed with the clip floor 0.01 instead of the
+      omega it was seeded with, and the criterion could fire on one
+      sub-threshold residual, which under an extrapolating acceleration
+      is frequently a transient dip two decades below the trend.  On that
+      fixture the worst error/residual ratio is now 0.94, and a 100x
+      tighter tolerance now improves the 25-step trajectory by ~37x where
+      it previously improved it by 12%.  What remains is inherent to a
+      residual criterion and is not reported: how far converged=True is
+      from the fixed point depends on the problem's spectrum.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The forward state is as accurate as the residual criterion makes it
+      and no error is raised, so the risk is a quiet accuracy shortfall
+      rather than a crash.  It matters most for gradients: under
+      solver="ift" the implicit-function-theorem derivative is exact only
+      at a fixed point, and strict_convergence gates a training run on
+      this same flag, so a stiff group whose slowest mode has lambda near
+      1 can hand an optimiser a gradient off by roughly residual *
+      cond(I - dF/dx) with a green light.  Whether that matters depends
+      on whether the downstream product differentiates through a coupled
+      group, on the conditioning of its interface problem, and on whether
+      calibrated parameters are validated against held-out measurements.
+      It is not safety relevant for a forward run whose accuracy is
+      established by convergence study rather than by the flag.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.tolerance"
+      - "maddening.core.coupling.group.CouplingGroup.strict_convergence"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "0.4.0"
+    workaround: >
+      Calibrate the criterion once per problem instead of trusting it:
+      solve the same step at tolerance t and at t/100 and take the
+      difference between the two answers as the error at t.  If the
+      answer barely moves, the residual is not resolving the slow mode
+      and the tolerance is not what is limiting accuracy.  Prefer
+      convergence_norm="interface" or "mixed" over the global L2 norm
+      when the group mixes field scales, and treat strict_convergence as
+      a guard against exhausting max_iterations, which is what it
+      detects, not as an accuracy assertion.
+    resolution_status: "open"
+    github_issue: null

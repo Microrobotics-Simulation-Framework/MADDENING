@@ -156,6 +156,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A coupling group no longer reports convergence it has not reached**:
+  `aitken`/`iqn-*` need the threshold met on two consecutive passes (a lone
+  dip is not arrival) and `max_iterations=1` reports its real residual
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep
@@ -267,6 +270,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- MADD-ANO-004: `converged=True` is a residual test, not a bound on the
+  distance to the fixed point -- calibrate it by re-solving at a 100x tighter
+  tolerance (minor, open, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
   swap rank, so no Clarke subgradient exists there and the integral of the

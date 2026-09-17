@@ -21,6 +21,7 @@ import time.  Levels:
 | `maddening.api.binary_encoder.BinaryStateEncoder` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.UnstructuredPartitionLayout` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.build_unstructured_partition` | evolving |
+| `maddening.cloud.multigpu.halo_unstructured.exchange_traffic` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.exchange_unstructured` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.gather_value` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.partition_value` | evolving |
@@ -32,6 +33,17 @@ import time.  Levels:
 | `maddening.cloud.multigpu.sharded_node.ShardedStencilNode` | stable |
 | `maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode` | stable |
 | `maddening.cloud.providers.CloudProvider` | evolving |
+| `maddening.cloud.resume.download_and_load_state` | evolving |
+| `maddening.core.coupling.mapping.StaticLinearMapping` | evolving |
+| `maddening.core.coupling.mapping.matrix_mapping` | evolving |
+| `maddening.core.coupling.mapping.nearest_neighbor_mapping` | evolving |
+| `maddening.core.coupling.mapping.projection_1d_mapping` | evolving |
+| `maddening.core.coupling.mapping.rbf_mapping` | evolving |
+| `maddening.core.coupling.mapping.rbf_matrix` | evolving |
+| `maddening.core.coupling.mapping_spec.MappingSpec` | evolving |
+| `maddening.core.coupling.mapping_spec.build_mapping` | evolving |
+| `maddening.core.coupling.mapping_spec.make_point_resolver` | evolving |
+| `maddening.core.coupling.mapping_spec.point_array_digest` | evolving |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
 | `maddening.core.node.SimulationNode` | stable |
@@ -40,12 +52,27 @@ import time.  Levels:
 | `maddening.core.params.constrain` | evolving |
 | `maddening.core.params.trainable_mask` | evolving |
 | `maddening.core.params.unconstrain` | evolving |
+| `maddening.core.simulation.compile_cache.enable` | evolving |
+| `maddening.core.simulation.compile_cache.enable_from_env` | evolving |
+| `maddening.core.simulation.compile_cache.warm_cache` | evolving |
+| `maddening.core.simulation.profiler.TraceSummary` | evolving |
+| `maddening.core.simulation.profiler.profile_graph` | evolving |
+| `maddening.core.solver_utils.ift_linear_solve` | experimental |
 | `maddening.core.static_data.StaticArray` | stable |
 | `maddening.fmi.directional_derivatives.get_directional_derivative` | evolving |
 | `maddening.fmi.fmu_state.FMUState` | evolving |
 | `maddening.fmi.fmu_state.deserialize_fmu_state` | evolving |
 | `maddening.fmi.fmu_state.serialize_fmu_state` | evolving |
 | `maddening.fmi.model_description.build_model_description` | evolving |
+| `maddening.fmi.package.build_fmu_binary` | evolving |
+| `maddening.fmi.package.write_fmu` | evolving |
+| `maddening.fmi.sidecar.FmuSidecar` | evolving |
+| `maddening.fmi.sidecar.SidecarConfig` | evolving |
+| `maddening.fmi.tcp_bridge.FmuTcpBridge` | evolving |
+| `maddening.nodes.adaptive.base.AdaptiveNode` | evolving |
+| `maddening.nodes.adaptive.base.AdaptiveNodeBlindnessError` | evolving |
+| `maddening.nodes.adaptive.base.adaptive_diagnostics_enabled` | evolving |
+| `maddening.nodes.adaptive.base.set_adaptive_diagnostics` | evolving |
 | `maddening.nodes.ball.BallNode` | stable |
 | `maddening.nodes.health_check.HealthCheckNode` | experimental |
 | `maddening.nodes.heart_pump.HeartPumpNode` | experimental |
@@ -59,6 +86,16 @@ import time.  Levels:
 | `maddening.surrogates.architecture.SurrogateArchitecture` | experimental |
 | `maddening.surrogates.dataset.DatasetGenerator` | experimental |
 | `maddening.surrogates.node.SurrogateNode` | experimental |
+| `maddening.surrogates.training.trainer.SurrogateTrainer` | experimental |
+| `maddening.sysid.FIMReport` | evolving |
+| `maddening.sysid.FitResult` | evolving |
+| `maddening.sysid.fim` | evolving |
+| `maddening.sysid.fit` | evolving |
+| `maddening.sysid.fit_lm` | evolving |
+| `maddening.sysid.fit_multiple_shooting` | evolving |
+| `maddening.sysid.init_window_states` | evolving |
+| `maddening.sysid.observations_from_history` | evolving |
+| `maddening.sysid.windowed_loss` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*42 API surfaces registered.*
+*79 API surfaces registered.*

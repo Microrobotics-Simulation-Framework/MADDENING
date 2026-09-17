@@ -146,11 +146,12 @@ pytest plugin is loaded (the suite runs with
 | Profile | `max_examples` | Used by | Notes |
 |---------|----------------|---------|-------|
 | `dev`   | 50  | default for every local run | fast enough to keep the full suite in its ~50-minute budget |
-| `ci`    | 200 | the `verify-hypothesis` GitHub Actions job | 4x the search for every test that lets the profile own its depth |
+| `ci`    | 200 | the `verify-hypothesis` GitHub Actions job | 4x the search; the depth tiers below scale with it |
 
 A per-test `@settings(max_examples=...)` **overrides the profile**, so a test
 that sets its own cap runs at that cap under both profiles and `ci` buys it
-nothing. That is the whole reason for the house rule below.
+nothing. That is the whole reason for the house rule and the depth tiers
+below.
 
 Both set `deadline=None` (a JAX compile blows any wall-clock deadline),
 `print_blob=True` (a failure prints a `@reproduce_failure` blob you can
@@ -182,6 +183,50 @@ is not an error, the job just starts from an empty database.
 
 To clear a stale entry locally, delete `.hypothesis/`.
 
+### Depth tiers
+
+A hand-picked `max_examples` overrides the profile, so a test that carries
+one runs at that number under `dev` and under `ci` alike. With about a
+hundred such call sites across the tree, the deeper profile bought almost
+nothing: `tests/verification/hypothesis/` measured **707 s under `dev`
+against 721 s under `ci`** — 2% apart, for a profile that asks for four
+times the search. With the tiers in place the same suite measures **462 s
+under `dev` and 1365 s under `ci`** — `dev` is a third faster than it was,
+and `ci` is 3x `dev` because it is finally doing more work rather than the
+same work.
+
+Depth a test really does need to state is therefore expressed as a
+**tier**: a multiple or fraction of the active profile's `max_examples`,
+resolved once in the root `tests/conftest.py` and imported by name.
+
+```python
+from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
+
+@given(x=st.floats(-1e4, 1e4, allow_nan=False))
+@settings(max_examples=EXAMPLES_CHEAP)
+def test_clamp_is_idempotent(x):
+    ...
+```
+
+| Tier | Resolves to | `dev` | `ci` | One example is |
+|------|-------------|-------|------|----------------|
+| `EXAMPLES_CHEAP` | 4x the profile | 200 | 800 | a pure function on scalars or small arrays, or a codec/socket round trip: no JAX trace, no graph build, no fresh compile — a few milliseconds at most |
+| `EXAMPLES_STANDARD` | the profile itself | 50 | 200 | an eager node update on a fixed shape, a call into an already-compiled step, a constrain/unconstrain round trip |
+| `EXAMPLES_COSTLY` | 2/5 of the profile, floored at 20 | 20 | 80 | a fresh JAX trace and compile, a dense solve or a `vjp` per draw, an optimiser loop, a multi-device `shard_map`, a full rollout, a graph built and compiled per draw |
+
+The tiers are named for **cost per example**, because that is the only
+thing the test author is in a position to judge; how wide to search at
+that cost is the profile's business. Pick one by reading what a single
+example actually does, not by matching the number that used to be there.
+Every run prints the resolved tiers in the pytest header beside the
+profile name.
+
+`stateful_step_count` is deliberately **not** tiered: it sets how long one
+example is, not how many there are, so scaling it with the profile would
+multiply `ci`'s work by the square and turn one example into seconds. The
+state machines in `tests/property/` keep an absolute step count — with the
+reason in the docstring — and leave `max_examples` to the profile.
+
 ### `max_examples`: the house rule
 
 **A property test carries no `max_examples`. The profile owns it.** That is
@@ -196,8 +241,17 @@ loop, a multi-device `shard_map`, a full rollout. Then:
   generation and the test is decoration: it can pass for months and fail
   once, which is exactly the failure mode this configuration exists to
   remove;
-* prefer the value already used by the sibling properties in the same file
-  over inventing a new one;
+* reach for a **tier** before a number. A tier says what the example costs
+  and lets `ci` search deeper than `dev`; a number freezes both;
+* a bare number is still right where it encodes a real constraint, and the
+  comment must say which:
+  * *the search space is exhausted anyway* — a rate multiplier drawn from
+    2..5, a pair of timesteps sampled from four values. Hypothesis stops
+    when it has seen every case, so a profile-relative cap would promise
+    depth that does not exist;
+  * *one example is measured in seconds* — a 30-iteration
+    Levenberg–Marquardt fit over a full rollout. `EXAMPLES_COSTLY` under
+    `ci` would turn that test into minutes on its own;
 * an explicit value *above* the profile default is fine and needs no
   special pleading — it only ever deepens the test.
 

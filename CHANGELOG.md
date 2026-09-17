@@ -157,8 +157,8 @@ guidance; the itemized changes follow.
 
 ### Fixed
 - **A coupling group no longer reports convergence it has not reached**:
-  `aitken`/`iqn-*` need the threshold met on two consecutive passes (a lone
-  dip is not arrival) and `max_iterations=1` reports its real residual
+  `acceleration="aitken"` needs the threshold met on two consecutive passes
+  (a lone dip is not arrival), `max_iterations=1` reports its real residual
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep

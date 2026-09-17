@@ -131,8 +131,11 @@ anomalies:
       into an unbounded one are fixed in 0.4.0 -- Aitken's first pass of
       every timestep relaxed with the clip floor 0.01 instead of the
       omega it was seeded with, and the criterion could fire on one
-      sub-threshold residual, which under an extrapolating acceleration
-      is frequently a transient dip two decades below the trend.  On that
+      sub-threshold residual, which under Aitken is frequently a
+      transient dip two decades below the trend (Aitken now has to meet
+      the threshold twice in a row; IQN, whose step is a least-squares
+      solve rather than a clipped scalar, has not been measured dipping
+      and is not charged for the second pass).  On that
       fixture the worst error/residual ratio is now 0.94, and a 100x
       tighter tolerance now improves the 25-step trajectory by ~37x where
       it previously improved it by 12%.  What remains is inherent to a

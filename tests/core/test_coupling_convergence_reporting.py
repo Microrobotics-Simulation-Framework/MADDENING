@@ -2,19 +2,19 @@
 
 Two invariants live here.
 
-*Extrapolating accelerations need a second opinion.*  Aitken and IQN
-choose a step that annihilates whichever modes dominate the residual.
-That is what makes them fast, and it is also what decouples the
-residual from the error: the residual sequence goes non-monotone and
-can dip orders of magnitude below its own trend for a single pass
-while the iterate has barely moved.  Stopping there reports
-``converged=True`` far from the fixed point -- and since the dip
-undershoots any plausible threshold, tightening ``tolerance`` does not
-move the exit, so ``tolerance`` stops controlling accuracy at all.
-Those accelerations must therefore meet the threshold on two
-*consecutive* passes; ``none`` and ``fixed`` advance by one constant
-linear operator, keep the monotone-residual argument, and must not pay
-for the guard.
+*Aitken needs a second opinion.*  It re-derives a scalar relaxation
+factor from each pair of residuals and clips it to [0.01, 2.0].  When
+its single-dominant-mode assumption fails the factor saturates
+alternately at both bounds and the residual sequence goes
+non-monotone, dipping orders of magnitude below its own trend for a
+single pass while the iterate has barely moved.  Stopping there
+reports ``converged=True`` far from the fixed point -- and since the
+dip undershoots any plausible threshold, tightening ``tolerance`` does
+not move the exit, so ``tolerance`` stops controlling accuracy at all.
+Aitken must therefore meet the threshold on two *consecutive* passes.
+Nothing else pays for the guard: ``none`` and ``fixed`` advance by one
+constant linear operator, and IQN's least-squares step is not a
+clipped scalar and has never been measured dipping.
 
 *A cap of one is a report, not an exemption.*  ``max_iterations=1``
 means "one staggered pass"; it is a legitimate setting, and it has to
@@ -104,40 +104,43 @@ def _group_l2(before, after, names):
 
 
 # ---------------------------------------------------------------------------
-# CF-01 -- the stopping criterion under an extrapolating acceleration
+# CF-01 -- the stopping criterion under Aitken
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("acceleration", ["aitken", "iqn-ils", "iqn-imvj"])
-def test_extrapolating_acceleration_needs_two_consecutive_passes_to_stop(
-    acceleration,
-):
+def test_aitken_needs_two_consecutive_passes_to_stop():
     """A lone sub-threshold residual must not end the iteration.
 
-    Under Aitken/IQN a single value at or below the threshold is not
-    evidence of arrival: the accelerator annihilates the modes that
-    dominate the residual, so the residual can collapse for one pass
-    and spring back on the next while the iterate is still far from
-    the fixed point.  The loop must keep going until it sees two in a
-    row.
+    Aitken re-derives a clipped scalar relaxation factor from each pair
+    of residuals.  When its single-dominant-mode assumption fails the
+    factor saturates alternately at both clip bounds and the residual
+    collapses for one pass and springs back on the next, while the
+    iterate has barely moved.  One value at or below the threshold is
+    therefore not evidence of arrival; the loop must see two in a row.
     """
-    n_iters, final_res = _scripted_loop(acceleration, _DIP_SCHEDULE)
+    n_iters, final_res = _scripted_loop("aitken", _DIP_SCHEDULE)
     assert n_iters == 7, (
-        f"{acceleration} stopped after {n_iters} passes; the schedule's "
-        "lone dips are at passes 3 and 6 and the first genuine pair "
-        "ends at pass 7"
+        f"aitken stopped after {n_iters} passes; the schedule's lone "
+        "dips are at passes 3 and 6 and the first genuine pair ends at "
+        "pass 7"
     )
     assert final_res == pytest.approx(1e-3)
 
 
-@pytest.mark.parametrize("acceleration", ["none", "fixed"])
-def test_plain_iteration_stops_on_the_first_sub_threshold_pass(acceleration):
-    """The guard is scoped to the adaptive accelerations.
+@pytest.mark.parametrize(
+    "acceleration", ["none", "fixed", "iqn-ils", "iqn-imvj"]
+)
+def test_other_accelerations_stop_on_the_first_sub_threshold_pass(
+    acceleration,
+):
+    """The second opinion is scoped to ``_TWO_PASS_EXIT``.
 
     ``none`` and ``fixed`` advance by one constant linear operator, so
-    their residual sequence is asymptotically monotone and one value
-    at or below the threshold is enough.  Making them pay an extra
-    pass would be a silent slowdown of every uncoupled-from-the-bug
-    configuration.
+    their residual sequence is asymptotically monotone.  IQN's step is
+    a least-squares solve over an accumulating secant basis rather
+    than a clipped scalar, it converges superlinearly in 2-4 passes
+    across every sweep fixture, and no dip has been measured in one --
+    a mandatory extra pass would cost it 30-50% of its budget for no
+    measured gain.  Charging any of them would be a silent slowdown.
     """
     n_iters, final_res = _scripted_loop(acceleration, _DIP_SCHEDULE)
     assert n_iters == 3

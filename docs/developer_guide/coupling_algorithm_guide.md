@@ -352,7 +352,16 @@ the trajectories drift further apart as a result.  Measured against the
 each field by its own magnitude rather than the graph's largest, the
 worst interface-norm row per fixture runs from 3.8x10⁻⁵ (`chain-2`)
 through 2x10⁻³ (`chain-20`, `star-4`) to 3.7x10⁻² on `chain-50`; every
-L2 row stays within 5x10⁻⁴.  That is the same fixed point reached
+L2 row on the fast fixtures stays within 5x10⁻⁴.
+
+The largest disagreement anywhere in the sweep is 4.2x10⁻² on
+`heterogeneous`, from `jacobi/aitken/l2` — a row that reports itself
+fully converged.  That is a fixture with a four-orders-of-magnitude
+spread of scales between its grid and its scalar nodes, and the figure
+is small enough to be consistent with each configuration stopping at its
+own tolerance, but it is the one number here that has not been run down
+to a cause.  If you are relying on `heterogeneous` for anything load-
+bearing, start by reproducing that row.  That is the same fixed point reached
 to a looser tolerance, not a different one — the sweep records
 `fixed_point_agreement` per fixture and the suite asserts it — but the
 deviation grows with the fixture's condition number, so set `rtol`

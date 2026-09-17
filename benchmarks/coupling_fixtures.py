@@ -314,6 +314,26 @@ def _spring(name, dt, gain, mass=1.0, x0=0.0, v0=0.0, damped=True):
     """
     from maddening.nodes.spring import SpringDamperNode
 
+    if damped and gain < 1.0:
+        # Cheap guard against the failure that cost the most time while
+        # these fixtures were being built: a time-stepping blow-up that
+        # looks exactly like a coupling failure in the diagnostics.  The
+        # worst mode of a symmetric coupling operator has |mu| <= gain,
+        # and the parameterisation is chosen so this always passes — but
+        # it stops passing the moment someone changes _LIVELINESS or
+        # hands in a gain the damping was not derived for.  (For the
+        # ring, where the gain varies per node, this is approximate: it
+        # checks each node against its own gain rather than against the
+        # ring's largest.)
+        radius = _mode_radius(gain, gain)
+        if radius >= 1.0:
+            raise ValueError(
+                f"spring {name!r}: gain={gain:g} with LIVELINESS="
+                f"{_LIVELINESS:g} gives a per-step amplification of "
+                f"{radius:.3f} >= 1.  The fixture would diverge for "
+                f"time-stepping reasons that have nothing to do with the "
+                f"coupling algorithm."
+            )
     stiffness = _SELF_KAPPA * mass / (dt * dt)
     xi = _xi_for(gain) if damped else 0.0
     damping = xi * mass / dt

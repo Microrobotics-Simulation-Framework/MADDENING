@@ -109,6 +109,10 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Version is now `0.4.0.dev0`** (was `0.3.1`) so a development build is
+  distinguishable from the last release.  `maddening.__version__` prefers
+  installed distribution metadata, so an editable install predating this
+  keeps reporting the old version until reinstalled.
 - **Coupling groups default to `solver="ift"`**, a `while_loop` that exits on
   convergence instead of always running `max_iterations`.  Set `solver="fori"`
   to keep the old behaviour

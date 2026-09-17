@@ -126,6 +126,14 @@ The **Verification**, **Security**, and **Known Anomalies** sections are require
 
 Update the changelog with every commit that adds, changes, fixes, or deprecates user-visible functionality. Empty sections can be omitted in the commit but must be present in release notes.
 
+### Entry style
+
+Add exactly **one contiguous block, at most three lines**, at the **top** of the relevant subsection, and never edit or reorder existing lines: branches merge in parallel, and appending at the top is what keeps the conflicts trivial.
+
+An entry answers two questions only — what changed, and what a user has to do about it. Measurements, file inventories, design rationale, test counts and "why" paragraphs belong in the pull request description and in the per-version release notes under `docs/release_notes/`; link to the release notes from the top of `## [Unreleased]`. If three lines are not enough, the surplus is release-notes material.
+
+Internal test infrastructure — fuzz harnesses, Hypothesis profiles and depth tiers, property-test packages, CI gating — is contributor-facing rather than user-facing. It belongs in the release notes' engineering section, or in a single changelog line at most.
+
 ## Anomaly Registry
 
 Known bugs, limitations, and failure modes go in `docs/validation/known_anomalies.yaml`. See [CONTRIBUTING.md](https://github.com/Microrobotics-Simulation-Framework/MADDENING/blob/main/CONTRIBUTING.md) for the three-phase anomaly lifecycle and release gate model.

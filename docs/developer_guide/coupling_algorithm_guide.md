@@ -245,12 +245,31 @@ earlier run of the identical code, because XLA's CPU SVD inside a
 `while_loop` is erratic.  Treat it as "one to two orders of magnitude",
 not as 79.  Two levers, in order:
 
-1. **Lower `max_iterations`.**  A cap of 60 gives IQN 59 secant columns
-   whether or not it ever needs them.
-2. **Set `accelerated_fields` explicitly** so a large-state node does not
-   put its whole array into the least-squares problem.  `None`
-   auto-detects the fields the group's internal edges *read*, which for
-   a grid node coupled on one cell is still the entire grid.
+**1. Lower `max_iterations`.**  A cap of 60 gives IQN 59 secant columns
+whether or not it ever needs them.  Re-running the same graphs with
+`--max-iterations 16` (`coupling_sweep_cap16_cpu.json`):
+
+| fixture / config | cap 60 | cap 16 |
+|---|---|---|
+| `chain-50` `gs/iqn-ils/l2` | 14.1 it, 107 ms | 14.0 it, 3.00 ms |
+| `chain-50` `gs/iqn-imvj5/l2` | 13.6 it, 65.0 ms | 13.8 it, 3.44 ms |
+| `chain-20` `gs/iqn-ils/l2` | 13.6 it, 2.56 ms | 13.6 it, 1.75 ms |
+| `star-16` `gs/iqn-ils/l2` | 5.0 it, 1.43 ms | 5.0 it, 1.35 ms |
+
+Same iteration count, a thirty-fifth of the cost on the worst row.  The
+cap is not a free safety margin, it is a sizing parameter.
+
+The obvious caveat: a cap only costs nothing for configurations that
+already converge inside it.  In the same run, `gs/none/l2` at cap 16
+converged on **0%** of `chain-20` and `chain-50` steps, 3% of `star-16`
+and 4% of `stiff-pair-0.8` — it needs 20–25.  Set the cap from the
+iteration count you measured, not from the one you hoped for, and read
+`converged_fraction` afterwards.
+
+**2. Set `accelerated_fields` explicitly** so a large-state node does not
+put its whole array into the least-squares problem.  `None`
+auto-detects the fields the group's internal edges *read*, which for
+a grid node coupled on one cell is still the entire grid.
 
 ## Four combinations that theory says should win
 

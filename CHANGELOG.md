@@ -596,6 +596,46 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   tier 1 blocking at zero errors, tier 2 every public signature
   annotated with bodies ratcheted.
 - **Independent audit, round 4** (residue across rounds 1-3; report under
+- **Multi-GPU session runner: exchange timing and recommender corrected
+  before any pod time is spent** (independent audit of the session
+  preparation, findings F1-F15; regression tests in
+  `tests/cloud/multigpu/test_run_pod_dry_run.py`,
+  `test_conftest_device_policy.py` and
+  `tests/cloud/test_cloud_examples_install_targets.py`).  The `exchange`
+  goal timed a slab that lived on device 0, so every timed call also
+  scattered the whole slab to the mesh and both transports were charged
+  the same constant (about 2/3 of the measured time on 4 virtual CPUs);
+  all timed inputs of `exchange`, `forward` and `gradient` are now
+  placed once with the mesh `NamedSharding` outside the timed region,
+  the runner refuses to time anything else and records
+  `input_presharded`.  `recommend()` accepted single-GPU rows (a no-op
+  exchange with a timer-noise ratio) and raised `TypeError` on a zero
+  median; a row now decides only from a real accelerator run at
+  >= 1e5 cells on >= 4 devices (>= 2 with the new
+  `--allow-fewer-devices`, recorded in the JSON) with a finite speedup,
+  the reason line names what each row lacked, and `--goal exchange` is
+  refused on 1 device (and on 2-3 without the flag).  Rollout gradient
+  timings compared a jitted unsharded grad with a retracing, host
+  re-partitioning sharded one; both are `jax.jit(jax.grad(...))` with
+  statics placed once and compile time reported apart (`compile_s`, also
+  for `forward` and `sharded_cg`; JSON `schema_version` 2).  `--summarise`
+  no longer imports JAX and `--dry-run` no longer shells out to
+  `nvidia-smi`; `--mesh` is loaded and partitioned once per process and a
+  file partition with fewer non-empty parts than `--n-devices` is an
+  error instead of silent empty shards.  Test policy: the four multigpu
+  test modules that still set `XLA_FLAGS` themselves (overriding
+  `MADDENING_VIRTUAL_DEVICES=0` and the accelerator rule) no longer do,
+  the conftest is the only setter (grep test), and a malformed or
+  negative `MADDENING_VIRTUAL_DEVICES` is a one-line usage error at
+  collection instead of a traceback.  Stale JAX pins: `docker/Dockerfile.cloud`
+  (`jax[cuda12]>=0.4,<0.6`; its Ubuntu 22.04 base has Python 3.10, which
+  neither MADDENING nor `jax>=0.10` supports, so the image moves to the
+  CUDA 12.6 / Ubuntu 24.04 base with Python 3.12) and the SOUP table now
+  carry the `pyproject` range; cloud examples 04/06/07 installed the
+  corrected pin under `python3.10` (uninstallable) and now use
+  `python3.12`, with PyGObject built by pip for that interpreter in the
+  two streaming examples and the constraint documented in their
+  docstrings.
   `benchmarks/results/audit4/`, regression tests in
   `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).
   FMU bridge: an input the importer never set is now the advertised zero

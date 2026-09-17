@@ -260,7 +260,7 @@ def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
     dataclass declares, and ``nodes`` comes back out as the positional
     argument.
 
-    Nothing is validated here on purpose.  ``add_coupling_group`` checks
+    Nothing else is validated here on purpose.  ``add_coupling_group`` checks
     the node names against the graph and the group against the groups
     already registered, and ``CouplingGroup.__post_init__`` checks every
     enum, so a hand-edited file is rejected by exactly the code that
@@ -268,6 +268,13 @@ def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
     """
     kwargs = dict(d)
     nodes = kwargs.pop("nodes")
+    if isinstance(nodes, str):
+        # ``list("rod_a")`` is five one-letter node names, and the failure
+        # that follows talks about a node called 'r'.  The one conversion
+        # here that can go quietly wrong, so it is the one thing checked.
+        raise TypeError(
+            f"'nodes' is a list of node names, not the string {nodes!r}"
+        )
     accelerated = kwargs.get("accelerated_fields")
     if accelerated is not None:
         kwargs["accelerated_fields"] = {

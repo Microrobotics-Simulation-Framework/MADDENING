@@ -241,6 +241,13 @@ def test_a_group_with_no_nodes_key_is_rejected_by_name():
         GraphManager.from_dict(config, REGISTRY)
 
 
+def test_a_string_node_list_is_not_five_one_letter_nodes():
+    """``list("rod_a")`` is a list of five names, and the failure that
+    follows it talks about a node called ``'r'``."""
+    with pytest.raises(ValueError, match="not the string 'rod_a'"):
+        GraphManager.from_dict(_config_with(nodes="rod_a"), REGISTRY)
+
+
 def test_two_groups_that_share_a_node_are_refused_on_load():
     """The graph refuses overlapping groups when they are built by hand
     (``add_coupling_group``), so it refuses them from a file too — naming

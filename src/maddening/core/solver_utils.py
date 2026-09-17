@@ -1,17 +1,24 @@
 """Public solver utilities.
 
 This module exposes the :func:`ift_linear_solve` primitive — a thin,
-``@stability(STABLE)`` wrapper over :func:`lineax.linear_solve` that
+``@stability(EXPERIMENTAL)`` wrapper over :func:`lineax.linear_solve` that
 any node solving a linear system in ``update()`` can use to obtain a
 clean differentiable path.  Lineax's native autodiff propagates the
 linear-solve adjoint correctly; this wrapper does **not** install a
 MADDENING-level ``custom_vjp``.
 
 .. note::
-   Shipped in v0.3.1 as an ``@stability(EXPERIMENTAL)`` pilot; promoted to
-   ``@stability(STABLE)`` in v0.4.0 together with its primary consumer, the
-   :class:`~maddening.nodes.adaptive.AdaptiveNode` framework, with the
-   signature unchanged.  Requires the ``lineax`` optional dependency:
+   **Experimental pilot (v0.3.1).**  ``ift_linear_solve`` is shipped early —
+   ahead of its roadmapped 0.4/M3 home — as an ``@stability(EXPERIMENTAL)``
+   pilot for downstream projects building on MADDENING.  The signature and
+   behaviour are validated but not yet frozen.  It was briefly promoted to
+   ``@stability(STABLE)`` alongside the ``AdaptiveNode`` framework and put
+   back: the 0.4.0 API freeze decides the final level, informed by the open
+   questions in ``docs/developer_guide/adaptive_node.md`` (whether the
+   wrapper should expose ``restart`` / ``max_steps`` / ``stagnation_iters``
+   and stop leaking ``lineax`` / ``equinox`` runtime error types — the
+   remedy lineax prints for a stagnating solve is not reachable through
+   this signature).  Requires the ``lineax`` optional dependency:
    ``pip install maddening[ift]``.
 
 Background
@@ -62,7 +69,7 @@ from maddening.core.compliance.stability import stability
 _ALLOWED_SOLVERS = ("gmres", "cg", "dense")
 
 
-@stability(StabilityLevel.STABLE)
+@stability(StabilityLevel.EXPERIMENTAL)
 def ift_linear_solve(
     operator_fn: Callable[[jax.Array], jax.Array],
     rhs: jax.Array,
@@ -120,7 +127,16 @@ def ift_linear_solve(
     Raises
     ------
     ValueError
-        If ``solver`` is not one of ``"gmres"``, ``"cg"``, ``"dense"``.
+        If ``solver`` is not one of ``"gmres"``, ``"cg"``, ``"dense"``,
+        or if ``rhs`` is not rank-1.
+    equinox._errors._EquinoxRuntimeError or jax.errors.JaxRuntimeError
+        Propagated from ``lineax`` when an iterative solve does not
+        converge or stagnates (the former eagerly, the latter under
+        ``jit`` / ``scan``).  These are third-party types and the remedy
+        lineax names (``stagnation_iters``, ``restart``) is not reachable
+        through this signature; both are open questions for the 0.4.0 API
+        freeze (see ``docs/developer_guide/adaptive_node.md``).  Until
+        then, ``solver="dense"`` is the escape hatch for a small system.
 
     Examples
     --------

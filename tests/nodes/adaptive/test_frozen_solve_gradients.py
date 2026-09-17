@@ -1,10 +1,18 @@
 """Gradients through the frozen solve: against finite differences and
-against dense closed-form references (float64 via the conftest fixture)."""
+against dense closed-form references (float64 via the conftest fixture).
+
+A finite difference of the mask-recomputing objective is only a valid
+oracle while the step stays inside one active-set region -- across a
+switch the objective jumps and the difference quotient diverges as 1/h
+(``test_active_set_switch.py``).  Every finite difference here therefore
+asserts that the active set is the same at both ends of the step first.
+"""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from tests.nodes.adaptive._toys import MaskedDenseNode, PoissonSineTopKNode
@@ -14,6 +22,19 @@ H = 1e-5
 
 def _central_fd(f, x, h=H):
     return (f(x + h) - f(x - h)) / (2 * h)
+
+
+def _assert_no_switch_within(node, state, key, x, h=H):
+    """The finite-difference step must not cross an active-set switch."""
+    def mask(value):
+        params = {**node.params, key: value}
+        return np.asarray(node.compute_active_set(state, params), dtype=bool)
+
+    assert np.array_equal(mask(x - h), mask(x + h)), (
+        f"the finite-difference step h={h} at {key}={float(x)} crosses an "
+        "active-set switch, where the objective jumps and a difference "
+        "quotient is not a valid oracle"
+    )
 
 
 def _sine_J(node, s):
@@ -28,6 +49,7 @@ def test_sine_gradient_matches_finite_differences():
     s = node.initial_state()
     J = _sine_J(node, s)
     th0 = jnp.asarray(0.42)
+    _assert_no_switch_within(node, s, "theta", th0)
     g, fd = float(jax.grad(J)(th0)), float(_central_fd(J, th0))
     assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)
 
@@ -86,6 +108,7 @@ def test_gradient_with_respect_to_the_whole_parameter_pytree():
 
     g = jax.grad(J)(pt)
     assert set(g) == {"theta", "sigma", "sensor_x"}
+    _assert_no_switch_within(node, s, "sigma", pt["sigma"], 1e-6)
     fd_sigma = float(_central_fd(lambda sg: J({**pt, "sigma": sg}), pt["sigma"], 1e-6))
     assert abs(float(g["sigma"]) - fd_sigma) / abs(fd_sigma) < 1e-5
     assert float(g["sensor_x"]) == 0.0  # the objective closes over the constructor value
@@ -114,6 +137,7 @@ def test_dense_solution_and_gradient_match_dense_sub_block_solve(solver):
     )
     assert jnp.allclose(node.update(s, {}, 1.0, params={"theta": th0})["c"], c_ref, atol=1e-9)
     g, g_ref = float(jax.grad(J)(th0)), float(jax.grad(J_ref)(th0))
+    _assert_no_switch_within(node, s, "theta", th0)
     fd = float(_central_fd(J, th0))
     assert abs(g - g_ref) / abs(g_ref) < 1e-8, (g, g_ref)
     assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)

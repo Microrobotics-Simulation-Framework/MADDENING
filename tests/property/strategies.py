@@ -22,16 +22,39 @@ the awkward-but-legal ones (``"a-b"``, ``"a.b"``, ``"1st"``, a name with
 a space, a non-ASCII name), edges with and without a registered
 transform, additive edges, edge units, live parameter overrides (a
 "calibrated" graph), :class:`ParamSpec` overrides including trainable
-mapping weights, external inputs, and interface mappings built by the
-real factories (RBF, nearest neighbour, 1-D projection) from either a
-node-field point reference or an inlined point set.
+mapping weights, external inputs, interface mappings built by the real
+factories (RBF, nearest neighbour, 1-D projection) from either a
+node-field point reference or an inlined point set, and **coupling
+groups** over random valid combinations of their settings.
+
+Coupling groups
+---------------
+Drawn since ``to_dict`` learned to write them.  A group is two or three
+nodes -- preferably ones an edge already joins, since a group whose
+members exchange nothing reaches its fixed point on the first pass and
+exercises the serialiser without exercising the solver -- and a drawn
+value for every other field but one.  Combinations that are
+merely *pointless* are drawn anyway (a relaxation factor with
+``acceleration="none"``, a ``jacobian_reuse`` window with no
+quasi-Newton method, ``waveform_iterations`` without subcycling): the
+group accepts them, they have to survive a round trip, and a serialiser
+that drops a field because it is inert in one configuration drops it in
+the configuration where it is not.  Two combinations are genuinely
+*invalid* and therefore never drawn:
+
+* **mixed timesteps without subcycling.**  ``validate()`` rejects it by
+  name, so a group over nodes of different timesteps always sets
+  ``subcycling=True``;
+* **``strict_convergence=True``.**  It turns a group that exits at
+  ``max_iterations`` still unconverged into a runtime error, and no
+  generator can promise that an arbitrary random graph converges.  The
+  failure would be a bad draw rather than a defect, which is the one
+  thing this module exists to prevent; the field is covered against a
+  graph that does converge in
+  ``tests/core/test_coupling_group_serialisation.py``.
 
 What is deliberately *not* drawn
 --------------------------------
-* **Coupling groups.**  ``GraphManager.to_dict`` has no field for them
-  (the USD writer does), so every generated graph with one would fail
-  the config round trip for a reason that is a known format gap rather
-  than a defect this suite found.
 * **Initial-condition parameter overrides.**  ``initial_*`` leaves (and
   ``TableNode.position``) are read by ``initial_state`` only, never by
   ``update``.  Writing one into ``gm.params`` changes what ``to_dict``
@@ -48,6 +71,7 @@ What is deliberately *not* drawn
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from typing import Any, Optional
 
 import numpy as np
@@ -101,6 +125,29 @@ NODE_NAME_POOL = (
     "_leading",
     "co2(aq)",
 )
+
+#: Every option of every ``Literal``-typed ``CouplingGroup`` field, hoisted
+#: out of the strategy so that a test in ``test_round_trips.py`` can hold
+#: them against the Literals the class declares: an option added there and
+#: not here is then a failing test rather than a hole in the search.
+COUPLING_ACCELERATIONS = ("none", "aitken", "fixed", "iqn-ils", "iqn-imvj")
+COUPLING_NORMS = ("l2", "mixed", "interface")
+COUPLING_ITERATION_MODES = ("gauss-seidel", "jacobi")
+COUPLING_INTERPOLATIONS = ("constant", "linear", "quadratic")
+COUPLING_PREDICTORS = ("none", "linear", "quadratic")
+COUPLING_SOLVERS = ("ift", "fori")
+COUPLING_LINEAR_SOLVERS = ("gmres", "dense")
+
+#: ``{field: options}`` for the guard test above.
+COUPLING_ENUM_OPTIONS = {
+    "convergence_norm": COUPLING_NORMS,
+    "acceleration": COUPLING_ACCELERATIONS,
+    "iteration_mode": COUPLING_ITERATION_MODES,
+    "boundary_interpolation": COUPLING_INTERPOLATIONS,
+    "predictor": COUPLING_PREDICTORS,
+    "solver": COUPLING_SOLVERS,
+    "linear_solver": COUPLING_LINEAR_SOLVERS,
+}
 
 #: Registered transforms that turn an ``(n,)`` source into a scalar.
 _SCALARISING = ("extract_first", "extract_last", "extract_second", "extract_second_last")
@@ -326,6 +373,55 @@ class ExternalInputRecipe:
 
 
 @dataclass(frozen=True)
+class CouplingGroupRecipe:
+    """One ``add_coupling_group`` call: the node set and the eighteen
+    other fields.
+
+    Every field is named and defaulted exactly as on
+    :class:`~maddening.core.coupling.group.CouplingGroup`, so a field
+    added there and not here would show up as a round trip that passes
+    while testing one field fewer --
+    ``test_the_coupling_group_recipe_covers_every_field_of_the_group``
+    in ``tests/property/test_round_trips.py`` fails first.
+
+    ``accelerated_fields`` is a tuple of pairs rather than a dict: a
+    recipe is frozen and printed in every falsifying example, and a dict
+    is neither hashable nor ordered here.
+    """
+
+    nodes: tuple[str, ...]
+    max_iterations: int = 10
+    tolerance: float = 1e-6
+    convergence_norm: str = "l2"
+    atol: float = 1e-8
+    rtol: float = 1e-6
+    diagnostics: bool = False
+    acceleration: str = "none"
+    relaxation: float = 1.0
+    iteration_mode: str = "gauss-seidel"
+    accelerated_fields: Optional[tuple[tuple[str, tuple[str, ...]], ...]] = None
+    subcycling: bool = False
+    boundary_interpolation: str = "linear"
+    jacobian_reuse: int = 0
+    waveform_iterations: int = 1
+    predictor: str = "none"
+    solver: str = "ift"
+    strict_convergence: bool = False
+    linear_solver: str = "gmres"
+
+    @property
+    def kwargs(self) -> dict:
+        """Everything but ``nodes``, as ``add_coupling_group`` takes it."""
+        out = {
+            f.name: getattr(self, f.name)
+            for f in dataclass_fields(self) if f.name != "nodes"
+        }
+        if out["accelerated_fields"] is not None:
+            out["accelerated_fields"] = dict(out["accelerated_fields"])
+        return out
+
+
+@dataclass(frozen=True)
 class SpecOverride:
     """One ``set_param_spec`` call.  ``owner`` is a node name or, for a
     mapped edge's weights, the edge key -- which only exists once the
@@ -357,6 +453,7 @@ class GraphRecipe:
     nodes: tuple[NodeRecipe, ...]
     edges: tuple[EdgeRecipe, ...] = ()
     external_inputs: tuple[ExternalInputRecipe, ...] = ()
+    coupling_groups: tuple[CouplingGroupRecipe, ...] = ()
     #: ``(node, key, factor)`` -- the live value is multiplied by
     #: ``factor``, which is what a calibration would have left behind.
     param_overrides: tuple[tuple[str, str, float], ...] = ()
@@ -401,6 +498,11 @@ class GraphRecipe:
             )
         for ext in self.external_inputs:
             gm.add_external_input(ext.target_node, ext.target_field, shape=ext.shape)
+        for group in self.coupling_groups:
+            # Before compile: a group changes how the step is built, which
+            # is the whole reason a config that drops one is a correctness
+            # bug rather than a cosmetic one.
+            gm.add_coupling_group(list(group.nodes), **group.kwargs)
         gm.compile()
         for node_name, key, factor in self.param_overrides:
             leaf = gm.params["nodes"][node_name][key]
@@ -526,6 +628,103 @@ def _edges(draw, nodes: tuple[NodeRecipe, ...], *, allow_mappings: bool,
 
 
 @st.composite
+def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecipe:
+    """One valid group over *members*.
+
+    Every field is drawn independently; see the module docstring for the
+    two combinations that are not drawn and why.
+    """
+    # Mixed timesteps inside one group are legal only with subcycling --
+    # ``validate()`` says so by name -- so this is a constraint, not a
+    # preference.  With one timestep, both values are drawn.
+    mixed_dt = len({m.timestep for m in members}) > 1
+    subcycling = True if mixed_dt else draw(st.booleans())
+
+    accelerated = None
+    if draw(st.booleans()):
+        # Only state fields of the group's own nodes: ``compile()``
+        # rejects anything else, and rightly.
+        accelerated = tuple(
+            (m.name, tuple(sorted(draw(st.lists(
+                st.sampled_from(sorted(m.outputs)),
+                min_size=1, max_size=len(m.outputs), unique=True,
+            )))))
+            for m in members
+        )
+
+    return CouplingGroupRecipe(
+        nodes=tuple(m.name for m in members),
+        # Two or more, so a quasi-Newton method has a secant column to
+        # allocate; small, because every iteration is a traced node update.
+        max_iterations=draw(st.integers(min_value=2, max_value=6)),
+        tolerance=draw(st.sampled_from([1e-8, 1e-6, 1e-3])),
+        convergence_norm=draw(st.sampled_from(COUPLING_NORMS)),
+        atol=draw(st.sampled_from([1e-8, 1e-5])),
+        rtol=draw(st.sampled_from([1e-6, 1e-3])),
+        diagnostics=draw(st.booleans()),
+        acceleration=draw(st.sampled_from(COUPLING_ACCELERATIONS)),
+        relaxation=draw(st.sampled_from([0.5, 0.8, 1.0])),
+        iteration_mode=draw(st.sampled_from(COUPLING_ITERATION_MODES)),
+        accelerated_fields=accelerated,
+        subcycling=subcycling,
+        boundary_interpolation=draw(st.sampled_from(COUPLING_INTERPOLATIONS)),
+        jacobian_reuse=draw(st.integers(min_value=0, max_value=3)),
+        waveform_iterations=draw(st.sampled_from([1, 2])),
+        predictor=draw(st.sampled_from(COUPLING_PREDICTORS)),
+        # 'fori' is deprecated, not removed: it is still a configuration a
+        # stored graph can name, so it is still one a round trip has to
+        # carry.  (Its DeprecationWarning is filtered in pyproject.toml.)
+        solver=draw(st.sampled_from(COUPLING_SOLVERS)),
+        linear_solver=draw(st.sampled_from(COUPLING_LINEAR_SOLVERS)),
+        # ``strict_convergence`` is the one field left at its default, and
+        # visibly so: True turns a group that exits at ``max_iterations``
+        # still unconverged into a runtime error, which no generator can
+        # promise an arbitrary random graph avoids.  Module docstring.
+        strict_convergence=False,
+    )
+
+
+@st.composite
+def _coupling_groups(draw, nodes: tuple[NodeRecipe, ...],
+                     edges: tuple[EdgeRecipe, ...], *,
+                     required: bool = False) -> tuple[CouplingGroupRecipe, ...]:
+    """Up to two disjoint groups over *nodes*.
+
+    Disjoint because ``add_coupling_group`` refuses a node that is
+    already in a group, and preferring node pairs an edge joins because a
+    group whose members exchange nothing converges on the first pass --
+    valid, but it tests the writer without testing the solver.
+    """
+    if len(nodes) < 2 or not (required or draw(st.booleans())):
+        return ()
+    by_name = {n.name: n for n in nodes}
+    joined = sorted({
+        tuple(sorted((e.source, e.target))) for e in edges if e.source != e.target
+    })
+    every_pair = sorted(
+        tuple(sorted((a.name, b.name)))
+        for i, a in enumerate(nodes) for b in nodes[i + 1:]
+    )
+    pairs = joined or every_pair
+
+    free = {n.name for n in nodes}
+    groups: list[CouplingGroupRecipe] = []
+    for _ in range(draw(st.integers(min_value=1, max_value=2))):
+        options = [p for p in pairs if p[0] in free and p[1] in free]
+        if not options:
+            break
+        members = list(draw(st.sampled_from(options)))
+        free.difference_update(members)
+        spare = sorted(free)
+        if spare and draw(st.booleans()):
+            third = draw(st.sampled_from(spare))
+            members.append(third)
+            free.discard(third)
+        groups.append(draw(_coupling_group(tuple(by_name[m] for m in members))))
+    return tuple(groups)
+
+
+@st.composite
 def _external_inputs(draw, nodes, edges) -> tuple[ExternalInputRecipe, ...]:
     taken = {(e.target, e.target_field) for e in edges}
     free = [(n, f, p) for n in nodes for f, p in n.inputs.items()
@@ -592,6 +791,8 @@ def graph_recipes(
     allow_mappings: bool = True,
     require_mapping: bool = False,
     train_mapping_weights: bool = False,
+    allow_coupling_groups: bool = True,
+    require_coupling_group: bool = False,
 ) -> GraphRecipe:
     """Valid :class:`GraphRecipe`\\ s.
 
@@ -609,8 +810,17 @@ def graph_recipes(
         Scale ``params["mappings"]`` away from what the ``MappingSpec``
         rebuilds, standing in for weights moved by ``sysid``.  Implies
         ``require_mapping``.
+    allow_coupling_groups, require_coupling_group : bool
+        Whether the graph may / must carry coupling groups.  It may by
+        default; a property about something else that a coupling group
+        only makes slower (or that wants a graph solved the staggered
+        way) turns ``allow_coupling_groups`` off, and a property *about*
+        groups requires one rather than spending its examples on graphs
+        that have none.
     """
     require_mapping = require_mapping or train_mapping_weights
+    # Requiring one implies allowing one.
+    allow_coupling_groups = allow_coupling_groups or require_coupling_group
     n = draw(st.integers(min_value=min_nodes, max_value=max_nodes))
     names = draw(st.lists(st.sampled_from(NODE_NAME_POOL),
                           min_size=n, max_size=n, unique=True))
@@ -634,6 +844,11 @@ def graph_recipes(
     return GraphRecipe(
         nodes=nodes,
         edges=edges,
+        coupling_groups=(
+            draw(_coupling_groups(nodes, edges,
+                                  required=require_coupling_group))
+            if allow_coupling_groups else ()
+        ),
         external_inputs=draw(_external_inputs(nodes, edges)),
         param_overrides=draw(_param_overrides(nodes)),
         spec_overrides=draw(_spec_overrides(nodes, edges)),

@@ -181,6 +181,39 @@ def _dry_run_node(node) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
+def _graph_structure_snapshot(gm) -> dict:
+    """Shallow copies of every container a structural edit mutates.
+
+    Nodes, edges and parameter arrays are shared with the live graph --
+    ``add_node`` / ``remove_node`` / ``add_edge`` rebind the containers
+    rather than mutating their contents, so copying one level is enough
+    to put the graph back exactly as it was.  Restoring is what makes an
+    endpoint that rebuilds a subgraph atomic: a failed rebuild leaves the
+    caller with an error and the server with a graph that still compiles.
+    """
+    return {
+        "nodes": dict(gm._nodes),
+        "state": dict(gm._state),
+        "edges": list(gm._edges),
+        "external_inputs": list(gm._external_inputs),
+        "param_spec_overrides": {k: dict(v) for k, v in gm._param_spec_overrides.items()},
+        "params": {k: (dict(v) if isinstance(v, dict) else v)
+                   for k, v in gm.params.items()},
+        "dirty": gm._dirty,
+    }
+
+
+def _restore_graph_structure(gm, snapshot: dict) -> None:
+    """Undo every structural edit made since :func:`_graph_structure_snapshot`."""
+    gm._nodes = snapshot["nodes"]
+    gm._state = snapshot["state"]
+    gm._edges = snapshot["edges"]
+    gm._external_inputs = snapshot["external_inputs"]
+    gm._param_spec_overrides = snapshot["param_spec_overrides"]
+    gm.params = snapshot["params"]
+    gm._dirty = snapshot["dirty"]
+
+
 class SimulationServer:
     """Wraps a ``GraphManager`` with a FastAPI HTTP + WebSocket interface.
 
@@ -882,30 +915,62 @@ class SimulationServer:
 
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
 
-            # Remove surrogate
+            # The revert rebuilds a subgraph, so it is all-or-nothing: on
+            # any failure the live graph goes back to the surrogate it had,
+            # rather than being left with the original node, half its edges
+            # and no compiled step.
+            snapshot = _graph_structure_snapshot(self.gm)
+            problems: list[str] = []
             try:
-                self.gm.remove_node(node_name)
-            except KeyError:
-                pass
-
-            # Restore original
-            self.gm.add_node(orig_node)
-            for edge in orig_edges:
                 try:
-                    self.gm.add_edge(
-                        source=edge.source_node, target=edge.target_node,
-                        source_field=edge.source_field, target_field=edge.target_field,
-                        transform=edge.transform,
-                    )
-                except Exception:
-                    pass
-            for ei in orig_ext:
-                try:
-                    self.gm.add_external_input(ei.target_node, ei.target_field, ei.shape, ei.dtype)
-                except Exception:
+                    self.gm.remove_node(node_name)
+                except KeyError:
                     pass
 
-            self.gm.compile()
+                self.gm.add_node(orig_node)
+                for edge in orig_edges:
+                    try:
+                        # Every EdgeSpec field, not just the endpoints: a
+                        # dropped ``mapping`` breaks the shapes, and a
+                        # dropped ``additive`` silently overwrites a
+                        # boundary input the graph used to add to.
+                        self.gm.add_edge(
+                            source=edge.source_node, target=edge.target_node,
+                            source_field=edge.source_field,
+                            target_field=edge.target_field,
+                            transform=edge.transform,
+                            additive=edge.additive,
+                            source_units=edge.source_units,
+                            target_units=edge.target_units,
+                            mapping=edge.mapping,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - reported below
+                        problems.append(f"edge {edge.key}: {exc}")
+                for ei in orig_ext:
+                    try:
+                        self.gm.add_external_input(
+                            ei.target_node, ei.target_field, ei.shape, ei.dtype,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - reported below
+                        problems.append(
+                            f"external input {ei.target_node}.{ei.target_field}: {exc}")
+                if problems:
+                    raise RuntimeError("; ".join(problems))
+                self.gm.compile()
+            except Exception as exc:
+                _restore_graph_structure(self.gm, snapshot)
+                try:
+                    self.gm.compile()
+                except Exception:  # pragma: no cover - the graph compiled a moment ago
+                    logger.exception(
+                        "Rolling back surrogate deactivation of %r left an "
+                        "uncompilable graph", node_name)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not restore '{node_name}'; the surrogate is "
+                           f"still active: {exc}",
+                )
+
             self._active_surrogates.discard(node_name)
             self._reset_state()
             del self._original_nodes[node_name]

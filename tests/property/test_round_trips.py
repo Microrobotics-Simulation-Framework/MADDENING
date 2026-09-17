@@ -14,7 +14,12 @@ Each test states one invariant over random *valid* graphs (see
   params exactly, a continued rollout agrees with an uninterrupted one,
   and a checkpoint's trained mapping weights beat the recipe a config
   rebuilds;
-* **cross-format** -- config and USD reload to the same trajectory.
+* **cross-format** -- config and USD reload to the same trajectory;
+* **coupling groups** -- a reloaded group is configured field for field
+  as the original, in both formats.  The generated graphs carry groups
+  now that ``to_dict`` writes them, so every property above covers them
+  too: a dropped group changes the trajectory, and a group reloaded with
+  one setting changed shows up in ``structure()``.
 
 ``pxr`` is a hard dependency of the USD tests here: it is installed in
 the development environment and a skip would hide exactly the bug the
@@ -25,12 +30,15 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
+from dataclasses import fields
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 from hypothesis import given, note
 from hypothesis import strategies as st
 
+from maddening.core.coupling.group import CouplingGroup, _literal_options
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
@@ -43,7 +51,11 @@ from tests.property.invariants import (
     assert_structure_identical,
     structure,
 )
-from tests.property.strategies import graph_recipes
+from tests.property.strategies import (
+    COUPLING_ENUM_OPTIONS,
+    CouplingGroupRecipe,
+    graph_recipes,
+)
 
 #: Rollout length.  Three steps is enough to make every coupling path
 #: (multi-rate dividers, additive edges, mapped interfaces) contribute
@@ -258,6 +270,94 @@ def test_usd_keeps_the_declared_units_of_an_edge():
     reloaded = _reload_usd(gm)
     assert reloaded.edges[0].source_units == "m"
     assert reloaded.edges[0].target_units == "m"
+
+
+# ---------------------------------------------------------------------------
+# Coupling groups
+# ---------------------------------------------------------------------------
+
+def _groups_by_nodes(gm: GraphManager) -> dict[frozenset, CouplingGroup]:
+    return {g.nodes: g for g in gm._coupling_groups}  # noqa: SLF001
+
+
+def _assert_groups_identical(expected: GraphManager, actual: GraphManager,
+                             *, what: str) -> None:
+    """Field for field, group for group.
+
+    Not ``==`` on the dataclass: when a round trip loses one setting, the
+    name of the setting is the entire finding, and a frozen-dataclass
+    comparison prints two nineteen-field reprs and leaves the reader to
+    diff them.
+    """
+    before, after = _groups_by_nodes(expected), _groups_by_nodes(actual)
+    assert set(before) == set(after), (
+        f"{what}: coupling groups differ -- only before "
+        f"{[sorted(n) for n in set(before) - set(after)]}, only after "
+        f"{[sorted(n) for n in set(after) - set(before)]}"
+    )
+    for node_set, group in before.items():
+        for f in fields(CouplingGroup):
+            assert getattr(after[node_set], f.name) == getattr(group, f.name), (
+                f"{what}: group {sorted(node_set)} came back with "
+                f"{f.name}={getattr(after[node_set], f.name)!r}, "
+                f"was {getattr(group, f.name)!r}"
+            )
+
+
+@given(recipe=graph_recipes(require_coupling_group=True))
+def test_a_config_round_trip_preserves_every_coupling_group_field(recipe):
+    """The group that comes back out of a config is the group that went
+    in -- every field, not the handful a solver happens to read first.
+
+    A partially serialised group is the failure this is for: it is still
+    a group, it still iterates, and it iterates differently.
+    """
+    gm = recipe.build()
+    note(f"recipe: {recipe}")
+    assert gm._coupling_groups, "the strategy promised a coupling group"
+    config, reloaded = _reload_config(gm, recipe.registry)
+    note(f"coupling_groups: {config.get('coupling_groups')}")
+
+    _assert_groups_identical(gm, reloaded, what="config")
+    assert_states_identical(gm.run_scan(N_STEPS), reloaded.run_scan(N_STEPS),
+                            what="trajectory")
+
+
+@usd_only
+@given(recipe=graph_recipes(require_coupling_group=True))
+def test_a_usd_round_trip_preserves_every_coupling_group_field(recipe):
+    """The stage owes the same nineteen fields the config does."""
+    gm = recipe.build()
+    note(f"recipe: {recipe}")
+    reloaded = _reload_usd(gm)
+
+    _assert_groups_identical(gm, reloaded, what="usd")
+    assert_states_identical(gm.run_scan(N_STEPS), reloaded.run_scan(N_STEPS),
+                            what="trajectory")
+
+
+def test_the_coupling_group_recipe_covers_every_field_of_the_group():
+    """The generator draws a value for every field of ``CouplingGroup``.
+
+    Without this, a field added to the class would quietly stop being
+    round-tripped by any property here: the recipe would not carry it,
+    every generated group would hold its default, and the properties
+    above would pass while testing one field fewer.
+    """
+    assert {f.name for f in fields(CouplingGroupRecipe)} == {
+        f.name for f in fields(CouplingGroup)
+    }
+
+
+def test_the_generator_draws_every_option_of_every_coupling_group_enum():
+    """And every *option* of each enum field, held against the ``Literal``
+    the class declares: an option added there is a hole in the search
+    until the generator samples it too."""
+    hints = get_type_hints(CouplingGroup)
+    for field_name, drawn in COUPLING_ENUM_OPTIONS.items():
+        declared = _literal_options(hints[field_name])
+        assert declared is not None, f"{field_name} is no longer a Literal"
+        assert set(drawn) == set(declared), field_name
 
 
 # ---------------------------------------------------------------------------

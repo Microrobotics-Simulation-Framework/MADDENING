@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 from pxr import Sdf, Usd, Vt
 
+from maddening.core.coupling.group import coupling_group_kwargs
 from maddening.core.transforms import (
     UnregisteredTransformError,
     get_transform_name,
@@ -102,6 +103,41 @@ def _resolve_node_class(qualified_name: str) -> type:
 # ------------------------------------------------------------------
 # Save
 # ------------------------------------------------------------------
+
+#: ``(USD attribute, CouplingGroup field, reader conversion)`` for every
+#: scalar field of a coupling group.  The writer and the reader both walk
+#: this one table, so the stage cannot come to carry a field one of them
+#: does not know about — the way it carried eleven of nineteen until the
+#: config grew a ``coupling_groups`` key and the two formats were made to
+#: say the same thing.  ``nodes`` (a string array) and
+#: ``accelerated_fields`` (JSON, since USD has no dict-of-arrays type) are
+#: handled beside it; ``tests/usd/test_usd_serialization.py`` asserts the
+#: three together cover ``dataclasses.fields(CouplingGroup)``, so a field
+#: added to the group fails that test until it is written here too.
+_COUPLING_GROUP_ATTRS: tuple[tuple[str, str, type], ...] = (
+    ("maddening:maxIterations", "max_iterations", int),
+    ("maddening:tolerance", "tolerance", float),
+    ("maddening:convergenceNorm", "convergence_norm", str),
+    ("maddening:atol", "atol", float),
+    ("maddening:rtol", "rtol", float),
+    ("maddening:diagnostics", "diagnostics", bool),
+    ("maddening:acceleration", "acceleration", str),
+    ("maddening:relaxation", "relaxation", float),
+    ("maddening:iterationMode", "iteration_mode", str),
+    ("maddening:subcycling", "subcycling", bool),
+    ("maddening:boundaryInterpolation", "boundary_interpolation", str),
+    ("maddening:jacobianReuse", "jacobian_reuse", int),
+    ("maddening:waveformIterations", "waveform_iterations", int),
+    ("maddening:predictor", "predictor", str),
+    ("maddening:solver", "solver", str),
+    ("maddening:strictConvergence", "strict_convergence", bool),
+    ("maddening:linearSolver", "linear_solver", str),
+)
+
+#: The two fields ``_COUPLING_GROUP_ATTRS`` cannot describe.
+_COUPLING_GROUP_NODES_ATTR = "maddening:nodes"
+_COUPLING_GROUP_FIELDS_ATTR = "maddening:acceleratedFieldsJson"
+
 
 def save_graph_to_usd(
     gm: "GraphManager",
@@ -274,41 +310,21 @@ def save_graph_to_usd(
                     ov_attr.Set(json.dumps(
                         {k: s.to_dict() for k, s in edge_overrides.items()}))
 
-        # Coupling group attributes
+        # Coupling group attributes.  ``CouplingGroup.to_dict`` is the
+        # same plain-data view the config writes, so the stage and the
+        # config carry one field set from one source.
         for i, group in enumerate(gm._coupling_groups):
             prim = cg_prims[i]
-            prim.GetAttribute("maddening:nodes").Set(
-                Vt.StringArray(sorted(group.nodes))
+            stored = group.to_dict()
+            prim.GetAttribute(_COUPLING_GROUP_NODES_ATTR).Set(
+                Vt.StringArray(stored["nodes"])
             )
-            prim.GetAttribute("maddening:maxIterations").Set(
-                group.max_iterations
-            )
-            prim.GetAttribute("maddening:tolerance").Set(
-                float(group.tolerance)
-            )
-            prim.GetAttribute("maddening:convergenceNorm").Set(
-                group.convergence_norm
-            )
-            prim.GetAttribute("maddening:acceleration").Set(
-                group.acceleration
-            )
-            prim.GetAttribute("maddening:relaxation").Set(
-                float(group.relaxation)
-            )
-            prim.GetAttribute("maddening:iterationMode").Set(
-                group.iteration_mode
-            )
-            prim.GetAttribute("maddening:subcycling").Set(
-                group.subcycling
-            )
-            prim.GetAttribute("maddening:boundaryInterpolation").Set(
-                group.boundary_interpolation
-            )
-            prim.GetAttribute("maddening:diagnostics").Set(
-                group.diagnostics
-            )
-            prim.GetAttribute("maddening:predictor").Set(
-                group.predictor
+            for attr_name, field_name, _convert in _COUPLING_GROUP_ATTRS:
+                prim.GetAttribute(attr_name).Set(stored[field_name])
+            accelerated = stored["accelerated_fields"]
+            prim.GetAttribute(_COUPLING_GROUP_FIELDS_ATTR).Set(
+                "" if accelerated is None
+                else json.dumps(accelerated, sort_keys=True)
             )
 
         # External input attributes
@@ -488,42 +504,35 @@ def load_graph_from_usd(
     cg_prim = stage.GetPrimAtPath(root_path + "/coupling_groups")
     if cg_prim and cg_prim.IsValid():
         for child in cg_prim.GetChildren():
-            nodes_attr = child.GetAttribute("maddening:nodes").Get()
+            nodes_attr = child.GetAttribute(_COUPLING_GROUP_NODES_ATTR).Get()
             if not nodes_attr:
                 continue
-            node_names = list(nodes_attr)
-            kwargs = {}
-            for attr_name, param_name, converter in [
-                ("maddening:convergenceNorm", "convergence_norm", str),
-                ("maddening:acceleration", "acceleration", str),
-                ("maddening:relaxation", "relaxation", float),
-                ("maddening:iterationMode", "iteration_mode", str),
-                ("maddening:subcycling", "subcycling", bool),
-                (
-                    "maddening:boundaryInterpolation",
-                    "boundary_interpolation",
-                    str,
-                ),
-                ("maddening:diagnostics", "diagnostics", bool),
-                ("maddening:predictor", "predictor", str),
-            ]:
+            # Rebuilt as the same plain-data dict the config stores, then
+            # through the same ``add_coupling_group``: one loader for two
+            # formats.  An attribute a stage does not author reads back as
+            # the schema fallback, which is the dataclass default, so a
+            # stage written before a field existed loads as it always did.
+            stored: dict = {"nodes": list(nodes_attr)}
+            for attr_name, field_name, convert in _COUPLING_GROUP_ATTRS:
                 val = child.GetAttribute(attr_name).Get()
                 if val is not None:
-                    kwargs[param_name] = converter(val)
+                    stored[field_name] = convert(val)
+            accelerated = child.GetAttribute(_COUPLING_GROUP_FIELDS_ATTR).Get()
+            if accelerated:
+                stored["accelerated_fields"] = json.loads(accelerated)
 
-            max_iters_val = child.GetAttribute(
-                "maddening:maxIterations"
-            ).Get()
-            tol_val = child.GetAttribute("maddening:tolerance").Get()
-
-            gm.add_coupling_group(
-                node_names,
-                max_iterations=int(max_iters_val)
-                if max_iters_val is not None
-                else 10,
-                tolerance=float(tol_val) if tol_val is not None else 1e-6,
-                **kwargs,
-            )
+            nodes, kwargs = coupling_group_kwargs(stored)
+            try:
+                gm.add_coupling_group(nodes, **kwargs)
+            except (KeyError, TypeError, ValueError) as exc:
+                # A stage is as hand-editable as a config, and the
+                # constructor's complaint names the field but not the prim
+                # it came from.  Name it, as the config loader names the
+                # index of the group it was reading.
+                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                raise ValueError(
+                    f"{child.GetPath()} cannot be rebuilt: {detail}"
+                ) from exc
 
     # --- External inputs ---
     ext_prim = stage.GetPrimAtPath(root_path + "/external_inputs")

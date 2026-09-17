@@ -173,6 +173,9 @@ class ShardedUnstructuredNode(SimulationNode):
                 sharded_static[k] = v
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
+        # Share the inner node's params dict rather than copying it, so a
+        # write through any surface reaches the code that reads it.
+        self.params = node.params
         if exchange not in ("all_to_all", "ppermute"):
             raise ValueError(
                 f"ShardedUnstructuredNode: exchange must be 'all_to_all' or "

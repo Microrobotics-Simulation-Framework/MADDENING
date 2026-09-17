@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import threading
 import time
@@ -129,6 +130,40 @@ class TrainSurrogateRequest(BaseModel):
 # ------------------------------------------------------------------
 # SimulationServer
 # ------------------------------------------------------------------
+
+def _non_finite_param(value: Any, path: str = "") -> Optional[str]:
+    """The path of the first non-finite number inside *value*, else ``None``.
+
+    A constructor constant is not validated by the node itself, and a NaN or
+    an infinity in one is not merely a bad simulation: every endpoint that
+    reports it serialises with ``allow_nan=False``, so the node's own 201
+    response -- and every later ``GET /graph`` -- fails inside the encoder.
+    Recurses into lists and dicts because a param may be an array.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            # A JSON integer literal is an unbounded Python int; one too big
+            # for a float is as unusable as an infinity and must not raise
+            # OverflowError here, which would be the 500 this check exists
+            # to prevent.
+            usable = math.isfinite(float(value))
+        except (OverflowError, ValueError):
+            usable = False
+        return None if usable else (path or "value")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            found = _non_finite_param(item, f"{path}.{key}" if path else str(key))
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found = _non_finite_param(item, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
 
 def _dry_run_node(node) -> None:
     """Abstractly trace one ``update`` of a freshly built node on its own
@@ -299,6 +334,17 @@ class SimulationServer:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unknown node type '{req.type}'. Available: {list(self.registry.keys())}",
+                )
+            # A non-finite constant is refused here, exactly as
+            # PUT /graph/state and PUT /graph/params refuse one: it survives
+            # construction and the trace, and only blows up in the JSON
+            # encoder -- after the node is already in the graph, which leaves
+            # GET /graph answering 500 for the life of the process.
+            bad = _non_finite_param(req.params)
+            if bad is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"params.{bad}: value must be finite",
                 )
             node_cls = self.registry[req.type]
             try:

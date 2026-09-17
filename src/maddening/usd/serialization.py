@@ -107,7 +107,7 @@ def _resolve_node_class(qualified_name: str) -> type:
 #: ``(USD attribute, CouplingGroup field, reader conversion)`` for every
 #: scalar field of a coupling group.  The writer and the reader both walk
 #: this one table, so the stage cannot come to carry a field one of them
-#: does not know about — the way it carried seven of nineteen until the
+#: does not know about — the way it carried eleven of nineteen until the
 #: config grew a ``coupling_groups`` key and the two formats were made to
 #: say the same thing.  ``nodes`` (a string array) and
 #: ``accelerated_fields`` (JSON, since USD has no dict-of-arrays type) are
@@ -522,7 +522,17 @@ def load_graph_from_usd(
                 stored["accelerated_fields"] = json.loads(accelerated)
 
             nodes, kwargs = coupling_group_kwargs(stored)
-            gm.add_coupling_group(nodes, **kwargs)
+            try:
+                gm.add_coupling_group(nodes, **kwargs)
+            except (KeyError, TypeError, ValueError) as exc:
+                # A stage is as hand-editable as a config, and the
+                # constructor's complaint names the field but not the prim
+                # it came from.  Name it, as the config loader names the
+                # index of the group it was reading.
+                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                raise ValueError(
+                    f"{child.GetPath()} cannot be rebuilt: {detail}"
+                ) from exc
 
     # --- External inputs ---
     ext_prim = stage.GetPrimAtPath(root_path + "/external_inputs")

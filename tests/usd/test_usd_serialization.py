@@ -499,3 +499,33 @@ class TestCouplingGroupFields:
         for name in added_fields:
             assert getattr(group, name) == getattr(default, name), name
         assert {f.name for f in fields(CouplingGroup)} >= set(added_fields)
+
+    def test_a_hand_edited_enum_on_the_stage_names_the_prim(self):
+        """A `.usda` is as hand-editable as a config, and the constructor's
+        complaint names the field but not where it came from.  The reader
+        names the prim, as the config loader names the group index."""
+        gm1 = self._two_rods()
+        gm1.add_coupling_group(["rod_a", "rod_b"])
+        stage = Usd.Stage.CreateInMemory()
+        save_graph_to_usd(gm1, stage)
+        prim = stage.GetPrimAtPath("/Simulation/coupling_groups/cg0")
+        prim.GetAttribute("maddening:acceleration").Set("aitkin")
+
+        with pytest.raises(ValueError) as exc:
+            load_graph_from_usd(stage)
+
+        msg = str(exc.value)
+        assert "/Simulation/coupling_groups/cg0" in msg, msg
+        assert "acceleration" in msg and "'aitkin'" in msg, msg
+        assert "expected one of" in msg, msg
+
+    def test_a_group_naming_a_node_the_stage_does_not_have_is_rejected(self):
+        gm1 = self._two_rods()
+        gm1.add_coupling_group(["rod_a", "rod_b"])
+        stage = Usd.Stage.CreateInMemory()
+        save_graph_to_usd(gm1, stage)
+        prim = stage.GetPrimAtPath("/Simulation/coupling_groups/cg0")
+        prim.GetAttribute("maddening:nodes").Set(Vt.StringArray(["rod_a", "ghost"]))
+
+        with pytest.raises(ValueError, match="ghost"):
+            load_graph_from_usd(stage)

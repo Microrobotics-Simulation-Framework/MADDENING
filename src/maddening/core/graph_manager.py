@@ -2038,6 +2038,19 @@ class GraphManager:
     # Graph construction
     # ------------------------------------------------------------------
 
+    def get_node(self, name: str) -> SimulationNode:
+        """The :class:`~maddening.core.node.SimulationNode` registered as ``name``.
+
+        The read-only counterpart of :meth:`add_node`, for callers that
+        need the node object itself — its ``static_data``, ``params`` or
+        ``boundary_input_spec`` — rather than the graph's view of it; a
+        point reference ``{"node": ..., "field": ...}`` of an interface
+        mapping resolves through it.  An unknown name is a ``KeyError``.
+        """
+        if name not in self._nodes:
+            raise KeyError(f"unknown node {name!r}; the graph has {sorted(self._nodes)}")
+        return self._nodes[name].node
+
     def add_node(self, node: SimulationNode) -> None:
         """Register a node and initialise its state."""
         if node.name in self._nodes:
@@ -4058,6 +4071,39 @@ class GraphManager:
     # Serialization
     # ------------------------------------------------------------------
 
+    def _warn_about_unsaved_mapping_weights(self) -> None:
+        """``UserWarning`` for every mapped edge whose live weights are no
+        longer the ones its recipe rebuilds.
+
+        A config carries the ``MappingSpec``, not the weights, so weights
+        moved by ``sysid`` or edited in ``params["mappings"]`` are dropped
+        by a config-only round trip (checkpoints carry them, and win).
+        The graph is the only place that knows both, so it says so here.
+        """
+        live = (self.params or {}).get("mappings") or {}
+        for e in self._edges:
+            if e.mapping is None:
+                continue
+            weights = live.get(e.key)
+            if not weights:
+                continue
+            recipe = e.mapping.params_pytree()
+            drifted = sorted(
+                k for k, v in weights.items()
+                if k in recipe and not (
+                    np.shape(v) == np.shape(recipe[k])
+                    and np.array_equal(np.asarray(v), np.asarray(recipe[k]))
+                )
+            )
+            if drifted:
+                warnings.warn(
+                    f"edge {e.key}: live mapping weights {drifted} differ from what the "
+                    f"MappingSpec rebuilds; a config carries the recipe only, so these "
+                    f"values are not in it — save a checkpoint (gm.save_state(...)) and "
+                    f"load it after the config to keep them",
+                    UserWarning, stacklevel=3,
+                )
+
     def to_dict(self, *, strict_mappings: bool = True) -> dict:
         """Serialise the graph structure (not runtime state).
 
@@ -4072,16 +4118,25 @@ class GraphManager:
         mapping that cannot be rebuilt from a config — no spec, or a
         point set neither referenced nor small enough to inline — is a
         ``ValueError`` naming the ``source_ref=`` / ``target_ref=`` /
-        ``asset=`` argument to pass; ``strict_mappings=False`` writes
-        whatever the mapping describes, for display.
+        ``asset=`` argument to pass — as is a node reference that no
+        longer resolves to the points it was built from (a removed node,
+        a renamed field).  ``strict_mappings=False`` writes whatever the
+        mapping describes, for display, and checks nothing.
+
+        Only the *recipe* is written, so live weights that were trained
+        or hand-edited away from it would be lost: a ``UserWarning``
+        naming the edge says so, pointing at :meth:`save_state`.
         """
         if strict_mappings:
             from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
                 check_mapping_serialisable,
             )
+            resolve = self.point_resolver()
             for e in self._edges:
                 if e.mapping is not None:
-                    check_mapping_serialisable(e.mapping, edge_key=e.key)
+                    check_mapping_serialisable(e.mapping, edge_key=e.key,
+                                               resolve_points=resolve)
+            self._warn_about_unsaved_mapping_weights()
         nodes = []
         for name, spec in self._nodes.items():
             d = spec.node.to_dict()
@@ -4124,15 +4179,18 @@ class GraphManager:
         working directory when ``None``) and registered in
         ``params["mappings"]`` exactly as ``add_edge(mapping=)`` does.
         A checkpoint loaded afterwards overwrites the rebuilt weights.
+
+        ``param_specs`` overrides are applied *after* the edges, because
+        an override may name a mapped edge's key (``set_param_spec(
+        edge.key, "H", ParamSpec())`` — trainable mapping weights) and
+        those slots only exist once the edge does; node overrides do not
+        depend on the edges, so the order is safe for them too.
         """
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
-        for node_name, overrides in config.get("param_specs", {}).items():
-            for key, spec_dict in overrides.items():
-                gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
         resolve = gm.point_resolver(base_dir)
         for ed in config["edges"]:
             mapping = None
@@ -4149,6 +4207,19 @@ class GraphManager:
                 target_units=ed.get("target_units"),
                 mapping=mapping,
             )
+        for owner, overrides in config.get("param_specs", {}).items():
+            for key, spec_dict in overrides.items():
+                try:
+                    gm.set_param_spec(owner, key, ParamSpec.from_dict(spec_dict))
+                except KeyError as exc:
+                    # set_param_spec reports an unknown owner / key as a
+                    # KeyError; the loader speaks ValueError like the rest
+                    # of from_dict, and names what it was applying.
+                    raise ValueError(
+                        f"param_specs[{owner!r}][{key!r}] cannot be applied to this "
+                        f"config ({owner!r} is neither one of its nodes nor one of its "
+                        f"mapped edge keys): {exc}"
+                    ) from exc
         for ei in config.get("external_inputs", []):
             gm.add_external_input(
                 target_node=ei["target_node"],
@@ -4160,22 +4231,49 @@ class GraphManager:
     @staticmethod
     def _rebuild_mapping(edge_dict: dict, resolve_points) -> Any:
         """The mapping of a serialised edge, rebuilt from its spec dict and
-        checked against the ``shape`` recorded with it."""
-        from maddening.core.coupling.mapping_spec import MappingSpec  # noqa: PLC0415
-        where = (f"edge {edge_dict['source_node']}.{edge_dict['source_field']} -> "
+        checked against the ``shape`` recorded with it.
+
+        *Every* way a spec can fail — a malformed dict, a reference that
+        does not resolve or no longer matches, an unreadable / oversized
+        asset, a hyper-parameter of the wrong type, a singular solve —
+        comes back as a
+        :class:`~maddening.core.coupling.mapping_spec.MappingRebuildError`
+        (a ``ValueError``) naming this edge, with the original exception
+        chained: a config is untrusted input and the edge it broke on is
+        the only thing that makes the failure actionable.
+        """
+        import zipfile  # noqa: PLC0415
+        from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+            MappingRebuildError,
+            MappingSpec,
+        )
+        # MappingRebuildError prefixes "edge "; this is just the key.
+        where = (f"{edge_dict['source_node']}.{edge_dict['source_field']} -> "
                  f"{edge_dict['target_node']}.{edge_dict['target_field']}")
         d = edge_dict["mapping"]
+        kind = d.get("kind") if isinstance(d, dict) else None
         try:
             mapping = MappingSpec.from_dict(d).build(resolve_points)
-        except ValueError as exc:
-            raise ValueError(f"{where}: cannot rebuild interface mapping: {exc}") from exc
-        shape = d.get("shape")
-        if shape is not None and [mapping.n_target, mapping.n_source] != list(shape):
-            raise ValueError(
-                f"{where}: rebuilt mapping has shape "
-                f"{[mapping.n_target, mapping.n_source]} but the config recorded "
-                f"{list(shape)}; the referenced point sets changed"
-            )
+            shape = d.get("shape")
+            if shape is not None:
+                if (isinstance(shape, (str, bytes)) or not isinstance(shape, (list, tuple))
+                        or len(shape) != 2
+                        or any(isinstance(s, bool) or not isinstance(s, int) for s in shape)):
+                    raise ValueError(
+                        f"'shape' must be a two-element list of ints "
+                        f"[n_target, n_source], got {shape!r}"
+                    )
+                if [mapping.n_target, mapping.n_source] != list(shape):
+                    raise ValueError(
+                        f"rebuilt mapping has shape "
+                        f"{[mapping.n_target, mapping.n_source]} but the config recorded "
+                        f"{list(shape)}; the referenced point sets changed"
+                    )
+        except (ValueError, TypeError, KeyError, OSError, MemoryError,
+                zipfile.BadZipFile) as exc:
+            # json.JSONDecodeError is a ValueError and numpy's
+            # UFuncTypeError a TypeError, so both land here too.
+            raise MappingRebuildError(where, kind, exc) from exc
         return mapping
 
     # ------------------------------------------------------------------

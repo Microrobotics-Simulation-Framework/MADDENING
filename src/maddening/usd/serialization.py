@@ -125,9 +125,11 @@ def save_graph_to_usd(
     from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
         check_mapping_serialisable,
     )
+    _resolve_points = gm.point_resolver()
     for edge in gm._edges:
         if edge.mapping is not None:
-            check_mapping_serialisable(edge.mapping, edge_key=edge.key)
+            check_mapping_serialisable(edge.mapping, edge_key=edge.key,
+                                       resolve_points=_resolve_points)
         if edge.transform is not None:
             tname = get_transform_name(edge.transform)
             if tname is None:
@@ -239,6 +241,16 @@ def save_graph_to_usd(
                     "maddening:mappingSpecJson", Sdf.ValueTypeNames.String,
                 )
                 attr.Set(json.dumps(edge.mapping.describe()))
+                # ParamSpec overrides keyed by the edge key (a mapping whose
+                # weights were made trainable for sysid) belong to the edge,
+                # not to any node prim, so they are written here.
+                edge_overrides = gm.param_spec_overrides().get(edge.key)
+                if edge_overrides:
+                    ov_attr = prim.CreateAttribute(
+                        "maddening:paramSpecOverridesJson", Sdf.ValueTypeNames.String,
+                    )
+                    ov_attr.Set(json.dumps(
+                        {k: s.to_dict() for k, s in edge_overrides.items()}))
 
         # Coupling group attributes
         for i, group in enumerate(gm._coupling_groups):
@@ -393,10 +405,21 @@ def load_graph_from_usd(
             spec_attr = child.GetAttribute("maddening:mappingSpecJson")
             spec_json = spec_attr.Get() if spec_attr else None
             if spec_json:
+                where = (f"{source_node}.{source_field} -> "
+                         f"{target_node}.{target_field}")
+                try:
+                    spec_dict = json.loads(spec_json)
+                except json.JSONDecodeError as exc:
+                    # A hand-edited / truncated attribute must name its edge
+                    # like every other rebuild failure does.
+                    from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+                        MappingRebuildError,
+                    )
+                    raise MappingRebuildError(where, None, exc) from exc
                 mapping = gm._rebuild_mapping(  # noqa: SLF001
                     {"source_node": source_node, "target_node": target_node,
                      "source_field": source_field, "target_field": target_field,
-                     "mapping": json.loads(spec_json)},
+                     "mapping": spec_dict},
                     gm.point_resolver(base_dir),
                 )
 
@@ -409,6 +432,27 @@ def load_graph_from_usd(
                 additive=bool(additive) if additive is not None else False,
                 mapping=mapping,
             )
+
+            edge_overrides_attr = child.GetAttribute("maddening:paramSpecOverridesJson")
+            edge_overrides_json = (
+                edge_overrides_attr.Get() if edge_overrides_attr else None
+            )
+            if edge_overrides_json and gm.edges:
+                import warnings  # noqa: PLC0415
+
+                from maddening.core.params import ParamSpec  # noqa: PLC0415
+                edge_key = gm.edges[-1].key
+                for key, ov_dict in json.loads(edge_overrides_json).items():
+                    try:
+                        gm.set_param_spec(edge_key, key, ParamSpec.from_dict(ov_dict))
+                    except (KeyError, ValueError) as exc:
+                        # The mapping changed since the stage was written
+                        # (different factory, different weight names): keep
+                        # loading, say what was dropped.
+                        warnings.warn(
+                            f"ignoring ParamSpec override {edge_key}.{key} from "
+                            f"the USD stage: {exc}", RuntimeWarning, stacklevel=2,
+                        )
 
     # --- Coupling groups ---
     cg_prim = stage.GetPrimAtPath(root_path + "/coupling_groups")

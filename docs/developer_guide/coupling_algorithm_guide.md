@@ -90,8 +90,10 @@ platform provides one.
 # 420 rows, ~14 min: every fast fixture
 JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
     --json benchmarks/results/coupling_sweep_cpu.json
-# 96 rows, ~16 min: the two grid fixtures, plus accelerated_fields variants
-JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+# 96 rows: the two grid fixtures, plus accelerated_fields variants.
+# The recorded file used --steps 10 rather than the fixtures' default 20,
+# to fit a short machine window; see the note below.
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py --steps 10 \
     --fixtures expensive-pair,heterogeneous --fields \
     --json benchmarks/results/coupling_sweep_expensive_cpu.json
 # 48 rows, ~2 min: the same graphs with a tighter iteration cap
@@ -102,7 +104,15 @@ JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
 ```
 
 The grid fixtures are opt-in (`--include-slow`, or named explicitly)
-because they are minutes rather than seconds.  The third run exists
+because they are minutes rather than seconds.  The recorded grid run is
+a **reduced** one: ten timed steps per row instead of twenty, which
+halves its wall time.  Iteration counts, convergence fractions and
+residuals are unaffected by that — they are properties of the step, and
+the sweep takes a separate statistics pass over them — but the step
+times are averaged over half as many samples and are correspondingly
+noisier.  The reduction is recorded in that file's `label`, and every
+number quoted from it below is a ratio large enough that halving the
+sample count does not change the conclusion.  The third run exists
 because `max_iterations` is not a free safety margin for IQN — see
 [What IQN costs](#what-iqn-costs).
 

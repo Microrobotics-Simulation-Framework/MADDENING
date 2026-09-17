@@ -260,7 +260,8 @@ Subclasses may add fields through `extra_initial_state()`.
 - Test files: `tests/nodes/adaptive/test_verification.py` (benchmark and the
   `verify_node` battery on two concrete subclasses),
   `tests/nodes/adaptive/test_frozen_solve_gradients.py` (`jax.grad` vs central
-  finite differences to $10^{-6}$ and vs dense closed-form references),
+  finite differences to $10^{-6}$ — each with the active set asserted not to
+  change within the step — and vs dense closed-form references),
   `tests/nodes/adaptive/test_blindness_diagnostics.py` (spike-measured
   blindness ratios 0.86 / 0.17 / 0.0 at $\theta = 0.42 / 0.48 / 0.5$, trap
   detection and escape), `tests/nodes/adaptive/test_traceability.py` (jit,

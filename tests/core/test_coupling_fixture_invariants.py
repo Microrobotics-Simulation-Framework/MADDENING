@@ -665,3 +665,147 @@ def test_mixed_mode_groups_keep_independent_iteration_counts():
         "widening the star changed the chain group's iteration history"
     )
     assert narrow.group_keys[1] != wide.group_keys[1]
+
+
+# ---------------------------------------------------------------------------
+# The sweep driver's summary fields
+# ---------------------------------------------------------------------------
+
+
+def _signature_row(label, entries):
+    """A minimal ``_same_fixed_point`` row carrying *entries*."""
+    return {"ok": True, "converged_fraction": 1.0, "label": label,
+            "state_signature": entries}
+
+
+def _uniform_entry(value, n):
+    """Signature entry for an *n*-element array whose elements are *value*."""
+    return [value * n, abs(value) * math.sqrt(n), abs(value), n]
+
+
+@pytest.mark.parametrize("n", [10, 60_000])
+def test_fixed_point_agreement_is_size_invariant(n):
+    """The same physical disagreement must score the same on any array size.
+
+    ``sum`` and the L2 norm are extensive and ``max_abs`` is intensive,
+    so comparing the raw triple against a scale taken from ``max_abs``
+    made the score proportional to the element count: a per-cell
+    disagreement of 7e-7 on a 60 000-cell grid was reported as a
+    relative deviation of 4.2e-2, and a grid fixture could never score
+    as well as a scalar one for the same physics.
+    """
+    ref = _signature_row("ref", {"grid.temperature": _uniform_entry(1.0, n)})
+    off = _signature_row("off", {"grid.temperature": _uniform_entry(1.01, n)})
+    got = sweep._same_fixed_point([ref, off])
+    assert got["max_relative_deviation"] == pytest.approx(0.01, rel=1e-6)
+    assert got["worst_config"] == "off"
+
+
+def test_agreement_metric_ignores_nodes_outside_every_group():
+    """A driver node must not set the scale a coupled node is measured against.
+
+    ``heterogeneous``'s driver is a spring carrying ``position`` ~0.88
+    while the coupled probes carry ~0.011.  While the signature covered
+    every node, the field scale for ``position`` came from the driver —
+    which is in no coupling group and cannot disagree with anything —
+    and a 10% error on a probe scored 1.3e-3 against a 5e-3 threshold.
+    """
+    built = cf.build_heterogeneous(cf.CouplingConfig(), n_cells=2000)
+    gm = built.gm
+    for _ in range(5):
+        gm.step()
+    coupled = sweep._coupled_nodes(built)
+    assert "driver" in gm.node_names and "driver" not in coupled
+
+    sig = sweep._state_signature(gm, coupled)
+    assert not any(key.startswith("driver.") for key in sig), sorted(sig)
+    assert sweep._field_scales(sig)["position"] == max(
+        sig[f"probe{i}.position"][2] for i in range(4)), (
+        "the position scale is not coming from the coupled probes"
+    )
+
+    perturbed = {k: list(v) for k, v in sig.items()}
+    entry = perturbed["probe0.position"]
+    perturbed["probe0.position"] = [1.10 * entry[0], 1.10 * entry[1],
+                                    1.10 * entry[2], entry[3]]
+    got = sweep._same_fixed_point([_signature_row("ref", sig),
+                                   _signature_row("off", perturbed)])
+    assert got["max_relative_deviation"] >= 0.05, (
+        f"a 10% error on a coupled probe scored "
+        f"{got['max_relative_deviation']:.2e}"
+    )
+
+
+def _timing_row(label, acceleration, median, p95, iterations):
+    return {"ok": True, "converged_fraction": 1.0, "label": label,
+            "acceleration": acceleration, "iteration_mode": "gauss-seidel",
+            "convergence_norm": "interface", "mean_step_ms": median,
+            "median_step_ms": median, "p95_step_ms": p95,
+            "iterations_mean": iterations}
+
+
+def test_best_picker_prefers_fewer_iterations_when_times_overlap():
+    """Two rows whose recorded spreads overlap tie, and iterations decide.
+
+    The numbers are ``star-8``'s.  A fixed 10% band around the fastest
+    mean put ``gs/aitken/interface`` outside it and reported the row
+    with 2.6x the iterations as the fixture's best configuration, even
+    though the fastest row's own median-to-p95 swing was 84% — far wider
+    than the 14% gap between them.
+    """
+    slow_but_scattered = _timing_row(
+        "gs/fixed0.8/interface", "fixed", median=0.299, p95=0.549,
+        iterations=18.62)
+    steady = _timing_row(
+        "gs/aitken/interface", "aitken", median=0.368, p95=0.458,
+        iterations=7.08)
+    best = sweep._best([slow_but_scattered, steady])
+    assert best["label"] == "gs/aitken/interface", best
+
+    # ... and a row that really is slower is still not tied.
+    genuinely_slower = _timing_row(
+        "gs/iqn-ils/interface", "iqn-ils", median=3.0, p95=3.2,
+        iterations=2.0)
+    best = sweep._best([slow_but_scattered, steady, genuinely_slower])
+    assert best["label"] == "gs/aitken/interface", best
+
+
+def test_heterogeneous_boundary_edges_are_all_additive():
+    """Mixing an additive and a non-additive edge on one field is order luck.
+
+    ``_resolve_boundary`` accumulates only when the target field is
+    already present, so a non-additive edge overwrites whatever was
+    resolved before it.  ``heterogeneous`` wires both the grid and the
+    driver into each probe's ``anchor_position``; with one of them
+    non-additive the fixture was correct only because the grid edge
+    happens to be inserted first, and the other order would have
+    silently dropped the driver.
+    """
+    built = cf.build_heterogeneous(cf.CouplingConfig(), n_cells=64)
+    shared = [e for e in built.gm.edges
+              if e.target_field == "anchor_position"]
+    assert len(shared) > 4, "expected both grid and driver edges per probe"
+    assert all(e.additive for e in shared), [
+        (e.source, e.target, e.additive) for e in shared if not e.additive
+    ]
+
+
+def test_coupling_statistics_do_not_depend_on_the_timed_step_count():
+    """``n_stat_steps`` pins the iteration statistics window.
+
+    The statistics pass used to run ``min(n_steps, 50)`` steps from
+    wherever the timed run left the state, so shortening a timing run
+    also halved the sample count *and* moved the window earlier in the
+    trajectory.  On a fixture driven by a 44-step oscillator that moved
+    the mean iteration count by tens of percent, which makes rows
+    recorded at different ``--steps`` silently incomparable.
+    """
+    from maddening.core.simulation.profiler import profile_graph
+
+    means = []
+    for n_steps in (4, 11):
+        built = cf.FIXTURES["stiff-pair-0.5"].build(cf.CouplingConfig())
+        report = profile_graph(built.gm, n_steps=n_steps, n_warmup=2,
+                               measure_coupling=False, n_stat_steps=12)
+        means.append({k: v["mean"] for k, v in report.coupling_iter_stats.items()})
+    assert means[0] and means[0] == means[1], means

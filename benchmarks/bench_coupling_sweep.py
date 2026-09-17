@@ -16,6 +16,11 @@ Useful flags::
     --include-slow              also run the 1e5-cell fixtures
     --fields                    add the accelerated_fields variants
     --steps N                   override every fixture's timed-step count
+    --stat-steps N              steps in the iteration-statistics pass
+                                (default 50; independent of --steps, so a
+                                shorter timing run does not also shorten
+                                and shift the window the iteration counts
+                                are averaged over)
     --trace / --no-trace        force the jax.profiler trace on or off
                                 (default: on only when the device is not CPU)
 
@@ -61,6 +66,17 @@ from maddening.core.simulation.profiler import profile_graph  # noqa: E402
 _LAUNCH_BOUND_AT = 0.33
 _COMPUTE_BOUND_AT = 0.10
 
+#: Steps in the iteration-statistics pass.  Fixed rather than derived
+#: from ``--steps``: the statistics pass used to be ``min(n_steps, 50)``
+#: steps taken *after* the timed run, so halving ``--steps`` both halved
+#: the sample count and moved the window earlier in the trajectory, and
+#: on a fixture driven by a 44-step oscillator the mean iteration count
+#: genuinely moved with it (``jac/iqn-imvj5/l2`` on ``chain-5``: 4.00 at
+#: ``--steps 10``, 3.00 at the default).  With the window pinned, rows
+#: recorded at different ``--steps`` are comparable on everything except
+#: the timings.
+_STAT_STEPS = 50
+
 
 def _regime(mean_ms: float, floor_ms: float, trace) -> tuple[str, float]:
     """Classify a row as launch- or compute-bound, and say on what basis."""
@@ -81,18 +97,40 @@ def _regime(mean_ms: float, floor_ms: float, trace) -> tuple[str, float]:
     return "mixed", frac
 
 
-def _state_signature(gm) -> dict[str, list]:
+def _coupled_nodes(built) -> frozenset:
+    """The nodes inside some coupling group of *built*."""
+    out: set[str] = set()
+    for key in built.group_keys:
+        out.update(key.split("+"))
+    return frozenset(out)
+
+
+def _state_signature(gm, nodes=None) -> dict[str, list]:
     """A small, order-stable fingerprint of the graph's state.
 
     Used to check that every configuration of a fixture lands on the
     same fixed point; a full state dump would bloat the JSON for the
     1e5-cell fixtures.  Each ``"<node>.<field>"`` entry carries
-    ``[sum, l2, max_abs]`` — the sum and the norm are what a
-    disagreement shows up in, and ``max_abs`` is the scale to measure
-    that disagreement against.
+    ``[sum, l2, max_abs, n]``.
+
+    ``n`` is the entry's element count and it is load-bearing rather
+    than informational.  ``sum`` and ``l2`` are *extensive* — they grow
+    with the array — while ``max_abs`` is *intensive*, so comparing the
+    raw triple against a scale taken from ``max_abs`` reports a
+    per-cell disagreement of 7e-7 on a 60 000-cell grid as a "relative
+    deviation" of 4e-2, and a fixture's score then depends on its state
+    size rather than on its physics.  With ``n`` recorded,
+    :func:`_same_fixed_point` can divide the sum by ``n`` and the norm
+    by ``sqrt(n)`` and compare three intensive quantities.
+
+    *nodes* restricts the signature to a subset — the driver nodes sit
+    outside every coupling group and have no business setting the scale
+    that a coupled node's disagreement is measured against.
     """
     out: dict[str, list] = {}
     for name in sorted(gm.node_names):
+        if nodes is not None and name not in nodes:
+            continue
         state = gm.get_node_state(name)
         for field in sorted(state):
             arr = np.asarray(state[field], dtype=np.float64).ravel()
@@ -102,12 +140,13 @@ def _state_signature(gm) -> dict[str, list]:
                 float(arr.sum()),
                 float(np.sqrt(np.sum(arr * arr))),
                 float(np.max(np.abs(arr))),
+                int(arr.size),
             ]
     return out
 
 
 def _measure(spec, config: CouplingConfig, *, steps: int, warmup: int,
-             trace: bool, trace_steps: int) -> dict:
+             stat_steps: int, trace: bool, trace_steps: int) -> dict:
     """Build, profile and diagnose one (fixture, configuration) pair."""
     row: dict = {
         "fixture": spec.name,
@@ -138,7 +177,7 @@ def _measure(spec, config: CouplingConfig, *, steps: int, warmup: int,
     gm = built.gm
     rep = profile_graph(
         gm, n_steps=steps, n_warmup=warmup, measure_coupling=False,
-        trace=trace, trace_steps=trace_steps,
+        n_stat_steps=stat_steps, trace=trace, trace_steps=trace_steps,
     )
     diag = gm.coupling_diagnostics()
 
@@ -185,13 +224,36 @@ def _measure(spec, config: CouplingConfig, *, steps: int, warmup: int,
     regime, basis = _regime(rep.mean_step_ms, rep.dispatch_floor_ms, tr)
     row["regime"] = regime
     row["regime_basis"] = basis
+    # ``expect`` used to be recorded per fixture and never compared to
+    # anything, so a fixture could declare itself launch-bound and
+    # measure compute-bound for its whole sweep without a word.
+    row["expect"] = spec.expect
+    row["regime_matches_expect"] = regime == spec.expect
     row["regime_from"] = "device_busy_fraction" if (
         tr is not None and tr.n_kernels_per_step > 0
     ) else "dispatch_floor_over_step"
 
-    row["state_signature"] = _state_signature(gm)
+    coupled = _coupled_nodes(built)
+    row["state_signature"] = _state_signature(gm, coupled)
+    # Kept for diagnostics, deliberately not part of the comparison:
+    # these are the driver nodes, which sit outside every group.
+    row["context_signature"] = _state_signature(
+        gm, frozenset(gm.node_names) - coupled)
     row["predicted_rho"] = dict(built.predicted_rho)
     return row
+
+
+def _intensive(entry: list) -> tuple[float, float, float]:
+    """``[sum, l2, max_abs, n]`` as three size-independent quantities.
+
+    The mean and the root-mean-square are what the sum and the L2 norm
+    become once the element count is divided out; ``max_abs`` already
+    is one.  All three then mean the same thing on a four-element
+    interface and on a 60 000-cell grid, which is what makes deviations
+    comparable across fixtures.
+    """
+    total, l2, max_abs, n = entry[0], entry[1], entry[2], max(int(entry[3]), 1)
+    return total / n, l2 / math.sqrt(n), max_abs
 
 
 def _field_scales(sig: dict) -> dict:
@@ -207,12 +269,24 @@ def _field_scales(sig: dict) -> dict:
     scalar, so per-entry is exactly that case.  Taking the scale of a
     field name across all the nodes carrying it is the measure that
     survives both.
+
+    This only works if *sig* is already restricted to the coupled
+    nodes.  ``heterogeneous``'s driver is a spring, so it carries a
+    ``position`` of ~0.88 while the coupled probes carry ~0.011; with
+    the driver in the signature every probe disagreement was divided by
+    eighty, and a 20.6% error scored 2.6e-3.
     """
     scales: dict[str, float] = {}
-    for key, (_s, _l2, max_abs) in sig.items():
+    for key, entry in sig.items():
         field = key.split(".", 1)[1]
-        scales[field] = max(scales.get(field, 0.0), abs(max_abs))
+        scales[field] = max(scales.get(field, 0.0), abs(entry[2]))
     return scales
+
+
+#: An entry whose own amplitude is below this fraction of its field's
+#: scale is measured against that fraction instead, so a node passing
+#: through zero cannot divide a finite disagreement by nothing.
+_NODE_SCALE_FLOOR = 1e-2
 
 
 def _same_fixed_point(rows: list[dict]) -> dict:
@@ -221,11 +295,23 @@ def _same_fixed_point(rows: list[dict]) -> dict:
     An accelerator that converges somewhere else is a bug, not a
     speed-up, so the sweep reports this next to the timings rather than
     leaving it to the test suite alone.
+
+    Two numbers, because one is not enough on a mixed-scale fixture.
+    ``max_relative_deviation`` measures every entry against its *field's*
+    scale, which is the right question for "did the graph land
+    somewhere else".  ``max_node_relative_deviation`` measures each
+    entry against its own amplitude (floored, so a zero crossing cannot
+    divide by nothing), which is the right question for "did any one
+    node move", and is the one that catches a small-amplitude node
+    hiding behind a large-amplitude one that shares its field name.
     """
     ref = None
     scales: dict = {}
     worst = 0.0
     worst_label = ""
+    worst_node = 0.0
+    worst_node_label = ""
+    worst_node_key = ""
     for row in rows:
         if not row.get("ok") or row.get("converged_fraction", 0.0) < 1.0:
             continue
@@ -235,12 +321,25 @@ def _same_fixed_point(rows: list[dict]) -> dict:
             continue
         if set(sig) != set(ref):
             continue
-        for key, values in sig.items():
-            scale = max(scales[key.split(".", 1)[1]], 1e-12)
-            dev = max(abs(v - r) for v, r in zip(values, ref[key])) / scale
+        for key, entry in sig.items():
+            field_scale = max(scales[key.split(".", 1)[1]], 1e-12)
+            got, want = _intensive(entry), _intensive(ref[key])
+            gap = max(abs(v - r) for v, r in zip(got, want))
+            dev = gap / field_scale
             if dev > worst:
                 worst, worst_label = dev, row["label"]
-    return {"max_relative_deviation": worst, "worst_config": worst_label}
+            own = max(abs(ref[key][2]), _NODE_SCALE_FLOOR * field_scale, 1e-12)
+            dev_node = gap / own
+            if dev_node > worst_node:
+                worst_node = dev_node
+                worst_node_label, worst_node_key = row["label"], key
+    return {
+        "max_relative_deviation": worst,
+        "worst_config": worst_label,
+        "max_node_relative_deviation": worst_node,
+        "worst_node_config": worst_node_label,
+        "worst_node_entry": worst_node_key,
+    }
 
 
 #: Preference order when two configurations time the same: the simpler
@@ -254,19 +353,45 @@ def _best(rows: list[dict]) -> dict:
     Not simply the fastest row: on the launch-bound fixtures the spread
     between configurations is a few tens of microseconds, well inside
     the run-to-run noise, so a bare ``min`` on ``mean_step_ms`` reports
-    whichever row happened to get a quiet scheduler slice.  Anything
-    within 10% of the fastest is treated as tied and broken on iteration
-    count — which *is* measured exactly — and then on simplicity.
+    whichever row happened to get a quiet scheduler slice.  Rows that
+    time the same are treated as tied and broken on iteration count —
+    which *is* measured exactly — and then on simplicity.
+
+    How wide "the same" is comes from the rows' own recorded spread
+    rather than from a fixed percentage, because a fixed percentage was
+    far inside it.  ``star-8``'s ``gs/fixed0.8/interface`` recorded a
+    median of 0.299 ms and a p95 of 0.549 ms — an 84% swing within one
+    row — so a 10% band around the fastest *mean* excluded
+    ``gs/aitken/interface`` at median 0.368 ms, a row that is not
+    measurably slower, and the fixture's reported best became the row
+    with 2.6x the iterations.  Ranking on a metric whose noise exceeds
+    the differences being ranked is how that happens.
+
+    Two rows tie when their spreads overlap.  Reading a row's spread as
+    ``[2*median - p95, p95]`` — its p95 reflected about its median,
+    since only the upper tail is recorded — that is
+    ``2*median - p95 <= fastest.p95``.  Medians rather than means
+    throughout: one slow sample moves a mean and not a median.
     """
     ok = [r for r in rows
           if r.get("ok") and r.get("converged_fraction", 0.0) >= 1.0]
     if not ok:
         return {}
-    floor = min(r["mean_step_ms"] for r in ok)
-    tied = [r for r in ok if r["mean_step_ms"] <= floor * 1.10]
+
+    def _median(r):
+        return r.get("median_step_ms", r["mean_step_ms"])
+
+    def _low(r):
+        """The bottom of *r*'s spread, p95 reflected about the median."""
+        return 2.0 * _median(r) - r.get("p95_step_ms", _median(r))
+
+    fastest = min(ok, key=_median)
+    floor = _median(fastest)
+    band = max(fastest.get("p95_step_ms", floor), floor)
+    tied = [r for r in ok if _low(r) <= band]
     best = min(tied, key=lambda r: (r.get("iterations_mean", 1e9),
                                     _SIMPLICITY.get(r["acceleration"], 9),
-                                    r["mean_step_ms"]))
+                                    _median(r)))
     base = next(
         (r for r in ok
          if r["iteration_mode"] == "gauss-seidel"
@@ -276,14 +401,20 @@ def _best(rows: list[dict]) -> dict:
     out = {
         "label": best["label"],
         "mean_step_ms": best["mean_step_ms"],
+        "median_step_ms": best.get("median_step_ms"),
         "iterations_mean": best.get("iterations_mean"),
-        "n_tied_within_10pct": len(tied),
-        "fastest_mean_step_ms": floor,
+        "tie_rule": "2*median - p95 <= fastest row's p95",
+        "n_tied": len(tied),
+        "fastest_label": fastest["label"],
+        "fastest_median_step_ms": floor,
+        "tie_band_ms": band,
     }
     if base is not None:
         out["baseline_label"] = base["label"]
         out["baseline_mean_step_ms"] = base["mean_step_ms"]
-        out["speedup_vs_baseline"] = base["mean_step_ms"] / best["mean_step_ms"]
+        out["baseline_median_step_ms"] = base.get("median_step_ms")
+        out["speedup_vs_baseline"] = (
+            _median(base) / _median(best) if _median(best) > 0 else float("nan"))
     return out
 
 
@@ -312,10 +443,14 @@ def _highlights(rows: list[dict]) -> dict:
             continue
         conv = [r for r in picked if r.get("converged_fraction", 0.0) >= 1.0]
         pool = conv or picked
-        best = min(pool, key=lambda r: r["mean_step_ms"])
+        # Median for the same reason as in ``_best``: on a launch-bound
+        # row a single slow sample moves the mean and not the median.
+        best = min(pool, key=lambda r: r.get("median_step_ms",
+                                             r["mean_step_ms"]))
         out[name] = {
             "label": best["label"],
             "mean_step_ms": best["mean_step_ms"],
+            "median_step_ms": best.get("median_step_ms"),
             "iterations_mean": best.get("iterations_mean"),
             "converged_fraction": best.get("converged_fraction"),
             "n_configs": len(picked),
@@ -341,6 +476,11 @@ def main() -> int:
                          "allocates max_iterations-1 secant columns, so "
                          "this is also the knob that decides how big its "
                          "least-squares problem is")
+    ap.add_argument("--stat-steps", type=int, default=_STAT_STEPS,
+                    help="steps in the iteration-statistics pass; "
+                         "independent of --steps so that reducing the "
+                         "timing run does not move the window the "
+                         "iteration counts are measured over")
     ap.add_argument("--warmup", type=int, default=0)
     ap.add_argument("--trace", dest="trace", action="store_true", default=None)
     ap.add_argument("--no-trace", dest="trace", action="store_false")
@@ -384,6 +524,7 @@ def main() -> int:
         fixture_rows: list[dict] = []
         for cfg in cfgs:
             row = _measure(spec, cfg, steps=steps, warmup=warmup,
+                           stat_steps=args.stat_steps,
                            trace=trace, trace_steps=args.trace_steps)
             fixture_rows.append(row)
             rows.append(row)
@@ -408,7 +549,11 @@ def main() -> int:
             "slow": spec.slow,
             "steps": steps,
             "warmup": warmup,
+            "stat_steps": args.stat_steps,
             "expect": spec.expect,
+            "regime_matches_expect_fraction": (
+                sum(1 for r in fixture_rows if r.get("regime_matches_expect"))
+                / max(sum(1 for r in fixture_rows if r.get("ok")), 1)),
             "predicted_rho": next(
                 (r["predicted_rho"] for r in fixture_rows
                  if r.get("ok") and r.get("predicted_rho")), {}),
@@ -425,6 +570,7 @@ def main() -> int:
         "jax": jax.__version__,
         "trace": trace,
         "max_iterations_override": args.max_iterations or None,
+        "stat_steps": args.stat_steps,
         "n_rows": len(rows),
         "wall_s": time.perf_counter() - t_start,
         "fixtures": per_fixture,

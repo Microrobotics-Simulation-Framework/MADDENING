@@ -107,10 +107,13 @@ python scripts/check_citations.py
 | `JAX_PLATFORMS` | Force CPU backend (avoids GPU issues) | `cpu` |
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
+| `MADDENING_HYPOTHESIS_PROFILE` | Hypothesis depth/settings profile (`dev` or `ci`) | `dev` |
 
 ## 4. Property-Based Testing (recommended for physics nodes)
 
-Location: `tests/verification/hypothesis/`
+Location: `tests/verification/hypothesis/` for the numerics suite; property
+tests that belong with a package (`tests/fmi/`, `tests/core/`) stay there.
+Configuration is global either way — see *Hypothesis profiles* below.
 
 Beyond analytical benchmarks, MADDENING provides a Hypothesis-based
 property-testing layer. See the full [Verification Guide](verification.md).
@@ -119,15 +122,90 @@ property-testing layer. See the full [Verification Guide](verification.md).
 
 ```python
 from maddening.testing.strategies import node_states, bounded_dt
-from hypothesis import given, settings
+from hypothesis import given
 
 @given(state=node_states(my_node, bounds={...}), dt=bounded_dt())
-@settings(max_examples=500, deadline=None)
 def test_my_node_finite(state, dt):
     out = my_node.update(state, {}, dt)
     for val in out.values():
         assert jnp.all(jnp.isfinite(val))
 ```
+
+Note the absence of `@settings`: `deadline`, `print_blob`, the example
+database and `max_examples` all come from the active profile.
+
+### Hypothesis profiles
+
+Profiles are registered and loaded in the **root** `tests/conftest.py`, so
+every property test in the tree gets them, whether or not the Hypothesis
+pytest plugin is loaded (the suite runs with
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, which disables the plugin and its
+`--hypothesis-profile` flag). Do not register profiles in a sub-directory
+`conftest.py`, and do not repeat `deadline=None` per test.
+
+| Profile | `max_examples` | Used by | Notes |
+|---------|----------------|---------|-------|
+| `dev`   | 50  | default for every local run | fast enough to keep the full suite in its ~50-minute budget |
+| `ci`    | 200 | the `verify-hypothesis` GitHub Actions job | 4x the search for every test that lets the profile own its depth |
+
+A per-test `@settings(max_examples=...)` **overrides the profile**, so a test
+that sets its own cap runs at that cap under both profiles and `ci` buys it
+nothing. That is the whole reason for the house rule below.
+
+Both set `deadline=None` (a JAX compile blows any wall-clock deadline),
+`print_blob=True` (a failure prints a `@reproduce_failure` blob you can
+paste into the test) and `suppress_health_check=[HealthCheck.too_slow]`.
+
+Select a profile with the `MADDENING_HYPOTHESIS_PROFILE` environment
+variable; an unknown name is a hard error rather than a silent fallback:
+
+```bash
+# local default -- same as setting nothing
+MADDENING_HYPOTHESIS_PROFILE=dev pytest tests/verification/hypothesis/
+
+# reproduce what CI runs
+MADDENING_HYPOTHESIS_PROFILE=ci pytest tests/verification/hypothesis/
+```
+
+Every run prints the active profile in the pytest header, e.g.
+`hypothesis profile: ci (max_examples=200, database=.../.hypothesis/examples)`.
+
+### The example database
+
+Failing examples are written to `<repo>/.hypothesis/examples` (git-ignored,
+absolute path fixed in `tests/conftest.py` so it does not depend on the
+working directory). Hypothesis replays them first on the next run, so a
+falsifying example found once stays found. The `verify-hypothesis` CI job
+caches that directory with `actions/cache`, keyed per run with a
+`restore-keys` prefix, so the database survives across runs; a cache miss
+is not an error, the job just starts from an empty database.
+
+To clear a stale entry locally, delete `.hypothesis/`.
+
+### `max_examples`: the house rule
+
+**A property test carries no `max_examples`. The profile owns it.** That is
+what makes "run the suite deeper" a one-line change instead of a hundred.
+
+An explicit `max_examples` is an exception that must be justified *in a
+comment on the line above it*, and is only justified when a single example
+is genuinely expensive — a fresh JAX trace/compile per draw, an optimiser
+loop, a multi-device `shard_map`, a full rollout. Then:
+
+* the floor is **20**. Below that Hypothesis barely gets past reuse and
+  generation and the test is decoration: it can pass for months and fail
+  once, which is exactly the failure mode this configuration exists to
+  remove;
+* prefer the value already used by the sibling properties in the same file
+  over inventing a new one;
+* an explicit value *above* the profile default is fine and needs no
+  special pleading — it only ever deepens the test.
+
+`verify_node` / `assert_node_verified` are a separate knob: they build
+their own `settings` internally (with `database=None`), so the profile does
+not reach them. Their `max_examples` argument defaults to 200; a call site
+that lowers it is subject to the same floor and the same
+comment-your-reason rule.
 
 **Node battery** — finite outputs, structure, determinism, jit/eager
 agreement, finite gradients, in one call:

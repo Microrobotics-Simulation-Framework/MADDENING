@@ -146,12 +146,16 @@ def test_verify_node_flags_flux_producer_without_params():
         def compute_boundary_fluxes(self, state, boundary_inputs, dt):     # no params kw
             return super().compute_boundary_fluxes(state, boundary_inputs, dt)
 
+    # ``verify_node`` runs its own Hypothesis settings (see
+    # ``maddening.testing.verification``), so the profile does not reach it and
+    # the battery size is spelled out at the house floor.  The trap fails
+    # structurally on the first example, so depth is free here.
     res = verify_node(Trap("t", 0.01), bounds={"position": (-1, 1), "velocity": (-1, 1)},
-                      checks=["params_consistent"], max_examples=3)
+                      checks=["params_consistent"], max_examples=20)
     assert res["params_consistent"].status == "FAIL"
     assert "compute_boundary_fluxes" in res["params_consistent"].detail
     ok = verify_node(SpringDamperNode("s", 0.01), bounds={"position": (-1, 1), "velocity": (-1, 1)},
-                     checks=["params_consistent", "params_effective"], max_examples=5,
+                     checks=["params_consistent", "params_effective"], max_examples=20,
                      derandomize=True)
     assert all(r.passed for r in ok.values()), ok
 

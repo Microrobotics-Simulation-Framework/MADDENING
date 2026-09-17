@@ -99,8 +99,12 @@ def test_verify_node_battery_passes_on_the_sharded_wrapper():
     mesh = create_device_mesh(shape=(4,))
     sh = ShardedStencilNode(_lbm(), mesh, axis_map={"devices": 1}, boundary="periodic")
     p = (0.3, 0.4)
+    # ``verify_node`` carries its own Hypothesis settings, so the profile in
+    # tests/conftest.py does not reach it; the battery size is spelled out at
+    # the house floor of 20 rather than left at the 200 default, because one
+    # example runs the whole battery through a 4-device ``shard_map``.
     res = verify_node(
-        sh, bounds={"f": (0.02, 0.2), "wall_mask": (0.0, 1.0)}, max_examples=6,
+        sh, bounds={"f": (0.02, 0.2), "wall_mask": (0.0, 1.0)}, max_examples=20,
         dt_range=(1.0, 1.0), derandomize=True,
         boundary_bounds={"inlet_pressure": p, "outlet_pressure": p,
                          "body_force": (-1e-3, 1e-3), "wall_mask_update": (0.0, 1.0)},

@@ -19,6 +19,39 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Changed
 
+- **Hypothesis property testing is configured once, in the root
+  `tests/conftest.py`.**  Two profiles are registered there -- `dev`
+  (`max_examples=50`, the default for a local run) and `ci`
+  (`max_examples=200`, what the `verify-hypothesis` job runs) -- both with
+  `deadline=None`, `print_blob=True` and
+  `suppress_health_check=[HealthCheck.too_slow]`.  Select one with the
+  `MADDENING_HYPOTHESIS_PROFILE` environment variable (an unknown name is a
+  hard error); the active profile is printed in the pytest header.  This
+  replaces the single `jax` profile that
+  `tests/verification/hypothesis/conftest.py` registered for that directory
+  alone, so property tests elsewhere in the tree (`tests/fmi/`,
+  `tests/core/`) now get the same settings instead of hand-rolling
+  `deadline=None` per test.  Registration and selection work both with and
+  without the Hypothesis pytest plugin, which
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` disables; when the plugin *is* loaded an
+  explicit `--hypothesis-profile` still wins.
+- **Failing examples are now persisted and replayed.**  The example database
+  is pinned to `<repo>/.hypothesis/examples` (git-ignored, absolute so it
+  does not follow the working directory), and the `verify-hypothesis` CI job
+  caches that directory with `actions/cache` -- keyed per run with a
+  `restore-keys` prefix, so every run restores the previous database and
+  saves its own.  A cache miss is not an error.  Previously a falsifying
+  example found once was lost, which is how the rollout-parity properties
+  passed for months and then failed once.
+- **`max_examples` house rule** (`docs/developer_guide/testing_standards.md`):
+  a property test carries no `max_examples` and the profile owns the default;
+  an explicit value is an exception that needs a comment saying what makes a
+  single example expensive, and may not go below 20.  Applied to the
+  shallowest tests: `tests/verification/test_builtin_nodes_verified.py`
+  (5 -> profile default), `tests/verification/hypothesis/test_hypothesis_retrace.py`
+  (15 -> 40), `test_hypothesis_params.py` (15 -> 25), `test_hypothesis_sysid.py`
+  (12 -> 30), `tests/core/test_sysid.py` (8 -> 20) and the `verify_node`
+  battery sizes in `tests/core/test_params_contract_completeness.py` (3, 5 -> 20).
 - **`AdaptiveNode` is `@stability(EVOLVING)`, not `STABLE`, and its blindness
   gate no longer rejects a small active-set budget** (independent audit of the
   `AdaptiveNode` merge; report under

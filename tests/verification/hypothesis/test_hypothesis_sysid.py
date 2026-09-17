@@ -244,7 +244,11 @@ class TestWindowedLoss:
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[1] == 1 and t[0] <= 60]),
            factor=perturb_st)
-    @settings(max_examples=12, deadline=None)
+    # Explicit cap: an example builds an IFT-coupled group, runs a
+    # rollout, and differentiates a windowed loss through it -- one JAX
+    # compile per (tiling, shape) draw.  30 matches the sibling
+    # coupled-group properties in this class.
+    @settings(max_examples=30, deadline=None)
     def test_mask_unconverged_through_coupled_group(
         self, coupled, truth, init, tiling, factor,
     ):

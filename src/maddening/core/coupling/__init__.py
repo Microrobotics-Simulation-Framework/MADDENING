@@ -6,6 +6,6 @@ Backward-compatible re-exports so that existing imports continue to work::
     from maddening.core.coupling.group import CouplingGroup   # also works
 """
 
-from maddening.core.coupling.group import CouplingGroup
+from maddening.core.coupling.group import CouplingGroup, coupling_group_kwargs
 
-__all__ = ["CouplingGroup"]
+__all__ = ["CouplingGroup", "coupling_group_kwargs"]

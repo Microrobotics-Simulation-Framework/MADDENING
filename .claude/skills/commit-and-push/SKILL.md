@@ -66,7 +66,11 @@ Check if the changes affect user-visible functionality. If yes, update `CHANGELO
 - **Security** — security-relevant changes (required by MDCG 2019-16)
 - **Known Anomalies** — changes to `known_anomalies.yaml` (required for IEC 62304 SOUP)
 
-**When to skip**: Pure internal refactors, CI config changes, and developer tooling changes that don't affect the package's external behavior don't need changelog entries.
+**How to write the entry**: add exactly **one contiguous block, at most three lines**, at the **top** of the relevant subsection. Never edit or reorder existing lines — branches merge in parallel and appending at the top of a subsection is what keeps the conflicts trivial.
+
+Say only what changed and what a user has to do about it. Measurements, file inventories, rationale, test counts and "why" paragraphs belong in the pull request description and in the release notes under `docs/release_notes/`, not in the changelog. If three lines are not enough, the extra detail is release-notes material.
+
+**When to skip**: Pure internal refactors, CI config changes, and developer tooling changes that don't affect the package's external behavior don't need changelog entries. Internal test infrastructure (fuzz harnesses, Hypothesis profiles, property-test packages, CI gating) is contributor-facing, not user-facing: put it in the release notes' engineering section, or give it a single line here at most.
 
 ### 5. New Node Checks (if applicable)
 

@@ -32,11 +32,19 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
-# Base install: simulation engine (CPU JAX + NumPy + PyYAML).
+# Base install: simulation engine (CPU JAX + NumPy + PyYAML + lineax).
 # For GPU acceleration, add the cuda12 or tpu extra.
+#
+# `lineax` is a core dependency, not an extra: a coupling group at its
+# *default* settings (solver="ift", linear_solver="gmres") routes its
+# derivative rule through lineax, so a base install without it failed
+# at runtime on the default path.  lineax is small and pure JAX
+# (equinox + jaxtyping transitively), so the footprint is acceptable.
+# It is still imported lazily -- see the note on the `ift` extra.
 dependencies = [
     "jax>=0.10,<0.13",
     "jaxlib>=0.10,<0.13",
+    "lineax>=0.0.7",
     "numpy>=1.24",
     "pyyaml>=6.0",
 ]
@@ -49,10 +57,15 @@ dependencies = [
 cuda12 = ["jax[cuda12]>=0.10,<0.13"]
 tpu = ["jax[tpu]>=0.10,<0.13"]
 
-# ── Differentiable linear solve (experimental pilot, v0.3.1) ────────
-# `maddening.core.solver_utils.ift_linear_solve` lazy-imports lineax.
-# Install this extra to use it:  pip install maddening[ift]
-ift = ["lineax>=0.0.7"]
+# ── Differentiable linear solve (compatibility alias, v0.4.0) ───────
+# `lineax` moved into the base dependencies in v0.4.0 because the
+# default coupling solver needs it (see the note above).  This extra
+# is kept, deliberately empty, so `pip install maddening[ift]` keeps
+# resolving for anyone who pinned it in v0.3.x -- pip errors on an
+# undeclared extra, and breaking those installs buys nothing.  It is
+# still imported lazily: `import maddening` must not pay lineax's
+# ~1 s import (equinox + jaxtyping + jax), only a Krylov solve does.
+ift = []
 
 # ── Cloud providers ────────────────────────────────────────────────
 # One extra per provider.  Installs SkyPilot WITH the provider SDK.
@@ -170,13 +183,8 @@ ci = [
     # FMI 3.0 round-trip validation (v0.3.0 A1).  Test-only -- not a
     # runtime dep of maddening.fmi.
     "fmpy>=0.3",
-    # IFT coupling solver tests (v0.3.0 A4) and the sharded sparse
-    # iterative solver lineax-backed path (v0.3.0 A5).  Both are
-    # lazy-imported at runtime, so lineax stays out of base
-    # dependencies; CI / dev installs need it explicitly.  Promoting
-    # this to a user-facing [ift] extra + a friendlier import error
-    # is scheduled for v0.4.0 -- see plans/MADDENING_v0.4.0_PLAN.md.
-    "lineax>=0.0.7",
+    # (`lineax` used to be listed here: as of v0.4.0 it is a base
+    # dependency, so the base install already provides it.)
     # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
     # Static type check (non-blocking `typecheck` CI job; see
@@ -200,7 +208,6 @@ dev = [
     "httpx>=0.24",
     "httpx2>=2.0",
     "fmpy>=0.3",
-    "lineax>=0.0.7",
     # `pyright` / `python scripts/typing_baseline.py` -- phase-1 typing
     # policy is non-blocking (docs/developer_guide/typing.md).  A floor
     # here; the ci extra pins the exact release the baseline was measured with.

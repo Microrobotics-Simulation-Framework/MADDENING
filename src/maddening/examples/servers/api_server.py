@@ -8,10 +8,8 @@ Starts a FastAPI server with a pre-loaded simulation graph:
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
     pip install fastapi uvicorn   # if not already installed
-    python maddening/examples/api_server.py
+    python -m maddening.examples.servers.api_server
 
 Then open http://localhost:8000/docs for the interactive API docs.
 
@@ -43,14 +41,6 @@ asyncio.run(listen())
 """
 
 import sys
-import os
-
-# Ensure the project root is on the path.
-_project_root = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
-)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager

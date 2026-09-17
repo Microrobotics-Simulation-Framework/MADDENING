@@ -12,7 +12,7 @@ real time.
 
 Usage::
 
-    python maddening/examples/lbm_pipe_interactive.py
+    python -m maddening.examples.servers.lbm_pipe_interactive
 
 Controls:
     Mouse drag     -- rotate camera

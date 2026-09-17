@@ -13,7 +13,7 @@ bandwidth is limited and full 3D state would be too large to ship.
 
 Usage::
 
-    python maddening/examples/lbm_pipe_server.py
+    python -m maddening.examples.servers.lbm_pipe_server
 
 Then open http://localhost:8000/viz/render in a browser.
 

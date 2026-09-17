@@ -390,7 +390,8 @@ def _load_asset(base: Path, ref: dict) -> np.ndarray:
     base_real = base.resolve()
     try:
         real = (base / rel).resolve(strict=True)
-    except (OSError, RuntimeError) as exc:      # missing, loop, not a directory
+    except (OSError, RuntimeError, ValueError) as exc:
+        # missing, symlink loop, not a directory, embedded NUL byte
         raise PointReferenceError(
             f"missing point asset {rel!r} (looked in {base}): {exc}; pass base_dir= "
             f"pointing at the directory the config was saved in, or save the array "

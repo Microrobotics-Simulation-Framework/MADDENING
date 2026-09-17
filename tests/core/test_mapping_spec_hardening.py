@@ -242,6 +242,16 @@ def test_compressed_asset_member_larger_than_the_cap_is_refused_before_decompres
         resolve({"asset": "bomb.npz", "key": "pts"})
 
 
+@pytest.mark.parametrize("rel", ["nul\x00.npy", "missing.npy", "loop.npy"])
+def test_an_unresolvable_asset_path_is_a_point_reference_error(tmp_path, rel):
+    """Whatever the operating system says about the path — gone, a
+    symlink loop, a NUL byte — the caller gets one error type that names
+    the asset and says where it was looked for."""
+    (tmp_path / "loop.npy").symlink_to(tmp_path / "loop.npy")
+    with pytest.raises(PointReferenceError, match="missing point asset"):
+        make_point_resolver(base_dir=tmp_path)({"asset": rel})
+
+
 def test_asset_of_a_non_numeric_dtype_is_refused(tmp_path):
     np.save(tmp_path / "words.npy", np.array(["a", "b"]))
     with pytest.raises(PointReferenceError, match="not a bool / integer / float"):

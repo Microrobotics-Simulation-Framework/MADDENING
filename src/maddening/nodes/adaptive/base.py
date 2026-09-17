@@ -1065,6 +1065,7 @@ class AdaptiveNode(SimulationNode):
             return
         try:
             values = np.asarray(c)
+            active = np.asarray(mask, dtype=bool)
         except (
             jax.errors.TracerArrayConversionError,
             jax.errors.ConcretizationTypeError,
@@ -1073,6 +1074,8 @@ class AdaptiveNode(SimulationNode):
             return  # traced: nothing to inspect, and nowhere to report it
         if bool(np.all(np.isfinite(values))):
             return
+        if not bool(np.all(np.isfinite(np.where(active, values, 0.0)))):
+            return  # the active block is non-finite too: a loud failure
         warnings.warn(
             f"{type(self).__name__} {self.name!r}: solve_frozen returned "
             "non-finite coefficients that the active-set mask then erased. "

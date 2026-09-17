@@ -271,7 +271,10 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=15),
     )
-    @settings(max_examples=15, deadline=None)
+    # Explicit cap: each example traces step, run_scan and run_sweep
+    # through a coupling group at a freshly drawn ``n_steps``, i.e. three
+    # compiles per example.  25 matches the neighbouring parity properties.
+    @settings(max_examples=25, deadline=None)
     def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
         """Same through the coupling group; ``_meta`` is batched too."""
         rng = np.random.default_rng(seed)

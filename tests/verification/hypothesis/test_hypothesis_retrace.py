@@ -106,7 +106,10 @@ def test_step_traces_once_over_random_graphs(kinds, couple, multirate, seed):
 
 
 @given(kinds=kinds_st, seed=st.integers(0, 2**31))
-@settings(max_examples=15, deadline=None)
+# Explicit cap: every distinct ``kinds`` tuple is a fresh graph and a fresh
+# JAX trace of both the stepped and the scanned path, so an example costs a
+# compile rather than a call.  40 matches the sibling property above.
+@settings(max_examples=40, deadline=None)
 def test_run_scan_and_step_agree_after_normalisation(kinds, seed):
     """Normalising the seed state changes the trace signature only."""
     a = _graph(kinds, False, False, seed)

@@ -160,7 +160,6 @@ _HEAT_INPUTS = make_inputs(
 
 
 @given(_HEAT_INPUTS.strategy())
-@settings(max_examples=5, deadline=None)
 def test_heat_source_sampled_with_declared_shape(args):
     """The battery samples ``heat_source`` at its declared ``(n,)`` shape,
     so the check exercised the real stencil path, not a broadcast scalar."""

@@ -680,29 +680,47 @@ def build_expensive_pair(config: CouplingConfig, n_cells: int = 100_000,
 
 def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
                         n_cheap: int = 4, fourier: float = 0.4,
-                        gain: float = 0.6) -> BuiltGraph:
+                        gain: float = 0.6,
+                        dt: float = _SPRING_DT) -> BuiltGraph:
     """One expensive heat grid coupled to *n_cheap* scalar spring nodes.
 
     A synthetic thermo-structural loop: the grid's left interface
-    temperature is driven by the sum of the scalar nodes' positions, and
+    temperature is driven by the mean of the scalar nodes' positions, and
     each scalar node is anchored to the grid's left interface cell.  The
     grid carries ``n_cells`` accelerated degrees of freedom and the
     scalars carry one each, so this is the fixture where restricting
     ``accelerated_fields`` changes the size of the quasi-Newton problem
     by four orders of magnitude.
+
+    The timestep is the *spring's*, and the diffusivity is solved for to
+    hit the requested Fourier number, which is the reverse of the
+    pure-heat fixtures.  Doing it the other way round — fixing a
+    physical ``alpha`` and letting ``dt = Fo*dx**2/alpha`` — gives
+    ``dt ~ 1e-9`` at this grid resolution, and a spring at that timestep
+    carries velocities of order ``position/dt``, i.e. ten million times
+    its positions.  The group's global L2 residual is then entirely
+    velocity round-off: every Jacobi L2 row exhausts the cap, the
+    surviving state sits at the float32 floor, and the fixture measures
+    nothing but its own conditioning.  The resulting ``alpha`` is not a
+    physical material property, and does not need to be: the interface
+    gain this fixture exists to control is the Fourier number, which is
+    the same either way.
     """
     from maddening.core.graph_manager import GraphManager
-    from maddening.core.transforms import extract_first, scale
+    from maddening.core.transforms import scale
     from maddening.nodes.heat import HeatNode
 
+    import numpy as np
+
     length = 1.0
-    alpha = 0.1
     dx = length / n_cells
-    dt = fourier * dx * dx / alpha
+    alpha = fourier * dx * dx / dt
+    xs = np.linspace(0.0, 1.0, n_cells, dtype=np.float32)
 
     gm = GraphManager()
     gm.add_node(HeatNode("grid", dt, n_cells=n_cells, length=length,
-                         thermal_diffusivity=alpha, initial_temperature=0.0))
+                         thermal_diffusivity=alpha,
+                         initial_temperature=np.cos(np.pi * xs)))
     cheap = [f"probe{i}" for i in range(n_cheap)]
     for i, nm in enumerate(cheap):
         gm.add_node(_spring(nm, dt, gain, x0=1.0 + 0.2 * i))
@@ -712,6 +730,10 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     for nm in cheap:
         gm.add_edge(nm, "grid", "position", "left_temperature",
                     transform=w, additive=True)
+    # Same reason as the pure-spring fixtures: without a driver the
+    # scalars settle onto the grid interface within a few steps and every
+    # configuration then converges in one iteration on a dead graph.
+    _add_driver(gm, dt, cheap)
 
     names = ["grid"] + cheap
     interface = {"grid": ("temperature",), **{n: ("position",) for n in cheap}}
@@ -723,7 +745,7 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     )
     gm.add_coupling_group(
         names,
-        **config.group_kwargs(max_iterations=20, tolerance=1e-5,
+        **config.group_kwargs(max_iterations=20, tolerance=_SPRING_TOL,
                               atol=1e-6, rtol=1e-4, accelerated_fields=accel),
     )
     gm.compile()

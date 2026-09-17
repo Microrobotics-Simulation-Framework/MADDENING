@@ -81,22 +81,28 @@ def _regime(mean_ms: float, floor_ms: float, trace) -> tuple[str, float]:
     return "mixed", frac
 
 
-def _state_signature(gm) -> list[float]:
+def _state_signature(gm) -> dict[str, list]:
     """A small, order-stable fingerprint of the graph's state.
 
     Used to check that every configuration of a fixture lands on the
     same fixed point; a full state dump would bloat the JSON for the
-    1e5-cell fixtures.
+    1e5-cell fixtures.  Each ``"<node>.<field>"`` entry carries
+    ``[sum, l2, max_abs]`` — the sum and the norm are what a
+    disagreement shows up in, and ``max_abs`` is the scale to measure
+    that disagreement against.
     """
-    out = []
+    out: dict[str, list] = {}
     for name in sorted(gm.node_names):
         state = gm.get_node_state(name)
         for field in sorted(state):
             arr = np.asarray(state[field], dtype=np.float64).ravel()
             if arr.size == 0:
                 continue
-            out.append(float(arr.sum()))
-            out.append(float(np.sqrt(np.sum(arr * arr))))
+            out[f"{name}.{field}"] = [
+                float(arr.sum()),
+                float(np.sqrt(np.sum(arr * arr))),
+                float(np.max(np.abs(arr))),
+            ]
     return out
 
 
@@ -188,29 +194,52 @@ def _measure(spec, config: CouplingConfig, *, steps: int, warmup: int,
     return row
 
 
+def _field_scales(sig: dict) -> dict:
+    """Largest magnitude of each *field name*, across the nodes carrying it.
+
+    A single global scale hides the thing this check exists to catch: on
+    the heterogeneous fixture the grid's temperature is ~1 and the
+    scalar nodes' positions are ~1e-2, so dividing everything by the
+    largest entry lets an accelerator move a scalar node by its whole
+    value and still score 1e-2.  Normalising each entry against *itself*
+    has the opposite failure — an oscillating trajectory passing through
+    zero explodes, and on the spring fixtures every field is a single
+    scalar, so per-entry is exactly that case.  Taking the scale of a
+    field name across all the nodes carrying it is the measure that
+    survives both.
+    """
+    scales: dict[str, float] = {}
+    for key, (_s, _l2, max_abs) in sig.items():
+        field = key.split(".", 1)[1]
+        scales[field] = max(scales.get(field, 0.0), abs(max_abs))
+    return scales
+
+
 def _same_fixed_point(rows: list[dict]) -> dict:
-    """Largest relative deviation between converged rows' fixed points.
+    """Largest deviation between converged rows' fixed points.
 
     An accelerator that converges somewhere else is a bug, not a
     speed-up, so the sweep reports this next to the timings rather than
     leaving it to the test suite alone.
     """
     ref = None
+    scales: dict = {}
     worst = 0.0
     worst_label = ""
     for row in rows:
         if not row.get("ok") or row.get("converged_fraction", 0.0) < 1.0:
             continue
-        sig = np.asarray(row["state_signature"], dtype=np.float64)
+        sig = row["state_signature"]
         if ref is None:
-            ref = sig
+            ref, scales = sig, _field_scales(sig)
             continue
-        if sig.shape != ref.shape:
+        if set(sig) != set(ref):
             continue
-        scale = max(float(np.max(np.abs(ref))), 1e-12)
-        dev = float(np.max(np.abs(sig - ref))) / scale
-        if dev > worst:
-            worst, worst_label = dev, row["label"]
+        for key, values in sig.items():
+            scale = max(scales[key.split(".", 1)[1]], 1e-12)
+            dev = max(abs(v - r) for v, r in zip(values, ref[key])) / scale
+            if dev > worst:
+                worst, worst_label = dev, row["label"]
     return {"max_relative_deviation": worst, "worst_config": worst_label}
 
 

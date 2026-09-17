@@ -53,21 +53,52 @@ cf = _load_fixtures()
 
 
 def _run(built, n_steps):
-    """Step *built* and return (flattened state, per-group diagnostics)."""
+    """Step *built* and return (state by node/field, per-group diagnostics)."""
     gm = built.gm
     for _ in range(n_steps):
         gm.step()
-    flat = []
+    state = {}
     for name in sorted(gm.node_names):
-        state = gm.get_node_state(name)
-        for field in sorted(state):
-            flat.append(np.asarray(state[field], dtype=np.float64).ravel())
-    return np.concatenate(flat), gm.coupling_diagnostics()
+        for field, value in sorted(gm.get_node_state(name).items()):
+            state[(name, field)] = np.asarray(value, dtype=np.float64).ravel()
+    return state, gm.coupling_diagnostics()
+
+
+def _flat(state):
+    """One array, for the bitwise-determinism comparisons."""
+    return np.concatenate([state[k] for k in sorted(state)])
+
+
+def _field_scales(state):
+    """Largest magnitude of each *field name*, across every node carrying it."""
+    scales = {}
+    for (_node, field), arr in state.items():
+        m = float(np.max(np.abs(arr))) if arr.size else 0.0
+        scales[field] = max(scales.get(field, 0.0), m)
+    return scales
 
 
 def _relative_spread(a, b):
-    scale = max(float(np.max(np.abs(a))), 1e-9)
-    return float(np.max(np.abs(a - b))) / scale
+    """Worst deviation of *b* from *a*, per field name against that field's scale.
+
+    Three scalings have to be got right at once.  A single global scale
+    is a velocity scale — these graphs carry velocities of order
+    ``position/dt`` — so a disagreement about position hides behind it.
+    Normalising each element against itself explodes whenever an
+    oscillating trajectory passes through zero, and on the spring
+    fixtures every field *is* a single element, so per-array
+    normalisation is per-element normalisation and has the same problem.
+    Taking the scale of a field name across all the nodes that carry it
+    is the one that works: a ring node passing through zero is still
+    measured against the ring's amplitude, while the grid's temperature
+    and a scalar node's position keep their own very different scales.
+    """
+    scales = _field_scales(a)
+    worst = 0.0
+    for key, ref in a.items():
+        scale = max(scales[key[1]], 1e-12)
+        worst = max(worst, float(np.max(np.abs(ref - b[key]))) / scale)
+    return worst
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +149,8 @@ def test_every_configuration_reaches_the_same_fixed_point(fixture):
             f"{fixture} / {config.label} did not converge; the fixture is "
             f"supposed to be inside every configuration's reach"
         )
-        assert np.all(np.isfinite(state)), f"{fixture} / {config.label}: non-finite state"
+        assert np.all(np.isfinite(_flat(state))), (
+            f"{fixture} / {config.label}: non-finite state")
         if reference is None:
             reference = state
             continue
@@ -401,7 +433,7 @@ def test_mixed_mode_graph_steps_deterministically():
     second = cf.FIXTURES["mixed-modes"].build(cf.CouplingConfig())
     a, diag_a = _run(first, 12)
     b, diag_b = _run(second, 12)
-    np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(_flat(a), _flat(b))
     assert {k: v["iterations"] for k, v in diag_a.items()} == \
            {k: v["iterations"] for k, v in diag_b.items()}
 

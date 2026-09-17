@@ -28,10 +28,10 @@ not, and says which.
 |---|---|---|
 | anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.6–1.9x fewer iterations than Jacobi on every shape measured; Aitken costs nothing measurable and removes 30–60% of the remaining iterations |
 | cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: every configuration's step time is within noise of every other, so pick the one with the fewest iterations and the least machinery |
-| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converged at all past the contraction limit, and the one case where IQN also wins on time: 6.0 iterations and 0.34 ms against a cap of 60 exhausted on 96% of steps |
+| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converged at all past the contraction limit, and the one case where IQN also wins on time: 6.0 iterations and 0.18 ms against a cap of 60 exhausted on 96% of steps |
 | one or more nodes with a large state (grids, meshes) | `gauss-seidel` / `aitken` / `interface`, and set `accelerated_fields` before trying IQN | IQN's least-squares runs over every accelerated degree of freedom; on a 2x10⁵-cell interface it cost 80x the plain step |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
-| wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 9.2 → 9.6 iterations from 2 to 16 leaves, IQN 4.9 → 5.0) but IQN's step cost is not: 1.55 ms against 0.69 ms at 16 leaves, for 4.6 fewer iterations that the dispatch floor hides |
+| wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 9.2 → 9.6 iterations from 2 to 16 leaves, IQN 4.9 → 5.0) but IQN's step cost is not: 1.43 ms against 0.82 ms at 16 leaves, for 4.6 fewer iterations that the dispatch floor hides |
 | ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
 | fixed point that barely moves between steps | `gauss-seidel` / `aitken` / `interface`; try `iqn-imvj` with `jacobian_reuse` only if the interface is small | reuse does cut iterations (3 → 2) but the quasi-Newton machinery cost 20x the saving here |
 | two subsystems with different shapes | one group each, with its own settings | groups in one graph keep independent schedules, iteration counts and convergence flags |
@@ -233,13 +233,17 @@ accelerated degrees of freedom and **`max_cols = max_iterations - 1`**.
 
 | fixture | accelerated DOFs | gs/none | gs/iqn-ils | factor |
 |---|---|---|---|---|
-| `chain-5` | 5 | 0.170 ms | 0.953 ms | 5.6x |
-| `chain-20` | 20 | 0.620 ms | 2.767 ms | 4.5x |
-| `chain-50` | 50 | 1.381 ms | 331.6 ms | 240x |
-| `slow-drift` | 4 000 | 0.447 ms | 9.065 ms | 20x |
+| `chain-5` | 5 | 0.168 ms | 0.828 ms | 4.9x |
+| `chain-20` | 20 | 0.739 ms | 2.56 ms | 3.5x |
+| `chain-50` | 50 | 1.35 ms | 107 ms | 79x |
+| `slow-drift` | 4 000 | 0.324 ms | 9.37 ms | 29x |
 
 `chain-50` is the cautionary row: 14.1 iterations against 25.4, and a
-step that is 240 times slower.  Two levers, in order:
+step 79 times slower for them.  That factor is also the least
+reproducible number on this page — the same row measured 332 ms on an
+earlier run of the identical code, because XLA's CPU SVD inside a
+`while_loop` is erratic.  Treat it as "one to two orders of magnitude",
+not as 79.  Two levers, in order:
 
 1. **Lower `max_iterations`.**  A cap of 60 gives IQN 59 secant columns
    whether or not it ever needs them.
@@ -282,10 +286,11 @@ the smaller residual vector also shrinks the least-squares problem).
 One honest caveat: the interface norm is a *relative* criterion
 (`atol`/`rtol`), so it stops earlier than an absolute L2 tolerance, and
 the trajectories drift further apart as a result.  Measured against the
-`gauss-seidel/none/l2` trajectory over the profiled run, the worst
-interface-norm row per fixture sits at 4x10⁻⁵ (`chain-2`) to 2x10⁻³
-(`chain-20`, `star-4`, `ring-16`), and 1.4x10⁻² on `chain-50`; the L2
-rows stay within 2x10⁻⁴ everywhere.  That is the same fixed point reached
+`gauss-seidel/none/l2` trajectory over the profiled run, and scaling
+each field by its own magnitude rather than the graph's largest, the
+worst interface-norm row per fixture runs from 3.8x10⁻⁵ (`chain-2`)
+through 2x10⁻³ (`chain-20`, `star-4`) to 3.7x10⁻² on `chain-50`; every
+L2 row stays within 5x10⁻⁴.  That is the same fixed point reached
 to a looser tolerance, not a different one — the sweep records
 `fixed_point_agreement` per fixture and the suite asserts it — but the
 deviation grows with the fixture's condition number, so set `rtol`

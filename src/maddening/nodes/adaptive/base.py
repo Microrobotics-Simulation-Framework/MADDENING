@@ -776,7 +776,14 @@ class AdaptiveNode(SimulationNode):
         ``None`` (a direct call) uses the constructor constants.  The
         mask returned by :meth:`compute_active_set` is committed under
         ``stop_gradient``; ``jax.grad`` of anything downstream reaches
-        ``params`` only through :meth:`solve_frozen`.
+        ``params`` only through :meth:`solve_frozen`, and is therefore
+        the derivative of the branch this call selected -- exact within
+        the active-set region and blind to the region's boundary (see
+        the module docstring and ``MADD-ANO-003``).
+
+        ``boundary_inputs`` and ``dt`` are ignored, so an ``AdaptiveNode``
+        is an edge *source* only; whether the hooks should receive them
+        is an open question for the 0.4.0 API freeze.
         """
         del boundary_inputs, dt  # the base class uses neither
         p = self._merged(params)

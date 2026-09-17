@@ -496,6 +496,19 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **The rollout-parity property tests are no longer flaky.**  The
+  `step` / `run_scan` / `run_sweep` agreement tests in
+  `tests/verification/hypothesis/test_hypothesis_params.py` compared a
+  near-zero final value against a fixed `atol=1e-7`, but float32 round-off
+  accumulates with the magnitudes the arithmetic passes through, and a
+  ball's velocity crosses zero on every bounce.  A sweep of 1600
+  seed/step-count combinations failed 7 times (all 15-step ball velocities,
+  2e-7 to 1e-6 absolute), about a 6 % chance of a red run per CI job.  The
+  absolute tolerance is now scaled by the largest magnitude in the compared
+  trees, and the seven seeds are pinned as an explicit regression test.  No
+  library code changed: the three rollout paths always agreed to float32
+  round-off.
+
 - **Resume-from-URL transport hardening** (independent audit of the
   `maddening.cloud.resume` move, report under
   `benchmarks/results/audit_cloud-resume-transport/`; regression tests in

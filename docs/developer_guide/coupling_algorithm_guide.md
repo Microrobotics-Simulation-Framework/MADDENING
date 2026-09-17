@@ -29,7 +29,8 @@ not, and says which.
 | anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.6–1.9x fewer iterations than Jacobi on every shape measured; Aitken costs nothing measurable and removes 30–60% of the remaining iterations |
 | cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: every configuration's step time is within noise of every other, so pick the one with the fewest iterations and the least machinery |
 | contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converged at all past the contraction limit, and the one case where IQN also wins on time: 6.0 iterations and 0.18 ms against a cap of 60 exhausted on 96% of steps |
-| one or more nodes with a large state (grids, meshes) | `gauss-seidel` / `aitken` / `interface`, and set `accelerated_fields` before trying IQN | IQN's least-squares runs over every accelerated degree of freedom; on a 2x10⁵-cell interface it cost 80x the plain step |
+| one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | same iteration count as accelerating everything, at 1/60th the cost — the quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid |
+| every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 5.6 iterations and 7.70 ms to 1.0 and 3.38 ms; IQN costs 70–160x and is not affordable at 2x10⁵ accelerated DOFs |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
 | wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 9.2 → 9.6 iterations from 2 to 16 leaves, IQN 4.9 → 5.0) but IQN's step cost is not: 1.43 ms against 0.82 ms at 16 leaves, for 4.6 fewer iterations that the dispatch floor hides |
 | ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
@@ -298,9 +299,11 @@ worth defaulting to.
 **Gauss-Seidel + fixed under-relaxation.** Never won.  See contradiction
 4 above.
 
-**Interface norm with `accelerated_fields` on interface DOFs.**  This is
-the one that generalised from AR4.  The interface norm alone removes
-25–35% of the iterations at no measurable cost:
+**Interface norm with `accelerated_fields` restricted to interface DOFs.**
+Half right, and the half that is wrong is the more useful half.
+
+The interface norm alone generalised from AR4 and removes 25–35% of the
+iterations at no measurable cost:
 
 | fixture | l2 | interface |
 |---|---|---|
@@ -310,8 +313,38 @@ the one that generalised from AR4.  The interface norm alone removes
 | `stiff-pair-0.95` | 58.8 (at cap on 96% of steps) | 46.2 (at cap on 20%) |
 
 Combined with IQN it is better still (`chain-50`: 14.1 iterations and
-331 ms under l2, 7.6 iterations and 30.7 ms under the interface norm —
-the smaller residual vector also shrinks the least-squares problem).
+107 ms under l2, 7.6 iterations and 23 ms under the interface norm — the
+smaller residual vector also shrinks the least-squares problem).
+
+The `accelerated_fields` half did not generalise the way it was
+expected to.  The expectation was that restricting the quasi-Newton
+problem to the *expensive* node's interface would beat accelerating
+everything.  On `heterogeneous` — one 6x10⁴-cell grid plus four scalar
+nodes — restricting it to the expensive node is the **worst** of the
+four options, and restricting it to the cheap ones is the best by two
+orders of magnitude (Gauss-Seidel, L2 norm, 10-step run):
+
+| `accelerated_fields` | accelerated DOFs | iterations | ms/step |
+|---|---|---|---|
+| `None` (auto: grid + scalars) | ~6x10⁴ | 4.0 | 188 |
+| everything, incl. velocities | ~6x10⁴ | 3.0 | 170 |
+| the expensive node only | 6x10⁴ | 8.5 | 343 |
+| **the four cheap nodes only** | **4** | **4.0** | **2.49** |
+| (no acceleration, for scale) | — | 6.2 | 2.22 |
+
+Same iteration count as accelerating everything, at one seventy-sixth of
+the cost — and `iqn-imvj` on the cheap nodes does better still, 3.0
+iterations at 2.02 ms.  The reading is that the secant history needs
+enough degrees of freedom to model how the *interface* responds, and the
+four scalars carry that; the grid's sixty thousand cells add nothing to
+the model and the entire cost.  Restricting to the grid alone removes
+the degrees of freedom that were doing the work and doubles the
+iteration count.
+
+The corollary for a grid-to-grid group, where there is no cheap subset
+to fall back on: IQN is simply not affordable.  On `expensive-pair` it
+costs 70–160x the plain step, and under the L2 norm it converged on only
+90% of steps.
 One honest caveat: the interface norm is a *relative* criterion
 (`atol`/`rtol`), so it stops earlier than an absolute L2 tolerance, and
 the trajectories drift further apart as a result.  Measured against the
@@ -330,9 +363,9 @@ deliberately rather than inheriting it.
 On a graph where one node carries a large state and the coupling touches
 a few cells of it, the global L2 residual is dominated by bulk change
 that does not iterate at all.  `expensive-pair` converges in **1.0
-iterations** under the interface norm, at 2.33 ms, because the interface
+iterations** under the interface norm, at 3.38 ms, because the interface
 agrees immediately at that tolerance; under the global L2 norm the same
-graph reports 5.3 iterations and 6.86 ms.  The two norms are measuring
+graph reports 5.6 iterations and 7.70 ms.  The two norms are measuring
 different things, and on a grid the L2 number is mostly a statement
 about the grid, not about the coupling.  Use the
 interface norm on grid couplings, and read `coupling_iter_stats` rather

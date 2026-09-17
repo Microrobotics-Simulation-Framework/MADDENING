@@ -80,11 +80,15 @@ def device_counts() -> st.SearchStrategy[int]:
 def param_values() -> st.SearchStrategy[float]:
     """A positive, finite constant to write into a node's parameter.
 
-    Bounded well away from zero and from the stability limit of the toy
-    integrators: the properties here are about a written value reaching
-    the physics, not about what the physics does with an absurd one.
+    Inside every family member's declared bounds and well away from the
+    stability limit of the toy integrators: the properties here are about
+    a written value reaching the physics, not about what the physics does
+    with an absurd one.  Out-of-bounds writes have a property of their
+    own.
     """
-    return st.floats(min_value=0.05, max_value=4.0, allow_nan=False,
+    # Both bounds are exactly representable in float32, which
+    # ``width=32`` requires.
+    return st.floats(min_value=0.0625, max_value=1.0, allow_nan=False,
                      allow_infinity=False, width=32)
 
 

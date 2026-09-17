@@ -45,17 +45,28 @@ A client opts in with ``{"op": "hello", "protocol": 2, "binary": true}``;
 only then does the bridge answer ``get`` / ``get_state`` with binary
 frames and accept binary ``set`` / ``set_state`` requests.  Every other
 op, every error reply and every JSON-only client is unchanged: a client
-that sends ``{"op": "hello"}`` gets exactly the protocol-1 behaviour
-(``recv_message`` / ``send_message`` here speak both forms).  A client
-announcing a protocol this bridge does not know is refused at hello.
+that sends ``{"op": "hello"}`` gets the protocol-1 behaviour (the hello
+reply merely gains ``protocol`` and ``binary``; ``recv_message`` /
+``send_message`` here speak both forms).  A client announcing a protocol
+this bridge does not know is refused at hello.
+
+**Frame limit.**  A frame is at most 64 MiB (``_MAX_MESSAGE``) in both
+directions: a longer request drops the connection (its length is not to
+be trusted), and a reply that would be longer (a ``get`` of more than
+about 8 M values, a huge state) is replaced by a JSON error reply, so the
+connection stays in sync and the C wrapper, which refuses to read a
+longer frame, never sees one from this bridge.
 
 The importer is **untrusted**: nothing that arrives on the socket is ever
 unpickled or evaluated.  The FMU-state blob is an ``npz`` archive of plain
 arrays (``allow_pickle=False`` on load) carrying the schema token, the
-time, the pending inputs, the node states, ``_meta`` and the params; on
-``set_state`` every array is checked against the live one (token, key set,
-shape) before anything is written.  Bind the bridge to ``127.0.0.1``
-unless the network is trusted.
+time, the pending inputs, the node states and the params; on
+``set_state`` the archive directory is checked first (only the expected
+member names, each member's declared size capped by the live array it
+replaces, and a cap on the total), so nothing is decompressed that the
+model could not hold, and then every array is checked against the live
+one (token, key set, shape) before anything is written.  Bind the bridge
+to ``127.0.0.1`` unless the network is trusted.
 
 ZMQ is not required.  A ZMQ transport with the same frame payloads can be
 added later without touching the C wrapper's request format.
@@ -69,6 +80,7 @@ import json
 import socket
 import struct
 import threading
+import zipfile
 from typing import Any, Optional
 
 import jax.numpy as jnp
@@ -81,10 +93,30 @@ from maddening.fmi.sidecar import FmuSidecar
 
 _HEADER = struct.Struct(">I")
 _MAX_MESSAGE = 64 * 1024 * 1024
+"""Frame limit in bytes, both directions and both frame kinds (the C wrapper's FRAME_MAX)."""
 _BINARY_FLAG = 0x80000000
 _LENGTH_MASK = 0x7FFFFFFF
+_NPY_SLACK = 4096
+"""Bytes an ``npz`` member may exceed its array by (the ``.npy`` header)."""
 PROTOCOL_VERSION = 2
 """Highest sidecar protocol this bridge speaks (1 = JSON only, 2 = + binary frames)."""
+
+
+def _json_object(body: bytes, what: str) -> Any:
+    """``json.loads`` of ``body``; every failure is a ``ValueError``.
+
+    The importer's bytes may be anything: not UTF-8, not JSON, or nested
+    so deeply that the JSON scanner raises ``RecursionError``.  All of
+    those must come out as the one exception the framing contract
+    promises, so the connection loop answers with an error reply instead
+    of dying with a traceback.
+    """
+    try:
+        return json.loads(body.decode("utf-8"))
+    except RecursionError as exc:
+        raise ValueError(f"{what} is nested too deeply") from exc
+    except ValueError as exc:                  # JSONDecodeError, UnicodeDecodeError
+        raise ValueError(f"{what} is not JSON: {exc}") from exc
 
 
 def _recv_exact(conn: socket.socket, n: int) -> Optional[bytes]:
@@ -136,10 +168,7 @@ def decode_binary(payload: bytes) -> tuple[dict, bytes]:
     (hlen,) = _HEADER.unpack_from(payload)
     if hlen > len(payload) - _HEADER.size:
         raise ValueError(f"binary header of {hlen} bytes exceeds the {len(payload)}-byte payload")
-    try:
-        header = json.loads(payload[_HEADER.size:_HEADER.size + hlen].decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ValueError(f"binary header is not JSON: {exc}") from exc
+    header = _json_object(payload[_HEADER.size:_HEADER.size + hlen], "binary header")
     if not isinstance(header, dict):
         raise ValueError("binary header must be a JSON object")
     return header, payload[_HEADER.size + hlen:]
@@ -147,7 +176,9 @@ def decode_binary(payload: bytes) -> tuple[dict, bytes]:
 
 def recv_message(conn: socket.socket) -> Optional[dict]:
     """One decoded message.  A JSON frame is its object; a binary frame is
-    its header with the raw payload under ``"raw"`` (``bytes``)."""
+    its header with the raw payload under ``"raw"`` (``bytes``), a dict
+    :meth:`FmuTcpBridge.handle` accepts as is.  ``ValueError`` on a
+    malformed frame of either kind."""
     got = recv_raw(conn)
     if got is None:
         return None
@@ -156,7 +187,7 @@ def recv_message(conn: socket.socket) -> Optional[dict]:
         header, raw = decode_binary(body)
         header["raw"] = raw
         return header
-    return json.loads(body.decode("utf-8"))
+    return _json_object(body, "message")
 
 
 def send_message(conn: socket.socket, payload: dict) -> None:
@@ -317,43 +348,64 @@ class FmuTcpBridge:
                             if not binary:
                                 raise ValueError("binary frames need a hello with "
                                                  "\"protocol\": 2, \"binary\": true first")
-                            req = self._decode_binary_request(body)
+                            req = self._binary_request(*decode_binary(body))
                             self.binary_frames_received += 1
                         else:
-                            req = json.loads(body.decode("utf-8"))
+                            req = _json_object(body, "request")
                             if not isinstance(req, dict):
                                 raise ValueError("request must be a JSON object")
-                    except (ValueError, UnicodeDecodeError) as exc:
+                    except ValueError as exc:
                         # a corrupt request (an FMU-state blob with stray
                         # quotes, say) is an error reply, not a dead instance
-                        send_message(conn, {"ok": False, "error": f"malformed request: {exc}"})
-                        continue
-                    reply = self._dispatch(req)
-                    if req.get("op") == "hello" and reply.get("ok"):
-                        binary = bool(reply.get("binary"))
-                    if binary and reply.get("ok") and ("values" in reply or "state" in reply):
-                        if "values" in reply:
-                            arr = np.ascontiguousarray(reply["values"], dtype="<f8")
-                            header, raw = {"ok": True, "n": int(arr.size), "dtype": "f64"}, arr.tobytes()
-                        else:
-                            header, raw = {"ok": True, "n": len(reply["state"])}, reply["state"]
-                        try:
-                            send_binary(conn, header, raw)
-                        except ValueError as exc:            # beyond the 31-bit length field
-                            send_message(conn, {"ok": False, "error": f"reply too large: {exc}"})
-                            continue
-                        self.binary_frames_served += 1
+                        reply = {"ok": False, "error": f"malformed request: {exc}"}
                     else:
-                        send_message(conn, self._jsonify(reply))
+                        reply = self._dispatch(req)
+                        if req.get("op") == "hello" and reply.get("ok"):
+                            binary = bool(reply.get("binary"))
+                    try:
+                        if self._send_reply(conn, reply, binary):
+                            self.binary_frames_served += 1
+                    except OSError:
+                        break          # the importer hung up mid-reply: nobody to tell
             finally:
                 self._busy.release()
 
+    def _send_reply(self, conn: socket.socket, reply: dict, binary: bool) -> bool:
+        """Send one reply; returns whether it went as a binary frame.
+
+        A successful ``get`` / ``get_state`` on a binary connection is a
+        binary frame, everything else JSON.  A reply of either kind that
+        would exceed the frame limit is replaced by a JSON error reply:
+        the bridge never puts a frame on the wire that the C wrapper
+        would refuse to read, so the connection stays in sync.
+        """
+        if binary and reply.get("ok") and ("values" in reply or "state" in reply):
+            if "values" in reply:
+                arr = np.ascontiguousarray(reply["values"], dtype="<f8")
+                header, raw = {"ok": True, "n": int(arr.size), "dtype": "f64"}, arr.tobytes()
+            else:
+                header, raw = {"ok": True, "n": len(reply["state"])}, reply["state"]
+            body = encode_binary(header, raw)
+            if len(body) <= _MAX_MESSAGE:
+                conn.sendall(_HEADER.pack(_BINARY_FLAG | len(body)) + body)
+                return True
+        else:
+            body = json.dumps(self._jsonify(reply), separators=(",", ":")).encode("utf-8")
+            if len(body) <= _MAX_MESSAGE:
+                conn.sendall(_HEADER.pack(len(body)) + body)
+                return False
+        send_message(conn, {"ok": False, "error": f"reply of {len(body)} bytes exceeds the "
+                                                   f"{_MAX_MESSAGE}-byte frame limit"})
+        return False
+
     @staticmethod
-    def _decode_binary_request(body: bytes) -> dict:
-        """A binary ``set`` / ``set_state`` request as the plain request
-        dict :meth:`handle` takes (``values`` as an array, ``state`` as
-        bytes).  ``ValueError`` on any inconsistency; nothing is trusted."""
-        header, raw = decode_binary(body)
+    def _binary_request(header: dict, raw) -> dict:
+        """A binary ``set`` / ``set_state`` request (its decoded header and
+        raw part) as the plain request dict :meth:`_dispatch` takes
+        (``values`` as an array, ``state`` as bytes).  ``ValueError`` on
+        any inconsistency; nothing is trusted."""
+        if not isinstance(raw, (bytes, bytearray, memoryview)):
+            raise ValueError("the raw part of a binary request must be bytes")
         op = header.get("op")
         n = header.get("n")
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
@@ -368,7 +420,7 @@ class FmuTcpBridge:
         if op == "set_state":
             if len(raw) != n:
                 raise ValueError(f"binary set_state announces {n} bytes but carries {len(raw)}")
-            return {"op": "set_state", "state": raw}
+            return {"op": "set_state", "state": bytes(raw)}
         raise ValueError(f"op {op!r} has no binary request form")
 
     @staticmethod
@@ -384,7 +436,17 @@ class FmuTcpBridge:
     # ---------------------------------------------------------------- handler
     def handle(self, req: dict) -> dict:
         """Serve one decoded request (also usable without a socket) in its
-        JSON form: ``values`` come back as a list, ``state`` as base64."""
+        JSON form: ``values`` come back as a list, ``state`` as base64.
+
+        ``req`` is either the JSON form or the dict :func:`recv_message`
+        returns for a binary frame (the header's keys plus ``"raw"``);
+        the latter is validated exactly as on the socket path.
+        """
+        if "raw" in req:
+            try:
+                req = self._binary_request({k: v for k, v in req.items() if k != "raw"}, req["raw"])
+            except ValueError as exc:
+                return {"ok": False, "error": f"malformed request: {exc}"}
         return self._jsonify(self._dispatch(req))
 
     def _dispatch(self, req: dict) -> dict:
@@ -488,40 +550,66 @@ class FmuTcpBridge:
         np.savez(buf, **arrays)
         return buf.getvalue()
 
+    def _member_caps(self) -> dict[str, int]:
+        """Every member an FMU-state archive may carry (name without the
+        ``.npy`` suffix) and the most bytes it may decompress to: the live
+        array it replaces plus the ``.npy`` header."""
+        caps = {"_token": 256, "_time": 8}
+        for n, fields in self._sidecar.state.items():
+            for f, v in fields.items():
+                caps[f"s/{n}/{f}"] = int(np.asarray(v).nbytes)
+        for section in ("nodes", "mappings"):
+            for owner, leaves in (self._sidecar.params or {}).get(section, {}).items():
+                for k, v in leaves.items():
+                    caps[f"p/{section}/{owner}/{k}"] = int(np.asarray(v).nbytes)
+        for var in self._md.variables:
+            if var.causality == "input":
+                node, _, field = var.name.partition(".")
+                caps[f"i/{node}/{field}"] = int(np.zeros(var.shape or (), var.dtype).nbytes)
+        return {k: v + _NPY_SLACK for k, v in caps.items()}
+
+    def _check_archive_directory(self, blob: bytes) -> None:
+        """Refuse the archive from its directory alone, before any member
+        is decompressed: every member (whatever its name) must be one the
+        model expects and declare no more than that member may hold, and
+        the total declared size is capped too (a zip bomb is a small blob
+        declaring gigabytes; deflate alone gives about 1000:1)."""
+        caps = self._member_caps()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(blob))
+        except Exception as exc:  # noqa: BLE001 - BadZipFile and friends
+            raise ValueError(f"FMU state blob is not a valid archive: {exc}") from exc
+        with zf:
+            total = 0
+            for info in zf.infolist():
+                name = info.filename
+                key = name[:-4] if name.endswith(".npy") else None
+                if key is None or key not in caps:
+                    kind = {"s": "state field", "p": "parameter", "i": "input"}.get(
+                        name.split("/", 1)[0], "member")
+                    raise ValueError(f"FMU state carries unknown {kind} {name!r}")
+                if info.file_size > caps[key]:
+                    raise ValueError(f"FMU state member {key!r} is {info.file_size} bytes, more "
+                                     f"than the {caps[key]} the model can hold")
+                total += info.file_size
+            budget = sum(caps.values())
+            if total > budget:
+                raise ValueError(f"FMU state declares {total} bytes in total, more than the "
+                                 f"{budget} the model can hold")
+
     def _decode_state(self, blob: bytes) -> None:
         """Validate against the live state before writing anything."""
+        self._check_archive_directory(blob)
         try:
             data = np.load(io.BytesIO(blob), allow_pickle=False)
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"FMU state blob is not a valid archive: {exc}") from exc
         with data:
             keys = set(data.files)
-            # Never decompress more than the model can hold: a compressed
-            # member must not exceed the live leaf it claims to replace.
-            zf = getattr(data, "zip", None)
-            live_bytes = {
-                f"s/{n}/{f}": int(np.asarray(v).nbytes)
-                for n, fields in self._sidecar.state.items() for f, v in fields.items()
-            }
-            for section in ("nodes", "mappings"):
-                for owner, leaves in (self._sidecar.params or {}).get(section, {}).items():
-                    for k, v in leaves.items():
-                        live_bytes[f"p/{section}/{owner}/{k}"] = int(np.asarray(v).nbytes)
-            for var in self._md.variables:
-                if var.causality == "input":
-                    node, _, field = var.name.partition(".")
-                    live_bytes[f"i/{node}/{field}"] = int(np.zeros(var.shape or (), var.dtype).nbytes)
-            if zf is not None:
-                for k in keys:
-                    try:
-                        size = zf.getinfo(k + ".npy").file_size
-                    except KeyError:
-                        continue
-                    cap = live_bytes.get(k, 256) + 4096
-                    if size > cap:
-                        raise ValueError(f"FMU state member {k!r} is {size} bytes, more than the "
-                                         f"{cap} the model can hold")
-            if "_token" not in keys or str(data["_token"]) != self._md.instantiation_token:
+            if "_token" not in keys:
+                raise ValueError("FMU state belongs to a different model (schema token mismatch)")
+            token = data["_token"]
+            if token.dtype.kind != "U" or token.shape != () or str(token) != self._md.instantiation_token:
                 raise ValueError("FMU state belongs to a different model (schema token mismatch)")
             state = {n: dict(f) for n, f in self._sidecar.state.items()}
             expected = {f"s/{n}/{f}" for n, fields in state.items() for f in fields}
@@ -600,13 +688,13 @@ class FmuTcpBridge:
         for var, arr in staged:
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"variable {var.name!r}: value must be finite")
+            if var.is_clock:
+                continue                              # clock ticks are informational
             if var.causality == "parameter":
-                param_updates[var.name] = arr.astype(var.dtype)
+                param_updates[var.name] = self._in_dtype(var, arr)
             elif var.causality == "input":
                 node, _, field = var.name.partition(".")
-                input_updates.append((node, field, arr.astype(var.dtype)))
-            elif var.is_clock:
-                continue                              # clock ticks are informational
+                input_updates.append((node, field, self._in_dtype(var, arr)))
             else:
                 raise ValueError(f"variable {var.name!r} ({var.causality}) is read-only")
         # Atomic: parameters are validated (bounds) by the sidecar first;
@@ -615,6 +703,24 @@ class FmuTcpBridge:
             self._sidecar.set_params(param_updates)
         for node, field, arr in input_updates:
             self._inputs.setdefault(node, {})[field] = arr
+
+    @staticmethod
+    def _in_dtype(var: FMIVariable, arr: np.ndarray) -> np.ndarray:
+        """``arr`` (finite float64) in the variable's dtype, refused when the
+        dtype cannot hold it: the finiteness check on the float64 wire
+        value is not enough, a float32 input set to 1e308 would be stored
+        (and read back) as ``inf``, and an integer would wrap silently."""
+        with np.errstate(over="ignore", invalid="ignore"):
+            cast = arr.astype(var.dtype)
+        if np.issubdtype(cast.dtype, np.floating):
+            fits = np.all(np.isfinite(cast))
+        elif np.issubdtype(cast.dtype, np.integer):
+            fits = np.array_equal(cast.astype(np.float64), arr)
+        else:
+            fits = True                                   # bool
+        if not fits:
+            raise ValueError(f"variable {var.name!r}: value does not fit its type {var.dtype}")
+        return cast
 
     def _get(self, vrs: list[int]) -> np.ndarray:
         if not isinstance(vrs, (list, tuple)):

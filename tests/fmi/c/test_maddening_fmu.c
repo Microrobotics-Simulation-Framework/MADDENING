@@ -97,7 +97,8 @@ static int g_seen_flag = 0;
     Instance *in = fake_instance(sv[0]);                                         \
     body;                                                                        \
     pthread_join(th, NULL);                                                      \
-    sock_close(sv[0]); if (!args.closed) sock_close(sv[1]);                      \
+    if (in->sock != SOCK_INVALID) sock_close(sv[0]);   /* unless the wrapper dropped it */ \
+    if (!args.closed) sock_close(sv[1]);                                         \
     free(g_seen); g_seen = args.seen ? args.seen : strdup("");                   \
     g_seen_len = args.seen_len; g_seen_flag = args.seen_flag;                    \
     free_instance(in);                                                           \
@@ -200,13 +201,16 @@ static void test_bridge_call_paths(void) {
         CHECK(bridge_call(in, "{\"op\":\"x\"}") == fmi3Error);
     });
     CHECK(g_log_calls == 1 && strstr(g_last_log, "KeyError: boom") != NULL);
-    /* server closes without replying */
+    /* server closes without replying: the connection is dead from now on */
     WITH_SERVER(NULL, 0, {
         CHECK(bridge_call(in, "{\"op\":\"x\"}") == fmi3Error);
+        CHECK(in->sock == SOCK_INVALID);
     });
-    /* header advertises more bytes than sent: recv fails, no read past buffer */
+    /* header advertises more bytes than sent: recv fails, no read past
+     * buffer, and the half-read stream is not reused */
     WITH_SERVER("{\"ok\":true}", 4096, {
         CHECK(bridge_call(in, "{\"op\":\"x\"}") == fmi3Error);
+        CHECK(in->sock == SOCK_INVALID);
     });
     /* zero-length body */
     WITH_SERVER("", 0, {
@@ -224,7 +228,9 @@ static void test_bridge_call_paths(void) {
     free(big);
     /* an unusable socket */
     Instance *dead = fake_instance(SOCK_INVALID);
+    g_log_calls = 0;
     CHECK(bridge_call(dead, "{}") == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
     free_instance(dead);
     /* the peer is gone before we send: EPIPE -> fmi3Error, not SIGPIPE */
     int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
@@ -370,6 +376,22 @@ static void test_binary_get_set(void) {
         in->binary = 1;
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
     });
+    /* a count that is not a plain decimal ("2abc", "1e3", "0x10") is no count */
+    n = bin_payload(frame, "{\"ok\":true,\"n\":2abc,\"dtype\":\"f64\"}", le, 16);
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+    });
+    CHECK(strstr(g_last_log, "no valid count") != NULL);
+    {
+        Instance tmp; size_t c = 99;
+        memset(&tmp, 0, sizeof tmp);
+        snprintf(tmp.hdr, sizeof tmp.hdr, "{\"ok\":true,\"n\":1e3}");   CHECK(hdr_count(&tmp, &c) == -1);
+        snprintf(tmp.hdr, sizeof tmp.hdr, "{\"ok\":true,\"n\":0x10}");  CHECK(hdr_count(&tmp, &c) == -1);
+        snprintf(tmp.hdr, sizeof tmp.hdr, "{\"ok\":true,\"n\": 12 }");  CHECK(hdr_count(&tmp, &c) == 0 && c == 12);
+        snprintf(tmp.hdr, sizeof tmp.hdr, "{\"ok\":true,\"n\":7,\"dtype\":\"f64\"}");
+        CHECK(hdr_count(&tmp, &c) == 0 && c == 7);
+    }
     /* wrong / missing dtype */
     n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f32\"}", le, 16);
     WITH_BINARY_SERVER((const char *)frame, n, {
@@ -377,19 +399,23 @@ static void test_binary_get_set(void) {
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
     });
     CHECK(strstr(g_last_log, "float64") != NULL);
-    /* truncated raw part: the announced length never arrives */
+    /* truncated raw part: the announced length never arrives; the
+     * connection is dropped (it can never be back in sync) */
     n = bin_payload(frame, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}", le, 16);
     WITH_SERVER_X((const char *)frame, n - 5, n, 1, {
         in->binary = 1;
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
         CHECK(in->resp[0] == '\0' && !in->resp_binary);
+        CHECK(in->sock == SOCK_INVALID);
     });
-    /* header_len larger than the payload, or larger than the header cap */
+    /* header_len larger than the payload, or larger than the header cap:
+     * the frame was read in full, so the connection stays usable */
     put_be32(frame, 1000);
     WITH_BINARY_SERVER((const char *)frame, 40, {
         in->binary = 1;
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
         CHECK(!in->resp_binary);
+        CHECK(in->sock != SOCK_INVALID);
     });
     CHECK(strstr(g_last_log, "malformed") != NULL);
     {
@@ -413,11 +439,24 @@ static void test_binary_get_set(void) {
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
         CHECK(in->resp_cap < 1000 && strstr(g_last_log, "frame limit") != NULL);
     });
-    WITH_SERVER_X("x", 1, (size_t)FRAME_MAX_BINARY + 1, 1, {
+    WITH_SERVER_X("x", 1, (size_t)FRAME_MAX + 1, 1, {
         in->binary = 1;
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
         CHECK(in->resp_cap < 1000);
     });
+    /* exactly the limit is still read (the bridge may send that much) */
+    {
+        unsigned char *max = (unsigned char *)malloc(FRAME_MAX);
+        size_t hl = bin_payload(max, "{\"ok\":true,\"n\":8388602,\"dtype\":\"f64\",\"p\":12}", NULL, 0) - 4;
+        memset(max + 4 + hl, 0, FRAME_MAX - 4 - hl);
+        CHECK(4 + hl + 8 * 8388602ul == FRAME_MAX);
+        WITH_BINARY_SERVER((const char *)max, FRAME_MAX, {
+            in->binary = 1;
+            CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3OK && g64[0] == 0.0);
+            CHECK(in->sock != SOCK_INVALID);
+        });
+        free(max);
+    }
     /* a binary-flagged error reply is reported like a JSON one */
     n = bin_payload(frame, "{\"ok\":false,\"error\":\"KeyError: nope\"}", NULL, 0);
     g_log_calls = 0;
@@ -458,7 +497,7 @@ static void test_binary_get_set(void) {
     CHECK(g_log_calls == 1 && strstr(g_last_log, "non-finite") != NULL);
     /* a set larger than the frame limit is refused before any buffer grows
      * (and before any value is read: the count alone decides) */
-    CHECK(do_set(dead, vr, 1, v64, (size_t)FRAME_MAX_BINARY / 8 + 1) == fmi3Error);
+    CHECK(do_set(dead, vr, 1, v64, (size_t)FRAME_MAX / 8 + 1) == fmi3Error);
     CHECK(dead->req_cap == 0 && strstr(g_last_log, "frame limit") != NULL);
     free_instance(dead);
     /* endianness helpers round-trip on this host */
@@ -507,7 +546,7 @@ static void test_binary_fmu_state(void) {
     CHECK(fmi3SetFMUState((fmi3Instance)dead, st2) == fmi3Error);
     CHECK(g_log_calls == 1 && strstr(g_last_log, "not valid") != NULL);
     /* an oversize blob is refused before the request buffer grows */
-    FmuState huge = { (char *)"x", (size_t)FRAME_MAX_BINARY + 1 };
+    FmuState huge = { (char *)"x", (size_t)FRAME_MAX + 1 };
     dead->binary = 1;
     CHECK(fmi3SetFMUState((fmi3Instance)dead, &huge) == fmi3Error && dead->req_cap == 0);
     free_instance(dead);
@@ -531,6 +570,98 @@ static void test_binary_fmu_state(void) {
     });
     CHECK(st != NULL && ((FmuState *)st)->n == 8);
     fmi3FreeFMUState(NULL, &st);
+}
+
+/* ------------------------------------------- over-limit / broken framing */
+
+static void test_oversize_reply_kills_the_connection(void) {
+    /* A binary reply over the frame limit is refused unread.  What the
+     * peer sent after the prefix is then still in the socket; before the
+     * fix an unanswered DoStep parsed those stale bytes as its reply and
+     * returned fmi3OK.  Now the connection is dropped: every later call
+     * is fmi3Error, never a false success. */
+    fmi3ValueReference vr[1] = { 7 }; fmi3Float64 out[1] = { 0 };
+    unsigned char stale[4 + 18];
+    put_be32(stale, 18);
+    memcpy(stale + 4, "{\"ok\":true,\"t\":9}", 18);       /* a well-formed JSON frame */
+    fmi3Boolean ev, term, early; fmi3Float64 last = -1;
+    WITH_SERVER_X((const char *)stale, sizeof stale, (size_t)FRAME_MAX + 1, 1, {
+        in->binary = 1;
+        g_log_calls = 0;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, out, 1) == fmi3Error);
+        CHECK(strstr(g_last_log, "frame limit") != NULL);
+        CHECK(in->sock == SOCK_INVALID && in->resp_cap < 1000);
+        in->time = 0.0;
+        CHECK(fmi3DoStep((fmi3Instance)in, 0.0, 0.5, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        CHECK(last == 0.0 && in->time == 0.0);
+        CHECK(strstr(g_last_log, "connection to the sidecar is closed") != NULL);
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, out, 1) == fmi3Error);
+    });
+    /* the same for a JSON (unflagged) reply: it used to get a 2 GiB
+     * realloc before the first body byte, now it is refused unallocated */
+    WITH_SERVER_X((const char *)stale, sizeof stale, (size_t)FRAME_LEN_MASK, 0, {
+        g_log_calls = 0;
+        CHECK(bridge_call(in, "{\"op\":\"step\"}") == fmi3Error);
+        CHECK(in->resp_cap < 1000 && strstr(g_last_log, "frame limit") != NULL);
+        CHECK(in->sock == SOCK_INVALID);
+        CHECK(fmi3DoStep((fmi3Instance)in, 0.0, 0.5, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+    });
+    WITH_SERVER_X((const char *)stale, sizeof stale, (size_t)FRAME_MAX + 1, 0, {
+        CHECK(bridge_call(in, "{\"op\":\"step\"}") == fmi3Error && in->sock == SOCK_INVALID);
+    });
+    /* FreeInstance on a dropped connection sends nothing and frees cleanly */
+    {
+        int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+        Instance *in = fake_instance(sv[0]);
+        conn_drop(in, "test");
+        fmi3FreeInstance((fmi3Instance)in);
+        char c; CHECK(recv(sv[1], &c, 1, 0) == 0);          /* EOF, no terminate frame */
+        sock_close(sv[1]);
+    }
+}
+
+static void test_max_set_frame_fits_the_bridge_limit(void) {
+    /* The largest binary set the wrapper lets through is at most FRAME_MAX
+     * bytes on the wire, header included; one more value, or a longer
+     * value-reference list, is refused before anything is sent (the
+     * bridge answers an over-limit frame by dropping the connection
+     * without an error reply). */
+    fmi3ValueReference vr[20];
+    for (size_t i = 0; i < 20; ++i) vr[i] = 4294967295u;
+    char hdr[128];
+    size_t n = FRAME_MAX / 8, hl = 0;
+    for (;;) {
+        hl = (size_t)snprintf(hdr, sizeof hdr, "{\"op\":\"set\",\"vr\":[%u],\"n\":%lu,\"dtype\":\"f64\"}",
+                              (unsigned)vr[0], (unsigned long)n);
+        if (4 + hl + 8 * n <= FRAME_MAX) break;
+        --n;
+    }
+    CHECK(4 + hl + 8 * (n + 1) > FRAME_MAX);              /* n is the largest that fits */
+    double *vals = (double *)calloc(n + 1, sizeof(double));
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->binary = 1;
+        CHECK(do_set(in, vr, 1, vals, n) == fmi3OK);
+    });
+    CHECK(g_seen_flag == 1 && g_seen_len == 4 + hl + 8 * n && g_seen_len <= FRAME_MAX);
+    CHECK(get_be32((const unsigned char *)g_seen) == hl && memcmp(g_seen + 4, hdr, hl) == 0);
+    Instance *dead = fake_instance(SOCK_INVALID);
+    dead->binary = 1;
+    g_log_calls = 0;
+    CHECK(do_set(dead, vr, 1, vals, n + 1) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);   /* refused, not "closed" */
+    /* the header counts: twenty 10-digit value references push the same
+     * payload over the limit even with a few values fewer */
+    g_log_calls = 0;
+    CHECK(do_set(dead, vr, 20, vals, n - 10) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
+    /* and an absurd count or vr list is refused before any buffer grows */
+    Instance *fresh = fake_instance(SOCK_INVALID);
+    fresh->binary = 1;
+    CHECK(do_set(fresh, vr, 1, vals, (size_t)FRAME_MAX / 8 + 1) == fmi3Error && fresh->req_cap == 0);
+    CHECK(do_set(fresh, vr, (size_t)FRAME_MAX, vals, 1) == fmi3Error && fresh->req_cap == 0);
+    free_instance(fresh);
+    free_instance(dead);
+    free(vals);
 }
 
 /* ----------------------------------------------------------- FMU state */
@@ -719,6 +850,8 @@ int main(int argc, char **argv) {
     test_get_set_step();
     test_binary_get_set();
     test_binary_fmu_state();
+    test_oversize_reply_kills_the_connection();
+    test_max_set_frame_fits_the_bridge_limit();
     test_fmu_state();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();

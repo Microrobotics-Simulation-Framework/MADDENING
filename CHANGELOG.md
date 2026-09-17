@@ -463,6 +463,21 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ### Security
+- **FMU sidecar `set_state`: zip bomb via an archive member without the
+  `.npy` suffix.**  The per-member size cap of the earlier arrays-only
+  `npz` fix looked members up by `name + ".npy"`, so a member named plainly
+  (`_token`, say) escaped it and was decompressed in full before the token
+  check (measured: 1 MiB on the wire declaring 1 GiB drove the bridge
+  process to +4.7 GB RSS; a 64 MiB frame could declare some 60 GiB and
+  OOM-kill it).  Reachable from the untrusted importer over both the
+  base64 (JSON) and the raw (binary, protocol 2) `set_state`.  The bridge
+  now checks the archive *directory* before `np.load` touches anything:
+  every member, whatever its name, must be one the model expects
+  (`_token`, `_time`, the live state fields, parameters and declared
+  inputs, all `.npy`) and declare no more than that array plus a header
+  can hold, and the total declared size is capped too (duplicate names
+  cannot multiply it).  Regression tests craft such archives on both paths
+  and assert the refusal happens before `np.load` runs.
 - **REST checkpoint endpoints are confined to a directory.**
   `/checkpoint/save` and `/checkpoint/load` took an arbitrary server-side
   path from an unauthenticated client (arbitrary file write, file-existence
@@ -513,6 +528,39 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   list that a compliance test checks against a grep for `@stability(` over
   `src/maddening`; the committed stability report is regenerated at the
   release freeze.
+- **FMU C wrapper / sidecar bridge: findings of the independent audit of
+  the protocol-2 merge (PR #11).**  *Fuzz harness:* the thread-free
+  harness introduced in 86dafe1 closed its fake server before the client
+  sent its request, so every exchange failed with EPIPE and the reply
+  parsers (`bridge_xfer`, `hdr_count`, `parse_binary_values`,
+  `parse_values`, the raw-state path) had had no fuzz coverage at all; the
+  seeded ASan/UBSan runs, the valgrind run and the libFuzzer campaign were
+  green for the wrong reason.  The server end is now half-closed
+  (`shutdown(SHUT_WR)`), a third of the replies are well formed for the
+  operation under test (so the success paths are reached too), and the
+  harness is self-checking: the wrapper counts each parser path when built
+  with `MADDENING_FUZZ_COUNTERS` (off in the shipped FMU), the standalone
+  run prints the counts and fails when any path was never reached, and
+  `tests/fmi/test_c_unit.py` asserts them (gcov, seeds 1/7/12345 x 3000:
+  26 % -> 57 % of the wrapper's lines).  *Framing:* a reply over the
+  64 MiB limit (now enforced for JSON replies too, which could announce
+  2 GiB and get it allocated) or cut short by the peer drops the
+  connection, so every later call returns `fmi3Error` instead of parsing
+  stale bytes as its reply (an unanswered `fmi3DoStep` used to return
+  `fmi3OK`); the bridge never sends a frame over the limit (a `get` /
+  `get_state` whose reply would exceed it gets a JSON error, connection
+  in sync); the C-side `set` limit counts the header bytes and the value
+  references, so the largest allowed `set` is no longer dropped without
+  a reply; `hdr_count` accepts only a plain decimal count.  *Validation:*
+  values are narrowed to the variable's dtype before the finiteness check
+  (a float32 input set to `1e308` was stored and read back as `inf`);
+  a JSON request or binary header nested too deeply (`RecursionError`
+  from the JSON scanner) is a malformed-request error reply, not a
+  dropped connection with a thread traceback; a client hanging up
+  mid-reply (`BrokenPipeError`) ends the connection quietly;
+  `FmuTcpBridge.handle` accepts the dict `recv_message` returns for a
+  binary frame.  Docs: the "Wire protocol" section states the send-side
+  behaviour and that the protocol-1 hello reply gains two keys.
 - **Type-check job: a broken pyright run can no longer look like a result**
   (independent audit of the phase-1 typing merge; report under
   `benchmarks/results/audit_typing-pep561/`, regression tests in

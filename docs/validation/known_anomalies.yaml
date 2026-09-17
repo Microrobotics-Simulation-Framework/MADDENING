@@ -108,3 +108,53 @@ anomalies:
       step and comparing the masks.
     resolution_status: "open"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-004"
+    title: "ShardedPointwiseNode ignored every parameter write; PUT /graph/params answered 200 without changing the physics"
+    description: >
+      ShardedPointwiseNode did not proxy the graph parameter contract of the
+      node it wraps.  It reported accepts_params() == False while
+      params_pytree() still returned the base class's leaves, its update()
+      declared no params keyword, param_specs() fell back to the base-class
+      default (losing the inner node's bounds and transforms), and the wrapper
+      kept a private copy of self.params that nothing read.  A wrapped node was
+      therefore left out of GraphManager.params entirely, and
+      PUT /graph/params/{node} answered 200, echoed the new value and left the
+      simulation running at the old constant: on a SpringDamperNode with
+      stiffness raised from 10 to 1000 through the API, the position after five
+      0.01 s steps stayed at 1.98523 (the k=10 trajectory) instead of the
+      0.83880 a genuinely k=1000 graph produces.  set_param_spec on such a node
+      raised "takes no params", and sysid, FMI parameter variables and
+      checkpointed calibrated constants all skipped it.  The sibling wrappers
+      ShardedStencilNode and ShardedUnstructuredNode proxied the contract
+      correctly and were not affected, though they too copied the params dict.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A public HTTP surface on a STABLE class confirmed a parameter change that
+      the solver never applied, with no diagnostic anywhere: the forward
+      simulation is self-consistent but describes a different model from the
+      one the operator believes they configured, and a calibration run over a
+      sharded pointwise node optimised a value the step ignored.  Whether that
+      is safety relevant depends on whether the downstream product wraps
+      pointwise nodes for multi-device execution and whether it tunes or
+      calibrates their constants at run time rather than at construction;
+      a graph whose parameters are only ever set through the node constructor
+      is unaffected, because the constructor value is the one the inner node
+      reads.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
+      - "maddening.api.server.SimulationServer"
+    affected_versions: "0.3.0, 0.3.1"
+    workaround: >
+      On 0.3.x, set the parameter on the inner node before wrapping it
+      (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh)), or
+      write to the inner node's params dict and recompile; do not rely on
+      PUT /graph/params, gm.params or sysid for a pointwise-sharded node.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    verification:
+      - "tests/cloud/multigpu/test_sharded_params.py::test_every_sharded_wrapper_proxies_the_param_contract_of_its_inner_node"
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_sharded_node_changes_the_trajectory"
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name"
+    github_issue: null

@@ -156,6 +156,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- Sharded pointwise nodes honour parameter writes again (`PUT /graph/params`)
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep

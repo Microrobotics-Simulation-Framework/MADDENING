@@ -61,7 +61,7 @@ JSON has no comments, so the settings are explained here.
 | `typeCheckingMode` | `"basic"` | Start where the signal is actionable.  Measured distance to the stricter modes is given below. |
 | `pythonVersion` | `"3.11"` | The floor in `pyproject.toml` (`requires-python = ">=3.11"`), so syntax/stdlib checks match the oldest supported interpreter. |
 | `pythonPlatform` | `"Linux"` | Matches CI; avoids platform-conditional stdlib noise. |
-| `reportMissingImports` | `"warning"` | Optional extras (`gi`/PyGObject, `pygfx`, `rendercanvas`, `skimage`, `fsspec`, `cupy`, plus `pxr`, `sky`, `zmq`, `lineax`, `fmpy` ... when those extras are not installed) are imported lazily or behind `try:`.  They must not count as errors in an environment without those extras. |
+| `reportMissingImports` | `"warning"` | Optional extras (`gi`/PyGObject, `pygfx`, `rendercanvas`, `skimage`, `fsspec`, `cupy`, plus `pxr`, `sky`, `zmq`, `fmpy` ... when those extras are not installed) are imported lazily or behind `try:`.  They must not count as errors in an environment without those extras. |
 | `reportMissingModuleSource` | `"warning"` | Same reason, for packages that ship only stubs. |
 | `reportMissingTypeStubs` | `false` | Several dependencies (`jax` internals, `pyvista`, `sky`, `pxr`) have no stubs; that is not something this repository can fix. |
 | `venvPath` / `venv` | *not set* | CI installs the package and pyright into the same environment, so `python` on `PATH` is the right interpreter; the script's import-resolution guard (above) is what turns a wrong interpreter into a failed job instead of a lower count.  Locally, pass `--pythonpath` (see above) rather than hard-coding a path in the shared config. |

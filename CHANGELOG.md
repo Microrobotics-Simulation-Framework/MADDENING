@@ -109,6 +109,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
+  at its default settings could not be differentiated on a base install.
+  `pip install maddening` is enough; the now-empty `[ift]` extra still resolves
 - **Version is now `0.4.0.dev0`** (was `0.3.1`) so a development build is
   distinguishable from the last release.  `maddening.__version__` prefers
   installed distribution metadata, so an editable install predating this

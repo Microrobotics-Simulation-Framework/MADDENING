@@ -293,7 +293,20 @@ def test_convergent_neighbour_of_the_divergent_fixture_still_converges():
 
 
 def _one_dof_pair(acceleration, accelerated_fields, *, dt=0.05, gain=0.5):
-    """Two mutually anchored springs, accelerating one scalar at most."""
+    """Two mutually anchored springs, accelerating one scalar at most.
+
+    Written out here rather than taken from the fixture registry because
+    the point is the *hand-written* ``accelerated_fields``: no fixture
+    produces a one-dimensional quasi-Newton problem, since a coupling
+    group is a cycle and every member feeds the interface.  Naming a
+    single node's single field is the only way to get one, and is
+    exactly what a user does when overriding the auto-detection.
+
+    The constants mirror ``benchmarks/coupling_fixtures.py``: unit
+    ``dt**2 k/m`` so the edge weight *is* the coupling gain, and a
+    damping of ``(1 - (1 - gain) * 0.8) / dt`` so the coupled solve's
+    ``1/(1 - gain)`` amplification stays time-step stable.
+    """
     gm = GraphManager()
     stiffness = 1.0 / (dt * dt)
     damping = (1.0 - (1.0 - gain) * 0.8) / dt

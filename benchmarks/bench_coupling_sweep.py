@@ -89,7 +89,7 @@ def _state_signature(gm) -> list[float]:
     1e5-cell fixtures.
     """
     out = []
-    for name in sorted(gm._nodes):
+    for name in sorted(gm.node_names):
         state = gm.get_node_state(name)
         for field in sorted(state):
             arr = np.asarray(state[field], dtype=np.float64).ravel()

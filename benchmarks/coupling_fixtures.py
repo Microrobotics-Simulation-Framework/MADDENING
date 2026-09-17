@@ -11,7 +11,7 @@ fixture                property it isolates
 ``chain-N``            sequential information flow (depth)
 ``star-N``             width with no leaf-to-leaf path
 ``ring-N``             a cycle with no natural first node
-``stiff-pair-K``       contraction factor, weak to divergent
+``stiff-pair-G``       contraction factor, weak to divergent
 ``expensive-pair``     cost per iteration (compute-bound)
 ``heterogeneous``      one expensive node among cheap ones
 ``mixed-modes``        two groups with different schedules
@@ -36,8 +36,11 @@ stiffness and the timestep, and the shapes are comparable:
   ``g**2`` under Gauss-Seidel,
 * the line and ring shapes add the usual ``cos(pi/(N+1))``-type factor
   from the graph adjacency,
-* ``g > 1`` is past the convergence limit and *must* be reported as
-  unconverged rather than truncated at the cap.
+* ``g > 1`` is past the convergence limit: every *fixed-point*
+  acceleration must report itself unconverged rather than truncate at
+  the cap.  IQN is a quasi-Newton root solver rather than a contraction
+  and does converge there, which is the point of keeping a divergent
+  fixture in the registry.
 
 See the "Spring helpers" comment below for why the damping is a function
 of ``g`` and why every spring fixture carries a driver node.

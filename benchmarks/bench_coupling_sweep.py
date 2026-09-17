@@ -367,27 +367,38 @@ def _best(rows: list[dict]) -> dict:
     time the same are treated as tied and broken on iteration count —
     which *is* measured exactly — and then on simplicity.
 
-    How wide "the same" is comes from the rows' own recorded spread
-    rather than from a fixed percentage, because a fixed percentage was
-    far inside it.  ``star-8``'s ``gs/fixed0.8/interface`` recorded a
-    median of 0.299 ms and a p95 of 0.549 ms — an 84% swing within one
-    row — so a 10% band around the fastest *mean* excluded
-    ``gs/aitken/interface`` at median 0.368 ms, a row that is not
-    measurably slower, and the fixture's reported best became the row
-    with 2.6x the iterations.  Ranking on a metric whose noise exceeds
-    the differences being ranked is how that happens.
+    How wide "the same" is comes from the measurement, not from a fixed
+    percentage.  A 10% band around the fastest *mean* was far inside
+    what these rows actually resolve: ``star-8``'s
+    ``gs/fixed0.8/interface`` recorded a median of 0.299 ms against a
+    p95 of 0.549 ms, an 84% swing within one row, so the band excluded
+    ``gs/aitken/interface`` — not measurably slower — and the fixture's
+    reported best became the row with 2.6x the iterations.  Ranking on a
+    metric whose noise exceeds the differences being ranked is how that
+    happens.
 
-    Two rows tie when the gap between them is inside the sampling noise
-    the fixture's rows actually show.  That noise is the *median* over
-    the rows of ``(p95 - median) / median``: a median over rows rather
-    than the fastest row's own p95, because one row's bad tail should
-    not widen the band for everything else — on ``ring-8`` the fastest
-    row's p95 alone would have tied a 2.7 ms row with a 0.2 ms one and
-    then preferred it for having fewer iterations.  Never narrower than
-    10%, so a fixture whose rows all happened to sample cleanly does not
-    end up ranking on differences it cannot really resolve.  Medians
-    rather than means throughout: one slow sample moves a mean and not a
-    median.
+    Two things set the band.  The first is the **dispatch floor**, the
+    time a jitted identity on the same pytree takes, which the profiler
+    measures per row: it is the part of a step that is getting work to
+    the device rather than doing it, and a difference smaller than it is
+    not a statement about the algorithm.  On ``star-8`` that floor is
+    0.217 ms against a fastest step of 0.288 ms — most of the step — so
+    a 29% gap between two configurations there is inside the dispatch
+    and means nothing, while the 3x gap in their iteration counts is
+    exact.  The median floor over the fixture's rows is used, so one
+    row's bad sample cannot set it.  The second is the sampling spread,
+    the median over the rows of ``(p95 - median) / median``, again a
+    median over rows so that one row's tail does not widen the band for
+    everything else, and floored at 10%.  The band is the fastest
+    median plus whichever of the two is larger.
+
+    Rows inside it are ranked on iteration count — which is measured
+    exactly — and then on simplicity.  Rows outside it really are
+    slower: IQN on ``star-8`` costs 1.2-1.4 ms against a 0.5 ms band and
+    is not in the running whatever its iteration count says, which is
+    the whole reason this function does not simply rank on iterations.
+    Medians rather than means throughout: one slow sample moves a mean
+    and not a median.
     """
     ok = [r for r in rows
           if r.get("ok") and r.get("converged_fraction", 0.0) >= 1.0]
@@ -401,11 +412,15 @@ def _best(rows: list[dict]) -> dict:
         m = _median(r)
         return (r.get("p95_step_ms", m) - m) / m if m > 0 else 0.0
 
-    spreads = sorted(_spread(r) for r in ok)
-    noise = max(spreads[len(spreads) // 2], _MIN_TIE_BAND)
+    def _mid(values):
+        values = sorted(values)
+        return values[len(values) // 2] if values else 0.0
+
+    noise = max(_mid([_spread(r) for r in ok]), _MIN_TIE_BAND)
+    dispatch = _mid([r.get("dispatch_floor_ms", 0.0) for r in ok])
     fastest = min(ok, key=_median)
     floor = _median(fastest)
-    band = floor * (1.0 + noise)
+    band = floor + max(dispatch, noise * floor)
     tied = [r for r in ok if _median(r) <= band]
     best = min(tied, key=lambda r: (r.get("iterations_mean", 1e9),
                                     _SIMPLICITY.get(r["acceleration"], 9),
@@ -416,16 +431,26 @@ def _best(rows: list[dict]) -> dict:
          and r["acceleration"] == "none" and r["convergence_norm"] == "l2"),
         None,
     )
+    fewest = min(ok, key=lambda r: (r.get("iterations_mean", 1e9),
+                                    _SIMPLICITY.get(r["acceleration"], 9)))
     out = {
         "label": best["label"],
         "mean_step_ms": best["mean_step_ms"],
         "median_step_ms": best.get("median_step_ms"),
         "iterations_mean": best.get("iterations_mean"),
-        "tie_rule": "median <= fastest median x (1 + row-spread median)",
+        "tie_rule": "median <= fastest median + max(dispatch floor, "
+                    "spread x fastest median)",
         "tie_noise": noise,
+        "tie_dispatch_floor_ms": dispatch,
         "n_tied": len(tied),
         "fastest_label": fastest["label"],
         "fastest_median_step_ms": floor,
+        # Recorded next to the pick rather than folded into it: where
+        # these two disagree, the reader is looking at a fixture whose
+        # step time and iteration count do not point the same way, and
+        # that is worth seeing rather than resolving silently.
+        "fewest_iterations_label": fewest["label"],
+        "fewest_iterations_mean": fewest.get("iterations_mean"),
         "tie_band_ms": band,
     }
     if base is not None:

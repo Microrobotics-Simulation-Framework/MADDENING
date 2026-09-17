@@ -331,9 +331,8 @@ def _fixed_point_while(
     number of body iterations run (as a float, for the diagnostics
     carry), ``final_res`` the residual of the last pass — the larger of
     the last two when ``acceleration`` is in ``_TWO_PASS_EXIT``, so
-    that it means
-    what the exit criterion below means — and ``(V, W)`` the IQN secant
-    matrices (an empty tuple for other accelerations).
+    that it says what the exit criterion above says — and ``(V, W)``
+    the IQN secant matrices (an empty tuple for other accelerations).
     No autodiff machinery here; the IFT rule is layered on by
     ``_ift_solve``.
 

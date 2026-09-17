@@ -251,9 +251,25 @@ jobs:
           pip install "jax==0.10.2" "jaxlib==0.10.2"
           pip install -e ".[ci]"
 
+      # Restore the Hypothesis example database so a falsifying example found
+      # by an earlier run is replayed first here.  Without it a shallow
+      # property test can pass for months and then fail once, unreproducibly.
+      # The key is unique per run (cache entries are immutable), so every run
+      # saves the database it ends with and restore-keys picks up the most
+      # recent previous one.  A miss is not an error: actions/cache reports
+      # "cache not found" and the job continues with an empty database.
+      - name: Restore Hypothesis example database
+        uses: actions/cache@v4
+        with:
+          path: .hypothesis
+          key: hypothesis-examples-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            hypothesis-examples-${{ runner.os }}-
+
       - name: Run hypothesis property tests
         env:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          MADDENING_HYPOTHESIS_PROFILE: ci
         run: |
           python -m pytest tests/verification/hypothesis/ -v --tb=short

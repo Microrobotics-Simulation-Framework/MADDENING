@@ -347,6 +347,11 @@ def _same_fixed_point(rows: list[dict]) -> dict:
     }
 
 
+#: Floor on the tie band, as a fraction of the fastest median.  A
+#: fixture whose rows all sampled cleanly still cannot resolve
+#: differences this small between separate timing runs.
+_MIN_TIE_BAND = 0.10
+
 #: Preference order when two configurations time the same: the simpler
 #: one wins, because every extra knob is a thing that can be wrong.
 _SIMPLICITY = {"none": 0, "fixed": 1, "aitken": 2, "iqn-ils": 3, "iqn-imvj": 4}
@@ -372,11 +377,17 @@ def _best(rows: list[dict]) -> dict:
     with 2.6x the iterations.  Ranking on a metric whose noise exceeds
     the differences being ranked is how that happens.
 
-    Two rows tie when their spreads overlap.  Reading a row's spread as
-    ``[2*median - p95, p95]`` — its p95 reflected about its median,
-    since only the upper tail is recorded — that is
-    ``2*median - p95 <= fastest.p95``.  Medians rather than means
-    throughout: one slow sample moves a mean and not a median.
+    Two rows tie when the gap between them is inside the sampling noise
+    the fixture's rows actually show.  That noise is the *median* over
+    the rows of ``(p95 - median) / median``: a median over rows rather
+    than the fastest row's own p95, because one row's bad tail should
+    not widen the band for everything else — on ``ring-8`` the fastest
+    row's p95 alone would have tied a 2.7 ms row with a 0.2 ms one and
+    then preferred it for having fewer iterations.  Never narrower than
+    10%, so a fixture whose rows all happened to sample cleanly does not
+    end up ranking on differences it cannot really resolve.  Medians
+    rather than means throughout: one slow sample moves a mean and not a
+    median.
     """
     ok = [r for r in rows
           if r.get("ok") and r.get("converged_fraction", 0.0) >= 1.0]
@@ -386,14 +397,16 @@ def _best(rows: list[dict]) -> dict:
     def _median(r):
         return r.get("median_step_ms", r["mean_step_ms"])
 
-    def _low(r):
-        """The bottom of *r*'s spread, p95 reflected about the median."""
-        return 2.0 * _median(r) - r.get("p95_step_ms", _median(r))
+    def _spread(r):
+        m = _median(r)
+        return (r.get("p95_step_ms", m) - m) / m if m > 0 else 0.0
 
+    spreads = sorted(_spread(r) for r in ok)
+    noise = max(spreads[len(spreads) // 2], _MIN_TIE_BAND)
     fastest = min(ok, key=_median)
     floor = _median(fastest)
-    band = max(fastest.get("p95_step_ms", floor), floor)
-    tied = [r for r in ok if _low(r) <= band]
+    band = floor * (1.0 + noise)
+    tied = [r for r in ok if _median(r) <= band]
     best = min(tied, key=lambda r: (r.get("iterations_mean", 1e9),
                                     _SIMPLICITY.get(r["acceleration"], 9),
                                     _median(r)))
@@ -408,7 +421,8 @@ def _best(rows: list[dict]) -> dict:
         "mean_step_ms": best["mean_step_ms"],
         "median_step_ms": best.get("median_step_ms"),
         "iterations_mean": best.get("iterations_mean"),
-        "tie_rule": "2*median - p95 <= fastest row's p95",
+        "tie_rule": "median <= fastest median x (1 + row-spread median)",
+        "tie_noise": noise,
         "n_tied": len(tied),
         "fastest_label": fastest["label"],
         "fastest_median_step_ms": floor,
@@ -463,6 +477,28 @@ def _highlights(rows: list[dict]) -> dict:
     return out
 
 
+def _resummarise(path: Path) -> int:
+    """Recompute a recorded file's derived summaries in place."""
+    data = json.loads(path.read_text())
+    for name, summary in data["fixtures"].items():
+        fixture_rows = [r for r in data["rows"] if r["fixture"] == name]
+        summary["fixed_point_agreement"] = _same_fixed_point(fixture_rows)
+        summary["best"] = _best(fixture_rows)
+        summary["highlights"] = _highlights(fixture_rows)
+        summary["regime_matches_expect_fraction"] = (
+            sum(1 for r in fixture_rows if r.get("regime_matches_expect"))
+            / max(sum(1 for r in fixture_rows if r.get("ok")), 1))
+    data["resummarised_by"] = "benchmarks/bench_coupling_sweep.py --resummarise"
+    path.write_text(json.dumps(data, indent=2, default=float))
+    print(f"resummarised {path} ({len(data['rows'])} rows)")
+    for name, summary in data["fixtures"].items():
+        best = summary.get("best") or {}
+        print(f"  {name:18s} {best.get('label', '(nothing converged)'):36s} "
+              f"{best.get('mean_step_ms', float('nan')):8.3f} ms  "
+              f"it {best.get('iterations_mean', float('nan')):5.1f}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -493,9 +529,19 @@ def main() -> int:
     ap.add_argument("--no-trace", dest="trace", action="store_false")
     ap.add_argument("--trace-steps", type=int, default=10)
     ap.add_argument("--json", type=Path, default=None)
+    ap.add_argument("--resummarise", type=Path, default=None,
+                    help="recompute the per-fixture summary blocks of an "
+                         "existing results file from its own recorded rows "
+                         "and write it back.  The rows are the measurement; "
+                         "`best`, `highlights` and `fixed_point_agreement` "
+                         "are derived from them, so correcting how one is "
+                         "derived does not need the machine time again")
     ap.add_argument("--label", default="")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+
+    if args.resummarise:
+        return _resummarise(args.resummarise)
 
     device = str(jax.devices()[0])
     trace = args.trace

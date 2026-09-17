@@ -166,7 +166,7 @@ def test_every_registered_fixture_builds_and_steps():
 
 
 #: Agreement threshold for the rows that stop on the *absolute* L2
-#: tolerance.  Every fixture here is built with ``tolerance=1e-4`` on an
+#: tolerance.  The fixtures here carry tolerances of 4e-5 to 1e-4 on an
 #: O(1) state, and 25 steps of compounding keeps the measured worst case
 #: an order of magnitude inside this.
 _L2_AGREEMENT = 5e-3
@@ -179,20 +179,17 @@ _L2_AGREEMENT = 5e-3
 #: inheriting the interface rows' slack.
 _INTERFACE_AGREEMENT = 2.5e-2
 
-#: Configurations that do *not* reach the common fixed point today,
-#: each with the defect that explains it.  Listed, not tolerated: the
-#: test below asserts every entry is still disagreeing, so fixing the
-#: defect turns this file red with an instruction to delete the entry.
-#: Silently widening the threshold instead would have thrown away the
-#: one measurement that catches the defect.
-_KNOWN_DISAGREEMENTS = {
-    ("heterogeneous-2000", "jac/aitken/l2"):
-        "aitken's stopping criterion is not a bound on the error when "
-        "its omega estimate saturates at a clip bound, which is what "
-        "jacobi does on this fixture's degenerate modes; the row "
-        "reports converged=True 15-31x above its own tolerance.  Being "
-        "fixed separately in the coupling library.",
-}
+#: ``{(fixture, label): why}`` for configurations that do *not* reach
+#: the common fixed point, each with the defect that explains it.  It is
+#: empty and should stay that way.  Entries are listed rather than
+#: tolerated by a wider threshold: the test asserts every entry is still
+#: disagreeing, so fixing the defect turns this file red with an
+#: instruction to delete the entry, and the measurement that caught the
+#: defect is never quietly thrown away.  ``jac/aitken/l2`` on the grid
+#: fixture was the one entry — it disagreed by 20.6% while reporting
+#: itself converged — and the corrected Aitken exit criterion cleared
+#: it, which is how the entry left.
+_KNOWN_DISAGREEMENTS = {}
 
 
 def _fixture_build(name):
@@ -235,7 +232,7 @@ def _assert_same_fixed_point(fixture, norms, n_steps=25):
         if dev > limit and known is None:
             drifted.append(f"{label} drifted {dev:.2e} (limit {limit:.0e})")
         elif dev <= limit and known is not None:
-            repaired.append(f"{label} now agrees to {dev:.2e}")
+            repaired.append(f"{label} now agrees to {dev:.2e} ({known})")
     assert not drifted, (
         f"{fixture}: these configurations left the gauss-seidel/none "
         f"trajectory after {n_steps} steps: " + "; ".join(drifted)
@@ -843,9 +840,10 @@ def test_recorded_sweep_rows_share_one_schema(name):
     assert measured
 
     keys = {frozenset(r) for r in measured}
+    common = frozenset.intersection(*keys)
     assert len(keys) == 1, (
         "measured rows disagree on their keys: "
-        f"{sorted(set.symmetric_difference(*(set(k) for k in keys)))}"
+        f"{sorted(frozenset.union(*keys) - common)}"
     )
     for row in skipped:
         assert row.get("skipped") is True, row

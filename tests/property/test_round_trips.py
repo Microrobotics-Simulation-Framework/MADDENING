@@ -23,18 +23,17 @@ USD property is for.
 
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 from pathlib import Path
 
 import pytest
 from hypothesis import given, note
 from hypothesis import strategies as st
-from pxr import Usd
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
-from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
 
 from tests.property.invariants import (
     assert_leaf_tree_identical,
@@ -82,7 +81,24 @@ def _rollout(gm: GraphManager, n_steps: int) -> dict:
     return {name: gm.get_node_state(name) for name in gm.node_names}
 
 
+#: ``usd-core`` is an optional extra: the `test-usd` CI job installs it and
+#: the shared venv has it, but the plain `test` job does not, so the USD
+#: properties skip there rather than failing to import the whole module.
+def _usd_installed() -> bool:
+    try:
+        return importlib.util.find_spec("pxr") is not None
+    except (ImportError, ValueError):       # a missing parent package raises
+        return False
+
+
+usd_only = pytest.mark.skipif(not _usd_installed(), reason="usd-core not installed")
+
+
 def _reload_usd(gm: GraphManager) -> GraphManager:
+    from pxr import Usd
+
+    from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
+
     stage = Usd.Stage.CreateInMemory()
     save_graph_to_usd(gm, stage)
     reloaded = load_graph_from_usd(stage)
@@ -145,6 +161,7 @@ def test_to_dict_is_idempotent_through_from_dict(recipe):
 # USD
 # ---------------------------------------------------------------------------
 
+@usd_only
 @given(recipe=graph_recipes())
 def test_a_usd_round_trip_preserves_trajectory_params_and_specs(recipe):
     """The USD stage is the other serialisation of the same graph and owes
@@ -160,6 +177,7 @@ def test_a_usd_round_trip_preserves_trajectory_params_and_specs(recipe):
                             what="trajectory")
 
 
+@usd_only
 @given(recipe=graph_recipes(require_mapping=True, max_nodes=3))
 def test_a_usd_round_trip_preserves_a_mapped_edge_and_its_weights(recipe):
     gm = recipe.build()
@@ -175,6 +193,7 @@ def test_a_usd_round_trip_preserves_a_mapped_edge_and_its_weights(recipe):
 
 # -- pinned regressions: the names and fields the USD writer used to lose ---
 
+@usd_only
 def test_usd_keeps_a_node_name_that_is_not_a_prim_identifier():
     """``"b-1"`` is a legal node name and not a legal ``SdfPath`` element.
     The writer has to mangle the prim name; it must not mangle the *node*
@@ -194,6 +213,7 @@ def test_usd_keeps_a_node_name_that_is_not_a_prim_identifier():
     assert [(e.source_node, e.target_node) for e in reloaded.edges] == [("t", "b-1")]
 
 
+@usd_only
 def test_usd_keeps_two_node_names_that_share_one_prim_name():
     """``"a-b"`` and ``"a.b"`` are two nodes; a naive safe-name mangling
     collapses them onto the prim ``a_b`` and the reload silently loses one."""
@@ -208,6 +228,7 @@ def test_usd_keeps_two_node_names_that_share_one_prim_name():
     assert_states_identical(gm.run_scan(N_STEPS), reloaded.run_scan(N_STEPS))
 
 
+@usd_only
 def test_usd_keeps_a_node_name_that_starts_with_a_digit():
     """``Sdf.Path.TokenizeIdentifier("1st")`` is empty, which used to leave
     the writer asking USD to define a prim at an ill-formed path."""
@@ -222,6 +243,7 @@ def test_usd_keeps_a_node_name_that_starts_with_a_digit():
     assert_states_identical(gm.run_scan(N_STEPS), reloaded.run_scan(N_STEPS))
 
 
+@usd_only
 def test_usd_keeps_the_declared_units_of_an_edge():
     """``source_units`` / ``target_units`` are part of ``EdgeSpec`` and of
     the config; the stage has to carry them too, or a reloaded graph stops
@@ -348,6 +370,7 @@ def test_a_split_rollout_is_step_for_step_identical():
 # Cross-format
 # ---------------------------------------------------------------------------
 
+@usd_only
 @given(recipe=graph_recipes())
 def test_config_and_usd_reload_to_the_same_graph(recipe):
     """The two formats are two spellings of one graph; a difference between

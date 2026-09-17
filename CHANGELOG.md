@@ -52,6 +52,30 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Changed
 
+- **Hypothesis depth is now relative to the active profile, so `ci` really
+  does search harder than `dev`.**  A per-test `@settings(max_examples=N)`
+  overrides the profile, and about a hundred call sites carried one, chosen
+  ad hoc between 12 and 1000 over the project's history: measured on
+  `tests/verification/hypothesis/`, `dev` took 707 s and `ci` 721 s -- 2%
+  apart, for a profile that asks for four times the search.  The root
+  `tests/conftest.py` now resolves three named depth tiers from whatever
+  profile is loaded -- `EXAMPLES_CHEAP` (4x the profile), `EXAMPLES_STANDARD`
+  (the profile itself) and `EXAMPLES_COSTLY` (two fifths of it, never below
+  the house floor of 20) -- named for what one example *costs* rather than
+  for a number, and 95 call sites across `tests/verification/hypothesis/`,
+  `tests/core/` and `tests/fmi/` now name a tier.  The same suite now
+  measures **462 s under `dev` and 1365 s under `ci`**: the local default is
+  a third faster (the tiers took depth away from tests whose example costs
+  seconds and gave it to pure-function properties) and `ci` finally searches
+  3x deeper than `dev` instead of 1.02x.  The eleven sites that keep an
+  absolute cap are the ones where the number encodes a real constraint -- a
+  search space Hypothesis exhausts anyway, or an example measured in seconds
+  -- and each says so in a comment, as the house rule requires.  No test's
+  logic, strategies or assertions changed, and `stateful_step_count` is
+  deliberately not tiered: it sets how long one example is, not how many
+  there are.  Documented in `docs/developer_guide/testing_standards.md`,
+  and every run now prints the resolved tiers in the pytest header.
+
 - **Hypothesis property testing is configured once, in the root
   `tests/conftest.py`.**  Two profiles are registered there -- `dev`
   (`max_examples=50`, the default for a local run) and `ci`

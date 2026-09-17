@@ -93,8 +93,8 @@ guidance; the itemized changes follow.
   `coupling_diagnostics()` reports `"converged"` per group, and
   `CouplingGroup.strict_convergence` raises on an unconverged exit (off by
   default — the IFT gradient is invalid there)
-- The IFT Krylov adjoint raises an actionable `ImportError` naming `pip
-  install maddening[ift]` when lineax is missing
+- The IFT Krylov adjoint needs `lineax`, which is a base dependency as of
+  this release (it was an optional extra when this entry was first written)
 - Node verification: `verify_node` gains `params_consistent` /
   `params_gradient_finite` / `params_effective` and a `SKIP` status
   (`SimulationNode.accepts_params()` exposes the probe);

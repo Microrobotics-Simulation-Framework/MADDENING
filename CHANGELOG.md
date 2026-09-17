@@ -530,6 +530,53 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **The rollout-parity property tests are no longer flaky.**  The
+  `step` / `run_scan` / `run_sweep` agreement tests in
+  `tests/verification/hypothesis/test_hypothesis_params.py` compared a
+  near-zero final value against a fixed `atol=1e-7`, but float32 round-off
+  accumulates with the magnitudes the arithmetic passes through, and a
+  ball's velocity crosses zero on every bounce.  A sweep of 1600
+  seed/step-count combinations failed 7 times (all 15-step ball velocities,
+  2e-7 to 1e-6 absolute), about a 6 % chance of a red run per CI job.  The
+  absolute tolerance is now scaled by the largest magnitude in the compared
+  trees, and the seven seeds are pinned as an explicit regression test.  No
+  library code changed: the three rollout paths always agreed to float32
+  round-off.
+
+- **Interface-mapping serialisation hardening** (independent audit of the
+  `MappingSpec` feature; regression tests in
+  `tests/core/test_mapping_spec_hardening.py` and `tests/usd/test_usd_mapping_spec.py`).
+  A graph with trainable mapping weights can reload its own config again:
+  `GraphManager.from_dict` applied `param_specs` before the edges existed, so
+  a `set_param_spec(edge.key, "H", ParamSpec())` override — the documented
+  sysid workflow — made the loader raise `KeyError "unknown node
+  '<edge key>'"`; overrides are now applied after the edges (and an override
+  naming neither a node nor a mapped edge is a `ValueError` saying so).  The
+  USD writer/reader carries edge-key overrides too, on the edge prim.  Point
+  references now record `sha256`, the content hash of the array the factory
+  was given: the writers resolve every node reference and refuse a stale one
+  (a removed node, a field that changed) naming the edge, and the rebuild
+  refuses a reference that resolves to different points instead of silently
+  building a different operator.  Asset loading is hardened — the path is
+  resolved and must stay under `base_dir` (symlinks to files and to
+  directories no longer escape it), the `.npy` header / `.npz` directory
+  entry is checked against `MAX_ASSET_BYTES` (256 MiB) and the file's own
+  size before anything is allocated, and non-numeric dtypes are refused;
+  inline sets are bounded by element count as well as point count and must
+  be finite and real.  Every failure while rebuilding one edge's mapping —
+  including `BadZipFile`, `TypeError`, `JSONDecodeError` from a corrupt
+  `maddening:mappingSpecJson`, `OSError` and `MemoryError` — is now a
+  `MappingRebuildError` (a `ValueError`) naming the edge with the cause
+  chained.  `describe()["kind"]` is the user-facing kind again
+  (`matrix_mapping(kind="supermesh")` reports `"supermesh"`, not `"matrix"`,
+  as before the feature landed) while the spec keeps `kind: "matrix"` plus
+  `label`.  Non-finite `epsilon` / `ridge` are refused by the factories (they
+  serialised to invalid JSON), a `key` on a `.npy` asset and a non-string
+  matrix label are errors, a 0-d static field is a clear `PointReferenceError`
+  instead of an `IndexError`, and `gm.to_dict()` warns when live
+  `params["mappings"]` weights differ from what the recipe rebuilds so
+  trained weights are not dropped silently.  New public accessor
+  `GraphManager.get_node(name)`.
 - **Resume-from-URL transport hardening** (independent audit of the
   `maddening.cloud.resume` move, report under
   `benchmarks/results/audit_cloud-resume-transport/`; regression tests in

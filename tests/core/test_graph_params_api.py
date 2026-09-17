@@ -18,6 +18,7 @@ from maddening.core.params import ParamSpec
 from maddening.nodes.ball import BallNode
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_STANDARD
 
 
 class Legacy(SimulationNode):
@@ -168,7 +169,7 @@ def test_round_trip_and_bounds_through_graph():
     u_k=st.floats(-40.0, 40.0, allow_nan=False, allow_infinity=False),
     u_e=st.floats(-3.0, 3.0, allow_nan=False, allow_infinity=False),
 )
-@settings(max_examples=50, deadline=None)
+@settings(max_examples=EXAMPLES_STANDARD, deadline=None)
 def test_constrained_params_from_any_coordinates_are_a_valid_step_input(u_k, u_e):
     """An optimiser step in unconstrained coordinates, however wild, maps
     to a params pytree the graph accepts and that stays inside bounds."""

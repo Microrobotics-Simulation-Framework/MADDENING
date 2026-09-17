@@ -329,9 +329,11 @@ def _full_residual(gm, obs):
 
 
 @given(kf=st.floats(0.5, 2.0), cf=st.floats(0.5, 2.0))
-# Explicit cap at the house floor: one example is a 30-iteration
-# Levenberg-Marquardt fit over a full rollout, seconds rather than
-# milliseconds, so this test pays for depth in wall-clock.
+# Absolute at the house floor, not ``EXAMPLES_COSTLY``: one example is
+# a 30-iteration Levenberg-Marquardt fit over a full rollout, seconds
+# rather than milliseconds.  Tiering it would let the ``ci`` profile
+# turn this single test into minutes; depth here is bought from the
+# cheaper properties instead.
 @settings(max_examples=20, deadline=None)
 def test_fit_lm_recovers_k_c_in_few_iterations(kf, cf):
     gm = _spring_gm()

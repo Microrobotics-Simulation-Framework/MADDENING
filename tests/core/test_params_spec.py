@@ -18,6 +18,7 @@ from maddening.core.params import (
     trainable_mask,
     unconstrain,
 )
+from tests.conftest import EXAMPLES_CHEAP
 
 SPECS = {
     "nodes": {
@@ -101,7 +102,7 @@ finite64 = dict(allow_nan=False, allow_infinity=False)
     m=st.floats(2 ** -10, 1e3, **finite), e=st.floats(2 ** -6, 63 / 64, **finite),
     off=st.floats(-1e3, 1e3, **finite), x0=st.floats(-1e3, 1e3, **finite),
 )
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_constrain_inverts_unconstrain_inside_bounds(k, c, m, e, off, x0):
     p = _params(k, c, m, e, off, x0)
     u = unconstrain(p, SPECS)
@@ -119,7 +120,7 @@ def test_constrain_inverts_unconstrain_inside_bounds(k, c, m, e, off, x0):
 @given(
     u=st.lists(st.floats(-30.0, 30.0, **finite64), min_size=6, max_size=6),
 )
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_constrain_lands_inside_bounds_for_any_coordinates(u):
     raw = _params(*u)                       # interpret as unconstrained coords
     p = constrain(raw, SPECS)
@@ -136,7 +137,7 @@ def test_constrain_lands_inside_bounds_for_any_coordinates(u):
 
 
 @given(u=st.floats(-1e4, 1e4, **finite64))
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_unconstrain_of_constrain_is_finite_for_any_coordinate(u):
     """float32 ``exp``/``sigmoid`` saturate for |u| beyond ~17-87; the
     transforms clamp to the representable interior so the inverse map

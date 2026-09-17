@@ -45,6 +45,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.nodes.heat import HeatNode
+from tests.conftest import EXAMPLES_COSTLY
 
 C2F = "coarse.temperature->fine.heat_source"
 
@@ -523,7 +524,7 @@ def _points(data, n, dim, dtype):
 @pytest.mark.parametrize("codec", ["json", "yaml"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("kind", ["rbf", "nearest_neighbor", "projection_1d", "matrix"])
-@settings(max_examples=12, deadline=None, database=None,
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, database=None,
           suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large])
 @given(data=st.data())
 def test_every_factory_round_trips_bitwise_for_random_hyperparameters(

@@ -26,8 +26,9 @@ from hypothesis import strategies as st
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import ParamSpec
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_STANDARD
 
-SETTINGS = dict(max_examples=40, deadline=None,
+SETTINGS = dict(max_examples=EXAMPLES_STANDARD, deadline=None,
                 suppress_health_check=[HealthCheck.too_slow])
 
 

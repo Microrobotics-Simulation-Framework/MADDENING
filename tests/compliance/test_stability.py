@@ -1,6 +1,8 @@
 """Tests for the @stability decorator and generate_stability_report()."""
 
 import os
+from pathlib import Path
+
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from maddening.core.compliance.metadata import StabilityLevel
@@ -123,3 +125,36 @@ class TestStabilityReport:
         report = generate_stability_report()
         assert "ReportTestClass" in report
         assert "stable" in report
+
+
+class TestStabilityReportGeneratorCoverage:
+    """The generated report is the artefact the release gate reads to say
+    what is frozen.  It enumerates the surface by importing a hard-coded
+    module list, so a module missing from that list is a stability tag the
+    gate cannot see (audit A6)."""
+
+    GENERATOR = (
+        Path(__file__).resolve().parents[2]
+        / "scripts" / "generate_stability_report.py"
+    )
+
+    def test_generator_imports_the_adaptive_node_surfaces(self):
+        source = self.GENERATOR.read_text()
+        for module in ("maddening.nodes.adaptive", "maddening.core.solver_utils"):
+            assert f"import {module}" in source, (
+                f"{module} is not imported by {self.GENERATOR.name}, so its "
+                "@stability-decorated surfaces never reach the report"
+            )
+
+    def test_the_adaptive_surfaces_reach_the_generated_report(self):
+        import importlib
+
+        importlib.import_module("maddening.nodes.adaptive")
+        importlib.import_module("maddening.core.solver_utils")
+        report = generate_stability_report()
+        for name in (
+            "maddening.nodes.adaptive.base.AdaptiveNode",
+            "maddening.nodes.adaptive.base.AdaptiveNodeBlindnessError",
+            "maddening.core.solver_utils.ift_linear_solve",
+        ):
+            assert name in report, name

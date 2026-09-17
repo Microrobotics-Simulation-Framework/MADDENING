@@ -17,10 +17,11 @@ Useful flags::
     --fields                    add the accelerated_fields variants
     --steps N                   override every fixture's timed-step count
     --stat-steps N              steps in the iteration-statistics pass
-                                (default 50; independent of --steps, so a
-                                shorter timing run does not also shorten
+                                (default: the fixture's own step count,
+                                capped at 50).  Independent of --steps, so
+                                a shorter timing run does not also shorten
                                 and shift the window the iteration counts
-                                are averaged over)
+                                are averaged over
     --trace / --no-trace        force the jax.profiler trace on or off
                                 (default: on only when the device is not CPU)
 
@@ -66,16 +67,20 @@ from maddening.core.simulation.profiler import profile_graph  # noqa: E402
 _LAUNCH_BOUND_AT = 0.33
 _COMPUTE_BOUND_AT = 0.10
 
-#: Steps in the iteration-statistics pass.  Fixed rather than derived
-#: from ``--steps``: the statistics pass used to be ``min(n_steps, 50)``
-#: steps taken *after* the timed run, so halving ``--steps`` both halved
-#: the sample count and moved the window earlier in the trajectory, and
-#: on a fixture driven by a 44-step oscillator the mean iteration count
-#: genuinely moved with it (``jac/iqn-imvj5/l2`` on ``chain-5``: 4.00 at
-#: ``--steps 10``, 3.00 at the default).  With the window pinned, rows
-#: recorded at different ``--steps`` are comparable on everything except
-#: the timings.
-_STAT_STEPS = 50
+#: Cap on the iteration-statistics window.
+#:
+#: The window itself is the *fixture's* declared step count, not the
+#: run's.  The statistics pass used to be ``min(n_steps, 50)`` steps
+#: taken from wherever the timed run stopped, so ``--steps 10`` halved
+#: the iteration-count sample and moved its window earlier in the
+#: trajectory; on fixtures driven by a 44-step oscillator the mean
+#: iteration count moved with it (``jac/iqn-imvj5/l2`` on ``chain-5``:
+#: 4.00 at ten steps, 3.00 at the default).  Taking it from the fixture
+#: makes it a property of the graph — ``stiff-pair-1.2`` is declared
+#: short because a divergent group overflows, ``slow-drift`` is declared
+#: long because its transient is — while ``--steps`` changes only how
+#: many timings are averaged.
+_STAT_CAP = 50
 
 
 def _regime(mean_ms: float, floor_ms: float, trace) -> tuple[str, float]:
@@ -476,11 +481,13 @@ def main() -> int:
                          "allocates max_iterations-1 secant columns, so "
                          "this is also the knob that decides how big its "
                          "least-squares problem is")
-    ap.add_argument("--stat-steps", type=int, default=_STAT_STEPS,
-                    help="steps in the iteration-statistics pass; "
-                         "independent of --steps so that reducing the "
-                         "timing run does not move the window the "
-                         "iteration counts are measured over")
+    ap.add_argument("--stat-steps", type=int, default=0,
+                    help="steps in the iteration-statistics pass "
+                         "(default: the fixture's own step count, capped "
+                         f"at {_STAT_CAP}).  Independent of --steps, so "
+                         "reducing the timing run does not also shorten "
+                         "and shift the window the iteration counts are "
+                         "measured over")
     ap.add_argument("--warmup", type=int, default=0)
     ap.add_argument("--trace", dest="trace", action="store_true", default=None)
     ap.add_argument("--no-trace", dest="trace", action="store_false")
@@ -521,10 +528,11 @@ def main() -> int:
                 if spec.mode_fixed else configs)
         steps = args.steps or spec.steps
         warmup = args.warmup or spec.warmup
+        stat_steps = args.stat_steps or min(spec.steps, _STAT_CAP)
         fixture_rows: list[dict] = []
         for cfg in cfgs:
             row = _measure(spec, cfg, steps=steps, warmup=warmup,
-                           stat_steps=args.stat_steps,
+                           stat_steps=stat_steps,
                            trace=trace, trace_steps=args.trace_steps)
             fixture_rows.append(row)
             rows.append(row)
@@ -549,7 +557,7 @@ def main() -> int:
             "slow": spec.slow,
             "steps": steps,
             "warmup": warmup,
-            "stat_steps": args.stat_steps,
+            "stat_steps": stat_steps,
             "expect": spec.expect,
             "regime_matches_expect_fraction": (
                 sum(1 for r in fixture_rows if r.get("regime_matches_expect"))
@@ -570,7 +578,7 @@ def main() -> int:
         "jax": jax.__version__,
         "trace": trace,
         "max_iterations_override": args.max_iterations or None,
-        "stat_steps": args.stat_steps,
+        "stat_steps_override": args.stat_steps or None,
         "n_rows": len(rows),
         "wall_s": time.perf_counter() - t_start,
         "fixtures": per_fixture,

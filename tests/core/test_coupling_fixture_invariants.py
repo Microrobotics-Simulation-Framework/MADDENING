@@ -13,6 +13,7 @@ script.
 """
 
 import importlib.util
+import json
 import math
 import sys
 from pathlib import Path
@@ -809,3 +810,76 @@ def test_coupling_statistics_do_not_depend_on_the_timed_step_count():
                                measure_coupling=False, n_stat_steps=12)
         means.append({k: v["mean"] for k, v in report.coupling_iter_stats.items()})
     assert means[0] and means[0] == means[1], means
+
+
+# ---------------------------------------------------------------------------
+# The recorded sweep files
+# ---------------------------------------------------------------------------
+
+
+_RESULTS = _REPO_ROOT / "benchmarks" / "results"
+_SWEEP_JSON = ("coupling_sweep_cpu.json",
+               "coupling_sweep_expensive_cpu.json",
+               "coupling_sweep_cap16_cpu.json")
+
+
+def _recorded(name):
+    return json.loads((_RESULTS / name).read_text())
+
+
+@pytest.mark.parametrize("name", _SWEEP_JSON)
+def test_recorded_sweep_rows_share_one_schema(name):
+    """Every measured row of every recorded file has the same shape.
+
+    A consumer of these files — the guide, a regression check, a future
+    comparison against a GPU run — reads them by key.  The keys were not
+    uniform: ``predicted_rho`` came in three different schemas depending
+    on the fixture, so indexing ``["jacobi"]`` silently missed on the
+    rings and raised ``KeyError`` on ``mixed-modes``.
+    """
+    data = _recorded(name)
+    measured = [r for r in data["rows"] if r.get("ok")]
+    skipped = [r for r in data["rows"] if not r.get("ok")]
+    assert measured
+
+    keys = {frozenset(r) for r in measured}
+    assert len(keys) == 1, (
+        "measured rows disagree on their keys: "
+        f"{sorted(set.symmetric_difference(*(set(k) for k in keys)))}"
+    )
+    for row in skipped:
+        assert row.get("skipped") is True, row
+        assert set(row) <= set(next(iter(keys))) | {"skipped"}, row
+
+    for row in measured:
+        assert set(row["predicted_rho"]) == {"jacobi", "gauss-seidel", "groups"}, (
+            f"{row['fixture']}: {sorted(row['predicted_rho'])}")
+        assert row["expect"] in ("launch-bound", "compute-bound", "mixed")
+        assert isinstance(row["regime_matches_expect"], bool)
+        for key, entry in row["state_signature"].items():
+            assert len(entry) == 4, f"{row['fixture']}.{key}: {entry}"
+            assert int(entry[3]) >= 1, f"{row['fixture']}.{key}: n={entry[3]}"
+
+    for summary in data["fixtures"].values():
+        agreement = summary["fixed_point_agreement"]
+        assert {"max_relative_deviation", "max_node_relative_deviation"} <= \
+            set(agreement)
+
+
+@pytest.mark.parametrize("name", _SWEEP_JSON)
+def test_recorded_sweep_signatures_exclude_the_driver_nodes(name):
+    """The fingerprint compared across configurations is the coupled state.
+
+    A driver node is exogenous: nothing feeds back into it, it is in no
+    group, and it cannot disagree between configurations.  What it can
+    do is set the scale everything else is divided by, which is how a
+    20.6% disagreement between coupled probes came to be recorded as
+    2.6e-3.
+    """
+    data = _recorded(name)
+    for row in data["rows"]:
+        if not row.get("ok"):
+            continue
+        signed = {key.split(".", 1)[0] for key in row["state_signature"]}
+        assert "driver" not in signed, f"{row['fixture']} / {row['label']}"
+        assert signed, row["label"]

@@ -83,6 +83,16 @@ final residual and the launch-bound / compute-bound verdict.  The
 results and what they mean for a given graph shape are in
 [Choosing a coupling algorithm](coupling_algorithm_guide.md).
 
+`--steps` changes only how many timings are averaged.  The iteration
+counts, convergence fractions and residuals come from a separate
+statistics pass whose length and starting point are the *fixture's*,
+not the run's (`--stat-steps` overrides it, `profile_graph`'s
+`n_stat_steps` is the underlying knob).  That matters because those
+three are the numbers people quote across runs: while the pass was
+`min(n_steps, 50)` steps taken from wherever the timed run stopped, a
+shortened run moved the window as well as the sample size, and on a
+periodically driven graph the mean iteration count moved with it.
+
 ## Persistent compilation cache
 
 ```bash

@@ -486,6 +486,23 @@ class FmuTcpBridge:
                         f"communication step {h!r} is not a whole multiple of the "
                         f"master timestep {self._dt!r}"
                     )
+                # The communication point is parsed *before* anything moves.
+                # It used to be parsed after the loop, so a request carrying a
+                # ``t`` that is not a number was answered "not ok" with the
+                # physics already advanced and ``_time`` left behind it: the
+                # importer's clock and the bridge's state desynchronise
+                # permanently, and nothing on the wire says so.
+                raw_t = req.get("t", self._time)
+                try:
+                    t0 = float(raw_t)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"communication point must be a number, got {raw_t!r}"
+                    ) from exc
+                if not np.isfinite(t0):
+                    raise ValueError(
+                        f"communication point must be finite, got {raw_t!r}"
+                    )
                 saved = self._sidecar._state                        # noqa: SLF001
                 try:
                     for _ in range(n):
@@ -495,7 +512,7 @@ class FmuTcpBridge:
                     # behind: the importer is told nothing happened
                     self._sidecar._state = saved                    # noqa: SLF001
                     raise
-                self._time = float(req.get("t", self._time)) + n * self._dt
+                self._time = t0 + n * self._dt
                 return {"ok": True, "t": self._time}
             if op == "get_state":
                 return {"ok": True, "state": self._encode_state()}

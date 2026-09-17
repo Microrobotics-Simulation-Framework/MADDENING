@@ -14,7 +14,6 @@ Then open http://localhost:8000/viz/graph in your browser.
 """
 
 import sys
-sys.path.insert(0, ".")
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode

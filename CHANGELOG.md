@@ -160,6 +160,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Examples no longer save plots into the installed package** (they broke on
+  a read-only install): output goes to the working directory, usage lines use
+  `python -m maddening.examples...`, and a smoke test pins both
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep

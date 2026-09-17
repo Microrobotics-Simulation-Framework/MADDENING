@@ -175,6 +175,38 @@ class TestSingleDeviceCorrectness:
             f"auto backend gave bad solution (rel_err={float(rel_err):.2e})"
         )
 
+    def test_auto_backend_uses_lineax_not_the_loop_fallback(self, monkeypatch):
+        """``auto`` with no preconditioner really routes through lineax.
+
+        While lineax was an optional extra, ``auto`` silently fell back
+        to the loop backend when the import failed — a solve could
+        quietly change backend depending on how MADDENING was
+        installed.  lineax is a base dependency now, so the only
+        remaining reason ``auto`` takes the loop is a preconditioner.
+        """
+        from maddening.cloud.multigpu import iterative_solver as solver_mod
+
+        calls = []
+        real = solver_mod._lineax_solve
+
+        def _spy(kind, *args, **kwargs):
+            calls.append(kind)
+            return real(kind, *args, **kwargs)
+
+        monkeypatch.setattr(solver_mod, "_lineax_solve", _spy)
+        n = 16
+        matvec = _laplacian_1d_matvec_unsharded(n)
+        b = jnp.ones(n, dtype=jnp.float32)
+        sharded_cg(matvec, b, rtol=1e-3, atol=1e-4, max_iters=200,
+                   backend="auto")
+        assert calls == ["cg"], calls
+
+        calls.clear()
+        # With a preconditioner, auto must still choose the loop.
+        sharded_cg(matvec, b, rtol=1e-3, atol=1e-4, max_iters=200,
+                   backend="auto", preconditioner=lambda r: r)
+        assert calls == [], calls
+
 
 # ---------------------------------------------------------------------------
 # Sharded correctness — the load-bearing acceptance test for v0.3.0 A5.
@@ -316,19 +348,6 @@ class TestValidation:
         with pytest.raises(ValueError, match="Unknown backend"):
             sharded_cg(lambda x: x, jnp.ones(4), backend="wat")
 
-    def test_lineax_backend_requested_without_lineax(self, monkeypatch):
-        """When backend='lineax' but lineax import fails, raise a clear error."""
-        import sys
-        # Make sure the import really fails.
-        original = sys.modules.pop("lineax", None)
-        monkeypatch.setitem(sys.modules, "lineax", None)
-        try:
-            with pytest.raises(RuntimeError, match="lineax not installed"):
-                sharded_cg(lambda x: x, jnp.ones(4), backend="lineax")
-        finally:
-            if original is not None:
-                sys.modules["lineax"] = original
-
 
 # ---------------------------------------------------------------------------
 # Stability tagging — these functions are the v0.4.0 commitment surface
@@ -394,7 +413,7 @@ class TestPreconditioned:
         assert int(jac.iters) < int(plain.iters)
 
     def test_lineax_backend_rejects_preconditioner(self):
-        pytest.importorskip("lineax")
+        # No importorskip: lineax is a base dependency as of v0.4.0.
         with pytest.raises(ValueError, match="cannot apply a preconditioner"):
             sharded_cg(lambda x: x, jnp.ones(4), backend="lineax",
                        preconditioner=lambda r: r)

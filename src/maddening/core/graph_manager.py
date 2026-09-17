@@ -29,10 +29,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ``lineax`` is imported lazily inside ``_ift_linear_solve`` — it pulls in
-# equinox + optax transitively, which we do NOT want to make a hard
-# module-load-time dependency.  Only users who opt into ``solver='ift'``
-# trigger the lineax import path.
+# ``lineax`` is a base dependency (v0.4.0) but is still imported lazily
+# inside ``_ift_linear_solve``: it pulls in equinox + jaxtyping, an order
+# of magnitude more import time than ``import maddening`` itself costs.
+# Only users who opt into ``solver='ift'`` pay it.  The import needs no
+# guard — a missing lineax is now an installation fault, not a
+# user-recoverable "install the extra" condition.
 
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
@@ -139,26 +141,6 @@ class _ResolvedParams(NamedTuple):
     is passed, baked constants otherwise."""
     nodes: dict
     mappings: dict
-
-
-def _import_lineax():
-    """``import lineax`` with an actionable error when it is missing.
-
-    The matrix-free Krylov adjoint of the IFT solver (``linear_solver=
-    "gmres" | "bicgstab"``) needs lineax; it is an optional dependency
-    (``pip install maddening[ift]``) so the base install stays light.
-    """
-    try:
-        import lineax as lx  # noqa: PLC0415  (lazy by design)
-    except ImportError as e:
-        raise ImportError(
-            "lineax is required for the matrix-free Krylov adjoint of the "
-            "coupling solver (solver='ift' with linear_solver='gmres' or "
-            "'bicgstab').  Install it with:  pip install maddening[ift]\n"
-            "Or use linear_solver='dense' (no lineax dependency; it builds "
-            "the coupling Jacobian explicitly, slower on large groups)."
-        ) from e
-    return lx
 
 
 def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
@@ -477,10 +459,12 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         return jnp.linalg.solve(A, b)
 
     def _krylov(mv, b):
-        # Lazy import — keeps lineax (and its equinox/optax transitive
-        # deps) out of module load time.  Only callers who opt into
+        # Lazy import — lineax is a base dependency (v0.4.0) but its
+        # equinox/jaxtyping transitive deps cost an order of magnitude
+        # more import time than ``import maddening`` does, so keep it
+        # out of module load time.  Only callers who opt into
         # ``solver='ift'`` pay this import cost.
-        lx = _import_lineax()
+        import lineax as lx  # noqa: PLC0415  (lazy by design)
 
         atol = 1e-8 + rtol * jnp.max(jnp.abs(b))
         op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
@@ -1270,8 +1254,8 @@ def _run_coupled_block_impl(
                 str(group.linear_solver),
             )
             if group.strict_convergence:
-                # Lazy: equinox ships with lineax, which this path
-                # already requires.
+                # Lazy for import time only: equinox is a transitive
+                # dependency of lineax, which is a base dependency.
                 import equinox as eqx  # noqa: PLC0415
 
                 x_star_full = eqx.error_if(

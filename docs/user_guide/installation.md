@@ -8,7 +8,9 @@ MADDENING requires Python 3.11+ (3.12+ for JAX 0.11 and later) and installs with
 pip install maddening
 ```
 
-This gives you the full simulation engine (JAX + NumPy) running on CPU. All core features work: graph construction, compilation, stepping, coupling, adaptive timestepping, parameter sweeps, and checkpoint/restore.
+This gives you the full simulation engine (JAX + NumPy + `lineax`) running on CPU. All core features work: graph construction, compilation, stepping, coupling, adaptive timestepping, parameter sweeps, and checkpoint/restore.
+
+That includes **differentiating through a coupling group at its default settings**. A coupling group defaults to `solver="ift"` with `linear_solver="gmres"`, whose adjoint is solved with `lineax`; `lineax` is therefore a base dependency as of v0.4.0, not an extra. In v0.3.x it lived behind an `ift` extra and the default configuration raised `ImportError` on a base install. The `ift` extra still exists and is now empty, so `pip install maddening[ift]` keeps working — you no longer need it.
 
 ## GPU Acceleration
 

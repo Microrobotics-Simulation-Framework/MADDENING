@@ -18,8 +18,8 @@ MADDENING-level ``custom_vjp``.
    wrapper should expose ``restart`` / ``max_steps`` / ``stagnation_iters``
    and stop leaking ``lineax`` / ``equinox`` runtime error types — the
    remedy lineax prints for a stagnating solve is not reachable through
-   this signature).  Requires the ``lineax`` optional dependency:
-   ``pip install maddening[ift]``.
+   this signature).  ``lineax`` is a base dependency as of v0.4.0, so
+   ``pip install maddening`` is enough — no extra is required.
 
 Background
 ----------
@@ -164,9 +164,10 @@ def ift_linear_solve(
     if solver == "dense":
         return _dense_solve(operator_fn, rhs, n)
 
-    # Lazy import keeps lineax (with its equinox/optax transitive
-    # deps) out of MADDENING's import path until a caller actually
-    # opts into a Krylov solve.
+    # Lazy for import time only (lineax is a base dependency as of
+    # v0.4.0): it drags in equinox + jaxtyping, which cost an order of
+    # magnitude more than ``import maddening`` itself.  Keep that off
+    # the import path until a caller actually opts into a Krylov solve.
     import lineax as lx  # noqa: PLC0415
 
     # Build the preconditioner as a lineax PSD-tagged FunctionLinearOperator.

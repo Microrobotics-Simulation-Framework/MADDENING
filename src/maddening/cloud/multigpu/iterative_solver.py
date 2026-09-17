@@ -26,13 +26,16 @@ Design:
   the Krylov iteration at the outer (un-shard_mapped) level, where
   JAX's ``vdot`` / ``linalg.norm`` correctly account for the
   partitioning of the inputs.
-* When ``lineax`` is available we route through
-  ``lineax.FunctionLinearOperator`` + ``lineax.GMRES`` / ``lineax.CG``
-  to reuse the IFT branch's battle-tested adjoint path.
+* By default we route through ``lineax.FunctionLinearOperator`` +
+  ``lineax.GMRES`` / ``lineax.CG`` to reuse the IFT branch's
+  battle-tested adjoint path.  ``lineax`` is a base dependency as of
+  v0.4.0, so this path is always available.
 * When ``lineax`` cannot consume a sharded matvec cleanly (the
-  contingency anticipated in §A5's risk callouts), the hand-rolled
-  ``lax.fori_loop`` paths in ``_cg_loop`` and ``_gmres_loop`` provide
-  a fallback that depends only on stock JAX.
+  contingency anticipated in §A5's risk callouts), or when a
+  preconditioner is supplied (lineax's CG / GMRES take none), the
+  hand-rolled ``lax.fori_loop`` paths in ``_cg_loop`` and
+  ``_gmres_loop`` provide a fallback that depends only on stock JAX.
+  Select it explicitly with ``backend="loop"``.
 
 Differentiability: forward-mode JVP composes naturally with stock
 JAX operators in both the lineax and the fori_loop fallback; the
@@ -327,7 +330,7 @@ def _gmres_loop(
 # ---------------------------------------------------------------------------
 
 
-def _try_lineax_solve(
+def _lineax_solve(
     solver_kind: str,
     matvec: Callable[[jax.Array], jax.Array],
     b: jax.Array,
@@ -336,16 +339,15 @@ def _try_lineax_solve(
     atol: float,
     restart: int,
     max_iters: int,
-) -> Optional[SharedSolveResult]:
-    """Attempt the lineax-backed path.  Returns None if lineax is unavailable.
+) -> SharedSolveResult:
+    """Run the lineax-backed path.
 
-    Raises any error other than ``ImportError`` — those propagate (a
-    user expecting lineax to be installed should see the real failure).
+    ``lineax`` is a base dependency as of v0.4.0, so this no longer
+    has an "unavailable" outcome; the import stays lazy purely to keep
+    equinox + jaxtyping off ``import maddening``'s critical path.
+    Errors propagate — the caller sees the real failure.
     """
-    try:
-        import lineax as lx  # noqa: PLC0415
-    except ImportError:
-        return None
+    import lineax as lx  # noqa: PLC0415  (lazy: import-time cost only)
 
     tags = ()
     if solver_kind == "cg":
@@ -538,9 +540,10 @@ def sharded_cg(
         ships only the identity (None) — Jacobi or other preconditioners
         are the caller's responsibility.
     backend : {"auto", "lineax", "loop"}
-        Solver backend.  ``"auto"`` (default) tries lineax then falls
-        back to the hand-rolled loop.  ``"loop"`` forces the
-        loop fallback (useful if lineax misbehaves with shard_map).
+        Solver backend.  ``"auto"`` (default) uses lineax, falling back
+        to the hand-rolled loop only when ``preconditioner`` is set
+        (lineax's CG takes none).  ``"loop"`` forces the loop fallback
+        (useful if lineax misbehaves with shard_map).
 
     Returns
     -------
@@ -570,13 +573,10 @@ def sharded_cg(
                     "takes none); use backend='loop' or 'auto' (auto routes a "
                     "preconditioned solve to the loop backend)."
                 )
-            result = _try_lineax_solve(
+            return _lineax_solve(
                 "cg", mv, rhs, rtol=rtol, atol=atol,
                 restart=0, max_iters=max_iters,
             )
-            if result is None:
-                raise RuntimeError("backend='lineax' requested but lineax not installed")
-            return result
         if backend == "loop":
             return _cg_loop(
                 mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
@@ -585,15 +585,13 @@ def sharded_cg(
         if backend != "auto":
             raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
 
-        # auto: try lineax first if no preconditioner (lineax doesn't take ours);
-        # otherwise loop.
+        # auto: lineax unless a preconditioner is set (lineax's CG takes
+        # none), in which case the loop backend applies it.
         if preconditioner is None:
-            result = _try_lineax_solve(
+            return _lineax_solve(
                 "cg", mv, rhs, rtol=rtol, atol=atol,
                 restart=0, max_iters=max_iters,
             )
-            if result is not None:
-                return result
         return _cg_loop(
             mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
             max_iters=max_iters, preconditioner=preconditioner,
@@ -663,13 +661,10 @@ def sharded_gmres(
                     "backend='lineax' cannot apply a preconditioner (lineax's GMRES "
                     "takes none); use backend='loop' or 'auto'."
                 )
-            result = _try_lineax_solve(
+            return _lineax_solve(
                 "gmres", mv, rhs, rtol=rtol, atol=atol,
                 restart=restart, max_iters=max_iters,
             )
-            if result is None:
-                raise RuntimeError("backend='lineax' requested but lineax not installed")
-            return result
         if backend == "loop":
             return _gmres_loop(
                 mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
@@ -679,13 +674,13 @@ def sharded_gmres(
         if backend != "auto":
             raise ValueError(f"Unknown backend {backend!r}; expected auto/lineax/loop")
 
+        # auto: lineax unless a preconditioner is set (lineax's GMRES
+        # takes none), in which case the loop backend applies it.
         if preconditioner is None:
-            result = _try_lineax_solve(
+            return _lineax_solve(
                 "gmres", mv, rhs, rtol=rtol, atol=atol,
                 restart=restart, max_iters=max_iters,
             )
-            if result is not None:
-                return result
         return _gmres_loop(
             mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
             restart=restart, max_iters=max_iters,

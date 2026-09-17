@@ -43,15 +43,27 @@ from maddening.nodes.spring import SpringDamperNode
 
 DT = 0.01
 EPS32 = float(np.finfo(np.float32).eps)
-ULP_TOL = dict(rtol=4 * EPS32, atol=1e-7)
+#: Tolerance for two evaluations of the *same* float32 program; the
+#: absolute part is scaled by the compared magnitudes in
+#: :func:`_assert_close`, so it carries the same units as ``rtol``.
+ULP_TOL = dict(rtol=4 * EPS32, atol=4 * EPS32)
 
 
 def _ulp_tol(n_steps):
     """Per-step round-off compounds: ``step`` (one jit per step), ``run_scan``
     (a scan body) and ``run_sweep`` (a vmapped scan body) are three XLA
     programs whose FMA contraction of ``dt * const`` can differ, so the
-    honest contract over ``n`` steps is a few ulps plus one per step."""
-    return dict(rtol=(4 + n_steps) * EPS32, atol=1e-7)
+    honest contract over ``n`` steps is a few ulps plus one per step.
+
+    The absolute part is scaled by the magnitudes the rollout actually
+    reaches (see :func:`_assert_close`), not by the final value.  Round-off
+    accumulates with the numbers the arithmetic passes through, while a
+    final value can be near zero through cancellation -- a ball's velocity
+    crosses zero on every bounce.  A fixed ``atol=1e-7`` made this suite
+    fail for about one sampled rollout in 230 (measured: 7 of 1600
+    seed/step combinations, every one of them a 15-step ball velocity
+    landing near zero with a difference of 2e-7 to 1e-6)."""
+    return dict(rtol=(4 + n_steps) * EPS32, atol=(4 + n_steps) * EPS32)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +135,17 @@ def _leaves_equal(a, b):
 
 
 def _assert_close(a, b, msg, **tol):
+    """``numpy.allclose`` over two pytrees, with the absolute tolerance
+    scaled by the largest magnitude in either tree (floored at one).  That
+    scale stands in for the magnitudes the arithmetic passed through, which
+    is what float32 round-off is proportional to; comparing a near-zero
+    leaf against a fixed ``atol`` alone is a flaky test, not a tight one."""
+    scale = max(
+        1.0,
+        *(float(np.max(np.abs(np.asarray(v)))) if np.size(np.asarray(v)) else 1.0
+          for tree in (a, b) for v in jax.tree_util.tree_leaves(tree)),
+    )
+    tol = {**tol, "atol": tol.get("atol", 0.0) * scale}
     for (pa, x), (_, y) in zip(
         jax.tree_util.tree_flatten_with_path(a)[0],
         jax.tree_util.tree_flatten_with_path(b)[0],
@@ -266,6 +289,31 @@ class TestRunPathsAgree:
 
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
         _assert_close(scanned, row, "run_scan vs run_sweep", **_ulp_tol(n_steps))
+
+    @pytest.mark.parametrize("seed", [17, 61, 132, 222, 259, 337, 355])
+    def test_ball_rollouts_agree_when_the_final_velocity_is_near_zero(self, ball, seed):
+        """Seeds whose 15-step rollout ends with the velocity close to zero.
+
+        The three rollout paths then differ by 2e-7 to 1e-6 in absolute
+        terms -- ordinary float32 round-off for a velocity that reached
+        several m/s on the way -- which a fixed ``atol`` rejected while a
+        magnitude-scaled one accepts.  Pinned so the flake cannot return
+        unnoticed: each of these was a real failure of
+        ``test_ball_step_scan_sweep`` before the tolerance was fixed."""
+        n_steps = 15
+        rng = np.random.default_rng(seed)
+        p = _copy_params(ball.params)
+        p["nodes"]["b"]["gravity"] = jnp.asarray(rng.uniform(-20.0, -1.0), jnp.float32)
+        init = _random_ball_state(rng, ball)
+
+        ball._state = init  # noqa: SLF001
+        for _ in range(n_steps):
+            stepped = ball.step(params=p)
+        ball._state = init  # noqa: SLF001
+        scanned = ball.run_scan(n_steps, params=p)
+
+        assert abs(float(scanned["b"]["velocity"])) < 0.5      # the cancellation case
+        _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
 
     @given(
         seed=st.integers(min_value=0, max_value=2**31),

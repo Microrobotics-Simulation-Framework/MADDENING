@@ -27,6 +27,7 @@ from maddening.core.coupling.mapping_spec import (
     MappingSpec,
     PointReferenceError,
     make_point_resolver,
+    point_array_digest,
 )
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -68,7 +69,14 @@ def _rods():
 
 
 def _grid(gm, name):
-    return gm._nodes[name].node.static_data["grid_x"].value
+    return gm.get_node(name).static_data["grid_x"].value
+
+
+def _refs(points):
+    """``points`` without the content hashes, for comparing the reference
+    itself (the hashes have their own assertions)."""
+    return {n: None if r is None else {k: v for k, v in r.items() if k != "sha256"}
+            for n, r in points.items()}
 
 
 def _two_rods_with_node_refs(kernel="thin_plate_spline"):
@@ -118,8 +126,10 @@ def test_rbf_node_field_references_round_trip(codec):
     assert "grid_x" in text and "\"H\"" not in text and "'H'" not in text
     back = json.loads(text) if codec == "json" else yaml.safe_load(text)
     m = back["edges"][0]["mapping"]
-    assert m["points"] == {"source_points": {"node": "coarse", "field": "grid_x"},
-                           "target_points": {"node": "fine", "field": "grid_x"}}
+    assert _refs(m["points"]) == {"source_points": {"node": "coarse", "field": "grid_x"},
+                                  "target_points": {"node": "fine", "field": "grid_x"}}
+    assert m["points"]["source_points"]["sha256"] == point_array_digest(
+        np.asarray(_grid(gm, "coarse")))
     assert m["kernel"] == "thin_plate_spline" and m["mode"] == "consistent"
     assert back["edges"][1]["mapping"]["mode"] == "conservative"
     gm2 = cfg.from_dict(back, REGISTRY)
@@ -168,8 +178,10 @@ def test_projection_1d_asset_references_round_trip(tmp_path):
     d = gm.to_dict()
     (tmp_path / "graph.json").write_text(json.dumps(d))
     back = json.loads((tmp_path / "graph.json").read_text())
-    assert back["edges"][0]["mapping"]["points"]["target_boundaries"] == {
+    assert _refs(back["edges"][0]["mapping"]["points"])["target_boundaries"] == {
         "asset": "grids.npz", "key": "fine"}
+    assert back["edges"][0]["mapping"]["points"]["target_boundaries"]["sha256"] == \
+        point_array_digest(tb)
     gm2 = cfg.from_dict(back, REGISTRY, base_dir=tmp_path)
     _same_weights_and_trajectory(gm, gm2, ["a.v->b.inp"])
     # an .npz with a single member needs no key
@@ -216,9 +228,12 @@ def test_matrix_mapping_requires_an_asset_and_round_trips_through_it(tmp_path):
     gm.add_edge("a", "b", "v", "inp", mapping=matrix_mapping(H, kind="supermesh", asset="H.npy"))
     gm.compile()
     d = gm.to_dict()
-    assert d["edges"][0]["mapping"] == {
-        "kind": "matrix", "mode": "consistent", "shape": [3, 3], "label": "supermesh",
-        "points": {"H": {"asset": "H.npy"}}}
+    # ``kind`` is the user label (what GET /graph shows); the spec's own
+    # kind is carried by ``label`` and names the factory on reload.
+    assert {k: v for k, v in d["edges"][0]["mapping"].items() if k != "points"} == {
+        "kind": "supermesh", "mode": "consistent", "shape": [3, 3], "label": "supermesh"}
+    assert _refs(d["edges"][0]["mapping"]["points"]) == {"H": {"asset": "H.npy"}}
+    assert d["edges"][0]["mapping"]["points"]["H"]["sha256"] == point_array_digest(H)
     gm2 = GraphManager.from_dict(d, REGISTRY, base_dir=tmp_path)
     assert gm2.edges[0].mapping.kind == "supermesh"
     _same_weights_and_trajectory(gm, gm2, ["a.v->b.inp"])
@@ -260,7 +275,11 @@ def test_add_edge_accepts_a_spec_and_its_dict_form():
     np.testing.assert_array_equal(np.asarray(gm.params["mappings"][C2F]["H"]),
                                   np.asarray(expected.H))
     rebuilt = gm.edges[0].mapping.spec
-    assert rebuilt.kind == "rbf" and rebuilt.points == spec.points
+    # The rebuild records the hash of the points it actually resolved;
+    # the hand-written spec carried none.
+    assert rebuilt.kind == "rbf" and _refs(rebuilt.points) == spec.points
+    assert rebuilt.points["source_points"]["sha256"] == point_array_digest(
+        np.asarray(_grid(gm, "coarse")))
     assert rebuilt.hyperparameters == {**spec.hyperparameters, "polynomial": True,
                                        "ridge": 1e-8}                # defaults filled in
     assert gm.edges[1].mapping.kind == "nearest_neighbor"
@@ -275,7 +294,8 @@ def test_checkpoint_weights_win_over_the_rebuilt_spec(tmp_path):
     trained = 1.5 * gm.params["mappings"][C2F]["H"]
     gm.params["mappings"][C2F]["H"] = trained
     ck = save_state(gm, tmp_path / "ck")
-    config = json.loads(json.dumps(gm.to_dict()))
+    with pytest.warns(UserWarning, match="save a checkpoint"):
+        config = json.loads(json.dumps(gm.to_dict()))
     assert "H" not in config["edges"][0]["mapping"]
 
     gm2 = cfg.from_dict(config, REGISTRY)

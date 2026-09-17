@@ -10,6 +10,14 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 ## [Unreleased]
 
 ### Fixed
+- **The interface-mapping adjoint test is no longer flaky.**  Its second
+  assertion compared JAX's transpose of `apply` against `apply_T` with a
+  bare `rtol=1e-5`, so a component that nearly cancels (both are float32
+  sums over the target index) failed on a 2e-7 absolute difference.  The
+  tolerance now scales with the matrix and vector norms, the same argument
+  the test's first assertion already made, and the case that failed is
+  pinned.  No library code changed.
+
 
 - **`POST /graph/nodes` no longer answers 500 -- and no longer leaves the
   graph unreadable -- for a non-finite constructor constant.**  A NaN or

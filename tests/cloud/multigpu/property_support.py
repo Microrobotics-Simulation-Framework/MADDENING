@@ -68,10 +68,6 @@ _AVAILABLE_DEVICES = len(jax.devices())
 #: the same code path at several times the wall clock.
 DEVICE_COUNTS = tuple(n for n in (1, 2, 4) if n <= _AVAILABLE_DEVICES)
 
-HAS_4_DEVICES = _AVAILABLE_DEVICES >= 4
-SKIP_4 = "needs >=4 CPU-virtual devices"
-
-
 def device_counts() -> st.SearchStrategy[int]:
     """A device count the local mesh can actually supply."""
     return st.sampled_from(DEVICE_COUNTS)
@@ -159,6 +155,12 @@ class StencilDiffusion1D(SimulationNode):
         self._mask = jnp.asarray(np.asarray(mask, dtype=np.float32))
         if self._mask.shape != (n,):
             raise ValueError(f"mask shape {self._mask.shape} != ({n},)")
+        # Built once, as SimulationNode.static_data requires ("stable
+        # across calls for a given node instance"): the sharded wrapper
+        # snapshots it at construction, and a node that rebuilt it per
+        # call would have the two paths reading different arrays.
+        self._static = {"mask": StaticArray(value=self._mask,
+                                            replication="shard", shard_axis=0)}
 
     def halo_width(self) -> dict[int, int]:
         return {0: 1}
@@ -168,8 +170,7 @@ class StencilDiffusion1D(SimulationNode):
 
     @property
     def static_data(self) -> dict:
-        return {"mask": StaticArray(value=self._mask, replication="shard",
-                                    shard_axis=0)}
+        return self._static
 
     def initial_state(self) -> dict:
         n = int(self.params["n_cells"])
@@ -236,21 +237,26 @@ class UnstructuredRelaxNode(SimulationNode):
         self._edges = np.asarray(edges, dtype=np.int32)
         self._table = self._neighbour_table()
         self._layout = layout
+        # Built once: see the note in StencilDiffusion1D.
+        self._static = ({} if layout is None
+                        else {"local_neighbours": StaticArray(
+                            value=self._slab_index_table(layout),
+                            replication="partition",
+                            partition_assignment=layout.partition_assignment)})
 
     @property
     def static_data(self) -> dict:
+        return self._static
+
+    def _slab_index_table(self, layout) -> np.ndarray:
         """The neighbour table translated into per-shard slab indices.
 
         Row ``g`` is delivered to the device that owns cell ``g``, so the
         translation is well defined globally: the slab index of a
         neighbour ``h`` of ``g`` is its local index on ``pa[g]`` when
         ``pa[h] == pa[g]``, and ``n_local_max`` plus its position in that
-        device's ghost list otherwise.  Without a layout (the unsharded
-        reference node) there is nothing to partition.
+        device's ghost list otherwise.
         """
-        if self._layout is None:
-            return {}
-        layout = self._layout
         table = np.full_like(self._table, -1)
         ghost_slot = [
             {int(g): j for j, g in enumerate(layout.ghost_global_ids[d])}
@@ -266,9 +272,7 @@ class UnstructuredRelaxNode(SimulationNode):
                     table[g, j] = layout.local_index_of(owner, h)
                 else:
                     table[g, j] = layout.n_local_max + ghost_slot[owner][h]
-        return {"local_neighbours": StaticArray(
-            value=table, replication="partition",
-            partition_assignment=layout.partition_assignment)}
+        return table
 
     def _neighbour_table(self) -> np.ndarray:
         adjacency: list[list[int]] = [[] for _ in range(self._n_global)]
@@ -367,6 +371,26 @@ class WrapperCase:
     param_name: str
     boundary_inputs: dict
     n_devices: int
+    #: For a wrapper whose sharded state is a padded slab rather than the
+    #: global field (the unstructured one), a 1/0 mask over the leading
+    #: axis marking the slots that hold owned cells.  ``None`` when the
+    #: sharded state has the same layout as the unsharded state.
+    slab_mask: Optional[jnp.ndarray] = None
+
+    def objective(self, state: dict, *, sharded: bool) -> jnp.ndarray:
+        """Sum of squares over the cells that exist, for gradient tests.
+
+        A padded slab carries slots that no global cell maps to; they
+        pick up values from the exchange and would make the sharded
+        objective a different function from the unsharded one.
+        """
+        total = jnp.float32(0.0)
+        for value in state.values():
+            if sharded and self.slab_mask is not None:
+                shape = (-1,) + (1,) * (jnp.ndim(value) - 1)
+                value = value * self.slab_mask.reshape(shape)
+            total = total + jnp.sum(value ** 2)
+        return total
 
     def gather(self, state: dict, *, sharded: bool) -> dict:
         """The state as global, host-side arrays, whichever path ran it."""
@@ -404,10 +428,11 @@ def build_pointwise(*, n_devices: int, rate: float = 0.5,
     )
 
 
-def build_stencil(*, n_devices: int, rate: float = 0.5,
-                  n_cells: int = 16) -> WrapperCase:
-    inner = StencilDiffusion1D(name="diff", n_cells=n_cells, rate=rate,
-                               mask=_mask_for(n_cells))
+def build_stencil(*, n_devices: int, rate: float = 0.5, n_cells: int = 16,
+                  mask: Optional[np.ndarray] = None) -> WrapperCase:
+    inner = StencilDiffusion1D(
+        name="diff", n_cells=n_cells, rate=rate,
+        mask=_mask_for(n_cells) if mask is None else mask)
     mesh = create_device_mesh(shape=(n_devices,))
     return WrapperCase(
         label="stencil", inner=inner, param_name="rate", n_devices=n_devices,
@@ -439,9 +464,13 @@ def build_unstructured(*, n_devices: int, rate: float = 0.5,
                                   edges=edges, rate=rate, layout=layout)
     mesh = create_device_mesh(shape=(n_devices,))
     wrapped = ShardedUnstructuredNode(inner, mesh, layout)
+    owned = np.zeros((layout.n_devices, layout.n_local_max), dtype=np.float32)
+    for device, ids in enumerate(layout.local_global_ids):
+        owned[device, : len(ids)] = 1.0
     return WrapperCase(
         label="unstructured", inner=inner, param_name="rate",
         n_devices=n_devices, wrapped=wrapped, boundary_inputs={},
+        slab_mask=jnp.asarray(owned.reshape(-1)),
     )
 
 

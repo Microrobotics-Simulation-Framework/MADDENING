@@ -2,8 +2,11 @@
 # GPU-enabled container with GStreamer for WebRTC streaming
 #
 # Incorporates all findings from RunPod cloud testing (2026-03-19/20):
-#   - Uses python3 (3.10) as primary — required for system python3-gi bindings
-#   - Installs jax[cuda12] with compatible versions
+#   - Uses the system python3 as primary — required for system python3-gi
+#     bindings.  Ubuntu 24.04's python3 is 3.12: MADDENING requires Python
+#     >= 3.11 and jax >= 0.10 requires >= 3.11 (0.11+: >= 3.12), so the
+#     22.04 image (python3 = 3.10) can no longer install either.
+#   - Installs jax[cuda12] with the pyproject range
 #   - GStreamer plugins including -ugly (for x264enc)
 #   - ZMQ for multi-job coordinator communication
 #   - matplotlib for server-side frame rendering (Agg backend, headless)
@@ -19,7 +22,7 @@
 #   docker run --gpus all -p 8000:8000 -p 5580:5580 -p 5555:5555 -p 5556:5556 \
 #     -e IS_RANK0=1 -e COORDINATOR_PORT=5580 maddening-cloud:latest
 
-FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
 LABEL org.opencontainers.image.title="maddening-cloud" \
       org.opencontainers.image.description="MADDENING simulation server with GPU streaming" \
@@ -28,7 +31,7 @@ LABEL org.opencontainers.image.title="maddening-cloud" \
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── System dependencies ──────────────────────────────────────────────
-# Python 3.10 (system default on Ubuntu 22.04) + pip
+# Python 3.12 (system default on Ubuntu 24.04) + pip
 # GStreamer (all plugins including -ugly for x264enc)
 # PyGObject bindings (python3-gi for system python3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,19 +58,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Python dependencies ─────────────────────────────────────────────
 # Install MADDENING with server + streaming extras
-# Uses system python3 (3.10) which has the gi bindings
+# Uses system python3 (3.12) which has the gi bindings; pip installs into
+# the system interpreter on purpose (PEP 668 needs --break-system-packages)
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install JAX with CUDA 12 support + MADDENING[server]
-#  suppresses pip's root user warning
-RUN pip3 install --no-cache-dir  \
-    "jax[cuda12]>=0.4,<0.6" && \
-    pip3 install --no-cache-dir  \
+# Install JAX with CUDA 12 support (same range as pyproject's `cuda12`
+# extra) + MADDENING[server]
+RUN pip3 install --no-cache-dir --break-system-packages \
+    "jax[cuda12]>=0.10,<0.13" && \
+    pip3 install --no-cache-dir --break-system-packages \
     -e ".[server]" && \
-    pip3 install --no-cache-dir  \
-    PyGObject websockets
+    pip3 install --no-cache-dir --break-system-packages \
+    websockets
 
 # ── Verify installation ─────────────────────────────────────────────
 RUN python3 -c "import jax; print(f'JAX: {jax.__version__}')" && \

@@ -24,23 +24,72 @@ SRC = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 # Surfaces we want enumerated.  Importing them ensures @stability fires.
-import maddening  # noqa: F401
-import maddening.core.graph_manager  # noqa: F401
-import maddening.core.node  # noqa: F401
-import maddening.core.edge  # noqa: F401
-import maddening.core.static_data  # noqa: F401
-import maddening.core.coupling  # noqa: F401
-import maddening.core.solver_utils  # noqa: F401
-import maddening.cloud.multigpu.sharded_node  # noqa: F401
-import maddening.cloud.multigpu.sharded_unstructured  # noqa: F401
-import maddening.cloud.multigpu.iterative_solver  # noqa: F401
-import maddening.cloud.providers  # noqa: F401
-import maddening.api.binary_encoder  # noqa: F401
-import maddening.nodes  # noqa: F401
-import maddening.nodes.adaptive  # noqa: F401 — not pulled in by maddening.nodes
-import maddening.surrogates  # noqa: F401
-import maddening.usd.live_stage  # noqa: F401
-import maddening.fmi  # noqa: F401
+# ``tests/compliance/test_stability.py`` checks that importing this list
+# reaches every module under ``src/maddening`` that uses ``@stability(``,
+# so a newly tagged module that is missing here fails CI instead of
+# silently dropping out of the report.
+STABILITY_MODULES: tuple[str, ...] = (
+    "maddening",
+    "maddening.core.graph_manager",
+    "maddening.core.node",
+    "maddening.core.edge",
+    "maddening.core.static_data",
+    "maddening.core.coupling",
+    "maddening.core.coupling.mapping",
+    "maddening.core.params",
+    "maddening.core.solver_utils",
+    "maddening.core.simulation.compile_cache",
+    "maddening.core.simulation.profiler",
+    "maddening.cloud.multigpu.sharded_node",
+    "maddening.cloud.multigpu.sharded_unstructured",
+    "maddening.cloud.multigpu.halo_unstructured",
+    "maddening.cloud.multigpu.iterative_solver",
+    "maddening.cloud.providers",
+    "maddening.cloud.resume",
+    "maddening.api.binary_encoder",
+    "maddening.nodes",
+    # not pulled in by ``maddening.nodes``
+    "maddening.nodes.adaptive",
+    "maddening.surrogates",
+    "maddening.surrogates.training.trainer",
+    "maddening.sysid",
+    "maddening.usd.live_stage",
+    "maddening.fmi",
+)
+
+
+#: Modules from :data:`STABILITY_MODULES` that could not be imported because
+#: an optional dependency is absent (``{module: reason}``).  Filled by
+#: :func:`import_stability_surfaces`.  A report generated with a non-empty
+#: map is incomplete; :func:`main` refuses to write one unless told to.
+SKIPPED_MODULES: dict[str, str] = {}
+
+
+def import_stability_surfaces() -> dict[str, str]:
+    """Import every module in :data:`STABILITY_MODULES` (fires ``@stability``).
+
+    A module whose *optional* dependency is missing (``usd-core`` for
+    ``maddening.usd.live_stage``, say) is recorded in :data:`SKIPPED_MODULES`
+    instead of aborting the import, so the script and the compliance tests
+    that load it work in environments without every extra.  Any other
+    failure propagates: a broken module must not silently vanish from the
+    report.  Returns the skipped map.
+    """
+    import importlib
+
+    SKIPPED_MODULES.clear()
+    for name in STABILITY_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:                       # ModuleNotFoundError included
+            missing = getattr(exc, "name", None)
+            if missing is not None and missing.startswith("maddening"):
+                raise                                    # our own module is broken
+            SKIPPED_MODULES[name] = str(exc)
+    return dict(SKIPPED_MODULES)
+
+
+import_stability_surfaces()
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import (
@@ -71,7 +120,25 @@ import time.  Levels:
 """
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--allow-missing-optional", action="store_true",
+                    help="write the report even if modules were skipped for a "
+                         "missing optional dependency (the report is then incomplete; "
+                         "the release gate runs without this flag)")
+    args = ap.parse_args(argv)
+
+    if SKIPPED_MODULES:
+        for name, why in SKIPPED_MODULES.items():
+            print(f"skipped {name}: {why}", file=sys.stderr)
+        if not args.allow_missing_optional:
+            print(f"{len(SKIPPED_MODULES)} module(s) skipped for missing optional "
+                  "dependencies; install the extras or pass --allow-missing-optional "
+                  "to write an incomplete report", file=sys.stderr)
+            return 2
+
     out_dir = REPO_ROOT / "docs" / "developer_guide"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "stability_report.md"

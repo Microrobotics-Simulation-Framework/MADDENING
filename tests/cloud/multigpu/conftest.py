@@ -9,9 +9,10 @@ whether the tests are about to run on real accelerators.
 Policy (:func:`virtual_device_count`), first rule that applies wins:
 
 1. ``MADDENING_VIRTUAL_DEVICES=N`` forces ``N`` virtual host devices
-   (``0`` disables the forcing altogether).  The explicit override for
-   running the suite on virtual devices on a GPU host, or the other way
-   round.
+   (``0`` disables the forcing altogether; anything but a non-negative
+   integer is a usage error that stops collection with a message).  The
+   explicit override for running the suite on virtual devices on a GPU
+   host, or the other way round.
 2. ``XLA_FLAGS`` already carries ``--xla_force_host_platform_device_count``:
    left untouched.
 3. ``JAX_PLATFORMS`` names an accelerator (``cuda``, ``gpu``, ``rocm``,
@@ -33,6 +34,10 @@ defaults ``JAX_PLATFORMS`` to ``cpu`` (rule 4) before this file runs, so
 under pytest the GPUs are used only when ``JAX_PLATFORMS=cuda`` is
 exported explicitly -- rule 5 covers direct imports and any future
 conftest that stops setting the default.
+
+This conftest is the only place under ``tests/cloud/multigpu`` that sets
+``XLA_FLAGS`` (checked by ``test_conftest_device_policy.py``); a test
+module that set its own default would silently override rules 1 and 3.
 """
 
 from __future__ import annotations
@@ -90,7 +95,7 @@ def virtual_device_count(environ, *, cuda_jaxlib: bool, nvidia_gpu: bool) -> int
     """
     override = environ.get(OVERRIDE_VAR)
     if override is not None and override.strip() != "":
-        n = int(override)
+        n = parse_override(override)
         return n if n > 0 else None
     if HOST_FLAG in environ.get("XLA_FLAGS", ""):
         return None
@@ -104,16 +109,46 @@ def virtual_device_count(environ, *, cuda_jaxlib: bool, nvidia_gpu: bool) -> int
     return None if accelerator_expected else DEFAULT_VIRTUAL_DEVICES
 
 
+def parse_override(value: str) -> int:
+    """``MADDENING_VIRTUAL_DEVICES`` as an integer, or a clear error.
+
+    Accepted: a non-negative integer (``0`` = force nothing).  Anything
+    else -- text, a negative number -- raises ``ValueError`` naming the
+    variable; :func:`apply` turns that into a pytest usage error so the
+    directory fails collection with one line instead of a traceback.
+    """
+    try:
+        n = int(value.strip())
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise ValueError(
+            f"{OVERRIDE_VAR} must be a non-negative integer (N>0 forces N virtual "
+            f"host devices, 0 forces nothing); got {value!r}")
+    return n
+
+
 def apply(environ=os.environ) -> int | None:
-    """Set ``XLA_FLAGS`` per the policy; returns the count forced (or None)."""
+    """Set ``XLA_FLAGS`` per the policy; returns the count forced (or None).
+
+    A malformed override is reported as ``pytest.UsageError`` when pytest
+    is importable (collection stops with the message), else re-raised.
+    """
     unset = not environ.get("JAX_PLATFORMS", "").strip()
     needs_probe = (environ.get(OVERRIDE_VAR, "").strip() == ""
                    and HOST_FLAG not in environ.get("XLA_FLAGS", "") and unset)
-    count = virtual_device_count(
-        environ,
-        cuda_jaxlib=cuda_jaxlib_installed() if needs_probe else False,
-        nvidia_gpu=nvidia_gpu_present() if needs_probe else False,
-    )
+    try:
+        count = virtual_device_count(
+            environ,
+            cuda_jaxlib=cuda_jaxlib_installed() if needs_probe else False,
+            nvidia_gpu=nvidia_gpu_present() if needs_probe else False,
+        )
+    except ValueError as e:
+        try:
+            import pytest  # noqa: PLC0415
+        except ImportError:  # pragma: no cover - conftest imported outside pytest
+            raise
+        raise pytest.UsageError(str(e)) from e
     if count is not None:
         environ["XLA_FLAGS"] = (environ.get("XLA_FLAGS", "") + f" {HOST_FLAG}={count}").strip()
     return count

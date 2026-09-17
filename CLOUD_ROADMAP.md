@@ -160,7 +160,7 @@ piece of work from the WebRTC transport layer (which is validated below).
 
 - [x] Wire `enable_multigpu()` into `_build_step_fn()` — `one_pass_jacobi` uses `jax.device_put` for node placement
 - [x] Integration tests: single step, 100 steps, and `lax.scan` all match between sharded and non-sharded (2 CPU devices via XLA_FLAGS)
-- [x] `conftest.py` sets `XLA_FLAGS=--xla_force_host_platform_device_count=2` for CI compatibility
+- [x] `tests/cloud/multigpu/conftest.py` forces virtual host devices (16 by default, `MADDENING_VIRTUAL_DEVICES=N` to override, nothing when an accelerator is about to be used) so the multi-device tests run everywhere; it is the only place that sets that flag
 - [x] Benchmark on real multi-GPU hardware (2xRTX4090 on RunPod)
   - Both GPUs visible: `[CudaDevice(id=0), CudaDevice(id=1)]`
   - Correctness: PASS on all node sizes (n_cells=10 to 5000)

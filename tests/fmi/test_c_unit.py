@@ -53,11 +53,63 @@ def test_c_unit_tests(tmp_path, sanitized):
     assert "0 failures" in out, out
 
 
+# The wrapper paths the fuzz harness counts (MADDENING_FUZZ_COUNTERS); every
+# one must be reached in every run, or the harness is not fuzzing what it
+# claims to.  From 86dafe1 ("thread-free fuzz harness") until the audit of
+# 2026-09-16 the fake server was closed before the client sent its request:
+# every exchange failed with EPIPE and no reply was ever parsed.
+FUZZ_PATHS = ("replies_read", "binary_replies", "parse_values", "parse_values_ok",
+              "parse_binary_values", "parse_binary_ok", "hello_negotiated", "hello_binary",
+              "raw_state", "raw_state_ok", "conn_dropped")
+
+
+def _fuzz_paths(out: str) -> dict[str, int]:
+    line = next(l for l in out.splitlines() if l.startswith("fuzz paths:"))
+    return {k: int(v) for k, v in (kv.split("=") for kv in line.split()[2:])}
+
+
+def _assert_fuzz_reached_the_parsers(out: str, iterations: int) -> dict[str, int]:
+    counts = _fuzz_paths(out)
+    missing = [p for p in FUZZ_PATHS if counts.get(p, 0) == 0]
+    assert not missing, (missing, counts)
+    # most iterations get as far as a fully read reply; the success paths
+    # of the binary parsers (a well-formed frame for the operation) are a
+    # steady few per cent, not a lucky one-off
+    assert counts["replies_read"] > 0.5 * iterations, counts
+    assert counts["parse_binary_ok"] > 0.01 * iterations, counts
+    assert counts["raw_state_ok"] > 0.01 * iterations, counts
+    assert counts["parse_values_ok"] > 0.005 * iterations, counts
+    assert counts["hello_binary"] > 0.005 * iterations, counts
+    return counts
+
+
+def test_fuzz_harness_reaches_every_parser_path(tmp_path):
+    """The plain build, one seed: the harness's own self-check passes and
+    the per-path counts it prints are what the sanitizer runs rely on."""
+    exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz")
+    out = _run(exe, "3", "2000")
+    counts = _assert_fuzz_reached_the_parsers(out, 2000)
+    assert "seed=3 iterations=2000 ok" in out
+    assert counts["binary_replies"] > 0.05 * 2000 and counts["conn_dropped"] > 0.05 * 2000
+
+
+def test_fuzz_harness_fails_when_a_path_is_unreached(tmp_path):
+    """The self-check has teeth: one iteration cannot reach every path, so
+    the harness must exit non-zero and say which paths it missed."""
+    exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz")
+    proc = subprocess.run([str(exe), "1", "1"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 1, proc.stdout
+    assert "FAILED" in proc.stdout and "paths unreached" in proc.stdout
+    assert "was never reached" in proc.stderr
+    assert " ok" not in proc.stdout.splitlines()[-1]
+
+
 @pytest.mark.parametrize("seed", [1, 7, 12345])
 def test_fuzz_replies_under_sanitizers(tmp_path, seed):
     exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz", *SANITIZE)
     out = _run(exe, str(seed), "3000", env=SAN_ENV)
     assert f"seed={seed} iterations=3000 ok" in out
+    _assert_fuzz_reached_the_parsers(out, 3000)
 
 
 @pytest.mark.slow
@@ -65,6 +117,7 @@ def test_fuzz_long_run(tmp_path):
     exe = _build(C_DIR / "fuzz_maddening_fmu.c", tmp_path / "fuzz", *SANITIZE)
     out = _run(exe, "2026", "60000", env=SAN_ENV, timeout=1500)
     assert "iterations=60000 ok" in out
+    _assert_fuzz_reached_the_parsers(out, 60000)
 
 
 def test_wrapper_compiles_clean_with_strict_warnings(tmp_path):
@@ -192,6 +245,7 @@ def test_fuzz_under_valgrind(tmp_path):
            "-q", str(exe), "42", "300"]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, f"exit {proc.returncode}\n{proc.stderr[-6000:]}"
+    _assert_fuzz_reached_the_parsers(proc.stdout, 300)
 
 
 @pytest.mark.skipif(CLANG is None, reason="clang (libFuzzer) not installed")

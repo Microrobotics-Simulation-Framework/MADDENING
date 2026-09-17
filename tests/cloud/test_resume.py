@@ -234,3 +234,32 @@ def test_core_checkpoint_module_does_not_import_cloud_or_fsspec():
         [sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env,
     )
     assert out.stdout.strip() == "[]", out.stdout
+
+
+def test_dir_of_cloud_package_lists_lazy_transport_name():
+    import maddening.cloud
+
+    names = dir(maddening.cloud)
+    assert "download_and_load_state" in names
+    # Every advertised name is listed, not only the eagerly imported ones.
+    assert set(maddening.cloud.__all__) <= set(names)
+
+
+def test_lazy_import_rewraps_only_missing_optional_modules(monkeypatch):
+    # A missing *third-party* module gets the install hint (naming the module);
+    # an ImportError from inside maddening propagates unchanged, so a broken
+    # or circular import is not misreported as a missing extra.
+    import maddening.cloud
+
+    monkeypatch.setitem(
+        maddening.cloud._LAZY, "download_and_load_state", "maddening.cloud._no_such_module",
+    )
+    with pytest.raises(ModuleNotFoundError, match=r"maddening\.cloud\._no_such_module") as ei:
+        maddening.cloud.download_and_load_state
+    assert "pip install" not in str(ei.value)
+
+    monkeypatch.setitem(
+        maddening.cloud._LAZY, "download_and_load_state", "no_such_optional_pkg_for_test",
+    )
+    with pytest.raises(ImportError, match=r"no_such_optional_pkg_for_test.*pip install"):
+        maddening.cloud.download_and_load_state

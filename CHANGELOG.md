@@ -536,6 +536,21 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ### Security
+- **FMU sidecar `set_state`: zip bomb via an archive member without the
+  `.npy` suffix.**  The per-member size cap of the earlier arrays-only
+  `npz` fix looked members up by `name + ".npy"`, so a member named plainly
+  (`_token`, say) escaped it and was decompressed in full before the token
+  check (measured: 1 MiB on the wire declaring 1 GiB drove the bridge
+  process to +4.7 GB RSS; a 64 MiB frame could declare some 60 GiB and
+  OOM-kill it).  Reachable from the untrusted importer over both the
+  base64 (JSON) and the raw (binary, protocol 2) `set_state`.  The bridge
+  now checks the archive *directory* before `np.load` touches anything:
+  every member, whatever its name, must be one the model expects
+  (`_token`, `_time`, the live state fields, parameters and declared
+  inputs, all `.npy`) and declare no more than that array plus a header
+  can hold, and the total declared size is capped too (duplicate names
+  cannot multiply it).  Regression tests craft such archives on both paths
+  and assert the refusal happens before `np.load` runs.
 - **REST checkpoint endpoints are confined to a directory.**
   `/checkpoint/save` and `/checkpoint/load` took an arbitrary server-side
   path from an unauthenticated client (arbitrary file write, file-existence
@@ -601,6 +616,71 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   exact-baseline pattern the design spike warns against), and that the
   integral of the gradient plus the crossed jumps reconstructs the objective
   change.
+- **Resume-from-URL transport hardening** (independent audit of the
+  `maddening.cloud.resume` move, report under
+  `benchmarks/results/audit_cloud-resume-transport/`; regression tests in
+  `tests/cloud/test_resume_transport_robustness.py`, `tests/cloud/test_resume.py`
+  and `tests/compliance/test_stability.py`).  The manifest URL is now derived
+  by appending `.manifest.json` to the URL *path*, keeping the query string
+  and fragment, so a presigned `https://…/snap.npz?X-Amz-Signature=…` no
+  longer fetches the `.npz` body as its own manifest; because a presigned
+  URL authorises one object only, `download_and_load_state(...,
+  manifest_url=)` and the entry point's `RESUME_MANIFEST_URL` take the
+  manifest's own URL.  HTTP(S) fetches have a `timeout=` (default 60 s,
+  `MADDENING_RESUME_TIMEOUT` in the entry point) and raise `TimeoutError`
+  instead of holding container start-up forever; the timeout is forwarded
+  to `s3fs` / `gcsfs` best-effort.  Downloads stream to disk in 1 MiB chunks.
+  The default per-call temporary directory is removed after the load
+  (success or failure); a caller-supplied `dest_dir` is kept.  `file://`
+  paths are percent-decoded, an empty URL raises
+  `ValueError("empty checkpoint URL")`, a directory raises a clear
+  `ValueError`, and Windows drive-letter paths are documented as
+  unsupported.  The entry point (`resume_from_env`, split out of `main()`)
+  logs URLs with the query string redacted, logs the manifest's key fields
+  on success, and, when `RESUME_FROM_URL` is set but the server's graph has
+  no nodes, says that resume is impossible until a graph is loaded (still
+  non-fatal).  `maddening.cloud.__getattr__` rewraps only a
+  `ModuleNotFoundError` for a module outside `maddening` (naming it) and the
+  package defines `__dir__`, so `dir(maddening.cloud)` lists the lazy names.
+  Docs and docstring state the closed scheme allow-list exactly.
+  `scripts/generate_stability_report.py` imports `maddening.cloud.resume`
+  (and the other tagged modules it had missed) from a `STABILITY_MODULES`
+  list that a compliance test checks against a grep for `@stability(` over
+  `src/maddening`; the committed stability report is regenerated at the
+  release freeze.
+- **FMU C wrapper / sidecar bridge: findings of the independent audit of
+  the protocol-2 merge (PR #11).**  *Fuzz harness:* the thread-free
+  harness introduced in 86dafe1 closed its fake server before the client
+  sent its request, so every exchange failed with EPIPE and the reply
+  parsers (`bridge_xfer`, `hdr_count`, `parse_binary_values`,
+  `parse_values`, the raw-state path) had had no fuzz coverage at all; the
+  seeded ASan/UBSan runs, the valgrind run and the libFuzzer campaign were
+  green for the wrong reason.  The server end is now half-closed
+  (`shutdown(SHUT_WR)`), a third of the replies are well formed for the
+  operation under test (so the success paths are reached too), and the
+  harness is self-checking: the wrapper counts each parser path when built
+  with `MADDENING_FUZZ_COUNTERS` (off in the shipped FMU), the standalone
+  run prints the counts and fails when any path was never reached, and
+  `tests/fmi/test_c_unit.py` asserts them (gcov, seeds 1/7/12345 x 3000:
+  26 % -> 57 % of the wrapper's lines).  *Framing:* a reply over the
+  64 MiB limit (now enforced for JSON replies too, which could announce
+  2 GiB and get it allocated) or cut short by the peer drops the
+  connection, so every later call returns `fmi3Error` instead of parsing
+  stale bytes as its reply (an unanswered `fmi3DoStep` used to return
+  `fmi3OK`); the bridge never sends a frame over the limit (a `get` /
+  `get_state` whose reply would exceed it gets a JSON error, connection
+  in sync); the C-side `set` limit counts the header bytes and the value
+  references, so the largest allowed `set` is no longer dropped without
+  a reply; `hdr_count` accepts only a plain decimal count.  *Validation:*
+  values are narrowed to the variable's dtype before the finiteness check
+  (a float32 input set to `1e308` was stored and read back as `inf`);
+  a JSON request or binary header nested too deeply (`RecursionError`
+  from the JSON scanner) is a malformed-request error reply, not a
+  dropped connection with a thread traceback; a client hanging up
+  mid-reply (`BrokenPipeError`) ends the connection quietly;
+  `FmuTcpBridge.handle` accepts the dict `recv_message` returns for a
+  binary frame.  Docs: the "Wire protocol" section states the send-side
+  behaviour and that the protocol-1 hello reply gains two keys.
 - **Type-check job: a broken pyright run can no longer look like a result**
   (independent audit of the phase-1 typing merge; report under
   `benchmarks/results/audit_typing-pep561/`, regression tests in
@@ -636,6 +716,46 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   tier 1 blocking at zero errors, tier 2 every public signature
   annotated with bodies ratcheted.
 - **Independent audit, round 4** (residue across rounds 1-3; report under
+- **Multi-GPU session runner: exchange timing and recommender corrected
+  before any pod time is spent** (independent audit of the session
+  preparation, findings F1-F15; regression tests in
+  `tests/cloud/multigpu/test_run_pod_dry_run.py`,
+  `test_conftest_device_policy.py` and
+  `tests/cloud/test_cloud_examples_install_targets.py`).  The `exchange`
+  goal timed a slab that lived on device 0, so every timed call also
+  scattered the whole slab to the mesh and both transports were charged
+  the same constant (about 2/3 of the measured time on 4 virtual CPUs);
+  all timed inputs of `exchange`, `forward` and `gradient` are now
+  placed once with the mesh `NamedSharding` outside the timed region,
+  the runner refuses to time anything else and records
+  `input_presharded`.  `recommend()` accepted single-GPU rows (a no-op
+  exchange with a timer-noise ratio) and raised `TypeError` on a zero
+  median; a row now decides only from a real accelerator run at
+  >= 1e5 cells on >= 4 devices (>= 2 with the new
+  `--allow-fewer-devices`, recorded in the JSON) with a finite speedup,
+  the reason line names what each row lacked, and `--goal exchange` is
+  refused on 1 device (and on 2-3 without the flag).  Rollout gradient
+  timings compared a jitted unsharded grad with a retracing, host
+  re-partitioning sharded one; both are `jax.jit(jax.grad(...))` with
+  statics placed once and compile time reported apart (`compile_s`, also
+  for `forward` and `sharded_cg`; JSON `schema_version` 2).  `--summarise`
+  no longer imports JAX and `--dry-run` no longer shells out to
+  `nvidia-smi`; `--mesh` is loaded and partitioned once per process and a
+  file partition with fewer non-empty parts than `--n-devices` is an
+  error instead of silent empty shards.  Test policy: the four multigpu
+  test modules that still set `XLA_FLAGS` themselves (overriding
+  `MADDENING_VIRTUAL_DEVICES=0` and the accelerator rule) no longer do,
+  the conftest is the only setter (grep test), and a malformed or
+  negative `MADDENING_VIRTUAL_DEVICES` is a one-line usage error at
+  collection instead of a traceback.  Stale JAX pins: `docker/Dockerfile.cloud`
+  (`jax[cuda12]>=0.4,<0.6`; its Ubuntu 22.04 base has Python 3.10, which
+  neither MADDENING nor `jax>=0.10` supports, so the image moves to the
+  CUDA 12.6 / Ubuntu 24.04 base with Python 3.12) and the SOUP table now
+  carry the `pyproject` range; cloud examples 04/06/07 installed the
+  corrected pin under `python3.10` (uninstallable) and now use
+  `python3.12`, with PyGObject built by pip for that interpreter in the
+  two streaming examples and the constraint documented in their
+  docstrings.
   `benchmarks/results/audit4/`, regression tests in
   `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).
   FMU bridge: an input the importer never set is now the advertised zero

@@ -481,6 +481,38 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   trusted in-process / Python clients only and is documented as such.
 
 ### Fixed
+- **Resume-from-URL transport hardening** (independent audit of the
+  `maddening.cloud.resume` move, report under
+  `benchmarks/results/audit_cloud-resume-transport/`; regression tests in
+  `tests/cloud/test_resume_transport_robustness.py`, `tests/cloud/test_resume.py`
+  and `tests/compliance/test_stability.py`).  The manifest URL is now derived
+  by appending `.manifest.json` to the URL *path*, keeping the query string
+  and fragment, so a presigned `https://…/snap.npz?X-Amz-Signature=…` no
+  longer fetches the `.npz` body as its own manifest; because a presigned
+  URL authorises one object only, `download_and_load_state(...,
+  manifest_url=)` and the entry point's `RESUME_MANIFEST_URL` take the
+  manifest's own URL.  HTTP(S) fetches have a `timeout=` (default 60 s,
+  `MADDENING_RESUME_TIMEOUT` in the entry point) and raise `TimeoutError`
+  instead of holding container start-up forever; the timeout is forwarded
+  to `s3fs` / `gcsfs` best-effort.  Downloads stream to disk in 1 MiB chunks.
+  The default per-call temporary directory is removed after the load
+  (success or failure); a caller-supplied `dest_dir` is kept.  `file://`
+  paths are percent-decoded, an empty URL raises
+  `ValueError("empty checkpoint URL")`, a directory raises a clear
+  `ValueError`, and Windows drive-letter paths are documented as
+  unsupported.  The entry point (`resume_from_env`, split out of `main()`)
+  logs URLs with the query string redacted, logs the manifest's key fields
+  on success, and, when `RESUME_FROM_URL` is set but the server's graph has
+  no nodes, says that resume is impossible until a graph is loaded (still
+  non-fatal).  `maddening.cloud.__getattr__` rewraps only a
+  `ModuleNotFoundError` for a module outside `maddening` (naming it) and the
+  package defines `__dir__`, so `dir(maddening.cloud)` lists the lazy names.
+  Docs and docstring state the closed scheme allow-list exactly.
+  `scripts/generate_stability_report.py` imports `maddening.cloud.resume`
+  (and the other tagged modules it had missed) from a `STABILITY_MODULES`
+  list that a compliance test checks against a grep for `@stability(` over
+  `src/maddening`; the committed stability report is regenerated at the
+  release freeze.
 - **Type-check job: a broken pyright run can no longer look like a result**
   (independent audit of the phase-1 typing merge; report under
   `benchmarks/results/audit_typing-pep561/`, regression tests in

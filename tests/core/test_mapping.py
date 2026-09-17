@@ -162,9 +162,23 @@ def test_apply_T_is_the_adjoint(seed, n_src, n_tgt):
     # cancel, so the tolerance scales with the terms, not the result.
     scale = float(jnp.linalg.norm(m.apply(v)) * jnp.linalg.norm(w)) + 1e-6
     assert abs(lhs - rhs) <= 1e-5 * scale, (lhs, rhs, scale)
-    # and matches what JAX's transpose of ``apply`` gives
+    # and matches what JAX's transpose of ``apply`` gives.  Same scaling
+    # argument as above: both are float32 sums over the target index, so a
+    # component that nearly cancels is accurate in absolute terms, not
+    # relative ones (seed=14928, n_src=3, n_tgt=9 lands on -0.0027 with a
+    # 2e-7 absolute difference, which is 7e-5 relative).
     _, vjp = jax.vjp(m.apply, v)
-    np.testing.assert_allclose(np.asarray(vjp(w)[0]), np.asarray(m.apply_T(w)), rtol=1e-5)
+    by_vjp, by_apply_T = np.asarray(vjp(w)[0]), np.asarray(m.apply_T(w))
+    row_scale = float(jnp.linalg.norm(m.H, axis=0).max() * jnp.linalg.norm(w))
+    np.testing.assert_allclose(by_vjp, by_apply_T, rtol=1e-5, atol=1e-5 * row_scale)
+
+
+@pytest.mark.parametrize("seed,n_src,n_tgt", [(14928, 3, 9)])
+def test_adjoint_agrees_with_the_vjp_when_a_component_nearly_cancels(seed, n_src, n_tgt):
+    """A component of the adjoint that nearly cancels is accurate in
+    absolute terms, not relative ones.  Pinned: this case failed the bare
+    ``rtol=1e-5`` with a 2e-7 absolute difference on a -0.0027 component."""
+    test_apply_T_is_the_adjoint.hypothesis.inner_test(seed, n_src, n_tgt)
 
 
 def test_weights_override_and_are_differentiable():

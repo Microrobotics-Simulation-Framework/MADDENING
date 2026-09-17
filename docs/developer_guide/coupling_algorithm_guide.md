@@ -11,6 +11,21 @@ span the four properties that actually decide the answer.
 Read [Profiling and benchmarking](profiling.md) first if you want to know
 how the per-step numbers are obtained; this page is about what they say.
 
+> **These numbers post-date the Aitken correction.**  Every row in the
+> recorded files was measured after two defects in `acceleration="aitken"`
+> were fixed: its first pass of each timestep relaxed with ω clipped to
+> the 0.01 floor, because the previous residual is seeded to zeros and
+> the resulting zero ω hit the clip; and the loop exited on the first
+> residual below the threshold, which under Aitken is a transient dip in
+> a non-monotone sequence rather than a bound on the error — on
+> `heterogeneous` under Jacobi that meant `converged=True` at a point
+> 15–31x the tolerance it claimed to have met, and a hundredfold tighter
+> tolerance barely moved the answer.  The exit now requires the
+> threshold on two consecutive passes for the accelerations where one
+> pass is not enough.  Aitken rows recorded earlier in this branch's
+> history are not comparable, and neither is any Aitken figure quoted
+> from them.
+
 ## Start here
 
 Pick the row that matches the *shape* of your graph.  Every recommendation
@@ -91,10 +106,8 @@ platform provides one.
 # 420 rows, ~14 min: every fast fixture
 JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
     --json benchmarks/results/coupling_sweep_cpu.json
-# 96 rows: the two grid fixtures, plus accelerated_fields variants.
-# The recorded file used --steps 10 rather than the fixtures' default 20,
-# to fit a short machine window; see the note below.
-JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py --steps 10 \
+# 96 rows: the two grid fixtures, plus accelerated_fields variants
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
     --fixtures expensive-pair,heterogeneous --fields \
     --json benchmarks/results/coupling_sweep_expensive_cpu.json
 # 48 rows, ~2 min: the same graphs with a tighter iteration cap
@@ -105,17 +118,23 @@ JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
 ```
 
 The grid fixtures are opt-in (`--include-slow`, or named explicitly)
-because they are minutes rather than seconds.  The recorded grid run is
-a **reduced** one: ten timed steps per row instead of twenty, which
-halves its wall time.  Iteration counts, convergence fractions and
-residuals are unaffected by that — they are properties of the step, and
-the sweep takes a separate statistics pass over them — but the step
-times are averaged over half as many samples and are correspondingly
-noisier.  The reduction is recorded in that file's `label`, and every
-number quoted from it below is a ratio large enough that halving the
-sample count does not change the conclusion.  The third run exists
+because they are minutes rather than seconds.  The third run exists
 because `max_iterations` is not a free safety margin for IQN — see
 [What IQN costs](#what-iqn-costs).
+
+`--steps` changes how many timings are averaged and nothing else.  The
+iteration counts, convergence fractions and residuals come from a
+separate statistics pass over a window that belongs to the *fixture*,
+so two runs of the same fixture at different `--steps` differ only in
+their timings.  That was not true of the first recording of these
+files: the pass ran `min(n_steps, 50)` steps from wherever the timed run
+stopped, so a shortened run moved the window as well as the sample
+size, and on fixtures driven by a 44-step oscillator the mean iteration
+count moved with it — `jac/iqn-imvj5/l2` on `chain-5` reads 4.00 at ten
+timed steps and 3.00 at twenty.  An earlier version of this page said
+those three quantities were unaffected by `--steps`; they were not, and
+the grid file was the one recorded at ten.  It has been re-recorded at
+the fixtures' own twenty.
 
 ### Platform caveat — read this before quoting a step time
 
@@ -142,8 +161,13 @@ consequences.
 * On the launch-bound fixtures the whole step is 0.1–2 ms and the spread
   between configurations is tens of microseconds — inside the noise.
   **The iteration counts are the reliable signal there**, and the sweep's
-  own "best configuration" picker treats anything within 10% of the
-  fastest as tied and breaks the tie on iterations.
+  own "best configuration" picker treats rows whose recorded spreads
+  overlap as tied and breaks the tie on iterations.  It used a fixed 10%
+  band before, which is well inside the within-row spread these rows
+  actually record — up to 84% from median to p95 — so it excluded rows
+  that were not measurably slower and named an 18.6-iteration
+  configuration as `star-8`'s best over a 7.1-iteration one.  Every
+  `best` field in the recorded files comes from the corrected rule.
 
 ## Where the measurement contradicted the theory
 
@@ -385,7 +409,16 @@ than trusting a residual whose units you have not thought about.
 `tests/core/test_coupling_fixture_invariants.py` asserts the properties
 that matter more than any timing:
 
-* every configuration of a fixture reaches the same fixed point (slow-marked);
+* every configuration of a fixture reaches the same fixed point.  Two
+  lanes: the six L2 configurations on a spring fixture and a
+  2 000-cell grid fixture run by default, and the full
+  24-configuration sweep over three spring fixtures is slow-marked.
+  The deviation is measured against the coupling group's own nodes;
+  including the driver divided it by the driver's amplitude, which on
+  `heterogeneous` is a factor of eighty.  The rows that do *not* reach
+  the common fixed point are listed in `_KNOWN_DISAGREEMENTS` with the
+  defect that explains each, and the test fails if a listed row starts
+  agreeing, so the list cannot outlive its defect;
 * Gauss-Seidel on a ring is order-dependent and Jacobi is not — the test
   first checks that rotating the build really does rotate the schedule,
   so it cannot pass vacuously;
@@ -393,8 +426,19 @@ that matter more than any timing:
   for every fixed-point acceleration, and IQN converges the same group;
 * IQN on a single-degree-of-freedom interface, where its least-squares is
   rank-deficient, agrees with plain iteration rather than returning a
-  silently wrong answer;
+  silently wrong answer.  The comparison runs over a driven trajectory
+  and is scaled by that trajectory's own amplitude: against an undriven
+  pair, whose state is ~5e-7 by step 20, the assertion was a flat 1e-3
+  absolute and an accelerator returning zero would have passed it;
 * `accelerated_fields` that names no field in the group is rejected at
   construction;
 * the two groups of `mixed-modes` keep their own schedules and iteration
-  counts, and the graph steps deterministically.
+  counts, and the graph steps deterministically.  "Keep their own
+  schedules" is asserted by building the counterfactual with one
+  group's mode flipped and requiring the iterate to move — reading
+  `iteration_mode` back off the dataclass, which is what the test did
+  before, would pass even if the solver ignored the field;
+* the sweep driver's own summary fields: the agreement metric is
+  size-invariant and ignores nodes outside every group, the best-row
+  picker prefers fewer iterations when two rows' timings overlap, and
+  the recorded JSON files share one schema.

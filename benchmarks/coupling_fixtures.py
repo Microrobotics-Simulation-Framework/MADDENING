@@ -222,8 +222,12 @@ class BuiltGraph:
     group_keys: tuple[str, ...] = ()
     #: Nodes whose cost dominates a coupling iteration (empty when none).
     expensive_nodes: frozenset[str] = frozenset()
-    #: Analytic Jacobi/Gauss-Seidel spectral radii where they are known.
-    predicted_rho: dict[str, float] = field(default_factory=dict)
+    #: Analytic Jacobi/Gauss-Seidel spectral radii where they are
+    #: known, in the canonical schema built by :func:`_rho`: always the
+    #: keys ``"jacobi"``, ``"gauss-seidel"`` and ``"groups"``, with
+    #: ``None`` where no closed form is known, so a consumer can index
+    #: it without a per-fixture special case.
+    predicted_rho: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -240,7 +244,10 @@ class FixtureSpec:
     warmup: int = 5
     #: Opt-in only (``--include-slow``): minutes rather than seconds.
     slow: bool = False
-    #: Expected regime, for the "did the measurement agree?" column.
+    #: Expected regime.  ``bench_coupling_sweep`` compares it against
+    #: the measured ``regime`` of every row and records the answer as
+    #: ``regime_matches_expect``; it was recorded and never compared to
+    #: anything until that was added.
     expect: str = "launch-bound"
     #: True when the fixture pins ``iteration_mode`` itself, so sweeping
     #: that axis would produce duplicate rows.
@@ -289,6 +296,36 @@ _SELF_KAPPA = 1.0
 _LIVELINESS = 0.8
 #: Fraction of a coupled node's anchor supplied by the driver.
 _DRIVE_W = 0.15
+
+
+def _rho(jacobi=None, gauss_seidel=None, groups=None) -> dict:
+    """The canonical ``predicted_rho`` schema.
+
+    Every fixture records the same three keys whether or not it knows a
+    value for them.  Before this was uniform, ``ring-*`` and
+    ``heterogeneous`` omitted ``"gauss-seidel"`` and ``mixed-modes``
+    used two entirely different keys, so a consumer reading
+    ``predicted_rho["jacobi"]`` got a silent miss on one fixture and a
+    ``KeyError`` on another.
+
+    Parameters
+    ----------
+    jacobi, gauss_seidel : float or None
+        Analytic spectral radii of the fixture's coupling operator, or
+        ``None`` where no closed form is known: a ring's per-node gains
+        are unequal, and a mixed heat/spring group has no single
+        consistently-ordered operator whose Gauss-Seidel radius is the
+        square of its Jacobi one.
+    groups : dict or None
+        For a multi-group fixture, ``{group_key: {"jacobi": ...,
+        "gauss-seidel": ...}}``; the top-level pair then stays ``None``
+        because the graph has no single radius.
+    """
+    return {
+        "jacobi": jacobi,
+        "gauss-seidel": gauss_seidel,
+        "groups": groups or {},
+    }
 
 
 def _xi_for(gain: float) -> float:
@@ -412,6 +449,33 @@ _SPRING_TOL = 1e-4
 #: inside the cap for Gauss-Seidel and outside it for Jacobi — which is
 #: the row that shows what an accelerator is for.
 _SPRING_MAXIT = 60
+#: The gain at which the ``stiff-pair`` sweep's tolerance is exactly
+#: ``_SPRING_TOL``; the other gains are scaled around it.
+_STIFF_REF_GAIN = 0.8
+
+
+def _stiff_pair_tolerance(gain: float) -> float:
+    """Absolute tolerance that keeps the *relative* one flat across the sweep.
+
+    Solving the coupled system amplifies the driver's forcing by
+    ``1/(1 - g)``, so the state amplitude of ``stiff-pair-G`` grows
+    about fifteen-fold from ``g = 0.25`` to ``g = 0.95``.  Held against
+    a fixed *absolute* L2 tolerance that is a fifteen-fold swing in the
+    effective relative tolerance, and the iteration count the sweep
+    records — modelled well by ``ln(tol/||x||)/ln(rho)`` — then moves
+    with the amplitude as well as with the contraction factor the
+    fixture exists to vary.  Scaling the tolerance by the same
+    ``1/(1 - g)`` leaves the gain as the only thing that changes.
+
+    Anchored at :data:`_STIFF_REF_GAIN` so the fixture the rest of the
+    suite and the iteration-cap sweep quote keeps exactly the tolerance
+    the other spring shapes use.  ``g >= 1`` is divergent by
+    construction and never reaches any tolerance, so it keeps the
+    unscaled value rather than a negative one.
+    """
+    if gain >= 1.0:
+        return _SPRING_TOL
+    return _SPRING_TOL * (1.0 - _STIFF_REF_GAIN) / (1.0 - gain)
 
 
 def _finish(gm, names, config, *, expensive=frozenset(), predicted=None,
@@ -477,7 +541,7 @@ def build_chain(n: int, config: CouplingConfig, gain: float = 0.8,
     _add_driver(gm, dt, names)
     rho_j = gain * math.cos(math.pi / (n + 1))
     return _finish(gm, names, config,
-                   predicted={"jacobi": rho_j, "gauss-seidel": rho_j ** 2})
+                   predicted=_rho(jacobi=rho_j, gauss_seidel=rho_j ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +579,7 @@ def build_star(n_leaves: int, config: CouplingConfig, gain: float = 0.8,
     names = ["hub"] + leaves
     _add_driver(gm, dt, names)
     return _finish(gm, names, config,
-                   predicted={"jacobi": gain, "gauss-seidel": gain ** 2})
+                   predicted=_rho(jacobi=gain, gauss_seidel=gain ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +637,11 @@ def build_ring(n: int, config: CouplingConfig, gain: float = 0.8,
         gm.add_edge(nxt, nm, "position", "anchor_position",
                     transform=scale(0.5 * gains[nm]), additive=True)
     _add_driver(gm, dt, names)
-    return _finish(gm, names, config, predicted={"jacobi": gain})
+    # A ring's per-node gains are deliberately unequal, so it is not a
+    # consistently-ordered operator and the Gauss-Seidel radius is not
+    # the square of the Jacobi one; recorded as unknown rather than
+    # guessed.
+    return _finish(gm, names, config, predicted=_rho(jacobi=gain))
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +657,10 @@ def build_stiff_pair(config: CouplingConfig, gain: float = 0.5,
     Jacobi contracts as ``gain`` per iteration and Gauss-Seidel as
     ``gain**2``.  ``gain >= 1`` is past the convergence limit: the group
     cannot converge and must say so rather than truncate at the cap.
+
+    The tolerance follows :func:`_stiff_pair_tolerance` rather than the
+    shared ``_SPRING_TOL``, so that the gain is the only property that
+    varies along this sweep.
     """
     from maddening.core.graph_manager import GraphManager
     from maddening.core.transforms import scale
@@ -603,7 +675,8 @@ def build_stiff_pair(config: CouplingConfig, gain: float = 0.5,
                 transform=w, additive=True)
     _add_driver(gm, dt, ["a", "b"])
     return _finish(gm, ["a", "b"], config, max_iterations=max_iterations,
-                   predicted={"jacobi": gain, "gauss-seidel": gain ** 2})
+                   tolerance=_stiff_pair_tolerance(gain),
+                   predicted=_rho(jacobi=gain, gauss_seidel=gain ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +728,7 @@ def _heat_pair(config, n_cells, fourier, *, names=("slabA", "slabB"),
     return BuiltGraph(
         gm=gm, group_keys=("+".join(sorted(names)),),
         expensive_nodes=frozenset(names),
-        predicted_rho={"jacobi": fourier, "gauss-seidel": fourier ** 2},
+        predicted_rho=_rho(jacobi=fourier, gauss_seidel=fourier ** 2),
     )
 
 
@@ -724,8 +797,16 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     cheap = [f"probe{i}" for i in range(n_cheap)]
     for i, nm in enumerate(cheap):
         gm.add_node(_spring(nm, dt, gain, x0=1.0 + 0.2 * i))
+        # ``additive=True`` matters: ``_add_driver`` wires a second
+        # edge into the same ``anchor_position``, and a non-additive
+        # edge *overwrites* whichever contribution was resolved first.
+        # With both additive the boundary value is the sum whatever
+        # order the edges were inserted in; with one of them
+        # non-additive the fixture is correct only by insertion luck,
+        # and the losing case silently drops the driver and lets the
+        # graph go dead -- the exact failure the driver exists to stop.
         gm.add_edge("grid", nm, "temperature", "anchor_position",
-                    transform=_first_scaled(gain))
+                    transform=_first_scaled(gain), additive=True)
     w = scale(1.0 / n_cheap)
     for nm in cheap:
         gm.add_edge(nm, "grid", "position", "left_temperature",
@@ -751,7 +832,8 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     gm.compile()
     return BuiltGraph(gm=gm, group_keys=("+".join(sorted(names)),),
                       expensive_nodes=frozenset({"grid"}),
-                      predicted_rho={"jacobi": math.sqrt(fourier * gain)})
+                      predicted_rho=_rho(
+                          jacobi=math.sqrt(fourier * gain)))
 
 
 # ---------------------------------------------------------------------------
@@ -761,13 +843,20 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
 
 def build_mixed_modes(config: CouplingConfig, n_chain: int = 5,
                       n_leaves: int = 8, gain: float = 0.8,
-                      dt: float = _SPRING_DT) -> BuiltGraph:
+                      dt: float = _SPRING_DT, *,
+                      chain_mode: str = "gauss-seidel",
+                      star_mode: str = "jacobi") -> BuiltGraph:
     """One graph holding a stiff chain and a wide star as separate groups.
 
     The chain group always runs ``gauss-seidel`` and the star group
     always runs ``jacobi``, whatever *config* says about
     ``iteration_mode`` — the point of the fixture is that two groups in
-    one graph keep their own schedules.  The other options
+    one graph keep their own schedules.  *chain_mode* and *star_mode*
+    override that, and exist for the invariant test: the only way to
+    show that a group *honoured* its declared mode, rather than that
+    the dataclass remembered it, is to build the counterfactual where
+    that one group runs the other schedule and watch the iterate
+    change.  The other options
     (acceleration, norm, accelerated fields) are applied to both, so the
     sweep still means something.  A single one-way edge from the chain's
     tail to the star's hub keeps the two cycles in one graph without
@@ -808,8 +897,8 @@ def build_mixed_modes(config: CouplingConfig, n_chain: int = 5,
     star = [star_hub] + leaves
     _add_driver(gm, dt, chain + star)
 
-    chain_cfg = replace(config, iteration_mode="gauss-seidel")
-    star_cfg = replace(config, iteration_mode="jacobi")
+    chain_cfg = replace(config, iteration_mode=chain_mode)
+    star_cfg = replace(config, iteration_mode=star_mode)
     for nodes, cfg in ((chain, chain_cfg), (star, star_cfg)):
         iface, allf = _spring_fields(nodes)
         accel = _resolve_accel_fields(
@@ -825,10 +914,18 @@ def build_mixed_modes(config: CouplingConfig, n_chain: int = 5,
     return BuiltGraph(
         gm=gm,
         group_keys=("+".join(sorted(chain)), "+".join(sorted(star))),
-        predicted_rho={
-            "chain_jacobi": gain * math.cos(math.pi / (n_chain + 1)),
-            "star_jacobi": star_gain,
-        },
+        # Two groups, so there is no single radius for the graph; the
+        # pair per group goes in ``groups`` under the same keys the
+        # diagnostics use.
+        predicted_rho=_rho(groups={
+            "+".join(sorted(chain)): {
+                "jacobi": gain * math.cos(math.pi / (n_chain + 1)),
+                "gauss-seidel": (gain * math.cos(math.pi / (n_chain + 1))) ** 2,
+            },
+            "+".join(sorted(star)): {
+                "jacobi": star_gain, "gauss-seidel": star_gain ** 2,
+            },
+        }),
     )
 
 
@@ -893,8 +990,8 @@ def build_slow_drift(config: CouplingConfig, n_cells: int = 2_000,
     )
     gm.compile()
     return BuiltGraph(gm=gm, group_keys=("slabA+slabB",),
-                      predicted_rho={"jacobi": fourier,
-                                     "gauss-seidel": fourier ** 2})
+                      predicted_rho=_rho(jacobi=fourier,
+                                         gauss_seidel=fourier ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -971,6 +1068,10 @@ def _build_registry() -> dict[str, FixtureSpec]:
         name="slow-drift", family="slow-drift",
         summary="heat pair whose fixed point creeps (jacobian_reuse's home)",
         build=build_slow_drift, steps=60, warmup=40,
+        # 2 000 cells x two slabs is past this CPU's dispatch floor:
+        # every recorded row measured compute-bound or mixed, none
+        # launch-bound.  Declared to match what it does.
+        expect="compute-bound",
     ), reg)
 
     return reg

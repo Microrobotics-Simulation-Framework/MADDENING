@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # module-load-time dependency.  Only users who opt into ``solver='ift'``
 # trigger the lineax import path.
 
-from maddening.core.coupling import CouplingGroup
+from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     float_fields_of,
     state_float_image,
@@ -4126,6 +4126,13 @@ class GraphManager:
         Only the *recipe* is written, so live weights that were trained
         or hand-edited away from it would be lost: a ``UserWarning``
         naming the edge says so, pointing at :meth:`save_state`.
+
+        ``coupling_groups`` carries *every* field of every group (see
+        :meth:`~maddening.core.coupling.group.CouplingGroup.to_dict`),
+        and is absent when the graph has none.  Partial would be worse
+        than nothing: a group that came back missing its acceleration or
+        its iteration cap would still be a group, and would quietly
+        solve the same graph a different way.
         """
         if strict_mappings:
             from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
@@ -4159,6 +4166,15 @@ class GraphManager:
                 }
                 for ei in self._external_inputs
             ],
+            # Every field of every group, or the key is absent: a config
+            # that carried only some of a group's solver settings would
+            # reload as a graph that *runs* differently -- a fixed point
+            # iterated to convergence becoming a single staggered pass --
+            # without anything saying so.  Absent, like ``param_specs``,
+            # when there is nothing to say, so an uncoupled graph writes
+            # exactly the config it wrote before this key existed.
+            **({"coupling_groups": [g.to_dict() for g in self._coupling_groups]}
+               if self._coupling_groups else {}),
         }
 
     @classmethod
@@ -4185,6 +4201,13 @@ class GraphManager:
         edge.key, "H", ParamSpec())`` — trainable mapping weights) and
         those slots only exist once the edge does; node overrides do not
         depend on the edges, so the order is safe for them too.
+
+        ``coupling_groups`` are rebuilt with :meth:`add_coupling_group`,
+        so a stored group is checked exactly like a hand-written one; a
+        group that cannot be rebuilt — an unknown node, a node already
+        in another group, a misspelled enum — raises ``ValueError``
+        naming the group and what is wrong with it.  A config without
+        the key (one written before it existed) loads unchanged.
         """
         gm = cls()
         for nd in config["nodes"]:
@@ -4226,6 +4249,30 @@ class GraphManager:
                 target_field=ei["target_field"],
                 shape=tuple(ei.get("shape", ())),
             )
+        for i, cg in enumerate(config.get("coupling_groups", [])):
+            # Straight back through ``add_coupling_group``, so a loaded
+            # group is checked by the same code as a hand-written one:
+            # the node names against this graph, the node set against the
+            # groups already registered, and every enum by
+            # ``CouplingGroup.__post_init__``.  What those checks do not
+            # know is *which* group of a multi-group config they are
+            # talking about, which is the only thing that makes a
+            # hand-edited file actionable -- so name it here.
+            try:
+                nodes, kwargs = coupling_group_kwargs(cg)
+                gm.add_coupling_group(nodes, **kwargs)
+            except (KeyError, TypeError, ValueError) as exc:
+                named = ""
+                if isinstance(cg, dict) and isinstance(cg.get("nodes"), (list, tuple)):
+                    named = f" (nodes {sorted(cg['nodes'])})"
+                # ``str(KeyError)`` is the *repr* of its message; unwrap it,
+                # and say what a bare missing key means.
+                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                if isinstance(exc, KeyError) and detail == "nodes":
+                    detail = "it has no 'nodes' key"
+                raise ValueError(
+                    f"coupling_groups[{i}]{named} cannot be rebuilt: {detail}"
+                ) from exc
         return gm
 
     @staticmethod

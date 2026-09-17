@@ -21,7 +21,16 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, fields
-from typing import Literal, Optional, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Any,
+    Literal,
+    Mapping,
+    Optional,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 
 @dataclass(frozen=True)
@@ -38,7 +47,7 @@ class CouplingGroup:
     tolerance : float
         Convergence threshold on the L2 norm of state change between
         successive iterations.  Used when ``convergence_norm="l2"``.
-    convergence_norm : str
+    convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  ``"l2"`` uses a global L2
         norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
         per-field mixed absolute/relative norm (converged when the
@@ -147,7 +156,7 @@ class CouplingGroup:
     nodes: frozenset[str]
     max_iterations: int = 10
     tolerance: float = 1e-6
-    convergence_norm: str = "l2"
+    convergence_norm: Literal["l2", "mixed", "interface"] = "l2"
     atol: float = 1e-8
     rtol: float = 1e-6
     diagnostics: bool = False
@@ -167,6 +176,37 @@ class CouplingGroup:
     solver: Literal["fori", "ift"] = "ift"
     strict_convergence: bool = False
     linear_solver: Literal["gmres", "dense"] = "gmres"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Every field of this group as JSON-compatible plain data.
+
+        Driven by ``dataclasses.fields`` rather than a hand-written list
+        of keys: a solver setting added to this class in future is
+        carried by the config the moment it exists, and the failure this
+        method was written to close — a group that serialises to *some*
+        of its configuration and silently solves differently when it
+        comes back — cannot return by omission.
+
+        Two fields are not already plain data:
+
+        * ``nodes`` is a ``frozenset``, written as a **sorted** list so
+          one group always produces one spelling;
+        * ``accelerated_fields`` maps a node to a tuple of field names,
+          written as a dict of lists.
+
+        The other seventeen are ``int``, ``float``, ``bool`` or ``str``
+        and are written as they are.  :func:`coupling_group_kwargs` is
+        the inverse.
+        """
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.name == "nodes":
+                value = sorted(value)
+            elif f.name == "accelerated_fields" and value is not None:
+                value = {node: list(flds) for node, flds in sorted(value.items())}
+            out[f.name] = value
+        return out
 
     def __post_init__(self) -> None:
         """Validate that ``Literal``-typed string fields hold permitted values.
@@ -207,6 +247,34 @@ class CouplingGroup:
                 DeprecationWarning,
                 stacklevel=3,
             )
+
+
+def coupling_group_kwargs(d: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Split a serialised group into the ``(nodes, kwargs)`` pair that
+    :meth:`~maddening.core.graph_manager.GraphManager.add_coupling_group`
+    takes.
+
+    The inverse of :meth:`CouplingGroup.to_dict`, and the one place both
+    readers (config and USD) turn stored data back into constructor
+    arguments.  Only the two fields that are not plain data are
+    converted: ``accelerated_fields``'s lists become the tuples the
+    dataclass declares, and ``nodes`` comes back out as the positional
+    argument.
+
+    Nothing is validated here on purpose.  ``add_coupling_group`` checks
+    the node names against the graph and the group against the groups
+    already registered, and ``CouplingGroup.__post_init__`` checks every
+    enum, so a hand-edited file is rejected by exactly the code that
+    rejects a hand-written call — with one loader, not two.
+    """
+    kwargs = dict(d)
+    nodes = kwargs.pop("nodes")
+    accelerated = kwargs.get("accelerated_fields")
+    if accelerated is not None:
+        kwargs["accelerated_fields"] = {
+            node: tuple(flds) for node, flds in accelerated.items()
+        }
+    return list(nodes), kwargs
 
 
 def _literal_options(ann: object) -> Optional[tuple]:

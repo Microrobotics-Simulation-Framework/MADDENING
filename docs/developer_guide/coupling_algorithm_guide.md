@@ -87,15 +87,24 @@ fingerprint of the resulting state, and the device trace where the
 platform provides one.
 
 ```
+# 420 rows, ~14 min: every fast fixture
 JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
     --json benchmarks/results/coupling_sweep_cpu.json
+# 96 rows, ~16 min: the two grid fixtures, plus accelerated_fields variants
 JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
     --fixtures expensive-pair,heterogeneous --fields \
     --json benchmarks/results/coupling_sweep_expensive_cpu.json
+# 48 rows, ~2 min: the same graphs with a tighter iteration cap
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --fixtures chain-20,chain-50,star-16,stiff-pair-0.8 \
+    --norms l2 --max-iterations 16 \
+    --json benchmarks/results/coupling_sweep_cap16_cpu.json
 ```
 
-The fast set is 420 rows in ~14 minutes on a laptop; the two grid
-fixtures are opt-in because they are minutes rather than seconds.
+The grid fixtures are opt-in (`--include-slow`, or named explicitly)
+because they are minutes rather than seconds.  The third run exists
+because `max_iterations` is not a free safety margin for IQN — see
+[What IQN costs](#what-iqn-costs).
 
 ### Platform caveat — read this before quoting a step time
 
@@ -287,10 +296,11 @@ deliberately rather than inheriting it.
 On a graph where one node carries a large state and the coupling touches
 a few cells of it, the global L2 residual is dominated by bulk change
 that does not iterate at all.  `expensive-pair` converges in **1.0
-iterations** under the interface norm because the interface agrees
-immediately at that tolerance, while the L2 norm reports 5.4: the two
-norms are measuring different things, and on a grid the L2 number is
-mostly a statement about the grid, not about the coupling.  Use the
+iterations** under the interface norm, at 2.33 ms, because the interface
+agrees immediately at that tolerance; under the global L2 norm the same
+graph reports 5.3 iterations and 6.86 ms.  The two norms are measuring
+different things, and on a grid the L2 number is mostly a statement
+about the grid, not about the coupling.  Use the
 interface norm on grid couplings, and read `coupling_iter_stats` rather
 than trusting a residual whose units you have not thought about.
 

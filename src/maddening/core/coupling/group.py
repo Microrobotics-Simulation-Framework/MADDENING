@@ -20,6 +20,7 @@ subcycling for mixed-timestep coupling groups.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Literal, Optional, Union, get_args, get_origin, get_type_hints
 
@@ -70,10 +71,13 @@ class CouplingGroup:
     accelerated_fields : dict or None
         For ``"iqn-ils"``: which fields per node participate in the
         quasi-Newton problem.  ``None`` auto-detects from coupling
-        edges (interface fields only).  When given it must name at
-        least one field on at least one node *of this group*; an empty
-        or foreign mapping raises ``ValueError`` rather than failing
-        inside the traced coupling loop.
+        edges (interface fields only).  Otherwise a mapping
+        ``{node: (field, ...)}`` naming at least one field on at least
+        one node *of this group*.  A non-mapping, a value given as a
+        bare field name instead of a one-element tuple, an empty
+        mapping and a mapping naming only foreign nodes all raise
+        ``ValueError`` here rather than failing inside the traced
+        coupling loop.
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
         Fast nodes take multiple sub-steps per coupling iteration.
@@ -202,9 +206,34 @@ class CouplingGroup:
                     f"option; expected one of {valid!r}"
                 )
         if self.accelerated_fields is not None:
-            # An empty mapping, or one naming only nodes outside the
-            # group, leaves the quasi-Newton problem with zero degrees
-            # of freedom.  That surfaces as
+            # Shape, before anything reads the mapping.  A non-mapping
+            # used to reach ``.values()`` and surface as
+            # ``AttributeError: 'list' object has no attribute
+            # 'values'`` from inside ``__post_init__``; a bare string
+            # value passed every check here and only failed at compile
+            # time, as ``accelerated_fields['a'] names ['p', 'o', 's',
+            # ...]`` -- the field name iterated character by character.
+            if not isinstance(self.accelerated_fields, Mapping):
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields must be a mapping of "
+                    "{node: (field, ...)}, got "
+                    f"{type(self.accelerated_fields).__name__}: "
+                    f"{self.accelerated_fields!r}."
+                )
+            bad = sorted(
+                k for k, v in self.accelerated_fields.items()
+                if isinstance(v, str)
+            )
+            if bad:
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields values must be "
+                    "sequences of field names, but "
+                    f"{bad} map to a bare string.  Wrap a single field "
+                    'in a tuple: {"node": ("field",)}.'
+                )
+            # Content.  An empty mapping, or one naming only nodes
+            # outside the group, leaves the quasi-Newton problem with
+            # zero degrees of freedom.  That surfaces as
             # ``ValueError: Need at least one array to concatenate``
             # from ``jnp.concatenate`` deep inside the traced coupling
             # loop, with no mention of the setting that caused it.

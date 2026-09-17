@@ -265,6 +265,14 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
+#: Accelerations whose convergence criterion must hold on two
+#: *consecutive* passes before a coupling group may call itself
+#: converged.  See :func:`_fixed_point_while` for the argument, and for
+#: why IQN is not here.  Both coupling solvers read this list, so
+#: ``"ift"`` and ``"fori"`` agree on what ``converged`` means.
+_TWO_PASS_EXIT = ("aitken",)
+
+
 def _fixed_point_while(
     step_pure, x0, consts, accel_init, threshold, max_iter,
     acceleration, relaxation, n_reuse, sub_idx,
@@ -285,9 +293,45 @@ def _fixed_point_while(
     Non-accelerated entries take the raw ``F(x)`` value each iteration,
     matching the fori path's ``_build_accel_state``.
 
+    **Aitken must meet the threshold twice** (``_TWO_PASS_EXIT``).
+    Under a constant iterator — ``none``, or ``fixed`` at any
+    relaxation — the iterate advances by one fixed linear operator and
+    the residual sequence is asymptotically monotone, so one value at
+    or below ``threshold`` is evidence the iteration has arrived.
+    Aitken re-derives a scalar relaxation factor from each pair of
+    residuals and clips it to ``[0.01, 2.0]``.  When its
+    single-dominant-mode assumption fails — a degenerate or partly
+    divergent Jacobi spectrum — the factor saturates alternately at
+    both bounds and the residual sequence stops being monotone: it
+    dips two decades below its own trend for a single pass, while the
+    iterate has barely moved, and springs back on the next.  Stopping
+    on such a dip reports ``converged=True`` far from the fixed point,
+    and since the dip undershoots any plausible threshold, tightening
+    ``tolerance`` does not move the exit either.  Aitken therefore
+    exits only when two *consecutive* passes are at or below
+    ``threshold``, and reports the larger of the two: a genuine
+    arrival pays one extra pass, a transient dip is rejected, and the
+    flag ``coupling_diagnostics`` derives from ``final_res`` means
+    what the loop means.
+
+    IQN is deliberately *not* on that list.  Its step comes from a
+    least-squares solve over an accumulating secant basis, not from a
+    clipped scalar, and it converges superlinearly — a large one-pass
+    drop is the method working, not a dip.  Across the 18 coupling
+    sweep fixtures every ``iqn-ils`` / ``iqn-imvj`` row converges in
+    2-4 iterations at a converged fraction of 1.0, with no measured
+    instance of the Aitken pathology, so charging it a mandatory
+    second pass would cost 30-50% of its iteration budget against no
+    evidence.  Its Aitken fallback (no secant columns yet) is covered
+    by the fix to ``aitken_relaxation``'s zero-seed.  If an IQN
+    residual sequence is ever measured dipping, add the name to
+    ``_TWO_PASS_EXIT``.
+
     Returns ``(x_star, n_iters, final_res, (V, W))``: ``n_iters`` is the
     number of body iterations run (as a float, for the diagnostics
-    carry), ``final_res`` the residual of the last pass, and ``(V, W)``
+    carry), ``final_res`` the residual of the last pass — the larger of
+    the last two when ``acceleration`` is in ``_TWO_PASS_EXIT``, so
+    that it says what the exit criterion above says — and ``(V, W)``
     the IQN secant matrices (an empty tuple for other accelerations).
     No autodiff machinery here; the IFT rule is layered on by
     ``_ift_solve``.
@@ -353,24 +397,48 @@ def _fixed_point_while(
         )
         return x_new, (V, W, n_cols, cur_r, cur_s, omega, cur_ra)
 
+    # See the docstring for why this list holds Aitken and not IQN.
+    # An empty ``prev`` slot means the carry -- and so the emitted HLO
+    # -- is unchanged for every acceleration that is not on it.
+    two_pass_exit = acceleration in _TWO_PASS_EXIT
+
     def cond(carry):
-        _x, res, i, _acc = carry
+        _x, res, prev, i, _acc = carry
         first = i == jnp.int32(0)
-        keep_going = jnp.logical_and(res > threshold, i < max_iter - 1)
+        above = res > threshold
+        if two_pass_exit:
+            above = jnp.logical_or(above, prev[0] > threshold)
+        keep_going = jnp.logical_and(above, i < max_iter - 1)
         return jnp.logical_or(first, keep_going)
 
     def body(carry):
-        x, _res, i, acc = carry
+        x, res_prev, _prev, i, acc = carry
         x_raw, res = step_pure(x, *consts)
         if idx is None:
             x_new, acc = accelerate(x, x_raw, acc, i)
         else:
             x_new_sub, acc = accelerate(x[idx], x_raw[idx], acc, i)
             x_new = x_raw.at[idx].set(x_new_sub)
-        return x_new, res, i + jnp.int32(1), acc
+        prev = (res_prev,) if two_pass_exit else ()
+        return x_new, res, prev, i + jnp.int32(1), acc
 
-    init = (x0, jnp.array(jnp.inf, dtype=dtype), jnp.int32(0), acc0)
-    x_star, final_res, n_iters, acc = jax.lax.while_loop(cond, body, init)
+    inf = jnp.array(jnp.inf, dtype=dtype)
+    init = (x0, inf, (inf,) if two_pass_exit else (), jnp.int32(0), acc0)
+    x_star, final_res, prev, n_iters, acc = jax.lax.while_loop(
+        cond, body, init
+    )
+    if two_pass_exit:
+        # Report what the criterion actually tested, so the flag
+        # ``coupling_diagnostics`` derives from this number ("residual
+        # <= threshold") means what the loop means.  Otherwise a group
+        # that exhausts ``max_iterations`` on an oscillating residual
+        # still reports ``converged=True`` whenever the cap happens to
+        # land on a dip.  ``n_iters == 1`` (reachable only at
+        # ``max_iterations=2``) has no second pass to compare with, so
+        # it reports its one measurement rather than the ``inf`` seed.
+        final_res = jnp.where(
+            n_iters > 1, jnp.maximum(final_res, prev[0]), final_res,
+        )
     vw = (acc[0], acc[1]) if is_iqn else ()
     return x_star, n_iters.astype(dtype), final_res, vw
 
@@ -1095,9 +1163,43 @@ def _run_coupled_block_impl(
         state_after_first = one_pass(new_state_inner)
 
         if max_iters <= 1:
+            # ``max_iterations=1`` is a legitimate "one staggered pass,
+            # no iteration" request, so it reports like any other cap
+            # rather than being refused.  Returning ``diag_data=None``
+            # here used to leave the ``_meta`` entries at the values
+            # ``compile()`` seeded them with (iterations 0, residual
+            # 0.0), which ``coupling_diagnostics()`` then reads as
+            # ``converged=True`` whatever the state, and which
+            # ``strict_convergence`` could never contradict because the
+            # check lives in ``_run_ift_forward``.  ``first_r`` is the
+            # residual of the state the single pass started from -- the
+            # same quantity every other cap reports (the residual at
+            # the iterate one pass before the one returned) -- and it
+            # is already needed for the ``strict_convergence`` guard,
+            # so honesty here costs nothing.
+            single_r = _compute_residual(state_after_first, new_state_inner)
+            sub = {nn: state_after_first[nn] for nn in group_node_names}
+            if group.strict_convergence and group.solver == "ift":
+                import equinox as eqx  # noqa: PLC0415
+
+                sub = eqx.error_if(
+                    sub, single_r > conv_threshold_value,
+                    f"coupling group {sorted(group.nodes)} exited at "
+                    f"max_iterations={max_iters} without converging; "
+                    "the IFT gradient is invalid here. Raise "
+                    "max_iterations, loosen the tolerance, or set "
+                    "strict_convergence=False to only report this via "
+                    "coupling_diagnostics().",
+                )
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
-                r[nn] = state_after_first[nn]
+                r[nn] = sub[nn]
+            # One coupling pass ran, so report one: a residual was
+            # measured, and ``iterations=0`` beside a non-zero residual
+            # would contradict itself.  ``solver="fori"`` keeps its own
+            # ``diagnostics=True`` gate.
+            if group.solver == "ift" or group.diagnostics:
+                return r, (jnp.array(1.0), single_r), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1306,12 +1408,24 @@ def _run_coupled_block_impl(
         # differentiates straight through the iterates. ----
 
         if group.acceleration == "aitken":
+            # Aitken is in ``_TWO_PASS_EXIT``, so it latches
+            # ``converged`` -- and so freezes the state -- only after
+            # two consecutive passes at or below the threshold; see
+            # ``_fixed_point_while`` for why one is not evidence.  Here
+            # the loop runs ``max_iterations`` passes whatever happens,
+            # so the second pass costs nothing.  ``first_r`` is the
+            # residual of the pass before the loop, which is the right
+            # seed for the streak.
+            first_below = first_r <= conv_threshold
+
             if track_diag:
                 def body_fn(i, carry):
-                    s_cur, converged, icount, fres, omega, prev_r = carry
+                    (s_cur, converged, prev_below, icount, fres,
+                     omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    below = residual <= conv_threshold
+                    new_converged = converged | (below & prev_below)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel, new_omega, cur_r = aitken_relaxation(
@@ -1322,10 +1436,11 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    return s_merged, new_converged, new_count, new_res, new_omega, cur_r
+                    return (s_merged, new_converged, below, new_count,
+                            new_res, new_omega, cur_r)
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
+                    state_after_first, jnp.array(False), first_below,
                     jnp.array(1.0), first_r,
                     jnp.array(1.0), jnp.zeros(n_dof),
                 )
@@ -1333,13 +1448,14 @@ def _run_coupled_block_impl(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                iter_count, final_res = final_carry[2], final_carry[3]
+                iter_count, final_res = final_carry[3], final_carry[4]
             else:
                 def body_fn(i, carry):
-                    s_cur, converged, omega, prev_r = carry
+                    s_cur, converged, prev_below, omega, prev_r = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    below = residual <= conv_threshold
+                    new_converged = converged | (below & prev_below)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel, new_omega, cur_r = aitken_relaxation(
@@ -1348,10 +1464,10 @@ def _run_coupled_block_impl(
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
-                    return s_merged, new_converged, new_omega, cur_r
+                    return s_merged, new_converged, below, new_omega, cur_r
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
+                    state_after_first, jnp.array(False), first_below,
                     jnp.array(1.0), jnp.zeros(n_dof),
                 )
                 final_carry = jax.lax.fori_loop(

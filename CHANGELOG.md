@@ -9,1202 +9,283 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ## [Unreleased]
 
+See [`docs/release_notes/v0.4.0.md`](docs/release_notes/v0.4.0.md) for the
+narrative release notes — measurements, design rationale and migration
+guidance; the itemized changes follow.
+
+### Added
+- **Measured guidance for choosing coupling options**: eight graph fixtures and
+  a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
+  `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window
+- **Graph parameter pytree**: the compiled step is `step_fn(state,
+  external_inputs, params)`, so node constants are traced inputs that
+  `jax.grad` reaches and that change without a recompile.  Opt a node in with
+  `update(..., *, params=None)`; `gm.nodes_without_params()` lists those still
+  baking constants
+- Migrated to the params contract: `SpringDamperNode`, `BallNode`, `HeatNode`,
+  `RigidBodyNode`, `RigidBody2DNode`, `HeartPumpNode`, `TableNode`,
+  `HealthCheckNode`, `LBMNode`, `LBMPipeNode`, `SurrogateNode` (network
+  weights), flux producers via `compute_boundary_fluxes(..., params=)`, and
+  `ShardedStencilNode` / `ShardedUnstructuredNode` (which previously ignored
+  `gm.params` entirely)
+- **`ParamSpec`** (`maddening.core.params`): per-parameter `trainable` /
+  `bounds` / `transform`, declared in `SimulationNode.param_specs()` or
+  `gm.set_param_spec`, with `gm.trainable_mask()`, `gm.unconstrain()` /
+  `gm.constrain()` and `gm.check_params()` as the optimiser-facing maps
+- **`maddening.sysid`**: `fit`, `fit_lm`, `fit_multiple_shooting`,
+  `windowed_loss` and `fim` (`mask=`, `noise_std=`, Cramér-Rao bounds); all
+  fitters emit `EVENT_FIT_PROGRESS`.  Guide: `docs/user_guide/parameters.md`
+- **Interface mappings on edges**: `add_edge(..., mapping=)` with
+  `rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
+  `matrix_mapping`; weights live in `gm.params["mappings"]`, are reachable by
+  `jax.grad`, and are `trainable=False` until you opt in
+- **Interface mappings are serialisable** (`MappingSpec`): config, USD and the
+  REST view carry mapped edges instead of refusing them.  Pass `source_ref=` /
+  `target_ref=` to the factories; an incomplete spec is refused with the
+  argument named
+- Params survive persistence and reach FMI: `to_dict`/`from_dict`, USD and
+  checkpoints store effective params and `ParamSpec` overrides;
+  `build_model_description` exposes each leaf as an FMI `parameter`/`tunable`;
+  `SidecarConfig(params=, param_specs=)` serves `get_params` / `set_params`
+- REST `PUT /graph/params/{node}` addresses any leaf of the live pytree,
+  updates in place without a recompile, and validates dtype, shape, finiteness
+  and `ParamSpec` bounds before writing
+- **FMU C wrapper, TCP bridge and packaging**: a graph now builds a real FMI
+  3.0 co-simulation `.fmu` (`build_fmu_binary`, `write_fmu`), driven end to
+  end by FMPy
+- **FMU sidecar protocol 2 — binary frames** for bulk
+  `get`/`set`/`get_state`/`set_state`, negotiated at `hello`; JSON-only
+  clients are unaffected.  See "Wire protocol" in
+  `docs/user_guide/fmu_export.md`
+- **Multi-clock FMU export**: `build_model_description(multi_clock=True)`
+  emits one `<Clock>` per distinct node timestep and tags outputs and inputs
+  with theirs.  Off by default
+- **`AdaptiveNode`** (`maddening.nodes.adaptive`, `MADD-NODE-009`):
+  frozen-active-set adjoint pattern for adaptive solvers, with
+  `gradient_capture_ratio`, `check_gradient_capture`, `mask_safe` and
+  `set_adaptive_diagnostics`.  Read `MADD-ANO-003` before optimising through
+  one.  Guides: `algorithm_guide/nodes/adaptive_node.md`,
+  `developer_guide/adaptive_node.md`; benchmark `MADD-VER-004`
+- **Per-neighbour unstructured halo exchange**: `exchange_unstructured(...,
+  method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`,
+  bit-identical to the `all_to_all` default; `exchange_traffic(layout)`
+  reports what each transport would move so you can choose before using a GPU
+- Multi-GPU session tooling: `benchmarks/multigpu/run_pod.py` (`--goal
+  exchange|forward|gradient`, `--summarise`, `--dry-run`) and
+  `benchmarks/multigpu/README.md`.  Nothing here launches a pod
+- `sharded_cg` / `sharded_gmres` take `differentiable=True` for exact
+  linear-solve adjoints through the same backend and preconditioner, plus
+  `jacobi_preconditioner` / `block_jacobi_preconditioner`
+- `SimulationNode.domain_integral_axes()`: reduce a domain integral over a
+  subset of mesh axes, or not at all, so a partial-surface integral needs no
+  full-mesh `psum`
+- Second `@stability` wave: the unstructured partition layout, halo exchange
+  and partition/gather helpers, `SidecarConfig` and `FMUState` are `EVOLVING`
+- **Persistent compilation cache**
+  (`maddening.core.simulation.compile_cache`): `enable(cache_dir)`,
+  `MADDENING_COMPILATION_CACHE_DIR`, and `warm_cache()` to compile step and
+  scan ahead of a run
+- Profiler rewrite (coupling overhead measured not inferred, per-group
+  iteration statistics, `trace=True` kernel attribution;
+  `docs/developer_guide/profiling.md`) and `benchmarks/bench_coupling.py`
+- `GraphManager.reset_state()` (reset without retracing the jitted step) and
+  `GraphManager.get_node()`
+- The USD stage stores a node's own name (`maddening:nodeName`) and an edge's
+  declared units, so node names USD cannot spell survive a round trip
+- Coupling diagnostics: iteration count and residual always in `_meta`,
+  `coupling_diagnostics()` reports `"converged"` per group, and
+  `CouplingGroup.strict_convergence` raises on an unconverged exit (off by
+  default — the IFT gradient is invalid there)
+- The IFT Krylov adjoint raises an actionable `ImportError` naming `pip
+  install maddening[ift]` when lineax is missing
+- Node verification: `verify_node` gains `params_consistent` /
+  `params_gradient_finite` / `params_effective` and a `SKIP` status
+  (`SimulationNode.accepts_params()` exposes the probe);
+  `maddening.testing.verification` is a Hypothesis battery over outputs,
+  structure, determinism, jit/eager agreement and gradients;
+  `strategies.node_states` samples bool and integer fields
+- Property-test coverage for round trips, the REST and FMU-bridge surfaces
+  (stateful machines), the params pytree, `sysid`, retracing and binary frames
+- **Static type checking, phase 1 (non-blocking)**: `pyrightconfig.json`,
+  `pyright` in the `ci`/`dev` extras, a `continue-on-error` `typecheck` job
+  and `scripts/typing_baseline.py`.  No source annotations changed; baseline
+  and phase-2 plan in `docs/developer_guide/typing.md`
+
+### Changed
+- **Version is now `0.4.0.dev0`** (was `0.3.1`) so a development build is
+  distinguishable from the last release.  `maddening.__version__` prefers
+  installed distribution metadata, so an editable install predating this
+  keeps reporting the old version until reinstalled.
+- **Coupling groups default to `solver="ift"`**, a `while_loop` that exits on
+  convergence instead of always running `max_iterations`.  Set `solver="fori"`
+  to keep the old behaviour
+- **The IFT derivative rule is a `jax.custom_jvp`** (was `custom_vjp`), so
+  `jax.jvp` / `jacfwd` and the FMI `FORWARD` directional derivative now work
+  through coupled steps
+- Node constants are no longer constant-folded, so `run_sweep` and an
+  individual `run_scan` can differ by ~1 ulp where they were bit-identical.
+  Loosen any bitwise assertion between the two
+- **Resume-from-URL transport moved to `maddening.cloud.resume`**
+  (`maddening.cloud.download_and_load_state`); the old path forwards and
+  warns.  Behaviour, signature and errors are unchanged
+- `AdaptiveNode` and `AdaptiveNodeBlindnessError` are `@stability(EVOLVING)`,
+  not `STABLE`, and `ift_linear_solve` returns to `EXPERIMENTAL`; the 0.4.0
+  freeze picks the final levels
+- `AdaptiveNode.blindness_ratio` / `blindness_threshold` are
+  `gradient_capture_ratio` / `gradient_capture_threshold`, and the cold-start
+  check warns rather than raising except under `on_blind="raise"` or a
+  confirmed Palais trap
+- The `AdaptiveNode` gradient is documented as exact within an active-set
+  region and first-order wrong across a switch; the previous "Clarke
+  subgradient" claim was false (`MADD-ANO-003`)
+- `AdaptiveNode.n_max` is structural and no longer in `params`, while
+  `blindness_gate`, `on_blind` and the diagnostic constants are; a subclass
+  whose basis size must round trip declares its own integer parameter.
+  `compute_active_set` and `solve_frozen` are `@abstractmethod`, and the
+  constructor validates `n_max`, the diagnostic constants and `dtype`
+- `iqn_ils_update` takes a keyword-only `have_prev` flag saying whether the
+  previous-iterate arguments are real
+- Hypothesis is configured once in the root `tests/conftest.py`: `dev`/`ci`
+  profiles selected by `MADDENING_HYPOTHESIS_PROFILE`, three named depth
+  tiers, a persisted example database, and a `max_examples` house rule in
+  `docs/developer_guide/testing_standards.md`
+
+### Deprecated
+- `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the
+  next minor release
+- `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
+  removed in 1.0; use `maddening.cloud.download_and_load_state`
+- `AdaptiveNode.blindness_ratio` / `blindness_threshold` warn; use
+  `gradient_capture_ratio` / `gradient_capture_threshold`
+
+### Removed
+- The stelling formal-verification suite, CI job and `stelling` dependency.
+  The `[verify]` extra now only pulls `hypothesis`.
+
 ### Fixed
-- **The interface-mapping adjoint test is no longer flaky.**  Its second
-  assertion compared JAX's transpose of `apply` against `apply_T` with a
-  bare `rtol=1e-5`, so a component that nearly cancels (both are float32
-  sums over the target index) failed on a 2e-7 absolute difference.  The
-  tolerance now scales with the matrix and vector norms, the same argument
-  the test's first assertion already made, and the case that failed is
-  pinned.  No library code changed.
+- **A coupling group no longer reports convergence it has not reached**:
+  `acceleration="aitken"` needs the threshold met on two consecutive passes
+  (a lone dip is not arrival), `max_iterations=1` reports its real residual
+- **FMU export of a real graph had no inputs and a wrong step size**: inputs
+  now come from the graph's external-input list as `<node>.<field>`, and the
+  step is the graph's base timestep
+- **FMU bridge and C wrapper robustness**: a non-whole-multiple communication
+  step, an unusable step time, an oversized or truncated reply, an over-nested
+  request, a second instance and a vanished peer no longer desynchronise,
+  wedge or kill the importer; `set` is atomic, values are narrowed before the
+  finiteness check, an unset input reads as zero, and memory-safety defects
+  (leaked and unterminated buffers, a missing reply parsed as data) are fixed
+  along with the fuzz harness that had missed them
+- **FMI `min`/`max` for open bounds** advertised a value the sidecar then
+  refused; the nearest representable float32 inside the interval is advertised
+  instead
+- **`compile()` no longer discards a calibration**: live params leaves are
+  carried across a recompile (`gm.reset_params()` to undo), a partial pytree
+  is completed from the live values, and `load_state` compiles before
+  restoring
+- **Params pytree correctness**: flux edges honour `params`, `ParamSpec`
+  clamps stay strictly inside open bounds and reject NaN/inf, leaf dtypes and
+  Python scalar types are preserved, wrong-shape leaves are refused rather
+  than broadcast, and `fim` / `fit_lm` accept a per-leaf `noise_std` pytree
+- **Interface-mapping serialisation hardening**: edge-key `param_specs` apply
+  after the edges exist, stale point references are refused by content hash,
+  asset loading is bounded and confined to `base_dir`, rebuild failures are
+  `MappingRebuildError`, and two mapped edges on one field pair get separate
+  slots via `EdgeSpec.ordinal`
+- **Resume-from-URL hardening**: the manifest URL is derived from the URL
+  *path*, so pass `manifest_url=` / `RESUME_MANIFEST_URL` for a presigned
+  object; fetches time out (`MADDENING_RESUME_TIMEOUT`), stream to disk, and
+  clean up their temporary directory
+- **`AdaptiveNode` survives a config / USD round trip** (`blindness_gate` was
+  dropped, `n_max` replayed as a duplicate keyword); the gradient-capture
+  diagnostic evaluates the parameters in use, is memoised, is disabled by
+  `MADDENING_ADAPTIVE_DIAGNOSTICS=0`, and the `jnp.where` tangent trap is
+  warned about with `mask_safe` as the remedy
+- **Coupling with non-float state leaves**: integer, boolean and PRNG-key
+  leaves survive the IFT closure exactly, keep their dtype through
+  `unflatten_coupled_state`, and no longer break reverse-mode differentiation
+  through `lax.scan`
+- **IQN acceleration**, four defects: IQN-ILS silently ran as Aitken without
+  Jacobian reuse; the safeguard vetoed valid steps on stiff problems; the
+  secant basis is now built from operator-output differences (Degroote 2009);
+  the gradient is no longer NaN with `jacobian_reuse > 0`
+- **Coupling diagnostics and solver settings**: the IFT path honours
+  `convergence_norm` and no longer freezes non-interface fields in IQN modes,
+  fori diagnostics are no longer one iteration stale, the IFT linear solve no
+  longer reports a spurious GMRES breakdown, and Gauss-Seidel no longer raises
+  `KeyError` for a flux edge whose consumer precedes its producer or for a
+  flux source under IQN
+- **Every run compiled the step three times** because weak-typed leaves
+  restrengthened after the first step; `compile()` and `set_node_state()`
+  normalise weak types (results bit-identical), and
+  `_default_external_inputs()` no longer reallocates zeros every step
+- **Sharded boundary inputs**: grid-shaped inputs are sharded and halo-padded
+  instead of replicated, the shape heuristic compares the full leading grid
+  shape, and `HeatNode.update_padded` takes `params=`
+- Node fixes: `LBMPipeNode` multiphase used `np.exp` on a tracer and had a NaN
+  gradient in the EDM velocity clamp; `HeatNode` ignored an injected `length`
+- **REST API**: a non-finite constructor constant is a 400 naming the
+  parameter instead of a 500 that leaves `GET /graph` broken for the process's
+  life; `PUT /graph/params/{node}` echoes what it wrote and validates first;
+  `PUT /graph/state` and `POST /graph/edges` validate their inputs; `add_node`
+  refuses names containing `/`, `#` or `->`
+- **Multi-GPU session runner**: the `exchange` goal timed an unsharded input
+  and charged both transports the same constant, and `recommend()` accepted
+  rows no real GPU produced; inputs are pre-sharded outside the timed region
+  and a recommendation needs a real accelerator run.  Stale `jax[cuda12]` /
+  Python 3.10 pins in `docker/Dockerfile.cloud` and the cloud examples are
+  corrected
+- **`scripts/typing_baseline.py` can no longer make a broken pyright run look
+  like a result**: infrastructure failures exit 2, a wrong interpreter or an
+  empty analysis is detected, and `pyright` is pinned to `1.1.414` in `ci`
+- `scripts/generate_stability_report.py` imports every `@stability`-tagged
+  module from a list a compliance test checks against the source, so none can
+  silently drop out of the release gate's report
+- Property-test flakes removed: the rollout-parity and interface-mapping
+  adjoint assertions scale their tolerance with the magnitudes compared and
+  pin the failing cases.  No library code changed.
+  `maddening.testing.strategies` no longer rejects float32 bounds that are not
+  exactly representable
 
+### Verification
+- **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
+  `tests/fmi/c/`): unit binary plain and under ASan/UBSan, a self-checking
+  deterministic fuzz harness, valgrind, a libFuzzer campaign, FMPy against
+  normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
+  build.  CI installs valgrind and clang; each part self-skips if its tool is
+  missing
+- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected via `-m "not
+  slow"`).  Slow-marked tests deferred to a longer pre-release pass
+- Sharded `StaticArray` acceptance on a 4-device virtual mesh: bit-compatible
+  with the single-device baseline, 50-step convergence, construction-time
+  validation, `shard_info` delivery
+- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py` green, with
+  shape and dtype errors raised in one `ExceptionGroup`
+- Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match
+  their dense and `fori` references in both differentiation modes
 
-- **`POST /graph/nodes` no longer answers 500 -- and no longer leaves the
-  graph unreadable -- for a non-finite constructor constant.**  A NaN or
-  infinite parameter survived the constructor and the dry-run trace, the node
-  went into the graph, and only then did the 201 body fail inside Starlette's
-  `allow_nan=False` JSON encoder: the caller saw a 500, and every later
-  `GET /graph` answered 500 for the life of the process.  Such a value is now
-  a 400 naming the parameter (`params.gravity[1]: value must be finite`),
-  exactly as `PUT /graph/state` and `PUT /graph/params` already refuse one.
-- **`PUT /graph/params/{node}` echoes the value it just wrote.**  Before the
-  first `compile()` the endpoint validates against a throwaway probe copy of
-  the node's params pytree, and it used to report *that* copy -- so the reply
-  carried the pre-write value while the very next `GET /graph/params/{node}`
-  carried the new one.
-- **An FMU sidecar `step` with an unusable communication point no longer
-  advances the physics.**  `t` was converted to a float *after* the sub-step
-  loop, so `{"op": "step", "t": <not a number>, "dt": h}` ran the graph,
-  failed on the conversion and answered `ok: false` with the sidecar already
-  advanced and `_time` left behind it -- a silent, permanent desynchronisation
-  between the importer's clock and the state it reads back.  `t` is now parsed
-  and checked for finiteness before anything moves, alongside `dt`.
-  All three were found by the new stateful property machines under
-  `tests/property/`.
+### Security
+- **FMU bridge no longer unpickles importer bytes** (CRITICAL): the FMU-state
+  blob is an arrays-only `npz` validated before use — regenerate any stored
+  blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only
+- **FMU sidecar `set_state` zip bomb** via an archive member without a `.npy`
+  suffix: the archive directory is checked before `np.load` runs, with
+  per-member and total declared-size caps
+- **REST checkpoint endpoints are confined to a directory**: paths are
+  relative to `SimulationServer(checkpoint_root=)` (default `./checkpoints`).
+  The API still has no authentication — bind it to localhost or authenticate
+  in front of it
 
 ### Known Anomalies
+- MADD-ANO-004: `converged=True` is a residual test, not a bound on the
+  distance to the fixed point -- calibrate it by re-solving at a 100x tighter
+  tolerance (minor, open, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
   swap rank, so no Clarke subgradient exists there and the integral of the
   returned gradient misses the sum of the jumps crossed (measured: 33 % of the
   objective change over a 0.1-wide theta window at n_max=256, k=16; ~1e-8 at
   k=64) (open, context_dependent)
-
-### Changed
-
-- **Hypothesis depth is now relative to the active profile, so `ci` really
-  does search harder than `dev`.**  A per-test `@settings(max_examples=N)`
-  overrides the profile, and about a hundred call sites carried one, chosen
-  ad hoc between 12 and 1000 over the project's history: measured on
-  `tests/verification/hypothesis/`, `dev` took 707 s and `ci` 721 s -- 2%
-  apart, for a profile that asks for four times the search.  The root
-  `tests/conftest.py` now resolves three named depth tiers from whatever
-  profile is loaded -- `EXAMPLES_CHEAP` (4x the profile), `EXAMPLES_STANDARD`
-  (the profile itself) and `EXAMPLES_COSTLY` (two fifths of it, never below
-  the house floor of 20) -- named for what one example *costs* rather than
-  for a number, and 95 call sites across `tests/verification/hypothesis/`,
-  `tests/core/` and `tests/fmi/` now name a tier.  The same suite now
-  measures **462 s under `dev` and 1365 s under `ci`**: the local default is
-  a third faster (the tiers took depth away from tests whose example costs
-  seconds and gave it to pure-function properties) and `ci` finally searches
-  3x deeper than `dev` instead of 1.02x.  The eleven sites that keep an
-  absolute cap are the ones where the number encodes a real constraint -- a
-  search space Hypothesis exhausts anyway, or an example measured in seconds
-  -- and each says so in a comment, as the house rule requires.  No test's
-  logic, strategies or assertions changed, and `stateful_step_count` is
-  deliberately not tiered: it sets how long one example is, not how many
-  there are.  Documented in `docs/developer_guide/testing_standards.md`,
-  and every run now prints the resolved tiers in the pytest header.
-
-- **Hypothesis property testing is configured once, in the root
-  `tests/conftest.py`.**  Two profiles are registered there -- `dev`
-  (`max_examples=50`, the default for a local run) and `ci`
-  (`max_examples=200`, what the `verify-hypothesis` job runs) -- both with
-  `deadline=None`, `print_blob=True` and
-  `suppress_health_check=[HealthCheck.too_slow]`.  Select one with the
-  `MADDENING_HYPOTHESIS_PROFILE` environment variable (an unknown name is a
-  hard error); the active profile is printed in the pytest header.  This
-  replaces the single `jax` profile that
-  `tests/verification/hypothesis/conftest.py` registered for that directory
-  alone, so property tests elsewhere in the tree (`tests/fmi/`,
-  `tests/core/`) now get the same settings instead of hand-rolling
-  `deadline=None` per test.  Registration and selection work both with and
-  without the Hypothesis pytest plugin, which
-  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` disables; when the plugin *is* loaded an
-  explicit `--hypothesis-profile` still wins.
-- **Failing examples are now persisted and replayed.**  The example database
-  is pinned to `<repo>/.hypothesis/examples` (git-ignored, absolute so it
-  does not follow the working directory), and the `verify-hypothesis` CI job
-  caches that directory with `actions/cache` -- keyed per run with a
-  `restore-keys` prefix, so every run restores the previous database and
-  saves its own.  A cache miss is not an error.  Previously a falsifying
-  example found once was lost, which is how the rollout-parity properties
-  passed for months and then failed once.
-- **`max_examples` house rule** (`docs/developer_guide/testing_standards.md`):
-  a property test carries no `max_examples` and the profile owns the default;
-  an explicit value is an exception that needs a comment saying what makes a
-  single example expensive, and may not go below 20.  Applied to the
-  shallowest tests: `tests/verification/test_builtin_nodes_verified.py`
-  (5 -> profile default), `tests/verification/hypothesis/test_hypothesis_retrace.py`
-  (15 -> 40), `test_hypothesis_params.py` (15 -> 25), `test_hypothesis_sysid.py`
-  (12 -> 30), `tests/core/test_sysid.py` (8 -> 20) and the `verify_node`
-  battery sizes in `tests/core/test_params_contract_completeness.py` (3, 5 -> 20).
-- **`AdaptiveNode` is `@stability(EVOLVING)`, not `STABLE`, and its blindness
-  gate no longer rejects a small active-set budget** (independent audit of the
-  `AdaptiveNode` merge; report under
-  `benchmarks/results/audit_adaptive-node-base/`).  Nothing has shipped, so
-  lowering the promise is free and raising it later would not be:
-  `AdaptiveNode` and `AdaptiveNodeBlindnessError` are now `EVOLVING` and
-  `maddening.core.solver_utils.ift_linear_solve` is back at the
-  `EXPERIMENTAL` it had before that merge.  The 0.4.0 API freeze picks the
-  final level, informed by two open questions now written down in
-  `docs/developer_guide/adaptive_node.md`: whether `ift_linear_solve` should
-  expose `restart` / `max_steps` / `stagnation_iters` and stop leaking
-  `lineax` / `equinox` runtime error types, and whether the three hooks need
-  `boundary_inputs` / `dt` so an adaptive node can be an edge *sink*.
-- **The documentation now states what the gradient is.**  The
-  "one-sided (Clarke) subgradient at the kinks" claim in the module docstring,
-  `NodeMeta` and the algorithm guide was wrong: the frozen-set objective has
-  *jump* discontinuities at active-set switches, so it is not locally
-  Lipschitz there and no Clarke subgradient exists.  The returned gradient is
-  exact *within* an active-set region and ignores the set's dependence on the
-  parameter; across a boundary the objective jumps and gradient-based
-  optimisation sees a first-order error equal to the sum of the jumps crossed
-  (measured on the 1-D sine toy at n_max=256, k=16: the integral of the
-  returned gradient over theta in [0.40, 0.50] is -1.5808e-3 against a true
-  change of -2.3598e-3, a 33 % shortfall equal to the sum of the 27 jumps
-  crossed; negligible with a large basis budget, 4e-8 at k=64 in the spike).
-  Recorded as `MADD-ANO-003` and asserted by
-  `tests/nodes/adaptive/test_active_set_switch.py`.
-- **`blindness_ratio` is now `gradient_capture_ratio`** (the old name is a
-  deprecated alias that warns), because the number measures active-set-budget
-  adequacy rather than a symmetry trap: at a fixed non-symmetric point it is a
-  function of `k` alone (0.16 / 0.57 / 0.85 / 1.00 at k=4/8/16/32, at every
-  `n_max`).  `blindness_threshold` is likewise `gradient_capture_threshold`
-  with a deprecated constructor alias.  The cold-start check
-  (`AdaptiveNode.check_gradient_capture`, new) **warns** on a low ratio,
-  naming the measured value, the threshold and the remedies in order, and
-  raises `AdaptiveNodeBlindnessError` only for the one cause it can establish
-  -- `is_trapped_at` confirming a Palais fixed point -- or under the new
-  opt-in `on_blind="raise"`.  `on_blind="ignore"` skips it entirely.  The
-  message no longer prescribes `cold_start()` / `symmetry_break()` where they
-  make matters worse (measured 0.565 -> 0.060 at a budget-limited point), and
-  the guide's "validated" `K/n_max = 0.016` row is now reachable through the
-  default API.
-- **`n_max` is no longer stored in `AdaptiveNode.params`** (it is structural),
-  and `blindness_gate` / `on_blind` / the diagnostic constants are, so a node
-  survives a config and USD round trip; `params_pytree()` excludes them so a
-  fit never sees them as leaves.  A subclass whose basis size must round-trip
-  declares its own integer parameter for it (see the authoring guide).
-- `AdaptiveNode.compute_active_set` and `solve_frozen` are `@abstractmethod`;
-  `objective` stays concrete because it is optional with the gate off.  The
-  constructor validates `n_max` (a positive whole number -- `2.7` and `"8"`
-  are rejected, an integral float from a JSON round trip is accepted), the
-  diagnostic constants (finite and non-negative) and `dtype` (floating, and
-  enforced on the coefficients when given explicitly); the diagnostics reject
-  a parameter key that is neither a pytree leaf nor a constructor parameter
-  instead of silently ignoring a typo.
-
-- **Resume-from-URL transport moved to `maddening.cloud.resume`.**
-  `download_and_load_state` (with its `file://` / `http(s)://` / fsspec
-  fetch helpers) now lives in the cloud package, where deployment concerns
-  such as storage backends and credentials belong; the core
-  `maddening.core.simulation.checkpoint` module keeps only the local
-  save/load/manifest functions and imports neither `maddening.cloud` nor
-  `fsspec`.  `maddening.cloud.download_and_load_state` is exported lazily
-  like the other cloud names.  The old
-  `maddening.core.simulation.checkpoint.download_and_load_state` import still
-  works as a forwarding alias that emits a `DeprecationWarning`; the alias is
-  removed in 1.0.  Behaviour, signature and errors are unchanged.
-- **Coupling groups now default to the early-exit solver** (`CouplingGroup.solver="ift"`).
-  The fixed-point iteration is a `jax.lax.while_loop` that exits as soon as the
-  group's convergence norm meets its threshold, for every `acceleration`,
-  `iteration_mode`, `convergence_norm` and `diagnostics` setting.  The legacy
-  unrolled `fori_loop` ran `max_iterations` passes regardless of convergence
-  (measured: step cost linear in `max_iterations`, 80–90 % dead iterations at
-  typical convergence).  IQN-IMVJ cross-timestep Jacobian reuse now runs inside
-  the while_loop with the same shift-and-insert column convention as before.
-- **IFT derivative rule is a `jax.custom_jvp`** (was `custom_vjp`).  JAX derives
-  reverse mode by transposing the linear tangent rule through lineax, so one
-  definition serves `jax.jvp` / `jacfwd` (the FMI `FORWARD` directional
-  derivative — previously a `TypeError` through coupled steps), `jax.grad` /
-  `jacrev`, and `jax.hessian`.
-- `iqn_ils_update` takes a keyword-only `have_prev` flag saying whether the
-  previous-iterate arguments are real; loop bodies pass `i > first`.
-
-### Added
-
-- **Measured guidance for choosing coupling options** — eight fixtures and a full
-  option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`; and
-  `accelerated_fields` selecting no field in the group now raises at construction.
-
-- **`tests/property/`: round-trip property tests.**  A Hypothesis strategy
-  (`tests/property/strategies.py`) that draws *valid* two-to-four-node
-  graphs -- real node classes, commensurate timesteps, awkward-but-legal
-  node names, edges with and without registered transforms, additive edges,
-  declared units, live ("calibrated") parameter overrides, `ParamSpec`
-  overrides including trainable interface-mapping weights, external inputs
-  and interface mappings built by the RBF / nearest-neighbour / 1-D
-  projection factories from either a node-field point reference or an
-  inlined point set -- plus the invariants over them
-  (`tests/property/test_round_trips.py`): a config round trip preserves
-  trajectory, parameter pytree (structure, dtype and bits) and
-  `param_specs()` including edge-key specs; `to_dict` is idempotent through
-  `from_dict`; a USD round trip owes the same; a checkpoint restores state
-  and params exactly, continues a rollout identically and beats the config
-  for trained mapping weights; and the two formats reload to the same graph.
-  `tests/property/test_adaptive_invariants.py` adds the `AdaptiveNode`
-  contract: a fixed-size state buffer, coefficients exactly zero off the
-  active set, the in-region gradient against a finite difference taken with
-  a step verified not to cross a switch, and config / checkpoint round trips
-  of a graph holding an adaptive node.  These directories had no `@given`
-  before; the properties own no `max_examples` and take their depth from the
-  profile.
-- **The USD stage carries a node's own name and an edge's declared units.**
-  `maddening:nodeName` on each node prim and `maddening:sourceUnits` /
-  `maddening:targetUnits` on each edge prim.  Node names may legally contain
-  characters a USD prim name may not (`-`, `.`, spaces, parentheses) and may
-  start with a digit, so the prim name is a mangled, de-duplicated
-  identifier and the node name is now stored beside it; a stage written
-  before this reads back as before.  This fixes three round-trip defects the
-  new property tests found: `save_graph_to_usd` + `load_graph_from_usd`
-  renamed such a node and left every edge referring to it dangling (the
-  reloaded graph would not compile), collapsed two distinct nodes whose
-  names mangled alike (`"a-b"` and `"a.b"`) into one, raised from `pxr` on a
-  name starting with a digit, and dropped `source_units` / `target_units`
-  entirely.
-
-- **Stateful property machines for the two externally driven surfaces**
-  (`tests/property/test_stateful_api.py`,
-  `tests/property/test_stateful_bridge.py`, shared scaffolding in
-  `tests/property/stateful_model.py`).  Two
-  `hypothesis.stateful.RuleBasedStateMachine`s drive *arbitrary* sequences
-  where every earlier test drove a hand-written one.  The REST machine works
-  over a FastAPI `TestClient` -- add and remove nodes and edges, compile,
-  step, run, read and write state and parameters, save and load checkpoints,
-  reset, validate -- interleaved with unknown nodes, wrong field sets, bad
-  dtypes, out-of-bounds and NaN values, and checkpoint paths outside the
-  configured root.  The bridge machine holds one real socket and mixes JSON
-  and binary frames on it: `hello` on both protocols with and without binary,
-  `set`, `get`, `step`, `get_state`, `set_state`, `reset`, `terminate`, and
-  malformed frames of both kinds.  Each checks, after *every* operation,
-  against an in-process model -- a `GraphManager` for the server, a second
-  bridge on the same compiled step for the sidecar: a valid call must succeed
-  and agree with the model, a refused call must be a 4xx (or an error reply)
-  that changes nothing and keeps the connection, and the REST server must
-  never answer 5xx.  The REST machine ends every example by rebuilding a
-  `GraphManager` from the server's own `GET /graph` and replaying its
-  trajectory; the bridge machine checks that a state saved with `get_state`
-  and restored later returns exactly the values captured at save time.  Both
-  leave `max_examples` to the profile and set `stateful_step_count`
-  explicitly (14 and 25), with the reasoning in the test docstring.
-- **`AdaptiveNode` diagnostic surface** (audit follow-up):
-  `gradient_capture_ratio` (renamed, re-selects the active set at the
-  evaluated parameters), `check_gradient_capture(params=None, *, state=None,
-  on_blind=None)` (runs the cold-start diagnostic at the parameters actually
-  in use and applies the warn / raise / ignore policy), `mask_safe(mask, x,
-  fill)` (the double-`where` guard for an operand that is singular off the
-  active set), and the module-level `set_adaptive_diagnostics(enabled)` /
-  `adaptive_diagnostics_enabled()` switches (also read from
-  `MADDENING_ADAPTIVE_DIAGNOSTICS`).
-- **`AdaptiveNode` base class** (`maddening.nodes.adaptive`, `@stability(STABLE)`,
-  `MADD-NODE-009`): the frozen-active-set adjoint pattern for adaptive solvers.
-  A subclass supplies `compute_active_set` (any fixed-shape `jnp` selection
-  rule) and `solve_frozen` (the masked solve, through `ift_linear_solve`); the
-  base class wires them into a JAX-traceable `update` over a padded `(c, mask)`
-  state — adaptivity changes which mask entries are true, never an array
-  shape, so the step runs under `jit` / `lax.scan` unchanged — commits the
-  selection under `stop_gradient`, and zeroes coefficients off the mask.
-  `jax.grad` through the node is the exact frozen-set adjoint on every region
-  where the active set is constant (verified against finite differences and
-  dense sub-block solves to 1e-6).  Physical parameters live in the graph
-  parameter pytree with the subclass's `ParamSpec`s, so `fit` / `fim` reach
-  them.  Palais-trap diagnostics from the design spike: `blindness_ratio`,
-  `is_trapped_at`, `symmetry_break` (anisotropic step along the full-basis
-  gradient, trainable leaves only), a cold-start gate in `initial_state`
-  (`AdaptiveNodeBlindnessError`) and `cold_start()` with one automatic escape;
-  constants `blindness_threshold = 0.7`, `blindness_break_delta = 0.05`,
-  `D_threshold = 5` as documented class attributes.  Algorithm guide
-  (`docs/algorithm_guide/nodes/adaptive_node.md`), authoring guide
-  (`docs/developer_guide/adaptive_node.md`), benchmark `MADD-VER-004`
-  (Green's-function reference for `-u'' + u = f`).  `ift_linear_solve` is
-  promoted from `EXPERIMENTAL` to `STABLE` with its signature unchanged, as
-  its v0.3.1 docstring promised.  The wavelet subclass stays post-1.0.
-- **Interface mappings are serialisable** (`MappingSpec`, the "13(a)" half of
-  the deferred mapping-serialisation item).  Every mapping factory
-  (`rbf_mapping`, `nearest_neighbor_mapping`, `projection_1d_mapping`,
-  `matrix_mapping`) attaches a `MappingSpec` — kind, hyper-parameters and
-  *references* to its point sets, never the weights — which
-  `GraphManager.to_dict` / `from_dict`, the config helpers and
-  `save_graph_to_usd` / `load_graph_from_usd` (attribute
-  `maddening:mappingSpecJson`) now carry instead of refusing mapped edges.
-  Point references are `{"node": name, "field": key}` (a node's
-  `static_data` or array-valued parameter), `{"asset": "<file>.npy|.npz"}`
-  (relative to the config / stage directory, `base_dir=`; no absolute
-  paths or `..`) or an inline list for at most 64 points; the factories
-  take `source_ref=` / `target_ref=` (`matrix_mapping(asset=)` — an
-  explicit matrix is never inlined).  On load the mapping is rebuilt by
-  the same factory (weights bitwise equal) and registered in
-  `params["mappings"]` as `add_edge(mapping=)` does — which now also
-  accepts a spec directly; a checkpoint loaded afterwards keeps its
-  (possibly trained) weights.  A mapping without a complete spec is
-  refused by the writers with a message naming the argument to pass
-  (`to_dict(strict_mappings=False)` for display; the REST `GET /graph`
-  uses it).  The FMI exporter is unchanged (mapping weights never reach
-  the FMU).  Guide: algorithm_guide/coupling/interface_mapping.md,
-  "Serialisation".
-- **Multi-GPU hardware-session tooling** (local preparation for the
-  human-supervised 4xA100 session; nothing here launches a pod).
-  `benchmarks/multigpu/run_pod.py` is the pod-side runner: `--goal
-  exchange` times `all_to_all` vs `ppermute` unstructured halo exchanges
-  at 1e5-1e6 cells (warmup + repeats, min/median, bytes from
-  `exchange_traffic()`, bit-identity), `--goal forward` runs a
-  `ShardedUnstructuredNode` at 1e6 cells on a real mesh (`--mesh
-  edges.npz`) or a synthetic one against the unsharded node, `--goal
-  gradient` reports sharded-vs-unsharded gradient parity through a
-  rollout and the preconditioned `sharded_cg`; each goal writes one JSON
-  under `--out`, `--summarise DIR` prints the ranking table and the
-  ppermute-vs-all_to_all recommendation (only real-GPU points at >= 1e5
-  cells decide), and `--dry-run` proves the whole script on CPU virtual
-  devices (`tests/cloud/multigpu/test_run_pod_dry_run.py`, slow lane).
-  `benchmarks/multigpu/README.md` is the session runbook (launch by
-  hand with `CloudLauncher`/SkyPilot, copy-back, stop the pod).  The
-  `tests/cloud/multigpu` conftest now forces virtual host devices only
-  when no accelerator is about to be used (`JAX_PLATFORMS` naming
-  cuda/gpu/rocm/tpu, or unset with a CUDA jaxlib plugin + `nvidia-smi`
-  GPU + visible devices, leaves `XLA_FLAGS` alone; `MADDENING_VIRTUAL_DEVICES=N`
-  overrides either way; `tests/cloud/multigpu/test_conftest_device_policy.py`),
-  so on a GPU pod with `JAX_PLATFORMS=cuda` the multi-device tests run on
-  the GPUs instead of 16 virtual CPUs.  The cloud examples' install
-  command pinned `jax[cuda12]>=0.4,<0.6` (uninstallable next to this
-  package); they now use the `pyproject` range `>=0.10,<0.13`.
-- **FMU sidecar protocol 2: binary frames for bulk payloads.**  Bit 31 of
-  the 4-byte length prefix marks a binary frame (`[u32 BE header_len]
-  [header JSON][raw bytes]`); after a `{"op":"hello","protocol":2,
-  "binary":true}` the bridge answers `get` / `get_state` with raw
-  little-endian float64 / raw `npz` bytes and accepts binary `set` /
-  `set_state`, so values no longer go through `%.17g` / `strtod` and
-  state blobs no longer through base64.  The C wrapper negotiates it and
-  falls back to JSON against a bridge whose hello lacks `protocol`; a
-  JSON-only client sees the protocol-1 behaviour unchanged (the hello
-  reply merely gains `protocol` and `binary`), and an unknown higher
-  protocol is refused at hello.  All validation (vr, bounds, read-only,
-  state token/shape/size, malformed frames as error replies) applies to
-  both forms; the C side checks the header count against the raw length
-  and the caller's array before any copy and refuses flagged lengths over
-  the 64 MiB limit before allocating.  Measured: a 10^6-element `get`
-  2.3 s as JSON vs 27 ms binary over loopback (8 bytes per value).
-  `FmuTcpBridge.binary_frames_served` / `binary_frames_received` count
-  the traffic; `tcp_bridge` gains `recv_raw`, `send_binary`,
-  `encode_binary`, `decode_binary`, `values_of`, `state_of`,
-  `PROTOCOL_VERSION`.  C unit tests, the sanitizer fuzz harness (now
-  also binary-flagged replies), `tests/fmi/test_binary_frames.py` and the
-  Hypothesis properties in `tests/fmi/test_binary_frames_properties.py`
-  (bitwise float64 round trip incl. NaN payloads / infinities / negative
-  zero / subnormals; any byte string decodes consistently or raises
-  `ValueError`; any flagged frame after a binary hello gets exactly one
-  reply and the connection keeps serving) cover it; user guide: "Wire
-  protocol" in `fmu_export.md`.
-- **Static type checking (phase 1, non-blocking).**  `pyrightconfig.json`
-  (basic mode, `src/maddening` only, optional extras' imports downgraded to
-  warnings), `pyright` in the `ci`/`dev` extras, a `typecheck` CI job that
-  runs with `continue-on-error` and writes the error count to the step
-  summary, and `scripts/typing_baseline.py`, which summarises a pyright run
-  per rule and per file.  The measured baseline and the phase-2 plan (annotate
-  the `STABLE` surface after the 0.4.0 API freeze, ship `py.typed`, make the
-  check blocking on that surface) are in `docs/developer_guide/typing.md`.
-  No source annotations changed.
-- **Per-neighbour unstructured halo exchange** (v0.4.0 plan hard gate,
-  the hardware-independent part).  `exchange_unstructured(...,
-  method="ppermute")` and `ShardedUnstructuredNode(..., exchange="ppermute")`
-  send one `lax.ppermute` per *communicating cyclic shift*, each sized to
-  that shift's largest message, instead of one dense
-  `(n_devices, n_ghost_max)` `all_to_all` payload to every shard; results
-  are bit-identical (random partitions, gradients, a 10^5-cell ring in
-  the slow lane).  `exchange_traffic(layout)` reports cells moved per
-  shard for both transports and the useful count, so the transport can
-  be chosen from the partition before any GPU time is spent (a ring on 4
-  shards: 2 cells vs 8).  The default stays `all_to_all`; the NCCL
-  timings that decide the default need a real multi-GPU host.
-- **FMU C wrapper, TCP/JSON bridge and packaging** (v0.4.0 plan hard
-  gate).  `src/maddening/fmi/c/maddening_fmu.c` implements the FMI 3.0
-  co-simulation entry points (instantiate / initialise / `DoStep` /
-  `Get`/`Set` for every numeric type / FMU state get, set, serialize /
-  reset / terminate; model exchange and scheduled execution refuse) with
-  nothing but libc: every call is forwarded as a length-prefixed JSON
-  message over TCP to `maddening.fmi.tcp_bridge.FmuTcpBridge`, which maps
-  value references onto the sidecar's inputs, outputs and parameters and
-  runs the master-step loop.  `maddening.fmi.package.build_fmu_binary`
-  compiles the wrapper against the vendored (BSD-2) FMI 3.0 headers and
-  `write_fmu` packages `modelDescription.xml`, the binary and
-  `resources/endpoint.txt` into a `.fmu`; `build_model_description(...,
-  model_identifier=)` emits the `<CoSimulation>` element.  Verified end
-  to end: FMPy `simulate_fmu` drives the compiled FMU through the bridge
-  and reproduces `gm.run_scan` with a set parameter and a driven input.
-  ZMQ is not required; a ZMQ transport can carry the same payloads later.
-- **Multi-clock FMU export.**  `build_model_description(multi_clock=True)`
-  emits one FMI 3.0 `<Clock>` (`intervalVariability="constant"`,
-  `intervalDecimal=<dt>`) per distinct node timestep among the exported
-  nodes and tags every exported output and external input with its node's
-  clock (`clocks=` attribute, `variability="discrete"`; clocked outputs
-  are not initial unknowns), so an importer knows a node on a coarser rate
-  only changes on its ticks.  Clocks are `clock_<k>` in order of
-  increasing interval; the fastest equals the default step size.  Off by
-  default: the single-clock surface is unchanged.  Validated with FMPy
-  (`validate=True, validate_model_structure=True`).
-
-- **Graph parameter pytree** — the compiled step is now
-  `step_fn(state, external_inputs, params)`.  `GraphManager.params`
-  (`{"nodes": {name: node.params_pytree()}, "mappings": {}}`) is snapshotted
-  at compile time and passed on every `step` / `run` / `run_scan` /
-  `run_scan_with_history` / `run_sweep` / adaptive run (each accepts an
-  optional `params=` keyword).  Node constants are therefore traced inputs
-  rather than closure constants baked into the jit: `jax.grad` /
-  `jax.jvp` / `jacfwd` reach them — including through coupling groups,
-  where `closure_convert` hoists them into the IFT rule — and a changed
-  value takes effect without recompiling.  A node opts in by declaring
-  `update(..., *, params=None)` and reading its constants from `params`
-  (`SpringDamperNode`, `BallNode`, `HeatNode`, `RigidBodyNode` migrated;
-  then `RigidBody2DNode` — mass, inertia, gravity; `HeartPumpNode` — the
-  six Windkessel constants including `systole_fraction` on a logit spec;
-  `TableNode` and `HealthCheckNode` — on the contract with no dynamics
-  constant to inject, `checks` and the surface height stay structural;
-  `LBMNode` — `viscosity`, so `tau` is a traced constant; `LBMPipeNode` —
-  `tau`, `tau_tracer`, `propeller_strength`, `gravity` and the Shan-Chen
-  constants `G`, `rho_0`, `rho_wall`, `rho_liquid`, `rho_gas`, the latter
-  trainable only when the node was built multiphase since `G != 0`
-  selects the branch; `SurrogateNode` — every floating leaf of the
-  network weights as a flat `"weights<path>"` entry, rebuilt into the
-  weights pytree inside `update`, so `jax.grad` of a trajectory loss
-  reaches the surrogate weights and fine-tuned weights need no recompile);
-  nodes on the 3-argument contract keep working unchanged.
-  `SimulationNode.params_pytree()` defaults to the float-valued entries of
-  `self.params`; structural values (`n_cells`, shapes, ...) stay on the
-  recompile path.  Checkpoints save and restore `params`; the REST
-  `PUT /graph/params/{node}` updates `gm.params` in place for such nodes
-  instead of forcing a recompile.  `TestParameterRecovery` now recovers
-  `k, c` through the real graph (single spring and a coupled group), with
-  the float32 gradient matching a float64 finite difference to 2.4e-6
-  relative over 100 steps.  One consequence: expressions like
-  `dt * gravity` are no longer constant-folded, so XLA may contract them
-  into an FMA in one compiled shape and not another; `run_sweep` and
-  individual `run_scan` results can now differ by ~1 ulp (they were
-  bit-identical before), and the vmap-consistency test allows a few ulps.
-- **`ParamSpec`** (`maddening.core.params`): per-parameter `trainable`,
-  `bounds` and `transform` (`"log"` for strictly positive constants,
-  `"logit"` for intervals, `None` = clip).  Nodes declare specs for their
-  constants in `SimulationNode.param_specs()` (`initial_*` entries default
-  to `trainable=False`; the four migrated nodes declare bounds/transforms);
-  `GraphManager.set_param_spec(node, key, spec)` overrides per graph.
-  `gm.trainable_mask()`, `gm.unconstrain()` / `gm.constrain(u)` and
-  `gm.check_params()` are the pytree maps an optimiser needs; the
-  transforms clamp to the representable float32 interior so a saturated
-  step (`exp(89)`, `sigmoid(17)`) stays finite and invertible.
-- `maddening.sysid.fit(gm, loss_fn, ...)`: Adam in the unconstrained
-  coordinates under the trainable mask, returning physical params inside
-  their bounds with frozen leaves bit-identical; raises on a non-finite
-  gradient.  `fim(..., mask=)` restricts the Fisher matrix to the leaves a
-  mask (e.g. `gm.trainable_mask()`) selects.  `TestParameterRecovery` now
-  fits through `sysid.fit` with `mass` frozen by spec.
-- Passing a `params` pytree that names a node whose `update` takes no
-  `params`, an unknown node, or an unknown parameter key is now a
-  `ValueError` at trace time (previously silently ignored — and a gradient
-  with respect to it silently zero).  `gm.nodes_without_params()` lists
-  the nodes whose constants are baked; `compile()` logs them.
-- `verify_node` / `assert_node_verified` battery gains `params_consistent`
-  (injected `params_pytree()` reproduces the baked-constant step to float32
-  round-off), `params_gradient_finite` (finite `d(outputs)/d(params)`) and
-  `params_effective` (every trainable leaf has a non-zero gradient on at
-  least one sample — catches a constant still read from `self.params`);
-  all `SKIP` — a new `VerificationResult` status that counts as passed —
-  on nodes whose `update` takes no `params`.  `SimulationNode.accepts_params()`
-  exposes that probe.  `tests/verification/test_builtin_nodes_verified.py`
-  runs the full battery on every built-in node in CI and asserts the
-  migrated ones do not skip the params checks.
-- Hypothesis property suites for the params pytree
-  (`test_hypothesis_params.py`: baked ≡ traced step, `step` ≡ `run_scan` ≡
-  `run_sweep` within ulps, float32 params gradient vs float64 finite
-  differences, jvp/vjp adjoint identity through an IFT-coupled group, no
-  dirty/recompile/mutation on a modified pytree, checkpoint round trip) and
-  for `maddening.sysid` (`test_hypothesis_sysid.py`: `windowed_loss` zero
-  at truth and non-negative elsewhere over random tilings, single window ≡
-  direct trajectory loss, unconverged masking, FIM symmetric PSD with
-  orthonormal eigenvectors, injected null directions recovered).
-- User guide page `docs/user_guide/parameters.md`.
-- **Interface mappings on edges** (`maddening.core.coupling.mapping`):
-  `add_edge(..., mapping=)` takes a `Mapping` (`apply` / `apply_T` /
-  `params_pytree`), applied before the scalar `transform`; its weights
-  are snapshotted into `gm.params["mappings"]["<src>.<field>-><tgt>.<field>"]`
-  and passed as a traced input on every step, so `jax.grad` reaches them
-  (also through an IFT coupling group) and a replaced matrix needs no
-  recompile.  `StaticLinearMapping` with factories `rbf_mapping`
-  (polynomial augmentation on by default, solve instead of `inv`,
-  kernel-relative ridge, `mode="consistent"|"conservative"` where
-  conservative is the transpose of the reverse consistent map and
-  preserves totals exactly), `nearest_neighbor_mapping`,
-  `projection_1d_mapping`, `matrix_mapping`.  Matrices are assembled and
-  solved in float64 on the host at construction.  Gates: patch test
-  (constants and linear fields reproduced across random non-conforming
-  point sets, float32 round-off and 1e-8 in float64) and conservation test
-  for every kernel; a mapped edge reproduces the closure-transform result;
-  gradient with respect to the weights is finite and non-zero.  Mapping
-  weights are `trainable=False` by default (opt in with
-  `set_param_spec(edge.key, "H", ParamSpec())`); `add_edge` checks
-  `n_source` / `n_target` against the field and declared boundary shape;
-  `gm.edges`, `gm.resolve_boundary_inputs(node)`; `to_dict` records
-  `mapping.describe()` (never the weights) and `from_dict` /
-  `save_graph_to_usd` refuse mapped edges until `MappingSpec` lands with
-  the USD read path.  `rbf_interpolation` (closure API) now shares the
-  same matrix construction, so its multiquadric constant test went from
-  `atol=0.1` to round-off.  Guide: `docs/algorithm_guide/coupling/interface_mapping.md`.
-- **Profiler rewrite** (`maddening.core.simulation.profiler`): coupling
-  overhead is now *measured* (the graph is recompiled with every group
-  capped at one iteration and timed; the difference is the cost of the
-  extra iterations, reported per iteration) instead of inferred from
-  isolated node timings; per-group iteration statistics over the run
-  (mean / min / max against `max_iterations`, fraction of steps at the
-  cap, fraction converged) replace the last-step count that assumed
-  `max_iterations`; `dispatch_floor_ms` (a jitted identity on the state
-  pytree), median / p95 step time, device name; `trace=True` records a
-  short `jax.profiler` trace and attributes device kernel time to the
-  graph's `jax.named_scope` labels (`node:<name>`, `coupling:residual`,
-  `coupling:accelerate`, `coupling:interface_override`, `edge:mapping`),
-  with the device-busy fraction and kernels per step that tell a
-  launch-bound step from a compute-bound one.  Recommendations use the
-  new numbers (unconverged-at-cap, launch-bound, dispatch-bound).
-- `benchmarks/bench_coupling.py`: coupled-step benchmark (coupling group
-  vs staggered baseline, iterations used vs cap, measured per-iteration
-  cost, optional trace attribution, PERF-1 acceptance) for the MIME AR4
-  experiment graph (`--graph mime-ar4 --experiment DIR`), a two-spring
-  pair and a heat chain; JSON output under `benchmarks/results/`.
-- **Persistent compilation cache** (`maddening.core.simulation.compile_cache`,
-  PERF-2): `enable(cache_dir)` points JAX's persistent cache at a
-  directory with thresholds that cache sub-second compiles; `compile()`
-  honours `MADDENING_COMPILATION_CACHE_DIR`; `warm_cache(gm_factory,
-  n_steps=, scan_steps=)` compiles a graph's step and scan ahead of a run.
-  A cross-process cache hit is tested.  Developer guide:
-  `docs/developer_guide/profiling.md`.
-- `maddening.sysid` follow-ups: **multiple shooting** — `windowed_loss(...,
-  window_states=, continuity_weight=)` restarts each window from a free
-  state and ties consecutive windows with a continuity penalty,
-  `init_window_states` seeds them from the observations, and
-  `fit_multiple_shooting` optimises params and window states jointly
-  (noisy window starts no longer seed every window with measurement
-  error); **noise model** — `fim(..., noise_std=)` (scalar or per-leaf σ)
-  weights the residual so `crb` is in the parameters' own units;
-  **Levenberg–Marquardt** — `fit_lm(gm, residual_fn, ...)` uses the same
-  `jacfwd` sensitivities as `fim` in unconstrained coordinates under the
-  trainable mask and recovers a spring's (k, c) from 2× perturbations in
-  a handful of iterations where Adam needs hundreds; **progress events** —
-  `fit` / `fit_lm` / `fit_multiple_shooting` notify the graph's observers
-  with a `"fit_progress"` event (`EVENT_FIT_PROGRESS`: method, iteration,
-  loss, params) every `notify_every` iterations, so the REST relay and
-  live stage can show a calibration as it runs.
-- **v0.4.0 plan items (sharded solvers, coupling, stability):**
-  `sharded_cg` / `sharded_gmres` gain `differentiable=True`, which routes
-  the solve through `lax.custom_linear_solve` so `jax.grad` and `jax.jvp`
-  through the result — and the IFT adjoint of a coupling group whose node
-  solves with them — are exact linear-solve adjoints using the same
-  backend *and the same preconditioner* in the adjoint solve (`iters` is
-  then -1; off by default to keep the STABLE result contract).
-  `jacobi_preconditioner(diag)` and `block_jacobi_preconditioner(blocks)`
-  are the first users of the `preconditioner=` hook; `backend="lineax"`
-  now refuses a preconditioner instead of silently dropping it.  Gradient
-  parity through the preconditioned solve is tested against the dense
-  reference (reverse and forward mode, RHS and operator coefficients) and
-  on a 4-device CPU-virtual mesh.  C1: a multi-physics IQN-IMVJ test
-  (heat rod ⊗ spring, different operators per sub-domain) through the
-  IFT while_loop with cross-timestep warm start, fori parity and a
-  finite-difference gradient check.  Second stability wave: the
-  unstructured partition layout / halo exchange / partition + gather
-  helpers, `SidecarConfig` and `FMUState` are tagged `EVOLVING`.
-  C4: `SimulationNode.domain_integral_axes()` — a domain integral can be
-  reduced over a subset of mesh axes (one leading axis per unreduced
-  axis) or not at all (per-shard values stacked), on both sharded
-  wrappers; a body-surface integral living on some shards no longer
-  needs a full-mesh `psum`.
-- The IFT Krylov adjoint raises an actionable `ImportError` naming
-  `pip install maddening[ift]` (and the `linear_solver='dense'` fallback)
-  when lineax is missing; `tests/core/test_solver_ift_no_lineax.py`.
-- Hypothesis property over random graphs of built-in nodes: the compiled
-  step must trace exactly once across steps and after `set_node_state`
-  (`test_hypothesis_retrace.py`).
-- **Graph params on the sharded path.**  `ShardedStencilNode` and
-  `ShardedUnstructuredNode` now take part in the graph parameter contract
-  when the wrapped node's `update_padded` accepts `params`: the wrapper
-  reports `accepts_params()` / `params_pytree()` / `param_specs()` from the
-  inner node, and the node's entry of `gm.params` is replicated to every
-  shard and handed to `update_padded(..., params=)` (the params signature
-  is part of the shard_map cache key).  `LBMNode.update_padded` reads
-  `viscosity` from the injected params, so a sharded LBM graph is
-  calibratable and matches the unsharded graph for the same params;
-  previously the sharded path silently ignored `gm.params`.
-- `GraphManager.reset_state()`: reset every node to `initial_state()` and
-  zero the `_meta` counters / coupling diagnostics / IQN warm-start
-  caches with the same weak-type normalisation `compile()` applies, so a
-  reset never retraces the jitted step.  The profiler, the REST server's
-  reset and the example servers use it instead of assigning
-  `initial_state()` into `_state`.
-- REST `PUT /graph/params/{node}` can address any leaf of the node's live
-  pytree, not only constructor params (surrogate weights, sharded wrappers
-  whose inner node owns the params), with shape and dtype checks.
-- REST `PUT /graph/params/{node}` validates values against the node's
-  `ParamSpec` bounds before writing anything (400 with the offending leaf).
-- `maddening.testing.strategies.node_states` samples bool / integer state
-  fields with their own dtype, so the `structure` check covers monitor-style
-  nodes (`HealthCheckNode`) instead of being skipped.
-- **Params persistence and FMI.**  `gm.to_dict()` / `from_dict` and USD
-  (`save_graph_to_usd` / `load_graph_from_usd`) store each node's
-  *effective* params (`gm.effective_node_params`: constructor args with
-  the live `gm.params` values written over them) and the graph's
-  `ParamSpec` overrides (`param_specs` key; `maddening:paramSpecOverridesJson`
-  on the node prim), so a calibrated graph reloads calibrated with the
-  same trainable mask.  `build_model_description` exposes every
-  `gm.params` leaf as an FMI `parameter` / `tunable` variable
-  `<node>.params.<key>` with `ParamSpec` description, units and bounds
-  (XML `min` / `max`; `include_parameters=False` to opt out).
-  `SidecarConfig(params=..., param_specs=gm.param_specs())`
-  makes the sidecar call the compiled step's 3-argument contract and
-  serve `get_params` / `set_params` (also as wire requests); a set value
-  takes effect on the next step without recompiling, unknown names,
-  wrong shapes or out-of-bounds values are errors (the call is atomic),
-  and FMU state snapshots carry the parameters
-  (`serialize_fmu_state(params=)`, `deserialize_fmu_state(return_params=True)`;
-  legacy snapshots still load).
-- `maddening.sysid`: `windowed_loss` (teacher-forced windowed trajectory
-  loss with optional masking of windows where a coupling group exited
-  unconverged) and `fim` (Fisher information `JᵀJ` from `jacfwd`
-  sensitivities, relative scaling, eigen-decomposition, Cramér–Rao bounds)
-  — the identifiability check correctly isolates the (k, c, m) common-scale
-  direction on a spring observed through position only.
-- Coupling iteration count and residual are now always written to `_meta`
-  under the default solver (not only with `diagnostics=True`), so
-  `coupling_diagnostics()` and scan histories always carry the converged
-  flag.
-- `CouplingGroup.strict_convergence`: raise (jit-safe, via `equinox.error_if`)
-  when a group exits at `max_iterations` unconverged, since the IFT gradient is
-  then invalid.  Off by default.
-- `GraphManager.coupling_diagnostics()` reports `"converged"` per group.
-- `maddening.testing.verification` is a Hypothesis battery (`verify_node`,
-  `assert_node_verified`): finite outputs, preserved structure, determinism,
-  jit/eager agreement, finite gradients, plus opt-in `output_bounds`,
-  `energy_fn` and custom `invariants`; failures return the shrunk
-  counterexample.
-
-### Deprecated
-
-- `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the next
-  minor release.
-
-### Removed
-
-- The stelling formal-verification suite, CI job and `stelling` dependency.
-  The `[verify]` extra now only pulls `hypothesis`.
-
-### Verification
-- **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
-  `tests/fmi/c/`): a unit-test binary that includes the wrapper source
-  (framing, JSON number parsing, endpoint discovery, every FMI entry
-  point against a fake sidecar on a socketpair and a loopback listener),
-  built plain and with `-fsanitize=address,undefined`; a deterministic
-  fuzz harness for the reply surface (3 seeds x 3000 iterations in the
-  fast lane, 60k in the slow lane, also exported as a libFuzzer target);
-  the unit and fuzz binaries under valgrind memcheck; a short
-  coverage-guided libFuzzer campaign with clang; FMPy driving an ASan
-  build in a subprocess against a normal and a hostile bridge; FMPy's
-  low-level FMI 3 API with two instances (params before initialisation,
-  FMU state get/set/serialize, reset, terminate); `validate_fmu` on the
-  packaged FMU; and a warning-free `-std=c11 -pedantic` build.  CI
-  installs valgrind and clang so all of it runs there; each part
-  self-skips where its tool is missing.
-- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
-  via `-m "not slow"`).  Slow-marked tests deferred to a longer
-  pre-release pass.
-- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
-  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
-  on the `lax.psum` integral), 50-step multi-step convergence,
-  construction-time validation (`shard_axis` must match the wrapper's
-  spatial axes; nodes with sharded statics must accept `static_padded`
-  on `update_padded`), `shard_info` delivery.
-- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
-  green; aggregation test confirms shape + dtype errors raise in one
-  `ExceptionGroup` alongside a `UnitMismatchWarning`.
-
-### Security
-- **FMU sidecar `set_state`: zip bomb via an archive member without the
-  `.npy` suffix.**  The per-member size cap of the earlier arrays-only
-  `npz` fix looked members up by `name + ".npy"`, so a member named plainly
-  (`_token`, say) escaped it and was decompressed in full before the token
-  check (measured: 1 MiB on the wire declaring 1 GiB drove the bridge
-  process to +4.7 GB RSS; a 64 MiB frame could declare some 60 GiB and
-  OOM-kill it).  Reachable from the untrusted importer over both the
-  base64 (JSON) and the raw (binary, protocol 2) `set_state`.  The bridge
-  now checks the archive *directory* before `np.load` touches anything:
-  every member, whatever its name, must be one the model expects
-  (`_token`, `_time`, the live state fields, parameters and declared
-  inputs, all `.npy`) and declare no more than that array plus a header
-  can hold, and the total declared size is capped too (duplicate names
-  cannot multiply it).  Regression tests craft such archives on both paths
-  and assert the refusal happens before `np.load` runs.
-- **REST checkpoint endpoints are confined to a directory.**
-  `/checkpoint/save` and `/checkpoint/load` took an arbitrary server-side
-  path from an unauthenticated client (arbitrary file write, file-existence
-  oracle).  Paths are now relative to `SimulationServer(checkpoint_root=)`
-  (default `./checkpoints`) and must resolve under it; load errors no
-  longer echo parser internals.  The API still has no authentication:
-  bind it to localhost or put it behind a proxy that authenticates.
-- **FMU bridge no longer unpickles importer bytes** (independent audit
-  round 3, CRITICAL).  `FmuTcpBridge` `set_state` used `pickle.loads` on
-  the base64 payload an importer hands to `fmi3SetFMUState`, i.e. remote
-  code execution for anyone able to reach the bridge port.  The FMU-state
-  blob is now an arrays-only `npz` (`allow_pickle=False`) carrying the
-  schema token, time, inputs, states and params; on `set_state` the
-  token, key set and every shape are validated before anything is
-  written.  The pickle-based `FmuSidecar.handle` wire protocol is for
-  trusted in-process / Python clients only and is documented as such.
-
-### Fixed
-- **`AdaptiveNode` survives a config / USD round trip** (audit A4).
-  `blindness_gate` was not forwarded to `super().__init__`, so it never
-  entered `self.params` and a node deliberately built with the gate off
-  reloaded with it on; `n_max` *was* in `self.params` and was replayed as a
-  constructor keyword, so every subclass following the documented pattern got
-  `TypeError: got multiple values for keyword argument 'n_max'`.  Both are
-  fixed and covered by `tests/nodes/adaptive/test_round_trip.py` and
-  `tests/usd/test_usd_adaptive_node.py`.
-- **The gradient-capture diagnostic evaluates the parameters actually in use**
-  (audit A5).  It no longer reuses `state["mask"]`, which made a state
-  selected at a healthy point report a healthy ratio (1.005) at an exact trap;
-  the active set is re-selected at the evaluated parameters.
-  `check_gradient_capture(gm.params["nodes"][name])` runs the check at a
-  graph's live pytree -- the point `sysid.fit` optimises -- which the
-  constructor-time gate never saw.
-- **`scripts/generate_stability_report.py` imports `maddening.nodes.adaptive`
-  and `maddening.core.solver_utils`** (audit A6), so their `@stability` tags
-  reach the generated report the release gate reads; `tests/compliance/
-  test_stability.py` now fails if either module drops out of that list again.
-  (The committed report is not regenerated here: it is refreshed at release
-  time.)
-- **The `jnp.where` gradient trap is documented, warned about and tested**
-  (audit A9).  Masking the solve output protects the value, not the tangent: a
-  `solve_frozen` that evaluates a singular expression on inactive entries
-  returns a clean forward pass and a `NaN` gradient.  The base class cannot
-  repair it, so it warns when it can see non-finite pre-mask coefficients and
-  offers `AdaptiveNode.mask_safe(mask, operand, fill)`, the inner half of the
-  double-`where` idiom, which the authoring guide now prescribes.
-- **The cold-start diagnostic is evaluated only when it can change the
-  outcome** (audit A13).  It costs two gradient evaluations (8-10x an
-  unguarded `initial_state()`) and `initial_state()` is called from
-  `add_node`, `reset_state`, the profiler, the REST API, the sharded-node
-  paths, the FMI model description and the hypothesis strategies; it is now
-  memoised per instance and parameter point, skipped when the gate is off,
-  when `on_blind="ignore"` or when the node has no trainable leaf, and can be
-  disabled process-wide with `MADDENING_ADAPTIVE_DIAGNOSTICS=0` or
-  `maddening.nodes.adaptive.set_adaptive_diagnostics(False)`.
-- **The adaptive-node suite now visits an active-set switch** (audit A2).
-  `tests/nodes/adaptive/test_active_set_switch.py` bisects a switch and
-  asserts the objective's jump does not vanish as the step shrinks, that
-  central finite differences across it diverge as `1/h` while the returned
-  gradient stays finite, that inside a region the gradient is the derivative
-  of the branch the forward pass selected (checked against a finite difference
-  *of that branch*, with a step verified to cross no switch -- not the
-  exact-baseline pattern the design spike warns against), and that the
-  integral of the gradient plus the crossed jumps reconstructs the objective
-  change.
-- **The rollout-parity property tests are no longer flaky.**  The
-  `step` / `run_scan` / `run_sweep` agreement tests in
-  `tests/verification/hypothesis/test_hypothesis_params.py` compared a
-  near-zero final value against a fixed `atol=1e-7`, but float32 round-off
-  accumulates with the magnitudes the arithmetic passes through, and a
-  ball's velocity crosses zero on every bounce.  A sweep of 1600
-  seed/step-count combinations failed 7 times (all 15-step ball velocities,
-  2e-7 to 1e-6 absolute), about a 6 % chance of a red run per CI job.  The
-  absolute tolerance is now scaled by the largest magnitude in the compared
-  trees, and the seven seeds are pinned as an explicit regression test.  No
-  library code changed: the three rollout paths always agreed to float32
-  round-off.
-
-- **Interface-mapping serialisation hardening** (independent audit of the
-  `MappingSpec` feature; regression tests in
-  `tests/core/test_mapping_spec_hardening.py` and `tests/usd/test_usd_mapping_spec.py`).
-  A graph with trainable mapping weights can reload its own config again:
-  `GraphManager.from_dict` applied `param_specs` before the edges existed, so
-  a `set_param_spec(edge.key, "H", ParamSpec())` override — the documented
-  sysid workflow — made the loader raise `KeyError "unknown node
-  '<edge key>'"`; overrides are now applied after the edges (and an override
-  naming neither a node nor a mapped edge is a `ValueError` saying so).  The
-  USD writer/reader carries edge-key overrides too, on the edge prim.  Point
-  references now record `sha256`, the content hash of the array the factory
-  was given: the writers resolve every node reference and refuse a stale one
-  (a removed node, a field that changed) naming the edge, and the rebuild
-  refuses a reference that resolves to different points instead of silently
-  building a different operator.  Asset loading is hardened — the path is
-  resolved and must stay under `base_dir` (symlinks to files and to
-  directories no longer escape it), the `.npy` header / `.npz` directory
-  entry is checked against `MAX_ASSET_BYTES` (256 MiB) and the file's own
-  size before anything is allocated, and non-numeric dtypes are refused;
-  inline sets are bounded by element count as well as point count and must
-  be finite and real.  Every failure while rebuilding one edge's mapping —
-  including `BadZipFile`, `TypeError`, `JSONDecodeError` from a corrupt
-  `maddening:mappingSpecJson`, `OSError` and `MemoryError` — is now a
-  `MappingRebuildError` (a `ValueError`) naming the edge with the cause
-  chained.  `describe()["kind"]` is the user-facing kind again
-  (`matrix_mapping(kind="supermesh")` reports `"supermesh"`, not `"matrix"`,
-  as before the feature landed) while the spec keeps `kind: "matrix"` plus
-  `label`.  Non-finite `epsilon` / `ridge` are refused by the factories (they
-  serialised to invalid JSON), a `key` on a `.npy` asset and a non-string
-  matrix label are errors, a 0-d static field is a clear `PointReferenceError`
-  instead of an `IndexError`, and `gm.to_dict()` warns when live
-  `params["mappings"]` weights differ from what the recipe rebuilds so
-  trained weights are not dropped silently.  New public accessor
-  `GraphManager.get_node(name)`.
-- **Resume-from-URL transport hardening** (independent audit of the
-  `maddening.cloud.resume` move, report under
-  `benchmarks/results/audit_cloud-resume-transport/`; regression tests in
-  `tests/cloud/test_resume_transport_robustness.py`, `tests/cloud/test_resume.py`
-  and `tests/compliance/test_stability.py`).  The manifest URL is now derived
-  by appending `.manifest.json` to the URL *path*, keeping the query string
-  and fragment, so a presigned `https://…/snap.npz?X-Amz-Signature=…` no
-  longer fetches the `.npz` body as its own manifest; because a presigned
-  URL authorises one object only, `download_and_load_state(...,
-  manifest_url=)` and the entry point's `RESUME_MANIFEST_URL` take the
-  manifest's own URL.  HTTP(S) fetches have a `timeout=` (default 60 s,
-  `MADDENING_RESUME_TIMEOUT` in the entry point) and raise `TimeoutError`
-  instead of holding container start-up forever; the timeout is forwarded
-  to `s3fs` / `gcsfs` best-effort.  Downloads stream to disk in 1 MiB chunks.
-  The default per-call temporary directory is removed after the load
-  (success or failure); a caller-supplied `dest_dir` is kept.  `file://`
-  paths are percent-decoded, an empty URL raises
-  `ValueError("empty checkpoint URL")`, a directory raises a clear
-  `ValueError`, and Windows drive-letter paths are documented as
-  unsupported.  The entry point (`resume_from_env`, split out of `main()`)
-  logs URLs with the query string redacted, logs the manifest's key fields
-  on success, and, when `RESUME_FROM_URL` is set but the server's graph has
-  no nodes, says that resume is impossible until a graph is loaded (still
-  non-fatal).  `maddening.cloud.__getattr__` rewraps only a
-  `ModuleNotFoundError` for a module outside `maddening` (naming it) and the
-  package defines `__dir__`, so `dir(maddening.cloud)` lists the lazy names.
-  Docs and docstring state the closed scheme allow-list exactly.
-  `scripts/generate_stability_report.py` imports `maddening.cloud.resume`
-  (and the other tagged modules it had missed) from a `STABILITY_MODULES`
-  list that a compliance test checks against a grep for `@stability(` over
-  `src/maddening`; the committed stability report is regenerated at the
-  release freeze.
-- **FMU C wrapper / sidecar bridge: findings of the independent audit of
-  the protocol-2 merge (PR #11).**  *Fuzz harness:* the thread-free
-  harness introduced in 86dafe1 closed its fake server before the client
-  sent its request, so every exchange failed with EPIPE and the reply
-  parsers (`bridge_xfer`, `hdr_count`, `parse_binary_values`,
-  `parse_values`, the raw-state path) had had no fuzz coverage at all; the
-  seeded ASan/UBSan runs, the valgrind run and the libFuzzer campaign were
-  green for the wrong reason.  The server end is now half-closed
-  (`shutdown(SHUT_WR)`), a third of the replies are well formed for the
-  operation under test (so the success paths are reached too), and the
-  harness is self-checking: the wrapper counts each parser path when built
-  with `MADDENING_FUZZ_COUNTERS` (off in the shipped FMU), the standalone
-  run prints the counts and fails when any path was never reached, and
-  `tests/fmi/test_c_unit.py` asserts them (gcov, seeds 1/7/12345 x 3000:
-  26 % -> 57 % of the wrapper's lines).  *Framing:* a reply over the
-  64 MiB limit (now enforced for JSON replies too, which could announce
-  2 GiB and get it allocated) or cut short by the peer drops the
-  connection, so every later call returns `fmi3Error` instead of parsing
-  stale bytes as its reply (an unanswered `fmi3DoStep` used to return
-  `fmi3OK`); the bridge never sends a frame over the limit (a `get` /
-  `get_state` whose reply would exceed it gets a JSON error, connection
-  in sync); the C-side `set` limit counts the header bytes and the value
-  references, so the largest allowed `set` is no longer dropped without
-  a reply; `hdr_count` accepts only a plain decimal count.  *Validation:*
-  values are narrowed to the variable's dtype before the finiteness check
-  (a float32 input set to `1e308` was stored and read back as `inf`);
-  a JSON request or binary header nested too deeply (`RecursionError`
-  from the JSON scanner) is a malformed-request error reply, not a
-  dropped connection with a thread traceback; a client hanging up
-  mid-reply (`BrokenPipeError`) ends the connection quietly;
-  `FmuTcpBridge.handle` accepts the dict `recv_message` returns for a
-  binary frame.  Docs: the "Wire protocol" section states the send-side
-  behaviour and that the protocol-1 hello reply gains two keys.
-- **Type-check job: a broken pyright run can no longer look like a result**
-  (independent audit of the phase-1 typing merge; report under
-  `benchmarks/results/audit_typing-pep561/`, regression tests in
-  `tests/test_typing_baseline.py` against a fake pyright executable).
-  `scripts/typing_baseline.py` now exits 2 (*infrastructure failure*,
-  distinct from 1 = errors found) and prints no table when pyright is
-  missing (an actionable hint instead of a `FileNotFoundError`
-  traceback), exits with a code other than 0/1 (3 = unparsable
-  `pyrightconfig.json`, which used to be flattened to "errors present"),
-  does not produce JSON, analysed zero files (a missing `include` path
-  gives a valid empty document, exit 0 and a stderr-only message, which
-  used to pass `--fail-on-errors` silently), or did not resolve the core
-  imports `jax`/`numpy`/`yaml` or more than `--max-missing-imports`
-  (default 40) imports: a wrong interpreter *lowers* the count (395 -> 230
-  in the audit) with nothing on stderr.  pyright's stderr is always
-  forwarded; a `--pythonpath` given after `--` is checked to exist and
-  import numpy before pyright runs; Markdown file cells are code spans
-  (`__init__.py` rendered as emphasis) with pipes escaped; `--help` says
-  that pyright's own flags go after `--`.  The CI `typecheck` job is two
-  steps: *Run pyright* fails the job on an infrastructure failure and
-  writes the step summary only when there is a table; *Report error
-  count* keeps `continue-on-error` in phase 1 and emits the count as a
-  workflow warning.  `pyright` is pinned to `1.1.414` in the `ci` extra
-  (the baseline is tied to it; `dev` keeps the floor).  The `changes`
-  gate treats an empty diff as code (logged explicitly), diffs with
-  `--no-renames` so a rename out of a code path lists both paths, and
-  reads file names line by line (paths with spaces); the on-purpose
-  nested-match semantics of `docs/*` and `*.md` are documented in the
-  job.  `docs/developer_guide/typing.md` carries the measured numbers:
-  33 STABLE-module errors across 7 modules (`fmi/model_description.py`
-  was omitted), tier 1 83 / tier 2 312 (was "~140 / ~250"), and the
-  script's exit-code contract.  Phase-2 scope is unchanged: two tiers,
-  tier 1 blocking at zero errors, tier 2 every public signature
-  annotated with bodies ratcheted.
-- **Independent audit, round 4** (residue across rounds 1-3; report under
-- **Multi-GPU session runner: exchange timing and recommender corrected
-  before any pod time is spent** (independent audit of the session
-  preparation, findings F1-F15; regression tests in
-  `tests/cloud/multigpu/test_run_pod_dry_run.py`,
-  `test_conftest_device_policy.py` and
-  `tests/cloud/test_cloud_examples_install_targets.py`).  The `exchange`
-  goal timed a slab that lived on device 0, so every timed call also
-  scattered the whole slab to the mesh and both transports were charged
-  the same constant (about 2/3 of the measured time on 4 virtual CPUs);
-  all timed inputs of `exchange`, `forward` and `gradient` are now
-  placed once with the mesh `NamedSharding` outside the timed region,
-  the runner refuses to time anything else and records
-  `input_presharded`.  `recommend()` accepted single-GPU rows (a no-op
-  exchange with a timer-noise ratio) and raised `TypeError` on a zero
-  median; a row now decides only from a real accelerator run at
-  >= 1e5 cells on >= 4 devices (>= 2 with the new
-  `--allow-fewer-devices`, recorded in the JSON) with a finite speedup,
-  the reason line names what each row lacked, and `--goal exchange` is
-  refused on 1 device (and on 2-3 without the flag).  Rollout gradient
-  timings compared a jitted unsharded grad with a retracing, host
-  re-partitioning sharded one; both are `jax.jit(jax.grad(...))` with
-  statics placed once and compile time reported apart (`compile_s`, also
-  for `forward` and `sharded_cg`; JSON `schema_version` 2).  `--summarise`
-  no longer imports JAX and `--dry-run` no longer shells out to
-  `nvidia-smi`; `--mesh` is loaded and partitioned once per process and a
-  file partition with fewer non-empty parts than `--n-devices` is an
-  error instead of silent empty shards.  Test policy: the four multigpu
-  test modules that still set `XLA_FLAGS` themselves (overriding
-  `MADDENING_VIRTUAL_DEVICES=0` and the accelerator rule) no longer do,
-  the conftest is the only setter (grep test), and a malformed or
-  negative `MADDENING_VIRTUAL_DEVICES` is a one-line usage error at
-  collection instead of a traceback.  Stale JAX pins: `docker/Dockerfile.cloud`
-  (`jax[cuda12]>=0.4,<0.6`; its Ubuntu 22.04 base has Python 3.10, which
-  neither MADDENING nor `jax>=0.10` supports, so the image moves to the
-  CUDA 12.6 / Ubuntu 24.04 base with Python 3.12) and the SOUP table now
-  carry the `pyproject` range; cloud examples 04/06/07 installed the
-  corrected pin under `python3.10` (uninstallable) and now use
-  `python3.12`, with PyGObject built by pip for that interpreter in the
-  two streaming examples and the constraint documented in their
-  docstrings.
-  `benchmarks/results/audit4/`, regression tests in
-  `tests/core/test_checkpoint_and_params_shape_guards.py` and `tests/fmi/test_bridge_inputs_and_robustness.py`).
-  FMU bridge: an input the importer never set is now the advertised zero
-  start value (like `gm.step()`), also after `reset` and `set_state`, so a
-  HeatNode FMU no longer runs adiabatic until its first `fmi3Set*`; a
-  multi-sub-step `step` that fails leaves state and time untouched; a
-  malformed request gets an error reply instead of a dropped connection;
-  an FMU-state member larger than the live leaf is refused before it is
-  decompressed and a non-finite time is refused; the C wrapper refuses a
-  non-base64 state blob before it can break the request framing and
-  accepts `[::1]:port` endpoints.  REST: `PUT /graph/state` validates
-  field set, dtype, shape and finiteness before writing; a JSON boolean
-  for a numeric param is a 400 (it used to drop the leaf at the next
-  recompile); `POST /graph/nodes` traces one update abstractly before
-  adding the node (a bad constant used to wedge every later step);
-  `POST /graph/edges` checks that the nodes and the source field exist.
-  Core: `load_state` refuses a state field of the wrong shape and coerces
-  dtype; a checkpoint without `_meta` keeps the freshly compiled `_meta`
-  instead of leaving a multirate graph to raise `KeyError`; a wrong-shape
-  params leaf is refused by `step(params=)` and by `gm.params[...] =`
-  (it used to broadcast the node's state permanently); `add_node` refuses
-  names containing `/`, `#` or `->`; a sharded `HeatNode` accepts a
-  halo-padded per-cell `heat_source`.  `fsspec` joins the `ci`/`dev`
-  extras so the cloud-URL checkpoint tests run in CI instead of skipping.
-- **FMU wrapper survives a sidecar that goes away.**  A `send()` to a
-  closed peer raised SIGPIPE and killed the importer's whole process;
-  sends now use `MSG_NOSIGNAL` (`SO_NOSIGPIPE` on macOS) and the call
-  returns `fmi3Error` (unit-tested against a closed socketpair).  Found
-  when the fuzz harness went thread-free: it preloads the fake reply
-  into the socket instead of spawning a thread per iteration, which is
-  what made the libFuzzer campaign reach 7.5 GB RSS and get OOM-killed on
-  the CI runner.  The campaign is now built with UBSan only (the ASan build
-  reported ~8 GB RSS at `INITED` with 25 MB of live heap on the runner and
-  in long test sessions, a host-accounting effect, not a leak) and guarded
-  by a per-allocation `-malloc_limit_mb` instead of an RSS limit; memory
-  safety of the same harness stays covered by the ASan seeded runs and
-  valgrind.  The
-  cross-process persistent-cache test proves a hit by the cache
-  directory gaining no entries rather than by a wall-clock ratio.
-- **Independent audit, round 3** (FMU bridge / wrapper / exchange;
-  regression tests in `tests/fmi/test_bridge_security_and_stepping.py`).  A
-  communication step that is not a whole multiple of the master timestep
-  is refused instead of silently snapping the physics while reporting
-  `t + h` (the FMU now advertises a fixed communication step); a `set`
-  request is atomic across parameters and inputs (a rejected parameter
-  no longer leaves an already-applied input behind) and refuses
-  non-finite inputs; a second FMU instance on one bridge gets a clear
-  error instead of blocking; `fmi3DoStep` initialises its output flags
-  on the error path and `fmi3EnterEventMode` refuses, matching
-  `hasEventMode="false"`; `exchange_unstructured(method="all_to_all")`
-  no longer raises when no shard needs a ghost cell (one device,
-  edge-disjoint shards).  Also: the two Hypothesis integrator-order
-  tests run under `jax.experimental.enable_x64()` instead of skipping.
-- **FMU C wrapper, found by its own fuzz/sanitizer tests.**  A failed
-  instantiation after the `hello` exchange (token mismatch) leaked the
-  reply buffer; a failed or partial reply receive left a freshly grown
-  buffer unterminated, so a later parse could read past it (ASan
-  heap-buffer-overflow); `parse_values` / `GetFMUState` now refuse a
-  missing reply; a `file://` resource path with nothing after the prefix
-  is no longer indexed at `[-1]`; the endpoint file's trailing newline is
-  stripped; POSIX feature macros make the source build under
-  `-std=c11 -pedantic`.  Also: `gm.trace_count` replaces the jit cache
-  size as the retrace probe in tests (the cache count reads 0 on JAX
-  0.10, which broke CI).
-- **Independent audit, round 2** (12 findings, all fixed; report under
-  `benchmarks/results/audit2/`, regression tests in
-  `tests/core/test_params_persistence_edge_cases.py`).  `compute_interface_correction`
-  joined the params contract (a calibrated diffusivity now also corrects
-  the coupled interface cells; `HeatNode`, `HybridNode`), and `HybridNode`
-  forwards `params` to its physics node.  `PUT /graph/params/{node}`
-  stores the constructor's Python type (a JSON `40` for a float leaf used
-  to turn it into an `int` the pytree no longer exposed), validates a
-  request before the first compile exactly as after it, and `GET` returns
-  the live view.  `load_state` compiles a fresh graph *before* restoring,
-  so the multirate step counter and coupling history survive a
-  load-before-compile; checkpoints now carry `params["mappings"]`, and a
-  params leaf of the wrong shape is refused.  `remove_edge` drops
-  ordinal-key overrides; Python-scalar leaves in `gm.params` are coerced
-  to the leaf dtype (no retrace, kept on recompile, also under x64); the
-  coupling residual `_meta` seed takes the group's floating dtype
-  (float64 graphs no longer fail `run_scan` after compile); the logit
-  clamp uses `nextafter` limits so a few-ulp-wide interval stays strictly
-  inside.
-- **FMU export of a real graph had no inputs and a wrong step size.**
-  `build_model_description` looked for a `_external_input_specs` dict a
-  `GraphManager` never had, so external inputs were silently omitted, and
-  read a `_master_timestep` attribute that does not exist, so the default
-  experiment step was always 1e-3.  Inputs now come from the graph's
-  external-input list as `<node>.<field>` (description / unit from the
-  target's `boundary_input_spec`), and the step size is the graph's base
-  timestep (fastest node).
-- **Flux edges honour the params pytree** (audit round 1, HIGH).
-  `compute_boundary_fluxes` gained the same keyword-only `params` as
-  `update`; the graph passes the node's `gm.params` entry on every flux
-  evaluation (Gauss-Seidel, Jacobi, uncoupled and IFT paths), so a
-  calibrated stiffness / diffusivity changes the force or heat flux an
-  edge *delivers* and the gradient through a flux consumer is correct.
-  `SpringDamperNode`, `HeatNode`, `HeartPumpNode`, `LBMNode` and
-  `HybridNode` migrated; `verify_node`'s params checks now cover fluxes
-  and fail a producer that takes `params` in `update` only.
-- **`compile()` keeps calibrated params** (audit round 1, HIGH).  Every
-  recompile used to overwrite `gm.params` with the constructor snapshot,
-  so adding an edge / external input, replacing a node, a REST write on a
-  legacy node or the profiler's one-iteration variant silently discarded
-  a fit.  Live leaves whose node/key/shape/dtype still exist are carried
-  over (`_merge_live_params`; a dropped leaf warns), `gm.reset_params()`
-  is the explicit way back, and `load_state` on a not-yet-compiled graph
-  compiles first instead of dropping the checkpoint's params.
-- **Non-float leaves in coupled graphs are bit-exact** (audit round 1,
-  HIGH).  The float32 images that carry integer / boolean leaves through
-  the IFT closure were exact only below 2**24: `uint32` / `int32` values
-  above that were corrupted and typed PRNG keys crashed at trace time.
-  Images are now 16-bit limbs (`float_image` / `from_float_image` in
-  `coupling.acceleration`), keys travel as their uint32 data, and the
-  coupling norms and the predictor act on floating fields only (a counter
-  or flag keeps its first-pass value instead of being extrapolated).
-- **A partial params pytree** through `gm.step` / `run` / `run_scan` is
-  completed from the *live* `gm.params` (a missing node or key used to
-  fall back to the constructor constant); the raw compiled step refuses
-  an incomplete pytree with a message pointing at the wrappers.
-- **Two mapped edges on one field pair** (two additive contributions)
-  used to share a single `params["mappings"]` slot, the first silently
-  using the second's weights; each now gets its own slot via
-  `EdgeSpec.ordinal` (`"a.v->b.inp"`, `"a.v->b.inp#1"`).
-- `set_param_spec` overrides no longer outlive `remove_node` /
-  `remove_edge` (a stale one broke `to_dict` -> `from_dict`); edge
-  `transform` (registered name), `additive` and units now survive the
-  config round trip.
-- **`ParamSpec` edge cases** (audit round 1).  `constrain` with
-  `transform="log"` and `lo != 0` could land exactly *on* the open bound
-  (`8.0 + exp(-15)` is `8.0` in float32), so `check_params` rejected the
-  fit's own output and `unconstrain` returned `-inf`; the clamp is now
-  relative to the bound (a few ulps of `lo` / `hi`), for `logit` too.
-  `ParamSpec.check` / `check_params` reject NaN and `±inf` (NaN used to
-  pass every bounds comparison).  `ParamSpec.from_dict({"bounds": null})`
-  no longer crashes.  A bounded identity leaf keeps its dtype through
-  `constrain` (integer weights were promoted to float32).
-- **`PUT /graph/params/{node}`** validates dtype coercion, shape,
-  finiteness and bounds for every key *before* writing anything: a string
-  or `null` for a live float is a 400 naming the key (was a 500), and
-  `NaN` / `Infinity` are refused (NaN used to be written into
-  `gm.params` and `node.params` before the response failed).
-- **`sysid.fim` / `fit_lm` with `noise_std` as a pytree** (documented,
-  per-leaf sigma matching the residual structure) crashed because
-  `jnp.ndim(dict) == 0` took the scalar branch; the scalar branch is now
-  keyed on real numbers and 0-d arrays only.
-- **FMI `min` / `max` for open bounds.**  A `log` / `logit` leaf's bound
-  is strict, but the FMI attributes are inclusive, so the sidecar refused
-  the very value the XML advertised.  The model description now advertises
-  the nearest representable float32 inside the interval (the smallest
-  normal for a zero bound — its subnormal neighbour is flushed to zero on
-  XLA:CPU), so every advertised bound is settable.  Inclusive bounds are
-  unchanged.
-- **Sharded boundary-input heuristic and `HeatNode` params.**
-  `ShardedStencilNode` classified an `(n,)` input on an `n x n` grid
-  sharded on axis 0 as grid-shaped (only the sharded axis's extent was
-  compared), sharded and halo-padded it and broke the inner
-  `update_padded`; the input must now match the full leading grid shape.
-  `HeatNode.update_padded` takes `params=` like `update`, so a
-  `ShardedStencilNode(HeatNode)` reports `accepts_params()` and is
-  calibratable / differentiable like the unsharded node.
-
-- **Grid-shaped boundary inputs on sharded nodes.**  `ShardedStencilNode`
-  replicated every boundary input, so a per-cell field (an LBM
-  `body_force` map, a `wall_mask_update`) reached each shard at its global
-  shape and broke `update_padded` (or silently mismatched); a sharded LBM
-  could only take a uniform force vector.  Grid-shaped inputs are now
-  sharded and halo-padded like state, on both the stencil and the
-  unstructured path (partition-layout inputs; global-order ones are
-  refused with a pointer to `partition_value`).  `verify_node` now passes
-  its full battery on a `ShardedStencilNode`, which is how this was found.
-
-- **Every run compiled the step three times.**  Leaves seeded as
-  `jnp.array(0.0)` (nodes' initial states and MADDENING's own coupling
-  residual in `_meta`) are weak-typed; after one step they come back
-  strongly typed, so the jitted step retraced on the second step and
-  again on the third for leaves that only change later.  `compile()` and
-  `set_node_state()` now normalise weak types (`_strong_typed`), and the
-  `_meta` residual is seeded as float32.  Measured on the MIME AR4 graph
-  on an RTX A2000: three compiles (0.92 + 0.85 + 0.83 s) became one, and
-  the experiment driver's "steady-state" figure — which had absorbed two
-  of them — went from 9.5–33 ms/step to 1.7 ms/step.  Results are
-  bit-identical (only the trace signature changed).
-- `GraphManager._default_external_inputs()` allocated fresh `jnp.zeros`
-  per declared input on every call (~1.5 ms/step on GPU for a graph with
-  external inputs stepped without explicit inputs); the zero arrays are
-  now allocated once per compile and shared (outer dicts stay fresh).
-- Differentiating through `lax.scan` over a coupled step failed when a
-  node in the coupling group had an integer / boolean state leaf
-  (`UnexpectedTracerError` in reverse mode, a missing constant handler
-  in forward mode): `closure_convert` hoisted the leaf as an integer
-  constant of the IFT `custom_jvp`, which JAX cannot linearise under a
-  scan.  The solver now captures float32 images of non-float leaves
-  before `closure_convert` and restores their dtype inside, and keeps
-  such fields out of the fixed-point vector altogether (they are
-  recomputed from the pre-step state on every pass).  Found by a
-  blind-spot test; reproduced outside MADDENING first.
-- `unflatten_coupled_state` returned every field as float32, so an
-  integer / boolean leaf of a node inside a coupling group came back as
-  float after each step (semantic drift, and a retrace of the jitted
-  step); it now restores each field's dtype.
-- Gauss-Seidel coupling with a *flux* edge whose consumer is scheduled
-  before its producer raised `KeyError` on the first pass; fluxes are now
-  seeded from the previous iterate (two sweeps, producers may depend on
-  each other) and overwritten as producers update.  IQN acceleration
-  derived its interface fields from edge source fields, so a flux edge
-  (not a state field) raised `KeyError` at compile; a flux source now maps
-  to the producer's state fields.
-- `LBMPipeNode` (multiphase): `_shan_chen_force` used `np.exp` on
-  `rho_wall / rho_0`, which are traced now that the graph injects params;
-  five multiphase graph tests failed with a tracer-conversion error.  Now
-  `jnp.exp`.
-- `LBMPipeNode` (multiphase): the EDM velocity clamp took
-  `sqrt(sum(u**2))`, whose gradient is NaN on a cell with exactly zero
-  shifted velocity (a uniform lattice, found by the `gradient_finite`
-  battery).  The sum is now floored at 1e-20 inside the sqrt; the forward
-  is unchanged wherever `|u| > 1e-10`, which the existing clamp assumed.
-- `HeatNode`: `length` was in `params_pytree()` but the Laplacian read it
-  from `self.params`, so an injected value was ignored and its gradient
-  identically zero.  `update` now passes the injected `length` to the
-  stencil (the new `params_effective` check fails on exactly this).
-- **IQN-ILS never activated without Jacobian reuse**: the first-iteration test
-  was `n_cols == 0` and reset `n_cols` to 0, so the secant basis never grew and
-  the method silently ran as Aitken.  With `jacobian_reuse > 0` it escaped only
-  by admitting a bogus first column.
-- **IQN safeguard vetoed valid steps on stiff problems**: the quasi-Newton
-  correction was rejected above 10× the residual, but a correct Newton step is
-  ≈ residual / (1 − ρ) (50× at ρ = 0.98).  Bound relaxed to a blow-up guard.
-- **IQN secant basis**: `W` is now built from differences of the raw operator
-  outputs (Degroote 2009) rather than of the inputs; 2 vs 5 iterations on the
-  ρ = 0.98 test contraction.
-- **IQN gradient NaN with `jacobian_reuse > 0`**: `jnp.linalg.lstsq`'s SVD
-  derivative is NaN on the repeated zero singular values of the masked secant
-  matrix; replaced by `jnp.linalg.pinv` (rank-deficiency-safe `custom_jvp`,
-  same solution).
-- IFT path ignored `convergence_norm` (hard-coded L2 against `tolerance`) and,
-  for IQN modes, iterated with non-interface fields frozen at their first-pass
-  values, giving the residual a floor and running to the cap.
-- Fori-path diagnostics recorded the residual one iteration stale.
-- IFT linear solve reported a spurious GMRES "iterative breakdown" on long
-  runs: lineax's tolerance is elementwise, so exact-zero entries of a
-  cotangent had to reach `atol=1e-8` absolute while float32 round-off from
-  the large entries is ~1e-5.  The solve now goes through
-  `jax.lax.custom_linear_solve` with `atol` scaled to the largest rhs entry
-  and `rtol` no tighter than ~100 ulp of the dtype.
-- `maddening.testing.strategies` rejected float32 bounds that are not exactly
-  representable (e.g. `0.1`); bounds now round inward to the sampling dtype.
 
 ## [0.3.1] - 2026-06-22
 

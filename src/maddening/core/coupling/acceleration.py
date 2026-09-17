@@ -372,7 +372,11 @@ def aitken_relaxation(
     x_raw_flat : jnp.ndarray
         Raw fixed-point result (flattened).
     prev_residual_flat : jnp.ndarray
-        Residual from the previous iteration.
+        Residual from the previous iteration.  An all-zero vector is
+        the caller's "no previous residual yet" sentinel (the coupling
+        loops seed it that way on the first pass of every timestep);
+        the formula needs two successive residuals, so that pass keeps
+        ``omega`` unchanged instead of deriving one from the sentinel.
     omega : jnp.ndarray
         Current relaxation factor.
 
@@ -392,11 +396,19 @@ def aitken_relaxation(
     # inf in float32 (delta_r entries > ~1.84e19), the division produces
     # nan.  The isfinite check catches this and falls back to input omega.
     denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
-    safe_denom = jnp.where(denom_ok, denom, jnp.array(1.0))
+    # First pass of a timestep: ``prev_residual_flat`` is the zero
+    # sentinel, so the numerator is identically 0 and the clip floor
+    # (0.01) would silently override the caller's seeded omega -- the
+    # loops seed omega=1.0 and then threw away 99% of the first
+    # correction.  Treat the sentinel like the degenerate denominator.
+    have_prev = jnp.any(prev_residual_flat != 0)
+    usable = denom_ok & have_prev
+    safe_denom = jnp.where(usable, denom, jnp.array(1.0))
     new_omega = -omega * jnp.sum(prev_residual_flat * delta_r) / safe_denom
     new_omega = jnp.clip(new_omega, 0.01, 2.0)
-    # Fall back to current omega when denominator is degenerate or overflowed
-    new_omega = jnp.where(denom_ok, new_omega, omega)
+    # Fall back to current omega when the denominator is degenerate or
+    # overflowed, or when there is no previous residual to extrapolate from.
+    new_omega = jnp.where(usable, new_omega, omega)
 
     x_relaxed = x_old_flat + new_omega * residual
     return x_relaxed, new_omega, residual

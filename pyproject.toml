@@ -61,10 +61,13 @@ tpu = ["jax[tpu]>=0.10,<0.13"]
 # `lineax` moved into the base dependencies in v0.4.0 because the
 # default coupling solver needs it (see the note above).  This extra
 # is kept, deliberately empty, so `pip install maddening[ift]` keeps
-# resolving for anyone who pinned it in v0.3.x -- pip errors on an
-# undeclared extra, and breaking those installs buys nothing.  It is
-# still imported lazily: `import maddening` must not pay lineax's
-# ~1 s import (equinox + jaxtyping + jax), only a Krylov solve does.
+# resolving for anyone who pinned it in v0.3.x.  Removing it would
+# still install, but pip warns on an extra the package does not
+# declare (and is moving towards erroring), and warning at every
+# downstream install buys nothing.  The wheel keeps a bare
+# `Provides-Extra: ift` with no requirements.  lineax is still
+# imported lazily: `import maddening` must not pay lineax's ~1 s
+# import (equinox + jaxtyping + jax); only a Krylov solve does.
 ift = []
 
 # ── Cloud providers ────────────────────────────────────────────────

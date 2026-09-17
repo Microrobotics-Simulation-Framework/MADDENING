@@ -70,6 +70,9 @@ _WS_RE = re.compile(r"\s+")
 #: ``typing.Optional`` / ``collections.abc.Callable`` render the same as the
 #: bare names a PEP 563 module writes.
 _TYPING_PREFIX_RE = re.compile(r"\b(?:typing|collections\.abc)\.")
+#: ``Optional[ForwardRef('X')]`` is how ``typing`` prints a string annotation
+#: nested in a subscript; write it the way the source did.
+_FORWARDREF_RE = re.compile(r"ForwardRef\('([^']+)'[^)]*\)")
 
 
 # --------------------------------------------------------------------------
@@ -140,6 +143,7 @@ def _annotation(value: Any) -> str | None:
     else:                                            # Optional[...], dict[...]
         text = str(value)
     text = _WS_RE.sub(" ", text.strip().strip("'\""))
+    text = _FORWARDREF_RE.sub(r"'\1'", text)
     return _TYPING_PREFIX_RE.sub("", text)
 
 

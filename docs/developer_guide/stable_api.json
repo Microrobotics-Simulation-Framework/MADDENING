@@ -319,7 +319,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -567,7 +567,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -836,7 +836,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -1947,7 +1947,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -2233,7 +2233,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -2485,7 +2485,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -2764,7 +2764,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",
@@ -3047,7 +3047,7 @@
         "uncertainty_spec": {
           "kind": "method",
           "parameters": [],
-          "returns": "Optional[ForwardRef('UncertaintySpec')]"
+          "returns": "Optional['UncertaintySpec']"
         },
         "update": {
           "kind": "method",

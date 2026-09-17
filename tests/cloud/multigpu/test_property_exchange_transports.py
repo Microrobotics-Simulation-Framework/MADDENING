@@ -108,11 +108,19 @@ def test_every_ghost_slot_holds_the_value_its_owner_holds(layout, method, seed):
 @given(layout=partition_layouts())
 @settings(max_examples=EXAMPLES_COSTLY)
 def test_the_sparse_transport_never_moves_more_cells_than_the_dense_one(layout):
-    """``useful <= ppermute <= all_to_all``, and no message without a cell."""
+    """``useful <= ppermute <= all_to_all``, and no message without a cell.
+
+    ``useful`` is a per-shard figure computed by integer division, so it
+    reads 0 whenever fewer than ``n_devices`` cells move in total -- it
+    is a floor of the average, not a lower bound on the real traffic,
+    and "nothing to send" has to be read off ``send_counts`` instead.
+    (Hypothesis made the distinction concrete with a four-device
+    partition where only two shards exchange one cell each.)
+    """
     traffic = exchange_traffic(layout)
     assert traffic["useful"] <= traffic["ppermute"] <= traffic["all_to_all"]
     assert traffic["ppermute_messages"] <= max(layout.n_devices - 1, 0)
-    if traffic["useful"] == 0:
+    if int(np.asarray(layout.send_counts).sum()) == 0:
         assert traffic["ppermute"] == 0 and traffic["ppermute_messages"] == 0
 
 

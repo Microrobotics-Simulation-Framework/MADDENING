@@ -83,7 +83,11 @@ def test_a_per_cell_boundary_input_survives_partitioning(
     n_cells = n_devices * cells_per_shard
     rng = np.random.default_rng(seed)
     source = jnp.asarray(rng.standard_normal(n_cells).astype(np.float32))
-    assume(float(jnp.max(jnp.abs(source))) > 1e-3)
+    # Enough of a forcing that its effect clears RTOL/ATOL by orders of
+    # magnitude: the second half of this property asserts that the input
+    # moved the answer, and a forcing at the tolerance would make that a
+    # coin toss rather than a statement about the wrapper.
+    assume(float(jnp.max(jnp.abs(source))) > 0.1)
 
     case = build_stencil(n_devices=n_devices, n_cells=n_cells)
     case.boundary_inputs = {"source": source, "gain": jnp.float32(gain)}

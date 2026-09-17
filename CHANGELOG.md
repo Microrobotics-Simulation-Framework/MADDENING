@@ -169,6 +169,43 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+
+- **`tests/property/`: round-trip property tests.**  A Hypothesis strategy
+  (`tests/property/strategies.py`) that draws *valid* two-to-four-node
+  graphs -- real node classes, commensurate timesteps, awkward-but-legal
+  node names, edges with and without registered transforms, additive edges,
+  declared units, live ("calibrated") parameter overrides, `ParamSpec`
+  overrides including trainable interface-mapping weights, external inputs
+  and interface mappings built by the RBF / nearest-neighbour / 1-D
+  projection factories from either a node-field point reference or an
+  inlined point set -- plus the invariants over them
+  (`tests/property/test_round_trips.py`): a config round trip preserves
+  trajectory, parameter pytree (structure, dtype and bits) and
+  `param_specs()` including edge-key specs; `to_dict` is idempotent through
+  `from_dict`; a USD round trip owes the same; a checkpoint restores state
+  and params exactly, continues a rollout identically and beats the config
+  for trained mapping weights; and the two formats reload to the same graph.
+  `tests/property/test_adaptive_invariants.py` adds the `AdaptiveNode`
+  contract: a fixed-size state buffer, coefficients exactly zero off the
+  active set, the in-region gradient against a finite difference taken with
+  a step verified not to cross a switch, and config / checkpoint round trips
+  of a graph holding an adaptive node.  These directories had no `@given`
+  before; the properties own no `max_examples` and take their depth from the
+  profile.
+- **The USD stage carries a node's own name and an edge's declared units.**
+  `maddening:nodeName` on each node prim and `maddening:sourceUnits` /
+  `maddening:targetUnits` on each edge prim.  Node names may legally contain
+  characters a USD prim name may not (`-`, `.`, spaces, parentheses) and may
+  start with a digit, so the prim name is a mangled, de-duplicated
+  identifier and the node name is now stored beside it; a stage written
+  before this reads back as before.  This fixes three round-trip defects the
+  new property tests found: `save_graph_to_usd` + `load_graph_from_usd`
+  renamed such a node and left every edge referring to it dangling (the
+  reloaded graph would not compile), collapsed two distinct nodes whose
+  names mangled alike (`"a-b"` and `"a.b"`) into one, raised from `pxr` on a
+  name starting with a digit, and dropped `source_units` / `target_units`
+  entirely.
+
 - **Stateful property machines for the two externally driven surfaces**
   (`tests/property/test_stateful_api.py`,
   `tests/property/test_stateful_bridge.py`, shared scaffolding in

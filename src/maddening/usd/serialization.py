@@ -12,11 +12,18 @@ an error during serialization.  Edge interface mappings are serialized
 as their :class:`~maddening.core.coupling.mapping_spec.MappingSpec`
 (JSON in ``maddening:mappingSpecJson``) and rebuilt on load; the
 weights themselves live in checkpoints, never in the stage.
+
+A node's prim name is a mangled, de-duplicated USD identifier -- node
+names may legally contain characters (``-``, ``.``, spaces, parentheses)
+that a prim name may not, and may legally start with a digit.  The node's
+own name is therefore written to ``maddening:nodeName`` and restored from
+there; the prim name is only a path element.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -147,10 +154,10 @@ def save_graph_to_usd(
 
     nodes_path = root_path + "/nodes"
     node_prims = {}
+    prim_names = _prim_names(gm._nodes)
     for node_name in gm._nodes:
-        safe_name = _safe_prim_name(node_name)
         node_prims[node_name] = stage.DefinePrim(
-            f"{nodes_path}/{safe_name}", "MaddeningNode"
+            f"{nodes_path}/{prim_names[node_name]}", "MaddeningNode"
         )
 
     edges_path = root_path + "/edges"
@@ -194,6 +201,12 @@ def save_graph_to_usd(
             prim.GetAttribute("maddening:nodeType").Set(
                 f"{type(node_obj).__module__}.{type(node_obj).__qualname__}"
             )
+            # The prim name is a mangled, de-duplicated identifier; the
+            # node's own name is the one every edge, coupling group and
+            # external input refers to, so it is written out verbatim.
+            prim.CreateAttribute(
+                "maddening:nodeName", Sdf.ValueTypeNames.String,
+            ).Set(node_name)
             prim.GetAttribute("maddening:timestep").Set(
                 float(spec.timestep)
             )
@@ -233,6 +246,15 @@ def save_graph_to_usd(
             if edge.transform is not None:
                 tname = get_transform_name(edge.transform)
                 prim.GetAttribute("maddening:transformName").Set(tname)
+            # Declared units are part of the EdgeSpec and of the config
+            # form; without them a reloaded graph stops unit-checking an
+            # edge the original was checking.
+            for attr_name, value in (("maddening:sourceUnits", edge.source_units),
+                                     ("maddening:targetUnits", edge.target_units)):
+                if value is not None:
+                    prim.CreateAttribute(
+                        attr_name, Sdf.ValueTypeNames.String,
+                    ).Set(value)
             if edge.mapping is not None:
                 # The spec (kind, hyper-parameters, point references) plus
                 # the shape ``describe()`` adds, as one JSON string — the
@@ -356,10 +378,11 @@ def load_graph_from_usd(
             params = json.loads(params_json) if params_json else {}
             cls = _resolve_node_class(node_type)
 
-            # Reconstruct the node name from the prim name
-            # (we stored the safe name as the prim name; the original
-            # name was used as the node name)
-            node_name = child.GetName()
+            # The node's own name, which need not be a legal prim name
+            # (``"a-b"``, ``"1st"``).  Stages written before
+            # ``maddening:nodeName`` existed only have the prim name.
+            name_attr = child.GetAttribute("maddening:nodeName")
+            node_name = (name_attr.Get() if name_attr else None) or child.GetName()
 
             # Create the node
             node = cls(name=node_name, timestep=timestep, **params)
@@ -423,6 +446,12 @@ def load_graph_from_usd(
                     gm.point_resolver(base_dir),
                 )
 
+            units = {}
+            for key, attr_name in (("source_units", "maddening:sourceUnits"),
+                                   ("target_units", "maddening:targetUnits")):
+                attr = child.GetAttribute(attr_name)
+                units[key] = attr.Get() if attr else None
+
             gm.add_edge(
                 source_node,
                 target_node,
@@ -431,6 +460,7 @@ def load_graph_from_usd(
                 transform=transform,
                 additive=bool(additive) if additive is not None else False,
                 mapping=mapping,
+                **units,
             )
 
             edge_overrides_attr = child.GetAttribute("maddening:paramSpecOverridesJson")
@@ -513,11 +543,47 @@ def load_graph_from_usd(
 # ------------------------------------------------------------------
 
 def _safe_prim_name(name: str) -> str:
-    """Convert a node name to a valid SdfPath element."""
+    """A node name as a **valid** ``SdfPath`` element.
+
+    Node names are only forbidden ``/``, ``#`` and ``->`` (see
+    ``GraphManager.add_node``), so ``"a-b"``, ``"with space"``,
+    ``"co2(aq)"`` and ``"1st"`` are all legal nodes and none of them is a
+    legal prim name.  The result is always a valid identifier -- the
+    previous version could return one that was not (``"1st"``), which
+    made ``DefinePrim`` raise on an ill-formed path.
+
+    The mangling is lossy and not injective, so it is only ever the prim
+    *name*: the node's own name is written to ``maddening:nodeName`` and
+    that is what the reader restores.
+    """
     tokens = Sdf.Path.TokenizeIdentifier(name)
-    if tokens:
-        return "_".join(tokens)
-    return name.replace("-", "_").replace(" ", "_").replace(".", "_")
+    candidate = "_".join(tokens) if tokens else re.sub(r"\W", "_", name, flags=re.UNICODE)
+    if not Sdf.Path.IsValidIdentifier(candidate):
+        # A leading digit (or an empty result) is the remaining case.
+        candidate = f"n_{candidate}"
+    if not Sdf.Path.IsValidIdentifier(candidate):  # pragma: no cover - belt and braces
+        candidate = "node"
+    return candidate
+
+
+def _prim_names(node_names) -> dict[str, str]:
+    """``{node name: prim name}``, with collisions broken by a suffix.
+
+    ``"a-b"`` and ``"a.b"`` are two different nodes that mangle to the
+    same ``a_b``; without this the second one overwrote the first and the
+    reload silently lost a node.
+    """
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for name in node_names:
+        base = _safe_prim_name(name)
+        candidate, suffix = base, 1
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        out[name] = candidate
+    return out
 
 
 def _params_to_serializable(params: dict) -> dict:

@@ -70,7 +70,10 @@ class CouplingGroup:
     accelerated_fields : dict or None
         For ``"iqn-ils"``: which fields per node participate in the
         quasi-Newton problem.  ``None`` auto-detects from coupling
-        edges (interface fields only).
+        edges (interface fields only).  When given it must name at
+        least one field on at least one node *of this group*; an empty
+        or foreign mapping raises ``ValueError`` rather than failing
+        inside the traced coupling loop.
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
         Fast nodes take multiple sub-steps per coupling iteration.
@@ -197,6 +200,27 @@ class CouplingGroup:
                 raise ValueError(
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
+                )
+        if self.accelerated_fields is not None:
+            # An empty mapping, or one naming only nodes outside the
+            # group, leaves the quasi-Newton problem with zero degrees
+            # of freedom.  That surfaces as
+            # ``ValueError: Need at least one array to concatenate``
+            # from ``jnp.concatenate`` deep inside the traced coupling
+            # loop, with no mention of the setting that caused it.
+            foreign = sorted(set(self.accelerated_fields) - set(self.nodes))
+            if foreign:
+                raise ValueError(
+                    f"CouplingGroup.accelerated_fields names node(s) "
+                    f"{foreign} that are not in the group "
+                    f"({sorted(self.nodes)})."
+                )
+            if not any(self.accelerated_fields.values()):
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields selects no field: "
+                    f"{self.accelerated_fields!r}.  Use None to let the "
+                    "group auto-detect its interface fields, or name at "
+                    "least one field on one node in the group."
                 )
         if self.solver == "fori":
             warnings.warn(

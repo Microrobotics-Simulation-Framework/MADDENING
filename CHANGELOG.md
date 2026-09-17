@@ -193,6 +193,40 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
   previous-iterate arguments are real; loop bodies pass `i > first`.
 
 ### Added
+- **A `STABLE` API signature can no longer change silently.**
+  `scripts/check_stable_signatures.py` records every surface tagged
+  `@stability(StabilityLevel.STABLE)` in a committed snapshot,
+  `docs/developer_guide/stable_api.json` — parameters with their kinds,
+  defaults and annotations, the return annotation, and for a class every
+  public method and property an *instance* resolves, inherited ones
+  included (13 surfaces, 223 members today).  It runs as a step of the CI
+  `compliance` job, which is ungated, so it fires even on a
+  documentation-only change.  A changed or removed signature fails with
+  the recorded and current forms side by side and a message saying the
+  change needs a major version bump or a revert; a *new* `STABLE` surface
+  fails too, with the "regenerate" message instead.  An intended change is
+  accepted with `python scripts/check_stable_signatures.py --update` in the
+  same commit.  A module skipped for a missing optional dependency is
+  tolerated when it carries no `STABLE` surface (the CI job installs
+  `.[ci]`, which has no `usd-core`) and stops the check when it does, so an
+  uninstalled extra can never read as a wall of removals.
+  Tests: `tests/compliance/test_stable_signatures.py`.
+- **`docs/developer_guide/deprecation_policy.md`** — what each stability
+  level promises, the notice each one owes (two minor releases of
+  `DeprecationWarning` for `STABLE`, one for `EVOLVING`, none for
+  `EXPERIMENTAL`), the seven-step deprecation procedure with the
+  `DeprecationWarning` / `FutureWarning` split, a table of what counts as
+  breaking, the CHANGELOG convention, and what the signature guard does
+  *not* cover.  Section 9 of `.claude/skills/commit-and-push/SKILL.md` now
+  points at it.
+- **`docs/developer_guide/api_freeze_proposal.md`** — a proposed stability
+  level for all 79 tagged surfaces with the evidence behind each call, the
+  surfaces that are public in practice and carry no tag (six of them are
+  named by a `STABLE` signature), and the six open questions the freeze has
+  to answer, each with options, a recommendation and the cost of changing
+  it after 1.0.  Nothing is applied: no `@stability` tag changed.
+- `docs/developer_guide/stability_report.md` regenerated — it had been
+  stale since the tree had 42 tagged surfaces; there are now 79.
 
 - **`tests/property/`: round-trip property tests.**  A Hypothesis strategy
   (`tests/property/strategies.py`) that draws *valid* two-to-four-node

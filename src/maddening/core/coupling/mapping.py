@@ -38,6 +38,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
 
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -134,8 +136,12 @@ class StaticLinearMapping:
     def describe(self) -> dict:
         """Kind, mode, shape and hyper-parameters (never the weights).
 
-        With a :attr:`spec` the dict is that spec's ``to_dict()`` plus
-        ``shape`` — what ``EdgeSpec.to_dict`` writes and
+        ``"kind"`` is always this mapping's user-facing :attr:`kind` —
+        the label given to ``matrix_mapping(kind=...)`` included, so a
+        dashboard keyed on it (``GET /graph``) sees ``"supermesh"``, not
+        ``"matrix"``.  With a :attr:`spec` the rest is that spec's
+        ``to_dict()`` (which keeps the factory kind ``"matrix"`` plus
+        ``label``) and ``shape`` — what ``EdgeSpec.to_dict`` writes and
         ``MappingSpec.from_dict`` reads back.
         """
         d = {
@@ -144,6 +150,7 @@ class StaticLinearMapping:
         }
         if self.spec is not None:
             d.update(self.spec.to_dict())
+            d["kind"] = self.kind
         return d
 
     def __repr__(self) -> str:
@@ -179,6 +186,17 @@ def _kernel(r: np.ndarray, eps: float, name: str) -> np.ndarray:
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(r > 1e-300, r ** 2 * np.log(np.where(r > 1e-300, r, 1.0)), 0.0)
     raise ValueError(f"Unknown kernel {name!r}; choose from {_KERNELS}")
+
+
+def _finite_real(name: str, value) -> float:
+    """``value`` as a float; a non-real or non-finite hyper-parameter is a
+    ``ValueError`` (it is meaningless for the kernel and JSON has no
+    ``Infinity`` / ``NaN``)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name} must be a real number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return float(value)
 
 
 def _out_dtype(*arrays):
@@ -223,6 +241,8 @@ def rbf_matrix(
     """
     if kernel not in _KERNELS:
         raise ValueError(f"Unknown kernel {kernel!r}; choose from {_KERNELS}")
+    epsilon = _finite_real("epsilon", epsilon)
+    ridge = _finite_real("ridge", ridge)
     dtype = _out_dtype(source_points, target_points)
     src = _as_points(source_points)
     tgt = _as_points(target_points)
@@ -282,6 +302,8 @@ def rbf_mapping(
     """
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
+    epsilon = _finite_real("epsilon", epsilon)
+    ridge = _finite_real("ridge", ridge)
     kw = dict(kernel=kernel, epsilon=epsilon, polynomial=polynomial, ridge=ridge)
     if mode == "consistent":
         H = rbf_matrix(source_points, target_points, **kw)
@@ -378,12 +400,20 @@ def matrix_mapping(
     with ``numpy.save``; ``from_dict`` / ``load_graph_from_usd`` read it
     back from ``base_dir``.  Without ``asset`` the mapping works but
     ``GraphManager.to_dict`` and the USD writer refuse it.  ``kind`` is
-    a free label (recorded as the spec's ``label``).
+    a free string label: it is the mapping's ``kind`` (``describe()``,
+    ``GET /graph``) and is recorded as the spec's ``label``; the spec's
+    own kind stays ``"matrix"`` so the rebuild finds this factory.  The
+    asset reference records the content hash of ``H``, so the file read
+    back must hold exactly this matrix.
     """
+    if not isinstance(kind, str) or not kind:
+        raise ValueError(f"matrix_mapping: kind must be a non-empty string label, got {kind!r}")
     hyper = {"mode": mode} if kind == "matrix" else {"mode": mode, "label": kind}
     ref = None if asset is None else normalise_point_reference(asset, name="H")
     if ref is not None and "asset" not in ref:
         raise ValueError("matrix_mapping: asset= must name a .npy/.npz file")
+    if ref is not None:
+        ref = reference_for_array(H, ref, name="H", inline_ok=False)
     spec = MappingSpec("matrix", hyper, {"H": ref})
     return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode, spec=spec)
 

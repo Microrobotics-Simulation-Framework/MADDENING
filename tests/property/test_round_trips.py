@@ -44,7 +44,7 @@ from tests.property.invariants import (
     assert_structure_identical,
     structure,
 )
-from tests.property.strategies import NODE_REGISTRY, graph_recipes
+from tests.property.strategies import graph_recipes
 
 #: Rollout length.  Three steps is enough to make every coupling path
 #: (multi-rate dividers, additive edges, mapped interfaces) contribute

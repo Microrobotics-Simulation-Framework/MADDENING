@@ -459,7 +459,7 @@ def build_unstructured(*, n_devices: int, rate: float = 0.5,
     # single-device reference over the global connectivity, its
     # ``update_padded`` is what each shard runs.  Nothing here fixes up
     # the params dict -- whether the wrapper shares it is the wrapper's
-    # business, and a property below checks it.
+    # business, and test_property_wrapper_equivalence.py checks it.
     inner = UnstructuredRelaxNode(name="cells", n_global_cells=n_cells,
                                   edges=edges, rate=rate, layout=layout)
     mesh = create_device_mesh(shape=(n_devices,))

@@ -194,6 +194,10 @@ Additional sections per release: **Verification**, **Security**, and **Known Ano
 
 ### Added
 
+- **Measured guidance for choosing coupling options** — eight fixtures and a full
+  option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`; and
+  `accelerated_fields` selecting no field in the group now raises at construction.
+
 - **`tests/property/`: round-trip property tests.**  A Hypothesis strategy
   (`tests/property/strategies.py`) that draws *valid* two-to-four-node
   graphs -- real node classes, commensurate timesteps, awkward-but-legal

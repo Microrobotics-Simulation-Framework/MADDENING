@@ -67,6 +67,22 @@ JSON record.  Keep before/after records under `benchmarks/results/` when
 a change claims a speed-up; a claim without the two JSON files is a
 guess.
 
+## `benchmarks/bench_coupling_sweep.py`
+
+```bash
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --json benchmarks/results/coupling_sweep_cpu.json
+```
+
+Sweeps every `iteration_mode` x `acceleration` x `convergence_norm` over
+the graph shapes in `benchmarks/coupling_fixtures.py` — chain, star,
+ring, a stiffness sweep, two grid fixtures, a two-group graph and a
+slow-drift case — and records per configuration the step time, the
+iterations used against the cap, the fraction of steps converged, the
+final residual and the launch-bound / compute-bound verdict.  The
+results and what they mean for a given graph shape are in
+[Choosing a coupling algorithm](coupling_algorithm_guide.md).
+
 ## Persistent compilation cache
 
 ```bash

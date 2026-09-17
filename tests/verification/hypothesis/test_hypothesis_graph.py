@@ -18,6 +18,7 @@ from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
 from maddening.warnings import ExceptionGroup
+from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ class TestRandomValidTopologies:
         n_nodes=st.integers(min_value=1, max_value=6),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_random_ball_chain_compiles_and_steps(self, n_nodes, seed):
         """Build a chain of BallNode objects and step without crash."""
         rng = np.random.default_rng(seed)
@@ -88,7 +89,7 @@ class TestRandomValidTopologies:
         n_nodes=st.integers(min_value=2, max_value=5),
         seed=st.integers(min_value=0, max_value=2**31),
     )
-    @settings(max_examples=80, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_random_spring_ball_coupled_steps(self, n_nodes, seed):
         """Build a random mix of springs and balls, edge them, step."""
         rng = np.random.default_rng(seed)
@@ -132,7 +133,7 @@ class TestRandomValidTopologies:
             assert jnp.isfinite(state[name]["position"])
             assert jnp.isfinite(state[name]["velocity"])
 
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(seed=st.integers(min_value=0, max_value=2**31))
     def test_single_node_graph_steps(self, seed):
         """A single isolated node should compile and step cleanly."""
@@ -148,7 +149,7 @@ class TestRandomValidTopologies:
         assert "solo" in state
         assert jnp.isfinite(state["solo"]["position"])
 
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(n_steps=st.integers(min_value=1, max_value=50))
     def test_empty_boundary_inputs_multi_step(self, n_steps):
         """Multiple steps with no boundary inputs should not crash."""
@@ -217,7 +218,7 @@ class TestDuplicateNodeNames:
             gm.add_node(BallNode(name="dup", timestep=0.02))
 
     @given(name=node_name_st)
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_duplicate_name_raises_any_name(self, name):
         """Any name used twice should be rejected."""
         gm = GraphManager()
@@ -257,7 +258,7 @@ class TestMissingEdgeTargets:
             gm.compile()
 
     @given(ghost_name=node_name_st)
-    @settings(max_examples=30, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_missing_target_any_name(self, ghost_name):
         """Any non-existent target should raise."""
         assume(ghost_name != "b")
@@ -331,6 +332,9 @@ class TestCyclicGraphs:
     """Cycles in the graph should be handled (staggering or coupling)."""
 
     @given(n_nodes=st.integers(min_value=2, max_value=4))
+    # Absolute, not a tier: the only draw is ``n_nodes`` in 2..4, so
+    # Hypothesis exhausts the space after three examples and a deeper
+    # profile would buy nothing here.
     @settings(max_examples=20, deadline=None)
     def test_cycle_compiles_with_staggering(self, n_nodes):
         """A simple cycle should compile (back-edges use prev timestep)."""

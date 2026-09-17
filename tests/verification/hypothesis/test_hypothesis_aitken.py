@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 
 from maddening.core.coupling.acceleration import aitken_relaxation
+from tests.conftest import EXAMPLES_CHEAP
 
 
 float_arrays = arrays(
@@ -41,7 +42,7 @@ class TestAitkenOmegaAlwaysBounded:
 
     @given(x_old=float_arrays, x_raw=float_arrays,
            prev_r=float_arrays, omega=omega_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_omega_in_range(self, x_old, x_raw, prev_r, omega):
         x_old_j = jnp.asarray(x_old)
         x_raw_j = jnp.asarray(x_raw)
@@ -56,7 +57,7 @@ class TestAitkenOmegaAlwaysBounded:
 
     @given(x_old=float_arrays, x_raw=float_arrays,
            prev_r=float_arrays, omega=omega_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_omega_is_finite(self, x_old, x_raw, prev_r, omega):
         x_old_j = jnp.asarray(x_old)
         x_raw_j = jnp.asarray(x_raw)
@@ -74,7 +75,7 @@ class TestAitkenDivisionGuard:
 
     @given(x_old=small_arrays, x_raw=small_arrays,
            prev_r=small_arrays, omega=omega_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_degenerate_returns_input_omega(self, x_old, x_raw, prev_r, omega):
         x_old_j = jnp.asarray(x_old)
         x_raw_j = jnp.asarray(x_raw)
@@ -100,7 +101,7 @@ class TestAitkenRelaxedState:
 
     @given(x_old=float_arrays, x_raw=float_arrays,
            prev_r=float_arrays, omega=omega_st)
-    @settings(max_examples=500)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_affine_combination(self, x_old, x_raw, prev_r, omega):
         x_old_j = jnp.asarray(x_old)
         x_raw_j = jnp.asarray(x_raw)
@@ -124,7 +125,7 @@ class TestAitkenOverflowRobustness:
                         allow_nan=False, allow_infinity=False),
         omega=omega_st,
     )
-    @settings(max_examples=200)
+    @settings(max_examples=EXAMPLES_CHEAP)
     def test_large_residuals_stay_finite(self, scale, omega):
         x_old = jnp.zeros(4, dtype=jnp.float32)
         x_raw = jnp.array([scale, 0, 0, 0], dtype=jnp.float32)

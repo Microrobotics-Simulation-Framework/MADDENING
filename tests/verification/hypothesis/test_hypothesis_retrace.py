@@ -24,6 +24,7 @@ from maddening.core.node import SimulationNode
 from maddening.nodes.ball import BallNode
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_COSTLY
 
 
 class WeakScalar(SimulationNode):
@@ -85,7 +86,7 @@ kinds_st = st.lists(st.sampled_from(["spring", "ball", "heat", "weak"]), min_siz
 
 @given(kinds=kinds_st, couple=st.booleans(), multirate=st.booleans(),
        seed=st.integers(0, 2**31))
-@settings(max_examples=40, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_step_traces_once_over_random_graphs(kinds, couple, multirate, seed):
     gm = _graph(kinds, couple, multirate, seed)
     assert all(not getattr(l, "weak_type", False) for l in jax.tree.leaves(gm._state))
@@ -106,10 +107,10 @@ def test_step_traces_once_over_random_graphs(kinds, couple, multirate, seed):
 
 
 @given(kinds=kinds_st, seed=st.integers(0, 2**31))
-# Explicit cap: every distinct ``kinds`` tuple is a fresh graph and a fresh
+# Costly tier: every distinct ``kinds`` tuple is a fresh graph and a fresh
 # JAX trace of both the stepped and the scanned path, so an example costs a
-# compile rather than a call.  40 matches the sibling property above.
-@settings(max_examples=40, deadline=None)
+# compile rather than a call.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 def test_run_scan_and_step_agree_after_normalisation(kinds, seed):
     """Normalising the seed state changes the trace signature only."""
     a = _graph(kinds, False, False, seed)

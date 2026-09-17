@@ -40,6 +40,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.checkpoint import load_state, save_state
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 
 DT = 0.01
 EPS32 = float(np.finfo(np.float32).eps)
@@ -204,7 +205,7 @@ class TestBakedEqualsTraced:
     """``_compiled_step(state, ext, None)`` vs ``(state, ext, gm.params)``."""
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=40, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_spring(self, spring, seed):
         rng = np.random.default_rng(seed)
         state = _random_spring_state(rng, spring, ("s",))
@@ -214,7 +215,7 @@ class TestBakedEqualsTraced:
         _assert_close(_user(baked), _user(traced), "spring baked vs traced", **ULP_TOL)
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=40, deadline=None)
+    @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_ball(self, ball, seed):
         rng = np.random.default_rng(seed)
         state = _random_ball_state(rng, ball)
@@ -224,7 +225,7 @@ class TestBakedEqualsTraced:
         _assert_close(_user(baked), _user(traced), "ball baked vs traced", **ULP_TOL)
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_coupled(self, coupled, seed):
         """Through the IFT-coupled group the fixed point is found by an
         early-exit while_loop; the same start must give the same iterate
@@ -248,7 +249,7 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=30),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_spring_step_scan_sweep(self, spring, seed, n_steps):
         rng = np.random.default_rng(seed)
         p = _random_spring_params(rng, spring, ("s",))
@@ -272,7 +273,7 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=30),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_ball_step_scan_sweep(self, ball, seed, n_steps):
         rng = np.random.default_rng(seed)
         p = _copy_params(ball.params)
@@ -319,10 +320,10 @@ class TestRunPathsAgree:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=15),
     )
-    # Explicit cap: each example traces step, run_scan and run_sweep
+    # Costly tier: each example traces step, run_scan and run_sweep
     # through a coupling group at a freshly drawn ``n_steps``, i.e. three
-    # compiles per example.  25 matches the neighbouring parity properties.
-    @settings(max_examples=25, deadline=None)
+    # compiles per example.
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
         """Same through the coupling group; ``_meta`` is batched too."""
         rng = np.random.default_rng(seed)
@@ -360,7 +361,7 @@ class TestGradientMatchesFiniteDifferences:
         n_steps=st.integers(min_value=5, max_value=40),
         which=st.sampled_from(["stiffness", "damping"]),
     )
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_spring_params_gradient(self, seed, n_steps, which):
         rng = np.random.default_rng(seed)
         k = float(rng.uniform(1.0, 200.0))
@@ -442,7 +443,7 @@ class TestAdjointIdentity:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=3),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_single_spring(self, spring, seed, n_steps):
         self._check(spring, ("s",), np.random.default_rng(seed), n_steps)
 
@@ -450,6 +451,11 @@ class TestAdjointIdentity:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=3),
     )
+    # Absolute, not ``EXAMPLES_COSTLY``: a jvp and a vjp through the
+    # coupling group's ``custom_jvp`` IFT rule, measured at 4.4 s an
+    # example -- the single most expensive property in this file.  At
+    # the costly tier the ``ci`` profile would spend six minutes here
+    # alone; the depth stays pinned at the house floor instead.
     @settings(max_examples=20, deadline=None)
     def test_coupled_pair(self, coupled, seed, n_steps):
         """The IFT rule is a ``custom_jvp``; its transpose (via
@@ -468,7 +474,7 @@ class TestParamsAreARuntimeArgument:
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=10),
     )
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_no_dirty_no_recompile_no_mutation(self, spring, seed, n_steps):
         rng = np.random.default_rng(seed)
         p_mod = _random_spring_params(rng, spring, ("s",))
@@ -488,7 +494,7 @@ class TestParamsAreARuntimeArgument:
             assert np.array_equal(np.asarray(x), y), "gm.params mutated"
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=25, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_default_params_after_modified_step(self, spring, seed):
         """``step(params=p_mod)`` followed by ``step()`` uses ``gm.params``
         for the second step — the modified pytree does not stick."""
@@ -515,7 +521,7 @@ class TestParamsAreARuntimeArgument:
 class TestCheckpointRoundTrip:
 
     @given(seed=st.integers(min_value=0, max_value=2**31))
-    @settings(max_examples=20, deadline=None)
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_params_round_trip(self, seed):
         rng = np.random.default_rng(seed)
         gm = _coupled_gm()

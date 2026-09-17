@@ -17,6 +17,17 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
+from tests.conftest import EXAMPLES_CHEAP
+
+# EXHAUSTED SPACES.  Every scheduling property below the first class
+# draws nothing but a small integer rate multiplier, or a pair of
+# sampled timesteps, so the whole search space is a handful of cases
+# and Hypothesis reports it exhausted long before any cap is reached
+# (verified: 2..5 stops at 4 examples, the 4x4 timestep pair at 16).
+# Those caps stay absolute rather than tiered, because a
+# profile-relative depth would promise a search that does not exist.
+# The two single-node properties at the top draw continuous positions
+# and velocities and do take a tier.
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +66,7 @@ class TestSingleNodeMultirate:
         velocity=st.floats(min_value=-5.0, max_value=5.0,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_ball_multirate_monotonic_error(self, n_sub, position, velocity):
         """For a BallNode (gravity-only, no collision), finer timestep
         should produce results closer to the analytical solution.
@@ -112,7 +123,7 @@ class TestSingleNodeMultirate:
         velocity=st.floats(min_value=-5.0, max_value=5.0,
                            allow_nan=False, allow_infinity=False),
     )
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_ball_velocity_exact_regardless_of_rate(self, n_sub, velocity):
         """For constant gravity, velocity integration is exact at any rate.
 
@@ -145,6 +156,7 @@ class TestGraphManagerMultirate:
     @given(
         rate_multiplier=st.integers(min_value=2, max_value=5),
     )
+    # Absolute (see EXHAUSTED SPACES above): 4 rate multipliers.
     @settings(max_examples=30, deadline=None)
     def test_slow_node_unchanged_between_fires(self, rate_multiplier):
         """A slow node should not change state on non-fire steps."""
@@ -181,6 +193,7 @@ class TestGraphManagerMultirate:
         )
 
     @given(rate_multiplier=st.integers(min_value=2, max_value=4))
+    # Absolute (see EXHAUSTED SPACES above): 3 rate multipliers.
     @settings(max_examples=20, deadline=None)
     def test_fast_node_fires_every_step(self, rate_multiplier):
         """A fast node should update every base step."""
@@ -213,6 +226,7 @@ class TestGraphManagerMultirate:
         rate_multiplier=st.integers(min_value=2, max_value=4),
         n_cycles=st.integers(min_value=1, max_value=5),
     )
+    # Absolute (see EXHAUSTED SPACES above): 3 x 5 = 15 combinations.
     @settings(max_examples=30, deadline=None)
     def test_multirate_state_consistent_at_sync_points(self, rate_multiplier, n_cycles):
         """At sync points (multiples of the slow timestep), both nodes
@@ -253,6 +267,7 @@ class TestMultirateWithEdges:
     """Test that edges between fast and slow nodes work correctly."""
 
     @given(rate_multiplier=st.integers(min_value=2, max_value=4))
+    # Absolute (see EXHAUSTED SPACES above): 3 rate multipliers.
     @settings(max_examples=20, deadline=None)
     def test_fast_to_slow_edge_uses_latest_fast_value(self, rate_multiplier):
         """An edge from a fast node to a slow node should use the fast
@@ -284,6 +299,7 @@ class TestMultirateWithEdges:
         assert jnp.isfinite(jnp.array(state["slow"]["position"]))
 
     @given(rate_multiplier=st.integers(min_value=2, max_value=3))
+    # Absolute (see EXHAUSTED SPACES above): 2 rate multipliers.
     @settings(max_examples=20, deadline=None)
     def test_multirate_spring_chain_finite(self, rate_multiplier):
         """A chain of springs at different rates should remain finite."""
@@ -325,6 +341,7 @@ class TestRateDividers:
         dt_a=st.sampled_from([0.01, 0.02, 0.05, 0.1]),
         dt_b=st.sampled_from([0.01, 0.02, 0.05, 0.1]),
     )
+    # Absolute (see EXHAUSTED SPACES above): 4 x 4 = 16 timestep pairs.
     @settings(max_examples=50, deadline=None)
     def test_rate_dividers_are_positive_integers(self, dt_a, dt_b):
         """Rate dividers should always be positive integers."""
@@ -338,6 +355,7 @@ class TestRateDividers:
             assert div >= 1, f"Rate divider for {name} is {div} (must be >= 1)"
 
     @given(multiplier=st.integers(min_value=2, max_value=10))
+    # Absolute (see EXHAUSTED SPACES above): 9 multipliers.
     @settings(max_examples=30, deadline=None)
     def test_rate_divider_ratio_matches_timestep_ratio(self, multiplier):
         """rate_divider(slow) / rate_divider(fast) == dt_slow / dt_fast."""

@@ -44,8 +44,8 @@ not, and says which.
 | anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.7–1.9x fewer iterations than Jacobi on every shape measured, and Aitken removes up to half of what is left (0–49% under the interface norm).  It is the sweep's own best configuration on eight of the eighteen fast fixtures.  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free |
 | cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
 | contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.1 iterations where `gs/none/l2` exhausts its cap of 60 on 98% of steps and converges on 2%.  Not faster there (0.21 ms against 0.10) — right rather than fast |
-| one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | same iteration count as accelerating everything, at 1/60th the cost — the quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid |
-| every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 5.6 iterations and 7.70 ms to 1.0 and 3.38 ms; IQN costs 70–160x and is not affordable at 2x10⁵ accelerated DOFs |
+| one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | the sweep's best configuration on `heterogeneous`: 3.0 iterations at 1.78 ms, against 5.4 and 2.02 for plain iteration and 2.0 at 122 ms for the same accelerator on every field.  The quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid.  Under **Jacobi** the same restriction costs convergence — see below |
+| every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 6.0 iterations and 6.17 ms to 1.5 and 1.85 ms; IQN buys 0.05 of an iteration for 91–148x the step time and is not affordable at 2x10⁵ accelerated DOFs |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
 | wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 7.9 → 8.1 iterations from 2 to 16 leaves under the interface norm, IQN 3.0 → 3.0) but IQN's step cost is not: 1.45 ms against 0.51 ms at 16 leaves, for 5 fewer iterations that the dispatch floor hides |
 | ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
@@ -326,26 +326,34 @@ reproducible number on this page — the same row has measured 107 ms and
 because XLA's CPU SVD inside a `while_loop` is erratic.  Treat it as
 "one to two orders of magnitude", not as 120.  Two levers, in order:
 
-**1. Lower `max_iterations`.**  A cap of 60 gives IQN 59 secant columns
-whether or not it ever needs them.  Re-running the same graphs with
-`--max-iterations 16` (`coupling_sweep_cap16_cpu.json`):
+**1. Lower `max_iterations`, but size it from a measurement.**  A cap of
+60 gives IQN 59 secant columns whether or not it ever needs them, and
+the least-squares problem is that wide every pass.  Re-running the same
+graphs with `--max-iterations 16` (`coupling_sweep_cap16_cpu.json`):
 
 | fixture / config | cap 60 | cap 16 |
 |---|---|---|
-| `chain-50` `gs/iqn-ils/l2` | 14.1 it, 107 ms | 14.0 it, 3.00 ms |
-| `chain-50` `gs/iqn-imvj5/l2` | 13.6 it, 65.0 ms | 13.8 it, 3.44 ms |
-| `chain-20` `gs/iqn-ils/l2` | 13.6 it, 2.56 ms | 13.6 it, 1.75 ms |
-| `star-16` `gs/iqn-ils/l2` | 5.0 it, 1.43 ms | 5.0 it, 1.35 ms |
+| `star-16` `gs/iqn-ils/l2` | 4.0 it, 1.33 ms, 100% converged | 4.0 it, 1.55 ms, **100%** |
+| `chain-20` `gs/iqn-ils/l2` | 14.1 it, 2.15 ms, 100% | 13.9 it, 1.85 ms, **86%** |
+| `chain-50` `gs/iqn-ils/l2` | 16.9 it, 169 ms, 100% | 14.9 it, 2.93 ms, **23%** |
+| `chain-50` `gs/iqn-imvj5/l2` | 17.5 it, 41.8 ms, 100% | 15.0 it, 3.05 ms, **13%** |
 
-Same iteration count, a thirty-fifth of the cost on the worst row.  The
-cap is not a free safety margin, it is a sizing parameter.
+Read the third column, not the second.  `star-16` converges in 4
+iterations, so 59 columns were pure overhead and taking them away costs
+nothing — that is the case the lever is for.  `chain-50` needs 16.9, so
+a cap of 16 cannot hold it: it sits at the cap on 93–100% of steps and
+converges on 13–23% of them.  The 58x saving on that row is real and it
+is bought by not converging.  **`max_cols = max_iterations - 1`, so the
+cap is simultaneously the secant history length and the iteration
+budget, and it is a sizing parameter in both directions** — lowering it
+shrinks the least-squares problem *and* the number of passes available
+to use it.
 
-The obvious caveat: a cap only costs nothing for configurations that
-already converge inside it.  In the same run, `gs/none/l2` at cap 16
-converged on **0%** of `chain-20` and `chain-50` steps, 3% of `star-16`
-and 4% of `stiff-pair-0.8` — it needs 20–25.  Set the cap from the
-iteration count you measured, not from the one you hoped for, and read
-`converged_fraction` afterwards.
+The unaccelerated rows show the same boundary more bluntly.  At cap 16,
+`gs/none/l2` converged on **0%** of `chain-50` steps, 2% of `chain-20`
+and `stiff-pair-0.8`, 0% of `star-16` — it needs 15–31.  Set the cap
+from the iteration count you measured, not from the one you hoped for,
+and read `converged_fraction` afterwards rather than the step time.
 
 **2. Set `accelerated_fields` explicitly** so a large-state node does not
 put its whole array into the least-squares problem.  `None`
@@ -407,59 +415,111 @@ problem to the *expensive* node's interface would beat accelerating
 everything.  On `heterogeneous` — one 6x10⁴-cell grid plus four scalar
 nodes — restricting it to the expensive node is the **worst** of the
 four options, and restricting it to the cheap ones is the best by two
-orders of magnitude (Gauss-Seidel, L2 norm, 10-step run):
+orders of magnitude (Gauss-Seidel, `iqn-ils`, L2 norm):
 
 | `accelerated_fields` | accelerated DOFs | iterations | ms/step |
 |---|---|---|---|
-| `None` (auto: grid + scalars) | ~6x10⁴ | 4.0 | 188 |
-| everything, incl. velocities | ~6x10⁴ | 3.0 | 170 |
-| the expensive node only | 6x10⁴ | 8.5 | 343 |
-| **the four cheap nodes only** | **4** | **4.0** | **2.49** |
-| (no acceleration, for scale) | — | 6.2 | 2.22 |
+| `None` (auto: grid + scalars) | ~6x10⁴ | 4.0 | 177 |
+| everything, incl. velocities | ~6x10⁴ | 3.0 | 121 |
+| the expensive node only | 6x10⁴ | 6.7 | 300 |
+| **the four cheap nodes only** | **4** | **4.0** | **2.10** |
+| (no acceleration, for scale) | — | 6.7 | 2.13 |
 
-Same iteration count as accelerating everything, at one seventy-sixth of
-the cost — and `iqn-imvj` on the cheap nodes does better still, 3.0
-iterations at 2.02 ms.  The reading is that the secant history needs
-enough degrees of freedom to model how the *interface* responds, and the
-four scalars carry that; the grid's sixty thousand cells add nothing to
-the model and the entire cost.  Restricting to the grid alone removes
-the degrees of freedom that were doing the work and doubles the
-iteration count.
+Two comparisons, stated separately because the earlier version of this
+page mixed them: cheap-only matches the **auto-detected** set on
+iterations exactly (4.0 against 4.0) at **1/85th** of its cost, and is
+one iteration behind accelerating **everything** (4.0 against 3.0) at
+**1/58th** of its cost.  Neither ratio is 1/60 or 1/76 paired with
+"same iteration count"; those were an iteration claim from one pair and
+a cost ratio from another.
+
+The reading is that the secant history needs enough degrees of freedom
+to model how the *interface* responds, and the four scalars carry that;
+the grid's sixty thousand cells add nothing to the model and the entire
+cost.  Restricting to the grid alone removes the degrees of freedom that
+were doing the work.
+
+Two caveats the recommendation needs.  First, the win is over IQN's own
+cost, not over doing nothing: cheap-only `iqn-ils` at 2.10 ms is a
+wash against `gs/none/l2` at 2.13 ms, and it is `iqn-imvj` under the
+interface norm — 3.0 iterations at 1.78 ms against `gs/none/interface`'s
+5.4 at 2.02 — that actually wins, by 12%.  The point of
+`accelerated_fields` here is that it makes IQN *affordable* on a
+heterogeneous group, not that IQN is a large win on one.
+
+Second, **under Jacobi the same restriction costs convergence.**  All
+four Jacobi cheap-only rows fall short:
+
+| row | iterations | converged |
+|---|---|---|
+| `jac/iqn-ils/l2/fields-cheap` | 16.0 | 60% |
+| `jac/iqn-imvj5/l2/fields-cheap` | 15.8 | 65% |
+| `jac/iqn-ils/interface/fields-cheap` | 13.6 | 75% |
+| `jac/iqn-imvj5/interface/fields-cheap` | 13.6 | 75% |
+
+against 100% for every one of the corresponding Gauss-Seidel rows and
+for the Jacobi rows that accelerate everything.  Restricting the secant
+basis to four scalars leaves Jacobi without enough of the interface
+response to model, and unlike Gauss-Seidel it has no sequential update
+to make up the difference.
 
 The corollary for a grid-to-grid group, where there is no cheap subset
 to fall back on: IQN is simply not affordable.  On `expensive-pair` it
-costs 70–160x the plain step, and under the L2 norm it converged on only
-90% of steps.
-One honest caveat: the interface norm is a *relative* criterion
-(`atol`/`rtol`), so it stops earlier than an absolute L2 tolerance, and
-the trajectories drift further apart as a result.  Measured against the
-`gauss-seidel/none/l2` trajectory over the profiled run, and scaling
-each field by its own magnitude rather than the graph's largest, the
-worst interface-norm row per fixture runs from 3.8x10⁻⁵ (`chain-2`)
-through 2x10⁻³ (`chain-20`, `star-4`) to 3.7x10⁻² on `chain-50`; every
-L2 row on the fast fixtures stays within 5x10⁻⁴.
+costs **91–148x** the plain step for 0.05 of an iteration under the
+interface norm, and under the L2 norm `gs/iqn-ils` converged on only
+75% of steps.
+## Do all these configurations agree?
 
-The largest disagreement anywhere in the sweep is 4.2x10⁻² on
-`heterogeneous`, from `jacobi/aitken/l2` — a row that reports itself
-fully converged.  That is a fixture with a four-orders-of-magnitude
-spread of scales between its grid and its scalar nodes, and the figure
-is small enough to be consistent with each configuration stopping at its
-own tolerance, but it is the one number here that has not been run down
-to a cause.  If you are relying on `heterogeneous` for anything load-
-bearing, start by reproducing that row.  That is the same fixed point reached
-to a looser tolerance, not a different one — the sweep records
-`fixed_point_agreement` per fixture and the suite asserts it — but the
-deviation grows with the fixture's condition number, so set `rtol`
-deliberately rather than inheriting it.
+The sweep records `fixed_point_agreement` per fixture: the largest
+deviation between the state fingerprints of any two fully converged
+rows, measured against the first of them.  Two numbers, because one is
+not enough on a mixed-scale fixture — `max_relative_deviation` scales
+each entry by its *field's* largest magnitude across the group, and
+`max_node_relative_deviation` scales it by that entry's own amplitude,
+which is the one that catches a small node hiding behind a large one
+sharing its field name.
+
+Across all twenty fixtures the field-scaled figure runs from 1.0x10⁻⁷
+(`slow-drift`) to 4.8x10⁻³ (`mixed-modes`), and every fixture's worst
+row is an interface-norm one.  That is the expected shape: the interface
+norm is a *relative* criterion (`atol`/`rtol`), so it stops earlier than
+an absolute L2 tolerance and the trajectories drift correspondingly
+further apart.  The node-scaled figure agrees with it everywhere except
+`chain-50`, where it reports 6.0x10⁻² for `link30.velocity` — a node
+passing near zero, measured against its own small amplitude.  That is
+what the second number is for, and it is also why the fixture-level
+threshold in the test suite is per-norm rather than one band for both.
+
+Two notes on how these figures got here, because the earlier version of
+this page quoted a different one.  The headline used to be 4.2x10⁻² on
+`heterogeneous` — a number that was **not** a disagreement of 4.2x10⁻².
+It was the *sum* of a 60 000-cell grid field: an extensive quantity
+compared against a scale taken from an intensive one, so a per-cell
+difference of 7x10⁻⁷ scored 4x10⁻².  And the scale it was divided by
+came from the driver node, which sits outside every coupling group and
+carries a `position` eighty times the coupled probes', so the probes'
+own disagreement — a real 20.6%, caused by the Aitken exit criterion
+described at the top of this page — was reported as 2.6x10⁻³ and passed
+under a 5x10⁻³ threshold.  Both are fixed: the signature records each
+entry's element count and the comparison divides it out, and the
+signature covers only the nodes inside a coupling group.
+`heterogeneous` now reports 1.8x10⁻³, from `jacobi/fixed` ω = 0.8 /
+`interface`, and the Aitken rows are unremarkable.
+
+The practical advice is unchanged and now rests on the right numbers:
+the deviation grows with the fixture's condition number and with how
+early the criterion lets you stop, so set `rtol` deliberately rather
+than inheriting it, and read `fixed_point_agreement` for your own graph
+rather than trusting a figure from this page.
 
 ## A note on the global L2 norm and large grids
 
 On a graph where one node carries a large state and the coupling touches
 a few cells of it, the global L2 residual is dominated by bulk change
-that does not iterate at all.  `expensive-pair` converges in **1.0
-iterations** under the interface norm, at 3.38 ms, because the interface
-agrees immediately at that tolerance; under the global L2 norm the same
-graph reports 5.6 iterations and 7.70 ms.  The two norms are measuring
+that does not iterate at all.  `expensive-pair` converges in **1.5
+iterations** under the interface norm, at 1.85 ms, because the interface
+agrees almost immediately at that tolerance; under the global L2 norm
+the same graph reports 6.0 iterations and 6.17 ms.  The two norms are measuring
 different things, and on a grid the L2 number is mostly a statement
 about the grid, not about the coupling.  Use the
 interface norm on grid couplings, and read `coupling_iter_stats` rather

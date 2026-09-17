@@ -74,9 +74,14 @@ class PoissonSineTopKNode(AdaptiveNode):
     ):
         if selection not in ("b", "c"):
             raise ValueError(f"selection must be 'b' or 'c', got {selection!r}")
+        # ``n`` is this subclass's own structural parameter: the base
+        # class keeps ``n_max`` out of ``self.params`` (it would collide
+        # with this call on a round-trip reconstruction), so a subclass
+        # that wants its basis size to survive serialisation declares it.
         super().__init__(
-            name, timestep, n_max=n, theta=theta, sigma=sigma, k=int(k),
-            selection=selection, sensor_x=sensor_x, solver=solver, **kw,
+            name, timestep, n_max=n, n=int(n), theta=theta, sigma=sigma,
+            k=int(k), selection=selection, sensor_x=sensor_x, solver=solver,
+            **kw,
         )
         dt = self.dtype
         n_grid = 2 * int(n)
@@ -150,8 +155,8 @@ class MaskedDenseNode(AdaptiveNode):
     def __init__(self, name: str = "dense", timestep: float = 1.0, *,
                  theta: float = 0.3, n: int = 24, k: int = 6, seed: int = 0,
                  solver: str = "dense", **kw):
-        super().__init__(name, timestep, n_max=n, theta=theta, k=int(k), seed=int(seed),
-                         solver=solver, **kw)
+        super().__init__(name, timestep, n_max=n, n=int(n), theta=theta, k=int(k),
+                         seed=int(seed), solver=solver, **kw)
         rng = np.random.default_rng(seed)
         m0 = rng.standard_normal((n, n))
         m1 = rng.standard_normal((n, n))

@@ -89,10 +89,20 @@ def test_checkpoint_round_trip_restores_coefficients_and_mask(tmp_path):
     assert np.array_equal(np.asarray(restored["c"]), np.asarray(saved["c"]))
 
 
-def test_add_node_at_a_trap_fails_loudly():
+def test_add_node_at_an_established_trap_fails_loudly():
     gm = GraphManager()
-    with pytest.raises(AdaptiveNodeBlindnessError):
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
         gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16))
+
+
+def test_add_node_at_a_budget_limited_point_succeeds_with_a_warning():
+    """A small active-set budget is the whole point of an adaptive solver:
+    it must not be a construction-time failure (audit A3)."""
+    gm = GraphManager()
+    with pytest.warns(UserWarning, match="not\\* a symmetry trap"):
+        gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.42, n=64, k=4))
+    gm.compile()
+    assert int(gm.run_scan(1)["adaptive"]["mask"].sum()) == 4
 
 
 def test_cold_start_params_can_seed_the_graph():
@@ -103,4 +113,40 @@ def test_cold_start_params_can_seed_the_graph():
     gm.compile()
     gm.params["nodes"]["adaptive"].update(params)
     state = gm.run_scan(1)["adaptive"]
-    assert node.blindness_ratio(state, gm.params["nodes"]["adaptive"]) > node.blindness_threshold
+    assert (node.gradient_capture_ratio(state, gm.params["nodes"]["adaptive"])
+            > node.gradient_capture_threshold)
+
+
+def test_the_diagnostic_can_be_run_at_the_live_graph_parameters_at_a_trap():
+    """The cold-start check sees the constructor parameters; a graph moved
+    onto a trap through ``gm.params`` (what ``sysid.fit`` does) used to run
+    silently, and the stale mask even reported a healthy ratio (audit A5)."""
+    gm = _graph(theta=0.42)
+    node = gm._nodes["adaptive"].node
+    live = gm.params["nodes"]["adaptive"]
+    assert node.check_gradient_capture(live) > node.gradient_capture_threshold
+
+    live["theta"] = jnp.asarray(0.5)          # the graph now sits on the trap
+    gm.run_scan(1)
+    assert node.gradient_capture_ratio(gm.get_node_state("adaptive"), live) < 0.01
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+        node.check_gradient_capture(live)
+
+
+def test_reset_state_does_not_re_pay_for_the_diagnostic():
+    """``reset_state`` re-runs ``initial_state`` on every node; the
+    diagnostic is a function of the parameters, so it is evaluated once."""
+    calls = {"n": 0}
+
+    class Counting(PoissonSineTopKNode):
+        def compute_full_basis_gradient(self, state, params=None):
+            calls["n"] += 1
+            return super().compute_full_basis_gradient(state, params)
+
+    gm = GraphManager()
+    gm.add_node(Counting("adaptive", 1.0, theta=0.42, n=64, k=16))
+    gm.compile()
+    before = calls["n"]
+    gm.reset_state()
+    gm.reset_state()
+    assert before == 1 and calls["n"] == 1, calls

@@ -253,3 +253,27 @@ class TestStabilityReportGeneratorCoverage:
             capture_output=True, text=True, check=True, env=env,
         )
         assert out.stdout.strip().splitlines()[-1] == "evolving"
+
+    def test_generator_lists_the_adaptive_node_surfaces(self):
+        """The adaptive package is not pulled in by ``maddening.nodes``, and
+        ``solver_utils`` by nothing else, so both must be listed explicitly or
+        their tags never reach the report (audit A6)."""
+        listed = self._listed_modules()
+        for module in ("maddening.nodes.adaptive", "maddening.core.solver_utils"):
+            assert module in listed, (
+                f"{module} is missing from STABILITY_MODULES, so its "
+                "@stability-decorated surfaces never reach the report"
+            )
+
+    def test_the_adaptive_surfaces_reach_the_generated_report(self):
+        import importlib
+
+        importlib.import_module("maddening.nodes.adaptive")
+        importlib.import_module("maddening.core.solver_utils")
+        report = generate_stability_report()
+        for name in (
+            "maddening.nodes.adaptive.base.AdaptiveNode",
+            "maddening.nodes.adaptive.base.AdaptiveNodeBlindnessError",
+            "maddening.core.solver_utils.ift_linear_solve",
+        ):
+            assert name in report, name

@@ -48,6 +48,8 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.cloud.resume",
     "maddening.api.binary_encoder",
     "maddening.nodes",
+    # not pulled in by ``maddening.nodes``
+    "maddening.nodes.adaptive",
     "maddening.surrogates",
     "maddening.surrogates.training.trainer",
     "maddening.sysid",

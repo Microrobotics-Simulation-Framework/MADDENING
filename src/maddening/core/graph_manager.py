@@ -267,8 +267,11 @@ def _fixed_point_while(
     measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm),
     compared against the static ``threshold``.  The loop always runs at
     least one body iteration and at most ``max_iter - 1``, so the number
-    of ``F`` evaluations at the cap (first pass + body iterations) equals
-    ``max_iter`` — the same budget as the legacy fori path.
+    of state updates at the cap (first pass + body iterations) equals
+    ``max_iter`` — the same budget as the legacy fori path.  An exit
+    that did *not* meet the criterion evaluates ``F`` once more to
+    measure what it is returning (see ``final_res`` below); that
+    evaluation updates nothing, and the fori path pays it too.
 
     ``first_res`` is the residual of the pass that produced ``x0`` —
     the one ``_run_coupling_inner`` ran before this loop.  It seeds the

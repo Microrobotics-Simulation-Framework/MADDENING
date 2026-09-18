@@ -12,6 +12,7 @@ here by path, the same way
 script.
 """
 
+import dataclasses
 import importlib.util
 import json
 import math
@@ -236,7 +237,20 @@ def _fixture_build(name):
         # 2 000 cells keeps the property that matters here — one
         # large-state node among small ones, four orders of magnitude of
         # scale in one group — at a couple of seconds.
-        return lambda config: cf.build_heterogeneous(config, n_cells=2000)
+        #
+        # The cap is raised from the registry's 20 because the fixture's
+        # premise is "inside every configuration's reach", and under
+        # 0.4.0's error-bound criterion ``fixed`` at omega = 0.5 is not
+        # inside it in 20 passes: under-relaxation halves every step by
+        # construction, so its residual is worth at least twice itself
+        # in error, and the group exits the cap at an estimate of
+        # 1.3e-04 (Gauss-Seidel) / 5.2e-03 (Jacobi) against a 1e-04
+        # threshold.  40 is enough for every configuration; 60 leaves
+        # headroom.  The registry's own cap is what the benchmark
+        # sweep reports against and is deliberately not changed here.
+        return lambda config: cf.build_heterogeneous(
+            dataclasses.replace(config, max_iterations=60), n_cells=2000,
+        )
     return cf.FIXTURES[name].build
 
 

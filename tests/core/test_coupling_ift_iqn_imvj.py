@@ -242,7 +242,7 @@ def test_convergence_rate_iqn_imvj_beats_aitken_on_stiff_scene():
     x_star = {}
     for acc in ("none", "aitken", "iqn-imvj"):
         accel_init = (zeros_vw, zeros_vw) if acc == "iqn-imvj" else ()
-        xs, nit, _res, _vw = _fixed_point_while(
+        xs, nit, _res, _amp, _vw = _fixed_point_while(
             # ``first_res`` -- the residual of the pass before the loop,
             # which seeds the two-consecutive-passes streak.  ``inf``
             # says "this run did not start out converged", the honest

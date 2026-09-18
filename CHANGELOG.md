@@ -121,6 +121,11 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
+  timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
+- **`coupling_diagnostics()["residual"]` describes the state the step returned**
+  and no longer depends on `solver`; a group that arrives on its last pass now
+  reports `converged=True` instead of raising under `strict_convergence`
 - **The interactive path stops redoing host work**: sharded wrappers place
   their static arrays on device once, not per `update`, and `run_scan` and its
   siblings compile once per `compile()`, not per call (`gm.scan_trace_count`)
@@ -178,6 +183,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`strict_convergence` no longer ignores a diverged group that overflowed**:
+  a NaN residual raises like any other failure instead of passing silently,
+  which is what `coupling_diagnostics()` already reported for it
 - **`gm.compile()` drops every node's materialised statics**, including one
   inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
   method that forwards inwards, so a static rewritten in place is not baked in

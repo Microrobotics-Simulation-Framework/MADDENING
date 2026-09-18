@@ -22,11 +22,20 @@ from maddening.nodes.spring import SpringDamperNode
 CAP = 25
 
 
-def _coupled(cap=CAP, tol=1e-8):
+def _coupled(cap=CAP, tol=1e-8, dt=0.01):
+    """Two springs, each the other's anchor.
+
+    ``dt`` sets how hard the interface problem is: at the default the
+    group converges in two or three passes, and its *second* pass lands
+    on the fixed point to the last bit of float32 -- so "cannot converge
+    in two iterations" is not something this fixture can express.  A
+    test that needs a group genuinely short of iterations asks for a
+    larger ``dt`` (see ``test_at_cap_reported_and_recommended``).
+    """
     gm = GraphManager()
-    gm.add_node(SpringDamperNode("a", 0.01, stiffness=30.0, damping=2.0,
+    gm.add_node(SpringDamperNode("a", dt, stiffness=30.0, damping=2.0,
                                  initial_position=0.0))
-    gm.add_node(SpringDamperNode("b", 0.01, stiffness=30.0, damping=2.0,
+    gm.add_node(SpringDamperNode("b", dt, stiffness=30.0, damping=2.0,
                                  initial_position=3.0))
     gm.add_edge("a", "b", "position", "anchor_position")
     gm.add_edge("b", "a", "position", "anchor_position")
@@ -73,7 +82,12 @@ def test_graph_restored_after_one_iteration_measurement():
 
 
 def test_at_cap_reported_and_recommended():
-    gm = _coupled(cap=2, tol=1e-12)          # cannot converge in 2
+    # dt=0.05: a strong enough interface problem that two passes really
+    # do leave it short.  At the default dt the second pass lands on the
+    # fixed point exactly, and the group is then converged at the cap --
+    # correctly reported as such since the residual describes the state
+    # that was returned.
+    gm = _coupled(cap=2, tol=1e-12, dt=0.05)
     rep = profile_graph(gm, n_steps=10, n_warmup=1, measure_coupling=False)
     st = rep.coupling_iter_stats["a+b"]
     assert st["at_cap_fraction"] == 1.0 and st["converged_fraction"] == 0.0

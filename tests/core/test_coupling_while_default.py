@@ -43,6 +43,31 @@ def _springs(**group_kw) -> GraphManager:
     return gm
 
 
+def _slow_springs(**group_kw) -> GraphManager:
+    """The same 2-cycle, coupled strongly enough to still be iterating.
+
+    ``_springs`` is so weakly coupled (``k * dt**2 / m = 5e-5``) that
+    its second pass lands on the fixed point to the last bit of
+    float32: its residual is *exactly* zero from pass two on.  That is
+    fine for "does it converge", but it cannot express "this group ran
+    out of iterations" -- a group whose returned state has a zero
+    residual has converged, whatever the cap said.  This one needs six
+    passes at 1e-12, so a cap of two genuinely leaves it short.
+    """
+    gm = GraphManager()
+    for name, pos in (("spring_a", 0.0), ("spring_b", 2.0)):
+        gm.add_node(SpringDamperNode(
+            name=name, timestep=0.05, stiffness=100.0, damping=1.0,
+            mass=1.0, rest_length=1.0, initial_position=pos,
+        ))
+    gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
+    gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
+    kw = dict(max_iterations=30, tolerance=1e-8)
+    kw.update(group_kw)
+    gm.add_coupling_group(["spring_a", "spring_b"], **kw)
+    return gm
+
+
 def _rods(**group_kw) -> GraphManager:
     gm = GraphManager()
     for name, T in (("rod_a", 100.0), ("rod_b", 0.0)):
@@ -138,15 +163,17 @@ def test_exits_early_and_reports_convergence():
 
 
 def test_unconverged_is_reported_not_raised_by_default():
-    gm = _springs(max_iterations=2, tolerance=1e-12, diagnostics=True)
+    gm = _slow_springs(max_iterations=2, tolerance=1e-12, diagnostics=True)
     gm.step()
     d = gm.coupling_diagnostics()["spring_a+spring_b"]
     assert d["converged"] is False
+    assert d["residual"] > 1e-12
     assert d["iterations"] == 1
 
 
 def test_strict_convergence_raises_at_cap():
-    gm = _springs(max_iterations=2, tolerance=1e-12, strict_convergence=True)
+    gm = _slow_springs(max_iterations=2, tolerance=1e-12,
+                       strict_convergence=True)
     with pytest.raises(Exception, match="without converging"):
         gm.step()
 

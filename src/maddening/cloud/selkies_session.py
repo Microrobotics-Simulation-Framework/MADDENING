@@ -201,8 +201,7 @@ class SelkiesSession(StreamingSession):
             )
 
         self._secret = secret or uuid.uuid4().hex
-        self._ephemeral_secret = not secret
-        if self._ephemeral_secret:
+        if not secret:
             logger.warning(
                 "SelkiesSession was constructed without a shared secret; a "
                 "random one was generated. Signaling clients cannot compute a "

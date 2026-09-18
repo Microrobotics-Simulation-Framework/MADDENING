@@ -52,14 +52,24 @@ NON_DEFAULT = {
     "linear_solver": "dense",
 }
 
-#: ``NON_DEFAULT`` is deliberately an inconsistent configuration: no
-#: assignment can hold ``tolerance`` *and* ``atol`` / ``rtol`` away from
-#: their defaults and still be one a user would write, because
-#: ``convergence_norm`` reads one pair or the other and ``CouplingGroup``
-#: now warns about the one it ignores.  Weakening the fixture would stop
-#: it testing a field, so the round trips opt out of that one warning.
-inert_tolerance_is_the_point = pytest.mark.filterwarnings(
-    "ignore:CouplingGroup.tolerance:UserWarning"
+#: ``NON_DEFAULT`` is deliberately an inconsistent configuration, and has
+#: to be: no group a user would write can hold every field away from its
+#: default at once.  ``convergence_norm`` reads ``tolerance`` or
+#: ``atol`` / ``rtol`` but never both; ``acceleration`` reads
+#: ``relaxation`` or ``jacobian_reuse`` but never both; and ``solver``
+#: reads ``linear_solver`` and ``strict_convergence`` only on the path
+#: this fixture does not take.  ``CouplingGroup`` warns about each knob
+#: its configuration ignores, which is the point of the warning and
+#: exactly wrong here -- weakening the fixture would stop it testing a
+#: field, which is the failure this module exists to catch.  So the
+#: round trips opt out of these five warnings and nothing else: a
+#: *sixth* inert knob in this fixture is a real finding and still fails.
+inert_knobs_are_the_point = pytest.mark.filterwarnings(
+    "ignore:CouplingGroup.tolerance:UserWarning",
+    "ignore:CouplingGroup.relaxation:UserWarning",
+    "ignore:CouplingGroup.jacobian_reuse:UserWarning",
+    "ignore:CouplingGroup.linear_solver:UserWarning",
+    "ignore:CouplingGroup.strict_convergence:UserWarning",
 )
 
 
@@ -93,7 +103,7 @@ def test_to_dict_writes_every_field_of_the_dataclass():
     assert written == {f.name for f in fields(CouplingGroup)}
 
 
-@inert_tolerance_is_the_point
+@inert_knobs_are_the_point
 def test_every_field_round_trips_through_a_config():
     gm = _two_rods()
     gm.add_coupling_group(["rod_a", "rod_b"], **NON_DEFAULT)
@@ -117,7 +127,7 @@ def test_the_non_default_fixture_is_non_default_in_every_field():
     assert set(NON_DEFAULT) | {"nodes"} == {f.name for f in fields(CouplingGroup)}
 
 
-@inert_tolerance_is_the_point
+@inert_knobs_are_the_point
 def test_the_config_is_json_and_survives_a_text_round_trip():
     gm = _two_rods()
     gm.add_coupling_group(["rod_a", "rod_b"], **NON_DEFAULT)
@@ -131,7 +141,7 @@ def test_the_config_is_json_and_survives_a_text_round_trip():
     assert json.loads(json.dumps(config)) == config
 
 
-@inert_tolerance_is_the_point
+@inert_knobs_are_the_point
 def test_to_dict_is_idempotent_through_from_dict():
     gm = _two_rods()
     gm.add_coupling_group(["rod_a", "rod_b"], **NON_DEFAULT)

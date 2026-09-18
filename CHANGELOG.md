@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state
+- **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
+  `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
+  `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
   and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead

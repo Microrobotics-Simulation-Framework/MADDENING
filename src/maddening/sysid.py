@@ -378,11 +378,11 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
     if len(flags) != len(entries):
         raise ValueError("mask must have the same tree structure as params")
     specs = gm.param_specs()
-    frozen = [
-        (path, _spec_for(specs, path))
-        for (path, _), flag in zip(entries, flags)
-        if bool(flag) and not _spec_for(specs, path).trainable
-    ]
+    frozen = []
+    for (path, _), flag in zip(entries, flags):
+        spec = _spec_for(specs, path)
+        if bool(flag) and not spec.trainable:
+            frozen.append((path, spec))
     if frozen:
         listed = "\n".join(
             f"  - {_leaf_location(path)}  "

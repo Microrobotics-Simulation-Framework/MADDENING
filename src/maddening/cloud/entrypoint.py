@@ -66,7 +66,7 @@ def main() -> None:
         # gm = load_graph(graph_usd)
 
     # Start FastAPI server
-    from maddening.api.server import SimulationServer
+    from maddening.api.server import SimulationServer, warn_if_publicly_bound
     server = SimulationServer(node_registry={})
 
     # v0.2 #8: resume from a remote checkpoint URL if requested.
@@ -90,6 +90,11 @@ def main() -> None:
     port = int(os.environ.get("MADDENING_PORT", "8000"))
 
     logger.info("Starting server on %s:%d", host, port)
+    # The default is 0.0.0.0 because a container bound to 127.0.0.1 is
+    # unreachable even with a published port.  That makes the exposure
+    # the normal case here, so say so loudly rather than leaving it to
+    # the release notes.
+    warn_if_publicly_bound(host, port)
     uvicorn.run(
         server.create_app(),
         host=host,

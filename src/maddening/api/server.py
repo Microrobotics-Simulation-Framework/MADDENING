@@ -16,10 +16,20 @@ Usage
     )
     app = server.create_app()
 
-    # Run with: uvicorn module:app
+    # Run with: uvicorn module:app --host 127.0.0.1
     # Or programmatically:
     #   import uvicorn
-    #   uvicorn.run(app, host="0.0.0.0", port=8000)
+    #   uvicorn.run(app, host="127.0.0.1", port=8000)
+
+Security
+--------
+This API has no authentication and no TLS.  Every route -- including
+``POST /cloud/launch``, which provisions paid GPU instances with this
+host's cloud credentials -- is open to anyone who can reach the port.
+Bind it to ``127.0.0.1`` and reach it through an SSH tunnel, or put an
+authenticating, TLS-terminating reverse proxy in front of it.  Call
+:func:`warn_if_publicly_bound` with the bind address before starting the
+server so a non-loopback bind is announced in the log.
 """
 
 from __future__ import annotations
@@ -32,16 +42,16 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field, field_validator
 except ImportError as _exc:
     raise ImportError(
         "The MADDENING API server requires 'fastapi' and 'pydantic'. "
@@ -50,6 +60,8 @@ except ImportError as _exc:
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
 from maddening.viz.relay import StateRelay
@@ -87,6 +99,77 @@ def _python_to_jax(value: Any) -> Any:
 
 
 # ------------------------------------------------------------------
+# Request bounds
+# ------------------------------------------------------------------
+# The server has no authentication (see the module note above and
+# ``warn_if_publicly_bound``), so every number a caller sends is a number
+# an *anonymous* caller sends.  Each limit below caps the work or memory
+# one request can name.  They are deliberately far above anything the
+# shipped examples and UI ask for (200 steps, 2000 data steps, 500
+# epochs) and are declared on the request models so the cap appears in
+# ``/openapi.json`` and a violation is a 422 naming the field, not a
+# server that stops answering.
+
+#: Upper bound on ``POST /sim/run?n_steps=``.  A longer run belongs to
+#: the background runner (``POST /sim/start``), which stays cancellable.
+MAX_RUN_STEPS = 100_000
+
+#: Upper bound on any integer constructor parameter in ``POST
+#: /graph/nodes``.  A node turns such an integer into an array dimension,
+#: so this is the memory one request can ask for.
+MAX_NODE_PARAM_INT = 10_000_000
+
+#: Upper bound on the number of scalars inside one node's parameters.
+MAX_NODE_PARAM_ELEMENTS = 1_000_000
+
+#: Upper bound on the elements of a new node's initial state, summed over
+#: its fields.  Catches dimensions that multiply (each factor small, the
+#: product not).  20e6 float32 elements is 80 MB.
+MAX_NODE_STATE_ELEMENTS = 20_000_000
+
+#: Bounds on ``POST /surrogate/train``.
+MAX_SURROGATE_DATA_STEPS = 100_000
+MAX_SURROGATE_EPOCHS = 10_000
+MAX_SURROGATE_BATCH_SIZE = 65_536
+MAX_SURROGATE_LAYERS = 16
+MAX_SURROGATE_LAYER_WIDTH = 8192
+
+
+def _oversized_param(value: Any, path: str = "") -> Optional[str]:
+    """Why *value* is too big to accept as a node parameter, else ``None``.
+
+    Integers are bounded because a node constructor turns one into an
+    array dimension -- the auditor measured +433 MB of RSS from a single
+    unauthenticated ``POST /graph/nodes``.  Element counts are bounded
+    because a parameter may itself be a large array.  Floats are not
+    bounded: a float is a physical constant, not a dimension, and any cap
+    on one would be arbitrary.
+    """
+    total = 0
+    stack: list[tuple[Any, str]] = [(value, path)]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, dict):
+            stack.extend((v, f"{where}.{k}" if where else str(k))
+                         for k, v in item.items())
+            continue
+        if isinstance(item, (list, tuple)):
+            stack.extend((v, f"{where}[{i}]") for i, v in enumerate(item))
+            continue
+        total += 1
+        if total > MAX_NODE_PARAM_ELEMENTS:
+            return (f"params: at most {MAX_NODE_PARAM_ELEMENTS} values in total "
+                    f"(this server is unauthenticated; see its README)")
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int) and abs(item) > MAX_NODE_PARAM_INT:
+            return (f"params.{where or 'value'}: integer magnitude must be at "
+                    f"most {MAX_NODE_PARAM_INT} (a node turns one into an array "
+                    f"dimension; this server is unauthenticated)")
+    return None
+
+
+# ------------------------------------------------------------------
 # Pydantic request/response models
 # ------------------------------------------------------------------
 
@@ -95,6 +178,14 @@ class AddNodeRequest(BaseModel):
     name: str
     timestep: float
     params: dict[str, Any] = {}
+
+    @field_validator("params")
+    @classmethod
+    def _params_within_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
+        problem = _oversized_param(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
 
 
 class AddEdgeRequest(BaseModel):
@@ -121,10 +212,12 @@ class SetNodeParamsRequest(BaseModel):
 
 class TrainSurrogateRequest(BaseModel):
     node_name: str
-    n_data_steps: int = 500
-    n_epochs: int = 100
-    hidden_sizes: list[int] = [64, 64]
-    batch_size: int = 64
+    n_data_steps: int = Field(500, ge=1, le=MAX_SURROGATE_DATA_STEPS)
+    n_epochs: int = Field(100, ge=1, le=MAX_SURROGATE_EPOCHS)
+    hidden_sizes: list[
+        Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH)]
+    ] = Field([64, 64], min_length=1, max_length=MAX_SURROGATE_LAYERS)
+    batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE)
 
 
 # ------------------------------------------------------------------
@@ -165,13 +258,32 @@ def _non_finite_param(value: Any, path: str = "") -> Optional[str]:
     return None
 
 
-def _dry_run_node(node) -> None:
+def _state_elements(state: Any) -> int:
+    """Total number of scalars across a node state's fields."""
+    total = 0
+    for leaf in jax.tree_util.tree_leaves(state):
+        shape = getattr(leaf, "shape", None)
+        if shape is None:
+            total += 1
+            continue
+        size = 1
+        for dim in shape:
+            size *= int(dim)
+        total += size
+    return total
+
+
+def _dry_run_node(node, state: Any = None) -> None:
     """Abstractly trace one ``update`` of a freshly built node on its own
     initial state with zero boundary inputs: catches constants of the
-    wrong type / shape before the node enters the graph."""
+    wrong type / shape before the node enters the graph.
+
+    *state* is the node's initial state when the caller has already built
+    it (the size check does), so it is not allocated twice.
+    """
     import jax  # noqa: PLC0415
 
-    state = node.initial_state()
+    state = node.initial_state() if state is None else state
     bi = {}
     try:
         for name, spec in (node.boundary_input_spec() or {}).items():
@@ -179,6 +291,66 @@ def _dry_run_node(node) -> None:
     except Exception:  # noqa: BLE001 - descriptor is advisory
         bi = {}
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
+
+
+#: Addresses that only this machine can reach.
+LOOPBACK_HOSTS = frozenset({
+    "127.0.0.1", "localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1",
+})
+
+
+@stability(StabilityLevel.EVOLVING)
+def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
+    """Log a warning when *host* is not a loopback address.
+
+    The API has no authentication and no TLS, and the documented posture
+    is to bind it to localhost or to front it with an authenticating
+    proxy.  Every shipped container path does the opposite, so a silent
+    non-loopback bind is the single most likely way a user ends up with
+    an open ``POST /cloud/launch`` -- an endpoint that provisions paid
+    GPU instances with the host's stored provider credentials.  Call this
+    immediately before handing the app to uvicorn so an operator sees the
+    exposure in the first screen of logs.
+
+    Parameters
+    ----------
+    host : str
+        Bind address about to be passed to the server.
+    port : int, optional
+        Bind port, for the log line only.
+
+    Returns
+    -------
+    bool
+        ``True`` when a warning was emitted, i.e. *host* is reachable
+        from outside this machine.
+
+    Notes
+    -----
+    This warns; it does not refuse.  Changing the bind default would
+    break containerised deployments, where binding 127.0.0.1 makes the
+    server unreachable even with a published port.
+    """
+    normalised = (host or "").strip().lower()
+    if normalised in LOOPBACK_HOSTS or normalised.startswith("127."):
+        return False
+    logger.warning(
+        "\n"
+        "============================================================\n"
+        "  MADDENING API is listening on %s:%s -- NOT loopback.\n"
+        "  This API has NO AUTHENTICATION and NO TLS.  Anyone who can\n"
+        "  reach this address can read and rewrite the graph, and can\n"
+        "  POST /cloud/launch, which provisions paid GPU instances\n"
+        "  with this host's cloud credentials (and /cloud/teardown,\n"
+        "  which destroys them).  /docs lists every route.\n"
+        "  Bind MADDENING_HOST=127.0.0.1 and reach the server through\n"
+        "  an SSH tunnel (ssh -L %s:127.0.0.1:%s <host>), or put an\n"
+        "  authenticating, TLS-terminating proxy in front of it and\n"
+        "  keep this port closed in the firewall / security group.\n"
+        "============================================================",
+        host, port, port, port,
+    )
+    return True
 
 
 def _graph_structure_snapshot(gm) -> dict:
@@ -384,12 +556,36 @@ class SimulationServer:
                 node = node_cls(name=req.name, timestep=req.timestep, **req.params)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
+            # AddNodeRequest bounds each integer the caller sends, which is
+            # what keeps a single dimension from naming hundreds of MB.
+            # Dimensions that multiply survive that bound, so the state the
+            # node actually built is measured too -- before the node joins
+            # the graph, so an oversized one is transient rather than
+            # resident for the life of the process.
+            try:
+                initial_state = node.initial_state()
+            except Exception as exc:  # noqa: BLE001 - a constant it cannot use
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"node '{req.name}' cannot build its initial state: {exc}",
+                )
+            n_elements = _state_elements(initial_state)
+            if n_elements > MAX_NODE_STATE_ELEMENTS:
+                del initial_state, node
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"node '{req.name}' would hold {n_elements} state "
+                            f"elements; at most {MAX_NODE_STATE_ELEMENTS} are "
+                            f"accepted over the API (this server is "
+                            f"unauthenticated -- build a graph this size "
+                            f"in-process)"),
+                )
             # Nodes do not validate their constants; a bad one only fails
             # inside the trace and would wedge every later /sim/step.
             # Trace one update on the node's own initial state (abstractly,
             # no compute) before it enters the graph.
             try:
-                _dry_run_node(node)
+                _dry_run_node(node, initial_state)
             except Exception as exc:  # noqa: BLE001 - any trace failure is a 400
                 raise HTTPException(
                     status_code=400,
@@ -655,7 +851,15 @@ class SimulationServer:
             return self._state_json()
 
         @app.post("/sim/run", tags=["sim"])
-        def sim_run(n_steps: int = 100):
+        def sim_run(
+            n_steps: int = Query(
+                100, ge=1, le=MAX_RUN_STEPS,
+                description="Steps to run synchronously.  Bounded because "
+                            "the request holds a worker for its whole "
+                            "duration and cannot be cancelled; for a longer "
+                            "run use POST /sim/start.",
+            ),
+        ):
             try:
                 self.gm.run(n_steps)
             except RuntimeError as exc:

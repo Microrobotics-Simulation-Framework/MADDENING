@@ -169,16 +169,3 @@ class USDWriter:
                         Vt.FloatArray(np_val.ravel().tolist()), time
                     )
 
-
-def _params_to_serializable(params: dict) -> dict:
-    """Convert node params dict to JSON-serializable form."""
-    result = {}
-    for k, v in params.items():
-        if isinstance(v, np.ndarray):
-            result[k] = v.tolist()
-        elif hasattr(v, "tolist"):
-            # JAX arrays
-            result[k] = np.asarray(v).tolist()
-        else:
-            result[k] = v
-    return result

@@ -183,6 +183,9 @@ guidance; the itemized changes follow.
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it
+- **`gm.compile()` drops every node's materialised statics**, including one
+  inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
+  method that forwards inwards, so a static rewritten in place is not baked in
 - **Examples no longer save plots into the installed package** (they broke on
   a read-only install): output goes to the working directory, usage lines use
   `python -m maddening.examples...`, and a smoke test pins both
@@ -274,6 +277,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Mapping-spec resolver, against generated input** (11 properties): a
+  mutated spec is refused naming the edge or loads exactly the recipe on
+  disk, and no generated asset path escapes the config directory
 - **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
   `tests/fmi/c/`): unit binary plain and under ASan/UBSan, a self-checking
   deterministic fuzz harness, valgrind, a libFuzzer campaign, FMPy against

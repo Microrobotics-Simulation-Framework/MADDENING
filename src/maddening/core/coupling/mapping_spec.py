@@ -683,7 +683,12 @@ class MappingSpec:
             # even when the user label collides with another kind's name.
             kind = "matrix"
         hyper = {k: v for k, v in d.items() if k not in _RESERVED_KEYS}
-        if kind in _FACTORIES and "mode" not in _FACTORIES[kind][2]:
+        # ``kind`` is untrusted: an unhashable one (a list, a dict) must
+        # reach the "unknown mapping kind" ValueError of ``__post_init__``,
+        # not come back out of this lookup as ``TypeError: unhashable type``,
+        # which names neither the key nor what is wrong with it.
+        if isinstance(kind, str) and kind in _FACTORIES \
+                and "mode" not in _FACTORIES[kind][2]:
             # ``describe()`` reports the mode of every mapping; a factory
             # with a fixed mode (projection_1d) does not take it back.
             hyper.pop("mode", None)

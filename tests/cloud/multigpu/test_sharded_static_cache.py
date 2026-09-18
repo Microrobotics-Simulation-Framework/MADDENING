@@ -39,6 +39,7 @@ from maddening.cloud.multigpu.sharded_unstructured import (
     ShardedUnstructuredNode,
 )
 from maddening.core.graph_manager import GraphManager
+from maddening.core.simulation.hybrid_node import HybridNode
 from maddening.core.node import SimulationNode
 from maddening.core.static_data import StaticArray
 
@@ -386,3 +387,235 @@ def test_replace_node_brings_its_own_static(monkeypatch):
     assert not np.allclose(old_next, new_next), (
         "the replacement node's mask never reached the update"
     )
+
+
+# ---------------------------------------------------------------------------
+# compile() is the framework's "rebuild everything"; it has to reach the
+# one change the identity key cannot see.  These two run on a single
+# device so they are not skipped on a 1-CPU CI runner.
+# ---------------------------------------------------------------------------
+
+
+class InPlaceMaskDiffusion1D(SimulationNode):
+    """1-D diffusion whose sharded mask is a NumPy buffer.
+
+    Unlike :class:`ScaledMaskDiffusion1D` the buffer is writable, so a
+    test can rewrite it *in place* -- the one change
+    ``ShardedStencilNode``'s identity-keyed static cache cannot see.
+    """
+
+    def __init__(self, name: str, n: int):
+        super().__init__(name=name, timestep=0.01)
+        self._n = int(n)
+        self._mask = np.ones(int(n), dtype=np.float32)
+
+    @property
+    def static_data(self) -> dict:
+        return {
+            "mask": StaticArray(
+                value=self._mask, replication="shard", shard_axis=0,
+            ),
+        }
+
+    def halo_width(self) -> dict[int, int]:
+        return {0: 1}
+
+    def state_fields(self) -> list[str]:
+        return ["f"]
+
+    def initial_state(self) -> dict:
+        return {"f": jnp.asarray(
+            np.linspace(0.0, 1.0, self._n).astype(np.float32)
+        )}
+
+    def update(self, state, boundary_inputs, dt):
+        f = state["f"]
+        f_pad = jnp.pad(f, 1, mode="edge")
+        lap = f_pad[2:] - 2 * f_pad[1:-1] + f_pad[:-2]
+        return {"f": f + 0.1 * jnp.asarray(self._mask) * lap * dt}
+
+    def update_padded(
+        self, state_padded, boundary_inputs, dt, *,
+        static_padded=None, shard_info=None,
+    ):
+        f_pad = state_padded["f"]
+        m_pad = static_padded["mask"]
+        lap = f_pad[2:] - 2 * f_pad[1:-1] + f_pad[:-2]
+        f_new = f_pad[1:-1] + 0.1 * m_pad[1:-1] * lap * dt
+        return {"f": jnp.pad(f_new, 1, mode="edge")}
+
+
+def test_compile_rematerialises_a_static_rewritten_in_place():
+    """``gm.compile()`` must not bake in the previous static buffer.
+
+    The per-device placement is cached on the *node*, keyed on the array's
+    identity, so a buffer rewritten in place is invisible to it.  That is
+    the accepted trade-off for a steady-state ``update``, but ``compile()``
+    is the framework's explicit "throw everything away and rebuild": it
+    rebuilds the step, clears the scan cache and re-snapshots the
+    static-data hashes, so it has to drop the materialised statics too.
+    Otherwise the freshly traced step closes over the old buffer and every
+    later step is silently wrong.
+    """
+    inner = InPlaceMaskDiffusion1D("d", n=N_CELLS)
+    mesh = create_device_mesh(shape=(1,))
+    wrapper = ShardedStencilNode(
+        inner, mesh, axis_map={"devices": 0}, boundary="edge",
+    )
+    gm = GraphManager()
+    gm.add_node(wrapper)
+    gm.compile()
+    gm.step()
+    start = np.asarray(gm.get_node_state("d")["f"]).copy()
+
+    # A mask of zeros freezes the field: the step becomes the identity.
+    inner._mask[:] = 0.0
+    gm.compile()
+    gm.set_node_state("d", {"f": jnp.asarray(start)})
+    gm.step()
+
+    np.testing.assert_allclose(
+        np.asarray(gm.get_node_state("d")["f"]), start, rtol=0, atol=0,
+        err_msg="compile() traced the step against the pre-rewrite mask",
+    )
+
+
+def test_compile_invalidates_every_node_static_cache():
+    """The hook is called for each node that offers it.
+
+    Pins the contract itself (rather than one wrapper's behaviour), so a
+    future node that caches a materialisation gets the same treatment.
+    """
+    class _Recorder(SimulationNode):
+        def __init__(self) -> None:
+            super().__init__(name="rec", timestep=0.1)
+            self.invalidations = 0
+
+        def state_fields(self) -> list[str]:
+            return ["x"]
+
+        def initial_state(self) -> dict:
+            return {"x": jnp.array(0.0, dtype=jnp.float32)}
+
+        def update(self, state, boundary_inputs, dt):
+            return {"x": state["x"] + dt}
+
+        def invalidate_static_cache(self) -> None:
+            self.invalidations += 1
+
+    node = _Recorder()
+    gm = GraphManager()
+    gm.add_node(node)
+    gm.compile()
+    assert node.invalidations == 1
+    gm.compile()
+    assert node.invalidations == 2
+
+
+# ---------------------------------------------------------------------------
+# ... including a cache that is not on the object the graph holds.  The
+# graph sees only the outermost node, so the hook has to be a contract
+# method that forwards inwards rather than a name probed on one object.
+# Single device, so these are not skipped on a 1-CPU CI runner.
+# ---------------------------------------------------------------------------
+
+
+def _in_place_mask_wrapper():
+    """A one-device ``ShardedStencilNode`` over a rewritable mask."""
+    inner = InPlaceMaskDiffusion1D("d", n=N_CELLS)
+    mesh = create_device_mesh(shape=(1,))
+    return inner, ShardedStencilNode(
+        inner, mesh, axis_map={"devices": 0}, boundary="edge",
+    )
+
+
+def _step_with_zeroed_mask(gm, inner, wrapper):
+    """Run one step, zero the mask in place, recompile, run one more.
+
+    Returns ``(state_before, state_after)`` from the same starting
+    field, so a mask of zeros must leave them identical.
+    """
+    gm.compile()
+    gm.step()
+    start = np.asarray(gm.get_node_state("d")["f"]).copy()
+    inner._mask[:] = 0.0
+    gm.compile()
+    # Read the cache here: the step below re-materialises it, so after
+    # the step "populated" says nothing about whether compile() cleared it.
+    assert wrapper._static_device_cache is None, (
+        "compile() left the wrapper's materialised statics in place"
+    )
+    gm.set_node_state("d", {"f": jnp.asarray(start)})
+    gm.step()
+    return start, np.asarray(gm.get_node_state("d")["f"])
+
+
+def test_compile_reaches_a_static_cache_nested_inside_another_node():
+    """A wrapped sharded node's cache is dropped by ``compile()`` too.
+
+    ``HybridNode`` holds the node it augments as an attribute, so the
+    graph's node -- the only object ``compile()`` sees -- is the
+    ``HybridNode``.  Probing *it* for a materialised-statics cache finds
+    nothing, while the ``ShardedStencilNode`` one level in still holds
+    the pre-rewrite device buffer.  Invalidation has to follow the
+    wrapping, or a composed graph keeps the silently-wrong results that
+    invalidating at all was meant to remove.
+    """
+    inner, wrapper = _in_place_mask_wrapper()
+    hybrid = HybridNode(wrapper, lambda state, boundary_inputs, dt: {})
+    gm = GraphManager()
+    gm.add_node(hybrid)
+
+    start, after = _step_with_zeroed_mask(gm, inner, wrapper)
+
+    np.testing.assert_allclose(
+        after, start, rtol=0, atol=0,
+        err_msg="compile() traced the step against the pre-rewrite mask "
+                "of a sharded node nested inside a HybridNode",
+    )
+
+
+def test_invalidate_static_cache_forwards_to_the_node_it_wraps():
+    """The contract, not one wrapper's behaviour.
+
+    Every node answers ``invalidate_static_cache`` (the base class does),
+    and the default forwards to the nodes held as attributes, so a
+    wrapper that adds no cache of its own still passes the call inwards.
+    """
+    _, wrapper = _in_place_mask_wrapper()
+    wrapper.update(wrapper.initial_state(), {}, 0.01)
+    assert wrapper._static_device_cache is not None
+
+    hybrid = HybridNode(wrapper, lambda state, boundary_inputs, dt: {})
+    hybrid.invalidate_static_cache()
+    assert wrapper._static_device_cache is None
+
+
+def test_invalidate_static_cache_terminates_on_a_cycle():
+    """Two nodes holding each other must not recurse forever."""
+    class _Holder(SimulationNode):
+        def __init__(self, name: str) -> None:
+            super().__init__(name=name, timestep=0.1)
+            self.other: SimulationNode | None = None
+            self.invalidations = 0
+
+        def state_fields(self) -> list[str]:
+            return ["x"]
+
+        def initial_state(self) -> dict:
+            return {"x": jnp.array(0.0, dtype=jnp.float32)}
+
+        def update(self, state, boundary_inputs, dt):
+            return {"x": state["x"] + dt}
+
+        def invalidate_static_cache(self) -> None:
+            self.invalidations += 1
+            super().invalidate_static_cache()
+
+    a, b = _Holder("a"), _Holder("b")
+    a.other, b.other = b, a
+    a.invalidate_static_cache()          # must return, not recurse
+    assert a.invalidations >= 1 and b.invalidations >= 1
+    # The guard sits in the base method, so a cycle re-enters an
+    # override at most once more before the forwarding stops.
+    assert a.invalidations <= 2 and b.invalidations <= 2

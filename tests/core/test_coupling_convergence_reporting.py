@@ -444,15 +444,25 @@ def test_a_group_at_its_fixed_point_does_not_raise_under_strict_convergence():
 @pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils"])
 @pytest.mark.parametrize("cap", [1, 2, 3, 4])
 @pytest.mark.parametrize("tolerance", [0.5, 0.05])
-def test_converged_means_the_returned_state_is_within_tolerance(
+def test_converged_survives_recomputation_on_a_contractive_group(
     acceleration, cap, tolerance,
 ):
-    """The flag is about the state the caller was handed.
+    """``converged=True`` names a state within tolerance -- here.
 
-    Whatever the stopping rule did, ``converged=True`` has to survive
-    the caller recomputing ``||F(x) - x||`` on the state they got back.
-    That is the claim a step-size controller, a CI assertion or
+    Whatever the stopping rule did, ``converged=True`` ought to survive
+    the caller recomputing ``||F(x) - x||`` on the state they got back:
+    that is what a step-size controller, a CI assertion or
     ``strict_convergence`` reads it as.
+
+    **This test does not establish that in general, and its name used
+    to claim it did.**  ``_affine_graph`` is contractive, so its
+    residual sequence is monotone and the one-update lag on a criterion
+    exit can only make the reported number conservative.  On a
+    non-normal group the sequence is not monotone and the guarantee
+    fails -- see
+    ``test_converged_is_proof_the_returned_state_is_within_tolerance``,
+    the strict xfail that pins it.  Keep this one for the contractive case
+    it does cover; do not read it as the general contract.
     """
     gm = _affine_graph(acceleration=acceleration, max_iterations=cap,
                        tolerance=tolerance)

@@ -3662,10 +3662,22 @@ class GraphManager:
               outside the threshold; under ``solver="ift"`` the
               gradient through that step is then unreliable.
 
-            Both values are independent of ``solver``: ``"ift"`` (the
-            default) and the legacy ``"fori"`` run the same passes with
-            the same stopping rule and report by the same rule, so the
-            flag does not move when a graph migrates between them.
+            Both solvers report by the same rule -- ``"ift"`` (the
+            default) and the legacy ``"fori"`` run the same passes and
+            derive both values the same way -- so the *number* does not
+            move when a graph migrates between them.
+
+            The *truth value* can still differ, because the two return
+            different states on a converged exit: ``"fori"`` freezes on
+            the iterate whose residual passed, while ``"ift"`` returns
+            one further accelerated update.  Re-measurement is gated on
+            a non-criterion exit, so on a criterion exit the reported
+            residual is the one measured before that last update.  For
+            a contractive group that is conservative.  For a non-normal
+            one whose residual sequence is not monotone it is not, and
+            ``converged=True`` can name a state whose own residual
+            exceeds the threshold -- pinned as a strict xfail in
+            ``tests/core/test_coupling_convergence_reporting.py``.
             Reported for every group under ``solver="ift"``; ``"fori"``
             groups only with ``diagnostics=True``.  Empty dict if no
             step has been taken yet.

@@ -144,14 +144,21 @@ Before fitting, ask what the data can identify:
 
 ```python
 report = fim(lambda p: residual(p), gm.params, mask=gm.trainable_mask())
-report.cond                  # inf => an exactly unidentifiable direction
+report.rank                  # < len(param_names) => directions the data misses
+report.crb                   # +inf for every parameter those directions spoil
 report.least_identifiable()  # ("['nodes']['spring']['mass']", 0.58)
-report.eigvecs[:, 0]         # the direction itself, in relative coordinates
+report.eigvecs[:, 0]         # the weakest direction, in relative coordinates
 ```
 
 For a spring observed through position only, `k`, `c` and `m` enter as
 `k/m` and `c/m`: scaling all three together is invisible, and the FIM's
-weakest eigenvector is `(1, 1, 1)/√3`.  Freeze one of them, then fit:
+weakest eigenvector is `(1, 1, 1)/√3`.  `rank` is 2 of 3, and all
+three bounds are `+inf` — each parameter lies partly along the invisible
+direction, so none of them is separately determined.  Read `rank` rather
+than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]` and in
+float32 rescaling the residual (by `noise_std`, say) can round the
+smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
+`rank`'s threshold scales with the matrix.  Freeze one of them, then fit:
 
 ```python
 gm.set_param_spec("spring", "mass", ParamSpec(trainable=False))

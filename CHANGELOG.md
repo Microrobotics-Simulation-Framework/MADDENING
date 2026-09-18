@@ -189,6 +189,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fim` reports an unidentifiable parameter as `+inf`, not a tight bound**:
+  `crb` was `diag(pinv(F))`, which is small in the null space; the new
+  `FIMReport.rank` counts the directions the data resolves (`rank_rtol=`)
 - **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
   `fit_multiple_shooting` copy every leaf outside the mask from the starting
   pytree, so comparing before and after says exactly what a calibration touched

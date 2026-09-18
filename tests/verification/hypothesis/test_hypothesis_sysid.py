@@ -381,9 +381,29 @@ class TestFIM:
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-    def test_identifiable_pair_finite_cond_and_crb(self, single, truth, init, n):
-        """Position data on a moving spring identifies (k, c): finite
-        condition number, finite CRB."""
+    def test_crb_is_finite_exactly_where_the_pair_is_identifiable(
+        self, single, truth, init, n,
+    ):
+        """``crb`` is finite where the data resolves a direction and ``+inf``
+        where it does not, and ``rank`` says which.
+
+        This used to assert that position data on a moving spring *always*
+        identifies ``(k, c)``.  It does not, and the old assertion passed only
+        because ``pinv`` returned a finite number for a direction the data
+        cannot see -- precisely the misreporting ``rank`` was added to end.
+
+        Counter-example found by this property: ``k=49, c=0.125, m=3`` over
+        ``n=20`` samples.  A lightly damped stiff spring over a short window
+        puts the damping direction at the float32 noise floor -- Fisher
+        eigenvalues ``[9.47e-08, 4.55e-01]``, a ratio of 2.1e-07 against the
+        ``n*eps`` cutoff of 2.4e-07.  ``numpy.linalg.matrix_rank`` calls that
+        matrix rank 1 as well, on the same convention.
+
+        Asserting the equivalence rather than the premise makes this strictly
+        stronger than what it replaced: it holds for every draw, identifiable
+        or not, and it would catch a ``rank`` that disagreed with its own
+        ``crb`` in either direction.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -393,9 +413,24 @@ class TestFIM:
         names = ("stiffness", "damping")
         sub = {k: p_truth["nodes"]["s"][k] for k in names}
         rep = fim(_residual_fn(gm, obs, p_truth, names), sub)
-        assert np.isfinite(rep.cond), rep.cond
-        assert bool(jnp.all(jnp.isfinite(rep.crb))), rep.crb
-        assert bool(jnp.all(rep.crb > 0.0)), rep.crb
+        note(f"eigvals={np.asarray(rep.eigvals)} rank={rep.rank} crb={rep.crb}")
+
+        assert rep.rank in (0, 1, 2), rep.rank
+        finite = np.asarray(jnp.isfinite(rep.crb))
+        crb = np.asarray(rep.crb)
+
+        if rep.rank == len(names):
+            # Full rank: every bound is a real, strictly positive number, and
+            # the matrix is invertible so cond is finite too.
+            assert finite.all(), rep.crb
+            assert bool((crb > 0.0).all()), rep.crb
+            assert np.isfinite(rep.cond), rep.cond
+        else:
+            # Rank deficient: at least one parameter is unresolvable and must
+            # say so with +inf rather than a small, confident-looking number.
+            assert not finite.all(), rep.crb
+            assert bool((crb[finite] > 0.0).all()), rep.crb
+            assert bool(np.isinf(crb[~finite]).all()), rep.crb
 
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)

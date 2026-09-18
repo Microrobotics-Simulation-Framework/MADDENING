@@ -187,9 +187,17 @@ anomalies:
       and is not charged for the second pass).  On that
       fixture the worst error/residual ratio is now 0.94, and a 100x
       tighter tolerance now improves the 25-step trajectory by ~37x where
-      it previously improved it by 12%.  What remains is inherent to a
-      residual criterion and is not reported: how far converged=True is
-      from the fixed point depends on the problem's spectrum.
+      it previously improved it by 12%.  A third, separate defect is also
+      fixed in 0.4.0: under solver="ift" the flag used to describe an
+      iterate one pass behind the state returned, so converged=True could
+      name a state whose own residual exceeded the threshold outright --
+      2.5x it on a non-normal group -- rather than merely being a loose
+      bound.  Both solvers now stop on the iterate whose residual was
+      measured, so recomputing the norm on the state you were handed
+      reproduces the reported number.  What remains is inherent to a
+      residual criterion and is not reported: converged=True is an exact
+      statement about ||F(x) - x||, and how far that puts x from the
+      fixed point depends on the problem's spectrum.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

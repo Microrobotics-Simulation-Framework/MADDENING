@@ -128,6 +128,15 @@ class CouplingGroup:
         iterates.  Deprecated: emits ``DeprecationWarning`` and will be
         removed in the next minor release.  Forward-mode AD does not
         work through it.
+
+        The two return the *same state*: both stop on the iterate whose
+        residual met the criterion rather than on the update it went on
+        to produce, so migrating a graph off ``"fori"`` does not change
+        the forward answer.  The *gradients* differ by design —
+        ``"ift"`` gives the derivative of the fixed point, ``"fori"``
+        the derivative of the iterate it returned — and they agree to
+        round-off once the criterion is tight enough for the two to be
+        the same point.
     strict_convergence : bool
         For ``solver="ift"``: if True, raise a runtime error (via
         ``equinox.error_if``, jit-safe) when the group exits at

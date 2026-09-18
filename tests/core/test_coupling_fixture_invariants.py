@@ -180,16 +180,53 @@ _L2_AGREEMENT = 5e-3
 _INTERFACE_AGREEMENT = 2.5e-2
 
 #: ``{(fixture, label): why}`` for configurations that do *not* reach
-#: the common fixed point, each with the defect that explains it.  It is
-#: empty and should stay that way.  Entries are listed rather than
-#: tolerated by a wider threshold: the test asserts every entry is still
-#: disagreeing, so fixing the defect turns this file red with an
-#: instruction to delete the entry, and the measurement that caught the
-#: defect is never quietly thrown away.  ``jac/aitken/l2`` on the grid
-#: fixture was the one entry — it disagreed by 20.6% while reporting
-#: itself converged — and the corrected Aitken exit criterion cleared
-#: it, which is how the entry left.
-_KNOWN_DISAGREEMENTS = {}
+#: the common fixed point, each with the defect that explains it.
+#: Entries are listed rather than tolerated by a wider threshold: the
+#: test asserts every entry is still disagreeing, so fixing the defect
+#: turns this file red with an instruction to delete the entry, and the
+#: measurement that caught the defect is never quietly thrown away.
+#: ``jac/aitken/l2`` on the grid fixture was an earlier entry — it
+#: disagreed by 20.6% while reporting itself converged — and the
+#: corrected Aitken exit criterion cleared it, which is how an entry
+#: leaves.
+#:
+#: **The IQN / interface rows below are the visible price of decision
+#: D2** (``plans/MADDENING_040_DECISIONS.md``): both solvers now return
+#: the iterate whose residual met the criterion instead of the update it
+#: went on to produce, and for IQN that discarded update is the
+#: quasi-Newton step.  The interface criterion is ``atol + rtol*|v|``
+#: with these fixtures' ``rtol=1e-4``, which is loose enough that the
+#: step was worth three orders of magnitude: measured on ``ring-8``
+#: ``gs/iqn-imvj5/interface``, the per-step deviation from a
+#: tolerance-1e-9 reference goes from 5e-07 to 6e-04, and 25 steps of a
+#: driven ring compound that into the numbers below.  The states are
+#: within their stated criterion at every step — ``converged=True`` is
+#: now exactly a statement about the returned state — so what these
+#: entries record is MADD-ANO-005, a residual criterion not bounding the
+#: distance to the fixed point, no longer masked by a free extra pass on
+#: the ``ift`` path.  The same rows under ``solver="fori"`` have always
+#: drifted (``ring-8 jac/iqn-ils/interface``: 5.16e-02 on
+#: ``release/0.4.0``); the invariant held only because these tests run
+#: the default solver.  Tightening ``atol``/``rtol`` on the fixtures
+#: closes them, and is the change that should retire these entries.
+_IQN_INTERFACE_D2 = (
+    "D2 (both solvers now return the measured iterate): the discarded "
+    "update was IQN's quasi-Newton step, and the interface criterion is "
+    "loose enough to stop before it. MADD-ANO-005, previously masked on "
+    "the ift path. Retire by tightening the fixture's atol/rtol."
+)
+_KNOWN_DISAGREEMENTS = {
+    ("stiff-pair-0.5", "gs/iqn-ils/interface"): _IQN_INTERFACE_D2,
+    ("stiff-pair-0.5", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    ("stiff-pair-0.5", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
+    ("stiff-pair-0.5", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    ("chain-5", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    ("chain-5", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
+    ("chain-5", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    ("ring-8", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    ("ring-8", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
+    ("ring-8", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+}
 
 
 def _fixture_build(name):

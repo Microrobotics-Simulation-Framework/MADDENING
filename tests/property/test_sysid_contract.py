@@ -39,10 +39,21 @@ A graph rollout cannot be made precise that way: the nodes pin their
 state and constants to float32 whatever ``jax_enable_x64`` says, so the
 finite difference measures float32 cancellation as much as the
 derivative.  ``test_fim_matches_a_finite_difference_of_a_rollout``
-therefore states the weaker, measured claim -- 1e-2 relative to the
-matrix's own scale, against a worst case of 1e-3 measured over 25 random
-spring configurations at a relative step of 3e-3 -- and says so here
-rather than pretending float32 buys more.
+therefore states the weaker, measured claim -- 2e-2 relative to the
+matrix's own scale, at a relative step of 3e-3 -- and says so here rather
+than pretending float32 buys more.
+
+That bound is set from a measured distribution, not a guess.  Over 126
+configurations drawn from this test's own strategy the relative deviation
+has median 1.6e-4 and p90 8.7e-4, with a long tail at high stiffness and
+large initial displacement reaching 9.997e-3.  A 1e-2 bound therefore held
+by 0.03%, which is not a bound -- it is a flake waiting for a draw that
+CI had not yet made.  2e-2 leaves 2x headroom on the measured worst case
+while still catching what this property exists to catch: a sign flip
+shifts the matrix by 2|F_ds|/scale, min 5.2e-2 and median 5.8e-1 over the
+same 126 configurations, so the sign-flip margin is 2.6x rather than 5x.
+(A transposed Jacobian is not caught by any tolerance -- ``J.T @ J`` is
+symmetric -- only by a shape error.)
 
 Cost
 ----
@@ -686,7 +697,7 @@ class TestFIMAgainstFiniteDifference:
         F_fd = jac.T @ jac
         scale = float(np.abs(F).max())
         assume(scale > 0.0)
-        assert np.abs(F - F_fd).max() <= 1e-2 * scale, (F, F_fd)
+        assert np.abs(F - F_fd).max() <= 2e-2 * scale, (F, F_fd)
 
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)

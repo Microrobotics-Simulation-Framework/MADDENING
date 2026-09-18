@@ -57,6 +57,16 @@ about 8 M values, a huge state) is replaced by a JSON error reply, so the
 connection stays in sync and the C wrapper, which refuses to read a
 longer frame, never sees one from this bridge.
 
+**Connection lifetime.**  A connection holds the bridge's single FMU
+instance for as long as it lives, so no wait on it is unbounded: a peer
+has ten seconds to begin its first frame, five minutes of silence
+between frames once it has spoken, and two minutes to finish a frame it
+has announced the length of.  Overrunning any of them ends the
+connection exactly as EOF does, and the instance slot is free again.
+The number of live connection threads is capped (16); further
+connections are closed on accept.  ``stop()`` shuts every live
+connection down, so a parked worker does not outlive the bridge.
+
 The importer is **untrusted**: nothing that arrives on the socket is ever
 unpickled or evaluated.  The FMU-state blob is an ``npz`` archive of plain
 arrays (``allow_pickle=False`` on load) carrying the schema token, the
@@ -80,6 +90,7 @@ import json
 import socket
 import struct
 import threading
+import time
 import zipfile
 from typing import Any, Optional
 
@@ -101,6 +112,41 @@ _NPY_SLACK = 4096
 PROTOCOL_VERSION = 2
 """Highest sidecar protocol this bridge speaks (1 = JSON only, 2 = + binary frames)."""
 
+# ---------------------------------------------------------------- timeouts
+# A connection holds the bridge's single instance slot (``_busy``) for as
+# long as it lives, so every wait on it is bounded.  The three budgets are
+# separate because a legitimate importer's silences are of three different
+# lengths, and one number generous enough for the longest would leave the
+# instance slot parkable by a peer that says nothing at all.
+_HANDSHAKE_TIMEOUT = 10.0
+"""Seconds a freshly accepted connection has to start its first frame.
+
+The C wrapper sends ``hello`` immediately after ``connect`` (see
+``bridge_connect`` in ``c/maddening_fmu.c``), so ten seconds is already
+three orders of magnitude more than a healthy importer needs, while a
+port scan, a crashed importer or a dropped link is dropped promptly
+instead of owning the instance for ever."""
+_IDLE_TIMEOUT = 300.0
+"""Seconds an established connection may stay silent between frames.
+
+An importer is idle between ``doStep`` calls, and the master may be
+waiting on a slow co-simulation partner or on a human at a debugger
+prompt, so this one is deliberately generous: five minutes of silence
+from a client that has already completed a handshake is a link that is
+gone, not a slow one."""
+_FRAME_TIMEOUT = 120.0
+"""Seconds to finish a frame once its length prefix has arrived.
+
+Bounds the dribbling peer the per-recv timeout alone does not: one byte
+every nine seconds would renew a plain socket timeout for ever.  Two
+minutes still covers a full 64 MiB frame on a link of about 5 Mbit/s."""
+_MAX_CONNECTIONS = 16
+"""Live connection threads allowed at once.
+
+The bridge serves one FMU instance, so every connection beyond the first
+is refused anyway; the cap exists so that refusing them costs a bounded
+number of threads."""
+
 
 def _json_object(body: bytes, what: str) -> Any:
     """``json.loads`` of ``body``; every failure is a ``ValueError``.
@@ -119,9 +165,24 @@ def _json_object(body: bytes, what: str) -> Any:
         raise ValueError(f"{what} is not JSON: {exc}") from exc
 
 
-def _recv_exact(conn: socket.socket, n: int) -> Optional[bytes]:
+def _recv_exact(conn: socket.socket, n: int,
+                deadline: Optional[float] = None) -> Optional[bytes]:
+    """``n`` bytes, ``None`` at EOF.
+
+    ``deadline`` (a :func:`time.monotonic` value) bounds the whole read,
+    not each ``recv``: a peer that dribbles one byte at a time renews the
+    socket's own timeout indefinitely, and the connection it is dribbling
+    on holds the bridge's only instance slot.  Overrunning it raises
+    :exc:`socket.timeout`, which every caller already treats as a dead
+    connection.
+    """
     buf = bytearray()
     while len(buf) < n:
+        if deadline is not None and time.monotonic() > deadline:
+            raise socket.timeout(
+                f"frame of {n} bytes was still incomplete after "
+                f"{len(buf)} bytes"
+            )
         chunk = conn.recv(min(n - len(buf), 1 << 20))
         if not chunk:
             return None
@@ -129,11 +190,16 @@ def _recv_exact(conn: socket.socket, n: int) -> Optional[bytes]:
     return bytes(buf)
 
 
-def recv_raw(conn: socket.socket) -> Optional[tuple[bool, bytes]]:
+def recv_raw(conn: socket.socket, *,
+             frame_timeout: Optional[float] = None) -> Optional[tuple[bool, bytes]]:
     """One length-prefixed frame as ``(is_binary, payload)``.
 
     ``None`` at EOF; ``ValueError`` when the (31-bit) length exceeds the
-    64 MiB limit, binary flag or not.
+    64 MiB limit, binary flag or not.  ``frame_timeout`` bounds the body
+    once the length prefix has arrived (:exc:`socket.timeout` on
+    overrun); the wait for the prefix itself is the socket's own timeout,
+    which the caller sets according to what the connection is waiting
+    for.
     """
     head = _recv_exact(conn, _HEADER.size)
     if head is None:
@@ -142,16 +208,18 @@ def recv_raw(conn: socket.socket) -> Optional[tuple[bool, bytes]]:
     n = word & _LENGTH_MASK
     if n > _MAX_MESSAGE:
         raise ValueError(f"message of {n} bytes exceeds the {_MAX_MESSAGE}-byte limit")
-    body = _recv_exact(conn, n)
+    deadline = None if frame_timeout is None else time.monotonic() + frame_timeout
+    body = _recv_exact(conn, n, deadline)
     if body is None:
         return None
     return bool(word & _BINARY_FLAG), body
 
 
-def recv_frame(conn: socket.socket) -> Optional[bytes]:
+def recv_frame(conn: socket.socket, *,
+               frame_timeout: Optional[float] = None) -> Optional[bytes]:
     """One length-prefixed frame's payload (``None`` at EOF; ``ValueError``
     over the limit).  Use :func:`recv_raw` to learn whether it was binary."""
-    got = recv_raw(conn)
+    got = recv_raw(conn, frame_timeout=frame_timeout)
     return None if got is None else got[1]
 
 
@@ -174,12 +242,13 @@ def decode_binary(payload: bytes) -> tuple[dict, bytes]:
     return header, payload[_HEADER.size + hlen:]
 
 
-def recv_message(conn: socket.socket) -> Optional[dict]:
+def recv_message(conn: socket.socket, *,
+                 frame_timeout: Optional[float] = None) -> Optional[dict]:
     """One decoded message.  A JSON frame is its object; a binary frame is
     its header with the raw payload under ``"raw"`` (``bytes``), a dict
     :meth:`FmuTcpBridge.handle` accepts as is.  ``ValueError`` on a
     malformed frame of either kind."""
-    got = recv_raw(conn)
+    got = recv_raw(conn, frame_timeout=frame_timeout)
     if got is None:
         return None
     is_binary, body = got
@@ -273,13 +342,21 @@ class FmuTcpBridge:
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind((host, port))
-        self._server.listen(4)
+        self._server.listen(_MAX_CONNECTIONS)
         self._host, self._port = self._server.getsockname()[:2]
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Live accepted connections and the threads serving them.  ``stop()``
+        # has to reach both: closing the listening socket says nothing to a
+        # connection already accepted, and a worker parked on one of those
+        # outlives the bridge that "stopped".
+        self._live_lock = threading.Lock()
+        self._live_conns: set[socket.socket] = set()
+        self._live_workers: set[threading.Thread] = set()
         self.requests_served = 0
         self.binary_frames_served = 0     # binary replies sent (get / get_state)
         self.binary_frames_received = 0   # binary requests accepted (set / set_state)
+        self.connections_refused_over_cap = 0
 
     # ----------------------------------------------------------------- server
     @property
@@ -293,13 +370,35 @@ class FmuTcpBridge:
         return self
 
     def stop(self) -> None:
+        """Stop accepting and end every connection this bridge still holds.
+
+        Closing the listening socket only stops new connections; a worker
+        blocked reading an accepted one is untouched by it and used to
+        survive ``stop()`` indefinitely, still holding the instance lock.
+        Each live connection is therefore shut down here, which turns the
+        worker's pending ``recv`` into an EOF, and the workers are joined.
+        """
         self._stop.set()
         try:
             self._server.close()
         except OSError:
             pass
+        with self._live_lock:
+            conns = list(self._live_conns)
+            workers = list(self._live_workers)
+        for conn in conns:
+            # shutdown, not close: the worker owns the socket object and
+            # closes it on its way out, and a half-close is what makes its
+            # blocking recv return instead of waiting for a peer that is
+            # never going to speak.
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+        for worker in workers:
+            worker.join(timeout=5.0)
 
     def __enter__(self) -> "FmuTcpBridge":
         return self.start()
@@ -316,32 +415,73 @@ class FmuTcpBridge:
                 continue
             except OSError:
                 return
-            threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
+            worker = threading.Thread(target=self._serve_conn, args=(conn,),
+                                      name="maddening-fmu-conn", daemon=True)
+            with self._live_lock:
+                if len(self._live_conns) >= _MAX_CONNECTIONS:
+                    over_cap = True
+                else:
+                    over_cap = False
+                    self._live_conns.add(conn)
+                    self._live_workers.add(worker)
+            if over_cap:
+                # Nothing is written back: a reply needs a send that a peer
+                # which is not reading can stall, and stalling the accept
+                # loop is exactly what the cap exists to prevent.
+                self.connections_refused_over_cap += 1
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
+            worker.start()
 
     def _serve_conn(self, conn: socket.socket) -> None:
+        try:
+            self._serve_conn_inner(conn)
+        finally:
+            with self._live_lock:
+                self._live_conns.discard(conn)
+                self._live_workers.discard(threading.current_thread())
+
+    def _serve_conn_inner(self, conn: socket.socket) -> None:
         with conn:
-            conn.settimeout(None)
-            if not self._busy.acquire(blocking=False):
-                # A bridge holds ONE sidecar state; a second instance
-                # would silently share it.  Refuse instead of blocking.
-                try:
-                    req = recv_message(conn)
-                    if req is not None:
-                        send_message(conn, {"ok": False, "error":
-                                            "bridge already serves an FMU instance; "
-                                            "start one FmuTcpBridge per instance"})
-                except (OSError, ValueError):
-                    pass
+            if self._stop.is_set():
                 return
             binary = False                # negotiated at hello, per connection
+            held = False                  # does this connection hold the instance?
             try:
                 while not self._stop.is_set():
+                    # Every wait on this socket is finite, and the first one
+                    # happens before the instance slot is claimed.  Both
+                    # matter: a peer that connects and says nothing used to
+                    # park the bridge's only FMU instance for ever (a port
+                    # scan, a crashed importer or a dropped link was enough),
+                    # and a peer that was refused the slot used to park a
+                    # thread for ever.
+                    conn.settimeout(_IDLE_TIMEOUT if held else _HANDSHAKE_TIMEOUT)
                     try:
-                        got = recv_raw(conn)
+                        got = recv_raw(conn, frame_timeout=_FRAME_TIMEOUT)
+                    except socket.timeout:
+                        break        # a silent peer is a gone peer: same as EOF
                     except (OSError, ValueError):
                         break                              # socket / framing error
                     if got is None:
                         break
+                    if not held:
+                        # A bridge holds ONE sidecar state; a second instance
+                        # would silently share it.  Refuse instead of
+                        # blocking -- but only now that this peer has proved
+                        # it has something to say.
+                        if not self._busy.acquire(blocking=False):
+                            try:
+                                send_message(conn, {"ok": False, "error":
+                                                    "bridge already serves an FMU instance; "
+                                                    "start one FmuTcpBridge per instance"})
+                            except OSError:
+                                pass
+                            return
+                        held = True
                     is_binary, body = got
                     try:
                         if is_binary:
@@ -368,7 +508,8 @@ class FmuTcpBridge:
                     except OSError:
                         break          # the importer hung up mid-reply: nobody to tell
             finally:
-                self._busy.release()
+                if held:
+                    self._busy.release()
 
     def _send_reply(self, conn: socket.socket, reply: dict, binary: bool) -> bool:
         """Send one reply; returns whether it went as a binary frame.

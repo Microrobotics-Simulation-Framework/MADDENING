@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
+  wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
+  invariants over generated meshes; two audit findings pinned as strict xfails
 - **Measured guidance for choosing coupling options**: eight graph fixtures and
   a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
   `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window

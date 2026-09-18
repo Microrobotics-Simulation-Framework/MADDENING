@@ -121,6 +121,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Extended-precision point sets are refused, never silently narrowed**: a
+  `MappingSpec` reference of `float128` / `np.longdouble` (unwritable as JSON,
+  unstable to hash) raises; pass `np.asarray(points, dtype=np.float64)` instead
 - **`solver="ift"` returns the iterate whose residual met the criterion**, as
   `fori` always has, so `converged=True` names the state you were handed and
   both solvers return it; every converged group's answer moves by one residual

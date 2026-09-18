@@ -176,17 +176,18 @@ audit.  Worth a separate look.
 **Confidence: proven** (the lazy build), **believed** (the `flux_state`
 reasoning).
 
-### MINOR-3 — `tests/cloud/multigpu/test_sharded_static_cache.py` does not run in CI
+### MINOR-3 — WITHDRAWN: the new sharded tests *do* run in CI
 
-Every test in the new file is `@pytest.mark.skipif(not _HAS_4_DEVICES)`,
-and neither `.github/workflows/ci.yml` nor `slow-tests.yml` sets
-`--xla_force_host_platform_device_count`, so the whole file is skipped
-on CI.  The behaviour it guards is real and the tests pass when run with
-four devices (`7 passed`), but nothing is watching them.  Suggest either
-setting the XLA flag for that job or, where possible, building the
-fixtures on a 1-device mesh — MAJOR-1's reproduction shows the sharded
-wrappers work fine with `shape=(1,)`, so most of the file could drop the
-skip.
+I first reported that every test in the new file is
+`@pytest.mark.skipif(not _HAS_4_DEVICES)` and that no workflow sets
+`--xla_force_host_platform_device_count`, so the file would be skipped
+on a 1-CPU runner.  That is wrong, and I am leaving it in the record
+rather than deleting it.  `tests/cloud/multigpu/conftest.py` forces
+16 virtual host devices (rule 4 of its policy) before JAX is imported
+whenever `JAX_PLATFORMS=cpu`, which the root `tests/conftest.py` sets by
+default.  `_HAS_4_DEVICES` is therefore true under pytest on a plain CPU
+runner, and the file runs.  Verified: `9 passed` with no XLA flag set on
+the command line.  No action needed.
 
 ### MINOR-4 — `test_param_write_through_the_rest_layer_reaches_a_derived_static` does not test what it says
 
@@ -256,9 +257,16 @@ not re-opened.
 
 * **The non-interactive path is numerically unchanged.**  Moving
   `ext`/`params`/`state` from closed-over constants to jitted arguments
-  is inert (`test_run_scan_still_matches_the_step_loop`, plus the
-  sysid/fit path, which passes `params=` explicitly and benefits from
-  the cache without any semantic change).
+  is inert; `test_run_scan_still_matches_the_step_loop` pins it against
+  a `step()` loop.  `sysid.py` is the only in-tree consumer of
+  `run_scan_with_history`, and it passes `params=` explicitly, so the
+  values flow as jitted arguments and it gets the cache for free with no
+  semantic change (read-verified; I did not run the sysid suite — CI
+  does).  One caveat I could not remove by reading: the scan program is
+  built at the first call rather than at `compile()`, so a fit whose
+  first `run_scan` happens *inside* `jax.grad` builds the program from
+  the traced avals; JAX's own cache retraces for the eager avals
+  afterwards, which is correct but costs one extra compile.
 
 ## Confirmed / refuted from the prior audit (`audit_fixset-2026-09-18` §X9)
 
@@ -299,10 +307,26 @@ not re-opened.
 
 ## What was run
 
+With the MAJOR-1 fix applied, from
+`/home/nick/MSF/msf/MADDENING-wt/perf/interactive-paths`:
+
 ```
-tests/cloud/multigpu/test_sharded_static_cache.py   7 passed   (4 devices)
-tests/core/test_scan_program_cache.py              16 passed
-tests/api/test_params_endpoint_live_view.py         4 passed
+PYTHONPATH=<wt>/src JAX_PLATFORMS=cpu PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python -m pytest tests/cloud/multigpu tests/core/test_scan_program_cache.py \
+                   tests/api/test_params_endpoint_live_view.py -q -rs
+  -> 262 passed, 10 deselected (the `slow` markers) in 243s
+
+scripts/check_anomalies.py  check_impl_mapping.py
+scripts/check_citations.py  check_transforms.py           -> all clean
 ```
+
+Before/after on the regression tests (the two new ones in
+`test_sharded_static_cache.py`): `2 failed, 7 passed` without the
+`compile()` change, `9 passed` with it.
+
+Differential evidence for MAJOR-1 and MINOR-1 came from running the same
+probe script against `origin/release/0.4.0` (extracted with `git archive`
+into a scratch tree) and against the branch, so the comparison is code,
+not memory.  The full suite was left to CI.
 
 Timings were deliberately not measured: the machine is shared.

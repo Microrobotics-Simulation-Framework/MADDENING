@@ -443,6 +443,32 @@ class TestUrlEdgeCases:
         assert _position(fresh) == _position(gm)
         assert (tmp_path / "dl" / "my snap.npz").exists()
 
+    def test_a_bare_path_is_used_verbatim_and_a_file_url_is_decoded(self, tmp_path):
+        """``%`` is a filename character in a path and an escape in a URL.
+
+        ``_local_path`` decoded neither while its docstring said it
+        decoded both, and the download's *destination* filename decoded
+        both -- three answers to one question.  A bare path now means
+        exactly the file it names, in the source and in the destination.
+        """
+        gm = _spring_graph(steps=3)
+        literal = tmp_path / "a%20b.npz"                  # a literal '%20'
+        ck.save_state_with_manifest(gm, literal)
+        assert literal.exists() and not (tmp_path / "a b.npz").exists()
+
+        fresh = _spring_graph()
+        download_and_load_state(fresh, str(literal), dest_dir=tmp_path / "dl")
+        assert _position(fresh) == _position(gm)
+        # ...and the copy kept the name the caller wrote, not a decoded one.
+        assert (tmp_path / "dl" / "a%20b.npz").exists()
+        assert not (tmp_path / "dl" / "a b.npz").exists()
+
+        # The same characters in a file:// URL *are* an escape, so that
+        # path is decoded and names a different (missing) file.
+        with pytest.raises(FileNotFoundError, match="a b.npz"):
+            download_and_load_state(_spring_graph(), f"file://{literal}",
+                                    dest_dir=tmp_path / "dl2")
+
     def test_windows_drive_letter_is_reported_as_unsupported_scheme(self, tmp_path):
         with pytest.raises(ValueError, match=r"Unsupported URL scheme 'c'.*drive-letter"):
             download_and_load_state(_spring_graph(), r"C:\Users\n\snap.npz", dest_dir=tmp_path)

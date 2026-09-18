@@ -632,6 +632,33 @@ def _ift_solve_impl(
 
 
 
+#: Largest flat coupling-group size at which a Krylov adjoint solve
+#: that reports failure is silently re-solved with a dense LU.  Tied to
+#: the ``restart = min(N, 50)`` clamp below: at or under this size the
+#: Krylov space GMRES builds is already the whole space, so a direct
+#: solve costs no more matvecs and is backward stable, while ``N**2``
+#: floats of scratch is negligible.  Above it, the matrix-free path is
+#: load-bearing and the failure is raised instead.
+_DENSE_ADJOINT_FALLBACK_MAX_DOF = 50
+
+#: Raised (through ``equinox.error_if``, at runtime inside jit) when a
+#: Krylov adjoint solve fails on a group too large to re-solve densely.
+#: It replaces lineax's own message, whose "increase ``restart``"
+#: remedy does not address the mechanism — see ``_ift_linear_solve``.
+_ADJOINT_SOLVE_FAILED_MSG = (
+    "MADDENING: the coupling adjoint solve did not converge "
+    "(linear_solver={solver!r}, {n} coupled DOF).  This is usually an "
+    "ill-conditioned (I - dF/dx): cond(A) ~ 1/(1 - rho) in the group's "
+    "slowest contraction rate, and float32 cannot resolve the solver's "
+    "tolerance once eps*cond(A) exceeds it.  Remedies, in order: pass "
+    "linear_solver='dense' to add_coupling_group() (exact, but O(N^2) "
+    "memory); set MADDENING_IFT_DENSE_SOLVE=1 to force that globally "
+    "for triage; or make the group less stiff (stronger relaxation, a "
+    "smaller timestep, or splitting the cycle).  Raising GMRES's "
+    "restart will NOT help: it is already min(N, 50)."
+)
+
+
 def _ift_linear_solve(matvec, rhs, linear_solver):
     """Solve ``A v = rhs`` for the matrix-free operator ``v -> matvec(v)``.
 
@@ -671,8 +698,52 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
       so a future lineax fix can re-enable it by widening the
       ``linear_solver`` Literal on CouplingGroup.
 
-    Lineax raises (``throw=True`` default) when a solve reports
-    failure, so a non-converged adjoint is loud rather than silent.
+    **Why a failed Krylov solve re-solves directly at small N.**  A
+    stiff coupling group makes ``A = I - dF/dx`` ill-conditioned:
+    ``cond(A) ~ 1 / (1 - rho)`` in the group's slowest contraction
+    rate, so ``rho = 0.999`` is already ``cond ~ 2e3``.  The relative
+    accuracy *any* solver can reach on such an operator in float32 is
+    ``~eps * cond(A)`` — ``2.4e-4`` at ``cond = 2e3`` — which is
+    looser than the ``rtol`` asked for above (100 ulp, ``1.2e-5``).
+    GMRES therefore exhausts its Krylov space without passing lineax's
+    convergence test; the next restart cycle re-orthogonalises against
+    a space that is already complete, Arnoldi returns a zero vector,
+    and lineax reports ``RESULTS.breakdown``.  Lineax forgives a
+    breakdown only when the solve *also* passes its tolerance test
+    (``breakdown & not_converged``), which this one cannot, so the
+    error escapes.  Measured on a 4-DOF two-node cycle with contraction
+    modes ``(0.999, 0.2)``: GMRES stops three restart cycles in holding
+    a solution whose relative error is ``1.0e-5`` — as accurate as
+    float32 allows — and raises anyway.
+
+    Two consequences.  This is *not* a Krylov breakdown in the textbook
+    sense (a lucky zero in Arnoldi that a longer subspace would avoid),
+    so lineax's "increase ``restart``" advice cannot help: ``restart``
+    is already ``min(N, 50)``, i.e. the whole space at small ``N``.
+    And it is a round-off lottery — whether the float32 iterate happens
+    to land inside an unreachable tolerance depends on the cotangent —
+    so the failure is non-monotone in stiffness (``rho = 0.998`` and
+    ``0.999`` fail, ``0.9995`` passes) and a user cannot predict it.
+
+    So the Krylov backends run with ``throw=False`` and this function
+    acts on ``result`` itself:
+
+    * ``N <= _DENSE_ADJOINT_FALLBACK_MAX_DOF``: re-solve densely under
+      a ``lax.cond``.  At that size the dense LU is *cheaper* than the
+      restart cycles GMRES already burned (``N`` matvecs against
+      ``3 * N`` in the measured case), needs ``N**2`` floats of
+      scratch, and is backward stable — so the fallback is a better
+      answer, not a degraded one.  Only the failing branch runs; a
+      successful GMRES solve is returned untouched, which is why
+      ``"gmres"`` still means GMRES.
+    * ``N`` above that: raise a MADDENING error naming the remedies
+      that do work.  A dense fallback is not offered there because
+      ``N**2`` is the compile-time memory the matrix-free path exists
+      to avoid, and ``lax.cond`` reserves a branch's scratch whether or
+      not the branch runs.
+
+    A non-converged adjoint therefore stays loud, but the message names
+    a remedy instead of one that cannot help.
     """
     force_dense = os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1"
     effective_solver = "dense" if force_dense else linear_solver
@@ -740,7 +811,22 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
                 restart=restart,
                 max_steps=max(4 * restart, 100),
             )
-        return lx.linear_solve(op, b, solver=solver).value
+        # ``throw=False`` so the failure is *this* module's to handle:
+        # lineax's own message recommends raising ``restart``, which is
+        # already the full space at small N and is not the mechanism
+        # (see the docstring).
+        sol = lx.linear_solve(op, b, solver=solver, throw=False)
+        failed = jnp.logical_not(sol.result == lx.RESULTS.successful)
+        if n <= _DENSE_ADJOINT_FALLBACK_MAX_DOF:
+            return jax.lax.cond(
+                failed, lambda bb: _dense(mv, bb), lambda _bb: sol.value, b,
+            )
+        import equinox as eqx  # noqa: PLC0415  (lineax transitive dep)
+
+        return eqx.error_if(
+            sol.value, failed,
+            _ADJOINT_SOLVE_FAILED_MSG.format(solver=effective_solver, n=n),
+        )
 
     solve = _dense if effective_solver == "dense" else _krylov
     # ``transpose_solve`` receives ``vecmat = v -> A^T v`` and must

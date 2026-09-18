@@ -459,11 +459,19 @@ def test_to_dict_warns_when_live_mapping_weights_differ_from_the_recipe():
 
 # ------------------------------------------------------------- F14: sharded wrappers
 
-def test_node_reference_to_a_sharded_wrapper_node_is_a_clear_error():
-    """``ShardedStencilNode`` classifies its inner node's ``static_data``
-    at build time and exposes none of its own, so a point reference cannot
-    reach ``grid_x`` through the wrapper.  Documented behaviour: the
-    resolver says so and points at the asset form."""
+def test_node_reference_reaches_through_a_sharded_wrapper():
+    """A point reference resolves to the statics of the node a wrapper wraps.
+
+    This inverts what this test used to assert.  ``ShardedStencilNode``
+    exposed none of its inner node's ``static_data``, so a reference to
+    ``grid_x`` through the wrapper was a documented dead end and the
+    resolver's error pointed at the asset form instead.  Now that
+    ``SimulationNode.static_data`` forwards to the nodes a node wraps, the
+    reference reaches the *declaration* the inner node made -- the full
+    ``(8,)`` grid, not a per-device shard -- which is exactly what a point
+    set should be.  The asset route still works and is still the right
+    answer for points that are not a node's static data at all.
+    """
     from maddening.cloud.multigpu.device_mesh import create_device_mesh
     from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
     from maddening.core.static_data import StaticArray
@@ -495,13 +503,24 @@ def test_node_reference_to_a_sharded_wrapper_node_is_a_clear_error():
     inner = Stencil1D("rod")
     wrapper = ShardedStencilNode(inner, create_device_mesh(shape=(1,)),
                                  axis_map={"devices": 0}, boundary="edge")
-    assert wrapper.static_data == {}
+    grid = np.asarray(inner.static_data["grid_x"].value)
+
+    # The wrapper now reports the inner node's declaration, full length.
+    assert set(wrapper.static_data) == {"grid_x"}
+    assert np.asarray(wrapper.static_data["grid_x"].value).shape == grid.shape
+
     gm = GraphManager()
     gm.add_node(wrapper)
-    with pytest.raises(PointReferenceError, match="does not re-export the static_data"):
-        gm.point_resolver()({"node": "rod", "field": "grid_x"})
-    # the supported route: save the inner node's points as an asset
-    grid = np.asarray(inner.static_data["grid_x"].value)
+    resolved = gm.point_resolver()({"node": "rod", "field": "grid_x"})
+    np.testing.assert_array_equal(resolved, grid)
+
+    # A field that is genuinely absent still fails, and the hint no longer
+    # claims a wrapper cannot re-export -- because it now can.
+    with pytest.raises(PointReferenceError) as exc:
+        gm.point_resolver()({"node": "rod", "field": "not_a_field"})
+    assert "does not re-export" not in str(exc.value)
+
+    # the asset route still works
     with tempfile.TemporaryDirectory() as tmp:
         np.save(Path(tmp) / "grid.npy", grid)
         np.testing.assert_array_equal(

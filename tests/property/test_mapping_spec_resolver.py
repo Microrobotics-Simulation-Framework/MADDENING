@@ -399,15 +399,16 @@ def test_a_mutated_spec_dict_parses_to_a_canonical_spec_or_a_value_error(data):
     )
 
 
-#: Rewrites of a serialised mapping that say the *same* thing in a
-#: different way.  Every one of them is a shape a hand-edited config, a
-#: different YAML dumper or an older writer really produces, and every
-#: one of them has to rebuild the same operator -- which is the other
-#: half of "never silently produces a different graph": a file that
-#: means what it meant must not load as something else either.
 @st.composite
 def _equivalent(draw, mapping: dict) -> tuple[dict, str]:
-    """``mapping`` rewritten without changing what it means."""
+    """``mapping`` rewritten without changing what it means.
+
+    Every rewrite here is a shape a hand-edited config, a different YAML
+    dumper or an older writer really produces, and every one of them has
+    to rebuild the same operator -- which is the other half of "never
+    silently produces a different graph": a file that still means what
+    it meant must not load as something else either.
+    """
     out = copy.deepcopy(mapping)
     refs = [k for k, v in out["points"].items() if isinstance(v, dict)]
     ops = ["reorder"]

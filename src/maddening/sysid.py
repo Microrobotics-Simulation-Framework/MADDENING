@@ -421,7 +421,7 @@ def _physical_params(gm, start: dict, mask: Optional[dict], flat_u, unravel, idx
     ``log`` or ``logit`` leaf that round trip is ``exp(log(p))`` in
     float32, exact only to about one ulp.  A leaf the mask did not
     select would therefore come back perturbed although no step touched
-    it (a ``HeatNode``'s ``thermal_diffusivity`` moved by 1.2e-7
+    it (a ``HeatNode``'s ``thermal_diffusivity`` moved by ~1e-7
     relative while only ``length`` was masked), and a bit comparison of
     a calibration's input and output could not tell "not fitted" from
     "fitted and barely moved".

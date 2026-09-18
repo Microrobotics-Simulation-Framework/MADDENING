@@ -183,6 +183,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
+  `fit_multiple_shooting` copy every leaf outside the mask from the starting
+  pytree, so comparing before and after says exactly what a calibration touched
 - **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
   `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
   could leave its bounds — make the parameter trainable in the spec instead

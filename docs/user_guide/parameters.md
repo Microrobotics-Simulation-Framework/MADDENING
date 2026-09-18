@@ -175,10 +175,12 @@ with measurement error.  All three fitters emit a `"fit_progress"` event
 to `gm.add_observer` callbacks every `notify_every` iterations.
 
 `fit` runs Adam in the unconstrained coordinates under the trainable
-mask, so positive constants stay positive and frozen leaves are returned
-bit-identical.  Gradients through the whole graph come from a single
-`jax.value_and_grad`; a non-finite gradient raises rather than
-continuing.
+mask, so positive constants stay positive.  Every leaf *outside* the
+mask — frozen, or trainable but not selected — comes back bit-identical
+to the value passed in, so comparing a fit's input and output leaf by
+leaf says exactly which constants it touched.  Gradients through the
+whole graph come from a single `jax.value_and_grad`; a non-finite
+gradient raises rather than continuing.
 
 All three fitters take a `mask=` that *narrows* `gm.trainable_mask()` —
 fit two of the three trainable constants, say.  It cannot widen it: a

@@ -192,6 +192,9 @@ guidance; the itemized changes follow.
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
   and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead
+- **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
+  `fit_multiple_shooting` copy every leaf outside the mask from the starting
+  pytree, so comparing before and after says exactly what a calibration touched
 - **A wrapper now reports the `static_data` of the node it wraps**, so the
   `static_data` drift check finally fires through `ShardedStencilNode`,
   `HybridNode` and friends instead of hashing to `0` forever

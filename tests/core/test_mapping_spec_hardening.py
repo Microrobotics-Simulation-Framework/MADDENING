@@ -491,6 +491,118 @@ def test_inline_reference_accepts_small_real_point_sets():
     assert ref == {"inline": [[0.0, 1.0], [1.0, 2.0]], "dtype": "float32"}
 
 
+# --------------------------------------------- extended precision is refused, loudly
+#
+# ``np.longdouble`` fails both halves of what a point reference has to do:
+# ``json.dumps`` cannot write the ``np.longdouble`` objects ``tolist()``
+# returns, and ``point_array_digest`` is unstable for it because the
+# padding bytes of an 80-bit value in its 16-byte slot are not zeroed, so
+# arrays that compare equal can hash differently.  The decision is to say
+# so rather than narrow to ``float64`` behind the caller's back: a silent
+# narrowing is exactly the precision loss nobody can trace to its cause.
+# These pin the refusal, its message, and that nothing legitimate was
+# caught by it.
+
+#: ``np.longdouble`` *is* ``float64`` on Windows and on some ARM builds, so
+#: there is no extended-precision dtype to refuse there.
+_needs_extended_precision = pytest.mark.skipif(
+    np.dtype(np.longdouble).itemsize <= 8,
+    reason="this platform's np.longdouble is float64, so there is no "
+           "extended-precision dtype to refuse")
+
+#: Every dtype a point set may still have: ``tolist()`` renders each as a
+#: Python scalar and each has a stable digest.
+_SUPPORTED_POINT_DTYPES = [
+    "bool", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64",
+    "float16", "float32", "float64",
+]
+
+
+@_needs_extended_precision
+@pytest.mark.parametrize("spelling", ["float128", "longdouble"])
+def test_an_inline_extended_precision_dtype_is_refused_naming_the_dtype(spelling):
+    """A hand-written config may say ``"dtype": "float128"``.  It is refused
+    with a message its author can act on, instead of being accepted into a
+    config that cannot then be written."""
+    with pytest.raises(PointReferenceError) as excinfo:
+        ms.normalise_point_reference({"inline": [[0.0, 1.0], [1.0, 2.0]],
+                                      "dtype": spelling}, name="source_points")
+    message = str(excinfo.value)
+    assert np.dtype(spelling).name in message           # which dtype was given
+    assert "extended-precision" in message
+    assert "not supported" in message
+    assert "json.dumps" in message                      # why it cannot be written
+    assert "point_array_digest" in message              # why it cannot be hashed
+
+
+@_needs_extended_precision
+def test_a_longdouble_point_set_is_refused_when_a_reference_is_recorded():
+    """The other way in: a factory handed ``np.longdouble`` points used to
+    inline them.  ``reference_for_array`` refuses instead of returning the
+    quiet ``None`` that means "not serialisable, work out why yourself"."""
+    points = np.array([[0.0, 1.0], [1.0, 2.0]], dtype=np.longdouble)
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        ms.reference_for_array(points, None, name="source_points")
+    # ...and with an explicit reference, and with inlining switched off
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        ms.reference_for_array(points, {"asset": "pts.npy"}, name="H", inline_ok=False)
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        point_array_digest(points)
+
+
+@_needs_extended_precision
+def test_a_factory_given_longdouble_points_refuses_rather_than_narrowing():
+    """End to end: the refusal reaches the user through the factory, and the
+    documented fix -- converting explicitly -- works."""
+    src = np.linspace(0.0, 1.0, 4).astype(np.longdouble).reshape(-1, 1)
+    tgt = np.linspace(0.0, 1.0, 3).astype(np.longdouble).reshape(-1, 1)
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        rbf_mapping(src, tgt)
+    mapping = rbf_mapping(np.asarray(src, dtype=np.float64),
+                          np.asarray(tgt, dtype=np.float64))
+    json.dumps(mapping.describe())
+
+
+@_needs_extended_precision
+def test_an_extended_precision_asset_is_refused_from_its_header(tmp_path):
+    """The asset path reads the dtype out of the ``.npy`` header, so it
+    refuses before loading anything."""
+    np.save(tmp_path / "pts.npy",
+            np.array([[0.0, 1.0], [1.0, 2.0]], dtype=np.longdouble))
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        make_point_resolver(base_dir=tmp_path)({"asset": "pts.npy"})
+
+
+@_needs_extended_precision
+def test_an_extended_precision_node_field_is_refused_naming_node_and_field():
+    from maddening.core.static_data import StaticArray
+
+    class WithLongDouble(Vec):
+        @property
+        def static_data(self):
+            return {"pts": StaticArray(np.array([[0.0, 1.0], [1.0, 2.0]],
+                                                dtype=np.longdouble))}
+
+    gm = GraphManager()
+    gm.add_node(WithLongDouble("a", 1.0))
+    with pytest.raises(PointReferenceError, match="extended-precision") as excinfo:
+        gm.point_resolver()({"node": "a", "field": "pts"})
+    assert "'a'" in str(excinfo.value) and "'pts'" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("dtype_name", _SUPPORTED_POINT_DTYPES)
+def test_every_supported_point_dtype_still_round_trips(dtype_name):
+    """The narrowing caught nothing legitimate: every dtype still on the
+    list inlines, writes as JSON and reads back unchanged."""
+    points = np.array([[0, 1], [1, 2]], dtype=np.dtype(dtype_name))
+    ref = ms.reference_for_array(points, None, name="source_points")
+    assert ref == {"inline": points.tolist(), "dtype": dtype_name}
+    assert ms.normalise_point_reference(json.loads(json.dumps(ref))) == ref
+    np.testing.assert_array_equal(np.asarray(ref["inline"], dtype=ref["dtype"]), points)
+    assert point_array_digest(points) == point_array_digest(points.copy())
+
+
 # ---------------------------------------------------------- F9: resolver edge cases
 
 def test_node_reference_to_a_scalar_static_field_is_a_point_reference_error():

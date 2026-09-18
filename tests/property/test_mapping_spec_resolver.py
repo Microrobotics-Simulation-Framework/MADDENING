@@ -44,6 +44,7 @@ that no resolution is ever allowed to return.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import unicodedata
 from pathlib import Path
@@ -67,6 +68,7 @@ from maddening.core.coupling.mapping_spec import (
     make_point_resolver,
     normalise_point_reference,
     point_array_digest,
+    reference_for_array,
 )
 from maddening.core.graph_manager import GraphManager
 
@@ -813,32 +815,159 @@ def test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt(
 
 
 # ---------------------------------------------------------------------------
-# An extended-precision corner that needs a decision, not a patch
+# Which dtypes a point set may have
 # ---------------------------------------------------------------------------
+#
+# The accepted set is not a list of names anybody has to keep in sync: it
+# is whatever a reference can actually *do* with a dtype.  A reference is
+# written as JSON (``{"inline": arr.tolist(), "dtype": ...}``) and it is
+# identified by ``point_array_digest``, so a dtype is usable exactly when
+# ``json.dumps(arr.tolist())`` round-trips it and equal arrays of it hash
+# alike.  ``np.longdouble`` fails both and is refused; the property below
+# states the equivalence rather than enumerating the survivors.
+
+#: Dtypes to try, by ``dtype.str`` so a platform where ``longdouble`` *is*
+#: ``float64`` simply contributes one dtype instead of two.  Byte-order
+#: variants are in because a reference records ``str(dtype)`` verbatim.
+_CANDIDATE_POINT_DTYPES = sorted({
+    np.dtype(t).str for t in (
+        np.bool_, np.int8, np.int16, np.int32, np.int64,
+        np.uint8, np.uint16, np.uint32, np.uint64,
+        np.float16, np.float32, np.float64, np.longdouble,
+        np.complex64, np.complex128, np.clongdouble,
+    )
+} | {"U8", "O", "M8[ns]", "m8[ns]", ">f8", "<f4", ">i4", ">u8"})
+
+_POINT_VALUES = [[1, 2], [3, 4]]
+
+
+def _equal_arrays_of(dtype: np.dtype) -> list[np.ndarray]:
+    """Arrays of ``dtype`` that all compare equal, built by different routes.
+
+    The routes matter: an extended-precision float leaves whatever was in
+    the unused bytes of its slot behind, so two arrays that ``==`` each
+    other can still differ byte for byte depending on how they were made.
+    Routes a dtype cannot support are dropped rather than faked.
+    """
+    base = np.array(_POINT_VALUES, dtype=dtype)
+    out = [base]
+    for build in (
+        lambda: np.array(_POINT_VALUES).astype(dtype),               # via int64
+        lambda: np.array([[0, 0]] + _POINT_VALUES, dtype=dtype)[1:],  # a slice
+        lambda: np.asarray(np.array(_POINT_VALUES, dtype=dtype).T.copy().T),
+    ):
+        try:
+            candidate = build()
+        except (TypeError, ValueError):
+            continue
+        if candidate.dtype == dtype and np.array_equal(candidate, base):
+            out.append(np.ascontiguousarray(candidate))
+    try:                                          # a deliberately dirty buffer
+        poisoned = np.empty(base.shape, dtype=dtype)
+        poisoned.view(np.uint8)[:] = 0xA5
+        poisoned[:] = base
+        out.append(poisoned)
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _digest_is_stable(dtype: np.dtype) -> bool:
+    """Do equal arrays of ``dtype`` have identical canonical bytes?
+
+    Deliberately not ``point_array_digest``: that function now refuses the
+    dtypes this asks about, and the question here is about the bytes it
+    would have hashed.
+    """
+    canonical = {(a.dtype.str, a.shape, a.tobytes(order="C"))
+                 for a in _equal_arrays_of(dtype)}
+    return len(canonical) == 1
+
+
+def _survives_json(dtype: np.dtype) -> bool:
+    """Does ``{"inline": arr.tolist(), "dtype": ...}`` survive JSON?"""
+    arr = np.array(_POINT_VALUES, dtype=dtype)
+    try:
+        text = json.dumps({"inline": arr.tolist(), "dtype": str(dtype)})
+    except (TypeError, ValueError):
+        return False
+    back = json.loads(text)
+    try:
+        restored = np.asarray(back["inline"], dtype=np.dtype(back["dtype"]))
+    except (TypeError, ValueError):
+        return False
+    return restored.dtype == arr.dtype and bool(np.array_equal(restored, arr))
+
+
+@settings(max_examples=EXAMPLES_CHEAP)
+@given(dtype_str=st.sampled_from(_CANDIDATE_POINT_DTYPES))
+def test_a_point_dtype_is_accepted_exactly_when_it_writes_and_hashes(dtype_str):
+    """Accepted iff usable: the two entry points agree with each other, and
+    with what JSON and the digest can actually do.
+
+    ``normalise_point_reference`` (a hand-written config) and
+    ``reference_for_array`` (a factory recording its own points) must reach
+    the same verdict, an accepted dtype must genuinely round-trip and hash
+    stably, and a *numeric* dtype may only be refused when it genuinely
+    fails one of those two -- so nothing legitimate is caught by the
+    narrowing, and nothing unusable slips through it.
+    """
+    dtype = np.dtype(dtype_str)
+    arr = np.array(_POINT_VALUES, dtype=dtype)
+    usable = _survives_json(dtype) and _digest_is_stable(dtype)
+    note(f"{dtype_str}: kind={dtype.kind} itemsize={dtype.itemsize} "
+         f"json={_survives_json(dtype)} stable={_digest_is_stable(dtype)}")
+
+    try:
+        ref = normalise_point_reference({"inline": arr.tolist(), "dtype": str(dtype)},
+                                        name="source_points")
+        accepted, refusal = True, None
+    except PointReferenceError as exc:
+        ref, accepted, refusal = None, False, exc
+
+    # the factory entry point reaches the same verdict on the same array
+    try:
+        recorded = reference_for_array(arr, None, name="source_points")
+    except PointReferenceError:
+        recorded = None
+    assert (recorded is not None) == accepted
+
+    if accepted:
+        # ...then everything downstream of acceptance has to work
+        assert usable, f"{dtype_str} was accepted but cannot be written or hashed"
+        assert json.loads(json.dumps(ref)) == ref
+        assert point_array_digest(arr) == point_array_digest(arr.copy())
+        assert ref == recorded
+    else:
+        assert dtype.kind not in "biuf" or not usable, (
+            f"{dtype_str} writes and hashes cleanly but was refused: {refusal}")
+        assert dtype.name in str(refusal) or str(dtype) in str(refusal), (
+            f"a refusal must name the dtype it refused, got: {refusal}")
+
 
 @pytest.mark.skipif(np.dtype(np.longdouble).itemsize <= 8,
                     reason="this platform's longdouble is float64, so there is no "
                            "extended-precision case to make")
-@pytest.mark.xfail(strict=True, reason=(
-    "An inline point set of an extended-precision float is accepted and then "
-    "cannot be written: `arr.tolist()` on a float128 array yields np.longdouble "
-    "objects, which json.dumps refuses, so `to_dict` produces a config no writer "
-    "can save.  `point_array_digest` is unstable for the same dtype as well -- the "
-    "padding bytes of an 80-bit value in a 16-byte slot are not zeroed, so two "
-    "arrays that compare equal can hash differently and a reference to them is "
-    "rejected at random.  Fixing it is an API decision this test does not take: "
-    "either narrow _NUMERIC_KINDS / _inlineable to the widths tolist() renders as "
-    "Python scalars (refusing float128 points with a message naming the asset form), "
-    "or keep accepting them and make both the inline form and the digest canonical "
-    "(store float128 as bytes, hash the value bytes only).  Reachable two ways: a "
-    "factory handed a np.longdouble point set inlines it, and a hand-written config "
-    "may say \"dtype\": \"float128\"."))
-def test_an_inline_extended_precision_point_set_survives_being_written_out():
-    """Whatever ``normalise_point_reference`` accepts, ``to_dict`` has to be
-    able to write."""
-    import json  # noqa: PLC0415 -- only this decision-pending case needs it
+def test_an_inline_extended_precision_point_set_is_refused_not_written_out():
+    """The decided shape of the extended-precision corner.
 
+    This was a strict xfail while the choice was open: an inline
+    ``float128`` point set was accepted and then could not be written
+    (``arr.tolist()`` yields ``np.longdouble`` objects that ``json.dumps``
+    refuses) and could not be hashed stably.  The decision was to narrow
+    the accepted dtypes and to say so out loud -- never to downcast to
+    ``float64``, because a silent narrowing is a well-known source of
+    numerical bugs and this library will not add to it.
+    """
     points = np.array([1.0, 2.0, 3.0], dtype=np.longdouble)
-    ref = normalise_point_reference({"inline": points.tolist(), "dtype": "float128"},
-                                    name="points")
-    json.dumps(ref)
+    with pytest.raises(PointReferenceError) as excinfo:
+        normalise_point_reference({"inline": points.tolist(), "dtype": "float128"},
+                                  name="points")
+    message = str(excinfo.value)
+    assert "float128" in message and "extended-precision" in message
+    assert "json.dumps" in message and "point_array_digest" in message
+    # refused, not quietly downcast
+    assert "float64" in message and "np.asarray(points, dtype=np.float64)" in message
+
+    with pytest.raises(PointReferenceError, match="extended-precision"):
+        reference_for_array(points, None, name="points")

@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`SimulationNode.static_data_deps()`** declares which parameters a
+  `static_data` array was derived from; `compile()` now refuses a graph whose
+  static derives from a *trainable* parameter — freeze it or stop deriving it
 - **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
   over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
   window wider than the data instead of returning a meaningless loss

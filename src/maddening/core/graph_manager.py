@@ -1217,7 +1217,12 @@ def _run_coupled_block_impl(
                 import equinox as eqx  # noqa: PLC0415
 
                 sub = eqx.error_if(
-                    sub, single_r > conv_threshold_value,
+                    # ``not (r <= t)``, not ``r > t``: a NaN residual
+                    # answers False to *both* comparisons, so the
+                    # second form lets the one state the IFT gradient
+                    # is certainly invalid at through silently.  See
+                    # the ift branch below.
+                    sub, jnp.logical_not(single_r <= conv_threshold_value),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "
@@ -1412,7 +1417,18 @@ def _run_coupled_block_impl(
                 import equinox as eqx  # noqa: PLC0415
 
                 x_star_full = eqx.error_if(
-                    x_star_full, final_res > conv_threshold_value,
+                    # ``not (r <= t)`` rather than ``r > t``: the two
+                    # differ exactly on NaN, which answers False to
+                    # both, and a NaN residual is the one case where
+                    # the IFT gradient is certainly invalid.  It is
+                    # also reachable *because* of the measurement
+                    # above: a solve that overflowed reports ``inf``
+                    # from the pass before the cap, but ``inf - inf``
+                    # -- NaN -- when the state it returns is measured.
+                    # ``coupling_diagnostics()`` already reads NaN as
+                    # ``converged=False``; the guard has to agree.
+                    x_star_full,
+                    jnp.logical_not(final_res <= conv_threshold_value),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "

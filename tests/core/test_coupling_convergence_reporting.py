@@ -534,3 +534,152 @@ def test_a_cap_of_one_costs_one_pass():
     assert _affine_state(gm) == (pytest.approx(1.0), pytest.approx(0.5))
     assert d["residual"] == pytest.approx(_affine_residual(0.0, 0.0), abs=1e-6)
     assert d["converged"] is False
+
+
+# ---------------------------------------------------------------------------
+# What ``strict_convergence`` and ``converged`` are allowed to miss
+#
+# Both are read as "is the state this step returned a fixed point?".
+# The two fixtures below are the two ways that question can be
+# answered wrongly: a residual that is not a number, and an early exit
+# whose measurement belongs to an iterate the caller never sees.
+# ---------------------------------------------------------------------------
+
+
+def _blowup_graph(cap, **group_kw):
+    """A group that overflows float32 within a couple of passes.
+
+    ``b``'s gain sends the iterate past ``float32`` range on the second
+    pass, so the *returned* state has an ``inf`` in it while the pass
+    before it was still finite.  Measuring the returned state is then
+    ``inf - inf``: a NaN, which is False against every comparison.
+    """
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain=10.0, bias=1.0))
+    gm.add_node(_Affine("b", gain=1e30, bias=0.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    kw = dict(diagnostics=True, solver="ift", acceleration="none",
+              max_iterations=cap, tolerance=1e-6)
+    kw.update(group_kw)
+    gm.add_coupling_group(["a", "b"], **kw)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("cap", [2, 3, 4])
+def test_a_residual_that_is_not_a_number_raises_under_strict_convergence(cap):
+    """NaN is the one residual that certainly is not convergence.
+
+    ``strict_convergence`` exists to stop a training loop taking an IFT
+    gradient at a state that is not a fixed point.  Written as
+    ``residual > threshold`` the guard is silent on NaN, because NaN is
+    False against ``>`` just as it is against ``<=`` -- so a group that
+    diverged until it overflowed returned an ``inf`` state with no
+    error at all, while ``coupling_diagnostics()`` (which asks
+    ``residual <= threshold``) called the same run ``converged=False``.
+    The guard has to ask the same question the flag asks.
+
+    The cap matters: measuring the *returned* state, which is what this
+    module's other invariants require, is exactly what turns the
+    reportable ``inf`` of the pass before the cap into a NaN.  At
+    ``cap=2`` the in-loop measurement is still ``inf``, so this is also
+    the case where the guard used to fire and stopped.
+    """
+    gm = _blowup_graph(cap, strict_convergence=True)
+    with pytest.raises(Exception, match="without converging"):
+        jax.block_until_ready(gm.step())
+
+
+@pytest.mark.parametrize("cap", [2, 3, 4])
+def test_a_diverged_group_is_never_reported_as_converged(cap):
+    """Without the guard the same run must still report the failure."""
+    gm = _blowup_graph(cap, strict_convergence=False)
+    jax.block_until_ready(gm.step())
+    assert gm.coupling_diagnostics()["a+b"]["converged"] is False
+
+
+def _amplifying_graph(solver, cap, tolerance):
+    """A convergent group whose residual is not monotone.
+
+    Jacobi on ``a = 10 b + 1``, ``b = 0.05 a`` contracts by ``0.5``
+    every two passes, but the iteration matrix is strongly non-normal,
+    so a single pass multiplies the residual by ten and the next
+    divides it by twenty.  From ``(12, 1.1)`` the measured sequence is
+    ``0.5, 5, 0.25, 2.5, 0.125, ...``: every second measurement is
+    below ``tolerance=1.0`` and the state it produces is well above it.
+    Nothing here is scripted -- it is one linear graph, run normally.
+    """
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain=10.0, bias=1.0, x0=12.0))
+    gm.add_node(_Affine("b", gain=0.05, bias=0.0, x0=1.1))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(
+        ["a", "b"], diagnostics=True, solver=solver, iteration_mode="jacobi",
+        acceleration="none", max_iterations=cap, tolerance=tolerance,
+    )
+    gm.compile()
+    return gm
+
+
+def _amplifying_residual(a, b):
+    a_new, b_new = 10.0 * b + 1.0, 0.05 * a
+    return ((a_new - a) ** 2 + (b_new - b) ** 2) ** 0.5
+
+
+@pytest.mark.parametrize("cap", [3, 4, 5])
+def test_the_fori_solver_never_claims_a_state_it_did_not_measure(cap):
+    """``fori`` freezes on the iterate whose residual passed.
+
+    This is the companion of the ``xfail`` below: the same graph, the
+    same stopping pass, and here ``converged=True`` does survive the
+    caller recomputing the residual, because the state handed back is
+    the one that was measured.
+    """
+    gm = _amplifying_graph("fori", cap, 1.0)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    a = float(gm.get_node_state("a")["x"])
+    b = float(gm.get_node_state("b")["x"])
+    assert d["converged"] is True
+    assert _amplifying_residual(a, b) == pytest.approx(d["residual"], abs=1e-5)
+    assert _amplifying_residual(a, b) <= 1.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known, pre-existing (identical on release/0.4.0): the ift loop "
+        "measures the iterate each pass starts from, and on an exit that "
+        "met the criterion it reports that measurement while returning "
+        "one further update.  The re-measurement added for the cap exit "
+        "is gated on the criterion, so this exit keeps the lag and "
+        "converged=True does not imply the returned state is within "
+        "tolerance.  Closing it means either always re-measuring (one "
+        "extra F per converged group per step) or returning the iterate "
+        "that passed, as fori does (which also changes the state ift "
+        "returns); both are design calls, not an audit fix."
+    ),
+)
+@pytest.mark.parametrize("cap", [3, 4, 5])
+def test_converged_is_proof_the_returned_state_is_within_tolerance(cap):
+    """``converged=True`` has to survive the caller remeasuring.
+
+    A step-size controller, a CI assertion and ``strict_convergence``
+    all read the flag as a statement about the state they were handed.
+    On :func:`_amplifying_graph` the ift solver stops on the pass that
+    measured 0.25, hands back the state one update later, and that
+    state's own residual is 2.5 -- two and a half times the tolerance
+    it just reported meeting.
+    """
+    gm = _amplifying_graph("ift", cap, 1.0)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    a = float(gm.get_node_state("a")["x"])
+    b = float(gm.get_node_state("b")["x"])
+    if d["converged"]:
+        assert _amplifying_residual(a, b) <= 1.0, (
+            f"reported converged at {d['residual']} but the returned "
+            f"state's own residual is {_amplifying_residual(a, b)}"
+        )

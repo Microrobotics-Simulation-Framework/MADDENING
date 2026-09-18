@@ -261,3 +261,14 @@ def test_run_scan_with_history_shape_and_final_state(n_steps):
     assert history["s"]["position"].shape == (n_steps,)
     assert np.isclose(float(history["s"]["position"][-1]),
                       float(final["s"]["position"]))
+
+
+def test_the_scan_cache_is_bounded():
+    """An HTTP handler taking ``n_steps`` from the request cannot grow it
+    without limit."""
+    from maddening.core.graph_manager import _SCAN_CACHE_MAX
+
+    gm = _spring_graph()
+    for n in range(1, _SCAN_CACHE_MAX + 6):
+        gm.run_scan(n)
+    assert len(gm._scan_cache) <= _SCAN_CACHE_MAX

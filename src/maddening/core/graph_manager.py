@@ -1758,6 +1758,10 @@ def _run_coupled_block_impl(
     return result
 
 
+# How many built scan programs one graph keeps between compiles.
+_SCAN_CACHE_MAX = 64
+
+
 def _build_adaptive_scan(
     dt_step_fn: Callable,
     user_state: Callable[[dict], dict],
@@ -3710,6 +3714,13 @@ class GraphManager:
         fn = self._scan_cache.get(full_key)
         if fn is None:
             fn = build()
+            # Bounded, because an HTTP handler taking ``n_steps`` from the
+            # request would otherwise grow this without limit.  Insertion
+            # order eviction: a workload cycling over more than
+            # ``_SCAN_CACHE_MAX`` distinct step counts is pathological,
+            # and pays what it used to pay on every call.
+            if len(self._scan_cache) >= _SCAN_CACHE_MAX:
+                self._scan_cache.pop(next(iter(self._scan_cache)))
             self._scan_cache[full_key] = fn
         return fn
 

@@ -18,6 +18,24 @@ names may legally contain characters (``-``, ``.``, spaces, parentheses)
 that a prim name may not, and may legally start with a digit.  The node's
 own name is therefore written to ``maddening:nodeName`` and restored from
 there; the prim name is only a path element.
+
+Trust boundary
+--------------
+
+**A ``.usda`` / ``.usdc`` stage is untrusted input**, exactly like an FMI
+frame or a mapping asset: it names the Python class of every node it
+carries, and a stage can name any class at all.  :func:`load_graph_from_usd`
+therefore instantiates only classes the *caller* has allowed -- the
+built-ins, whatever :func:`register_node_class` registered, and whatever
+the ``node_registry`` argument passes in -- the same rule
+:meth:`GraphManager.from_dict` has always applied to a config.
+
+Until 0.4.0 the reader fell back to ``importlib.import_module`` on the
+stage's own string, so merely *opening* an untrusted stage ran the named
+module's import-time code (the ``TypeError`` that followed arrived far too
+late).  That fallback is now off unless the caller passes
+``allow_import=True``, which is only ever appropriate for a stage from a
+source you would run a script from.
 """
 
 from __future__ import annotations
@@ -59,10 +77,22 @@ def register_node_class(cls: type) -> type:
     return cls
 
 
+_BUILTINS_REGISTERED = False
+
+
 def _ensure_builtins_registered():
-    """Lazily register all built-in MADDENING nodes."""
-    if _NODE_CLASS_REGISTRY:
+    """Lazily register all built-in MADDENING nodes.
+
+    Guarded by its own flag rather than by the registry being empty: a
+    caller that runs ``register_node_class`` for one of its own classes
+    before the first load would otherwise keep the built-ins out of the
+    registry for ever.  That went unnoticed while an unregistered class
+    was resolved by importing it.
+    """
+    global _BUILTINS_REGISTERED
+    if _BUILTINS_REGISTERED:
         return
+    _BUILTINS_REGISTERED = True
     from maddening.nodes.ball import BallNode
     from maddening.nodes.heat import HeatNode
     from maddening.nodes.spring import SpringDamperNode
@@ -77,14 +107,37 @@ def _ensure_builtins_registered():
         register_node_class(cls)
 
 
-def _resolve_node_class(qualified_name: str) -> type:
-    """Resolve a qualified name to a node class."""
+def _resolve_node_class(
+    qualified_name: str,
+    node_registry: Optional[dict[str, type]] = None,
+    *,
+    allow_import: bool = False,
+) -> type:
+    """Resolve a stage's ``maddening:nodeType`` string to a node class.
+
+    The string comes off the stage, so it is untrusted: only classes the
+    caller has allowed are instantiated.  In order, that is
+    ``node_registry`` (by qualified name, then by bare class name, so a
+    registry written for :meth:`GraphManager.from_dict` works here too),
+    then the process-wide registry of built-ins and anything
+    :func:`register_node_class` was called with.
+
+    ``allow_import`` restores the pre-0.4.0 behaviour of importing the
+    module the stage names.  **Importing runs that module's top-level
+    code**, so it is opt-in and belongs only to a caller who trusts the
+    stage as much as a script.
+    """
     _ensure_builtins_registered()
+    if node_registry:
+        cls = node_registry.get(qualified_name)
+        if cls is None:
+            cls = node_registry.get(qualified_name.rsplit(".", 1)[-1])
+        if cls is not None:
+            return cls
     if qualified_name in _NODE_CLASS_REGISTRY:
         return _NODE_CLASS_REGISTRY[qualified_name]
-    # Try importing the module and getting the class
     parts = qualified_name.rsplit(".", 1)
-    if len(parts) == 2:
+    if allow_import and len(parts) == 2:
         module_path, class_name = parts
         import importlib
         try:
@@ -95,8 +148,15 @@ def _resolve_node_class(qualified_name: str) -> type:
         except (ImportError, AttributeError):
             pass
     raise KeyError(
-        f"Node class '{qualified_name}' not found. "
-        f"Register it with register_node_class() or ensure it is importable."
+        f"Node class '{qualified_name}' is not allowed by this load. "
+        f"A USD stage is untrusted input and names its own Python classes, "
+        f"so only classes the caller allows are instantiated.  Pass it in: "
+        f"load_graph_from_usd(stage, node_registry={{'{qualified_name}': "
+        f"{parts[-1]}}}), or call register_node_class({parts[-1]}) first.  "
+        f"To go back to importing whatever the stage names -- which runs "
+        f"'{parts[0] if len(parts) == 2 else qualified_name}' at import time "
+        f"and is safe only for a stage you trust as much as a script -- pass "
+        f"allow_import=True."
     )
 
 
@@ -345,8 +405,16 @@ def load_graph_from_usd(
     stage: Usd.Stage,
     root_path: str = "/Simulation",
     base_dir=None,
+    *,
+    node_registry: Optional[dict[str, type]] = None,
+    allow_import: bool = False,
 ) -> "GraphManager":
     """Reconstruct a GraphManager from a USD stage.
+
+    A stage is untrusted input: it names the Python class of every node
+    it carries.  Only classes the caller allows are instantiated -- see
+    ``node_registry`` and ``allow_import``, and the *Trust boundary*
+    section of this module.
 
     Parameters
     ----------
@@ -359,12 +427,31 @@ def load_graph_from_usd(
         mappings are relative to.  Defaults to the directory of the
         stage's root layer when it is a file, else the working
         directory.
+    node_registry : dict, optional
+        Node classes this load may instantiate, keyed by qualified name
+        (``"maddening.nodes.ball.BallNode"``) or by bare class name
+        (``"BallNode"``), so a registry written for
+        :meth:`GraphManager.from_dict` works unchanged.  Searched before
+        the built-ins and the :func:`register_node_class` registry, which
+        remain available whether or not this is given.
+    allow_import : bool, default False
+        Import the module a stage names when no registered class matches.
+        **Importing executes that module**, so this is only for a stage
+        you trust as much as a script; before 0.4.0 it was the
+        unconditional behaviour.
 
     Returns
     -------
     GraphManager
         A new graph manager with nodes, edges, coupling groups,
         and external inputs restored from the USD stage.
+
+    Raises
+    ------
+    KeyError
+        If the stage names a node class that is neither registered nor in
+        ``node_registry``.  The message names the class and says what to
+        pass.
     """
     from maddening.core.graph_manager import GraphManager
 
@@ -392,7 +479,8 @@ def load_graph_from_usd(
                 continue
 
             params = json.loads(params_json) if params_json else {}
-            cls = _resolve_node_class(node_type)
+            cls = _resolve_node_class(node_type, node_registry,
+                                      allow_import=allow_import)
 
             # The node's own name, which need not be a legal prim name
             # (``"a-b"``, ``"1st"``).  Stages written before

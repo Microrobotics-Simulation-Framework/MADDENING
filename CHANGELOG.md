@@ -186,6 +186,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
+  `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
+  could leave its bounds — make the parameter trainable in the spec instead
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it

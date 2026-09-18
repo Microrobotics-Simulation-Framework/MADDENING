@@ -262,8 +262,99 @@ class SimulationNode(ABC):
         outside the state, closing over them in ``update()``.  JAX bakes
         them into the JIT-compiled HLO as constants, which is exactly
         what we want for a 1 GB FVM mesh.
+
+        Wrappers
+        --------
+        The default is **not** an empty dict for a node that wraps
+        others: it forwards, returning the merged ``static_data`` of
+        every :class:`SimulationNode` held as an instance attribute.
+        A wrapper that declares no statics of its own therefore reports
+        the statics of the node it wraps, and
+        :meth:`static_data_hash` -- the signal
+        :meth:`~maddening.core.graph_manager.GraphManager._check_static_data_dirty`
+        watches -- moves when those change.  Without the forwarding a
+        wrapped node's statics were invisible to the graph, which sees
+        only the outermost object, and the drift check could never fire
+        for exactly the nodes (the sharded wrappers) that cache a
+        materialisation of them.  Forwarding composes, so
+        ``HybridNode(ShardedStencilNode(inner))`` reports ``inner``'s
+        statics through both levels; re-entrancy is guarded, so a cycle
+        between two nodes terminates (and contributes nothing).
+
+        What is reported is the wrapped node's **declaration** -- the
+        :class:`~maddening.core.static_data.StaticArray` as the node
+        built it, full shape, ``replication`` and ``shard_axis`` intact
+        -- never a wrapper's materialised per-device view.  Three
+        reasons, and getting this backwards makes every compile look
+        like drift:
+
+        * the hash is over ``(key, shape, dtype, replication,
+          shard_axis)``, and a materialised shard is a bare
+          ``jax.Array`` that has lost ``replication`` and
+          ``shard_axis``; ``coerce_static_data_value`` raises
+          ``MigrationError`` on a bare array, so hashing one would not
+          merely be wrong, it would fail;
+        * materialising costs a ``device_put`` per array, and this
+          property is read on every ``step()`` via the drift check --
+          precisely the per-frame host overhead the cached
+          materialisation exists to avoid;
+        * a per-device view is a function of the mesh, not of the
+          node's statics.  "The statics changed" is a property of the
+          declaration; an unchanged node must hash the same however
+          many devices it is spread over.
+
+        A wrapper that does declare statics of its own overrides this
+        and should merge ``super().static_data`` in, or the nodes it
+        wraps drop out of the hash again.
         """
-        return {}
+        return self._wrapped_static_data()
+
+    def _wrapped_static_data(self) -> dict:
+        """Merged ``static_data`` of every node held as an attribute.
+
+        The default :attr:`static_data` of a node that declares none of
+        its own; see that property for the contract and the reasoning.
+
+        Returns
+        -------
+        dict
+            ``{}`` when this node wraps nothing.  Otherwise the union of
+            the wrapped nodes' ``static_data``, in attribute order.  Two
+            wrapped nodes declaring the same key keep both entries, the
+            second qualified by the attribute holding it, rather than
+            one silently displacing the other and going unhashed.
+        """
+        d = getattr(self, "__dict__", None)
+        # Fast path: a leaf node wraps nothing, and this runs per node
+        # per ``step()``.  Checked before the guard so a leaf never even
+        # grows the guard attribute.
+        if not d or not any(isinstance(v, SimulationNode) for v in d.values()):
+            return {}
+        if getattr(self, "_collecting_static_data", False):
+            return {}
+        # ``object.__setattr__`` so a node built as a frozen dataclass
+        # can still carry the guard; a node that refuses it outright is
+        # only at risk from a reference cycle, which is not a shape the
+        # wrappers make.
+        try:
+            object.__setattr__(self, "_collecting_static_data", True)
+        except (AttributeError, TypeError):
+            pass
+        try:
+            out: dict = {}
+            for attr, value in list(d.items()):
+                if not isinstance(value, SimulationNode):
+                    continue
+                for key, item in value.static_data.items():
+                    while key in out:
+                        key = f"{attr}.{key}"
+                    out[key] = item
+            return out
+        finally:
+            try:
+                object.__setattr__(self, "_collecting_static_data", False)
+            except (AttributeError, TypeError):
+                pass
 
     def static_data_hash(self) -> int:
         """Stable hash over :attr:`static_data` for JIT cache invalidation.

@@ -239,37 +239,40 @@ pull further ahead as the chain grew.  It does not:
 | `chain-20` | 23.7 | 40.7 | 1.72 | 1.79 |
 | `chain-50` | 30.8 | 53.0 | 1.72 | **1.59** |
 
-The last column is why row 1 of "Start here" now says 1.6–2.0x.  The
-finding — the ratio does not *grow* with depth — survives; the flatness
-does not, since at `c51cd6a` the ratio falls from 1.88 at N = 5 to 1.59
-at N = 50.  Whether that is the operator or the error-bound criterion
-charging the two iterations differently has not been measured, and this
-paragraph's explanation is for the flat case only:
-
 The ratio was flat because a tridiagonal coupling operator is
 *consistently ordered*, for which the Gauss-Seidel spectral radius is
 exactly the square of the Jacobi one — a constant factor of two in
 iterations at any depth, not a growing one.  What grows with N is the
 radius itself (0.40 → 0.80), and so the absolute iteration count.
 
-**2. The star is where Gauss-Seidel wins by the most, not the least.**
+The last column is why row 1 of "Start here" now says 1.6–2.0x.  The
+prediction this paragraph tested — that the advantage *widens* with
+depth — is still refuted, and more firmly: at `c51cd6a` the ratio
+*falls*, from 1.88 at N = 5 to 1.59 at N = 50.  The flatness the
+explanation above accounts for is what did not survive.  Whether the
+difference is the operator or the error-bound criterion charging the two
+modes differently has not been measured.
+
+**2. The star is one of the shapes where Gauss-Seidel wins by the most,
+not the least.**
 The expectation was that leaves which cannot see each other would leave
 Gauss-Seidel's ordering nothing to exploit, making Jacobi competitive.
 Measured, the star family shows the *largest* Gauss-Seidel advantage of
 any shape family — 1.83–1.85 against 1.69–1.77 on the chain, with only
 `stiff-pair-0.8` at 1.83 reaching into the same band — and it is flat in
-width (20.5 iterations at 2 leaves, 22.9 at 16).  The *flat in width*
-half holds at `c51cd6a` (re-measured `c51cd6a`, 2026-09-19): 1.92–1.96 across the four stars,
-23.1 iterations at 2 leaves and 24.8 at 16.  The **"largest of any
-shape family" half does not**: `stiff-pair-0.8` measures 1.98 and
-`slow-drift` 2.04, both above every star.  The claim that stands
-re-measurement is the one the paragraph was written to test — a star
-gives Gauss-Seidel the full squared radius, so leaves that cannot see
-each other are not what produces the factor — not the ranking against
-the other families.  The hub-to-leaf
+width (20.5 iterations at 2 leaves, 22.9 at 16).  The hub-to-leaf
 dependency alone is enough to give the full squared radius; ordering
 *among* the leaves was never what produced the factor.  On one device
 there is no shape at which Jacobi is competitive on iterations.
+
+Re-measured at `c51cd6a` on 2026-09-19, the *flat in width* half holds:
+1.92–1.96 across the four stars, 23.1 iterations at 2 leaves and 24.8 at
+16.  The **"largest of any shape family" half does not** —
+`stiff-pair-0.8` measures 1.98 and `slow-drift` 2.04, both above every
+star.  What survives is the finding the paragraph was written to test:
+a star gives Gauss-Seidel the full squared radius, so leaves that cannot
+see each other were never what produced the factor.  The ranking against
+the other families was a by-product of that, and it no longer holds.
 
 **3. Aitken helps Gauss-Seidel more than Jacobi, except on a two-node
 pair.**  The expectation was the reverse: Jacobi's error history decays

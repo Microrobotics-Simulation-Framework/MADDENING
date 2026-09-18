@@ -60,6 +60,45 @@ from maddening.core.node import SimulationNode
 from maddening.core.static_data import StaticArray
 
 
+def _partition_statics(static_data) -> dict[str, StaticArray]:
+    """The ``replication="partition"`` entries of a ``static_data`` dict."""
+    return {
+        k: v for k, v in static_data.items()
+        if isinstance(v, StaticArray) and v.replication == "partition"
+    }
+
+
+def _validate_partition_statics(
+    sharded: dict[str, StaticArray], layout: UnstructuredPartitionLayout,
+) -> None:
+    """Every partitioned static must agree with the layout's assignment.
+
+    All ``partition_assignment``s must be the layout's one -- otherwise
+    we would need a different layout per array.  Kept out of the hot
+    path: the element-wise comparison is O(n_cells) and only runs when
+    the set of partitioned statics changes.
+    """
+    ref_pa = layout.partition_assignment
+    for k, v in sharded.items():
+        pa = v.partition_assignment
+        if pa.shape != ref_pa.shape:
+            raise ValueError(
+                f"ShardedUnstructuredNode: StaticArray {k!r} has "
+                f"partition_assignment.shape={pa.shape} but layout "
+                f"was built with shape {ref_pa.shape}."
+            )
+        # Element-wise equality (numpy-style -- pa might be a numpy or
+        # jax array).  The layout claims authority.
+        if not np.array_equal(np.asarray(pa), np.asarray(ref_pa)):
+            raise ValueError(
+                f"ShardedUnstructuredNode: StaticArray {k!r} has a "
+                "partition_assignment that disagrees with the "
+                "layout's.  All partitioned static arrays on a "
+                "node must share one assignment (build the layout "
+                "from that one assignment).",
+            )
+
+
 @stability(StabilityLevel.STABLE)
 class ShardedUnstructuredNode(SimulationNode):
     """Sharded wrapper for a graph-partitioned :class:`SimulationNode`.
@@ -146,31 +185,8 @@ class ShardedUnstructuredNode(SimulationNode):
 
         # Verify any StaticArray(replication="partition") on the inner
         # node uses a partition_assignment compatible with the layout.
-        sharded_static: dict[str, StaticArray] = {}
-        for k, v in node.static_data.items():
-            if isinstance(v, StaticArray) and v.replication == "partition":
-                # All partition_assignments must agree on the layout's
-                # one — otherwise we'd need a different layout per array.
-                pa = v.partition_assignment
-                ref_pa = layout.partition_assignment
-                if pa.shape != ref_pa.shape:
-                    raise ValueError(
-                        f"ShardedUnstructuredNode: StaticArray {k!r} has "
-                        f"partition_assignment.shape={pa.shape} but layout "
-                        f"was built with shape {ref_pa.shape}."
-                    )
-                # Element-wise equality (numpy-style — pa might be a
-                # numpy or jax array).  The layout claims authority.
-                import numpy as np  # noqa: PLC0415
-                if not np.array_equal(np.asarray(pa), np.asarray(ref_pa)):
-                    raise ValueError(
-                        f"ShardedUnstructuredNode: StaticArray {k!r} has a "
-                        "partition_assignment that disagrees with the "
-                        "layout's.  All partitioned static arrays on a "
-                        "node must share one assignment (build the layout "
-                        "from that one assignment).",
-                    )
-                sharded_static[k] = v
+        sharded_static = _partition_statics(node.static_data)
+        _validate_partition_statics(sharded_static, layout)
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         # Share the inner node's params dict rather than copying it, so a
@@ -189,6 +205,9 @@ class ShardedUnstructuredNode(SimulationNode):
         self._sharded_static = sharded_static
         # Cached compiled fns keyed by the input signature.
         self._sharded_cache: dict[Any, Any] = {}
+        # Cached per-device materialisation of the partitioned statics;
+        # see ``_materialise_partitioned_statics``.
+        self._static_device_cache: Optional[tuple] = None
 
     # -----------------------------------------------------------------
     # Layout accessor — handoff for the experiment-setup contract.
@@ -281,22 +300,71 @@ class ShardedUnstructuredNode(SimulationNode):
         ``GraphManager.params``) is replicated to every shard and handed
         to an inner ``update_padded(..., params=)``.
         """
+        # Materialise first: it refreshes ``self._sharded_static``, which
+        # ``_get_sharded_fn`` keys its compiled-function cache on.
+        static_partitioned = self._materialise_partitioned_statics()
         fn = self._get_sharded_fn(state, boundary_inputs, params)
-        # Collect the per-partition static arrays from the inner node.
-        static_partitioned = {}
-        for k, sa in self._sharded_static.items():
-            host = jax.device_get(sa.value) if hasattr(sa.value, "device") \
-                else sa.value
-            per_shard = partition_value(value=host, layout=self._layout)
-            sharding = NamedSharding(self._mesh, P(self._mesh_axis))
-            static_partitioned[k] = jax.device_put(
-                jnp.asarray(per_shard.reshape(
-                    (self._layout.n_devices * self._layout.n_local_max,)
-                    + per_shard.shape[2:]
-                )), sharding,
-            )
         return fn(state, boundary_inputs, jnp.asarray(dt), static_partitioned,
                   params if params else {})
+
+    @stability(StabilityLevel.STABLE)
+    def invalidate_static_cache(self) -> None:
+        """Drop the cached per-device copy of the partitioned statics.
+
+        Call this after rewriting a partitioned ``StaticArray``'s buffer
+        in place; replacing the array object is detected automatically.
+        """
+        self._static_device_cache = None
+
+    def _materialise_partitioned_statics(self) -> dict:
+        """Per-device materialisation of every partitioned StaticArray.
+
+        Partitioning a static array costs a device-to-host copy, a
+        NumPy gather through the layout, and a host-to-device copy.
+        None of that depends on the state, so doing it on every public
+        ``update`` was the dominant host cost of an interactive step.
+        The result is cached and reused; the key is the identity of each
+        static's underlying array (see
+        :meth:`ShardedStencilNode._static_cache_key` for why identity,
+        and for the one case it cannot see).
+        """
+        sharded = _partition_statics(self._inner.static_data)
+        key = tuple(
+            (k, id(sharded[k].value), tuple(sharded[k].value.shape),
+             str(sharded[k].value.dtype))
+            for k in sorted(sharded)
+        )
+        cached = self._static_device_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        _validate_partition_statics(sharded, self._layout)
+        if sorted(sharded) != sorted(self._sharded_static):
+            # A partitioned key appeared or vanished: every shard_map
+            # compiled against the old set is stale.
+            self._sharded_cache.clear()
+        self._sharded_static = sharded
+
+        # ``ensure_compile_time_eval``: this may run inside GraphManager's
+        # trace of the compiled step, and a cached tracer would escape it.
+        # The statics are compile-time constants, so evaluating the
+        # placement eagerly is both correct and what we want cached.
+        static_partitioned = {}
+        sharding = NamedSharding(self._mesh, P(self._mesh_axis))
+        with jax.ensure_compile_time_eval():
+            for k, sa in sharded.items():
+                host = jax.device_get(sa.value) if hasattr(sa.value, "device") \
+                    else sa.value
+                per_shard = partition_value(value=host, layout=self._layout)
+                static_partitioned[k] = jax.device_put(
+                    jnp.asarray(per_shard.reshape(
+                        (self._layout.n_devices * self._layout.n_local_max,)
+                        + per_shard.shape[2:]
+                    )), sharding,
+                )
+        # ``sharded`` is retained so the ``id()``s in ``key`` stay pinned.
+        self._static_device_cache = (key, static_partitioned, sharded)
+        return static_partitioned
 
     # -----------------------------------------------------------------
     # Internals

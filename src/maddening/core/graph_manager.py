@@ -247,16 +247,17 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
-#: Accelerations whose convergence criterion must hold on two
-#: *consecutive* passes before a coupling group may call itself
-#: converged.  See :func:`_fixed_point_while` for the argument, and for
-#: why IQN is not here.  Both coupling solvers read this list, so
-#: ``"ift"`` and ``"fori"`` agree on what ``converged`` means.
+#: Accelerations that may not *stop iterating* on a single pass at or
+#: below the threshold: the criterion has to hold on two consecutive
+#: passes.  See :func:`_fixed_point_while` for the argument, and for
+#: why IQN is not here.  Both coupling solvers read this list and both
+#: seed the streak with the residual of the pass before their loop, so
+#: ``"ift"`` and ``"fori"`` stop at the same pass at every cap.
 _TWO_PASS_EXIT = ("aitken",)
 
 
 def _fixed_point_while(
-    step_pure, x0, consts, accel_init, threshold, max_iter,
+    step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
     acceleration, relaxation, n_reuse, sub_idx,
 ):
     """Early-exit fixed-point iteration ``x = F(x)`` with acceleration.
@@ -268,6 +269,13 @@ def _fixed_point_while(
     least one body iteration and at most ``max_iter - 1``, so the number
     of ``F`` evaluations at the cap (first pass + body iterations) equals
     ``max_iter`` — the same budget as the legacy fori path.
+
+    ``first_res`` is the residual of the pass that produced ``x0`` —
+    the one ``_run_coupling_inner`` ran before this loop.  It seeds the
+    two-consecutive-passes streak, which is what lets the guard below
+    be *provable* at ``max_iter == 2``, where the loop itself only gets
+    to measure one residual.  The fori path seeds its streak from the
+    same quantity, so both solvers stop at the same pass.
 
     ``sub_idx`` (static tuple of ints, or None) restricts the
     acceleration to a subset of ``x`` — the IQN interface fields — while
@@ -287,14 +295,15 @@ def _fixed_point_while(
     both bounds and the residual sequence stops being monotone: it
     dips two decades below its own trend for a single pass, while the
     iterate has barely moved, and springs back on the next.  Stopping
-    on such a dip reports ``converged=True`` far from the fixed point,
-    and since the dip undershoots any plausible threshold, tightening
+    on such a dip returns a state far from the fixed point, and since
+    the dip undershoots any plausible threshold, tightening
     ``tolerance`` does not move the exit either.  Aitken therefore
-    exits only when two *consecutive* passes are at or below
-    ``threshold``, and reports the larger of the two: a genuine
-    arrival pays one extra pass, a transient dip is rejected, and the
-    flag ``coupling_diagnostics`` derives from ``final_res`` means
-    what the loop means.
+    *stops* only when two consecutive passes are at or below
+    ``threshold``: a genuine arrival pays one extra pass and a
+    transient dip is rejected.  The guard is on the exit only — what
+    is *reported* is a measurement of the state being handed back (see
+    ``final_res`` below), which is the one number a dip cannot
+    flatter.
 
     IQN is deliberately *not* on that list.  Its step comes from a
     least-squares solve over an accumulating secant basis, not from a
@@ -311,10 +320,26 @@ def _fixed_point_while(
 
     Returns ``(x_star, n_iters, final_res, (V, W))``: ``n_iters`` is the
     number of body iterations run (as a float, for the diagnostics
-    carry), ``final_res`` the residual of the last pass — the larger of
-    the last two when ``acceleration`` is in ``_TWO_PASS_EXIT``, so
-    that it says what the exit criterion above says — and ``(V, W)``
-    the IQN secant matrices (an empty tuple for other accelerations).
+    carry) and ``(V, W)`` the IQN secant matrices (an empty tuple for
+    other accelerations).
+
+    ``final_res`` is the number ``coupling_diagnostics``' ``converged``
+    flag and ``strict_convergence`` are derived from, so it has to be
+    a statement about ``x_star`` and not about some iterate before it.
+    Every pass measures the residual of the iterate it starts from, so
+    the loop's own last measurement lags ``x_star`` by one update.
+    When the loop leaves on its criterion that lag is harmless — the
+    measurement is at or below ``threshold`` and ``x_star`` is one
+    further update along.  When it leaves because ``max_iter`` ran
+    out, the lag is the whole question (an Aitken step routinely
+    arrives on the pass that had no successor), so one extra
+    evaluation of ``F`` measures ``x_star`` itself and *that* is what
+    is reported.  The extra pass is charged only on the exit that was
+    about to report failure, and it is also the second opinion the
+    two-pass guard wanted: a residual that dipped for one pass springs
+    back here, on the very state the caller is being handed.  Both
+    coupling solvers report this same quantity by the same rule.
+
     No autodiff machinery here; the IFT rule is layered on by
     ``_ift_solve``.
 
@@ -404,29 +429,43 @@ def _fixed_point_while(
         prev = (res_prev,) if two_pass_exit else ()
         return x_new, res, prev, i + jnp.int32(1), acc
 
-    inf = jnp.array(jnp.inf, dtype=dtype)
-    init = (x0, inf, (inf,) if two_pass_exit else (), jnp.int32(0), acc0)
+    # The seed is the residual of the pass that produced ``x0``, not
+    # ``inf``: the streak the guard tests then has a first member even
+    # when the loop only runs one body (``max_iter == 2``), so the
+    # guard is provable at every cap instead of being switched off at
+    # the smallest one.  ``cond`` forces the first body regardless, so
+    # this value only ever reaches the criterion through ``prev``.
+    seed = jnp.asarray(first_res, dtype)
+    init = (x0, seed, (seed,) if two_pass_exit else (), jnp.int32(0), acc0)
     x_star, final_res, prev, n_iters, acc = jax.lax.while_loop(
         cond, body, init
     )
+    # Did the loop leave on its criterion, or because it ran out of
+    # passes?  On the criterion the last measurement is a true
+    # statement (``<= threshold``) about the iterate one update behind
+    # ``x_star``; at the cap it is a statement about an iterate the
+    # caller never sees, and the Aitken step that produced ``x_star``
+    # is exactly the one that most often crossed the threshold.  So
+    # pay one evaluation of ``F`` there and report ``x_star``'s own
+    # residual.  See the docstring.
     if two_pass_exit:
-        # Report what the criterion actually tested, so the flag
-        # ``coupling_diagnostics`` derives from this number ("residual
-        # <= threshold") means what the loop means.  Otherwise a group
-        # that exhausts ``max_iterations`` on an oscillating residual
-        # still reports ``converged=True`` whenever the cap happens to
-        # land on a dip.  ``n_iters == 1`` (reachable only at
-        # ``max_iterations=2``) has no second pass to compare with, so
-        # it reports its one measurement rather than the ``inf`` seed.
-        final_res = jnp.where(
-            n_iters > 1, jnp.maximum(final_res, prev[0]), final_res,
+        criterion_met = jnp.logical_and(
+            final_res <= threshold, prev[0] <= threshold,
         )
+    else:
+        criterion_met = final_res <= threshold
+    final_res = jax.lax.cond(
+        criterion_met,
+        lambda _x: final_res,
+        lambda _x: step_pure(_x, *consts)[1],
+        x_star,
+    )
     vw = (acc[0], acc[1]) if is_iqn else ()
     return x_star, n_iters.astype(dtype), final_res, vw
 
 
 def _ift_solve_impl(
-    step_pure, x0, consts, accel_init, threshold, max_iter,
+    step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
     acceleration, relaxation, n_reuse, sub_idx, linear_solver,
 ):
     """Returns ``(x_star, aux)`` with ``x_star = F(x_star, *consts)``.
@@ -437,9 +476,10 @@ def _ift_solve_impl(
 
     ``x_star`` differentiates via the implicit function theorem:
         ``dx*/d(consts) = (I - dF/dx)^{-1} dF/d(consts)``
-    evaluated at the fixed point.  ``x0`` and ``accel_init`` receive a
-    zero derivative (the fixed point is invariant under the initial
-    guess and the acceleration state in the converged limit).
+    evaluated at the fixed point.  ``x0``, ``accel_init`` and
+    ``first_res`` receive a zero derivative (the fixed point is
+    invariant under the initial guess, the acceleration state and the
+    stopping bookkeeping in the converged limit).
 
     The rule is installed as a ``jax.custom_jvp`` (see
     ``_ift_solve_jvp``) rather than a ``custom_vjp``: JAX obtains
@@ -462,7 +502,7 @@ def _ift_solve_impl(
     tangent/adjoint solver — see ``_ift_linear_solve``.
     """
     x_star, n_iters, final_res, vw = _fixed_point_while(
-        step_pure, x0, consts, accel_init, threshold, max_iter,
+        step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
         acceleration, relaxation, n_reuse, sub_idx,
     )
     return x_star, (n_iters, final_res, vw)
@@ -594,14 +634,15 @@ def _ift_solve_jvp(
     # Tangent rule of the implicit function theorem at ``x*``:
     #     (I - dF/dx) x_dot = dF/d(consts) . consts_dot
     # Linear in ``consts_dot`` (a jvp of F composed with a lineax solve),
-    # so JAX can transpose it for reverse mode.  ``x0_dot`` and
-    # ``accel_dot`` are ignored: the converged fixed point does not
-    # depend on the initial guess or the accelerator's seed state, and
+    # so JAX can transpose it for reverse mode.  ``x0_dot``,
+    # ``accel_dot`` and ``first_res_dot`` are ignored: the converged
+    # fixed point does not depend on the initial guess, the
+    # accelerator's seed state or the stopping bookkeeping, and
     # ``aux`` is forward-only bookkeeping with a zero tangent.
-    x0, consts, accel_init = primals
-    _x0_dot, consts_dot, _accel_dot = tangents
+    x0, consts, accel_init, first_res = primals
+    _x0_dot, consts_dot, _accel_dot, _first_res_dot = tangents
     x_star, aux = _ift_solve(
-        step_pure, x0, consts, accel_init, threshold, max_iter,
+        step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
         acceleration, relaxation, n_reuse, sub_idx, linear_solver,
     )
     _, rhs = jax.jvp(
@@ -619,13 +660,15 @@ def _ift_solve_jvp(
     return (x_star, aux), (x_dot, aux_dot)
 
 
-# nondiff_argnums: 0=step_pure (callable), 4=threshold (static float),
-#                  5=max_iter (static int), 6=acceleration (static str),
-#                  7=relaxation (static float), 8=n_reuse (static int),
-#                  9=sub_idx (static tuple | None), 10=linear_solver
-#                  (static str).
+# nondiff_argnums: 0=step_pure (callable), 5=threshold (static float),
+#                  6=max_iter (static int), 7=acceleration (static str),
+#                  8=relaxation (static float), 9=n_reuse (static int),
+#                  10=sub_idx (static tuple | None), 11=linear_solver
+#                  (static str).  4=first_res is a *traced* scalar (the
+#                  residual of the pass before the loop), so it is a
+#                  primal with an ignored tangent, not a static.
 _ift_solve = jax.custom_jvp(
-    _ift_solve_impl, nondiff_argnums=(0, 4, 5, 6, 7, 8, 9, 10)
+    _ift_solve_impl, nondiff_argnums=(0, 5, 6, 7, 8, 9, 10, 11)
 )
 _ift_solve.defjvp(_ift_solve_jvp)
 
@@ -1155,12 +1198,16 @@ def _run_coupled_block_impl(
             # 0.0), which ``coupling_diagnostics()`` then reads as
             # ``converged=True`` whatever the state, and which
             # ``strict_convergence`` could never contradict because the
-            # check lives in ``_run_ift_forward``.  ``first_r`` is the
-            # residual of the state the single pass started from -- the
-            # same quantity every other cap reports (the residual at
-            # the iterate one pass before the one returned) -- and it
-            # is already needed for the ``strict_convergence`` guard,
-            # so honesty here costs nothing.
+            # check lives in ``_run_ift_forward``.  ``single_r`` is the
+            # residual of the state the single pass started from: how
+            # far that pass moved.  Every larger cap reports the
+            # residual of the state it *returns*, measuring it with one
+            # extra evaluation of ``F`` when its criterion was not met
+            # (see ``_fixed_point_while``); a cap of one is the
+            # exception, because it is the one setting that is a
+            # request about cost -- one staggered pass has to cost one
+            # pass, and the profiler's one-iteration variant depends on
+            # it.  So this cap reports its single measurement.
             single_r = _compute_residual(state_after_first, new_state_inner)
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
@@ -1347,6 +1394,7 @@ def _run_coupled_block_impl(
 
             x_star_full, (n_iters, final_res, vw) = _ift_solve(
                 step_pure, x0_full, consts, accel_init,
+                jnp.asarray(first_r, x0_full.dtype),
                 conv_threshold_value,
                 int(max_iters),
                 group.acceleration,
@@ -1617,6 +1665,23 @@ def _run_coupled_block_impl(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
+
+        # Report the residual of the state being handed back, by the
+        # same rule as the ift path (see ``_fixed_point_while``): the
+        # in-loop measurement lags the returned state by one update,
+        # which only matters on the exit that is about to be reported
+        # as a failure, so that exit -- and only that one -- pays one
+        # more evaluation of ``F``.  ``converged`` is index 1 of every
+        # branch's carry.  Keeping the rule identical on both solvers
+        # is what makes ``solver`` invisible in
+        # ``coupling_diagnostics()``.
+        if track_diag:
+            final_res = jax.lax.cond(
+                final_carry[1],
+                lambda _s: final_res,
+                lambda _s: _compute_residual(one_pass(_s), _s),
+                final_state,
+            )
 
         # Merge coupled nodes back into the full state
         r = {k: v for k, v in new_state_inner.items()}
@@ -3419,17 +3484,27 @@ class GraphManager:
             joined by ``"+"``), each containing:
 
             - ``"iterations"`` : int — coupling iterations used
-            - ``"residual"`` : float — final residual norm
-            - ``"converged"`` : bool — residual met the group's
+            - ``"residual"`` : float — ``||F(x) - x||`` in the group's
+              convergence norm for the state ``x`` this step returned.
+              A group that stopped early on its own criterion reports
+              instead the measurement that criterion passed, taken one
+              update before ``x`` and at or below the threshold.  At
+              ``max_iterations=1`` it is the distance the single pass
+              moved.
+            - ``"converged"`` : bool — that residual met the group's
               threshold (``tolerance`` for the L2 norm, ``1.0`` for the
               mixed / interface norms).  ``False`` means the group hit
-              ``max_iterations``; under ``solver="ift"`` the gradient
-              through that step is then unreliable.
+              ``max_iterations`` *and* the state it returned is still
+              outside the threshold; under ``solver="ift"`` the
+              gradient through that step is then unreliable.
 
-            Reported for every group under ``solver="ift"`` (the
-            default); legacy ``solver="fori"`` groups only with
-            ``diagnostics=True``.  Empty dict if no step has been taken
-            yet.
+            Both values are independent of ``solver``: ``"ift"`` (the
+            default) and the legacy ``"fori"`` run the same passes with
+            the same stopping rule and report by the same rule, so the
+            flag does not move when a graph migrates between them.
+            Reported for every group under ``solver="ift"``; ``"fori"``
+            groups only with ``diagnostics=True``.  Empty dict if no
+            step has been taken yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}

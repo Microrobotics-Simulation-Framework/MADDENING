@@ -94,7 +94,7 @@ def _scripted_loop(
     accel_init = (
         (empty, empty) if acceleration in ("iqn-ils", "iqn-imvj") else ()
     )
-    _x, n_iters, final_res, _vw = _fixed_point_while(
+    _x, n_iters, final_res, _amp, _vw = _fixed_point_while(
         step_pure, x0, (), accel_init, seed, threshold, max_iter,
         acceleration, 1.0, 0, (0,),
     )
@@ -122,17 +122,30 @@ def _coupled_springs(dt=0.01, k=200.0, c=0.5, pos_a=0.0, pos_b=3.0):
     return gm
 
 
+def _rel(new, old, atol=1e-8):
+    """One field's contribution to the L2 norm: its change divided by
+    its own magnitude, or nothing at all if the field is inside the
+    dead band ``atol``.  The norm is scale-aware since 0.4.0, so
+    ``tolerance`` is a relative tolerance and a group's verdict does
+    not depend on the units its fields are written in."""
+    new = jnp.asarray(new)
+    old = jnp.asarray(old)
+    ref = float(max(jnp.max(jnp.abs(new)), jnp.max(jnp.abs(old))))
+    if ref <= atol:
+        return 0.0
+    return float(jnp.sum(((new - old) / ref) ** 2))
+
+
 def _group_l2(before, after, names):
-    """L2 norm of the float-field change across ``names`` -- the same
-    quantity ``coupling_residual_l2`` computes, recomputed here from
-    the public state accessor."""
+    """L2 norm of the relative float-field change across ``names`` --
+    the same quantity ``coupling_residual_l2`` computes, recomputed
+    here from the public state accessor."""
     total = 0.0
     for nn in names:
         for fld, new in after[nn].items():
             if not jnp.issubdtype(jnp.asarray(new).dtype, jnp.floating):
                 continue
-            diff = jnp.asarray(new) - jnp.asarray(before[nn][fld])
-            total += float(jnp.sum(diff ** 2))
+            total += _rel(new, before[nn][fld])
     return total ** 0.5
 
 
@@ -195,9 +208,10 @@ def _affine_pass(a, b):
 
 
 def _affine_residual(a, b):
-    """``||F(x) - x||`` for the state ``(a, b)`` -- the group's L2 norm."""
+    """``||F(x) - x||`` for the state ``(a, b)`` -- the group's L2 norm,
+    which scales each field by its own magnitude (see :func:`_rel`)."""
     a_new, b_new = _affine_pass(a, b)
-    return ((a_new - a) ** 2 + (b_new - b) ** 2) ** 0.5
+    return (_rel(a_new, a) + _rel(b_new, b)) ** 0.5
 
 
 def _affine_state(gm):
@@ -489,13 +503,15 @@ def test_the_aitken_guard_is_answerable_at_every_cap(cap):
     does not arrive the group measures what it returns instead of
     trusting the single value.
 
-    Concretely, with ``tolerance=0.5`` the pass before the loop is at
-    1.118 and the first pass inside it at 0.2795.  ``none`` stops on
-    that one value and reports it.  Aitken may not, so at caps 2 and 3
-    it reports the measured residual of the state it returns, which is
-    a smaller, different number -- the guard is doing something.
+    Concretely, with ``tolerance=0.75`` the pass before the loop is at
+    1.414 in the group's (scale-aware) norm and the first pass inside
+    it at 0.283, whose error bound is 0.512.  ``none`` stops on that
+    one value and reports it.  Aitken may not -- its streak still holds
+    the 1.414 -- so at caps 2 and 3 it reports the measured residual of
+    the state it returns, which is a smaller, different number: the
+    guard is doing something.
     """
-    tol = 0.5
+    tol = 0.75
     verdicts = {}
     for acceleration in ("none", "aitken"):
         gm = _affine_graph(acceleration=acceleration, max_iterations=cap,
@@ -636,7 +652,7 @@ def _amplifying_graph(solver, cap, tolerance):
 
 def _amplifying_residual(a, b):
     a_new, b_new = 10.0 * b + 1.0, 0.05 * a
-    return ((a_new - a) ** 2 + (b_new - b) ** 2) ** 0.5
+    return (_rel(a_new, a) + _rel(b_new, b)) ** 0.5
 
 
 @pytest.mark.parametrize("solver", ["ift", "fori"])

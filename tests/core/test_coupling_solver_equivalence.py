@@ -227,9 +227,12 @@ def test_the_state_returned_is_the_one_measured_not_its_successor():
     )
     # ``residual`` is the group's L2 norm of one pass applied to the
     # returned state, i.e. the distance to that discarded successor.
+    # The norm divides each field's change by that field's own
+    # magnitude (scale-aware since 0.4.0), and both fields here move by
+    # the same *relative* amount, so the two contributions are equal.
+    rel = (successor - ift) / successor
     assert diag["residual"] == pytest.approx(
-        ((successor - ift) ** 2 + (_RHO * successor - _RHO * ift) ** 2) ** 0.5,
-        rel=1e-4,
+        (2.0 * rel ** 2) ** 0.5, rel=1e-4,
     )
 
 

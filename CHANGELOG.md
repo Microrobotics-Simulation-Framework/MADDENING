@@ -124,6 +124,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`converged=True` means "within `tolerance` of the fixed point"**, not "the
+  last step was small": the threshold is tested against `residual / (1 - rho)`
+  and every norm is now relative, so expect more iterations and retune `atol`
 - **Extended-precision point sets are refused, never silently narrowed**: a
   `MappingSpec` reference of `float128` / `np.longdouble` (unwritable as JSON,
   unstable to hash) raises; pass `np.asarray(points, dtype=np.float64)` instead

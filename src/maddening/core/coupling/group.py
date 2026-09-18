@@ -45,27 +45,40 @@ class CouplingGroup:
     max_iterations : int
         Upper bound on iterations per timestep.
     tolerance : float
-        Convergence threshold on the L2 norm of state change between
-        successive iterations.  Read **only** when
-        ``convergence_norm="l2"``; the other two norms carry their
-        tolerances in ``atol`` / ``rtol`` and test against a fixed
-        threshold of ``1.0``.  Setting it away from its default under
-        those norms is inert and warns (``UserWarning``).
+        Convergence threshold under ``convergence_norm="l2"``.  Since
+        0.4.0 the L2 norm divides each field's change by that field's
+        own magnitude, so this is a *relative* tolerance; for fields of
+        order one it is the absolute threshold it used to be.
+
+        Read **only** when ``convergence_norm="l2"``.  The other two
+        norms carry their tolerances in ``atol`` / ``rtol`` and test
+        against a fixed threshold of ``1.0``, so setting this away from
+        its default under those norms is inert and warns
+        (``UserWarning``).
     convergence_norm : {"l2", "mixed", "interface"}
-        Norm used to check convergence.  ``"l2"`` uses a global L2
-        norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
-        per-field mixed absolute/relative norm (converged when the
-        norm <= 1.0).  ``"interface"`` checks consistency of
-        coupling-edge values between iterations.
+        Norm used to check convergence.  All three scale each field's
+        change by the field's own magnitude, so a group's verdict does
+        not depend on the units its quantities are written in.  ``"l2"``
+        uses a global L2 norm with ``tolerance`` as threshold;
+        ``"mixed"`` a per-field RMS of ``|dx| / (rtol * |v|)`` over
+        every float field, and ``"interface"`` the same over the
+        coupling-edge fields only (both converged when the norm
+        <= 1.0).
     atol : float
-        Absolute tolerance for the ``"mixed"`` and ``"interface"``
-        norms.  Read **only** by those two; setting it away from its
-        default under ``convergence_norm="l2"`` is inert and warns
-        (``UserWarning``) — tighten ``tolerance`` instead.
+        Dead band, in each field's own units: a field whose magnitude
+        does not exceed ``atol`` counts as being at zero and leaves the
+        norm.  Set it to the field's noise floor.  Before 0.4.0 it was
+        a floor under the scale, which made every criterion absolute
+        for fields smaller than ``atol / rtol``.
+
+        Read **only** by the ``"mixed"`` and ``"interface"`` norms;
+        setting it away from its default under ``convergence_norm="l2"``
+        is inert and warns (``UserWarning``) — tighten ``tolerance``
+        instead.
     rtol : float
-        Relative tolerance for the ``"mixed"`` and ``"interface"``
-        norms.  Read **only** by those two, on the same terms as
-        ``atol``.
+        Relative change demanded of every field above the dead band,
+        under the ``"mixed"`` and ``"interface"`` norms.  Read **only**
+        by those two, on the same terms as ``atol``.
     diagnostics : bool
         If True, store iteration count and final residual in the
         ``_meta`` key of the state dict after each step.

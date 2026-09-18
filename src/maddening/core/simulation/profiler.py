@@ -216,14 +216,20 @@ class TraceSummary:
         return out
 
 
-def _meta_group_keys(gm) -> list[tuple[str, str, str, float, int]]:
-    """``(group_key, iter_key, res_key, threshold, cap)`` per group."""
+def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, int]]:
+    """``(group_key, iter_key, res_key, amp_key, threshold, cap)``.
+
+    ``amp_key`` carries the amplification ``1/(1 - rho)`` the
+    convergence flag is built from: ``converged_fraction`` has to test
+    the same estimated distance to the fixed point that
+    ``coupling_diagnostics()`` does, not the raw residual.
+    """
     out = []
     for g in gm._coupling_groups:
         key = "+".join(sorted(g.nodes))
         thr = 1.0 if g.convergence_norm in ("mixed", "interface") else float(g.tolerance)
         out.append((key, f"coupling_{key}_iterations", f"coupling_{key}_residual",
-                    thr, int(g.max_iterations)))
+                    f"coupling_{key}_amplification", thr, int(g.max_iterations)))
     return out
 
 
@@ -480,11 +486,13 @@ def profile_graph(
         for _ in range(n_stat):
             gm.step(external_inputs)
             meta = gm._state.get("_meta", {})
-            for key, iter_key, res_key, thr, cap in group_keys:
+            for key, iter_key, res_key, amp_key, thr, cap in group_keys:
                 if iter_key in meta:
                     iters[key].append(int(meta[iter_key]))
-                    conv[key].append(float(meta[res_key]) <= thr)
-        for key, _ik, _rk, _thr, cap in group_keys:
+                    amp = float(meta.get(amp_key, 0.0))
+                    est = float(meta[res_key]) * (amp if amp >= 1.0 else 1.0)
+                    conv[key].append(est <= thr)
+        for key, _ik, _rk, _ak, _thr, cap in group_keys:
             if iters[key]:
                 a = np.asarray(iters[key])
                 report.coupling_iter_stats[key] = {

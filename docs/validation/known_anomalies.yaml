@@ -159,75 +159,93 @@ anomalies:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name"
 
   - anomaly_id: "MADD-ANO-005"
-    title: "A coupling group's converged flag is a residual test, not a bound on the distance to the fixed point"
+    title: "A coupling group's converged flag was a residual test, not a bound on the distance to the fixed point"
     description: >
-      CouplingGroup.tolerance is compared against the group's convergence
-      norm of F(x) - x, so converged=True says the last two passes changed
-      the state by less than the threshold, not that the state is within
-      the threshold of the fixed point.  The two differ by the
-      amplification 1/|1 - lambda| of the slowest mode of dF/dx, which the
-      library neither measures nor reports.  An acceleration widens the
-      gap systematically: Aitken and IQN choose the step that annihilates
-      whichever modes dominate the residual, which is what makes them
-      fast and which leaves the remaining error in exactly the mode where
-      |1 - lambda| is smallest.  Measured on the coupling audit's
-      heterogeneous fixture (a 60 000-cell heat grid coupled to four
-      scalar probes, Jacobi, global L2 norm, tolerance 1e-4):
-      acceleration="aitken" reported converged at a state 15-31x its own
-      tolerance from a separately converged reference, where plain
-      Gauss-Seidel on the same fixture held a ratio of 0.32 across ten
-      decades of residual.  Two defects that turned that amplification
-      into an unbounded one are fixed in 0.4.0 -- Aitken's first pass of
-      every timestep relaxed with the clip floor 0.01 instead of the
+      Until 0.4.0, CouplingGroup.tolerance was compared against the
+      group's convergence norm of F(x) - x, so converged=True said the
+      last two passes changed the state by less than the threshold, not
+      that the state was within the threshold of the fixed point.  The
+      two differ by the amplification 1/|1 - lambda| of the slowest mode
+      of dF/dx, which the library neither measured nor reported.  An
+      acceleration widened the gap systematically: Aitken and IQN choose
+      the step that annihilates whichever modes dominate the residual,
+      which is what makes them fast and which leaves the remaining error
+      in exactly the mode where |1 - lambda| is smallest.  Measured on
+      the coupling audit's heterogeneous fixture (a 60 000-cell heat grid
+      coupled to four scalar probes, Jacobi, global L2 norm, tolerance
+      1e-4): acceleration="aitken" reported converged at a state 15-31x
+      its own tolerance from a separately converged reference, where
+      plain Gauss-Seidel on the same fixture held a ratio of 0.32 across
+      ten decades of residual.
+      Four defects behind that are fixed in 0.4.0.  Aitken's first pass
+      of every timestep relaxed with the clip floor 0.01 instead of the
       omega it was seeded with, and the criterion could fire on one
       sub-threshold residual, which under Aitken is frequently a
       transient dip two decades below the trend (Aitken now has to meet
       the threshold twice in a row; IQN, whose step is a least-squares
       solve rather than a clipped scalar, has not been measured dipping
-      and is not charged for the second pass).  On that
-      fixture the worst error/residual ratio is now 0.94, and a 100x
-      tighter tolerance now improves the 25-step trajectory by ~37x where
-      it previously improved it by 12%.  A third, separate defect is also
-      fixed in 0.4.0: under solver="ift" the flag used to describe an
-      iterate one pass behind the state returned, so converged=True could
-      name a state whose own residual exceeded the threshold outright --
-      2.5x it on a non-normal group -- rather than merely being a loose
-      bound.  Both solvers now stop on the iterate whose residual was
-      measured, so recomputing the norm on the state you were handed
-      reproduces the reported number.  What remains is inherent to a
-      residual criterion and is not reported: converged=True is an exact
-      statement about ||F(x) - x||, and how far that puts x from the
-      fixed point depends on the problem's spectrum.
+      and is not charged for the second pass).  Under solver="ift" the
+      flag used to describe an iterate one pass behind the state
+      returned, so converged=True could name a state whose own residual
+      exceeded the threshold outright -- 2.5x it on a non-normal group;
+      both solvers now stop on the iterate whose residual was measured,
+      so recomputing the norm on the state you were handed reproduces
+      the reported number.
+      The fourth is this anomaly's own subject, and it is now closed:
+      the threshold is applied to an estimate of the distance to the
+      fixed point, residual / (1 - rho), with rho = max(r_k / r_{k-1},
+      sqrt(r_k / r_{k-2})) read off the residual sequence the loop
+      already has, and every convergence norm divides each field's
+      change by that field's own magnitude so the criterion means the
+      same thing in any units (atol is now a dead band -- what counts as
+      zero -- rather than a floor under the scale, which made every
+      criterion absolute below atol/rtol).  coupling_diagnostics()
+      reports error_estimate, amplification, bound_valid and
+      gradient_error_bound beside the residual.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      The forward state is as accurate as the residual criterion makes it
-      and no error is raised, so the risk is a quiet accuracy shortfall
-      rather than a crash.  It matters most for gradients: under
-      solver="ift" the implicit-function-theorem derivative is exact only
-      at a fixed point, and strict_convergence gates a training run on
-      this same flag, so a stiff group whose slowest mode has lambda near
-      1 can hand an optimiser a gradient off by roughly residual *
-      cond(I - dF/dx) with a green light.  Whether that matters depends
-      on whether the downstream product differentiates through a coupled
-      group, on the conditioning of its interface problem, and on whether
-      calibrated parameters are validated against held-out measurements.
-      It is not safety relevant for a forward run whose accuracy is
-      established by convergence study rather than by the flag.
+      The forward state is as accurate as the criterion makes it and no
+      error is raised, so the residual risk is a quiet accuracy
+      shortfall rather than a crash.  It matters most for gradients:
+      under solver="ift" the implicit-function-theorem derivative is
+      exact only at a fixed point, and strict_convergence gates a
+      training run on this same flag, so a stiff group whose slowest
+      mode has lambda near 1 can hand an optimiser a gradient off by
+      roughly residual * cond(I - dF/dx).  That quantity is now reported
+      as gradient_error_bound, and the flag itself accounts for the
+      amplification, so the failure mode is diagnosable rather than
+      silent.  What remains is the residual part below.
     affected_components:
       - "maddening.core.coupling.group.CouplingGroup.tolerance"
       - "maddening.core.coupling.group.CouplingGroup.strict_convergence"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
-    affected_versions: "0.4.0"
+    affected_versions: "<=0.3.0"
     workaround: >
-      Calibrate the criterion once per problem instead of trusting it:
-      solve the same step at tolerance t and at t/100 and take the
-      difference between the two answers as the error at t.  If the
-      answer barely moves, the residual is not resolving the slow mode
-      and the tolerance is not what is limiting accuracy.  Prefer
-      convergence_norm="interface" or "mixed" over the global L2 norm
-      when the group mixes field scales, and treat strict_convergence as
-      a guard against exhausting max_iterations, which is what it
-      detects, not as an accuracy assertion.
-    resolution_status: "open"
+      On 0.3.x and earlier, calibrate the criterion once per problem
+      instead of trusting it: solve the same step at tolerance t and at
+      t/100 and take the difference between the two answers as the error
+      at t.  On 0.4.0 the flag carries the amplification itself; read
+      coupling_diagnostics()['bound_valid'] to see whether it did, and
+      treat bound_valid=False as the old behaviour.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The bound is an estimate, not a proof.  rho is measured from the
+      group's own residual sequence, so it describes the mode that
+      sequence reveals; a mode that has not been excited by the
+      iterations taken is not in it, and a strongly non-linear F breaks
+      the geometric-series argument the bound rests on.  Where the
+      sequence gives no usable ratio -- rho >= 1, a zero or non-finite
+      predecessor, or max_iterations=1, which measures one residual and
+      so has no ratio at all -- the criterion falls back to the raw
+      residual test that shipped before 0.4.0, i.e. to this anomaly
+      exactly.  That fallback is reported, not silent:
+      coupling_diagnostics()['bound_valid'] is False and
+      gradient_error_bound is +inf.
+    verification:
+      - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
+      - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"
+      - "tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in"
+      - "tests/property/test_coupling_error_bound.py::test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point"
     github_issue: null

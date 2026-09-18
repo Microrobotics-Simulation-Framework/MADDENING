@@ -356,17 +356,26 @@ class TestGaussSeidel:
         )
 
     def test_convergence_with_tolerance(self):
-        """Tighter tolerance should give more accurate results."""
+        """Tighter tolerance should give more accurate results.
+
+        The reference is the *same* timestep solved to a much tighter
+        coupling criterion, not a finer timestep.  A finer-dt reference
+        measures time-discretisation error, which on this fixture is
+        ~8 against positions of ~24 -- three hundred times the coupling
+        error the tolerance controls -- so which tolerance lands nearer
+        it is luck, and the assertion below held only because both
+        tolerances happened to sit on the same plateau of it.
+        """
         dt = 0.01
         n_steps = 100
         kwargs = dict(dt=dt, k=50.0, c=0.5, pos_a=0.0, pos_b=3.0)
 
-        # Reference: very fine dt
-        ref_kwargs = dict(kwargs)
-        ref_kwargs["dt"] = dt / 50
-        gm_ref = _make_bidirectional_springs(**ref_kwargs)
+        # Reference: the same dt, solved to a far tighter criterion.
+        gm_ref = _make_bidirectional_springs(**kwargs)
+        gm_ref.add_coupling_group(["spring_a", "spring_b"],
+                                  max_iterations=200, tolerance=1e-9)
         gm_ref.compile()
-        ref_state = gm_ref.run_scan(n_steps * 50)
+        ref_state = gm_ref.run_scan(n_steps)
 
         # Loose tolerance
         gm_loose = _make_bidirectional_springs(**kwargs)
@@ -378,7 +387,7 @@ class TestGaussSeidel:
         # Tight tolerance
         gm_tight = _make_bidirectional_springs(**kwargs)
         gm_tight.add_coupling_group(["spring_a", "spring_b"],
-                                     max_iterations=50, tolerance=1e-10)
+                                     max_iterations=50, tolerance=1e-7)
         gm_tight.compile()
         tight_state = gm_tight.run_scan(n_steps)
 

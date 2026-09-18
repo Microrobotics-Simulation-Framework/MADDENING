@@ -84,10 +84,30 @@ class TestResidualNorms:
         assert float(r) == pytest.approx(0.0, abs=1e-12)
 
     def test_l2_known_value(self):
+        """The L2 norm is of the *relative* change, since 0.4.0.
+
+        A field going 0 -> 3 has moved by all of itself, so the norm is
+        1.0, not 3.0.  That is the point of the change: the same motion
+        in micronewtons scores the same.
+        """
         s_old = {"a": {"x": jnp.array(0.0)}}
         s_new = {"a": {"x": jnp.array(3.0)}}
         r = coupling_residual_l2(s_new, s_old, ["a"])
-        assert float(r) == pytest.approx(3.0, abs=1e-6)
+        assert float(r) == pytest.approx(1.0, abs=1e-6)
+        tiny = coupling_residual_l2({"a": {"x": jnp.array(3e-6)}},
+                                    {"a": {"x": jnp.array(0.0)}}, ["a"])
+        assert float(tiny) == pytest.approx(1.0, abs=1e-6)
+
+    def test_l2_ignores_a_field_inside_the_dead_band(self):
+        """``atol`` is what counts as zero, in the field's own units.
+
+        Without it a relative norm would divide two round-offs by each
+        other on a field that is legitimately at zero.
+        """
+        s_old = {"a": {"x": jnp.array(0.0)}}
+        s_new = {"a": {"x": jnp.array(1e-12)}}
+        r = coupling_residual_l2(s_new, s_old, ["a"], 1e-8)
+        assert float(r) == pytest.approx(0.0, abs=1e-12)
 
     def test_mixed_identical_states_zero(self):
         s = {"a": {"x": jnp.array(1.0), "v": jnp.array(2.0)}}

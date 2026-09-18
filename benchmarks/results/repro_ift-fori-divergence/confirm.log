@@ -1,0 +1,28 @@
+=== A. interface norm, tiny interface values (MIME's configuration) ===
+rho=0.0214  fori=1.0000000000000001e-09 ift=1.0214e-09 rel=2.1400%
+          F(fori)=1.0214e-09  ift-F(fori)=0.000e+00   fori_conv={'iterations': 1, 'residual': 0.0015135548120379164, 'converged': True} ift_conv={'iterations': 1, 'residual': 0.0015135548120379164, 'converged': True}
+rho=0.5     fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+          F(fori)=1.5000000000000002e-09  ift-F(fori)=0.000e+00   fori_conv={'iterations': 1, 'residual': 0.03952846541576197, 'converged': True} ift_conv={'iterations': 1, 'residual': 0.03952846541576197, 'converged': True}
+rho=0.99    fori=1.0000000000000001e-09 ift=1.99e-09 rel=99.0000%
+          F(fori)=1.99e-09  ift-F(fori)=0.000e+00   fori_conv={'iterations': 1, 'residual': 0.09850622420503154, 'converged': True} ift_conv={'iterations': 1, 'residual': 0.09850622420503154, 'converged': True}
+
+=== B. invariance of the gap to max_iterations and tolerance ===
+  m=2    tol=0.0001  fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=2    tol=1e-14   fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=8    tol=0.0001  fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=8    tol=1e-14   fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=40   tol=0.0001  fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=40   tol=1e-14   fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=200  tol=0.0001  fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+  m=200  tol=1e-14   fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=50.0000%
+
+=== C. the live knob: atol (interface norm ignores `tolerance`) ===
+  atol=1e-08    fori=1.0000000000000001e-09 ift=1.5000000000000002e-09 rel=5.0000e-01  iters=1
+  atol=1e-12    fori=1.9980468750000004e-09 ift=1.9990234375000001e-09 rel=4.8876e-04  iters=10
+  atol=1e-16    fori=1.9999997615814207e-09 ift=1.9999998807907102e-09 rel=5.9605e-08  iters=23
+  atol=0        fori=1.9999999999999716e-09 ift=1.9999999999999856e-09 rel=7.0310e-15  iters=46
+
+=== D. gradients: analytic vs each path's own central FD ===
+  rho=0.0214  atol=1e-08   fori |g-fd|/fd=3.19e-10  ift |g-fd|/fd=4.58e-04
+  rho=0.5     atol=1e-08   fori |g-fd|/fd=3.19e-10  ift |g-fd|/fd=3.33e-01
+  rho=0.5     atol=0       fori |g-fd|/fd=3.19e-10  ift |g-fd|/fd=3.19e-10

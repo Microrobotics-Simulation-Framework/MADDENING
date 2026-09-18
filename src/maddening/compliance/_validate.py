@@ -25,10 +25,12 @@ _VALID_SEVERITIES = {"critical", "major", "minor", "enhancement"}
 _VALID_SAFETY_RELEVANCES = {
     "safety_relevant", "not_safety_relevant", "context_dependent",
 }
-# Mirrors ``maddening.core.compliance.anomaly.ResolutionStatus``, plus
-# ``partially_resolved``, which MADD-ANO-005 uses and the enum does not yet
-# define.  The two are pinned against each other by
-# ``tests/compliance/test_validator.py::test_every_resolution_status_enum_value_is_accepted``.
+# These three mirror the enums in ``maddening.core.compliance.anomaly``.
+# They are spelled out rather than imported so this module stays importable
+# on its own, and pinned to be *exactly* equal to the enums by
+# ``tests/compliance/test_validator.py::TestSchemaEnumsMatchTheDataclass``.
+# That pin is how ``partially_resolved`` -- used by MADD-ANO-005, missing
+# from ``ResolutionStatus`` until v0.4.0 -- was caught.
 _VALID_RESOLUTION_STATUSES = {
     "open", "resolved", "partially_resolved", "wont_fix", "duplicate",
 }

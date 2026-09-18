@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
+  `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
+  written; the enum could not represent the registry this project ships
 - **`SimulationNode.static_data_deps()`** declares which parameters a
   `static_data` array was derived from; `compile()` now refuses a graph whose
   static derives from a *trainable* parameter — freeze it or stop deriving it

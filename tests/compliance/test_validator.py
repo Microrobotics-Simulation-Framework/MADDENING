@@ -251,6 +251,31 @@ class TestResolutionStatus:
             path = self._one(tmp_path, resolution_status=member.value)
             assert validate_anomaly_registry(path) == [], member
 
+    def test_a_partially_resolved_anomaly_is_representable(self, tmp_path):
+        """MADD-ANO-005 is one: fixed, with a bounded residual risk left.
+
+        Until v0.4.0 the registry MADDENING ships could not be loaded into
+        MADDENING's own dataclass, because the enum had no such member.
+        """
+        from maddening.core.compliance.anomaly import (
+            AnomalyRecord, AnomalySeverity, ResolutionStatus, SafetyRelevance,
+        )
+
+        record = AnomalyRecord(
+            anomaly_id="MADD-ANO-005",
+            title="T",
+            description="D",
+            severity=AnomalySeverity.MINOR,
+            safety_relevance=SafetyRelevance.CONTEXT_DEPENDENT,
+            safety_relevance_rationale="R",
+            resolution_status=ResolutionStatus.PARTIALLY_RESOLVED,
+            resolution_version="0.4.0",
+        )
+        assert record.resolution_status.value == "partially_resolved"
+
+        path = self._one(tmp_path, resolution_status="partially_resolved")
+        assert validate_anomaly_registry(path) == []
+
     def test_an_unknown_field_is_rejected(self, tmp_path):
         path = self._one(tmp_path, workaroud="dropped by a typo")
         errors = validate_anomaly_registry(path)
@@ -340,3 +365,44 @@ class TestSharedResolver:
         assert resolve_test_reference(real, root) is None
         renamed = "tests/compliance/test_validator.py::test_renamed_away"
         assert resolve_test_reference(renamed, root) is not None
+
+
+class TestSchemaEnumsMatchTheDataclass:
+    """The YAML schema's accepted values and the enums are one vocabulary.
+
+    ``_validate`` spells its sets out rather than importing the enums, so
+    nothing but this test stops the two drifting -- and they had drifted:
+    ``partially_resolved`` was in the registry and not in the enum, so
+    MADDENING's own registry could not be loaded into ``AnomalyRecord``.
+    """
+
+    def test_severity(self):
+        from maddening.compliance._validate import _VALID_SEVERITIES
+        from maddening.core.compliance.anomaly import AnomalySeverity
+
+        assert _VALID_SEVERITIES == {m.value for m in AnomalySeverity}
+
+    def test_safety_relevance(self):
+        from maddening.compliance._validate import _VALID_SAFETY_RELEVANCES
+        from maddening.core.compliance.anomaly import SafetyRelevance
+
+        assert _VALID_SAFETY_RELEVANCES == {m.value for m in SafetyRelevance}
+
+    def test_resolution_status(self):
+        from maddening.compliance._validate import _VALID_RESOLUTION_STATUSES
+        from maddening.core.compliance.anomaly import ResolutionStatus
+
+        assert _VALID_RESOLUTION_STATUSES == {m.value for m in ResolutionStatus}
+
+    def test_the_shipped_registry_uses_only_representable_statuses(self):
+        """Every status in the repo registry must round-trip to the enum."""
+        from maddening.core.compliance.anomaly import ResolutionStatus
+
+        registry = TestActualRegistryReferences.REGISTRY
+        if not os.path.exists(registry):
+            pytest.skip("known_anomalies.yaml not found")
+        with open(registry) as f:
+            data = yaml.safe_load(f)
+        for anomaly in data["anomalies"]:
+            status = anomaly.get("resolution_status")
+            assert ResolutionStatus(status) is not None, anomaly["anomaly_id"]

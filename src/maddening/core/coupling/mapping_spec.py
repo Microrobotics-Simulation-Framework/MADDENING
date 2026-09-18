@@ -610,12 +610,15 @@ def _node_field(graph, node_name: str, field_name: str) -> np.ndarray:
     })
     hint = ""
     if not available:
-        # Wrapper nodes (ShardedStencilNode, ShardedUnstructuredNode) hold
-        # the inner node's static data privately and expose none of their
-        # own, so a node reference cannot reach it.
-        hint = (" (the node exposes no array field at all — a wrapper such as "
-                "ShardedStencilNode / ShardedUnstructuredNode does not re-export the "
-                "static_data of the node it wraps; save the points as an "
+        # A node with no array field at all.  This used to be the common
+        # case for a wrapper, which held the inner node's static data
+        # privately; ``SimulationNode.static_data`` now forwards to the
+        # nodes a node wraps, so a reference reaches through a
+        # ShardedStencilNode / HybridNode to the statics the wrapped node
+        # declares, and reaching this branch means the field really is
+        # absent everywhere.
+        hint = (" (the node exposes no array field at all, including through "
+                "any node it wraps; save the points as an "
                 "{'asset': '<file>.npy'} next to the config instead)")
     raise PointReferenceError(
         f"node {node_name!r} has no point field {field_name!r}; its array fields are "

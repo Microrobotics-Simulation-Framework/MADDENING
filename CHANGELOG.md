@@ -189,6 +189,9 @@ guidance; the itemized changes follow.
 - **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
   `fit_multiple_shooting` copy every leaf outside the mask from the starting
   pytree, so comparing before and after says exactly what a calibration touched
+- **A wrapper now reports the `static_data` of the node it wraps**, so the
+  `static_data` drift check finally fires through `ShardedStencilNode`,
+  `HybridNode` and friends instead of hashing to `0` forever
 - **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
   `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
   could leave its bounds — make the parameter trainable in the spec instead

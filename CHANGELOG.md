@@ -303,6 +303,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
+  and the data now come from the descriptor that was checked, closing a
+  time-of-check/time-of-use window for a writer in the config directory
 - **FMU bridge no longer unpickles importer bytes** (CRITICAL): the FMU-state
   blob is an arrays-only `npz` validated before use — regenerate any stored
   blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only

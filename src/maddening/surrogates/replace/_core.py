@@ -11,41 +11,20 @@ from maddening.surrogates.node import SurrogateNode
 logger = logging.getLogger(__name__)
 
 
-# Every :class:`~maddening.core.edge.EdgeSpec` field, mapped to the
-# :meth:`~maddening.core.graph_manager.GraphManager.add_edge` keyword that
-# restores it.  The saved edges are re-added *from this table* rather than
-# positionally: passing only the first five arguments reset ``additive``,
-# both units and ``mapping`` to their defaults on every replacement, so an
-# additive boundary input measured 3.0 before a swap and 1.0 after it with
-# no error and no warning.  ``_restore_kwargs`` checks the table against
-# the dataclass, so a tenth ``EdgeSpec`` field cannot reintroduce that.
-EDGE_FIELD_TO_ADD_EDGE_KWARG = {
-    "source_node": "source",
-    "target_node": "target",
-    "source_field": "source_field",
-    "target_field": "target_field",
-    "transform": "transform",
-    "additive": "additive",
-    "source_units": "source_units",
-    "target_units": "target_units",
-    "mapping": "mapping",
-}
+# Edges go back through :meth:`~maddening.core.edge.EdgeSpec.add_edge_kwargs`,
+# which derives the call from the dataclass's own fields.  ``ordinal`` is
+# the one field it leaves to ``add_edge``, and it does not need carrying
+# across here: ``remove_node`` drops *every* edge touching the replaced
+# node, and an edge that shares a saved edge's base key necessarily
+# touches that node too -- the key is built from the two endpoint names
+# and the surrogate must keep the original's name -- so no edge with a
+# colliding base key survives the removal, and re-adding the saved edges
+# in their saved order recomputes exactly the ordinals (and therefore the
+# keys) they had.  ``replace_node`` verifies that per swap rather than
+# trusting the argument.
 
-# ``ordinal`` is the one EdgeSpec field ``add_edge`` does not take: it
-# numbers the mapped edges that share a field pair (and with them their
-# ``params["mappings"]`` slots), and ``add_edge`` assigns it by counting
-# the mapped edges already in the graph.  It does not need carrying
-# across by hand.  ``remove_node`` drops *every* edge touching the
-# replaced node, and an edge that shares a saved edge's base key
-# necessarily touches that node too -- the key is built from the two
-# endpoint names and the surrogate must keep the original's name -- so no
-# edge with a colliding base key survives the removal, and re-adding the
-# saved edges in their saved order recomputes exactly the ordinals (and
-# therefore the keys) they had.  ``replace_node`` verifies that per swap
-# rather than trusting the argument.
-EDGE_FIELDS_ASSIGNED_BY_ADD_EDGE = frozenset({"ordinal"})
-
-# The same table for ``ExternalInputSpec`` / ``add_external_input``.
+# ``ExternalInputSpec`` has no equivalent method of its own, so its table
+# lives here and is checked against the dataclass the same way.
 EXTERNAL_INPUT_FIELD_TO_ADD_KWARG = {
     "target_node": "target_node",
     "target_field": "target_field",
@@ -54,28 +33,25 @@ EXTERNAL_INPUT_FIELD_TO_ADD_KWARG = {
 }
 
 
-def _restore_kwargs(spec, table, assigned=frozenset()):
+def _restore_kwargs(spec, table):
     """Keyword arguments that re-add ``spec`` with every field intact.
 
     Parameters
     ----------
     spec : dataclass instance
-        The saved ``EdgeSpec`` / ``ExternalInputSpec``.
+        The saved ``ExternalInputSpec``.
     table : dict
         Maps each dataclass field name to the re-adding method's keyword.
-    assigned : frozenset of str
-        Fields the re-adding method derives itself.
 
     Raises
     ------
     RuntimeError
-        If ``spec`` carries a field that is in neither ``table`` nor
-        ``assigned`` -- the field would otherwise be reset to its default
-        silently, which is the bug this indirection exists to prevent.
+        If ``spec`` carries a field the table does not name -- it would
+        otherwise be reset to its default silently, which is the bug this
+        indirection exists to prevent.
     """
     unknown = sorted(
-        f.name for f in dataclass_fields(spec)
-        if f.name not in table and f.name not in assigned
+        f.name for f in dataclass_fields(spec) if f.name not in table
     )
     if unknown:
         raise RuntimeError(
@@ -178,11 +154,7 @@ def replace_node(gm, original_name: str, surrogate_node: SurrogateNode):
     # Build the re-add arguments *before* mutating the graph, so an edge
     # this function cannot preserve aborts the replacement instead of
     # leaving the graph half-rewired.
-    edge_kwargs = [
-        _restore_kwargs(e, EDGE_FIELD_TO_ADD_EDGE_KWARG,
-                        EDGE_FIELDS_ASSIGNED_BY_ADD_EDGE)
-        for e in saved_edges
-    ]
+    edge_kwargs = [e.add_edge_kwargs() for e in saved_edges]
     external_kwargs = [
         _restore_kwargs(ei, EXTERNAL_INPUT_FIELD_TO_ADD_KWARG)
         for ei in saved_external
@@ -205,7 +177,7 @@ def replace_node(gm, original_name: str, surrogate_node: SurrogateNode):
     # ``ordinal`` -- and with it ``EdgeSpec.key``, which names the
     # ``params["mappings"]`` slot -- is recomputed by ``add_edge``.  It
     # must come out the same or the restored weights below would land in
-    # the wrong slot; see EDGE_FIELDS_ASSIGNED_BY_ADD_EDGE.
+    # the wrong slot; see the note above on ``ordinal``.
     restored_keys = [
         e.key for e in gm._edges
         if e.source_node == original_name or e.target_node == original_name

@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core import edge as edge_module
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.edge import EdgeSpec
 from maddening.core.graph_manager import ExternalInputSpec, GraphManager
@@ -350,21 +351,31 @@ class TestReplaceNodePreservesEdgeAttributes:
         assert gm._default_external_inputs()["ball"]["force"].dtype == jnp.int32
 
 
-class TestReplaceNodeCannotSilentlyDropAField:
-    """The durable guard: ``replace_node`` derives its re-add from the
-    dataclass's own fields, so a new field on ``EdgeSpec`` /
-    ``ExternalInputSpec`` fails here instead of being reset to its
-    default in silence."""
+class TestEdgeSpecCannotSilentlyDropAField:
+    """The durable guard.  Every re-add of a saved edge in the tree --
+    ``replace_node`` and ``POST /surrogate/deactivate`` -- goes through
+    ``EdgeSpec.add_edge_kwargs``, which derives the call from the
+    dataclass's own fields, so a new field on ``EdgeSpec`` fails here
+    instead of being reset to its default in silence."""
 
     def test_every_edge_spec_field_is_carried_across(self):
-        carried = set(_core.EDGE_FIELD_TO_ADD_EDGE_KWARG)
-        derived = set(_core.EDGE_FIELDS_ASSIGNED_BY_ADD_EDGE)
+        carried = set(edge_module._ADD_EDGE_KWARGS)
+        derived = set(edge_module._DERIVED_BY_ADD_EDGE)
         assert {f.name for f in fields(EdgeSpec)} == carried | derived
         assert not (carried & derived)
 
     def test_every_edge_keyword_is_an_add_edge_parameter(self):
         params = signature(GraphManager.add_edge).parameters
-        assert set(_core.EDGE_FIELD_TO_ADD_EDGE_KWARG.values()) <= set(params)
+        assert set(edge_module._ADD_EDGE_KWARGS.values()) <= set(params)
+
+    def test_add_edge_kwargs_round_trips_an_edge(self):
+        """The kwargs really do rebuild the edge -- including ``ordinal``,
+        which ``add_edge`` recomputes rather than being handed."""
+        gm, _ = _mapped_graph()
+        saved = gm._edges[0]
+        gm.remove_edge("coarse", "fine", "temperature", "heat_source")
+        gm.add_edge(**saved.add_edge_kwargs())
+        assert gm._edges[0] == saved
 
     def test_every_external_input_field_is_carried_across(self):
         carried = set(_core.EXTERNAL_INPUT_FIELD_TO_ADD_KWARG)
@@ -372,12 +383,22 @@ class TestReplaceNodeCannotSilentlyDropAField:
         params = signature(GraphManager.add_external_input).parameters
         assert set(_core.EXTERNAL_INPUT_FIELD_TO_ADD_KWARG.values()) <= set(params)
 
-    def test_an_uncarried_field_aborts_the_replacement(self, monkeypatch):
+    def test_an_uncarried_field_is_refused_by_name(self, monkeypatch):
         """Stands in for a future field: with ``additive`` off the table,
-        the swap must raise and leave the graph exactly as it was."""
-        table = dict(_core.EDGE_FIELD_TO_ADD_EDGE_KWARG)
+        building the kwargs must raise rather than return eight of nine."""
+        table = dict(edge_module._ADD_EDGE_KWARGS)
         table.pop("additive")
-        monkeypatch.setattr(_core, "EDGE_FIELD_TO_ADD_EDGE_KWARG", table)
+        monkeypatch.setattr(edge_module, "_ADD_EDGE_KWARGS", table)
+
+        with pytest.raises(RuntimeError, match="additive"):
+            EdgeSpec("a", "b", "x", "y", additive=True).add_edge_kwargs()
+
+    def test_an_uncarried_field_aborts_the_replacement(self, monkeypatch):
+        """And ``replace_node`` raises before touching the graph, rather
+        than leaving it half-rewired."""
+        table = dict(edge_module._ADD_EDGE_KWARGS)
+        table.pop("additive")
+        monkeypatch.setattr(edge_module, "_ADD_EDGE_KWARGS", table)
 
         gm = GraphManager()
         gm.add_node(TableNode("t", timestep=0.01, position=1.0))

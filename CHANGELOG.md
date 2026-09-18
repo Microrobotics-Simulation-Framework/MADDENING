@@ -198,9 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **`replace_node` no longer resets an edge's `additive`, units and `mapping`**:
-  a swap silently turned two additive contributions of 3.0 into 1.0 and dropped
-  interface transfers whole.  Re-check any result produced across a replacement
+- **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
+  `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
+  1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

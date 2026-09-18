@@ -14,6 +14,12 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
+  wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
+  invariants over generated meshes; two audit findings pinned as strict xfails
+- **Measured guidance for choosing coupling options**: eight graph fixtures and
+  a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
+  `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window
 - **Coupling groups are serialisable**: `to_dict` / `from_dict` carry a
   `coupling_groups` key with all 19 `CouplingGroup` fields, and the USD stage
   carries the same set, so a reloaded graph solves the way the saved one did
@@ -117,6 +123,9 @@ guidance; the itemized changes follow.
 - **`coupling_diagnostics()["residual"]` describes the state the step returned**
   and no longer depends on `solver`; a group that arrives on its last pass now
   reports `converged=True` instead of raising under `strict_convergence`
+- **The interactive path stops redoing host work**: sharded wrappers place
+  their static arrays on device once, not per `update`, and `run_scan` and its
+  siblings compile once per `compile()`, not per call (`gm.scan_trace_count`)
 - **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
   at its default settings could not be differentiated on a base install.
   `pip install maddening` is enough; the now-empty `[ift]` extra still resolves

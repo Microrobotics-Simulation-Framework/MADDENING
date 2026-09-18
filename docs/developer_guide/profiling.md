@@ -51,6 +51,14 @@ into `gm._state` can reintroduce it — use `gm.set_node_state()` and
 `gm.reset_state()` instead, and check that `gm._compiled_step._cache_size()`
 stays at 1 across a run.
 
+`gm.trace_count` covers the compiled step only.  `run_scan`,
+`run_scan_with_history`, `run_sweep` and `run_adaptive_scan` build a
+separate `lax.scan` program around that step, counted by
+`gm.scan_trace_count`: one per `compile()` per (entry point, step count)
+in a healthy run.  A driver that loops over `run_scan` and sees that
+number climb is paying a compile per call, which `trace_count` alone
+would not show.
+
 ## `benchmarks/bench_coupling.py`
 
 ```bash
@@ -66,6 +74,32 @@ cap, PERF-1 acceptance at `--acceptance-ms`, default 30), and writes a
 JSON record.  Keep before/after records under `benchmarks/results/` when
 a change claims a speed-up; a claim without the two JSON files is a
 guess.
+
+## `benchmarks/bench_coupling_sweep.py`
+
+```bash
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --json benchmarks/results/coupling_sweep_cpu.json
+```
+
+Sweeps every `iteration_mode` x `acceleration` x `convergence_norm` over
+the graph shapes in `benchmarks/coupling_fixtures.py` — chain, star,
+ring, a stiffness sweep, two grid fixtures, a two-group graph and a
+slow-drift case — and records per configuration the step time, the
+iterations used against the cap, the fraction of steps converged, the
+final residual and the launch-bound / compute-bound verdict.  The
+results and what they mean for a given graph shape are in
+[Choosing a coupling algorithm](coupling_algorithm_guide.md).
+
+`--steps` changes only how many timings are averaged.  The iteration
+counts, convergence fractions and residuals come from a separate
+statistics pass whose length and starting point are the *fixture's*,
+not the run's (`--stat-steps` overrides it, `profile_graph`'s
+`n_stat_steps` is the underlying knob).  That matters because those
+three are the numbers people quote across runs: while the pass was
+`min(n_steps, 50)` steps taken from wherever the timed run stopped, a
+shortened run moved the window as well as the sample size, and on a
+periodically driven graph the mean iteration count moved with it.
 
 ## Persistent compilation cache
 

@@ -188,6 +188,7 @@ developer_guide/stability_report
 developer_guide/versioned_docs
 developer_guide/adaptive_node
 developer_guide/typing
+developer_guide/coupling_algorithm_guide
 ```
 
 ```{toctree}

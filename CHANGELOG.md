@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **A recompile no longer re-phases a multi-rate graph or restarts a coupling
   warm start**: `_meta` is preserved like node state and `params`, so a mid-run
   edit changes no trajectory; `reset_state()` is still the way to zero it
+- **The static-data/trainable-parameter refusal now reads `set_param_spec`
+  overrides**, in both directions: unfreezing a declared parameter re-arms the
+  refusal instead of yielding a wrong gradient, and freezing one clears it
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

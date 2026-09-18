@@ -2459,7 +2459,13 @@ class GraphManager:
         (e.g. freeze a node's ``mass`` when the data cannot identify it,
         or make a mapped edge's weights trainable by passing the edge
         key — ``"<src>.<field>-><tgt>.<field>"`` — as ``node``).
-        Does not dirty the graph: specs are optimiser-side metadata."""
+
+        Specs are optimiser-side metadata, so this does not dirty the
+        graph — *unless* ``key`` is one a
+        :meth:`~maddening.core.node.SimulationNode.static_data_deps`
+        entry names.  Then it decides whether ``compile()`` refuses the
+        graph (a static baked from a trainable parameter loses the
+        gradient through it), so the verdict has to be taken again."""
         if not isinstance(spec, ParamSpec):
             raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
         mapped = {e.key: e for e in self._edges if e.mapping is not None}
@@ -2485,6 +2491,12 @@ class GraphManager:
                 f"{sorted(self._nodes[node].node.params_pytree())}"
             )
         self._param_spec_overrides.setdefault(node, {})[key] = spec
+        # ``static_data_deps()`` forwards from wrapped nodes, so the outer
+        # declaration is enough to know whether this key is load-bearing
+        # for the compile-time refusal.
+        declared = self._nodes[node].node.static_data_deps() or {}
+        if any(key in names for names in declared.values()):
+            self._dirty = True
 
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
         """``params``-shaped pytree of Python bools (``True`` = an
@@ -3395,10 +3407,18 @@ class GraphManager:
         # resolved against its own specs, so a wrapper cannot hide one.
         # Placed in the same region as the invalidation below: before
         # ``_build_step_fn`` and before the static-data hash snapshot.
+        # Resolved against the *merged* specs -- the node's own with this
+        # graph's ``set_param_spec`` overrides applied -- because that is
+        # the view ``trainable_mask``, ``unconstrain``, ``check_params``
+        # and ``maddening.sysid`` optimise against.  Reading the node
+        # alone made the rule disagree with the optimiser both ways: a
+        # graph-level unfreeze walked past the refusal into a silently
+        # wrong gradient, and a graph-level freeze -- the first remedy the
+        # message below names -- did not clear it.
         from maddening.core.node import static_data_dep_violations
         for name, spec in self._nodes.items():
             for owner, static_key, param_key in static_data_dep_violations(
-                spec.node
+                spec.node, self._param_spec_overrides.get(name)
             ):
                 where = (
                     f"node {name!r}" if owner == name

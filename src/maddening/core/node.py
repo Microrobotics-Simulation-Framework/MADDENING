@@ -134,7 +134,9 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
             pass
 
 
-def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
+def static_data_dep_violations(
+    node, spec_overrides: Optional[dict] = None,
+) -> list[tuple[str, str, str]]:
     """Declared static-data dependencies that name a trainable parameter.
 
     The rule
@@ -164,12 +166,33 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     and the parameter, which is where the fix goes.  The graph supplies
     the outer name it knows the node by.
 
+    ``spec_overrides`` is how the *graph* takes part.  The node's own
+    ``param_specs()`` is not the view the optimiser sees:
+    :meth:`~maddening.core.graph_manager.GraphManager.param_specs` merges
+    :meth:`~maddening.core.graph_manager.GraphManager.set_param_spec`
+    overrides over it, and ``trainable_mask``, ``unconstrain``,
+    ``check_params`` and ``maddening.sysid`` all read that merged view.
+    Resolving the rule against the node alone made it disagree with the
+    optimiser in both directions: unfreezing a parameter at graph level
+    let a baked static through (a silently wrong gradient), and the
+    remedy the error message names -- freeze it -- did not clear the
+    refusal when applied through ``set_param_spec``.
+
     Parameters
     ----------
     node : SimulationNode
         The node to check.  Duck-typed objects missing any of the three
         methods contribute nothing rather than raising, matching how
         ``compile`` probes for the other node-contract hooks.
+    spec_overrides : dict of str to ParamSpec, optional
+        The graph's overrides for *this* node, applied over each walked
+        node's own specs.  They always apply to ``node`` itself, whose
+        ``params_pytree`` is the one they were validated against.  They
+        reach a wrapped node only when it is the single wrapped holder of
+        the parameter name: two wrapped nodes exposing the same name make
+        the override ambiguous (the graph sees one of them under a
+        qualified key), and leaving their own specs alone can only
+        over-refuse, never let a baked static through.
 
     Returns
     -------
@@ -181,6 +204,29 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     # keeps the report in first-seen (outermost) order.
     owner_of: dict[tuple[str, str], str] = {}
     order: list[tuple[str, str]] = []
+    overrides = dict(spec_overrides or {})
+    # How many *wrapped* nodes expose each overridden name, so an
+    # ambiguous override can be recognised without a second walk.
+    holders: dict[str, int] = {}
+    if overrides:
+        inner_seen: set[int] = {id(node)}
+        inner_queue = [
+            v for v in getattr(node, "__dict__", {}).values()
+            if isinstance(v, SimulationNode)
+        ]
+        while inner_queue:
+            obj = inner_queue.pop(0)
+            if id(obj) in inner_seen:
+                continue
+            inner_seen.add(id(obj))
+            pytree_of = getattr(obj, "params_pytree", None)
+            if callable(pytree_of):
+                for key in pytree_of() or {}:
+                    if key in overrides:
+                        holders[key] = holders.get(key, 0) + 1
+            for value in list(getattr(obj, "__dict__", {}).values()):
+                if isinstance(value, SimulationNode):
+                    inner_queue.append(value)
     seen: set[int] = set()
     queue = [node]
     while queue:
@@ -194,7 +240,12 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
         if callable(deps) and callable(specs_of) and callable(pytree_of):
             declared = deps() or {}
             if declared:
-                specs = specs_of() or {}
+                specs = dict(specs_of() or {})
+                if overrides:
+                    specs.update({
+                        k: v for k, v in overrides.items()
+                        if obj is node or holders.get(k) == 1
+                    })
                 leaves = set(pytree_of() or {})
                 owner = getattr(obj, "name", repr(obj))
                 for static_key in sorted(declared):

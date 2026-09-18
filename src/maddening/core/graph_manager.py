@@ -3165,6 +3165,21 @@ class GraphManager:
         self._schedule = topological_sort(node_names, self._edges)
         self._back_edges = identify_back_edges(self._schedule, self._edges)
 
+        # ``_meta`` is *state*, not derived data: ``step_count`` decides
+        # which sub-steps a node with a rate divider > 1 fires on, and the
+        # ``coupling_*`` entries are the predictor history and the IQN
+        # warm start.  A recompile preserves node state and ``params``; it
+        # has to preserve these for the same reason.  A mid-run structural
+        # edit (adding an edge or an external input, the profiler or the
+        # REST server recompiling behind your back) used to replace this
+        # dict, silently re-phasing a multi-rate schedule and restarting
+        # every warm start.  Snapshotted here, *before* the rate dividers
+        # are recomputed, and re-applied below over the key set the new
+        # graph expects.  ``reset_state()`` remains the explicit way to
+        # zero the counters.
+        previous_meta = dict(self._state.get(_META_KEY, {}))
+        previous_dividers = dict(getattr(self, "_rate_dividers", None) or {})
+
         # Compute multi-rate info.
         # For nodes in subcycling coupling groups, use the group's
         # macro timestep (max of member timesteps) for rate divider
@@ -3190,15 +3205,16 @@ class GraphManager:
                 name: round(effective_timesteps[name] / base_dt)
                 for name in self._nodes
             }
-            # Initialise the step counter in the state
-            self._state[_META_KEY] = {
-                "step_count": jnp.array(0, dtype=jnp.int32),
-            }
         else:
             self._is_multirate = False
             self._rate_dividers = {name: 1 for name in self._nodes}
-            # Remove meta if it existed from a previous compile
-            self._state.pop(_META_KEY, None)
+
+        # Build ``_meta`` fresh over the key set *this* graph needs, so a
+        # key whose owning coupling group is gone cannot linger in the
+        # scan carry, then carry the previous values back over it below.
+        meta: dict = {}
+        if self._is_multirate:
+            meta["step_count"] = jnp.array(0, dtype=jnp.int32)
 
         # Ensure _meta exists with correct structure when coupling
         # diagnostics are enabled.  Pre-populate diagnostic keys so
@@ -3213,7 +3229,6 @@ class GraphManager:
             g.predictor != "none" for g in self._coupling_groups
         )
         if has_diagnostics or has_imvj or has_predictor:
-            meta = self._state.get(_META_KEY, {})
             for g in self._coupling_groups:
                 key = "+".join(sorted(g.nodes))
                 if g.diagnostics or g.solver == "ift":
@@ -3279,7 +3294,29 @@ class GraphManager:
                     meta[f"coupling_{key}_pred_count"] = jnp.array(
                         0, dtype=jnp.int32
                     )
+
+        # Carry the live ``_meta`` back over the seeds, key by key.  Only
+        # keys the new graph expects are kept (a group that was removed
+        # takes its diagnostics and warm start with it), and only when the
+        # live value still fits the seed's shape and dtype -- a group
+        # whose interface DOF count changed gets a fresh, correctly shaped
+        # warm start rather than a crash inside ``lax.scan``.
+        # ``step_count`` restarts only when the rate dividers themselves
+        # changed, because the phase it counts no longer means the same
+        # thing; otherwise the schedule continues where it left off.
+        for key_, seed in meta.items():
+            if key_ == "step_count" and self._rate_dividers != previous_dividers:
+                continue
+            live = previous_meta.get(key_)
+            if live is None:
+                continue
+            live = jnp.asarray(live)
+            if live.shape == jnp.shape(seed) and live.dtype == jnp.asarray(seed).dtype:
+                meta[key_] = live
+        if meta:
             self._state[_META_KEY] = meta
+        else:
+            self._state.pop(_META_KEY, None)
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,

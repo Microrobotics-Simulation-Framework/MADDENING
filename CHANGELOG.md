@@ -198,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A recompile no longer re-phases a multi-rate graph or restarts a coupling
+  warm start**: `_meta` is preserved like node state and `params`, so a mid-run
+  edit changes no trajectory; `reset_state()` is still the way to zero it
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

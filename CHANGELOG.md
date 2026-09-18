@@ -112,6 +112,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **The interactive path stops redoing host work**: sharded wrappers place
+  their static arrays on device once, not per `update`, and `run_scan` and its
+  siblings compile once per `compile()`, not per call (`gm.scan_trace_count`)
 - **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
   at its default settings could not be differentiated on a base install.
   `pip install maddening` is enough; the now-empty `[ift]` extra still resolves

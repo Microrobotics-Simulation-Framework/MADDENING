@@ -51,6 +51,14 @@ into `gm._state` can reintroduce it — use `gm.set_node_state()` and
 `gm.reset_state()` instead, and check that `gm._compiled_step._cache_size()`
 stays at 1 across a run.
 
+`gm.trace_count` covers the compiled step only.  `run_scan`,
+`run_scan_with_history`, `run_sweep` and `run_adaptive_scan` build a
+separate `lax.scan` program around that step, counted by
+`gm.scan_trace_count`: one per `compile()` per (entry point, step count)
+in a healthy run.  A driver that loops over `run_scan` and sees that
+number climb is paying a compile per call, which `trace_count` alone
+would not show.
+
 ## `benchmarks/bench_coupling.py`
 
 ```bash

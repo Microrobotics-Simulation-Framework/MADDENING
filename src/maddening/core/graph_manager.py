@@ -1758,6 +1758,107 @@ def _run_coupled_block_impl(
     return result
 
 
+def _build_adaptive_scan(
+    dt_step_fn: Callable,
+    user_state: Callable[[dict], dict],
+    max_steps: int,
+    safety: float,
+    order: int,
+    min_factor: float,
+    max_factor: float,
+    on_trace: Callable[[], None],
+) -> Callable:
+    """Build the jitted adaptive-timestepping scan for ``run_adaptive_scan``.
+
+    Kept at module level (and built through
+    :meth:`GraphManager._cached_scan`) so the program is compiled once
+    per graph compile rather than once per call.  ``t_end``, the
+    tolerances and the timestep bounds arrive as the traced ``knobs``
+    tuple, so changing any of them reuses the compilation; the PI
+    controller's constants are closed over and therefore belong in the
+    cache key.
+
+    Parameters
+    ----------
+    dt_step_fn : callable
+        ``(state, external_inputs, dt, params) -> state``.
+    user_state : callable
+        Strips the internal ``_meta`` key from a state dict.
+    max_steps : int
+        Scan length.
+    safety, order, min_factor, max_factor
+        PI step-size controller constants.
+    on_trace : callable
+        Called once per Python trace of the program, for
+        :attr:`GraphManager.scan_trace_count`.
+
+    Returns
+    -------
+    Callable
+        ``(state, ext, params, knobs) -> ((state, t, dt, n), history)``.
+    """
+    from maddening.core.simulation.adaptive import _tree_error_norm
+
+    def adaptive_scan(init_state, ext, params, knobs):
+        on_trace()
+        t_end, dt_initial, atol, rtol, dt_min, dt_max = knobs
+
+        def scan_body(carry, _unused):
+            state, t, dt, n_accepted = carry
+
+            # Clamp dt to not overshoot
+            dt = jnp.minimum(dt, t_end - t)
+            dt = jnp.maximum(dt, dt_min)
+
+            # Check if we've already reached t_end
+            done = t >= t_end
+
+            # Full step + two half-steps
+            state_full = dt_step_fn(state, ext, dt, params)
+            half_dt = dt / 2.0
+            state_half = dt_step_fn(state, ext, half_dt, params)
+            state_half = dt_step_fn(state_half, ext, half_dt, params)
+
+            # Error estimate
+            user_full = {k: v for k, v in state_full.items() if k != _META_KEY}
+            user_half = {k: v for k, v in state_half.items() if k != _META_KEY}
+            error_norm = _tree_error_norm(user_half, user_full, atol, rtol)
+
+            accepted = (error_norm <= 1.0) | (dt <= dt_min)
+
+            # PI controller
+            safe_error = jnp.maximum(error_norm, 1e-10)
+            factor = safety * jnp.power(1.0 / safe_error, 1.0 / (order + 1))
+            factor = jnp.clip(factor, min_factor, max_factor)
+            dt_next = jnp.clip(dt * factor, dt_min, dt_max)
+
+            # If done, keep state unchanged; if accepted, use half-step result
+            new_state = jax.tree.map(
+                lambda s, h: jnp.where(done, s, jnp.where(accepted, h, s)),
+                state, state_half,
+            )
+            new_t = jnp.where(done, t, jnp.where(accepted, t + dt, t))
+            new_dt = jnp.where(done, dt, dt_next)
+            new_n = jnp.where(
+                done, n_accepted, jnp.where(accepted, n_accepted + 1, n_accepted),
+            )
+
+            # Output the state for history (no-op state if not accepted)
+            output_state = user_state(new_state)
+
+            return (new_state, new_t, new_dt, new_n), output_state
+
+        init_carry = (
+            init_state,
+            jnp.array(0.0),
+            dt_initial,
+            jnp.array(0, dtype=jnp.int32),
+        )
+        return jax.lax.scan(scan_body, init_carry, None, length=max_steps)
+
+    return jax.jit(adaptive_scan)
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -1775,6 +1876,16 @@ class GraphManager:
         self._schedule: list[str] = []
         self._compiled_step: Optional[Callable] = None
         self._dirty: bool = True
+        # Bumped by every ``compile()``.  The scan cache keys on it, so a
+        # cached scan is exactly as fresh as ``_compiled_step``: every
+        # graph mutation marks the graph dirty, every public entry point
+        # recompiles a dirty graph, and the recompile invalidates the
+        # cache.
+        self._compile_generation: int = 0
+        # ``jax.lax.scan`` programs built by ``run_scan`` and its
+        # siblings, keyed by ``_cached_scan``.
+        self._scan_cache: dict[tuple, Callable] = {}
+        self._n_scan_traces: int = 0
         self._observers: list[Callable] = []
         self._back_edges: list[EdgeSpec] = []
         self._external_inputs: list[ExternalInputSpec] = []
@@ -1883,8 +1994,32 @@ class GraphManager:
     def trace_count(self) -> int:
         """How many times the compiled step has been traced since the
         last ``compile()`` (0 before the first step; more than 1 after
-        steady state means the step is being retraced)."""
+        steady state means the step is being retraced).
+
+        This counts ``step`` / ``run`` only.  ``run_scan`` and its
+        siblings build their own program around the step and are counted
+        by :attr:`scan_trace_count`; a loop that kept recompiling a scan
+        used to leave ``trace_count`` at 1 and so look healthy.
+        """
         return int(getattr(self, "_n_traces", 0))
+
+    @property
+    def scan_trace_count(self) -> int:
+        """How many scan programs have been traced since the last
+        ``compile()``.
+
+        ``run_scan``, ``run_scan_with_history``, ``run_sweep`` and
+        ``run_adaptive_scan`` each build a ``jax.lax.scan`` around the
+        step function and cache it (see :meth:`_cached_scan`).  This
+        counts the Python traces of those programs -- one per XLA
+        compile.  Calling the same entry point again with the same step
+        count and the same argument shapes must not increase it.
+        """
+        return int(getattr(self, "_n_scan_traces", 0))
+
+    def _count_scan_trace(self) -> None:
+        """Record one Python trace of a cached scan program."""
+        self._n_scan_traces += 1
 
     def reset_params(self) -> None:
         """Discard live/calibrated values: ``gm.params`` becomes the
@@ -2947,6 +3082,12 @@ class GraphManager:
         }
 
         self._dirty = False
+        # A rebuilt step invalidates every scan built against the old
+        # one.  Bumping the generation as well as clearing means a scan
+        # a caller still holds can never be re-entered into the cache.
+        self._compile_generation += 1
+        self._scan_cache.clear()
+        self._n_scan_traces = 0
         self._notify(EVENT_COMPILED, self._schedule)
 
     def _check_static_data_dirty(self) -> bool:
@@ -3526,6 +3667,52 @@ class GraphManager:
             if callback is not None:
                 callback(i, user_state)
 
+    def _cached_scan(self, key: tuple, build: Callable[[], Callable]) -> Callable:
+        """Return the jitted scan program for *key*, building it once.
+
+        Building a scan means tracing the whole in-XLA loop and
+        compiling it: hundreds of milliseconds upward.  ``run_scan`` and
+        its siblings used to do that on every call, so a caller driving
+        a simulation from a Python loop, a slider or an HTTP handler
+        paid a compile per call.
+
+        Parameters
+        ----------
+        key : tuple
+            Everything that determines the built program *beyond* the
+            graph structure: which entry point, the scan length, and any
+            Python value the body closes over (the adaptive controller's
+            constants, for instance).  ``_compile_generation`` is
+            prepended, which covers the structure -- every graph
+            mutation marks the graph dirty, every entry point recompiles
+            a dirty graph before it gets here, and ``compile()`` clears
+            this cache.
+        build : callable
+            Zero-argument builder returning the jitted program.  Called
+            only on a miss.
+
+        Returns
+        -------
+        Callable
+            The cached (or freshly built) jitted program.
+
+        Notes
+        -----
+        Shapes and dtypes of the runtime values are deliberately *not*
+        in the key.  State, external inputs and params are arguments of
+        the jitted program rather than constants closed over by it, so
+        JAX's own cache retraces when an aval changes and reuses the
+        compilation when it does not.  Baking them into the key instead
+        would mean hashing arrays -- and closing over them, as the old
+        code did, is what made the rebuild mandatory in the first place.
+        """
+        full_key = (self._compile_generation,) + tuple(key)
+        fn = self._scan_cache.get(full_key)
+        if fn is None:
+            fn = build()
+            self._scan_cache[full_key] = fn
+        return fn
+
     def run_scan(
         self,
         n_steps: int,
@@ -3571,20 +3758,27 @@ class GraphManager:
             external_inputs = self._default_external_inputs()
         params = self._params_or_default(params)
 
-        # Build the raw (unjitted) step function -- lax.scan will JIT
-        # the entire scan body, so an inner jit would be redundant.
-        step_fn = self._build_step_fn()
+        # External inputs and params are *arguments* of the jitted scan,
+        # not constants closed over by it: that is what lets the built
+        # program be cached across calls whose values differ.
+        def build():
+            step_fn = self._build_step_fn()
 
-        # Close over the static external inputs (and params) so the scan
-        # body has the correct signature: (carry, x) -> (carry, None)
-        ext = external_inputs
+            def scan(state, ext, params):
+                self._count_scan_trace()
 
-        def scan_body(state, _unused):
-            new_state = step_fn(state, ext, params)
-            return new_state, None
+                def scan_body(carry, _unused):
+                    return step_fn(carry, ext, params), None
 
-        final_state, _ = jax.lax.scan(scan_body, self._state, None, length=n_steps)
-        self._state = final_state
+                final, _ = jax.lax.scan(
+                    scan_body, state, None, length=int(n_steps),
+                )
+                return final
+
+            return jax.jit(scan)
+
+        fn = self._cached_scan(("run_scan", int(n_steps)), build)
+        self._state = fn(self._state, external_inputs, params)
         return self._user_state(self._state)
 
     def run_scan_with_history(
@@ -3629,14 +3823,24 @@ class GraphManager:
             external_inputs = self._default_external_inputs()
         params = self._params_or_default(params)
 
-        step_fn = self._build_step_fn()
-        ext = external_inputs
+        def build():
+            step_fn = self._build_step_fn()
 
-        def scan_body(state, _unused):
-            new_state = step_fn(state, ext, params)
-            return new_state, new_state  # carry, output (stacked by scan)
+            def scan(state, ext, params):
+                self._count_scan_trace()
 
-        final_state, history = jax.lax.scan(scan_body, self._state, None, length=n_steps)
+                def scan_body(carry, _unused):
+                    new_state = step_fn(carry, ext, params)
+                    return new_state, new_state  # carry, stacked output
+
+                return jax.lax.scan(
+                    scan_body, state, None, length=int(n_steps),
+                )
+
+            return jax.jit(scan)
+
+        fn = self._cached_scan(("run_scan_with_history", int(n_steps)), build)
+        final_state, history = fn(self._state, external_inputs, params)
         self._state = final_state
         return self._user_state(final_state), self._user_state(history)
 
@@ -3693,31 +3897,32 @@ class GraphManager:
             external_inputs = self._default_external_inputs()
         params = self._params_or_default(params)
 
-        step_fn = self._build_step_fn()
-        ext = external_inputs
+        def build():
+            step_fn = self._build_step_fn()
 
-        # Build the scan function
-        if return_history:
-            def simulate(init_state):
-                def scan_body(state, _unused):
-                    new_state = step_fn(state, ext, params)
-                    return new_state, new_state
-                final, hist = jax.lax.scan(scan_body, init_state, None, length=n_steps)
-                return self._user_state(final), self._user_state(hist)
+            def sweep(init_states, ext, params):
+                self._count_scan_trace()
 
-            vmapped = jax.vmap(simulate)
-            finals, histories = vmapped(initial_states)
-            return finals, histories
-        else:
-            def simulate(init_state):
-                def scan_body(state, _unused):
-                    new_state = step_fn(state, ext, params)
-                    return new_state, None
-                final, _ = jax.lax.scan(scan_body, init_state, None, length=n_steps)
-                return self._user_state(final)
+                def simulate(init_state):
+                    def scan_body(state, _unused):
+                        new_state = step_fn(state, ext, params)
+                        return new_state, (new_state if return_history else None)
 
-            vmapped = jax.vmap(simulate)
-            return vmapped(initial_states)
+                    final, hist = jax.lax.scan(
+                        scan_body, init_state, None, length=int(n_steps),
+                    )
+                    if return_history:
+                        return self._user_state(final), self._user_state(hist)
+                    return self._user_state(final)
+
+                return jax.vmap(simulate)(init_states)
+
+            return jax.jit(sweep)
+
+        fn = self._cached_scan(
+            ("run_sweep", int(n_steps), bool(return_history)), build,
+        )
+        return fn(initial_states, external_inputs, params)
 
     # ------------------------------------------------------------------
     # Adaptive timestepping
@@ -4042,73 +4247,32 @@ class GraphManager:
         if external_inputs is None:
             external_inputs = self._default_external_inputs()
 
-        from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
+        from maddening.core.simulation.adaptive import AdaptiveConfig
 
         config = AdaptiveConfig(
             dt_initial=dt_initial, atol=atol, rtol=rtol,
             dt_min=dt_min, dt_max=dt_max,
         )
 
-        dt_step_fn = self._build_dt_step_fn()
-        ext = external_inputs
-        params = self.params
-
-        t_end_jax = jnp.array(t_end)
-        dt_min_jax = jnp.array(dt_min)
-        dt_max_jax = jnp.array(dt_max)
-
-        def scan_body(carry, _unused):
-            state, t, dt, n_accepted = carry
-
-            # Clamp dt to not overshoot
-            dt = jnp.minimum(dt, t_end_jax - t)
-            dt = jnp.maximum(dt, dt_min_jax)
-
-            # Check if we've already reached t_end
-            done = t >= t_end_jax
-
-            # Full step + two half-steps
-            state_full = dt_step_fn(state, ext, dt, params)
-            half_dt = dt / 2.0
-            state_half = dt_step_fn(state, ext, half_dt, params)
-            state_half = dt_step_fn(state_half, ext, half_dt, params)
-
-            # Error estimate
-            user_full = {k: v for k, v in state_full.items() if k != _META_KEY}
-            user_half = {k: v for k, v in state_half.items() if k != _META_KEY}
-            error_norm = _tree_error_norm(user_half, user_full, config.atol, config.rtol)
-
-            accepted = (error_norm <= 1.0) | (dt <= dt_min_jax)
-
-            # PI controller
-            safe_error = jnp.maximum(error_norm, 1e-10)
-            factor = config.safety * jnp.power(1.0 / safe_error, 1.0 / (config.order + 1))
-            factor = jnp.clip(factor, config.min_factor, config.max_factor)
-            dt_next = jnp.clip(dt * factor, dt_min_jax, dt_max_jax)
-
-            # If done, keep state unchanged; if accepted, use half-step result
-            new_state = jax.tree.map(
-                lambda s, h: jnp.where(done, s, jnp.where(accepted, h, s)),
-                state, state_half,
-            )
-            new_t = jnp.where(done, t, jnp.where(accepted, t + dt, t))
-            new_dt = jnp.where(done, dt, dt_next)
-            new_n = jnp.where(done, n_accepted, jnp.where(accepted, n_accepted + 1, n_accepted))
-
-            # Output the state for history (will be no-op state if not accepted)
-            output_state = self._user_state(new_state)
-
-            return (new_state, new_t, new_dt, new_n), output_state
-
-        init_carry = (
-            self._state,
-            jnp.array(0.0),
-            jnp.array(dt_initial),
-            jnp.array(0, dtype=jnp.int32),
+        # The tolerances and the time bounds ride in as arguments
+        # (``knobs``) so a caller sweeping them reuses the compilation;
+        # only the controller constants, which this signature does not
+        # expose, are baked in and therefore part of the cache key.
+        fn = self._cached_scan(
+            ("run_adaptive_scan", int(max_steps), config.safety,
+             config.order, config.min_factor, config.max_factor),
+            lambda: _build_adaptive_scan(
+                self._build_dt_step_fn(), self._user_state, int(max_steps),
+                config.safety, config.order, config.min_factor,
+                config.max_factor, self._count_scan_trace,
+            ),
         )
-
-        (final_state, final_t, final_dt, n_accepted), history = jax.lax.scan(
-            scan_body, init_carry, None, length=max_steps
+        knobs = (
+            jnp.array(t_end), jnp.array(dt_initial), jnp.array(atol),
+            jnp.array(rtol), jnp.array(dt_min), jnp.array(dt_max),
+        )
+        (final_state, final_t, final_dt, n_accepted), history = fn(
+            self._state, external_inputs, self.params, knobs,
         )
 
         self._state = final_state

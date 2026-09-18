@@ -215,6 +215,17 @@ budget case and raises when the frozen gradient has also collapsed.
 7. **Abstract.** `AdaptiveNode` cannot be instantiated at all without
    `compute_active_set` and `solve_frozen` (both `@abstractmethod`);
    `objective` stays optional and is needed only by the diagnostics.
+8. **Accuracy is not monotone in the budget $K$ for a non-nested selection.**
+   Top-K does not nest: the $K = 8$ active set is not a superset of the
+   $K = 4$ set, so raising the budget can drop a mode that was carrying the
+   quantity of interest. Sweeping the 1-D toy over
+   $\theta \in \{0.20 \ldots 0.70\}$, $x_s \in \{0.25, 1/3, 0.5, 0.75\}$ and
+   both selection rules, the sensor error is non-monotone in $K$ in 9 of 48
+   configurations — including $\theta = 0.42$, $x_s = 0.5$, one grid point
+   from where `MADD-VER-004` asserts. The *trend* is robust over all 48:
+   $K = 32$ gives the smallest of the four errors, below $2.1\times10^{-7}$,
+   and at least two orders below the $K = 4$ error. Do not read a single
+   budget comparison as a convergence check; compare the large-budget end.
 
 ## Stability Conditions
 
@@ -263,8 +274,10 @@ Subclasses may add fields through `extra_initial_state()`.
 
 - Benchmark: `MADD-VER-004` — frozen-active-set solve of $-u'' + u = f$ on
   $(0, 1)$ vs the exact Green's-function solution: full active set reproduces
-  it (L2 relative error $< 10^{-4}$, sensor error $< 10^{-6}$); top-K sensor
-  error decreases monotonically over $K \in \{4, 8, 16, 32\}$.
+  it (L2 relative error $< 10^{-4}$, sensor error $< 10^{-6}$); over
+  $K \in \{4, 8, 16, 32\}$ the $K = 32$ sensor error is the smallest of the
+  four, is $< 10^{-6}$ and is at least two orders of magnitude below the
+  $K = 4$ error. It is **not** monotone in $K$ — see *Known Limitations* 8.
 - Test files: `tests/nodes/adaptive/test_verification.py` (benchmark and the
   `verify_node` battery on two concrete subclasses),
   `tests/nodes/adaptive/test_frozen_solve_gradients.py` (`jax.grad` vs central

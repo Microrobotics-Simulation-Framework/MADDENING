@@ -57,7 +57,11 @@ from hypothesis import strategies as st
 from maddening.core.coupling.group import _FIELD_DEFAULTS
 
 from tests.conftest import EXAMPLES_COSTLY
-from tests.property.strategies import NODE_KINDS, graph_recipes
+from tests.property.strategies import (
+    NODE_KINDS,
+    graph_recipes,
+    without_inert_knobs,
+)
 
 #: Accelerations compared against plain fixed-point iteration.  Every
 #: one of the ten fixture rows is ``iqn-ils`` or ``iqn-imvj``; Aitken is
@@ -178,13 +182,25 @@ _NORM = "l2"
 
 def _retune(recipe, *, acceleration, accelerated_fields=None,
             jacobian_reuse=0):
-    """*recipe* with every group on one criterion and one accelerator."""
+    """*recipe* with every group on one criterion and one accelerator.
+
+    ``acceleration`` is a gate: ``accelerated_fields`` is read by the
+    two IQN methods alone, ``jacobian_reuse`` by ``iqn-imvj`` alone and
+    ``relaxation`` (which the draw may have set) by ``"fixed"`` alone.
+    Overriding the gate here therefore strands up to three knobs, and
+    ``CouplingGroup`` warns about each -- fatally, under
+    ``filterwarnings = ["error"]``.  :func:`without_inert_knobs` puts
+    every one the new accelerator does not read back to its default, so
+    what reaches ``build()`` is the configuration this module means to
+    measure and nothing else.  Under ``acceleration="none"`` that is
+    what makes the plain arm plain.
+    """
     def _one(group):
         fields = (None if accelerated_fields is None else tuple(
             (name, tuple(f)) for name, f in sorted(accelerated_fields.items())
             if name in group.nodes
         ))
-        return dataclasses.replace(
+        return without_inert_knobs(dataclasses.replace(
             group,
             convergence_norm=_NORM,
             acceleration=acceleration,
@@ -196,7 +212,7 @@ def _retune(recipe, *, acceleration, accelerated_fields=None,
             tolerance=_TOLERANCE,
             atol=_ATOL,
             rtol=_RTOL,
-        )
+        ))
 
     return dataclasses.replace(
         recipe, coupling_groups=tuple(_one(g) for g in recipe.coupling_groups),

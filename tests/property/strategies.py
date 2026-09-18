@@ -49,8 +49,15 @@ under ``filterwarnings = ["error"]`` that fails the graph over the
 *recipe* rather than over the property.  The round-trip coverage
 survives because the gating configuration is itself drawn: every field
 still takes a non-default value somewhere in the search, and has to
-come back.  Two combinations are genuinely *invalid* and therefore
-never drawn:
+come back.
+
+Gating at draw time only settles the recipes this module *hands out*.  A
+test that flips one of those gates afterwards --
+``dataclasses.replace(g, solver=...)``, ``acceleration=...`` -- inherits
+the question, so :func:`without_inert_knobs` resets the knobs the new
+configuration stops reading, off the library's own rule table.
+
+Two combinations are genuinely *invalid* and therefore never drawn:
 
 * **mixed timesteps without subcycling.**  ``validate()`` rejects it by
   name, so a group over nodes of different timesteps always sets
@@ -82,11 +89,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
+from dataclasses import replace as dataclass_replace
 from typing import Any, Optional
 
 import numpy as np
 from hypothesis import strategies as st
 
+from maddening.core.coupling.group import _FIELD_DEFAULTS, _INERT_RULES
 from maddening.core.coupling.mapping import (
     nearest_neighbor_mapping,
     projection_1d_mapping,
@@ -429,6 +438,46 @@ class CouplingGroupRecipe:
         if out["accelerated_fields"] is not None:
             out["accelerated_fields"] = dict(out["accelerated_fields"])
         return out
+
+
+def without_inert_knobs(group: CouplingGroupRecipe) -> CouplingGroupRecipe:
+    """*group* with every knob its own configuration ignores put back.
+
+    :func:`_coupling_group` gates each knob at *draw* time, so a recipe
+    as drawn is always quiet.  A test that then flips a **gate** --
+    ``solver``, ``acceleration``, ``convergence_norm``, ``subcycling``
+    -- with :func:`dataclasses.replace` re-opens the question the draw
+    had settled: the knob that gate used to make live keeps the value it
+    was drawn with, :class:`CouplingGroup` warns that the new
+    configuration never reads it, and under ``filterwarnings =
+    ["error"]`` the test fails on its own recipe rather than on the
+    property it states.  Applying this after the flip closes it.
+
+    The rules are read from
+    :data:`~maddening.core.coupling.group._INERT_RULES`, the same table
+    the warning is raised from, rather than restated here.  That is the
+    point: a gate added to the table is respected at every override site
+    in this suite with no second edit, so the property tests keep
+    testing the framework instead of quietly testing a stale copy of its
+    rules.  ``live`` reads its gate by attribute name and
+    :class:`CouplingGroupRecipe` declares the same field names as
+    :class:`~maddening.core.coupling.group.CouplingGroup`, so the
+    predicates apply to a recipe unchanged --
+    ``tests/property/test_inert_knob_reset.py`` fails loudly if a
+    rename on either side ever breaks that correspondence, since a
+    silently skipped reset would look exactly like a passing test.
+
+    Only knobs the table calls inert are touched, and only ever back to
+    their declared default, so this can never make a configuration do
+    something it was not already doing.
+    """
+    resets = {
+        name: _FIELD_DEFAULTS[name]
+        for rule in _INERT_RULES if not rule.live(group)
+        for name in rule.fields
+        if getattr(group, name) != _FIELD_DEFAULTS[name]
+    }
+    return dataclass_replace(group, **resets) if resets else group
 
 
 @dataclass(frozen=True)

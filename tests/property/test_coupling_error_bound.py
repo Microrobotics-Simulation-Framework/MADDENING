@@ -57,7 +57,7 @@ from maddening.core.coupling.acceleration import (
 )
 
 from tests.conftest import EXAMPLES_COSTLY
-from tests.property.strategies import graph_recipes
+from tests.property.strategies import graph_recipes, without_inert_knobs
 
 #: How much the linear extrapolation, the reference's own residual and
 #: float32 are jointly allowed to be wrong by.  See the module docstring.
@@ -261,10 +261,16 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
     other = "fori" if solver == "ift" else "ift"
     built = {}
     for name in (solver, other):
+        # ``linear_solver`` and ``strict_convergence`` are read inside
+        # the IFT path alone, so flipping to ``"fori"`` strands whatever
+        # the draw put in them and the group warns -- fatally, under
+        # ``filterwarnings = ["error"]``.  Resetting them is not a
+        # weakening of the comparison: they are exactly the fields
+        # ``"fori"`` does not read.
         r = dataclasses.replace(
             base,
             coupling_groups=tuple(
-                dataclasses.replace(g, solver=name)
+                without_inert_knobs(dataclasses.replace(g, solver=name))
                 for g in base.coupling_groups
             ),
         )

@@ -206,6 +206,9 @@ guidance; the itemized changes follow.
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
   it registers the node, so an `initial_state()` that raises (an `AdaptiveNode`
   at a Palais trap) no longer wedges the graph with a ghost `step()` dies on
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator fixes
+  exactly what the criterion measures — use a norm that sees the whole state
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

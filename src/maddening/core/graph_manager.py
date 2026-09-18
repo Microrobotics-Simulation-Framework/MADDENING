@@ -3064,21 +3064,6 @@ class GraphManager:
                 "differentiable through the graph): %s", baked,
             )
 
-        step_fn = self._build_step_fn()
-        # Count Python-level traces of the step: a robust, JAX-version-
-        # independent retrace probe (the jit object's C++ cache count is
-        # not comparable across versions).  ``trace_count`` is 0 right
-        # after compile() and 1 after the first step of a well-behaved
-        # graph; a growing count means something in the call signature
-        # (weak types, dtypes, params structure) keeps changing.
-        self._n_traces = 0
-
-        def _counted_step(full_state, external_inputs, params=None):
-            self._n_traces += 1
-            return step_fn(full_state, external_inputs, params)
-
-        self._compiled_step = jax.jit(_counted_step)
-
         # A node may keep its own materialised copy of its static arrays
         # (the sharded wrappers cache the per-device placement, keyed on
         # the arrays' identity).  Such a key cannot see a static whose
@@ -3094,10 +3079,31 @@ class GraphManager:
         # cache nested inside a wrapper (a sharded node inside a
         # HybridNode) is reached too.  The getattr probe stays for the
         # duck-typed node objects the graph also accepts.
+        #
+        # Ordered before the build rather than after it.  Both work today
+        # only because ``_build_step_fn`` and ``jax.jit`` are lazy and
+        # materialise nothing; clearing first is correct whether or not
+        # that stays true, and it still precedes the static-data hash
+        # snapshot below, which is the other ordering constraint.
         for spec in self._nodes.values():
             invalidate = getattr(spec.node, "invalidate_static_cache", None)
             if callable(invalidate):
                 invalidate()
+
+        step_fn = self._build_step_fn()
+        # Count Python-level traces of the step: a robust, JAX-version-
+        # independent retrace probe (the jit object's C++ cache count is
+        # not comparable across versions).  ``trace_count`` is 0 right
+        # after compile() and 1 after the first step of a well-behaved
+        # graph; a growing count means something in the call signature
+        # (weak types, dtypes, params structure) keeps changing.
+        self._n_traces = 0
+
+        def _counted_step(full_state, external_inputs, params=None):
+            self._n_traces += 1
+            return step_fn(full_state, external_inputs, params)
+
+        self._compiled_step = jax.jit(_counted_step)
 
         # Snapshot static_data hashes so we can detect drift.
         self._static_data_hashes = {

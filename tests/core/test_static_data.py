@@ -8,6 +8,7 @@ import pytest
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
+from maddening.core.params import ParamSpec
 from maddening.core.simulation.hybrid_node import HybridNode
 from maddening.core.static_data import StaticArray
 
@@ -622,3 +623,251 @@ class TestWrapperStaticDataProxy:
         a.other, b.other = b, a
         assert a.static_data == {}          # must return, not recurse
         assert a.static_data_hash() == 0
+
+
+# ---------------------------------------------------------------------------
+# D10 steps 2 and 3: declaring where a static comes from, and refusing the
+# one provenance that cannot work.
+#
+# A static built in ``__init__`` from a parameter goes stale invisibly: a
+# live parameter write does not dirty the graph, and ``static_data_hash``
+# covers shape and dtype but never contents.  ``static_data_deps`` is the
+# node's declaration of that link; ``compile()`` refuses the case no
+# rebuild could fix, a static derived from a *trainable* parameter, since
+# the static is baked into the HLO as a constant and the gradient would
+# silently omit the term through it.
+# ---------------------------------------------------------------------------
+
+
+class _DerivedStaticNode(SimulationNode):
+    """A node whose static table is built in ``__init__`` from ``scale``.
+
+    ``scale`` is a float (a leaf of ``params_pytree``) whose trainability
+    the test chooses; ``n`` is an ``int``, so it is structural and can
+    never be a violation however it is declared.
+    """
+
+    def __init__(self, name, timestep, *, scale=2.0, n=4, trainable=True):
+        super().__init__(name, timestep, scale=scale, n=n)
+        self._trainable = trainable
+        self._table = jnp.arange(n, dtype=jnp.float32) * scale
+
+    @property
+    def static_data(self) -> dict:
+        return {"table": StaticArray(self._table)}
+
+    def static_data_deps(self) -> dict:
+        return {"table": ("scale", "n")}
+
+    def param_specs(self) -> dict:
+        return {**super().param_specs(),
+                "scale": ParamSpec(trainable=self._trainable)}
+
+    def initial_state(self):
+        return {"y": jnp.array(0.0)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        # ``scale`` reaches the step twice: traced through ``params``,
+        # and baked through the table built from it in ``__init__``.
+        # That split is exactly what the refusal is about -- a gradient
+        # through the first alone is missing the second.
+        p = {**self.params, **(params or {})}
+        return {"y": state["y"] + (self._table[0] + p["scale"]) * dt}
+
+
+def _compiled_graph(node):
+    gm = GraphManager()
+    gm.add_node(node)
+    gm.compile()
+    return gm
+
+
+class TestStaticDataDepsDeclaration:
+    def test_a_node_declares_no_dependencies_by_default(self):
+        """The declaration is opt-in: a node that says nothing owes nothing."""
+        assert _PointwiseNode("p", timestep=0.01).static_data_deps() == {}
+        assert _StaticDataNode("s", timestep=0.01).static_data_deps() == {}
+
+    def test_a_declaration_keys_on_the_nodes_static_data_keys(self):
+        node = _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        assert set(node.static_data_deps()) <= set(node.static_data)
+
+    def test_a_wrapper_forwards_the_declaration_as_it_forwards_the_statics(self):
+        """Both forward, so a wrapper's deps still key on its own statics.
+
+        If only ``static_data`` forwarded, a wrapper would publish a
+        static whose provenance had vanished -- the same blind spot the
+        static-data hash had before wrappers proxied it.
+        """
+        inner = _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        wrapper = _Wrapper(inner)
+        assert wrapper.static_data_deps() == inner.static_data_deps()
+        assert set(wrapper.static_data_deps()) <= set(wrapper.static_data)
+
+    def test_the_forwarded_declaration_composes_through_a_nested_pair(self):
+        inner = _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        nested = HybridNode(_Wrapper(inner), lambda s, b, dd: {})
+        assert nested.static_data_deps() == {"table": ("scale", "n")}
+
+    def test_a_cycle_between_two_nodes_terminates(self):
+        """The forwarding guard is the one ``static_data`` already uses."""
+
+        class _Holder(SimulationNode):
+            def __init__(self, name):
+                super().__init__(name, timestep=0.01)
+                self.other = None
+
+            def initial_state(self):
+                return {"x": jnp.array(0.0)}
+
+            def update(self, state, boundary_inputs, dt):
+                return {"x": state["x"] + dt}
+
+        a, b = _Holder("a"), _Holder("b")
+        a.other, b.other = b, a
+        assert a.static_data_deps() == {}
+
+
+class TestStaticDataDepsRefusedAtCompile:
+    def test_a_non_trainable_dependency_compiles(self):
+        """The legal case: the parameter is frozen, so nothing is lost."""
+        gm = _compiled_graph(
+            _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        )
+        gm.step()
+
+    def test_a_trainable_dependency_is_refused(self):
+        gm = GraphManager()
+        gm.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=True))
+        with pytest.raises(ValueError) as excinfo:
+            gm.compile()
+        message = str(excinfo.value)
+        # The three things a reader needs to locate the problem ...
+        assert "'d'" in message
+        assert "'table'" in message
+        assert "'scale'" in message
+        # ... why it cannot be supported ...
+        assert "constant" in message
+        assert "differentiate" in message
+        # ... and both ways out.
+        assert "trainable=False" in message
+        assert "update()" in message
+
+    def test_a_structural_dependency_is_not_a_violation(self):
+        """``n`` is an ``int``: nothing differentiates through it.
+
+        ``_DerivedStaticNode`` declares ``n`` alongside ``scale`` on both
+        sides of the test, so the passing case above proves a structural
+        dependency is allowed and this pins the reason: it is absent from
+        the parameter pytree, not merely absent from ``param_specs``.
+        """
+        node = _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        assert "n" in node.static_data_deps()["table"]
+        assert "n" not in node.params_pytree()
+
+    def test_an_undeclared_derivation_still_compiles(self):
+        """A guard rail, not an inference engine.
+
+        The same node without the declaration compiles happily -- which
+        is the latent hazard D10 describes, and the reason the
+        declaration has to be written by hand.
+        """
+
+        class _Undeclared(_DerivedStaticNode):
+            def static_data_deps(self):
+                return {}
+
+        _compiled_graph(_Undeclared("d", timestep=0.01, trainable=True))
+
+    def test_the_refusal_fires_through_a_wrapper(self):
+        """A wrapper must not be able to hide an inner node's declaration."""
+        inner = _DerivedStaticNode("d", timestep=0.01, trainable=True)
+        gm = GraphManager()
+        gm.add_node(_Wrapper(inner))
+        with pytest.raises(ValueError, match="'scale'"):
+            gm.compile()
+
+    def test_the_refusal_names_the_wrapped_node_when_the_names_differ(self):
+        """The graph knows the wrapper's name; the fix is in the inner node."""
+        inner = _DerivedStaticNode("inner", timestep=0.01, trainable=True)
+        gm = GraphManager()
+        gm.add_node(HybridNode(inner, lambda s, b, d: {}, name="outer"))
+        with pytest.raises(ValueError) as excinfo:
+            gm.compile()
+        assert "'outer'" in str(excinfo.value)
+        assert "'inner'" in str(excinfo.value)
+
+    def test_a_wrapper_over_a_frozen_dependency_still_compiles(self):
+        inner = _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        _compiled_graph(HybridNode(inner, lambda s, b, dd: {}))
+
+    def test_freezing_the_parameter_is_a_working_fix(self):
+        """The message's first remedy has to actually work."""
+        gm = GraphManager()
+        gm.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=True))
+        with pytest.raises(ValueError):
+            gm.compile()
+        gm2 = GraphManager()
+        gm2.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=False))
+        gm2.compile()
+
+
+class TestHeatNodeStaticDataDeps:
+    """``HeatNode`` is the only shipped node deriving a static from params.
+
+    Its provenance differs by grid, and so does its declaration: the
+    non-uniform grid reads ``grid_x`` and derives it from the frozen
+    ``grid_points``, while the uniform grid derives it from the trainable
+    ``length`` but never reads it -- ``_compute_laplacian`` recomputes
+    ``dx`` from the traced parameter.  Declaring ``length`` there anyway
+    would trip the refusal, which the last test here pins.
+    """
+
+    def test_the_uniform_grid_declares_nothing(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        assert node.static_data_deps() == {}
+
+    def test_the_non_uniform_grid_declares_grid_points(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=4,
+                        grid_points=[0.1, 0.2, 0.35, 0.8])
+        assert node.static_data_deps() == {"grid_x": ("grid_points",)}
+
+    def test_grid_points_is_frozen_so_the_declaration_is_legal(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=4,
+                        grid_points=[0.1, 0.2, 0.35, 0.8])
+        assert node.param_specs()["grid_points"].trainable is False
+        assert "grid_points" in node.params_pytree()   # it *is* a pytree leaf
+        _compiled_graph(node).step()
+
+    def test_the_uniform_grid_still_compiles_with_length_trainable(self):
+        from maddening.nodes.heat import HeatNode
+
+        node = HeatNode("rod", timestep=0.01, n_cells=8, length=2.0)
+        assert node.param_specs()["length"].trainable is True
+        _compiled_graph(node).step()
+
+    def test_declaring_length_would_be_refused(self):
+        """The guard rail is live for the exact case HeatNode avoids.
+
+        If the uniform Laplacian ever started reading ``grid_x``, the
+        honest declaration would name ``length`` -- and this is what
+        ``compile()`` does about it.
+        """
+        from maddening.nodes.heat import HeatNode
+
+        class _ReadsGridXOnTheUniformPath(HeatNode):
+            def static_data_deps(self):
+                return {"grid_x": ("grid_points", "length", "n_cells")}
+
+        gm = GraphManager()
+        gm.add_node(_ReadsGridXOnTheUniformPath("rod", timestep=0.01, n_cells=8))
+        with pytest.raises(ValueError) as excinfo:
+            gm.compile()
+        assert "'length'" in str(excinfo.value)
+        assert "'grid_x'" in str(excinfo.value)

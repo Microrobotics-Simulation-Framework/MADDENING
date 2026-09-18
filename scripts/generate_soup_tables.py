@@ -34,6 +34,9 @@ Sources
     test modules in ``BENCHMARK_MODULES``.
 ``tests/``
     Which test packages exist.
+``.github/workflows/ci.yml``
+    Python matrix, JAX pin and runner -- the configuration the evidence
+    was produced on.
 
 Usage
 -----
@@ -80,6 +83,7 @@ ANOMALY_REGISTRY = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
 CITATION = REPO_ROOT / "CITATION.cff"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 TESTS = REPO_ROOT / "tests"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 #: Test modules whose import populates the verification benchmark
 #: registry.  ``_check_benchmark_modules_are_complete`` scans ``tests/``
@@ -133,6 +137,7 @@ FULL_NAME = (
 INSTALL_COMMAND = "`pip install maddening`"
 
 _PRERELEASE_RE = re.compile(r"(?:a|b|rc|\.dev|\.post)\d*$")
+_JAX_PIN_RE = re.compile(r"\bjax==([0-9][^\"\'\s]*)")
 
 
 # --------------------------------------------------------------------
@@ -153,6 +158,34 @@ def read_registry() -> dict:
 def read_citation() -> dict:
     with CITATION.open() as fh:
         return yaml.safe_load(fh)
+
+
+def read_ci() -> dict:
+    """Python versions, JAX pin and runner, read out of the CI workflow.
+
+    The old hand-written page said "Python: 3.12" and "JAX: 0.4+" while
+    CI ran 3.11 and 3.12 against a jax==0.10.2 pin.  Nothing about the
+    verified configuration is retyped here.
+    """
+    with CI_WORKFLOW.open() as fh:
+        workflow = yaml.safe_load(fh)
+
+    jobs = workflow.get("jobs", {})
+    pythons = (
+        jobs.get("test", {})
+        .get("strategy", {})
+        .get("matrix", {})
+        .get("python-version", [])
+    )
+    runners = sorted({
+        job["runs-on"] for job in jobs.values() if isinstance(job.get("runs-on"), str)
+    })
+    pins = sorted(set(_JAX_PIN_RE.findall(CI_WORKFLOW.read_text())))
+    return {
+        "pythons": [str(v) for v in pythons],
+        "runners": runners,
+        "jax_pins": pins,
+    }
 
 
 def package_version(pyproject: dict) -> str:
@@ -318,7 +351,7 @@ def render_test_organization(packages: list[str]) -> str:
     return _table(["Directory", "Scope"], rows)
 
 
-def render_test_suite(pyproject: dict, packages: list[str]) -> str:
+def render_test_suite(pyproject: dict, packages: list[str], ci: dict) -> str:
     jax_spec = next(
         (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
         "",
@@ -326,9 +359,12 @@ def render_test_suite(pyproject: dict, packages: list[str]) -> str:
     rows = [
         ["Test runner", "pytest"],
         ["CI system", "GitHub Actions"],
-        ["Python versions", "3.11, 3.12 (floor: "
+        ["CI runners", ", ".join(f"`{r}`" for r in ci["runners"])],
+        ["Python versions", ", ".join(ci["pythons"]) + " (floor: "
                             f"{pyproject['project'].get('requires-python', '')})"],
-        ["JAX", f"pinned to 0.10.2 in CI; `{jax_spec}` supported"],
+        ["JAX", "pinned to "
+                + ", ".join(f"`{v}`" for v in ci["jax_pins"])
+                + f" in CI; `{jax_spec}` supported"],
         ["Backend", "CPU (GPU tests are not run in CI — MADD-ANO-001)"],
         ["Test packages", f"{len(packages)} — listed below"],
     ]
@@ -464,6 +500,7 @@ def build() -> tuple[dict[Path, str], list[str]]:
     citation = read_citation()
     benchmarks = load_benchmarks()
     packages = test_packages()
+    ci = read_ci()
 
     errors = (
         _check_versions(pyproject, registry, citation)
@@ -481,7 +518,7 @@ def build() -> tuple[dict[Path, str], list[str]]:
 
     fv = FRAMEWORK_VERIFICATION.read_text()
     fv = splice(fv, "test-suite",
-                render_test_suite(pyproject, packages),
+                render_test_suite(pyproject, packages, ci),
                 FRAMEWORK_VERIFICATION)
     fv = splice(fv, "test-organization",
                 render_test_organization(packages), FRAMEWORK_VERIFICATION)

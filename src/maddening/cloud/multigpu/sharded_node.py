@@ -53,9 +53,9 @@ def _check_shard_divisible(
 
     ``jax.device_put`` raises :class:`jax.errors.IndivisibleError` from
     inside the sharding machinery, naming neither the node, the field,
-    the cell count nor the device count.  Both stencil wrappers validate
-    up front instead, so the failure arrives at construction with the
-    two numbers that have to agree and the three ways to make them.
+    the cell count nor the device count.  Both Cartesian wrappers
+    validate up front instead, so the failure arrives at construction
+    with the two numbers that have to agree and the ways to make them.
 
     Parameters
     ----------
@@ -141,8 +141,9 @@ class ShardedPointwiseNode(SimulationNode):
     Notes
     -----
     ``initial_state`` is where the placement happens: it places every
-    state field onto the mesh with ``jax.device_put``.  ``update`` deliberately does neither
-    a ``device_put`` nor a ``shard_map`` -- the operation is pointwise, so
+    state field onto the mesh with ``jax.device_put``.  ``update``
+    deliberately does neither a ``device_put`` nor a ``shard_map`` --
+    the operation is pointwise, so
     XLA's SPMD propagation keeps a sharded input sharded through it, and
     forcing a placement would insert a resharding collective on every
     step.  The consequence is that the wrapper follows the sharding of

@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator fixes
+  exactly what the criterion measures — use a norm that sees the whole state
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

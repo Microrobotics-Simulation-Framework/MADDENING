@@ -334,9 +334,10 @@ class SimulationNode(ABC):
         if getattr(self, "_invalidating_static_cache", False):
             return
         # ``object.__setattr__`` so a node built as a frozen dataclass
-        # can still carry the guard; a node that refuses it outright
-        # (``__slots__``) cannot hold a back-reference either, so
-        # forwarding without a guard is still finite.
+        # can still carry the guard.  A node that refuses the attribute
+        # outright (``__slots__``) has no ``__dict__`` for the scan
+        # below to walk, so it forwards to nothing and the recursion
+        # stops there with or without a guard.
         try:
             object.__setattr__(self, "_invalidating_static_cache", True)
         except (AttributeError, TypeError):

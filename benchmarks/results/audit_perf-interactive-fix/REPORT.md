@@ -80,10 +80,11 @@ for spec in self._nodes.values():
 | `ShardedPointwiseNode` | `_inner` | no (has no static cache) |
 | `HybridNode` | `physics_node` | no |
 
-`HybridNode` is a public, documented composition (`maddening.core.simulation.
-hybrid_node`) that delegates `update`, `halo_width`, `initial_state`,
-`state_fields` and the params contract to the node it augments — including to a
-sharded wrapper.  Put one over a `ShardedStencilNode` and the fix does nothing:
+`HybridNode` (`maddening.core.simulation.hybrid_node`) is shipped and tested,
+and the CHANGELOG bills it as "a drop-in `SimulationNode` replacement".  It
+delegates `update`, `halo_width`, `initial_state`, `state_fields` and the
+params contract to the node it augments — including to a sharded wrapper.  Put
+one over a `ShardedStencilNode` and the fix does nothing:
 
 ```
 spec.node type: HybridNode
@@ -327,12 +328,16 @@ The four compliance scripts (`check_anomalies`, `check_impl_mapping`,
 `check_citations`, `check_transforms`) are clean; `check_citations` emits its
 two pre-existing "not cited by any algorithm guide" warnings and exits 0.
 
-A wider targeted run — `tests/cloud/multigpu tests/core/test_node.py
-tests/core/test_hybrid_node.py tests/core/test_static_array.py
-tests/core/test_static_data.py tests/core/test_scan_program_cache.py
-tests/core/test_replace_static_sharding.py tests/core/test_compile_cache.py
-tests/compliance` — was started; its result is recorded in
-`targeted_run.txt` beside this report.
+```
+pytest tests/cloud/multigpu tests/core/test_node.py tests/core/test_hybrid_node.py \
+       tests/core/test_static_array.py tests/core/test_static_data.py \
+       tests/core/test_scan_program_cache.py tests/core/test_replace_static_sharding.py \
+       tests/core/test_compile_cache.py tests/compliance -q -rs
+  -> 486 passed, 10 deselected, 3 xfailed in 384s
+```
+
+The 10 deselected are the `slow` markers; the 3 xfails are the two audit
+findings the property-test branch pinned, unrelated to this change.
 
 Differential evidence came from running the same probe script against the
 pre-fix tree and the fixed tree, so the before/after is code rather than

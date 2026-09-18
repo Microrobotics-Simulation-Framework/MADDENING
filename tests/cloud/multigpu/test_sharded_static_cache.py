@@ -619,3 +619,147 @@ def test_invalidate_static_cache_terminates_on_a_cycle():
     # The guard sits in the base method, so a cycle re-enters an
     # override at most once more before the forwarding stops.
     assert a.invalidations <= 2 and b.invalidations <= 2
+
+
+# ---------------------------------------------------------------------------
+# The wrapper proxies its inner node's static_data.
+#
+# ``SimulationNode.static_data`` defaults to the merged static_data of the
+# nodes held as attributes, so a sharded wrapper -- which declares none of
+# its own -- reports what it wraps.  Before that every wrapper hashed to
+# ``0`` forever and ``GraphManager._check_static_data_dirty`` could never
+# fire for the nodes that carry the cache above: the drift check did
+# nothing for exactly the nodes it was most needed on.
+#
+# What a wrapper reports is the inner node's *declaration*, not the
+# per-device materialisation.  See ``SimulationNode.static_data``: the
+# materialised shard is a bare ``jax.Array`` that has lost ``replication``
+# and ``shard_axis`` (and would raise ``MigrationError`` when hashed),
+# producing it costs a ``device_put`` on a property the drift check reads
+# every step, and a per-device view is a function of the mesh rather than
+# of the statics.
+# ---------------------------------------------------------------------------
+
+
+class _BiasedMaskDiffusion1D(InPlaceMaskDiffusion1D):
+    """Sharded mask plus a replicated static that can appear later.
+
+    Models a node that acquires a static after the graph is compiled (a
+    reconfiguration, a provider that fills in on restore) -- a change of
+    the *key set*, which is what the hash is contracted to catch.
+    """
+
+    def __init__(self, name: str, n: int):
+        super().__init__(name=name, n=n)
+        self.bias = None
+
+    @property
+    def static_data(self) -> dict:
+        sd = dict(super().static_data)
+        if self.bias is not None:
+            sd["bias"] = StaticArray(value=self.bias)
+        return sd
+
+
+def _biased_wrapper(n_devices: int = 1):
+    inner = _BiasedMaskDiffusion1D("d", n=N_CELLS)
+    mesh = create_device_mesh(shape=(n_devices,))
+    return inner, ShardedStencilNode(
+        inner, mesh, axis_map={"devices": 0}, boundary="edge",
+    )
+
+
+@pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
+def test_sharded_wrapper_reports_the_declaration_not_the_per_shard_view():
+    """Full shape and sharding policy, over four devices.
+
+    A per-shard view would report ``(N_CELLS // N_DEVICES,)`` and a bare
+    array, so an unchanged node would hash differently on a different
+    mesh -- every compile would look like drift.
+    """
+    inner, wrapper = _stencil_wrapper()
+    declared = wrapper.static_data["mask"]
+    assert isinstance(declared, StaticArray)
+    assert declared.shape == (N_CELLS,)          # not N_CELLS // N_DEVICES
+    assert declared.replication == "shard"
+    assert declared.shard_axis == 0
+    assert wrapper.static_data_hash() == inner.static_data_hash() != 0
+
+
+@pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
+def test_materialising_the_shards_does_not_move_the_wrappers_hash():
+    """Reading the per-device cache must not change what is reported."""
+    _, wrapper = _stencil_wrapper()
+    before = wrapper.static_data_hash()
+    _drive(wrapper, wrapper.initial_state(), 2)
+    assert wrapper._static_device_cache is not None
+    assert wrapper.static_data_hash() == before
+
+
+def test_a_hybrid_over_a_sharded_node_reports_the_statics_two_levels_in():
+    """``HybridNode(ShardedStencilNode(node))`` -- the composed shape.
+
+    The graph holds only the ``HybridNode``; a proxy covering one level
+    would leave this at ``0``.
+    """
+    inner, wrapper = _in_place_mask_wrapper()
+    hybrid = HybridNode(wrapper, lambda state, boundary_inputs, dt: {})
+    assert set(hybrid.static_data) == {"mask"}
+    assert hybrid.static_data["mask"].replication == "shard"
+    assert hybrid.static_data_hash() == inner.static_data_hash() != 0
+
+
+def test_drift_check_fires_for_a_changed_static_behind_two_wrappers():
+    """The whole point: a changed inner static reaches the graph.
+
+    The node gains a replicated static after ``compile()``; the next
+    ``step()`` has to retrace rather than run the stale executable.
+    """
+    inner, wrapper = _biased_wrapper()
+    hybrid = HybridNode(wrapper, lambda state, boundary_inputs, dt: {})
+    gm = GraphManager()
+    gm.add_node(hybrid)
+    gm.compile()
+    assert gm._static_data_hashes["d"] != 0, (
+        "the wrapper hashed to 0, so the drift check cannot fire"
+    )
+    gm.step()
+    # ``_n_traces`` resets on every compile, so the compiled step's own
+    # identity is what says a rebuild happened.
+    step_before = gm._compiled_step
+
+    inner.bias = np.zeros(N_CELLS, dtype=np.float32)
+
+    assert gm._check_static_data_dirty() is True
+    assert gm._dirty is True
+    gm.step()
+    assert gm._compiled_step is not step_before
+    assert gm._static_data_hashes["d"] == hybrid.static_data_hash()
+
+
+def test_drift_check_stays_quiet_behind_two_wrappers_when_nothing_changed():
+    """A check that always fires is as useless as one that never does.
+
+    Includes a parameter-driven rebuild of the static array: a *new
+    array object* of the same shape and dtype must not read as drift,
+    because the hash is over shape/dtype/replication/shard_axis by
+    contract and recompiling on it would undo the cached
+    materialisation's whole purpose.
+    """
+    inner, wrapper = _biased_wrapper()
+    hybrid = HybridNode(wrapper, lambda state, boundary_inputs, dt: {})
+    gm = GraphManager()
+    gm.add_node(hybrid)
+    gm.compile()
+    gm.step()
+    step_before = gm._compiled_step
+
+    for _ in range(3):
+        gm.step()
+        assert gm._check_static_data_dirty() is False
+        assert gm._dirty is False
+
+    inner._mask = np.full(N_CELLS, 0.5, dtype=np.float32)   # same shape
+    assert gm._check_static_data_dirty() is False
+    gm.step()
+    assert gm._compiled_step is step_before

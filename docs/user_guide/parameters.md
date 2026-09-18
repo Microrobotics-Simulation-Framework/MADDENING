@@ -180,6 +180,16 @@ bit-identical.  Gradients through the whole graph come from a single
 `jax.value_and_grad`; a non-finite gradient raises rather than
 continuing.
 
+All three fitters take a `mask=` that *narrows* `gm.trainable_mask()` —
+fit two of the three trainable constants, say.  It cannot widen it: a
+mask naming a leaf whose spec says `trainable=False` is a `ValueError`,
+because `unconstrain` / `constrain` apply a leaf's transform and bounds
+only when its spec is trainable, so such a leaf would be stepped in
+physical coordinates with nothing clipping it.  To fit a frozen
+parameter, make it trainable in its `ParamSpec` — that is what turns its
+bounds and transform on.  (`fim`'s `mask=` is unrestricted: it
+linearises, it never steps a parameter.)
+
 ## Persistence and FMI
 
 * **Checkpoints** (`save_state` / `load_state`) store `gm.params`

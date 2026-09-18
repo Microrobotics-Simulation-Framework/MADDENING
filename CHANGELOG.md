@@ -174,6 +174,9 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `maddening.core.simulation.calibration.calibrate` and
+  `tune_coupling_params` warn and are removed in 0.5.0; use
+  `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
 - `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
@@ -189,6 +192,12 @@ guidance; the itemized changes follow.
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
   and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead
+- **A wrapper now reports the `static_data` of the node it wraps**, so the
+  `static_data` drift check finally fires through `ShardedStencilNode`,
+  `HybridNode` and friends instead of hashing to `0` forever
+- **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
+  `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
+  could leave its bounds — make the parameter trainable in the spec instead
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it
@@ -309,6 +318,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
+  and the data now come from the descriptor that was checked, closing a
+  time-of-check/time-of-use window for a writer in the config directory
 - **FMU bridge no longer unpickles importer bytes** (CRITICAL): the FMU-state
   blob is an arrays-only `npz` validated before use — regenerate any stored
   blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only

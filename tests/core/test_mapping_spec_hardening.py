@@ -14,6 +14,8 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import builtins
+import io
 import json
 import tempfile
 import warnings
@@ -259,6 +261,120 @@ def test_asset_of_a_non_numeric_dtype_is_refused(tmp_path):
         make_point_resolver(base_dir=tmp_path)({"asset": "words.npy"})
 
 
+# ------------------------------------ F3 / F4: the asset file is opened exactly once
+
+def _count_opens_of(monkeypatch, target: Path) -> dict:
+    """Count every open of ``target`` *by path*, however it is opened.
+
+    ``os.open``, ``builtins.open`` and ``io.open`` are the three ways
+    this code path (and numpy, and zipfile) can name a file; each extra
+    one is another window in which the name can come to mean a different
+    file than the one that was checked.
+    """
+    counter = {"n": 0}
+    real_os_open, real_builtins_open, real_io_open = os.open, builtins.open, io.open
+
+    def names_target(path) -> bool:
+        try:
+            return Path(os.fsdecode(path)) == target
+        except TypeError:                    # an int fd, or something stranger
+            return False
+
+    def counted(wrapped):
+        def opener(path, *args, **kwargs):
+            if names_target(path):
+                counter["n"] += 1
+            return wrapped(path, *args, **kwargs)
+        return opener
+
+    monkeypatch.setattr(os, "open", counted(real_os_open))
+    monkeypatch.setattr(builtins, "open", counted(real_builtins_open))
+    monkeypatch.setattr(io, "open", counted(real_io_open))
+    return counter
+
+
+@pytest.mark.parametrize("name, save", [
+    ("pts.npy", lambda path: np.save(path, np.array([1.0, 2.0, 3.0]))),
+    ("pts.npz", lambda path: np.savez(path, pts=np.array([1.0, 2.0, 3.0]))),
+])
+def test_an_asset_is_opened_by_path_exactly_once(tmp_path, monkeypatch, name, save):
+    """Resolving the path, then opening it again to read the header, then
+    a third time to read the data, gives a writer in the config directory
+    two windows in which to swap the checked file for a symlink.  The
+    loader opens the resolved path once and does everything else on that
+    descriptor, so there is nothing to swap in between."""
+    save(tmp_path / name)
+    real = (tmp_path / name).resolve()
+    counter = _count_opens_of(monkeypatch, real)
+
+    points = make_point_resolver(base_dir=tmp_path)({"asset": name})
+
+    np.testing.assert_array_equal(points, [1.0, 2.0, 3.0])
+    assert counter["n"] == 1, f"{name} was opened by path {counter['n']} times, not once"
+
+
+def test_a_final_path_component_that_is_a_symlink_is_refused_at_open_time(tmp_path):
+    """``O_NOFOLLOW`` on the open of the *resolved* path.
+
+    A reference that names a symlink is not affected: the link is
+    followed by the resolution, and the resolved path — the target — is
+    what is opened, so a link inside the config directory to a file
+    inside it still loads.  The flag only fires when the last component
+    is a symlink at the moment of the open, which after a successful
+    ``resolve()`` means it became one since, i.e. the race.
+    """
+    np.save(tmp_path / "real.npy", np.array([1.0, 2.0]))
+    (tmp_path / "link.npy").symlink_to(tmp_path / "real.npy")
+
+    # A symlink reference, resolved the ordinary way, still loads.
+    resolve = make_point_resolver(base_dir=tmp_path)
+    np.testing.assert_array_equal(resolve({"asset": "link.npy"}), [1.0, 2.0])
+
+    # Handed a path whose final component is a link — what the resolved
+    # path becomes if it is swapped after the check — the open refuses.
+    with pytest.raises(PointReferenceError, match="cannot open point asset"):
+        ms._open_asset(tmp_path / "link.npy", "link.npy")
+
+    fp, _info = ms._open_asset(tmp_path / "real.npy", "real.npy")
+    fp.close()
+
+
+def test_the_asset_size_cap_is_measured_on_the_opened_descriptor(tmp_path):
+    """``stat`` on a path answers about whatever that name means *now*;
+    ``fstat`` answers about the file that was opened and keeps answering
+    after the name has been given to another file.  The size the loader
+    checks the header against comes from the descriptor it reads, so a
+    forged header cannot be excused by a different file of the same
+    name."""
+    _forged_npy(tmp_path / "short.npy", (1000,))          # claims 8000 bytes of data
+    np.save(tmp_path / "big.npy", np.zeros(1000))         # really holds 8000
+
+    fp, info = ms._open_asset(tmp_path / "short.npy", "short.npy")
+    try:
+        os.replace(tmp_path / "big.npy", tmp_path / "short.npy")
+        assert (tmp_path / "short.npy").stat().st_size > info.st_size, "swap did not take"
+        # The descriptor still describes, and still reads, the small file.
+        assert info.st_size < 1024
+        shape, dtype = ms._read_npy_header(fp, "asset 'short.npy'")
+        with pytest.raises(PointReferenceError, match="the file holds only"):
+            ms._check_declared_size(shape, dtype, "asset 'short.npy'",
+                                    available=info.st_size - fp.tell())
+    finally:
+        fp.close()
+
+
+def test_an_asset_that_is_not_a_regular_file_is_refused_without_blocking(tmp_path):
+    """A FIFO named ``*.npy`` opens for reading only once someone writes
+    to it, which would hang the load.  The open is non-blocking and the
+    descriptor's mode decides."""
+    os.mkfifo(tmp_path / "pipe.npy")
+    with pytest.raises(PointReferenceError, match="is not a file"):
+        make_point_resolver(base_dir=tmp_path)({"asset": "pipe.npy"})
+    (tmp_path / "dir.npy").mkdir()
+    with pytest.raises(PointReferenceError, match="is not a file"):
+        make_point_resolver(base_dir=tmp_path)({"asset": "dir.npy"})
+
+
 # ------------------------------------------- F5: every rebuild failure names its edge
 
 @pytest.mark.parametrize("mapping, message", [
@@ -459,11 +575,19 @@ def test_to_dict_warns_when_live_mapping_weights_differ_from_the_recipe():
 
 # ------------------------------------------------------------- F14: sharded wrappers
 
-def test_node_reference_to_a_sharded_wrapper_node_is_a_clear_error():
-    """``ShardedStencilNode`` classifies its inner node's ``static_data``
-    at build time and exposes none of its own, so a point reference cannot
-    reach ``grid_x`` through the wrapper.  Documented behaviour: the
-    resolver says so and points at the asset form."""
+def test_node_reference_reaches_through_a_sharded_wrapper():
+    """A point reference resolves to the statics of the node a wrapper wraps.
+
+    This inverts what this test used to assert.  ``ShardedStencilNode``
+    exposed none of its inner node's ``static_data``, so a reference to
+    ``grid_x`` through the wrapper was a documented dead end and the
+    resolver's error pointed at the asset form instead.  Now that
+    ``SimulationNode.static_data`` forwards to the nodes a node wraps, the
+    reference reaches the *declaration* the inner node made -- the full
+    ``(8,)`` grid, not a per-device shard -- which is exactly what a point
+    set should be.  The asset route still works and is still the right
+    answer for points that are not a node's static data at all.
+    """
     from maddening.cloud.multigpu.device_mesh import create_device_mesh
     from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
     from maddening.core.static_data import StaticArray
@@ -495,13 +619,24 @@ def test_node_reference_to_a_sharded_wrapper_node_is_a_clear_error():
     inner = Stencil1D("rod")
     wrapper = ShardedStencilNode(inner, create_device_mesh(shape=(1,)),
                                  axis_map={"devices": 0}, boundary="edge")
-    assert wrapper.static_data == {}
+    grid = np.asarray(inner.static_data["grid_x"].value)
+
+    # The wrapper now reports the inner node's declaration, full length.
+    assert set(wrapper.static_data) == {"grid_x"}
+    assert np.asarray(wrapper.static_data["grid_x"].value).shape == grid.shape
+
     gm = GraphManager()
     gm.add_node(wrapper)
-    with pytest.raises(PointReferenceError, match="does not re-export the static_data"):
-        gm.point_resolver()({"node": "rod", "field": "grid_x"})
-    # the supported route: save the inner node's points as an asset
-    grid = np.asarray(inner.static_data["grid_x"].value)
+    resolved = gm.point_resolver()({"node": "rod", "field": "grid_x"})
+    np.testing.assert_array_equal(resolved, grid)
+
+    # A field that is genuinely absent still fails, and the hint no longer
+    # claims a wrapper cannot re-export -- because it now can.
+    with pytest.raises(PointReferenceError) as exc:
+        gm.point_resolver()({"node": "rod", "field": "not_a_field"})
+    assert "does not re-export" not in str(exc.value)
+
+    # the asset route still works
     with tempfile.TemporaryDirectory() as tmp:
         np.save(Path(tmp) / "grid.npy", grid)
         np.testing.assert_array_equal(

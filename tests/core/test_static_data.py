@@ -8,6 +8,7 @@ import pytest
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
+from maddening.core.simulation.hybrid_node import HybridNode
 from maddening.core.static_data import StaticArray
 
 
@@ -459,3 +460,165 @@ class TestHeatNodeStaticData:
         import numpy as np
         T = np.asarray(gm.get_node_state("rod")["temperature"])
         assert np.all(np.isfinite(T))
+
+
+# ---------------------------------------------------------------------------
+# A wrapper reports the statics of the node it wraps.
+#
+# ``SimulationNode.static_data`` defaults to the merged static_data of
+# every node held as an attribute, so a wrapper that declares none of its
+# own still hashes what it wraps.  Before that, every wrapper hashed to
+# ``0`` forever and ``_check_static_data_dirty`` could not fire for the
+# nodes most likely to need it.
+# ---------------------------------------------------------------------------
+
+
+class _Wrapper(SimulationNode):
+    """A wrapper that declares no static_data of its own."""
+
+    def __init__(self, inner: SimulationNode):
+        super().__init__(inner.name, inner.delta_t)
+        self.inner = inner
+
+    def initial_state(self):
+        return self.inner.initial_state()
+
+    def update(self, state, boundary_inputs, dt):
+        return self.inner.update(state, boundary_inputs, dt)
+
+
+class _WrapperWithOwnStatics(_Wrapper):
+    """A wrapper that adds a static of its own and merges the rest in."""
+
+    @property
+    def static_data(self) -> dict:
+        return {"own": StaticArray(jnp.zeros(3, dtype=jnp.float32)),
+                **super().static_data}
+
+
+class _TwoNodeHolder(SimulationNode):
+    """Holds two nodes that both declare a ``lookup``."""
+
+    def __init__(self, name, timestep, first, second):
+        super().__init__(name, timestep)
+        self.first = first
+        self.second = second
+
+    def initial_state(self):
+        return {"y": jnp.array(0.0)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"y": state["y"] + dt}
+
+
+class TestWrapperStaticDataProxy:
+    def test_a_node_that_wraps_nothing_reports_nothing(self):
+        """The forwarding default must not invent statics for a leaf."""
+        assert _PointwiseNode("p", timestep=0.01).static_data == {}
+        assert _PointwiseNode("p", timestep=0.01).static_data_hash() == 0
+
+    def test_one_wrapper_reports_the_wrapped_nodes_statics(self):
+        inner = _StaticDataNode("s", timestep=0.01, n=8)
+        wrapper = _Wrapper(inner)
+        assert set(wrapper.static_data) == {"lookup"}
+        assert wrapper.static_data["lookup"].shape == (8,)
+        assert wrapper.static_data_hash() == inner.static_data_hash()
+        assert wrapper.static_data_hash() != 0
+
+    def test_a_production_wrapper_proxies_too(self):
+        """``HybridNode`` declares no statics, so it inherits the default."""
+        inner = _StaticDataNode("s", timestep=0.01, n=8)
+        hybrid = HybridNode(inner, lambda state, boundary_inputs, dt: {})
+        assert hybrid.static_data_hash() == inner.static_data_hash() != 0
+
+    def test_the_proxy_composes_through_a_nested_pair(self):
+        """Two levels of wrapping, because one level is not the real case.
+
+        ``HybridNode(ShardedStencilNode(node))`` is the shape the sharded
+        statics cache lives in; a proxy that only covered the outermost
+        wrapper would report ``0`` for it.
+        """
+        inner = _StaticDataNode("s", timestep=0.01, n=8)
+        nested = HybridNode(_Wrapper(inner), lambda s, b, d: {})
+        assert set(nested.static_data) == {"lookup"}
+        assert nested.static_data["lookup"].shape == (8,)
+        assert nested.static_data_hash() == inner.static_data_hash() != 0
+
+    def test_hash_moves_when_the_wrapped_nodes_statics_change(self):
+        inner = _StaticDataNode("s", timestep=0.01, n=4)
+        nested = HybridNode(_Wrapper(inner), lambda s, b, d: {})
+        before = nested.static_data_hash()
+        inner._lut = jnp.arange(8, dtype=jnp.float32)      # a remesh
+        assert nested.static_data_hash() != before
+
+    def test_hash_holds_when_the_wrapped_nodes_statics_do_not(self):
+        """A check that always fires is as useless as one that never does.
+
+        The hash is over shape/dtype/replication/shard_axis by contract,
+        never over contents, so rebuilding the same-shaped array must
+        leave it alone.
+        """
+        inner = _StaticDataNode("s", timestep=0.01, n=4)
+        nested = HybridNode(_Wrapper(inner), lambda s, b, d: {})
+        before = nested.static_data_hash()
+        assert nested.static_data_hash() == before          # stable re-read
+        inner._lut = jnp.arange(4, dtype=jnp.float32) * 3.0  # same shape
+        assert nested.static_data_hash() == before
+
+    def test_drift_check_fires_for_a_changed_wrapped_node(self):
+        gm = GraphManager()
+        inner = _StaticDataNode("s", timestep=0.01, n=4)
+        gm.add_node(HybridNode(_Wrapper(inner), lambda s, b, d: {}))
+        gm.compile()
+        assert gm._static_data_hashes["s"] != 0
+        inner._lut = jnp.arange(8, dtype=jnp.float32)
+        assert gm._check_static_data_dirty() is True
+        assert gm._dirty is True
+
+    def test_drift_check_stays_quiet_for_an_unchanged_wrapped_node(self):
+        gm = GraphManager()
+        inner = _StaticDataNode("s", timestep=0.01, n=4)
+        gm.add_node(HybridNode(_Wrapper(inner), lambda s, b, d: {}))
+        gm.compile()
+        for _ in range(3):
+            gm.step()
+            assert gm._check_static_data_dirty() is False
+            assert gm._dirty is False
+
+    def test_a_wrapper_can_add_its_own_statics_and_keep_the_wrapped_ones(self):
+        inner = _StaticDataNode("s", timestep=0.01, n=4)
+        wrapper = _WrapperWithOwnStatics(inner)
+        assert set(wrapper.static_data) == {"own", "lookup"}
+        assert wrapper.static_data_hash() not in (
+            0, inner.static_data_hash(),
+        )
+
+    def test_two_wrapped_nodes_sharing_a_key_both_reach_the_hash(self):
+        """Neither may silently displace the other and go unhashed."""
+        first = _StaticDataNode("a", timestep=0.01, n=4)
+        second = _StaticDataNode("b", timestep=0.01, n=8)
+        holder = _TwoNodeHolder("h", 0.01, first, second)
+        assert len(holder.static_data) == 2
+        before = holder.static_data_hash()
+        second._lut = jnp.arange(16, dtype=jnp.float32)
+        after = holder.static_data_hash()
+        assert after != before
+        first._lut = jnp.arange(2, dtype=jnp.float32)
+        assert holder.static_data_hash() != after
+
+    def test_a_cycle_between_two_nodes_terminates(self):
+        class _Holder(SimulationNode):
+            def __init__(self, name):
+                super().__init__(name, timestep=0.01)
+                self.other: SimulationNode | None = None
+
+            def initial_state(self):
+                return {"x": jnp.array(0.0)}
+
+            def update(self, state, boundary_inputs, dt):
+                return {"x": state["x"] + dt}
+
+        a, b = _Holder("a"), _Holder("b")
+        a.other, b.other = b, a
+        assert a.static_data == {}          # must return, not recurse
+        assert a.static_data_hash() == 0

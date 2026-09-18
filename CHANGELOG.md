@@ -204,6 +204,9 @@ guidance; the itemized changes follow.
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64
+- **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
+  "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
+  `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state

@@ -29,11 +29,14 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from maddening.cloud import entrypoint, resume
 from maddening.cloud.resume import download_and_load_state
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.core.simulation import checkpoint as ck
 from maddening.nodes.spring import SpringDamperNode
 
@@ -54,6 +57,43 @@ def _spring_graph(steps: int = 0) -> GraphManager:
 
 def _position(gm: GraphManager) -> float:
     return float(gm.get_node_state("s")["position"])
+
+
+class _RelaxWithVectorParam(SimulationNode):
+    """A node whose parameter *shape* is fixed at construction.
+
+    Two graphs built with different ``gain_len`` agree on every node
+    name, field name and state shape and disagree on one params leaf:
+    the redeploy-after-a-code-change that a resume has to survive.
+    """
+
+    def __init__(self, name="r", gain_len=3, timestep=0.01):
+        super().__init__(name=name, timestep=timestep, rate=0.5,
+                         gainvec=[1.0] * int(gain_len))
+
+    def halo_width(self):
+        return {}
+
+    def state_fields(self):
+        return ["x"]
+
+    def initial_state(self):
+        return {"x": jnp.zeros(4, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        gain = jnp.sum(jnp.asarray(p["gainvec"]))
+        return {"x": state["x"] + p["rate"] * dt * (gain - state["x"])}
+
+
+def _relax_graph(*, gain_len: int) -> GraphManager:
+    gm = GraphManager()
+    gm.add_node(_RelaxWithVectorParam(gain_len=gain_len))
+    gm.compile()
+    return gm
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -403,6 +443,32 @@ class TestUrlEdgeCases:
         assert _position(fresh) == _position(gm)
         assert (tmp_path / "dl" / "my snap.npz").exists()
 
+    def test_a_bare_path_is_used_verbatim_and_a_file_url_is_decoded(self, tmp_path):
+        """``%`` is a filename character in a path and an escape in a URL.
+
+        ``_local_path`` decoded neither while its docstring said it
+        decoded both, and the download's *destination* filename decoded
+        both -- three answers to one question.  A bare path now means
+        exactly the file it names, in the source and in the destination.
+        """
+        gm = _spring_graph(steps=3)
+        literal = tmp_path / "a%20b.npz"                  # a literal '%20'
+        ck.save_state_with_manifest(gm, literal)
+        assert literal.exists() and not (tmp_path / "a b.npz").exists()
+
+        fresh = _spring_graph()
+        download_and_load_state(fresh, str(literal), dest_dir=tmp_path / "dl")
+        assert _position(fresh) == _position(gm)
+        # ...and the copy kept the name the caller wrote, not a decoded one.
+        assert (tmp_path / "dl" / "a%20b.npz").exists()
+        assert not (tmp_path / "dl" / "a b.npz").exists()
+
+        # The same characters in a file:// URL *are* an escape, so that
+        # path is decoded and names a different (missing) file.
+        with pytest.raises(FileNotFoundError, match="a b.npz"):
+            download_and_load_state(_spring_graph(), f"file://{literal}",
+                                    dest_dir=tmp_path / "dl2")
+
     def test_windows_drive_letter_is_reported_as_unsupported_scheme(self, tmp_path):
         with pytest.raises(ValueError, match=r"Unsupported URL scheme 'c'.*drive-letter"):
             download_and_load_state(_spring_graph(), r"C:\Users\n\snap.npz", dest_dir=tmp_path)
@@ -438,9 +504,55 @@ class TestEntrypointLogging:
             got = entrypoint.resume_from_env(server, {"RESUME_FROM_URL": url})
         assert got is None
         text = caplog.text
-        assert "starting fresh" in text
+        assert "RESUME FAILED" in text
         assert "SECRET" not in text
         assert "file:///nonexistent/dir/sim.npz?<redacted>" in text
+
+    def test_a_failed_resume_is_never_logged_as_a_fresh_start(self, caplog):
+        """The operator must be able to tell the two apart in the log.
+
+        A failed resume used to log "starting fresh" -- the same thing a
+        run that was never asked to resume would look like -- while the
+        graph could be half-restored from the checkpoint it had just
+        rejected.
+        """
+        server = _FakeServer(_spring_graph())
+        url = "file:///nonexistent/dir/sim.npz"
+        with caplog.at_level(logging.DEBUG, logger="maddening.cloud.entrypoint"):
+            assert entrypoint.resume_from_env(server, {"RESUME_FROM_URL": url}) is None
+        failed = caplog.text
+        assert "fresh start" not in failed.lower().replace("a genuine fresh start", "")
+        assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="maddening.cloud.entrypoint"):
+            assert entrypoint.resume_from_env(server, {}) is None
+        assert caplog.records == []
+
+    def test_a_resume_that_fails_on_params_leaves_the_graph_untouched(
+        self, tmp_path, caplog,
+    ):
+        """What the entry point says and what the graph holds must agree.
+
+        ``load_state`` applied every node state before validating the
+        params, so a checkpoint rejected for a changed parameter shape
+        was left *in* the graph the entry point then called fresh.
+        """
+        src = _relax_graph(gain_len=3)
+        src.set_node_state("r", {"x": jnp.asarray([7.0, 8.0, 9.0, 10.0], jnp.float32)})
+        src.params["nodes"]["r"]["gainvec"] = jnp.full((3,), 2.0, jnp.float32)
+        npz, _ = ck.save_state_with_manifest(src, tmp_path / "snap.npz")
+
+        server = _FakeServer(_relax_graph(gain_len=4))   # the redeployed graph
+        before = np.asarray(server.gm.get_node_state("r")["x"]).copy()
+        with caplog.at_level(logging.INFO, logger="maddening.cloud.entrypoint"):
+            got = entrypoint.resume_from_env(
+                server, {"RESUME_FROM_URL": f"file://{npz}"})
+
+        assert got is None
+        assert "RESUME FAILED" in caplog.text
+        np.testing.assert_array_equal(
+            np.asarray(server.gm.get_node_state("r")["x"]), before)
 
     def test_successful_resume_logs_manifest_key_fields(self, saved_checkpoint, caplog):
         src_gm, npz, _ = saved_checkpoint

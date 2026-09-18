@@ -33,11 +33,35 @@ how the per-step numbers are obtained; this page is about what they say.
 > Replaying the 350-row sweep across the change: mean iterations per
 > step +10.3%, 438 of 14 733 converged step-verdicts lost against 8
 > gained, and 12 of 350 rows that used to converge now exhaust their
-> cap — eleven of them `acceleration="fixed"` at ω = 0.5 or 0.8, which
-> halves every step and so has the largest gap between its residual and
-> its error.  Iteration counts and `converged_fraction` on this page are
-> therefore lower bounds; re-recording the baselines is queued
-> (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+> cap — eleven of them `acceleration="fixed"` at ω = 0.5 or 0.8.  Those
+> rows *contract slowly on these fixtures*, so their error is a large
+> multiple of their residual.  An earlier wording here said ω = 0.5
+> "halves every step and so has the largest gap between its residual
+> and its error", which reads as a floor ρ ≥ 1 − ω.  **There is no such
+> floor, and that mechanism is retracted.**  Relaxing maps an eigenvalue
+> λ to `1 - ω + ωλ`, so a λ near −1 drives ρ towards zero — damping
+> oscillatory modes is what under-relaxation is *for* — and a search
+> over 20 000 random iteration matrices at ω = 0.5 found ρ = **0.156**
+> (`benchmarks/results/convergence_error_bound/REPORT.md`, corrected
+> 2026-09-18 in `0ee18a0`).  The measured numbers are unaffected; the
+> generality was not there.  Iteration counts and `converged_fraction`
+> on this page are therefore lower bounds; re-recording the baselines is
+> queued (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+
+> **Where each number on this page comes from.**  Unless it says
+> otherwise, a figure is from `benchmarks/results/coupling_sweep_cpu.json`
+> (the 420-row fast sweep) or `coupling_sweep_expensive_cpu.json` (the
+> two grid fixtures), both recorded **2026-09-18**, `689d7c2`.  A figure
+> tagged **(re-measured `c51cd6a`, 2026-09-19)** is *not* from those
+> files: the fast sweep was re-run at that commit with the same
+> configuration
+> (`benchmarks/results/audit_040_final/docs-compliance/coupling_sweep_cpu_HEAD_c51cd6a.json`)
+> and the recorded value no longer held, so the re-run's value is
+> quoted instead.  A figure marked **[not re-evidenced]** is one the
+> re-run contradicted with nothing on this page left to support it; it
+> is marked rather than deleted, so that it is not quoted again.  The
+> grid file was **not** re-run, so every `expensive-pair` and
+> `heterogeneous` figure is still the 2026-09-18 recording.
 
 ## Start here
 

@@ -234,9 +234,17 @@ _KNOWN_DISAGREEMENTS = {
 #: the registry bakes in.  Those lanes assert that *every* configuration
 #: is inside the fixture's reach, and under 0.4.0's error-bound
 #: criterion ``acceleration="fixed"`` at omega = 0.5 is not inside the
-#: registry's caps: under-relaxation halves every step by construction,
-#: so the residual is worth at least twice itself in error and often
-#: six times.  Measured at the registry's caps, ``jac/fixed0.5/l2``
+#: registry's caps: it contracts slowly *on these fixtures*, so its
+#: residual is worth several times itself in error -- six times
+#: measured on ``chain-5``.  Not "by construction": an earlier wording
+#: here said under-relaxation halves every step and so floors rho at
+#: 1 - omega, and that was retracted in ``0ee18a0``
+#: (``benchmarks/results/convergence_error_bound/REPORT.md``) after a
+#: search over 20 000 random iteration matrices at omega = 0.5 found
+#: rho = 0.156.  Relaxing maps an eigenvalue lam to
+#: ``1 - omega + omega*lam``, which a lam near -1 drives towards zero.
+#: The cap below is set from the measurements, which are unaffected.
+#: Measured at the registry's caps, ``jac/fixed0.5/l2``
 #: leaves ``chain-5`` at an error estimate of 1.5e-04 (residual
 #: 2.4e-05) and ``heterogeneous-2000`` at 1.3e-04 (Gauss-Seidel) /
 #: 5.2e-03 (Jacobi), all against a 1e-04 threshold.  120 clears every

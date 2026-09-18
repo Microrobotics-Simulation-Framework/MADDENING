@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
   adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
 - **`error_estimate` accounts for `relaxation`** — and is an estimate, not a bound
+- **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
+  "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
+  `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state

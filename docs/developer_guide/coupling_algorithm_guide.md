@@ -41,7 +41,7 @@ not, and says which.
 
 | your graph | start with | why |
 |---|---|---|
-| anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.7–1.9x fewer iterations than Jacobi on every shape measured, and Aitken removes up to half of what is left (0–49% under the interface norm).  It is the sweep's own best configuration on eight of the eighteen fast fixtures.  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free |
+| anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.7–1.9x fewer iterations than Jacobi on every shape where both converge (1.69 on `chain-2` to 1.93 on `slow-drift`), and Aitken removes up to half of what is left (0–49% under the interface norm).  It is the sweep's own best configuration on eight of the eighteen fast fixtures.  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free |
 | cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
 | contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.1 iterations where `gs/none/l2` exhausts its cap of 60 on 98% of steps and converges on 2%.  Not faster there (0.21 ms against 0.10) — right rather than fast |
 | one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | the sweep's best configuration on `heterogeneous`: 3.0 iterations at 1.78 ms, against 5.4 and 2.02 for plain iteration and 2.0 at 122 ms for the same accelerator on every field.  The quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid.  Under **Jacobi** the same restriction costs convergence — see below |
@@ -54,12 +54,11 @@ not, and says which.
 
 Three settings that are nearly always right and are not in the table:
 
-* **Leave `relaxation` alone unless your fixed point creeps.** Fixed
-  under-relaxation lost on seventeen of the eighteen fast fixtures,
-  usually by a factor of two in iterations, and it rescued no divergent
-  case at all.  The exception is `slow-drift` under Jacobi, where
-  ω = 0.8 cuts iterations 44% and is the fixture's best configuration.
-  See below.
+* **Leave `relaxation` alone under Gauss-Seidel.** Not one Gauss-Seidel
+  row in the sweep beats its unrelaxed counterpart, usually by a factor
+  of two in iterations, and no ω rescued a divergent case.  Under
+  *Jacobi* it is worth measuring: ω = 0.8 cuts iterations 44% on
+  `slow-drift` and 18% on `expensive-pair`.  See below.
 * **Cap `max_iterations` at what you actually expect.** It is not a free
   safety margin: IQN allocates `max_iterations - 1` secant columns, so
   the cap sets the size of its least-squares problem.
@@ -198,8 +197,9 @@ radius itself (0.40 → 0.80), and so the absolute iteration count.
 **2. The star is where Gauss-Seidel wins by the most, not the least.**
 The expectation was that leaves which cannot see each other would leave
 Gauss-Seidel's ordering nothing to exploit, making Jacobi competitive.
-Measured, the star shows the *largest* Gauss-Seidel advantage of any
-shape — 1.83–1.85 against 1.69–1.77 on the chain — and it is flat in
+Measured, the star family shows the *largest* Gauss-Seidel advantage of
+any shape family — 1.83–1.85 against 1.69–1.77 on the chain, with only
+`stiff-pair-0.8` at 1.83 reaching into the same band — and it is flat in
 width (20.5 iterations at 2 leaves, 22.9 at 16).  The hub-to-leaf
 dependency alone is enough to give the full squared radius; ordering
 *among* the leaves was never what produced the factor.  On one device
@@ -225,29 +225,37 @@ and Jacobi's cleaner decay stops helping: on `star-16` Aitken buys
 Jacobi **nothing at all** (42.4 → 42.5, inside the sampling spread of an
 iteration count that varies by step) and Gauss-Seidel 53%.
 
-**4. Fixed under-relaxation lost everywhere except one regime, and that
-regime is `slow-drift`.**  The prediction was that it would lose
-everywhere, and on seventeen of the eighteen fast fixtures it does,
-roughly doubling the iteration count at ω = 0.5 (`chain-20`:
-23.7 → 51.3; `star-16`: 22.9 → 49.4).  The exception is Jacobi on
-`slow-drift`, the fixture that exists for the "fixed point barely moves"
-regime, where ω = 0.8 cuts iterations by 44%:
+**4. Fixed under-relaxation never helps Gauss-Seidel, and helps Jacobi
+on two fixtures out of twenty.**  The prediction was that it would lose
+everywhere, and the shape of where it does not is more useful than the
+prediction was.  Across all twenty fixtures, both norms and both ω
+values, **not one Gauss-Seidel row beats its unrelaxed counterpart on
+iterations** — it usually roughly doubles them (`chain-20`:
+23.7 → 51.3; `star-16`: 22.9 → 49.4; `slow-drift`: 3.2 → 4.3).  Every
+row where relaxation wins is a Jacobi row, and there are two of them:
 
-| `slow-drift`, Jacobi | ω = 1 | ω = 0.5 | ω = 0.8 |
+| fixture / norm | ω = 1 | ω = 0.5 | ω = 0.8 |
 |---|---|---|---|
-| L2 norm | 6.14 | 4.30 | **3.46** |
-| interface norm | 6.40 | 4.54 | **3.84** |
+| `slow-drift`, jacobi, L2 | 6.14 | 4.30 | **3.46** |
+| `slow-drift`, jacobi, interface | 6.40 | 4.54 | **3.84** |
+| `expensive-pair`, jacobi, interface | 2.45 | 2.20 | **2.00** |
 
-`jacobi`/`fixed` ω = 0.8 / L2 is in fact the sweep's own best
-configuration for that fixture.  That is not luck: a constant ω is a
-one-parameter model of the error's decay, and a fixed point that barely
-moves between steps is the one case where that model is right for the
-whole run.  Everywhere else the error is a mixture of modes and a
-constant ω is the wrong constant.  So: leave `relaxation` alone unless
-your fixed point creeps, and if it does, measure both ω values.
+`jacobi`/`fixed` ω = 0.8 / L2 is the sweep's own best configuration for
+`slow-drift`, and the `expensive-pair` row is the more interesting of
+the two because that fixture is compute-bound, so its 3.33 → 2.60 ms is
+a real 22% and not dispatch.
 
-What under-relaxation does *not* do, anywhere, is rescue a divergent
-group.  This is arithmetic, not bad luck: relaxing maps an eigenvalue λ
+The split is the textbook one, and it is the same sentence as the next
+paragraph read the other way.  Under-relaxation damps an iteration that
+*overshoots*.  A Jacobi iteration matrix on these shapes has eigenvalues
+of both signs, so its error alternates and overshoots; Gauss-Seidel's is
+the square of it, positive, so the error approaches monotonically and
+damping it only slows the approach.  Read that way, "leave `relaxation`
+alone" is advice about Gauss-Seidel, and under Jacobi on a graph whose
+fixed point barely moves it is worth measuring both ω values.
+
+What under-relaxation does *not* do, under either mode, is rescue a
+divergent group.  This is arithmetic, not bad luck: relaxing maps an eigenvalue λ
 to `1 - ω + ωλ`, which for a *positive* λ > 1 stays above 1 for every
 ω > 0.  `stiff-pair-1.2` has a Gauss-Seidel eigenvalue of +1.44 and
 neither ω = 0.5 nor ω = 0.8 converged a single step of it.
@@ -382,8 +390,9 @@ worth defaulting to.
 Half right, and the half that is wrong is the more useful half.
 
 The interface norm alone generalised from AR4.  Measured on
-`gs/none` across all eighteen fast fixtures it removes **−5% to 31%** of
-the iterations: 25–31% on the deep chains, the wide stars and the larger
+`gs/none` across the eighteen fast fixtures it removes **−5% to 31%** of
+the iterations, and far more than that on a grid fixture where the L2
+residual is mostly bulk (`expensive-pair` 6.0 → 1.5, a 75% cut): 25–31% on the deep chains, the wide stars and the larger
 rings, 13–25% on the small and the stiff pairs, nothing at all on
 `stiff-pair-1.2` (which converges nowhere), and −5% on `slow-drift`,
 where it costs a fifth of an iteration.  A blanket "25–35%" was the top

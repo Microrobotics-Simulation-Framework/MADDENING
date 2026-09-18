@@ -881,3 +881,114 @@ def test_recorded_sweep_signatures_exclude_the_driver_nodes(name):
         signed = {key.split(".", 1)[0] for key in row["state_signature"]}
         assert "driver" not in signed, f"{row['fixture']} / {row['label']}"
         assert signed, row["label"]
+
+
+# ---------------------------------------------------------------------------
+# The guide's universal claims, re-derived from the rows it cites
+# ---------------------------------------------------------------------------
+#
+# ``docs/developer_guide/coupling_algorithm_guide.md`` makes a handful of
+# claims of the form "X on every fixture".  Each of these tests re-derives
+# one of them from the committed JSON and fails when a counter-example
+# appears, so a re-recorded sweep cannot silently leave the prose behind.
+# That is how "fixed under-relaxation never won anything" survived in a
+# document whose own data had four counter-examples and whose own summary
+# field named a fixed configuration on three fixtures.
+
+
+def _measured_rows():
+    """Every measured row of the two sweeps the guide quotes, by key."""
+    out = {}
+    for name in ("coupling_sweep_cpu.json", "coupling_sweep_expensive_cpu.json"):
+        for row in _recorded(name)["rows"]:
+            if row.get("ok"):
+                out[(row["fixture"], row["label"])] = row
+    return out
+
+
+def test_fixed_relaxation_never_helps_gauss_seidel_and_helps_jacobi_twice():
+    """Guide: "not one Gauss-Seidel row beats its unrelaxed counterpart ...
+    every row where relaxation wins is a Jacobi row, and there are two"."""
+    rows = _measured_rows()
+    winners = set()
+    for (fixture, label), row in rows.items():
+        if row.get("acceleration") != "fixed" or row["converged_fraction"] < 1.0:
+            continue
+        plain = rows.get((fixture, label.replace(
+            "fixed%g" % row["relaxation"], "none")))
+        if plain is None or plain["converged_fraction"] < 1.0:
+            continue
+        if row["iterations_mean"] < plain["iterations_mean"]:
+            winners.add((fixture, row["iteration_mode"],
+                         row["convergence_norm"]))
+    assert not [w for w in winners if w[1] == "gauss-seidel"], sorted(winners)
+    assert {(w[0], w[2]) for w in winners} == {
+        ("slow-drift", "l2"),
+        ("slow-drift", "interface"),
+        ("expensive-pair", "interface"),
+    }, sorted(winners)
+
+
+def test_gauss_seidel_needs_between_1_7_and_1_9_times_fewer_iterations():
+    """Guide: "1.7-1.9x fewer iterations than Jacobi on every shape where
+    both converge (1.69 on ``chain-2`` to 1.93 on ``slow-drift``)"."""
+    rows = _measured_rows()
+    ratios = {}
+    for (fixture, label), row in rows.items():
+        if label != "gs/none/l2" or row["converged_fraction"] < 1.0:
+            continue
+        jacobi = rows.get((fixture, "jac/none/l2"))
+        if jacobi is None or jacobi["converged_fraction"] < 1.0:
+            continue
+        ratios[fixture] = jacobi["iterations_mean"] / row["iterations_mean"]
+    assert len(ratios) >= 12, sorted(ratios)
+    # Every ratio rounds into the quoted band, and none is below one --
+    # there is no shape on one device where Jacobi needs fewer passes.
+    outside = {f: round(v, 2) for f, v in ratios.items()
+               if not 1.7 <= round(v, 1) <= 1.9}
+    assert not outside, outside
+
+
+def test_interface_norm_iteration_change_is_inside_the_quoted_range():
+    """Guide: "removes -5% to 31% of the iterations" on ``gs/none``.
+
+    The fast fixtures only.  The claim is explicitly about them: a grid
+    fixture whose L2 residual is mostly bulk change is a different
+    regime and the guide quotes it separately (``expensive-pair``
+    6.0 -> 1.5, a 75% cut).
+    """
+    rows = {k: v for k, v in _measured_rows().items()
+            if k[0] not in ("expensive-pair", "heterogeneous")}
+    changes = {}
+    for fixture in {f for f, _ in rows}:
+        l2 = rows.get((fixture, "gs/none/l2"))
+        interface = rows.get((fixture, "gs/none/interface"))
+        if l2 is None or interface is None:
+            continue
+        changes[fixture] = (
+            (l2["iterations_mean"] - interface["iterations_mean"])
+            / l2["iterations_mean"] * 100.0)
+    assert changes
+    worst, best = min(changes.values()), max(changes.values())
+    assert -5.5 <= worst, {f: round(v, 1) for f, v in changes.items()}
+    assert best <= 31.5, {f: round(v, 1) for f, v in changes.items()}
+
+
+def test_jacobi_loses_convergence_when_iqn_is_restricted_to_the_cheap_nodes():
+    """Guide: "all four Jacobi cheap-only rows fall short ... against 100%
+    for every one of the corresponding Gauss-Seidel rows".
+
+    Recorded rather than asserted as a desirable property: it is a real
+    limitation of restricting the secant basis under Jacobi, and the
+    guide recommends the restriction, so the caveat has to stay true or
+    the recommendation has to change.
+    """
+    rows = _measured_rows()
+    cheap = {label: row["converged_fraction"]
+             for (fixture, label), row in rows.items()
+             if fixture == "heterogeneous" and label.endswith("/fields-cheap")}
+    assert len(cheap) == 8, sorted(cheap)
+    gs = {k: v for k, v in cheap.items() if k.startswith("gs/")}
+    jac = {k: v for k, v in cheap.items() if k.startswith("jac/")}
+    assert all(v == 1.0 for v in gs.values()), gs
+    assert all(v < 1.0 for v in jac.values()), jac

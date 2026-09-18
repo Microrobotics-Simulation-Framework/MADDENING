@@ -30,6 +30,29 @@ problems can be expressed either way), the rule is:
   wasteful (large blanked-out regions, very high anisotropy in the
   mesh, mesh adapts dynamically, etc.).
 
+### The grid extent must divide by the device count (Cartesian paths only)
+
+Both Cartesian wrappers split each sharded axis **evenly**, so a sharded
+extent has to be a multiple of the devices on its mesh axis: 16 cells over
+3 devices has no layout.  Since v0.4.0 `ShardedStencilNode` and
+`ShardedPointwiseNode` refuse that at construction, with a `ValueError`
+naming the node, the cell count and the device count; before that it
+surfaced much later as a `jax.errors.IndivisibleError` raised from inside
+`device_put`, naming none of them.
+
+Three ways out, in the order most people want them:
+
+1. **Size the grid to a multiple of the device count.**  A sharded axis of
+   `n_devices * k` cells is the cheapest fix and keeps the Cartesian
+   performance in the table above.
+2. **Run on a device count that divides the grid.**  The error message
+   lists the ones that do.
+3. **Use `ShardedUnstructuredNode`.**  It carries an explicit padded
+   layout and accepts **any** (device, cell) pair — 17 cells over 3
+   devices included — at the per-cell scatter/gather cost the table
+   above describes.  The constraint is a property of the Cartesian
+   pencil decomposition, not of the framework.
+
 ## Class hierarchy
 
 ```text

@@ -1,0 +1,3077 @@
+{
+ "note": "deviation from gs/none/l2 after 25 steps, cap 120 (_REACH_CAP), one entry per rtol; atol fixed at the fixtures' 1e-8",
+ "by_rtol": {
+  "1e-4": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.0002936611396250124,
+     "mean_iters": 6.52,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.00020678530203887058,
+     "mean_iters": 17.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.0002664149001425323,
+     "mean_iters": 9.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.15946228640122617,
+     "mean_iters": 3.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.4579283392796882,
+     "mean_iters": 2.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.0003676616659521302,
+     "mean_iters": 12.56,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 1.781734992410394e-05,
+     "mean_iters": 6.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.00024092438492264636,
+     "mean_iters": 29.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.00036323830221107674,
+     "mean_iters": 16.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.44336182002709257,
+     "mean_iters": 3.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.5611464576666583,
+     "mean_iters": 2.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.0006576048823899249,
+     "mean_iters": 10.96,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 1.114012377765273e-05,
+     "mean_iters": 7.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.000514096082479826,
+     "mean_iters": 27.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.000927443436115291,
+     "mean_iters": 14.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.001176202024981934,
+     "mean_iters": 5.72,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.34992479103640883,
+     "mean_iters": 2.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.001269899092983875,
+     "mean_iters": 20.8,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.0016135550325490412,
+     "mean_iters": 13.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.0007064413846071095,
+     "mean_iters": 47.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.0010023860869831367,
+     "mean_iters": 27.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.02550105613624649,
+     "mean_iters": 4.8,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.554582217976889,
+     "mean_iters": 2.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.005106148535192337,
+     "mean_iters": 11.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.0024482069564562524,
+     "mean_iters": 8.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.004442899689251312,
+     "mean_iters": 27.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.007461135671894316,
+     "mean_iters": 15.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.009710657167419446,
+     "mean_iters": 6.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 2.2493917077679515,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.007613630053974156,
+     "mean_iters": 20.2,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.006019050589043955,
+     "mean_iters": 13.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.0023632839798807936,
+     "mean_iters": 46.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.0032532799654851324,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.033842564050033795,
+     "mean_iters": 7.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 1.692675674485484,
+     "mean_iters": 3.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  },
+  "1e-5": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 1.2343049104259889e-05,
+     "mean_iters": 8.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 8.648531005025636e-06,
+     "mean_iters": 22.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 3.879244004195965e-05,
+     "mean_iters": 11.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.15946228640122617,
+     "mean_iters": 3.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.38163666647998157,
+     "mean_iters": 2.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 2.6270837114372237e-05,
+     "mean_iters": 15.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 2.0678530203887055e-05,
+     "mean_iters": 7.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 1.796879257354841e-05,
+     "mean_iters": 37.52,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 1.9703127835779178e-05,
+     "mean_iters": 20.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.37309716574204355,
+     "mean_iters": 3.72,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.5611464576666583,
+     "mean_iters": 2.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 8.10190820192926e-05,
+     "mean_iters": 14.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.475583061700607e-06,
+     "mean_iters": 9.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 6.549042463226151e-05,
+     "mean_iters": 34.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.00010660010699019886,
+     "mean_iters": 19.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.001312884217055222,
+     "mean_iters": 6.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.03898818269172847,
+     "mean_iters": 2.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.00015483646785909252,
+     "mean_iters": 27.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 7.1281337832941955e-06,
+     "mean_iters": 17.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 6.083932918300583e-05,
+     "mean_iters": 61.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 9.167159095145884e-05,
+     "mean_iters": 35.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.05078328573337235,
+     "mean_iters": 5.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.11721128118700157,
+     "mean_iters": 2.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.00044715198093513083,
+     "mean_iters": 14.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.00019086728178185558,
+     "mean_iters": 10.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.0004283245291062832,
+     "mean_iters": 34.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.0006954589462626232,
+     "mean_iters": 19.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.0006384181494082755,
+     "mean_iters": 8.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 1.582491393221862,
+     "mean_iters": 4.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.0005809086606916632,
+     "mean_iters": 25.96,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.0002868693362078704,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.0002743243497668268,
+     "mean_iters": 59.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.0004948588292133125,
+     "mean_iters": 33.92,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0011138811132576534,
+     "mean_iters": 7.92,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.5049359834726884,
+     "mean_iters": 3.2,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  },
+  "1e-6": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 1.755724262594184e-05,
+     "mean_iters": 10.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 1.8922805941292872e-05,
+     "mean_iters": 27.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 1.9117886414914448e-05,
+     "mean_iters": 14.44,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.15946228640122617,
+     "mean_iters": 3.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.31475035511456073,
+     "mean_iters": 2.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 1.7687296275022892e-05,
+     "mean_iters": 19.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 2.1003664326589682e-05,
+     "mean_iters": 7.72,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 1.8922805941292872e-05,
+     "mean_iters": 45.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 1.8142484046806567e-05,
+     "mean_iters": 25.44,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.35494549452258306,
+     "mean_iters": 3.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.41492582793101024,
+     "mean_iters": 2.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 1.560367505556746e-05,
+     "mean_iters": 17.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 1.2152862302893889e-05,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 1.71040284262951e-05,
+     "mean_iters": 42.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 1.4703463033130878e-05,
+     "mean_iters": 23.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.001312884217055222,
+     "mean_iters": 6.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.07303142572654424,
+     "mean_iters": 3.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 1.7254063763367868e-05,
+     "mean_iters": 33.96,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 1.5078551375812789e-05,
+     "mean_iters": 21.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 1.2152862302893889e-05,
+     "mean_iters": 71.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 6.789099002542574e-06,
+     "mean_iters": 43.56,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.047197591212670365,
+     "mean_iters": 5.2,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.06695882047619266,
+     "mean_iters": 2.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.00015628380564708676,
+     "mean_iters": 17.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.00013777546317127046,
+     "mean_iters": 12.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.0001555658096027663,
+     "mean_iters": 42.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.00016130977795732998,
+     "mean_iters": 23.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.0003382559142131944,
+     "mean_iters": 8.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.0019232720707197384,
+     "mean_iters": 5.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.0001623668276892462,
+     "mean_iters": 31.72,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.000158038907088759,
+     "mean_iters": 20.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.00015468825888193018,
+     "mean_iters": 70.52,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.00016112030677896763,
+     "mean_iters": 41.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0013088270114579405,
+     "mean_iters": 8.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.5016663391806931,
+     "mean_iters": 4.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  },
+  "3e-7": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 2.0418422905724956e-05,
+     "mean_iters": 10.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 2.1003664326589682e-05,
+     "mean_iters": 29.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 2.0938637502049158e-05,
+     "mean_iters": 15.96,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.15955019913872387,
+     "mean_iters": 3.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.31765974613454745,
+     "mean_iters": 2.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 2.048344973026548e-05,
+     "mean_iters": 24.8,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 2.132879844929231e-05,
+     "mean_iters": 8.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 1.9768154660319702e-05,
+     "mean_iters": 47.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 2.0353396081184428e-05,
+     "mean_iters": 27.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.33690936096004404,
+     "mean_iters": 4.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.3138701781605784,
+     "mean_iters": 2.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 7.501766853638203e-06,
+     "mean_iters": 19.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 7.051660842419911e-06,
+     "mean_iters": 11.56,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 1.2828021319721328e-05,
+     "mean_iters": 44.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 1.110261494338454e-05,
+     "mean_iters": 25.8,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.0013269125210715253,
+     "mean_iters": 6.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.0002648123699334286,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 6.976643173883529e-06,
+     "mean_iters": 36.92,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 6.526537162665237e-06,
+     "mean_iters": 23.56,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 74.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 1.1402685617530069e-05,
+     "mean_iters": 45.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.05321790914805209,
+     "mean_iters": 5.56,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.15554853556883985,
+     "mean_iters": 3.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.00015436914952889885,
+     "mean_iters": 18.92,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.00015237471607245314,
+     "mean_iters": 13.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.00015077916930729656,
+     "mean_iters": 45.44,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.00014870495851259302,
+     "mean_iters": 25.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.000327027253853405,
+     "mean_iters": 9.52,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.00027169169760431845,
+     "mean_iters": 6.44,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.0001594748991773999,
+     "mean_iters": 34.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.00014543408764402204,
+     "mean_iters": 30.04,
+     "conv_frac": 0.92,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.00015572536427928195,
+     "mean_iters": 73.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.00014942295455691346,
+     "mean_iters": 44.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0013095450075022608,
+     "mean_iters": 8.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.0005110835453814984,
+     "mean_iters": 7.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  },
+  "1e-7": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 11.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.48,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 41.88,
+     "conv_frac": 0.88,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 2.1198744800211258e-05,
+     "mean_iters": 17.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.14828930797225787,
+     "mean_iters": 3.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.45505152719203107,
+     "mean_iters": 2.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 2.132879844929231e-05,
+     "mean_iters": 26.36,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 2.132879844929231e-05,
+     "mean_iters": 13.52,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 2.048344973026548e-05,
+     "mean_iters": 52.24,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 2.106869115113021e-05,
+     "mean_iters": 28.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.16654904384612096,
+     "mean_iters": 22.72,
+     "conv_frac": 0.84,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.32682899427576406,
+     "mean_iters": 12.76,
+     "conv_frac": 0.92,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 6.113939985715135e-06,
+     "mean_iters": 20.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 6.113939985715135e-06,
+     "mean_iters": 12.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 7.876855196320114e-06,
+     "mean_iters": 53.2,
+     "conv_frac": 0.92,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 6.5640459969334275e-06,
+     "mean_iters": 27.24,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.0014576683173304393,
+     "mean_iters": 11.36,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 9.827314578266045e-06,
+     "mean_iters": 5.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 6.976643173883529e-06,
+     "mean_iters": 42.12,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 44.16,
+     "conv_frac": 0.8,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 1.25279506455758e-05,
+     "mean_iters": 82.8,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 49.08,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0543022895467455,
+     "mean_iters": 15.72,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.00654825477770652,
+     "mean_iters": 14.12,
+     "conv_frac": 0.92,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.00014471609159970157,
+     "mean_iters": 20.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.0001514173880133592,
+     "mean_iters": 14.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.00014934317721865565,
+     "mean_iters": 48.28,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.00014958250923342913,
+     "mean_iters": 26.84,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.0002524952755860284,
+     "mean_iters": 10.6,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.0002463524205401756,
+     "mean_iters": 12.24,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.00015109827866032787,
+     "mean_iters": 37.04,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.00015133761067510137,
+     "mean_iters": 25.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.0001555658096027663,
+     "mean_iters": 78.8,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.000143120544834545,
+     "mean_iters": 47.0,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0012541795347513277,
+     "mean_iters": 13.68,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.00015566553127558858,
+     "mean_iters": 15.32,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  },
+  "1e-8": {
+   "stiff-pair-0.5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 8.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 2.1523878922913884e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 1.0339265101943528e-05,
+     "mean_iters": 23.52,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 5.332199612323077e-06,
+     "mean_iters": 12.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 2.1783986221075987e-05,
+     "mean_iters": 4.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 3.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 2.1588905747454412e-05,
+     "mean_iters": 11.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 2.1653932571994936e-05,
+     "mean_iters": 5.16,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 2.1133717975670733e-05,
+     "mean_iters": 101.84,
+     "conv_frac": 0.2,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 2.1263771624751785e-05,
+     "mean_iters": 17.12,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.04421238205985673,
+     "mean_iters": 27.0,
+     "conv_frac": 0.8,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.04012909989699851,
+     "mean_iters": 3.52,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 1.1335453259014183e-05,
+     "mean_iters": 16.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.9312966888536023e-05,
+     "mean_iters": 7.32,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 1.444220711518844e-05,
+     "mean_iters": 39.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 1.9060354739231256e-05,
+     "mean_iters": 21.72,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 4.76,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 2.3409656834589122e-05,
+     "mean_iters": 3.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 2.1588905747454412e-05,
+     "mean_iters": 26.76,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 2.1718959396535463e-05,
+     "mean_iters": 31.4,
+     "conv_frac": 0.8,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 2.0873610677508634e-05,
+     "mean_iters": 105.64,
+     "conv_frac": 0.2,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 2.1263771624751785e-05,
+     "mean_iters": 29.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.0007418424410621505,
+     "mean_iters": 56.68,
+     "conv_frac": 0.56,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.25754989467684597,
+     "mean_iters": 17.56,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "chain-5": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 8.401978876074788e-06,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 2.663127233041562e-06,
+     "mean_iters": 36.04,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 9.752296909729663e-07,
+     "mean_iters": 20.16,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 7.0,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 4.0059434998428e-05,
+     "mean_iters": 4.28,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 6.7515901682743825e-06,
+     "mean_iters": 20.88,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 13.36,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 7.72681985924735e-06,
+     "mean_iters": 119.0,
+     "conv_frac": 0.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 6.526537162665237e-06,
+     "mean_iters": 27.72,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 7.111674977249016e-05,
+     "mean_iters": 23.8,
+     "conv_frac": 0.88,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 6.901625505347147e-06,
+     "mean_iters": 24.8,
+     "conv_frac": 0.88,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 5.626325140228652e-06,
+     "mean_iters": 28.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 1.2377915308503035e-05,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 3.150742078528045e-06,
+     "mean_iters": 63.68,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 8.47699654461117e-06,
+     "mean_iters": 36.84,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 5.963904648642372e-06,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 5.086197926766702e-05,
+     "mean_iters": 4.08,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 7.651802190710968e-06,
+     "mean_iters": 43.52,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 7.76432869351554e-06,
+     "mean_iters": 53.92,
+     "conv_frac": 0.72,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 9.827314578266045e-06,
+     "mean_iters": 118.0,
+     "conv_frac": 0.04,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 7.576784522174585e-06,
+     "mean_iters": 50.76,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 5.92639581437418e-06,
+     "mean_iters": 46.4,
+     "conv_frac": 0.72,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 2.5280954296760746e-05,
+     "mean_iters": 66.56,
+     "conv_frac": 0.52,
+     "norm": "interface",
+     "finite": true
+    }
+   },
+   "ring-8": {
+    "gs/none/l2": {
+     "dev": 0.0,
+     "mean_iters": 14.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/aitken/l2": {
+     "dev": 0.00013921145525991137,
+     "mean_iters": 10.4,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.5/l2": {
+     "dev": 4.722818424863469e-05,
+     "mean_iters": 35.24,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/fixed0.8/l2": {
+     "dev": 4.843481648978435e-05,
+     "mean_iters": 19.56,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-ils/l2": {
+     "dev": 0.00014054772567573002,
+     "mean_iters": 8.44,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/iqn-imvj5/l2": {
+     "dev": 9.368851161653778e-05,
+     "mean_iters": 5.92,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "gs/none/interface": {
+     "dev": 0.00014790718513001472,
+     "mean_iters": 21.4,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/aitken/interface": {
+     "dev": 0.00014886451318910866,
+     "mean_iters": 15.68,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.5/interface": {
+     "dev": 0.00015301293477851577,
+     "mean_iters": 119.0,
+     "conv_frac": 0.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/fixed0.8/interface": {
+     "dev": 0.00014878473585085085,
+     "mean_iters": 28.32,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-ils/interface": {
+     "dev": 0.00014886451318910866,
+     "mean_iters": 20.76,
+     "conv_frac": 0.92,
+     "norm": "interface",
+     "finite": true
+    },
+    "gs/iqn-imvj5/interface": {
+     "dev": 0.00014742852110046775,
+     "mean_iters": 15.68,
+     "conv_frac": 0.96,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/none/l2": {
+     "dev": 0.00016673463695886234,
+     "mean_iters": 26.64,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/aitken/l2": {
+     "dev": 0.00024332088168637806,
+     "mean_iters": 17.36,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.5/l2": {
+     "dev": 0.0001078489891573024,
+     "mean_iters": 60.6,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/fixed0.8/l2": {
+     "dev": 0.00013306860021405854,
+     "mean_iters": 34.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-ils/l2": {
+     "dev": 9.054727892263576e-05,
+     "mean_iters": 8.8,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/iqn-imvj5/l2": {
+     "dev": 0.0002489850727026839,
+     "mean_iters": 5.88,
+     "conv_frac": 1.0,
+     "norm": "l2",
+     "finite": true
+    },
+    "jac/none/interface": {
+     "dev": 0.00014790718513001472,
+     "mean_iters": 38.64,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/aitken/interface": {
+     "dev": 0.00014918362254214,
+     "mean_iters": 57.96,
+     "conv_frac": 0.68,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.5/interface": {
+     "dev": 0.00015795912975050117,
+     "mean_iters": 119.0,
+     "conv_frac": 0.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/fixed0.8/interface": {
+     "dev": 0.00014774763045349908,
+     "mean_iters": 49.2,
+     "conv_frac": 1.0,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-ils/interface": {
+     "dev": 0.00014918362254214,
+     "mean_iters": 41.12,
+     "conv_frac": 0.8,
+     "norm": "interface",
+     "finite": true
+    },
+    "jac/iqn-imvj5/interface": {
+     "dev": 0.00012915951063942495,
+     "mean_iters": 53.84,
+     "conv_frac": 0.72,
+     "norm": "interface",
+     "finite": true
+    }
+   }
+  }
+ }
+}

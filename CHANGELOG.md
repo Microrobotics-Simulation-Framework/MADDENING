@@ -207,6 +207,12 @@ guidance; the itemized changes follow.
 - **`external_inputs` is now as strict as `params`**: an undeclared `node.field`
   raises instead of being dropped in silence, an omitted one is zero-filled, and
   a declared `dtype` survives `to_dict`/`from_dict` instead of reloading float32
+- **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
+  "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
+  `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator fixes
+  exactly what the criterion measures — use a norm that sees the whole state
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

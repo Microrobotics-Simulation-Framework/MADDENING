@@ -139,7 +139,22 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         If the file cannot be found.
     ValueError
         If the saved state does not match the current graph structure
-        (different node names or field names).
+        (different node names, field names, or a state field / params
+        leaf whose shape differs from the live one).
+
+    Notes
+    -----
+    The restore is atomic: every node name, field name, state shape and
+    params-leaf shape is checked before anything is written, and a
+    failure part-way through the write puts ``gm._state`` and
+    ``gm.params`` back as they were.  A caller that catches the error
+    (the cloud entry point does) is therefore looking at the graph it
+    had before the attempt, never at a half-restored one.
+
+    The one thing outside that guarantee is the ``compile()`` this
+    function triggers on a dirty or never-compiled graph: it runs before
+    any checkpoint data is read into the graph, so a failure there is
+    the graph's own and leaves nothing of the checkpoint behind.
     """
     path = Path(path)
     if not path.exists() and path.suffix != ".npz":
@@ -222,61 +237,19 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                 )
             new_state[field] = jnp.asarray(arr, dtype=want.dtype)
         staged_states[node_name] = new_state
-    for node_name, new_state in staged_states.items():
-        graph_manager.set_node_state(node_name, new_state)
 
-    # Restore _meta if present in the checkpoint.
-    #
-    # Merged over the compiled graph's own ``_meta``, never substituted
-    # for it.  The key set is the *graph's*: a checkpoint written before
-    # ``predictor=`` was turned on carries fewer keys, and replacing the
-    # dict dropped the ones the recompiled graph had just seeded --
-    # ``step()`` survived that (it rebuilds ``_meta`` each call) while
-    # ``run_scan`` died on a carry-structure mismatch, the one place the
-    # execution paths disagreed.  A key the checkpoint carries and this
-    # graph does not is stale (its coupling group is gone) and is
-    # dropped; a key whose shape no longer fits keeps the graph's freshly
-    # seeded value, since every ``_meta`` entry but the step counter is a
-    # warm start that is only ever an accelerator.
-    raw_state = graph_manager._state  # noqa: SLF001
-    if meta_keys:
-        live_meta = raw_state.get(_META_KEY) or {}
-        merged = dict(live_meta)
-        dropped, reshaped = [], []
-        for field, arr in meta_keys.items():
-            if field not in live_meta:
-                dropped.append(field)
-                continue
-            want = jnp.asarray(live_meta[field])
-            if tuple(np.shape(arr)) != tuple(want.shape):
-                reshaped.append(field)
-                continue
-            merged[field] = jnp.asarray(arr, dtype=want.dtype)
-        if merged:
-            raw_state[_META_KEY] = merged
-        if dropped or reshaped:
-            detail = []
-            if dropped:
-                detail.append(f"not present in this graph: {sorted(dropped)}")
-            if reshaped:
-                detail.append(f"shape no longer fits: {sorted(reshaped)}")
-            warnings.warn(
-                "checkpoint _meta entries ignored (" + "; ".join(detail) + "); "
-                "this graph's freshly compiled values are used instead",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-    # A checkpoint without ``_meta`` (written by a graph that had none)
-    # keeps the freshly compiled ``_meta`` of *this* graph: a multirate
-    # step counter or coupling history seeded at zero is the right start,
-    # whereas dropping the key made the next step raise KeyError.
-
-    # Restore graph parameters for nodes/keys the current graph knows;
-    # unknown ones are ignored (a node may have stopped accepting params).
-    # A leaf whose shape differs from the live one is an error, like a
-    # state field: restoring it would run the graph wrong.
-    def _restore(section: str, saved_tree: dict) -> None:
+    # Stage the graph parameters the same way, so a leaf that does not
+    # fit is found *before* any node state is applied.  Applying first
+    # and validating afterwards left a failed resume married to the
+    # checkpoint's states and the graph's fresh params -- silently, and
+    # the cloud entry point logged it as a fresh start.  Unknown nodes
+    # and keys are ignored (a node may have stopped accepting params);
+    # a leaf whose shape differs from the live one is an error, like a
+    # state field, because restoring it would run the graph wrong.
+    def _stage_params(section: str, saved_tree: dict) -> list:
+        """``[(leaf_dict, name, value)]`` to write; raises before any write."""
         current = graph_manager.params.get(section, {})
+        writes: list[tuple[dict, str, Any]] = []
         for owner, saved in saved_tree.items():
             if owner not in current:
                 continue
@@ -289,10 +262,125 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                         f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
                         f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
                     )
-                current[owner][pname] = jnp.asarray(arr, dtype=live.dtype)
+                writes.append(
+                    (current[owner], pname, jnp.asarray(arr, dtype=live.dtype))
+                )
+        return writes
 
-    _restore("nodes", param_keys)
-    _restore("mappings", mapping_keys)
+    staged_params = (
+        _stage_params("nodes", param_keys)
+        + _stage_params("mappings", mapping_keys)
+    )
+
+    # ---- Apply.  Everything above validated without mutating; the
+    # rollback below is the net for whatever validation cannot see, so a
+    # restore that fails leaves the graph exactly as it found it.
+    undo = _state_and_params_snapshot(graph_manager)
+    try:
+        for node_name, new_state in staged_states.items():
+            graph_manager.set_node_state(node_name, new_state)
+
+        # Restore _meta if present in the checkpoint.
+        #
+        # Merged over the compiled graph's own ``_meta``, never
+        # substituted for it.  The key set is the *graph's*: a checkpoint
+        # written before ``predictor=`` was turned on carries fewer keys,
+        # and replacing the dict dropped the ones the recompiled graph had
+        # just seeded -- ``step()`` survived that (it rebuilds ``_meta``
+        # each call) while ``run_scan`` died on a carry-structure
+        # mismatch, the one place the execution paths disagreed.  A key
+        # the checkpoint carries and this graph does not is stale (its
+        # coupling group is gone) and is dropped; a key whose shape no
+        # longer fits keeps the graph's freshly seeded value, since every
+        # ``_meta`` entry but the step counter is a warm start that is
+        # only ever an accelerator.
+        raw_state = graph_manager._state  # noqa: SLF001
+        if meta_keys:
+            live_meta = raw_state.get(_META_KEY) or {}
+            merged = dict(live_meta)
+            dropped, reshaped = [], []
+            for field, arr in meta_keys.items():
+                if field not in live_meta:
+                    dropped.append(field)
+                    continue
+                want = jnp.asarray(live_meta[field])
+                if tuple(np.shape(arr)) != tuple(want.shape):
+                    reshaped.append(field)
+                    continue
+                merged[field] = jnp.asarray(arr, dtype=want.dtype)
+            if merged:
+                raw_state[_META_KEY] = merged
+            if dropped or reshaped:
+                detail = []
+                if dropped:
+                    detail.append(f"not present in this graph: {sorted(dropped)}")
+                if reshaped:
+                    detail.append(f"shape no longer fits: {sorted(reshaped)}")
+                warnings.warn(
+                    "checkpoint _meta entries ignored (" + "; ".join(detail)
+                    + "); this graph's freshly compiled values are used instead",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        # A checkpoint without ``_meta`` (written by a graph that had none)
+        # keeps the freshly compiled ``_meta`` of *this* graph: a multirate
+        # step counter or coupling history seeded at zero is the right start,
+        # whereas dropping the key made the next step raise KeyError.
+
+        for leaves, pname, value in staged_params:
+            leaves[pname] = value
+    except BaseException:
+        _restore_state_and_params(graph_manager, undo)
+        raise
+
+
+def _state_and_params_snapshot(graph_manager: "GraphManager") -> tuple[dict, dict]:
+    """Copy of ``gm._state`` and ``gm.params`` deep enough to undo a restore.
+
+    Two levels of dict for the state (node -> field -> array) and three
+    for the params (section -> owner -> name -> array).  The leaves are
+    JAX/NumPy arrays and are never mutated in place by a restore, so
+    copying the dicts that hold them is enough to put everything back.
+    """
+    state = {
+        name: (dict(fields) if isinstance(fields, dict) else fields)
+        for name, fields in graph_manager._state.items()  # noqa: SLF001
+    }
+    params = {
+        section: {
+            owner: (dict(leaves) if isinstance(leaves, dict) else leaves)
+            for owner, leaves in owners.items()
+        }
+        for section, owners in graph_manager.params.items()
+        if isinstance(owners, dict)
+    }
+    return state, params
+
+
+def _restore_state_and_params(
+    graph_manager: "GraphManager", snapshot: tuple[dict, dict],
+) -> None:
+    """Put a snapshot from :func:`_state_and_params_snapshot` back.
+
+    The container objects are refilled rather than replaced: callers
+    (and the compiled step) hold references to ``gm.params`` and to the
+    per-node leaf dicts, so swapping in new dicts would strand them.
+    """
+    state, params = snapshot
+    raw_state = graph_manager._state  # noqa: SLF001
+    raw_state.clear()
+    raw_state.update(state)
+    for section, owners in params.items():
+        live_section = graph_manager.params.get(section)
+        if not isinstance(live_section, dict):
+            continue
+        for owner, leaves in owners.items():
+            live_leaves = live_section.get(owner)
+            if isinstance(live_leaves, dict) and isinstance(leaves, dict):
+                live_leaves.clear()
+                live_leaves.update(leaves)
+            else:
+                live_section[owner] = leaves
 
 
 # ---------------------------------------------------------------------------

@@ -748,32 +748,142 @@ class TestFIMAgainstFiniteDifference:
             assume(np.all(diag > 1e-8))
             assume(np.isfinite(report.cond) and report.cond < 1e8)
             note(f"cond={report.cond}")
+            # Well conditioned, so every direction is resolved and the
+            # bound is the plain inverse -- no direction is dropped.
+            assert report.rank == len(keys)
             assert np.allclose(crb, np.diag(np.linalg.inv(F)), rtol=1e-6,
                                atol=1e-9)
             assert np.all(crb >= (1.0 / diag) * (1 - 1e-6)), (crb, 1.0 / diag)
             assert np.all(crb > 0.0)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "``fim`` documents ``crb`` as 'NaN where the FIM is singular', but "
-        "it is ``diag(pinv(F))``: along an exact null direction the "
-        "pseudo-inverse is finite and small, so an entirely unidentifiable "
-        "parameter is reported with a *tight* variance bound instead of an "
-        "infinite one.  Here the residual depends only on ``a + b``, "
-        "``eigvals[0]`` is exactly 0 and ``cond`` is inf, yet crb is "
-        "~0.008 for both.  Uncertainty quantification built on this output "
-        "would understate the variance by an unbounded factor.  The fix is "
-        "an API decision (NaN, +inf, or a documented pseudo-inverse with a "
-        "rank field), so the behaviour is pinned rather than changed."))
-    def test_crb_is_not_finite_along_an_exact_null_direction(self):
-        def residual(p):
-            t = jnp.arange(5, dtype=jnp.float32)
-            return (p["a"] + p["b"]) * t
+    def test_crb_is_infinite_along_an_exact_null_direction(self):
+        """An unidentifiable parameter's bound is ``+inf``; a resolved
+        one's is still the diagonal of the inverse.
 
-        report = fim(residual, {"a": jnp.float32(1.0), "b": jnp.float32(2.0)},
-                     scale=None)
-        assert report.cond == float("inf")
+        ``diag(pinv(F))`` is finite *and small* in the null space -- for
+        a residual that sees only ``a + b`` it reports ~0.008 for two
+        parameters the data cannot separate at all, which understates
+        the variance by an unbounded factor and looks healthy doing it.
+        The bound there is genuinely infinite: no unbiased estimator of
+        ``a`` alone has finite variance when only ``a + b`` is observed.
+
+        The second half is the guard that matters as much as the first:
+        answering ``+inf`` too eagerly would be worse than the bug, so a
+        well-conditioned problem has to come back full rank with the
+        bound it had before.
+        """
+        t = jnp.arange(5, dtype=jnp.float32)
+        theta = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+
+        report = fim(lambda p: (p["a"] + p["b"]) * t, theta, scale=None)
         assert float(report.eigvals[0]) == 0.0
-        assert not bool(jnp.all(jnp.isfinite(report.crb))), report.crb
+        assert report.cond == float("inf")
+        assert report.rank == 1, report.eigvals
+        assert np.all(np.isinf(np.asarray(report.crb))), report.crb
+
+        # One more observation, and ``a`` and ``b`` separate.
+        def resolved(p):
+            return jnp.concatenate([(p["a"] + p["b"]) * t,
+                                    (p["a"] + 2.0 * p["b"]) * t])
+
+        report = fim(resolved, theta, scale=None)
+        assert report.rank == 2
+        assert np.isfinite(report.cond)
+        F = np.asarray(report.fim, dtype=np.float64)
+        crb = np.asarray(report.crb, dtype=np.float64)
+        assert np.all(np.isfinite(crb)), crb
+        assert np.allclose(crb, np.diag(np.linalg.inv(F)), rtol=1e-5), crb
+
+    def test_an_unidentifiable_parameter_is_found_from_the_whole_null_space(
+        self,
+    ):
+        """Support anywhere in the null space is enough, and support
+        nowhere in it leaves the bound alone.
+
+        Two independent invisible combinations (``a + b`` and ``c + d``)
+        make the zero eigenvalue degenerate, so which pair of vectors
+        ``eigh`` returns for it is arbitrary and no single eigenvector
+        names all four parameters.  The verdict has to come from the
+        projector onto the whole null space; a loop over "is this
+        eigenvalue zero, and is this parameter its largest component"
+        would clear half of them.  ``e``, which the data does see, keeps
+        a finite bound: ``1 / sum(t**2)``.
+        """
+        t = jnp.arange(5, dtype=jnp.float32)
+
+        def residual(p):
+            return jnp.concatenate([(p["a"] + p["b"]) * t,
+                                    (p["c"] + p["d"]) * t,
+                                    p["e"] * t])
+
+        theta = {k: jnp.float32(v) for k, v in
+                 (("a", 1.0), ("b", 2.0), ("c", 0.5), ("d", 1.5), ("e", 3.0))}
+        report = fim(residual, theta, scale=None)
+        assert report.param_names == ("['a']", "['b']", "['c']", "['d']",
+                                      "['e']")
+        assert report.rank == 3, report.eigvals
+        crb = np.asarray(report.crb, dtype=np.float64)
+        assert np.all(np.isinf(crb[:4])), crb
+        assert crb[4] == pytest.approx(1.0 / 30.0, rel=1e-5)
+
+    @pytest.mark.parametrize("eta,expected_rank", [(1e-2, 2), (1e-4, 1)])
+    def test_rank_does_not_move_when_the_residual_is_rescaled(
+        self, eta, expected_rank,
+    ):
+        """Dividing the residual by ``noise_std`` cannot change the rank.
+
+        ``cond`` does move: it is ``eigvals[-1] / eigvals[0]`` against a
+        smallest eigenvalue that is already at the float32 noise floor,
+        and rescaling can round that eigenvalue to exactly zero -- at
+        ``eta = 3e-4`` this problem reports a finite ``cond`` of ~1.3e7
+        at ``noise_std=1`` and ``inf`` at ``noise_std=10``, for the same
+        matrix in different units.  ``rank`` must not inherit that,
+        which is why its threshold is relative to ``eigvals[-1]``: the
+        eigenvalue and the cutoff move together.
+
+        The two ``eta`` are deliberately far from the cutoff (``eta``
+        enters the spectrum squared, so 1e-2 sits ~400x above it and
+        1e-4 below the point where float32 keeps anything at all).  A
+        problem *at* the cutoff is by definition one whose rank is not
+        determined, and pinning one would only pin the rounding.
+        """
+        t = jnp.arange(5, dtype=jnp.float32)
+
+        def residual(p):
+            return jnp.concatenate([(p["a"] + p["b"]) * t,
+                                    eta * (p["a"] - p["b"]) * t])
+
+        theta = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+        for noise_std in (None, 0.1, 1.0, 10.0, 100.0, 1000.0):
+            report = fim(residual, theta, scale=None, noise_std=noise_std)
+            assert report.rank == expected_rank, (noise_std, report.eigvals)
+            finite = bool(np.all(np.isfinite(np.asarray(report.crb))))
+            assert finite == (expected_rank == 2), (noise_std, report.crb)
+
+    def test_rank_rtol_widens_what_counts_as_the_null_space(self):
+        """The caller can declare an ill-conditioned direction dead.
+
+        The default cutoff is the numerical one -- below it ``eigh`` is
+        reporting its own rounding error -- and says nothing about
+        whether a direction is *useful*.  A caller who considers a
+        condition number of 1e4 unidentifiable in practice says so with
+        ``rank_rtol`` rather than post-processing ``crb``.
+        """
+        t = jnp.arange(5, dtype=jnp.float32)
+
+        def residual(p):
+            return jnp.concatenate([(p["a"] + p["b"]) * t,
+                                    1e-2 * (p["a"] - p["b"]) * t])
+
+        theta = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+        loose = fim(residual, theta, scale=None, rank_rtol=1e-3)
+        assert loose.rank == 1
+        assert np.all(np.isinf(np.asarray(loose.crb)))
+        # ... and the same matrix keeps full rank at the default.
+        assert fim(residual, theta, scale=None).rank == 2
+
+        with pytest.raises(ValueError, match="rank_rtol"):
+            fim(residual, theta, scale=None, rank_rtol=-1.0)
 
 
 def _sub_residual(gm, obs, base_params, names, node="s"):

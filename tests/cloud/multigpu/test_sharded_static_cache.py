@@ -301,7 +301,9 @@ def test_invalidate_static_cache_forces_rematerialisation(monkeypatch):
 @pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
 def test_param_write_through_the_rest_layer_reaches_a_derived_static():
     """``PUT /graph/params`` on a sharded node is not cached past."""
-    pytest.importorskip("fastapi")
+    pytest.importorskip(
+        "fastapi", reason="the REST layer is the optional [api] extra",
+    )
     from fastapi.testclient import TestClient
 
     from maddening.api.server import SimulationServer

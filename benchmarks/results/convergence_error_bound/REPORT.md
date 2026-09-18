@@ -66,11 +66,27 @@ chain-50        gs/fixed0.5/l2       chain-50         jac/fixed0.5/interface
 ```
 
 Eleven of twelve are **fixed under-relaxation**; the twelfth is Aitken on the
-stiffest fixture. At omega = 0.5 every step is halved by construction, so
-rho >= 0.5 and the error is at least 2x the residual — 6x measured on
-`chain-5`, 20x on `stiff-pair-0.95`. These are exactly the configurations whose
-residual was least informative about their distance from the answer: they were
-already inaccurate and reporting success.
+stiffest fixture. Their observed contraction is slow, so the error is a large
+multiple of the residual — 6x measured on `chain-5`, 20x on
+`stiff-pair-0.95`. These are exactly the configurations whose residual was
+least informative about their distance from the answer: they were already
+inaccurate and reporting success.
+
+**Correction to an earlier draft of this report**, which said that at
+`omega = 0.5` every step is halved "by construction", so `rho >= 0.5`. That is
+true only when the iteration matrix is small. Under-relaxation gives the
+relaxed matrix `(1-w)I + wM`, with eigenvalues `(1-w) + w*lam`: with a perfect
+solver (`M = 0`) the eigenvalue is exactly `1-w = 0.5` and the 2x floor holds,
+but with `lam` near `-1` the eigenvalue approaches **zero**. Searching 20 000
+random `M` at `w = 0.5`, the best slowest-mode `rho` was **0.156**, well below
+the claimed floor — unsurprising, since damping oscillatory modes is what
+under-relaxation is *for*.
+
+The measured numbers above are unaffected; they were measured, not derived.
+What changes is the generality: the new criterion penalises **slow observed
+contraction**, which under-relaxation causes on some spectra and cures on
+others. It does not penalise under-relaxation categorically, and the original
+wording could reasonably be read that way.
 
 ## What did not change
 

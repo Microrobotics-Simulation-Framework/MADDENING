@@ -223,8 +223,9 @@ def test_a_report_with_no_zero_valued_parameter_names_none():
 ])
 def test_fit_rejects_a_hyper_parameter_with_no_reading(kwargs, match):
     gm = _spring_gm()
+    call = {"n_iter": 2, **kwargs}
     with pytest.raises(ValueError, match=match):
-        fit(gm, lambda p: jnp.asarray(0.0), n_iter=kwargs.pop("n_iter", 2), **kwargs)
+        fit(gm, lambda p: jnp.asarray(0.0), **call)
 
 
 @pytest.mark.parametrize("kwargs,match", [

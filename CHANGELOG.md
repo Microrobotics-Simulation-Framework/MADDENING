@@ -121,6 +121,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`solver="ift"` returns the iterate whose residual met the criterion**, as
+  `fori` always has, so `converged=True` names the state you were handed and
+  both solvers return it; every converged group's answer moves by one residual
 - **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
   timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
 - **`coupling_diagnostics()["residual"]` describes the state the step returned**
@@ -192,6 +195,9 @@ guidance; the itemized changes follow.
 - **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
   `fit_multiple_shooting` copy every leaf outside the mask from the starting
   pytree, so comparing before and after says exactly what a calibration touched
+- **A wrapper now reports the `static_data` of the node it wraps**, so the
+  `static_data` drift check finally fires through `ShardedStencilNode`,
+  `HybridNode` and friends instead of hashing to `0` forever
 - **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
   `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
   could leave its bounds — make the parameter trainable in the spec instead
@@ -315,6 +321,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
+  and the data now come from the descriptor that was checked, closing a
+  time-of-check/time-of-use window for a writer in the config directory
 - **FMU bridge no longer unpickles importer bytes** (CRITICAL): the FMU-state
   blob is an arrays-only `npz` validated before use — regenerate any stored
   blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only

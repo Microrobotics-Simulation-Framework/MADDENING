@@ -273,6 +273,22 @@ def _fixed_point_while(
     measure what it is returning (see ``final_res`` below); that
     evaluation updates nothing, and the fori path pays it too.
 
+    **On a criterion exit the state returned is the iterate that
+    passed**, not the one it went on to produce.  Every pass measures
+    the iterate it starts from, so the pass that satisfies the
+    criterion has already computed a successor by the time the loop
+    stops; that successor is discarded.  ``converged=True`` therefore
+    means "the residual of the state you were handed is at or below
+    ``threshold``" rather than "some earlier iterate passed", and the
+    fori path — whose ``_merge`` keeps ``s_cur`` on the converging
+    pass — returns the identical state.  The discarded successor is
+    nearer the fixed point, but nothing ever measured it, and a
+    non-monotone (non-normal) group can put it well outside the
+    tolerance the flag just claimed.  Keeping it and re-measuring was
+    the alternative; it costs one evaluation of ``F`` per converged
+    group per step and still leaves the two solvers returning
+    different states.  See ``plans/MADDENING_040_DECISIONS.md`` D1/D2.
+
     ``first_res`` is the residual of the pass that produced ``x0`` —
     the one ``_run_coupling_inner`` ran before this loop.  It seeds the
     two-consecutive-passes streak, which is what lets the guard below
@@ -330,18 +346,20 @@ def _fixed_point_while(
     flag and ``strict_convergence`` are derived from, so it has to be
     a statement about ``x_star`` and not about some iterate before it.
     Every pass measures the residual of the iterate it starts from, so
-    the loop's own last measurement lags ``x_star`` by one update.
-    When the loop leaves on its criterion that lag is harmless — the
-    measurement is at or below ``threshold`` and ``x_star`` is one
-    further update along.  When it leaves because ``max_iter`` ran
-    out, the lag is the whole question (an Aitken step routinely
+    the loop's own last measurement describes the iterate the last
+    body started from.  When the loop leaves on its criterion that
+    iterate *is* ``x_star`` (see above), so the loop's own measurement
+    is already a statement about what is being returned and nothing
+    further is evaluated.  When it leaves because ``max_iter`` ran
+    out, ``x_star`` is the successor instead (an Aitken step routinely
     arrives on the pass that had no successor), so one extra
     evaluation of ``F`` measures ``x_star`` itself and *that* is what
     is reported.  The extra pass is charged only on the exit that was
     about to report failure, and it is also the second opinion the
     two-pass guard wanted: a residual that dipped for one pass springs
     back here, on the very state the caller is being handed.  Both
-    coupling solvers report this same quantity by the same rule.
+    coupling solvers report this same quantity by the same rule, and
+    both now return the same state as well.
 
     No autodiff machinery here; the IFT rule is layered on by
     ``_ift_solve``.
@@ -413,7 +431,7 @@ def _fixed_point_while(
     two_pass_exit = acceleration in _TWO_PASS_EXIT
 
     def cond(carry):
-        _x, res, prev, i, _acc = carry
+        _x, _x_meas, res, prev, i, _acc = carry
         first = i == jnp.int32(0)
         above = res > threshold
         if two_pass_exit:
@@ -422,7 +440,7 @@ def _fixed_point_while(
         return jnp.logical_or(first, keep_going)
 
     def body(carry):
-        x, res_prev, _prev, i, acc = carry
+        x, _x_meas, res_prev, _prev, i, acc = carry
         x_raw, res = step_pure(x, *consts)
         if idx is None:
             x_new, acc = accelerate(x, x_raw, acc, i)
@@ -430,7 +448,10 @@ def _fixed_point_while(
             x_new_sub, acc = accelerate(x[idx], x_raw[idx], acc, i)
             x_new = x_raw.at[idx].set(x_new_sub)
         prev = (res_prev,) if two_pass_exit else ()
-        return x_new, res, prev, i + jnp.int32(1), acc
+        # ``x`` is the iterate ``res`` is a measurement of; carrying it
+        # is what lets a criterion exit hand back the state its own
+        # criterion passed on.  See the docstring.
+        return x_new, x, res, prev, i + jnp.int32(1), acc
 
     # The seed is the residual of the pass that produced ``x0``, not
     # ``inf``: the streak the guard tests then has a first member even
@@ -439,24 +460,35 @@ def _fixed_point_while(
     # the smallest one.  ``cond`` forces the first body regardless, so
     # this value only ever reaches the criterion through ``prev``.
     seed = jnp.asarray(first_res, dtype)
-    init = (x0, seed, (seed,) if two_pass_exit else (), jnp.int32(0), acc0)
-    x_star, final_res, prev, n_iters, acc = jax.lax.while_loop(
+    init = (x0, x0, seed, (seed,) if two_pass_exit else (),
+            jnp.int32(0), acc0)
+    x_next, x_meas, final_res, prev, n_iters, acc = jax.lax.while_loop(
         cond, body, init
     )
     # Did the loop leave on its criterion, or because it ran out of
-    # passes?  On the criterion the last measurement is a true
-    # statement (``<= threshold``) about the iterate one update behind
-    # ``x_star``; at the cap it is a statement about an iterate the
-    # caller never sees, and the Aitken step that produced ``x_star``
-    # is exactly the one that most often crossed the threshold.  So
-    # pay one evaluation of ``F`` there and report ``x_star``'s own
-    # residual.  See the docstring.
+    # passes?
+    #
+    # On the criterion, ``final_res`` is a true statement
+    # (``<= threshold``) about ``x_meas``, the iterate the last body
+    # started from -- so ``x_meas`` is what is returned, and the flag
+    # derived from ``final_res`` describes it exactly.  ``x_next``, one
+    # update further along, is discarded: it is nearer the fixed point
+    # but nothing measured it, and the fori path has always made the
+    # same choice (``_merge`` keeps ``s_cur`` on the pass that
+    # converged).  The two solvers therefore return the same state.
+    #
+    # At the cap the last measurement is a statement about an iterate
+    # the caller never sees, and the Aitken step that produced
+    # ``x_next`` is exactly the one that most often crossed the
+    # threshold -- so ``x_next`` is returned and one evaluation of
+    # ``F`` measures it.  See the docstring.
     if two_pass_exit:
         criterion_met = jnp.logical_and(
             final_res <= threshold, prev[0] <= threshold,
         )
     else:
         criterion_met = final_res <= threshold
+    x_star = jnp.where(criterion_met, x_meas, x_next)
     final_res = jax.lax.cond(
         criterion_met,
         lambda _x: final_res,
@@ -492,11 +524,28 @@ def _ift_solve_impl(
     derivative), ``jax.grad`` / ``vjp`` / ``jacrev``, and higher
     order.  A ``custom_vjp`` cannot be forward-differentiated at all.
 
-    The derivative is valid only at a converged fixed point.  When the
-    loop exits at ``max_iter`` unconverged, ``final_res`` says so
+    The derivative is valid only at a converged fixed point, and it is
+    taken at the state this function *returns*: on a criterion exit
+    that is the iterate whose residual met ``threshold`` (see
+    :func:`_fixed_point_while`), which is also the state the fori path
+    returns.  The rule is unchanged by that choice — the IFT tangent
+    is the derivative of ``F``'s fixed point, linearised at whatever
+    ``x_star`` is handed to it — but the linearisation point moves by
+    one pass, so on a non-linear ``F`` the reported gradient moves by
+    ``O(residual)`` too.
+
+    ``final_res`` bounds how far ``x_star`` is from a true fixed point
     (surfaced through ``GraphManager.coupling_diagnostics`` and, with
     ``CouplingGroup.strict_convergence``, a runtime error); the
-    derivative is then off by roughly ``residual * cond(I - dF/dx)``.
+    derivative is off by roughly ``residual * cond(I - dF/dx)``
+    whenever it is non-zero, whether the loop stopped on its criterion
+    or at ``max_iter``.  A finite difference of this function's own
+    output is therefore *not* the quantity the adjoint computes: it is
+    the derivative of a truncated iterate, and the two agree only as
+    ``final_res`` goes to zero.  Tighten the criterion that is live
+    for the group's norm (``tolerance`` for ``"l2"``; ``atol`` /
+    ``rtol`` for ``"mixed"`` and ``"interface"``, whose threshold is
+    hard-coded to 1.0) if the gradient has to match the forward.
 
     ``acceleration`` / ``relaxation`` / ``n_reuse`` are static and
     control only the forward iterator; the derivative is identical for
@@ -1686,14 +1735,14 @@ def _run_coupled_block_impl(
                 final_state = final_carry[0]
 
         # Report the residual of the state being handed back, by the
-        # same rule as the ift path (see ``_fixed_point_while``): the
-        # in-loop measurement lags the returned state by one update,
-        # which only matters on the exit that is about to be reported
-        # as a failure, so that exit -- and only that one -- pays one
-        # more evaluation of ``F``.  ``converged`` is index 1 of every
-        # branch's carry.  Keeping the rule identical on both solvers
-        # is what makes ``solver`` invisible in
-        # ``coupling_diagnostics()``.
+        # same rule as the ift path (see ``_fixed_point_while``): once
+        # ``converged`` latches, ``_merge`` freezes the state on the
+        # iterate that was measured, so the in-loop number already
+        # describes what is returned; at the cap it does not, so that
+        # exit -- and only that one -- pays one more evaluation of
+        # ``F``.  ``converged`` is index 1 of every branch's carry.
+        # Keeping the rule identical on both solvers is what makes
+        # ``solver`` invisible in ``coupling_diagnostics()``.
         if track_diag:
             final_res = jax.lax.cond(
                 final_carry[1],
@@ -3676,11 +3725,9 @@ class GraphManager:
             - ``"iterations"`` : int — coupling iterations used
             - ``"residual"`` : float — ``||F(x) - x||`` in the group's
               convergence norm for the state ``x`` this step returned.
-              A group that stopped early on its own criterion reports
-              instead the measurement that criterion passed, taken one
-              update before ``x`` and at or below the threshold.  At
-              ``max_iterations=1`` it is the distance the single pass
-              moved.
+              At ``max_iterations=1`` it is the distance the single
+              pass moved, which is the same thing measured one pass
+              earlier.
             - ``"converged"`` : bool — that residual met the group's
               threshold (``tolerance`` for the L2 norm, ``1.0`` for the
               mixed / interface norms).  ``False`` means the group hit
@@ -3688,25 +3735,22 @@ class GraphManager:
               outside the threshold; under ``solver="ift"`` the
               gradient through that step is then unreliable.
 
-            Both solvers report by the same rule -- ``"ift"`` (the
-            default) and the legacy ``"fori"`` run the same passes and
-            derive both values the same way -- so the *number* does not
-            move when a graph migrates between them.
+            ``converged=True`` is a statement about the state this step
+            returned: both solvers stop on the iterate whose residual
+            met the criterion rather than on the update it went on to
+            produce, so recomputing ``||F(x) - x||`` on the state you
+            were handed reproduces the number reported here.  It is
+            *not* a bound on the distance to the fixed point, which is
+            larger by up to ``1/(1 - rho)`` for a group contracting at
+            ``rho`` — see ``MADD-ANO-005``.
 
-            The *truth value* can still differ, because the two return
-            different states on a converged exit: ``"fori"`` freezes on
-            the iterate whose residual passed, while ``"ift"`` returns
-            one further accelerated update.  Re-measurement is gated on
-            a non-criterion exit, so on a criterion exit the reported
-            residual is the one measured before that last update.  For
-            a contractive group that is conservative.  For a non-normal
-            one whose residual sequence is not monotone it is not, and
-            ``converged=True`` can name a state whose own residual
-            exceeds the threshold -- pinned as a strict xfail in
-            ``tests/core/test_coupling_convergence_reporting.py``.
-            Reported for every group under ``solver="ift"``; ``"fori"``
-            groups only with ``diagnostics=True``.  Empty dict if no
-            step has been taken yet.
+            ``"ift"`` (the default) and the legacy ``"fori"`` run the
+            same passes, return the same state and derive both values
+            the same way, so nothing here moves when a graph migrates
+            between them.  Reported for every group under
+            ``solver="ift"``; ``"fori"`` groups only with
+            ``diagnostics=True``.  Empty dict if no step has been taken
+            yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}

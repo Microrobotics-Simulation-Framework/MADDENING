@@ -18,17 +18,20 @@ least-squares step is not a clipped scalar and has never been measured
 dipping.
 
 *The residual is a statement about the state you were handed.*  Every
-pass measures the iterate it starts from, so the loop's last
-measurement lags the state it returns by one update.  On an exit that
-met the criterion the lag is harmless (the measurement is at or below
-the threshold and the returned state is one further update along); on
-an exit at ``max_iterations`` it is the whole question, because an
-Aitken step routinely arrives on the pass that had no successor.  So
-that exit -- and only that one -- pays one more evaluation of ``F`` and
-reports the returned state's own residual.  Both coupling solvers
-follow the same rule, so ``solver`` is invisible in
-``coupling_diagnostics()``, and the extra measurement doubles as the
-guard's second opinion: a dip springs back exactly there.
+pass measures the iterate it starts from, so a pass has always
+computed a successor to the iterate it measured.  On an exit that met
+the criterion the measured iterate is the one returned and the
+successor is dropped, so the reported number describes the returned
+state outright -- that is what lets ``converged=True`` be read as "the
+state you hold is within tolerance" rather than "something upstream of
+it was".  On an exit at ``max_iterations`` the successor *is* returned,
+because an Aitken step routinely arrives on the pass that had no
+successor, so that exit -- and only that one -- pays one more
+evaluation of ``F`` and reports the returned state's own residual.
+Both coupling solvers follow the same rule, so ``solver`` is invisible
+in ``coupling_diagnostics()`` and in the state itself, and the extra
+measurement doubles as the guard's second opinion: a dip springs back
+exactly there.
 
 *A cap of one is a report, not an exemption.*  ``max_iterations=1``
 means "one staggered pass"; it is a legitimate setting, and it has to
@@ -456,13 +459,11 @@ def test_converged_survives_recomputation_on_a_contractive_group(
 
     **This test does not establish that in general, and its name used
     to claim it did.**  ``_affine_graph`` is contractive, so its
-    residual sequence is monotone and the one-update lag on a criterion
-    exit can only make the reported number conservative.  On a
-    non-normal group the sequence is not monotone and the guarantee
-    fails -- see
+    residual sequence is monotone, so the guarantee held here even
+    while it failed on a non-normal group -- see
     ``test_converged_is_proof_the_returned_state_is_within_tolerance``,
-    the strict xfail that pins it.  Keep this one for the contractive case
-    it does cover; do not read it as the general contract.
+    which was a strict xfail and is now the general statement.  Keep
+    this one for the accelerations and caps it sweeps.
     """
     gm = _affine_graph(acceleration=acceleration, max_iterations=cap,
                        tolerance=tolerance)
@@ -638,16 +639,16 @@ def _amplifying_residual(a, b):
     return ((a_new - a) ** 2 + (b_new - b) ** 2) ** 0.5
 
 
+@pytest.mark.parametrize("solver", ["ift", "fori"])
 @pytest.mark.parametrize("cap", [3, 4, 5])
-def test_the_fori_solver_never_claims_a_state_it_did_not_measure(cap):
-    """``fori`` freezes on the iterate whose residual passed.
+def test_neither_solver_claims_a_state_it_did_not_measure(solver, cap):
+    """The stopping rule freezes on the iterate whose residual passed.
 
-    This is the companion of the ``xfail`` below: the same graph, the
-    same stopping pass, and here ``converged=True`` does survive the
-    caller recomputing the residual, because the state handed back is
-    the one that was measured.
+    ``fori`` has always done this -- its ``_merge`` keeps ``s_cur`` on
+    the pass that converged -- and ``ift`` now does too, so the same
+    graph gives the same state and the same verdict from either solver.
     """
-    gm = _amplifying_graph("fori", cap, 1.0)
+    gm = _amplifying_graph(solver, cap, 1.0)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     a = float(gm.get_node_state("a")["x"])
@@ -657,39 +658,41 @@ def test_the_fori_solver_never_claims_a_state_it_did_not_measure(cap):
     assert _amplifying_residual(a, b) <= 1.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known, pre-existing (identical on release/0.4.0): the ift loop "
-        "measures the iterate each pass starts from, and on an exit that "
-        "met the criterion it reports that measurement while returning "
-        "one further update.  The re-measurement added for the cap exit "
-        "is gated on the criterion, so this exit keeps the lag and "
-        "converged=True does not imply the returned state is within "
-        "tolerance.  Closing it means either always re-measuring (one "
-        "extra F per converged group per step) or returning the iterate "
-        "that passed, as fori does (which also changes the state ift "
-        "returns); both are design calls, not an audit fix."
-    ),
-)
 @pytest.mark.parametrize("cap", [3, 4, 5])
 def test_converged_is_proof_the_returned_state_is_within_tolerance(cap):
     """``converged=True`` has to survive the caller remeasuring.
 
     A step-size controller, a CI assertion and ``strict_convergence``
     all read the flag as a statement about the state they were handed.
-    On :func:`_amplifying_graph` the ift solver stops on the pass that
-    measured 0.25, hands back the state one update later, and that
-    state's own residual is 2.5 -- two and a half times the tolerance
-    it just reported meeting.
+
+    Was a strict xfail, and pre-existing on ``release/0.4.0``.
+    :func:`_amplifying_graph` is the fixture that breaks the
+    contractive shortcut that
+    ``test_converged_survives_recomputation_on_a_contractive_group``
+    relies on: its residual sequence is
+    ``0.5, 5, 0.25, 2.5, ...``, so the ift solver stopped on the pass
+    that measured 0.25, handed back the state one update later, and
+    *that* state's residual was 2.5 -- two and a half times the
+    tolerance it had just reported meeting, silently.  Returning the
+    iterate that passed (decision D2,
+    ``plans/MADDENING_040_DECISIONS.md``) makes the flag a statement
+    about the state the caller holds on a non-monotone group, which is
+    the only case where it was ever in doubt.
+
+    The two solvers agreeing is the test above; this one is about the
+    flag alone, so it reads only ``ift`` -- the default, and the path
+    ``strict_convergence`` and the IFT adjoint hang off.
     """
     gm = _amplifying_graph("ift", cap, 1.0)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     a = float(gm.get_node_state("a")["x"])
     b = float(gm.get_node_state("b")["x"])
-    if d["converged"]:
-        assert _amplifying_residual(a, b) <= 1.0, (
-            f"reported converged at {d['residual']} but the returned "
-            f"state's own residual is {_amplifying_residual(a, b)}"
-        )
+    assert d["converged"] is True, (
+        "fixture premise: the residual dips below the tolerance on every "
+        "second pass, so this group does exit on its criterion"
+    )
+    assert _amplifying_residual(a, b) <= 1.0, (
+        f"reported converged at {d['residual']} but the returned "
+        f"state's own residual is {_amplifying_residual(a, b)}"
+    )

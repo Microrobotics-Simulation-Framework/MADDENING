@@ -790,15 +790,37 @@ class TestMultirateRecompile:
         on sub-steps chosen for the previous schedule.
         """
         gm = GraphManager()
+        gm.add_node(CounterNode(name="a", timestep=0.02))
+        gm.add_node(CounterNode(name="b", timestep=0.04))
+        gm.compile()
+        gm.run(4)
+        assert gm.rate_dividers == {"a": 1, "b": 2}
+        assert int(gm._state[_META_KEY]["step_count"]) == 4
+
+        # The base timestep halves, so every surviving divider doubles.
+        gm.add_node(CounterNode(name="c", timestep=0.03))
+        gm.compile()
+        assert gm.rate_dividers == {"a": 2, "b": 4, "c": 3}
+        assert int(gm._state[_META_KEY]["step_count"]) == 0
+
+    def test_adding_a_node_does_not_re_phase_the_ones_already_running(self):
+        """The dividers of the surviving nodes are what the phase means.
+
+        ``add_node`` + ``add_edge`` mid-run is the scenario
+        ``docs/user_guide/parameters.md`` calls transparent, so a new node
+        arriving at a rate that changes nobody else's divider must leave
+        the running schedule alone.
+        """
+        gm = GraphManager()
         gm.add_node(CounterNode(name="a", timestep=0.01))
         gm.add_node(CounterNode(name="b", timestep=0.03))
         gm.compile()
         gm.run(4)
-        assert int(gm._state[_META_KEY]["step_count"]) == 4
 
-        gm.add_node(CounterNode(name="c", timestep=0.02))     # dividers change
+        gm.add_node(CounterNode(name="c", timestep=0.02))
         gm.compile()
-        assert int(gm._state[_META_KEY]["step_count"]) == 0
+        assert gm.rate_dividers == {"a": 1, "b": 3, "c": 2}
+        assert int(gm._state[_META_KEY]["step_count"]) == 4
 
     def test_recompile_drops_meta_of_a_removed_coupling_group(self):
         """Preserving ``_meta`` must not preserve a key with no owner.

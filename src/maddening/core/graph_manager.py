@@ -3313,11 +3313,18 @@ class GraphManager:
         # live value still fits the seed's shape and dtype -- a group
         # whose interface DOF count changed gets a fresh, correctly shaped
         # warm start rather than a crash inside ``lax.scan``.
-        # ``step_count`` restarts only when the rate dividers themselves
-        # changed, because the phase it counts no longer means the same
-        # thing; otherwise the schedule continues where it left off.
+        # ``step_count`` restarts only when a divider moved, because the
+        # sub-step it indexes is then not the sub-step it indexed before.
+        # Judged over the nodes that survived the edit only: adding or
+        # removing a node must not re-phase the ones already running,
+        # which is the whole point of preserving the counter.
+        phase_still_means_the_same = all(
+            previous_dividers[name] == divider
+            for name, divider in self._rate_dividers.items()
+            if name in previous_dividers
+        )
         for key_, seed in meta.items():
-            if key_ == "step_count" and self._rate_dividers != previous_dividers:
+            if key_ == "step_count" and not phase_still_means_the_same:
                 continue
             live = previous_meta.get(key_)
             if live is None:

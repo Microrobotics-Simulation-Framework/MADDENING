@@ -45,6 +45,11 @@ from jax.flatten_util import ravel_pytree
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+# ``_spec_for`` is the one place that resolves a params path to its
+# ParamSpec (the same walk ``trainable_mask`` / ``constrain`` use);
+# duplicating it here would be a second definition of "which spec
+# governs this leaf".
+from maddening.core.params import _spec_for
 
 _META_KEY = "_meta"
 
@@ -334,6 +339,79 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
     return np.asarray(idx)
 
 
+def _leaf_location(path) -> str:
+    """Human description of a ``params`` leaf path: ``"node 's', parameter
+    'damping'"`` for a node constant, ``"mapping '<edge>', weight 'H'"``
+    for an interface-mapping weight."""
+    keys = [k for k in (getattr(k, "key", None) for k in path) if k is not None]
+    if len(keys) == 3 and keys[0] == "nodes":
+        return f"node {keys[1]!r}, parameter {keys[2]!r}"
+    if len(keys) == 3 and keys[0] == "mappings":
+        return f"mapping {keys[1]!r}, weight {keys[2]!r}"
+    return f"leaf {jax.tree_util.keystr(path)}"
+
+
+def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
+    """The trainable mask the fitters optimise under.
+
+    ``None`` means the graph's own declarations (``gm.trainable_mask``).
+    An explicit ``mask`` may only *narrow* that set: the
+    :class:`~maddening.core.params.ParamSpec`, not the mask, is what
+    ``constrain`` / ``unconstrain`` consult, and they pass a
+    ``trainable=False`` leaf through untransformed and unclipped.  A
+    mask that marked such a leaf would therefore have the optimiser step
+    it in physical coordinates, straight through its declared bounds, so
+    it is refused here — once, before any coordinates are built — rather
+    than in each fitter.
+
+    Raises
+    ------
+    ValueError
+        If ``mask`` marks a leaf whose ``ParamSpec`` declares
+        ``trainable=False``, naming every such leaf and the spec change
+        that would make it fittable.
+    """
+    if mask is None:
+        return gm.trainable_mask(params)
+    entries = jax.tree_util.tree_flatten_with_path(params)[0]
+    flags = jax.tree.leaves(mask)
+    if len(flags) != len(entries):
+        raise ValueError("mask must have the same tree structure as params")
+    specs = gm.param_specs()
+    frozen = [
+        (path, _spec_for(specs, path))
+        for (path, _), flag in zip(entries, flags)
+        if bool(flag) and not _spec_for(specs, path).trainable
+    ]
+    if frozen:
+        listed = "\n".join(
+            f"  - {_leaf_location(path)}  "
+            f"(params{jax.tree_util.keystr(path)}, bounds={spec.bounds}, "
+            f"transform={spec.transform!r})"
+            for path, spec in frozen
+        )
+        first_path, first_spec = frozen[0]
+        keys = [k for k in (getattr(k, "key", None) for k in first_path)
+                if k is not None]
+        owner, key = (keys[1], keys[2]) if len(keys) == 3 else ("<node>", "<key>")
+        raise ValueError(
+            f"mask marks {len(frozen)} parameter(s) whose ParamSpec declares "
+            f"trainable=False:\n{listed}\n"
+            "The ParamSpec, not the mask, decides what an optimiser may move: "
+            "constrain/unconstrain apply a leaf's transform and bounds only "
+            "when its spec is trainable, so fitting a frozen leaf through the "
+            "mask would step it in physical coordinates with no transform and "
+            "no clipping and could leave its declared bounds. To fit it, make "
+            "it trainable in the spec -- "
+            f"gm.set_param_spec({owner!r}, {key!r}, ParamSpec(trainable=True, "
+            f"bounds={first_spec.bounds}, transform={first_spec.transform!r})) "
+            "-- which is what activates those bounds and that transform. A "
+            "mask may only narrow the trainable set, never widen it; drop the "
+            "leaf from the mask to leave it frozen."
+        )
+    return mask
+
+
 def _inverse_noise_std(noise_std, residual):
     """``1 / sigma`` flattened like ``ravel_pytree(residual)``, or ``None``.
 
@@ -394,6 +472,10 @@ def fim(
         Same structure as ``params``; only leaves marked ``True`` are
         treated as parameters (``GraphManager.trainable_mask()``).  The
         report's ``param_names`` / matrix are restricted accordingly.
+        Unlike the fitters' ``mask`` this one is free to name a leaf the
+        specs freeze: ``fim`` only linearises, it never steps a
+        parameter, and the sensitivity of a frozen constant is a
+        legitimate thing to ask for.
     noise_std : float or pytree, optional
         Measurement noise model.  A scalar σ (same for every residual
         entry) or a pytree matching ``residual_fn``'s output (per-leaf σ,
@@ -493,7 +575,8 @@ def fit(
     intervals), so a positive parameter cannot cross zero and a bounded
     one cannot leave its interval, and it only moves the leaves the
     ``mask`` marks trainable (default ``gm.trainable_mask()``: the
-    nodes' declarations plus ``gm.set_param_spec`` overrides).  This is
+    nodes' declarations plus ``gm.set_param_spec`` overrides; a ``mask``
+    may narrow that set but not widen it).  This is
     what stops a fit from wandering along an unidentifiable direction
     through a parameter the data cannot see — freeze it with
     ``gm.set_param_spec(node, key, ParamSpec(trainable=False))`` after
@@ -509,7 +592,12 @@ def fit(
     params : dict, optional
         Starting pytree (``gm.params`` layout).
     mask : pytree of bool, optional
-        Overrides ``gm.trainable_mask()``.
+        Narrows ``gm.trainable_mask()``.  It may only *narrow* it: a
+        mask that marks a leaf whose :class:`ParamSpec` declares
+        ``trainable=False`` is a ``ValueError``, because ``constrain`` /
+        ``unconstrain`` transform and clip a leaf only when its spec
+        says trainable — make the parameter trainable in the spec
+        instead, which is what activates its bounds and transform.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
         at or below it.
@@ -524,7 +612,7 @@ def fit(
     """
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
-    mask = gm.trainable_mask(start) if mask is None else mask
+    mask = _resolve_mask(gm, start, mask)
     b1, b2 = betas
     progress = _progress_notifier(gm, "adam", n_iter, notify_every)
 
@@ -616,7 +704,7 @@ def fit_lm(
     """
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
-    mask = gm.trainable_mask(start) if mask is None else mask
+    mask = _resolve_mask(gm, start, mask)
     u0 = gm.unconstrain(start)
     flat_u, unravel = ravel_pytree(u0)
     idx = _masked_indices(start, mask)
@@ -720,7 +808,7 @@ def fit_multiple_shooting(
     """
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
-    mask = gm.trainable_mask(start) if mask is None else mask
+    mask = _resolve_mask(gm, start, mask)
     ws0 = init_window_states(observations, window) if window_states is None else window_states
     b1, b2 = betas
     lr_s = lr if lr_states is None else lr_states

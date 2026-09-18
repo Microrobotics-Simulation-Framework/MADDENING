@@ -2808,7 +2808,12 @@ class GraphManager:
         max_iterations : int
             Maximum iterations per timestep.
         tolerance : float
-            Convergence threshold (L2 norm of state change).
+            Convergence threshold (L2 norm of state change).  Read
+            **only** under ``convergence_norm="l2"``; ``"mixed"`` and
+            ``"interface"`` carry their tolerances in ``atol`` /
+            ``rtol`` and test against a fixed threshold of ``1.0``.
+            Setting a knob the chosen norm ignores warns
+            (``UserWarning``) rather than turning silently.
         **kwargs
             Additional keyword arguments forwarded to
             :class:`~maddening.core.coupling.CouplingGroup`

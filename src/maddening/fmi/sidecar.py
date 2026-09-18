@@ -140,6 +140,19 @@ class FmuSidecar:
     def params(self) -> Optional[dict]:
         return self._params
 
+    @property
+    def param_specs(self) -> Optional[dict]:
+        """The ``ParamSpec`` tree this sidecar validates against, if any.
+
+        ``{"nodes": {name: {key: ParamSpec}}, "mappings": {...}}``, the
+        layout :meth:`GraphManager.param_specs` returns.  Exposed so that
+        every writer into the parameter tree -- ``set_params`` here and
+        the FMU-state archive in
+        :meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state` --
+        checks against the same declarations.
+        """
+        return self._config.param_specs
+
     # -- High-level handlers -------------------------------------------------
 
     def step(self, external_inputs: dict[str, dict[str, Any]]) -> dict:

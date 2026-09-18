@@ -99,6 +99,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
 from maddening.fmi.sidecar import FmuSidecar
 
@@ -297,6 +298,53 @@ def _copy_tree(tree):
 
 def _size(var: FMIVariable) -> int:
     return int(np.prod(var.shape)) if var.shape else 1
+
+
+def checked_value(arr, dtype, *, what: str) -> np.ndarray:
+    """``arr`` in ``dtype``, refused unless the model can hold it.
+
+    The one value check on this module's write paths.  ``set`` and
+    ``set_state`` both go through it, so an FMU-state archive cannot
+    install a value a ``set`` of the same variable would refuse -- which
+    it could until 0.4.0, because the two paths each had their own idea
+    of what a valid value was and only one of them had any.
+
+    Parameters
+    ----------
+    arr : array-like
+        The incoming value, in whatever dtype it arrived in (float64 off
+        the wire, the archive's own dtype out of an ``npz``).
+    dtype : numpy dtype
+        The dtype of the live array it would replace.
+    what : str
+        How to name the value in an error, e.g. ``"variable 'm.params.k'"``.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``arr`` cast to ``dtype``.
+
+    Raises
+    ------
+    ValueError
+        If the incoming value is not finite, or if ``dtype`` cannot hold
+        it: a float32 field set to ``1e308`` would be stored (and read
+        back) as ``inf``, and an integer would wrap silently.
+    """
+    a = np.asarray(arr)
+    if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
+        raise ValueError(f"{what}: value must be finite")
+    with np.errstate(over="ignore", invalid="ignore"):
+        cast = a.astype(dtype)
+    if np.issubdtype(cast.dtype, np.floating):
+        fits = bool(np.all(np.isfinite(cast)))
+    elif np.issubdtype(cast.dtype, np.integer):
+        fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
+    else:
+        fits = True                                       # bool
+    if not fits:
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
+    return cast
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -756,7 +804,16 @@ class FmuTcpBridge:
                                  f"{budget} the model can hold")
 
     def _decode_state(self, blob: bytes) -> None:
-        """Validate against the live state before writing anything."""
+        """Validate against the live state before writing anything.
+
+        An archive may only install values a ``set`` of the same variables
+        would be allowed to install: every restored array goes through
+        :func:`checked_value` (finite, and representable in the live
+        array's dtype) and the restored parameter tree through
+        ``check_bounds`` against the graph's declared ``ParamSpec``.  A snapshot
+        of a diverged model -- one holding ``inf`` or ``NaN`` -- therefore
+        does not restore; the error names the field.
+        """
         self._check_archive_directory(blob)
         try:
             data = np.load(io.BytesIO(blob), allow_pickle=False)
@@ -782,7 +839,9 @@ class FmuTcpBridge:
                 arr = data[k]
                 if arr.shape != live.shape:
                     raise ValueError(f"FMU state {node}.{field}: shape {arr.shape} != {live.shape}")
-                new_state.setdefault(node, {})[field] = jnp.asarray(arr, dtype=live.dtype)
+                new_state.setdefault(node, {})[field] = jnp.asarray(
+                    checked_value(arr, live.dtype, what=f"FMU state {node}.{field}")
+                )
             params = self._sidecar.params
             new_params = None
             if params is not None:
@@ -798,7 +857,10 @@ class FmuTcpBridge:
                             arr = data[key]
                             if arr.shape != live.shape:
                                 raise ValueError(f"FMU state param {key}: shape {arr.shape} != {live.shape}")
-                            new_params[section][owner][k] = jnp.asarray(arr, dtype=live.dtype)
+                            new_params[section][owner][k] = jnp.asarray(
+                                checked_value(arr, live.dtype,
+                                              what=f"FMU state param {owner}.params.{k}")
+                            )
             inputs: dict[str, dict[str, Any]] = self._zero_inputs()
             for k in keys:
                 if k.startswith("i/"):
@@ -810,10 +872,22 @@ class FmuTcpBridge:
                     arr = data[k]
                     if tuple(arr.shape) != tuple(var.shape or ()):
                         raise ValueError(f"FMU state input {node}.{field}: bad shape {arr.shape}")
-                    inputs.setdefault(node, {})[field] = jnp.asarray(arr, dtype=var.dtype)
+                    inputs.setdefault(node, {})[field] = jnp.asarray(
+                        checked_value(arr, var.dtype,
+                                      what=f"FMU state input {node}.{field}")
+                    )
             t = float(data["_time"]) if "_time" in keys else 0.0
             if not np.isfinite(t):
                 raise ValueError("FMU state carries a non-finite time")
+        if new_params is not None:
+            # The bounds the model description advertises, applied to the
+            # archive exactly as ``set`` applies them through
+            # ``FmuSidecar.set_params``.  Without this an importer could
+            # restore mass = -1.0 against a declared (0.1, 10.0) and the
+            # bridge would answer ok -- the documented guarantee is that it
+            # cannot silently tune a constant the graph declares invalid,
+            # and that has to hold for both doors into the parameter tree.
+            check_bounds(new_params, self._sidecar.param_specs or {})
         # every check passed: commit
         self._sidecar._state = new_state                      # noqa: SLF001
         if new_params is not None:
@@ -864,21 +938,10 @@ class FmuTcpBridge:
 
     @staticmethod
     def _in_dtype(var: FMIVariable, arr: np.ndarray) -> np.ndarray:
-        """``arr`` (finite float64) in the variable's dtype, refused when the
-        dtype cannot hold it: the finiteness check on the float64 wire
-        value is not enough, a float32 input set to 1e308 would be stored
-        (and read back) as ``inf``, and an integer would wrap silently."""
-        with np.errstate(over="ignore", invalid="ignore"):
-            cast = arr.astype(var.dtype)
-        if np.issubdtype(cast.dtype, np.floating):
-            fits = np.all(np.isfinite(cast))
-        elif np.issubdtype(cast.dtype, np.integer):
-            fits = np.array_equal(cast.astype(np.float64), arr)
-        else:
-            fits = True                                   # bool
-        if not fits:
-            raise ValueError(f"variable {var.name!r}: value does not fit its type {var.dtype}")
-        return cast
+        """``arr`` in the variable's dtype, refused when the dtype cannot
+        hold it.  The shared check :func:`checked_value`, named for the
+        FMI variable; ``set_state`` applies the same one."""
+        return checked_value(arr, var.dtype, what=f"variable {var.name!r}")
 
     def _get(self, vrs: list[int]) -> np.ndarray:
         if not isinstance(vrs, (list, tuple)):

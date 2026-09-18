@@ -175,6 +175,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`gm.compile()` drops every node's materialised statics**, including one
+  inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
+  method that forwards inwards, so a static rewritten in place is not baked in
 - **Examples no longer save plots into the installed package** (they broke on
   a read-only install): output goes to the working directory, usage lines use
   `python -m maddening.examples...`, and a smoke test pins both

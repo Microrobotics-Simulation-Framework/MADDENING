@@ -48,8 +48,13 @@ Three things happen per step:
    different array object (a mesh rebuilt after a parameter write,
    a `static_data_provider` reconstruction, a `replace_node`) is
    picked up on the next `update`.  What the check cannot see is a
-   static rewritten *in place* — call
-   `wrapper.invalidate_static_cache()` if you do that.
+   static rewritten *in place*.  `GraphManager.compile()` drops the
+   cached placement on every node (and on every node they wrap), so
+   the usual recovery is a recompile; outside a graph, call
+   `wrapper.invalidate_static_cache()` after such a rewrite.  Note
+   that a rewrite with no recompile is *not* picked up by a later
+   `step()` on its own: the graph's static-data check hashes shape
+   and dtype, never contents.
 2. Inside `shard_map`, each device's slab is halo-exchanged along
    the matching spatial axis (boundary `"edge"` — static arrays
    don't evolve, so periodic wrap is wrong even if state uses

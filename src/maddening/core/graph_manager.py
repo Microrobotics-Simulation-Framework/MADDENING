@@ -3064,6 +3064,32 @@ class GraphManager:
                 "differentiable through the graph): %s", baked,
             )
 
+        # A node may keep its own materialised copy of its static arrays
+        # (the sharded wrappers cache the per-device placement, keyed on
+        # the arrays' identity).  Such a key cannot see a static whose
+        # buffer was rewritten in place, and the cache lives on the node,
+        # so without this the step just rebuilt would be traced against
+        # the previous buffer.  ``compile()`` is the framework's explicit
+        # "rebuild everything", so it has to reach those caches too; it
+        # runs rarely, and the cost is one re-materialisation per sharded
+        # static per compile, paid lazily on the next trace.
+        #
+        # ``invalidate_static_cache`` is a ``SimulationNode`` contract
+        # method whose default forwards to any node this one wraps, so a
+        # cache nested inside a wrapper (a sharded node inside a
+        # HybridNode) is reached too.  The getattr probe stays for the
+        # duck-typed node objects the graph also accepts.
+        #
+        # Ordered before the build rather than after it.  Both work today
+        # only because ``_build_step_fn`` and ``jax.jit`` are lazy and
+        # materialise nothing; clearing first is correct whether or not
+        # that stays true, and it still precedes the static-data hash
+        # snapshot below, which is the other ordering constraint.
+        for spec in self._nodes.values():
+            invalidate = getattr(spec.node, "invalidate_static_cache", None)
+            if callable(invalidate):
+                invalidate()
+
         step_fn = self._build_step_fn()
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is

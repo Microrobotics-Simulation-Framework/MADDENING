@@ -80,8 +80,10 @@ class CouplingGroup:
         For ``"iqn-ils"``: which fields per node participate in the
         quasi-Newton problem.  ``None`` auto-detects from coupling
         edges (interface fields only).  Otherwise a mapping
-        ``{node: (field, ...)}``; a non-mapping, or a value given as a
-        bare field name instead of a one-element tuple, raises
+        ``{node: (field, ...)}`` naming at least one field on at least
+        one node *of this group*.  A non-mapping, a value given as a
+        bare field name instead of a one-element tuple, an empty
+        mapping and a mapping naming only foreign nodes all raise
         ``ValueError`` here rather than failing inside the traced
         coupling loop.
     subcycling : bool
@@ -267,6 +269,26 @@ class CouplingGroup:
                     "sequences of field names, but "
                     f"{bad} map to a bare string.  Wrap a single field "
                     'in a tuple: {"node": ("field",)}.'
+                )
+            # Content.  An empty mapping, or one naming only nodes
+            # outside the group, leaves the quasi-Newton problem with
+            # zero degrees of freedom.  That surfaces as
+            # ``ValueError: Need at least one array to concatenate``
+            # from ``jnp.concatenate`` deep inside the traced coupling
+            # loop, with no mention of the setting that caused it.
+            foreign = sorted(set(self.accelerated_fields) - set(self.nodes))
+            if foreign:
+                raise ValueError(
+                    f"CouplingGroup.accelerated_fields names node(s) "
+                    f"{foreign} that are not in the group "
+                    f"({sorted(self.nodes)})."
+                )
+            if not any(self.accelerated_fields.values()):
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields selects no field: "
+                    f"{self.accelerated_fields!r}.  Use None to let the "
+                    "group auto-detect its interface fields, or name at "
+                    "least one field on one node in the group."
                 )
         if self.solver == "fori":
             warnings.warn(

@@ -75,6 +75,32 @@ JSON record.  Keep before/after records under `benchmarks/results/` when
 a change claims a speed-up; a claim without the two JSON files is a
 guess.
 
+## `benchmarks/bench_coupling_sweep.py`
+
+```bash
+JAX_PLATFORMS=cpu python benchmarks/bench_coupling_sweep.py \
+    --json benchmarks/results/coupling_sweep_cpu.json
+```
+
+Sweeps every `iteration_mode` x `acceleration` x `convergence_norm` over
+the graph shapes in `benchmarks/coupling_fixtures.py` — chain, star,
+ring, a stiffness sweep, two grid fixtures, a two-group graph and a
+slow-drift case — and records per configuration the step time, the
+iterations used against the cap, the fraction of steps converged, the
+final residual and the launch-bound / compute-bound verdict.  The
+results and what they mean for a given graph shape are in
+[Choosing a coupling algorithm](coupling_algorithm_guide.md).
+
+`--steps` changes only how many timings are averaged.  The iteration
+counts, convergence fractions and residuals come from a separate
+statistics pass whose length and starting point are the *fixture's*,
+not the run's (`--stat-steps` overrides it, `profile_graph`'s
+`n_stat_steps` is the underlying knob).  That matters because those
+three are the numbers people quote across runs: while the pass was
+`min(n_steps, 50)` steps taken from wherever the timed run stopped, a
+shortened run moved the window as well as the sample size, and on a
+periodically driven graph the mean iteration count moved with it.
+
 ## Persistent compilation cache
 
 ```bash

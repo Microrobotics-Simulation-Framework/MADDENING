@@ -46,7 +46,11 @@ class CouplingGroup:
         Upper bound on iterations per timestep.
     tolerance : float
         Convergence threshold on the L2 norm of state change between
-        successive iterations.  Used when ``convergence_norm="l2"``.
+        successive iterations.  Read **only** when
+        ``convergence_norm="l2"``; the other two norms carry their
+        tolerances in ``atol`` / ``rtol`` and test against a fixed
+        threshold of ``1.0``.  Setting it away from its default under
+        those norms is inert and warns (``UserWarning``).
     convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  ``"l2"`` uses a global L2
         norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
@@ -54,9 +58,14 @@ class CouplingGroup:
         norm <= 1.0).  ``"interface"`` checks consistency of
         coupling-edge values between iterations.
     atol : float
-        Absolute tolerance for the ``"mixed"`` norm.
+        Absolute tolerance for the ``"mixed"`` and ``"interface"``
+        norms.  Read **only** by those two; setting it away from its
+        default under ``convergence_norm="l2"`` is inert and warns
+        (``UserWarning``) — tighten ``tolerance`` instead.
     rtol : float
-        Relative tolerance for the ``"mixed"`` norm.
+        Relative tolerance for the ``"mixed"`` and ``"interface"``
+        norms.  Read **only** by those two, on the same terms as
+        ``atol``.
     diagnostics : bool
         If True, store iteration count and final residual in the
         ``_meta`` key of the state dict after each step.
@@ -302,6 +311,7 @@ class CouplingGroup:
                     "group auto-detect its interface fields, or name at "
                     "least one field on one node in the group."
                 )
+        self._warn_about_inert_tolerances()
         if self.solver == "fori":
             warnings.warn(
                 "CouplingGroup solver='fori' is deprecated and will be "
@@ -311,6 +321,77 @@ class CouplingGroup:
                 DeprecationWarning,
                 stacklevel=3,
             )
+
+    def _warn_about_inert_tolerances(self) -> None:
+        """Warn when a tolerance knob this group's norm never reads was set.
+
+        Each ``convergence_norm`` reads exactly one of the two tolerance
+        settings and ignores the other outright:
+
+        * ``"l2"`` compares the global L2 state change against
+          ``tolerance``; ``atol`` and ``rtol`` are never passed to it.
+        * ``"mixed"`` and ``"interface"`` fold ``atol`` and ``rtol``
+          into the residual itself and then test it against a threshold
+          hard-coded to ``1.0``; ``tolerance`` is never read.
+
+        Nothing rejects the unread setting, and nothing reports it, so
+        the knob turns silently.  Tightening ``tolerance`` from 1e-4 to
+        1e-14 on an ``"interface"`` group changes no digit of the
+        answer — which reads exactly like a solver converging to a
+        different fixed point, and has already been written up as one.
+        An inert control proves nothing; this warning says so at the
+        call site while the user can still act on it.
+
+        Only a *deliberate* setting warns.  A group that names a norm
+        and leaves the other knobs alone has done nothing wrong, so the
+        test is against the field's declared default rather than a
+        record of what the caller passed — a frozen dataclass keeps no
+        such record, and a sentinel default would have to survive
+        :meth:`to_dict`, the USD schema and every ``float(...)`` read of
+        these fields.  The one case it cannot see is an explicit value
+        that equals the default, which is also the one case where the
+        warning would tell the user nothing they could act on.
+        Comparing against the default is what makes the round trip
+        through :meth:`to_dict` / :func:`coupling_group_kwargs` quiet:
+        it re-passes every field by name, defaults included.
+        """
+        if self.convergence_norm == "l2":
+            inert = [
+                name for name in ("atol", "rtol")
+                if getattr(self, name) != _FIELD_DEFAULTS[name]
+            ]
+            if inert:
+                warnings.warn(
+                    f"CouplingGroup.{' and '.join(inert)} "
+                    f"{'are' if len(inert) > 1 else 'is'} ignored under "
+                    "convergence_norm='l2', which tests the global L2 norm "
+                    "of the state change against tolerance alone.  Set "
+                    "tolerance to control convergence under this norm, or "
+                    "choose convergence_norm='mixed' or 'interface' to make "
+                    "atol and rtol live.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+        elif self.tolerance != _FIELD_DEFAULTS["tolerance"]:
+            warnings.warn(
+                f"CouplingGroup.tolerance={self.tolerance!r} is ignored "
+                f"under convergence_norm={self.convergence_norm!r}, whose "
+                "residual is already scaled by atol and rtol and is tested "
+                "against a fixed threshold of 1.0.  Set atol and rtol to "
+                "control convergence under this norm, or choose "
+                "convergence_norm='l2' to make tolerance live.",
+                UserWarning,
+                stacklevel=4,
+            )
+
+
+#: Declared default of every :class:`CouplingGroup` field, used by
+#: ``_warn_about_inert_tolerances`` to tell a deliberately-set tolerance
+#: knob from one the caller never touched.  ``nodes`` has no default and
+#: maps to ``dataclasses.MISSING``; nothing looks it up.
+_FIELD_DEFAULTS: dict[str, Any] = {
+    f.name: f.default for f in fields(CouplingGroup)
+}
 
 
 def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:

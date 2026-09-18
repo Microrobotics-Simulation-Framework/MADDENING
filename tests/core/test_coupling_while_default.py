@@ -25,6 +25,25 @@ from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
 
 
+def _group_kw(**group_kw) -> dict:
+    """The fixtures' group settings, minus any the chosen norm ignores.
+
+    ``tolerance=1e-8`` is the fixture default because these graphs are
+    held against the legacy ``fori`` path under the L2 norm, which reads
+    it.  ``"mixed"`` and ``"interface"`` test a residual already scaled
+    by ``atol`` / ``rtol`` against a fixed threshold of 1.0 and never
+    read ``tolerance``, so carrying the default into those cells put a
+    dead number in the group -- which ``CouplingGroup`` now warns about.
+    A ``tolerance`` a test names itself is passed through regardless;
+    dropping that one would hide the setting rather than the warning.
+    """
+    kw = dict(max_iterations=30, tolerance=1e-8)
+    kw.update(group_kw)
+    if kw.get("convergence_norm", "l2") != "l2" and "tolerance" not in group_kw:
+        kw.pop("tolerance")
+    return kw
+
+
 def _springs(**group_kw) -> GraphManager:
     gm = GraphManager()
     gm.add_node(SpringDamperNode(
@@ -37,8 +56,7 @@ def _springs(**group_kw) -> GraphManager:
     ))
     gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
     gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
-    kw = dict(max_iterations=30, tolerance=1e-8)
-    kw.update(group_kw)
+    kw = _group_kw(**group_kw)
     gm.add_coupling_group(["spring_a", "spring_b"], **kw)
     return gm
 
@@ -62,8 +80,7 @@ def _slow_springs(**group_kw) -> GraphManager:
         ))
     gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
     gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
-    kw = dict(max_iterations=30, tolerance=1e-8)
-    kw.update(group_kw)
+    kw = _group_kw(**group_kw)
     gm.add_coupling_group(["spring_a", "spring_b"], **kw)
     return gm
 
@@ -79,8 +96,7 @@ def _rods(**group_kw) -> GraphManager:
                 transform=lambda T: T[-1])
     gm.add_edge("rod_b", "rod_a", "temperature", "right_temperature",
                 transform=lambda T: T[0])
-    kw = dict(max_iterations=30, tolerance=1e-8)
-    kw.update(group_kw)
+    kw = _group_kw(**group_kw)
     gm.add_coupling_group(["rod_a", "rod_b"], **kw)
     return gm
 

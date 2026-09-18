@@ -120,9 +120,29 @@ class _Struct(SimulationNode):
         return {"disp": p["b"] * tin}
 
 
-def _graph(solver, *, scale=1.0, norm="l2", tolerance=_LOOSE, atol=1e-8,
-           rtol=1e-6, acceleration="none", max_iterations=8, int_leaf=False):
-    """A two-node affine cycle that meets its criterion on pass one."""
+def _graph(solver, *, scale=1.0, norm="l2", tolerance=None, atol=None,
+           rtol=None, acceleration="none", max_iterations=8, int_leaf=False):
+    """A two-node affine cycle that meets its criterion on pass one.
+
+    Only the tolerance knobs ``norm`` actually reads are forwarded, plus
+    any the caller named outright.  ``CouplingGroup`` warns about a
+    knob its norm ignores, so forwarding all three unconditionally
+    would make every non-L2 cell here raise under
+    ``filterwarnings = ["error"]`` -- and the one test that *wants* a
+    dead ``tolerance``
+    (:func:`test_the_cap_and_the_tolerance_are_both_inert_under_the_interface_norm`)
+    still gets one, and expects the warning that comes with it.
+    """
+    knobs: dict[str, float] = {}
+    if norm == "l2":
+        knobs["tolerance"] = _LOOSE if tolerance is None else tolerance
+    else:
+        knobs["atol"] = 1e-8 if atol is None else atol
+        knobs["rtol"] = 1e-6 if rtol is None else rtol
+    for name, value in (("tolerance", tolerance), ("atol", atol),
+                        ("rtol", rtol)):
+        if value is not None:
+            knobs[name] = value
     gm = GraphManager()
     gm.add_node(_Flow("flow", 0.01, scale=scale, int_leaf=int_leaf))
     gm.add_node(_Struct("struct", 0.01))
@@ -130,9 +150,8 @@ def _graph(solver, *, scale=1.0, norm="l2", tolerance=_LOOSE, atol=1e-8,
     gm.add_edge("struct", "flow", "disp", "disp")
     gm.add_coupling_group(
         ["flow", "struct"], max_iterations=max_iterations,
-        tolerance=tolerance, convergence_norm=norm, acceleration=acceleration,
-        solver=solver, atol=atol, rtol=rtol, diagnostics=True,
-        strict_convergence=False,
+        convergence_norm=norm, acceleration=acceleration,
+        solver=solver, diagnostics=True, strict_convergence=False, **knobs,
     )
     gm.compile()
     return gm
@@ -251,8 +270,12 @@ def test_the_cap_and_the_tolerance_are_both_inert_under_the_interface_norm(
     """
     kw = dict(scale=_SMALL, norm="interface", max_iterations=max_iterations,
               tolerance=tolerance)
-    fori, d = _tau("fori", **kw)
-    ift, _ = _tau("ift", **kw)
+    # Setting the dead knob is the point of the test, and the group now
+    # says so at construction -- which is the whole remedy for the day
+    # this configuration cost.
+    with pytest.warns(UserWarning, match=r"CouplingGroup\.tolerance"):
+        fori, d = _tau("fori", **kw)
+        ift, _ = _tau("ift", **kw)
     assert d["converged"] is True
     assert fori == pytest.approx(_SMALL, rel=1e-5)
     assert ift == pytest.approx(_SMALL, rel=1e-5)

@@ -151,17 +151,22 @@ class CouplingConfig:
         rtol: float,
         accelerated_fields: Optional[dict] = None,
     ) -> dict:
-        """Build the ``add_coupling_group`` keyword arguments."""
-        return {
+        """Build the ``add_coupling_group`` keyword arguments.
+
+        Only the tolerance knobs the configured norm actually reads are
+        emitted: ``"l2"`` tests against ``tolerance`` and never sees
+        ``atol`` / ``rtol``, while ``"mixed"`` and ``"interface"`` scale
+        the residual by ``atol`` / ``rtol`` and never see ``tolerance``.
+        Passing all three used to put a dead number in every sweep row,
+        which reads — in the results table and in the group itself — as
+        if it had been part of the configuration under test.
+        ``CouplingGroup`` now warns about exactly that.
+        """
+        kwargs = {
             "max_iterations": (
                 self.max_iterations if self.max_iterations is not None
                 else max_iterations
             ),
-            "tolerance": (
-                self.tolerance if self.tolerance is not None else tolerance
-            ),
-            "atol": self.atol if self.atol is not None else atol,
-            "rtol": self.rtol if self.rtol is not None else rtol,
             "convergence_norm": self.convergence_norm,
             "acceleration": self.acceleration,
             "relaxation": self.relaxation,
@@ -169,6 +174,14 @@ class CouplingConfig:
             "jacobian_reuse": self.jacobian_reuse,
             "accelerated_fields": accelerated_fields,
         }
+        if self.convergence_norm == "l2":
+            kwargs["tolerance"] = (
+                self.tolerance if self.tolerance is not None else tolerance
+            )
+        else:
+            kwargs["atol"] = self.atol if self.atol is not None else atol
+            kwargs["rtol"] = self.rtol if self.rtol is not None else rtol
+        return kwargs
 
 
 def _resolve_accel_fields(

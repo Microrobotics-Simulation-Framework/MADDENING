@@ -156,3 +156,40 @@ def test_subcycling_quadratic_predictor_config():
     )
     assert g.boundary_interpolation == "quadratic"
     assert g.predictor == "quadratic"
+
+
+# ---------------------------------------------------------------------------
+# 4. ``accelerated_fields`` is checked for shape, not only for content.
+# ---------------------------------------------------------------------------
+
+def test_accelerated_fields_rejects_a_non_mapping():
+    """A non-mapping is a ``ValueError``, not an ``AttributeError``.
+
+    The validator reads the mapping's values, so a list used to escape
+    as ``AttributeError: 'list' object has no attribute 'values'``
+    raised from inside ``__post_init__`` -- the wrong exception type,
+    naming an internal call rather than the setting.
+    """
+    with pytest.raises(ValueError, match="must be a mapping"):
+        CouplingGroup(nodes=NODES, accelerated_fields=["a"])
+
+
+def test_accelerated_fields_rejects_a_bare_string_value():
+    """``{"a": "position"}`` names a field, not a sequence of fields.
+
+    A string is iterable, so it survived construction and reached the
+    traced coupling loop as a per-character field list
+    (``names ['p', 'o', 's', ...]``) -- exactly the deep, confusing
+    failure this validation exists to prevent.
+    """
+    with pytest.raises(ValueError, match="bare string"):
+        CouplingGroup(nodes=NODES, accelerated_fields={"a": "position"})
+
+
+def test_accelerated_fields_accepts_tuples_and_none():
+    """The shape checks reject nothing that was valid before."""
+    assert CouplingGroup(nodes=NODES).accelerated_fields is None
+    g = CouplingGroup(
+        nodes=NODES, accelerated_fields={"a": ("position",), "b": ()}
+    )
+    assert g.accelerated_fields == {"a": ("position",), "b": ()}

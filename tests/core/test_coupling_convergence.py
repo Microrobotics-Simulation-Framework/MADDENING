@@ -336,16 +336,29 @@ class TestAitkenAcceleration:
         assert jnp.isfinite(new_omega)
         assert jnp.all(jnp.isfinite(residual))
 
-    def test_aitken_first_iteration_omega_clamped(self):
-        """With zero prev_residual, omega is clamped within [0.01, 2.0]."""
+    def test_aitken_without_a_previous_residual_keeps_the_seeded_omega(self):
+        """The zero ``prev_residual`` sentinel must not choose omega.
+
+        Aitken needs two successive residuals.  On the first pass of a
+        timestep the coupling loops seed ``prev_residual`` with zeros,
+        which makes the formula's numerator identically zero; the clip
+        then used to turn that into its *floor*, 0.01, throwing away
+        99% of the first correction of every timestep and silently
+        overriding the omega=1.0 the same loops seed alongside it.
+        """
         x_old = jnp.array([1.0, 2.0])
         x_raw = jnp.array([1.5, 2.5])
         prev_r = jnp.zeros(2)
         omega = jnp.array(1.0)
         x_rel, new_omega, _ = aitken_relaxation(x_old, x_raw, prev_r, omega)
-        # With zero prev_r: numerator = 0, so omega = 0 -> clamped to 0.01
-        assert float(new_omega) == pytest.approx(0.01, abs=1e-6)
-        assert jnp.all(jnp.isfinite(x_rel))
+        assert float(new_omega) == pytest.approx(1.0, abs=1e-6)
+        assert jnp.allclose(x_rel, x_raw)
+
+        # The guard returns the caller's omega; it does not hard-code 1.0.
+        _, half_omega, _ = aitken_relaxation(
+            x_old, x_raw, prev_r, jnp.array(0.5)
+        )
+        assert float(half_omega) == pytest.approx(0.5, abs=1e-6)
 
     def test_aitken_convergence_in_graph(self):
         gm = _make_bidirectional_springs(dt=0.01, k=50.0, c=0.5,

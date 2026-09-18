@@ -169,6 +169,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A coupling group no longer reports convergence it has not reached**:
+  `acceleration="aitken"` needs the threshold met on two consecutive passes
+  (a lone dip is not arrival), `max_iterations=1` reports its real residual
 - Sharded pointwise nodes honour parameter writes again (`PUT /graph/params`)
 - `POST /surrogate/deactivate` restores every edge field, or changes nothing
 - A `.` in a node name no longer misroutes that node's FMU inputs and outputs
@@ -283,6 +286,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- MADD-ANO-005: `converged=True` is a residual test, not a bound on the
+  distance to the fixed point -- calibrate it by re-solving at a 100x tighter
+  tolerance (minor, open, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
   swap rank, so no Clarke subgradient exists there and the integral of the

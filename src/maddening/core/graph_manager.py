@@ -4351,6 +4351,17 @@ class GraphManager:
             histories has shape ``(batch, n_steps, ...)``.
             If False (default), return only ``final_states``.
 
+        Notes
+        -----
+        Multi-rate and coupled graphs are supported.  Their internal
+        ``_meta`` (the sub-step counter, the coupling diagnostics and the
+        predictor / IQN warm starts) is not part of ``initial_states``:
+        every simulation in the batch starts from the graph's current
+        ``_meta`` and evolves its own copy from there, and none of it
+        appears in the returned states.  Pass an explicit ``_meta`` entry
+        in ``initial_states`` — batched like any other leaf — to start
+        each simulation from a different phase.
+
         Returns
         -------
         final_states : dict[str, dict]
@@ -4367,19 +4378,34 @@ class GraphManager:
             external_inputs = self._default_external_inputs()
         params = self._params_or_default(params)
 
+        # Every other entry point carries ``self._state``, which
+        # ``compile()`` seeded with ``_meta``; the batched carry is the
+        # caller's ``initial_states``, which has none.  Without this a
+        # multi-rate graph raised ``KeyError: '_meta'`` and a coupled one
+        # with diagnostics a scan carry mismatch, though nothing
+        # documented either as unsupported.  Passed as an argument rather
+        # than closed over so a cached program cannot serve a stale
+        # counter, and unbatched inside ``vmap`` so each simulation forks
+        # its own copy of the warm start.
+        meta = self._state.get(_META_KEY)
+
         def build():
             step_fn = self._build_step_fn()
 
-            def sweep(init_states, ext, params):
+            def sweep(init_states, ext, params, meta0):
                 self._count_scan_trace()
 
                 def simulate(init_state):
+                    carry = dict(init_state)
+                    if meta0 is not None:
+                        carry.setdefault(_META_KEY, meta0)
+
                     def scan_body(state, _unused):
                         new_state = step_fn(state, ext, params)
                         return new_state, (new_state if return_history else None)
 
                     final, hist = jax.lax.scan(
-                        scan_body, init_state, None, length=int(n_steps),
+                        scan_body, carry, None, length=int(n_steps),
                     )
                     if return_history:
                         return self._user_state(final), self._user_state(hist)
@@ -4392,7 +4418,7 @@ class GraphManager:
         fn = self._cached_scan(
             ("run_sweep", int(n_steps), bool(return_history)), build,
         )
-        return fn(initial_states, external_inputs, params)
+        return fn(initial_states, external_inputs, params, meta)
 
     # ------------------------------------------------------------------
     # Adaptive timestepping

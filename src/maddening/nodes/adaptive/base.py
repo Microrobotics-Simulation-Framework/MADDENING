@@ -590,12 +590,26 @@ class AdaptiveNode(SimulationNode):
         Masking only the result (which the base class does for you) keeps
         the value finite but leaves the gradient ``NaN``.
 
+        **Rank.**  This is a plain ``jnp.where``, so the mask broadcasts
+        against the **last** axis of ``x``.  That is what you want for a
+        1-D operand of shape ``(n_max,)`` and for a batch of shape
+        ``(..., n_max)``.  It is *not* what you want for a square
+        operator of shape ``(n_max, n_max)``: the mask then fills whole
+        **columns** and leaves the rows untouched, silently and with no
+        error.  Mask an operator's rows explicitly::
+
+            A = self.mask_safe(mask[:, None], A, fill=0.0)   # rows
+            A = self.mask_safe(mask, A, fill=0.0)            # columns
+
         Parameters
         ----------
         mask : jax.Array
-            Boolean active set.
+            Boolean active set, shape ``(n_max,)``.  Broadcast against
+            the last axis of ``x``; reshape it yourself (``mask[:,
+            None]``) to mask another one.
         x : jax.Array
-            Operand to sanitise.
+            Operand to sanitise.  Any rank, subject to the broadcasting
+            rule above.
         fill : float, default 1.0
             Value substituted on the inactive entries.  Must be safe for
             the operation that follows (``1.0`` for division, square

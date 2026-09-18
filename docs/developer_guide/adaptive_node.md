@@ -98,7 +98,9 @@ from maddening.nodes.adaptive import AdaptiveNode
 class MyAdaptiveNode(AdaptiveNode):
     def __init__(self, name, timestep, *, theta, k, **kw):
         super().__init__(name, timestep, n_max=256, theta=theta, k=int(k), **kw)
-        # build basis arrays once; keep them on self (static data), not in state
+        # Precompute basis arrays once and keep them on self -- but only from
+        # values that are NOT trainable parameters.  See "Precomputed basis
+        # arrays" below: baking a trainable parameter zeroes its gradient.
 
     def param_specs(self):
         return {**super().param_specs(),
@@ -122,13 +124,34 @@ class MyAdaptiveNode(AdaptiveNode):
 ```
 
 - **`compute_active_set(state, params, *, prev, is_cold_start)`** returns a
-  boolean `(n_max,)` mask. It must be traceable with a fixed output shape.
-  The base class wraps the result in `jax.lax.stop_gradient`; keep
-  differentiable surrogates (soft thresholds, softmax scores) off this path
-  anyway — a tangent leaking through the selection is the one silent failure
-  the framework cannot detect. `prev` is the previous mask (`None` at cold
-  start) for rolling or hysteresis rules; `is_cold_start` is true on the call
-  from `initial_state`.
+  boolean `(n_max,)` mask with **at least one entry true**. It must be
+  traceable with a fixed output shape. The base class wraps the result in
+  `jax.lax.stop_gradient`; keep differentiable surrogates (soft thresholds,
+  softmax scores) off this path anyway — a tangent leaking through the
+  selection is the one silent failure the framework cannot detect. `prev` is
+  the previous mask (`None` at cold start) for rolling or hysteresis rules;
+  `is_cold_start` is true on the call from `initial_state`.
+
+  All three parts of that contract are enforced, and the two value-level ones
+  are enforced because a violation is otherwise invisible:
+
+  - **The dtype must be `bool`.** Returning the scores, or an `argsort` you
+    forgot to scatter, is truthy almost everywhere: the node quietly becomes
+    an `O(n_max)` full-basis solver and `gradient_capture_ratio` then reports
+    `1.00`, because the frozen set *is* the full set. Return
+    `scores >= threshold`, or `jnp.zeros(n_max, bool).at[idx].set(True)`.
+  - **The set must not be empty.** An empty mask solves to `c = 0` with an
+    exactly zero gradient, which the diagnostics read as a symmetry trap on a
+    problem that may have no symmetry at all. This is the easy one to hit:
+    thresholding `|c|` selects nothing at a cold start, where `c` is all
+    zeros. Branch on `is_cold_start` and seed a set there (the coarsest
+    scale, or the top-k by score); afterwards, start from `prev` and add
+    above `eps_add` / remove below `eps_remove < eps_add`, which never
+    empties a set that started non-empty.
+  - Shape and dtype are static and checked on every call. Emptiness is a
+    value, so it is checked whenever the mask is concrete — every
+    `initial_state()`, and every eager `update` — but not inside a `jit`
+    trace, where there is nothing to read.
 - **`solve_frozen(state, mask, params)`** is the differentiable half. Build
   the masked operator as a full-size operator that is the identity on
   inactive rows (so the buffer keeps its shape and the inactive block is
@@ -149,6 +172,61 @@ class MyAdaptiveNode(AdaptiveNode):
 `params` in the hooks is always the merged dict `{**self.params, **injected}`:
 read the physical constants from it, never from `self.params`, or the graph's
 injected (traced, differentiable) values are ignored.
+
+#### Precomputed basis arrays
+
+Building the basis once in `__init__` and keeping it on `self` is the right
+pattern — **as long as nothing in it derives from a trainable parameter**. An
+array computed in `__init__` is a Python constant: it was built from the
+constructor's float, not from the traced value the graph injects, so nothing
+downstream of it is a function of that parameter. `jax.grad` with respect to it
+returns exactly `0.0`, and so does a central finite difference, because both
+read the same baked numbers. `compile()` accepts the graph and no diagnostic
+fires; the gradient is simply wrong, silently, and the usual oracle agrees with
+it.
+
+Both shipped toys are safe, and it is worth seeing why: `PoissonSineTopKNode`
+bakes `_phi_sensor` from `sensor_x`, which is `ParamSpec(trainable=False)`, and
+`_x` / `_phi` / `_lambdas` from `n`, a structural `int` that never reaches
+`params_pytree()`; `MaskedDenseNode` bakes from `seed`, also structural.
+
+So, for every array you precompute, one of these must hold:
+
+1. it derives only from **structural** values (ints, strings, shapes) that are
+   not leaves of `params_pytree()`; or
+2. it derives only from parameters declared `ParamSpec(trainable=False)`; or
+3. you publish it through `static_data` and declare where it came from with
+   `static_data_deps`, which makes `compile()` refuse the graph if the
+   dependency is trainable:
+
+   ```python
+   def static_data(self):
+       return {"phi_sensor": self._phi_sensor}
+
+   def static_data_deps(self):
+       return {"phi_sensor": ("sensor_x",)}
+   ```
+
+   The guard only sees arrays published that way. `AdaptiveNode` publishes
+   none of its own, so a bare instance attribute is invisible to it — which is
+   exactly why rules 1 and 2 are on you.
+
+If the array genuinely depends on a **trainable** parameter, do not bake it:
+recompute it inside `solve_frozen` / `objective` from the `params` argument, so
+the tangent flows.
+
+#### Masked operands and rank
+
+`mask_safe(mask, x, fill)` is a plain `jnp.where`, so the mask broadcasts
+against the **last** axis of `x`. That is right for a `(n_max,)` operand and
+for a batch `(..., n_max)`. On a square operator `(n_max, n_max)` it fills
+whole *columns* and leaves the rows untouched — silently. Mask rows with
+`mask[:, None]`:
+
+```python
+A = self.mask_safe(mask[:, None], A, fill=0.0)   # rows
+A = self.mask_safe(mask, A, fill=0.0)            # columns
+```
 
 ### What the base class does
 
@@ -288,6 +366,15 @@ check still refuses to construct through.
   active set, the mask is empty, or `solver="cg"` was used on a non-SPD
   operator. The identity-off-mask construction keeps the inactive block
   harmless; the active block is the subclass's responsibility.
+- **`jax.grad` returns exactly `0.0` for one parameter, and so does a finite
+  difference.** An array used by `solve_frozen` or `objective` was built in
+  `__init__` from that parameter, so it is a constant and the parameter is not
+  in the computation at all. Both oracles agree because both read the same
+  baked numbers, and `compile()` has nothing to object to. See *Precomputed
+  basis arrays* above.
+- **A masked square operator comes out wrong along one axis.** `mask_safe`
+  broadcasts against the last axis: on an `(n_max, n_max)` operand it masks
+  columns. Use `mask[:, None]` for rows.
 - **`verify_node` reports `params_effective` failing.** `update` did not read
   the parameter from the injected `params` dict.
 

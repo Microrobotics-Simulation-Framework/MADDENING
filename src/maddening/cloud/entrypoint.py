@@ -121,6 +121,13 @@ def resume_from_env(server, environ: Optional[dict] = None) -> Optional[dict]:
     server from starting.  URLs are logged with their query string
     redacted (presigned signatures are credentials).
 
+    A failure is logged as ``RESUME FAILED``, never as a fresh start: the
+    restore is atomic (see
+    :func:`maddening.core.simulation.checkpoint.load_state`), so the
+    graph is left exactly as this process built it, and the log has to
+    let an operator tell that apart from a run that was never asked to
+    resume.
+
     Parameters
     ----------
     server : SimulationServer
@@ -165,8 +172,19 @@ def resume_from_env(server, environ: Optional[dict] = None) -> Optional[dict]:
     try:
         manifest = resume_from_url(server, url, manifest_url=manifest_url, **kwargs)
     except Exception:
-        # Non-fatal: log and continue with the in-memory state.
-        logger.exception("Failed to resume from %s; starting fresh", shown)
+        # Non-fatal, but say what actually happened.  This used to log
+        # "starting fresh", which is what a run with no RESUME_FROM_URL
+        # at all does -- an operator reading the log could not tell a
+        # clean start from a resume that did not happen.  The restore
+        # itself is atomic (checkpoint.load_state rolls back), so the
+        # graph here is the one this process built at start-up.
+        logger.exception(
+            "RESUME FAILED from %s (%s was set): the graph was NOT restored "
+            "and still holds the state this process built at start-up, so "
+            "this run does NOT continue the checkpointed one. A genuine "
+            "fresh start logs nothing here.",
+            shown, RESUME_URL_ENV,
+        )
         return None
     extra = manifest.get("extra") or {}
     logger.info(

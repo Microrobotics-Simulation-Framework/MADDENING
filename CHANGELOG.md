@@ -198,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A failed graph mutation is now a no-op**: `add_node` builds the state before
+  it registers the node, so an `initial_state()` that raises (an `AdaptiveNode`
+  at a Palais trap) no longer wedges the graph with a ghost `step()` dies on
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

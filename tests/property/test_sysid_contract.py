@@ -168,28 +168,6 @@ def _moved(before, after):
     }
 
 
-#: Eight float32 ulps.  ``fit`` maps the *whole* tree through
-#: ``unconstrain``/``constrain``, and that round trip is only exact to
-#: about one ulp for a ``log`` or ``logit`` leaf (see
-#: ``test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit``), so a
-#: leaf the optimiser never stepped can still come back one ulp away.
-_ROUND_TRIP_RTOL = 8.0 * float(np.finfo(np.float32).eps)
-
-
-def _materially_moved(before, after):
-    """Paths whose leaf moved by more than the constrain round trip can."""
-    out = set()
-    for path, b, a in zip(_leaf_paths(before), _leaf_values(before),
-                          _leaf_values(after)):
-        if np.issubdtype(b.dtype, np.floating):
-            if not np.allclose(b, a, rtol=_ROUND_TRIP_RTOL, atol=0.0,
-                               equal_nan=True):
-                out.add(path)
-        elif not np.array_equal(b, a):
-            out.add(path)
-    return out
-
-
 def _in_bounds(gm, params=None) -> bool:
     try:
         gm.check_params(params)
@@ -300,19 +278,15 @@ class TestTrainableContract:
             assert jnp.asarray(b).dtype == jnp.asarray(a).dtype
             assert jnp.asarray(b).shape == jnp.asarray(a).shape
 
-        # Only the masked leaves are *optimised*.  Bit-identity outside
-        # the mask is a stronger claim than ``fit`` currently keeps: it
-        # round-trips the whole tree through
-        # ``unconstrain``/``constrain``, which shifts a ``log`` or
-        # ``logit`` leaf by about one float32 ulp whether or not the
-        # optimiser touched it.  That gap is pinned on its own below.
-        moved = _materially_moved(before, result.params)
+        # Only the masked leaves move, and they are the only ones that
+        # differ *at all*: a leaf outside the mask is copied from the
+        # starting pytree rather than round-tripped through
+        # ``unconstrain``/``constrain`` (see
+        # ``test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit``),
+        # which subsumes the weaker claim about the frozen leaves.
+        moved = _moved(before, result.params)
         assert moved <= masked, sorted(moved - masked)
-        # A leaf the specs declare non-trainable passes through both maps
-        # untouched, so for those the bit-identity does hold.
-        frozen = {path for path, spec in _spec_leaves(gm) if not spec.trainable}
-        assert not (_moved(before, result.params) & frozen)
-        # ... and the result is still a legal starting point.
+        # The result is still a legal starting point.
         assert _in_bounds(gm, result.params)
 
         # Non-vacuity: a masked leaf that is float-valued and strictly
@@ -328,22 +302,25 @@ class TestTrainableContract:
         if movable:
             assert moved, f"nothing moved although {sorted(movable)} could"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "``maddening.core.params`` documents 'constrain(unconstrain(p)) == p "
-        "on the whole tree and an optimiser that only updates the masked "
-        "leaves never touches the others', and ``fit`` returns "
-        "``gm.constrain(unravel(flat_u.at[idx].set(theta)))`` -- the WHOLE "
-        "tree through both maps.  For a ``log`` or ``logit`` leaf that round "
-        "trip is ``exp(log(p))`` in float32, which is exact only to about "
-        "one ulp, so every transformed trainable leaf comes back perturbed "
-        "even when the mask excluded it.  A downstream provenance claim of "
-        "the form 'these constants were not fitted, here are their bits' "
-        "cannot be made from ``fit``'s output as it stands.  The fix -- "
-        "copying the untouched leaves straight from ``start`` in ``fit``, "
-        "``fit_lm`` and ``fit_multiple_shooting``, or making the maps exact "
-        "round trips -- changes what three public functions return, so the "
-        "behaviour is pinned rather than changed."))
-    def test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit(self):
+    # Parametrised rather than drawn because there is nothing to
+    # generate: the point is one leaf at one value in each fitter.  A
+    # plain method takes ``@pytest.mark.parametrize`` happily; only the
+    # ``@given`` methods below have to draw the fitter instead.
+    @pytest.mark.parametrize("fitter", ["adam", "lm", "multiple_shooting"])
+    def test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit(self, fitter):
+        """A leaf the mask excluded comes back exactly, not merely close.
+
+        Every fitter used to return ``gm.constrain(unravel(...))`` over
+        the WHOLE tree, and for a ``log`` or ``logit`` leaf that round
+        trip is ``exp(log(p))`` in float32, exact only to about one ulp,
+        so a transformed trainable leaf came back perturbed even when
+        the mask excluded it (``stiffness`` 30.0 -> 30.000001907348633).
+        A provenance claim of the form "these constants were not fitted,
+        here are their bits" needs the value itself back, so the fitters
+        copy an unmasked leaf straight from the starting pytree.  All
+        three share that map: a fix in one of them would be the bug in a
+        new place.
+        """
         gm = _spring_gm()
         # ``SpringDamperNode`` declares *stiffness* and *mass* as positive
         # constants (``transform='log'``); ``damping`` is bounded below but
@@ -351,7 +328,7 @@ class TestTrainableContract:
         # exactly -- so damping is the one spring constant that could not
         # show this.  The leaf under test must also be a value ``exp(log
         # .))`` moves: 1.0 and 2.5 are fixed points in float32, 30.0 is not
-        # (it comes back as 30.000001907348633).
+        # (it came back as 30.000001907348633).
         specs = gm.param_specs()["nodes"]["s"]
         assert specs["stiffness"].transform == "log"
         assert specs["damping"].transform is None
@@ -359,9 +336,27 @@ class TestTrainableContract:
         mask["nodes"]["s"]["damping"] = True
         before = float(gm.params["nodes"]["s"]["stiffness"])
         assert before == 30.0
-        result = fit(gm, lambda p: p["nodes"]["s"]["damping"] ** 2,
-                     mask=mask, n_iter=1, lr=0.05)
+        before_damping = float(gm.params["nodes"]["s"]["damping"])
+
+        if fitter == "adam":
+            result = fit(gm, lambda p: p["nodes"]["s"]["damping"] ** 2,
+                         mask=mask, n_iter=1, lr=0.05)
+        elif fitter == "lm":
+            result = fit_lm(
+                gm, lambda p: jnp.atleast_1d(p["nodes"]["s"]["damping"] - 3.0),
+                mask=mask, n_iter=2)
+        else:
+            # Observations of a *more* damped spring, so the fit has a
+            # reason to move ``damping`` away from where it starts.
+            obs = _observe(gm, 12, _with_params(gm, "s", {"damping": 4.0}))
+            result, _ = fit_multiple_shooting(
+                gm, obs, obs_fn=(lambda h: h["s"]["position"]), window=4,
+                mask=mask, n_iter=2, lr=0.05)
+
         assert float(result.params["nodes"]["s"]["stiffness"]) == before
+        # Non-vacuity: the masked leaf did move, so the fit was not a
+        # no-op that would leave every leaf untouched for free.
+        assert float(result.params["nodes"]["s"]["damping"]) != before_damping
 
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)

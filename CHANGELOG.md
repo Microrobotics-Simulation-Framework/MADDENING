@@ -186,6 +186,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A wrapper now reports the `static_data` of the node it wraps**, so the
+  `static_data` drift check finally fires through `ShardedStencilNode`,
+  `HybridNode` and friends instead of hashing to `0` forever
 - **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
   `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
   could leave its bounds — make the parameter trainable in the spec instead

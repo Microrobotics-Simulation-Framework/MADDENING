@@ -482,7 +482,19 @@ class FmuTcpBridge:
                 except OSError:
                     pass
                 continue
-            worker.start()
+            try:
+                worker.start()
+            except RuntimeError:
+                # The process cannot make another thread.  Undo the
+                # bookkeeping the worker's own ``finally`` would have done,
+                # or the cap fills with connections nothing is serving.
+                with self._live_lock:
+                    self._live_conns.discard(conn)
+                    self._live_workers.discard(worker)
+                try:
+                    conn.close()
+                except OSError:
+                    pass
 
     def _serve_conn(self, conn: socket.socket) -> None:
         try:
@@ -530,6 +542,10 @@ class FmuTcpBridge:
                                 pass
                             return
                         held = True
+                        # From here the generous budget applies to the reply
+                        # send as well: a first frame that asks for a 64 MiB
+                        # get should not be cut off by the handshake budget.
+                        conn.settimeout(_IDLE_TIMEOUT)
                     is_binary, body = got
                     try:
                         if is_binary:

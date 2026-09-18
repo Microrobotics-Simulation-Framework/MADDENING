@@ -1,0 +1,18 @@
+=== float64, the loose-L2 O(1) configuration used by the test ===
+fori tau=1.0 conv={'iterations': 1, 'residual': 0.021404900511756017, 'converged': True}
+ift  tau=1.0214000009000301 conv={'iterations': 1, 'residual': 0.021404900511756017, 'converged': True}
+rel gap = 0.021400000900030136   F(fori) = 1.0214
+fori: analytic=1.0 fd=0.9999990463256836 rel=9.537e-07
+ift: analytic=1.0218679904937744 fd=1.0213990268170825 rel=4.591e-04
+
+=== float64, interface norm + default atol, tau ~ 1e-9 (MIME shape) ===
+fori tau=9.999999717180685e-10 conv={'iterations': 1, 'residual': 0.0015135548329171136, 'converged': True}
+ift  tau=1.0213999720128653e-09 conv={'iterations': 1, 'residual': 0.0015135548329171136, 'converged': True}
+rel gap = 0.021400000900030136
+=== strict_convergence=True does not catch it ===
+fori 1.0 ift 1.0214000009000301 -> no error raised
+
+=== a cap exit (criterion never met) is bit-identical ===
+  m=3   fori=1.0218579609385514 ift=1.0218579609385514 identical=True conv=False
+  m=8   fori=1.0218679755974536 ift=1.0218679755974536 identical=True conv=False
+  m=40  fori=1.0218679755974975 ift=1.0218679755974984 identical=False conv=True

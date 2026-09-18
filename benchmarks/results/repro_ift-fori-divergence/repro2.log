@@ -1,0 +1,43 @@
+# analytic fixed point: tau* = scale/(1-rho)
+scale=1e-06 rho=0.9 interface m=8 tol=1e-4   rel_fwd=0.000e+00  fori=5.6953279000000003e-06 ift=5.6953279000000003e-06
+                                             fori g/fd=1.34e-09 ift g/fd=7.56e-01  fori_diag={'iterations': 8, 'residual': 40.92703715920943, 'converged': False} ift_diag={'iterations': 7, 'residual': 40.92703715920943, 'converged': False}
+scale=1e-06 rho=0.99 interface m=8 tol=1e-4  rel_fwd=0.000e+00  fori=7.7255305572079895e-06 ift=7.7255305572079895e-06
+                                             fori g/fd=9.39e-10 ift g/fd=1.19e+01  fori_diag={'iterations': 8, 'residual': 91.73531378297241, 'converged': False} ift_diag={'iterations': 7, 'residual': 91.73531378297241, 'converged': False}
+scale=0.0001 rho=0.9 interface m=8 tol=1e-4  rel_fwd=0.000e+00  fori=0.00056953279000000008 ift=0.00056953279000000008
+                                             fori g/fd=1.07e-09 ift g/fd=7.56e-01  fori_diag={'iterations': 8, 'residual': 3868.762785470571, 'converged': False} ift_diag={'iterations': 7, 'residual': 3868.762785470571, 'converged': False}
+scale=0.0001 rho=0.99 interface m=8 tol=1e-4 rel_fwd=0.000e+00  fori=0.000772553055720799 ift=0.000772553055720799
+                                             fori g/fd=1.25e-09 ift g/fd=1.19e+01  fori_diag={'iterations': 8, 'residual': 8453.927730794618, 'converged': False} ift_diag={'iterations': 7, 'residual': 8453.927730794618, 'converged': False}
+scale=1 rho=0.9 interface m=8 tol=1e-4       rel_fwd=0.000e+00  fori=5.6953279000000006 ift=5.6953279000000006
+                                             fori g/fd=2.02e-09 ift g/fd=7.56e-01  fori_diag={'iterations': 8, 'residual': 70150.3611436114, 'converged': False} ift_diag={'iterations': 7, 'residual': 70150.3611436114, 'converged': False}
+scale=1 rho=0.99 interface m=8 tol=1e-4      rel_fwd=0.000e+00  fori=7.72553055720799 ift=7.72553055720799
+                                             fori g/fd=6.13e-10 ift g/fd=1.19e+01  fori_diag={'iterations': 8, 'residual': 106573.10898269487, 'converged': False} ift_diag={'iterations': 7, 'residual': 106573.10898269487, 'converged': False}
+
+# tolerance / iteration invariance at the worst point
+interface scale=1e-6 rho=0.99 tol=0.0001 m=8 rel_fwd=0.000e+00  fori=7.7255305572079895e-06 ift=7.7255305572079895e-06
+                                             fori g/fd=9.39e-10 ift g/fd=1.19e+01  fori_diag={'iterations': 8, 'residual': 91.73531378297241, 'converged': False} ift_diag={'iterations': 7, 'residual': 91.73531378297241, 'converged': False}
+interface scale=1e-6 rho=0.99 tol=0.0001 m=40 rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 66.34059527538085, 'converged': False} ift_diag={'iterations': 39, 'residual': 66.34059527538084, 'converged': False}
+interface scale=1e-6 rho=0.99 tol=1e-14 m=8  rel_fwd=0.000e+00  fori=7.7255305572079895e-06 ift=7.7255305572079895e-06
+                                             fori g/fd=9.39e-10 ift g/fd=1.19e+01  fori_diag={'iterations': 8, 'residual': 91.73531378297241, 'converged': False} ift_diag={'iterations': 7, 'residual': 91.73531378297241, 'converged': False}
+interface scale=1e-6 rho=0.99 tol=1e-14 m=40 rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 66.34059527538085, 'converged': False} ift_diag={'iterations': 39, 'residual': 66.34059527538084, 'converged': False}
+
+# same graph, l2 norm (tolerance is live there)
+l2 scale=1e-6 rho=0.99 tol=0.0001 m=40       rel_fwd=9.900e-01  fori=9.9999999999999995e-07 ift=1.99e-06
+                                             fori g/fd=4.51e-10 ift g/fd=4.93e+01  fori_diag={'iterations': 1, 'residual': 1.3930886583416003e-06, 'converged': True} ift_diag={'iterations': 1, 'residual': 1.3930886583416003e-06, 'converged': True}
+l2 scale=1e-6 rho=0.99 tol=1e-14 m=40        rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 9.41350474357831e-07, 'converged': False} ift_diag={'iterations': 39, 'residual': 9.41350474357831e-07, 'converged': False}
+
+# atol sweep under the interface norm (the live knob)
+interface scale=1e-6 rho=0.99 atol=1e-08 m=40 rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 66.34059527538085, 'converged': False} ift_diag={'iterations': 39, 'residual': 66.34059527538084, 'converged': False}
+interface scale=1e-6 rho=0.99 atol=1e-14 m=40 rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 19802.6996665342, 'converged': False} ift_diag={'iterations': 39, 'residual': 19802.6996665342, 'converged': False}
+interface scale=1e-6 rho=0.99 atol=0 m=40    rel_fwd=0.000e+00  fori=3.3102824143031952e-05 ift=3.3102824143031952e-05
+                                             fori g/fd=8.87e-10 ift g/fd=2.02e+00  fori_diag={'iterations': 40, 'residual': 19808.592960789243, 'converged': False} ift_diag={'iterations': 39, 'residual': 19808.592960789243, 'converged': False}
+
+# with iqn-ils acceleration
+interface scale=1e-6 rho=0.99 iqn-ils af=False m=8 rel_fwd=1.003e-14  fori=9.9999999999997714e-05 ift=9.9999999999998717e-05
+                                             fori g/fd=1.29e-07 ift g/fd=4.34e-08  fori_diag={'iterations': 3, 'residual': 1.3419008075542676e-12, 'converged': True} ift_diag={'iterations': 3, 'residual': 2.1217944968561597e-12, 'converged': True}
+interface scale=1e-6 rho=0.99 iqn-ils af=True m=8 rel_fwd=1.003e-14  fori=9.9999999999997714e-05 ift=9.9999999999998717e-05
+                                             fori g/fd=1.29e-07 ift g/fd=4.34e-08  fori_diag={'iterations': 3, 'residual': 1.3419008075542676e-12, 'converged': True} ift_diag={'iterations': 3, 'residual': 2.1217944968561597e-12, 'converged': True}

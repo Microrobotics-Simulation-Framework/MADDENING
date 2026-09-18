@@ -43,7 +43,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 
-from maddening.core.coupling.acceleration import estimated_error
+from maddening.core.coupling.acceleration import (
+    estimated_error,
+    relaxation_step_scale,
+)
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_spec_for`` is the one place that resolves a params path to its
@@ -78,21 +81,26 @@ def _leading_len(tree) -> int:
     return int(leaves[0].shape[0])
 
 
-def _group_thresholds(gm) -> list[tuple[str, str, float]]:
-    """``(residual key, amplification key, threshold)`` per group.
+def _group_thresholds(gm) -> list[tuple[str, str, float, float]]:
+    """``(residual key, amplification key, threshold, step scale)`` per group.
 
     The pair of keys is what the convergence criterion is built from:
-    the flag tests ``residual / (1 - rho)`` -- an estimate of the
-    distance to the fixed point -- and not the residual alone, so a
+    the flag tests ``omega * residual / (1 - rho)`` -- an estimate of
+    the distance to the fixed point -- and not the residual alone, so a
     mask derived here agrees with
-    ``GraphManager.coupling_diagnostics()['converged']``.
+    ``GraphManager.coupling_diagnostics()['converged']``.  ``omega`` is
+    the step scale (see
+    :func:`~maddening.core.coupling.acceleration.relaxation_step_scale`)
+    and has to be carried too, or an over-relaxed group would be masked
+    on a different criterion from the one it converged under.
     """
     out = []
     for g in gm._coupling_groups:  # noqa: SLF001
         key = "+".join(sorted(g.nodes))
         thr = 1.0 if g.convergence_norm in ("mixed", "interface") else float(g.tolerance)
         out.append((f"coupling_{key}_residual",
-                    f"coupling_{key}_amplification", thr))
+                    f"coupling_{key}_amplification", thr,
+                    relaxation_step_scale(g.acceleration, g.relaxation)))
     return out
 
 
@@ -211,10 +219,10 @@ def windowed_loss(
     def _converged(state):
         ok = jnp.array(True)
         meta = state.get(_META_KEY, {})
-        for key, amp_key, thr in thresholds:
+        for key, amp_key, thr, scale in thresholds:
             if key in meta:
                 amp = meta.get(amp_key, jnp.zeros_like(meta[key]))
-                ok = ok & (estimated_error(meta[key], amp) <= thr)
+                ok = ok & (estimated_error(meta[key], amp, scale) <= thr)
         return ok
 
     def _advance_one_sample(carry, _):

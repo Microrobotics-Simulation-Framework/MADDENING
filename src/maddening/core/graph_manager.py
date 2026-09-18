@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     float_fields_of,
+    relaxation_step_scale,
     state_float_image,
     state_from_float_image,
 )
@@ -245,8 +246,9 @@ def _bound_helpers():
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         error_amplification,
         estimated_error,
+        relaxation_step_scale,
     )
-    return error_amplification, estimated_error
+    return error_amplification, estimated_error, relaxation_step_scale
 
 
 def _F_dispatch(step_pure, x, consts):
@@ -276,36 +278,64 @@ def _fixed_point_while(
     one-pass function; ``residual`` is the group's configured convergence
     measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm).
 
-    **The criterion is an error bound, not a residual test.**  What is
-    compared against the static ``threshold`` is not ``r_k`` but an
+    **The criterion is an error estimate, not a residual test.**  What
+    is compared against the static ``threshold`` is not ``r_k`` but an
     estimate of the distance to the fixed point,
-    ``r_k / (1 - rho)``, with ``rho = r_k / r_{k-1}`` taken from the
-    two residuals the loop already has (see
-    :func:`~maddening.core.coupling.acceleration.error_amplification`).
-    ``converged=True`` therefore means "within ``threshold`` of the
-    fixed point" rather than "the last step was smaller than
+    ``omega * r_k / (1 - rho)``, with ``rho = r_k / r_{k-1}`` taken from
+    the two residuals the loop already has (see
+    :func:`~maddening.core.coupling.acceleration.error_amplification`)
+    and ``omega`` the ratio of the step the iterate takes to the
+    residual that is measured (see
+    :func:`~maddening.core.coupling.acceleration.relaxation_step_scale`).
+    ``converged=True`` therefore means "estimated within ``threshold``
+    of the fixed point" rather than "the last step was smaller than
     ``threshold``" — the gap MADD-ANO-005 recorded.  The estimate is
     never smaller than ``r_k``, so this criterion is never looser than
     the raw one it replaces: a group that stops here would have
     stopped under the old rule too, possibly later.
 
-    **Caveat on the derivation.**  ``r_k / (1 - rho)`` is the sum of a
-    geometric series of remaining step lengths, which bounds the
-    distance to the fixed point only if step lengths add --- i.e. under
-    the triangle inequality.  The 0.4.0 measures divide each field's
-    change by that field's own magnitude, and a scale that depends on
-    the pair being compared is *not* a metric: the inequality fails
-    when the iterate detours through a state orders of magnitude
-    larger than its neighbours (pinned by
-    ``test_the_triangle_inequality_does_not_hold``).  That is the price
-    of units-invariance and it was paid deliberately.
+    **Why "estimate" and not "bound".**  ``omega * r_k / (1 - rho)`` is
+    the sum of a geometric series of remaining step lengths.  Three
+    independent things break the inequality, and only the last of them
+    is detected:
 
-    The bound is therefore rigorous where the iterate's scale is stable
-    across the tail --- which is the regime it is applied in, since a
-    converging iteration does not take that detour --- and is an
-    estimate rather than a guarantee where the scale moves by orders of
-    magnitude between passes.  ``bound_valid`` does not detect this;
-    it reports an unusable *ratio*, not an unstable *scale*.
+    1. *The measure is not a metric.*  Summing step lengths bounds the
+       distance only under the triangle inequality, and the 0.4.0
+       measures divide each field's change by that field's own
+       magnitude — a scale that depends on the pair being compared.
+       The inequality fails when the iterate detours through a state
+       orders of magnitude larger than its neighbours (pinned by
+       ``test_the_triangle_inequality_does_not_hold``).  That is the
+       price of units-invariance and it was paid deliberately.  The
+       estimate is rigorous where the iterate's scale is stable across
+       the tail, which is the regime a converging iteration is in.
+    2. *``rho`` reads the mode that dominates the step, not the mode
+       that dominates the remaining error.*  On a linear two-mode
+       contraction the residual sequence is a clean geometric decay at
+       the *fast* rate for as long as the fast mode's amplitude
+       dominates, even though the distance still to travel is already
+       owned by the slow one.  Measured: modes ``(0.999, 0.2)`` at
+       ``tolerance=1e-4`` report ``9.19e-05`` against a true distance
+       of ``1.12e-02``, a 122x understatement, with ``bound_valid``
+       and ``converged`` both true.  The two-step ``sqrt`` guard in
+       ``error_amplification`` reads the same fast rate and does not
+       help, and no test on the residual sequence can: the sequence is
+       indistinguishable from a single-mode decay at 0.2 until the slow
+       mode emerges.  The same mechanism, inverted, is why IQN
+       understates — a superlinear sequence reads ``rho -> 0``.
+    3. *A dynamic step scale.*  ``omega`` above is exact for
+       ``acceleration="fixed"``, where relaxation is a constant, and
+       for ``"none"``, where it is 1.  It is *not* corrected for
+       Aitken's clipped per-pass factor (a measured 2.04x
+       understatement when it saturates at 2.0) or for the IQN
+       quasi-Newton step, which is not a multiple of ``F(x) - x``.
+    4. *A non-monotone ratio* — the one that is caught.  ``rho >= 1``,
+       a zero predecessor or a non-finite residual reject the estimate
+       and ``bound_valid`` records it.
+
+    ``bound_valid`` therefore reports a usable *ratio*, not a valid
+    *bound*; see
+    ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 
     On a non-monotone sequence the ratio is meaningless, so it is
     rejected (``rho >= 1``, a zero predecessor, a non-finite residual)
@@ -481,12 +511,17 @@ def _fixed_point_while(
     # -- is unchanged for every acceleration that is not on it.
     two_pass_exit = acceleration in _TWO_PASS_EXIT
 
-    amplification, error_of = _bound_helpers()
+    amplification, error_of, step_scale_of = _bound_helpers()
+    # Static: ``acceleration`` and ``relaxation`` are both nondiff
+    # arguments of the custom_jvp, so this is a Python float and costs
+    # nothing in the loop.
+    step_scale = step_scale_of(acceleration, relaxation)
 
     def _met(res, res_prev, res_prev2):
         """The stopping criterion: the *estimated distance to the fixed
         point* is at or below ``threshold``, not merely the last step."""
-        est = error_of(res, amplification(res, res_prev, res_prev2))
+        est = error_of(res, amplification(res, res_prev, res_prev2),
+                       step_scale)
         met = est <= threshold
         if two_pass_exit:
             # The streak the Aitken guard wants, with the current pass
@@ -1016,10 +1051,16 @@ def _run_coupled_block_impl(
         fixed_relaxation,
         flatten_coupled_state,
         iqn_ils_update,
+        relaxation_step_scale,
         unflatten_coupled_state,
     )
 
     max_iters = group.max_iterations
+    # How much longer the iterate's step is than the residual that is
+    # measured -- ``relaxation`` under ``acceleration="fixed"``, 1.0
+    # otherwise.  Static, and identical on both solver paths so
+    # ``solver`` stays invisible in ``coupling_diagnostics()``.
+    step_scale = relaxation_step_scale(group.acceleration, group.relaxation)
     group_node_names = list(group_schedule)
     _node_params = node_params.nodes if node_params is not None else {}
 
@@ -1361,7 +1402,7 @@ def _run_coupled_block_impl(
         happens when the ratio is rejected.
         """
         amp = error_amplification(residual, prev_residual, prev2_residual)
-        return estimated_error(residual, amp), amp
+        return estimated_error(residual, amp, step_scale), amp
 
     # Convergence threshold depends on norm type
     conv_threshold_value = (
@@ -1450,7 +1491,7 @@ def _run_coupled_block_impl(
                     # the ift branch below.
                     sub,
                     jnp.logical_not(
-                        estimated_error(single_r, single_amp)
+                        estimated_error(single_r, single_amp, step_scale)
                         <= conv_threshold_value
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
@@ -1659,7 +1700,7 @@ def _run_coupled_block_impl(
                     # ``converged=False``; the guard has to agree.
                     x_star_full,
                     jnp.logical_not(
-                        estimated_error(final_res, final_amp)
+                        estimated_error(final_res, final_amp, step_scale)
                         <= conv_threshold_value
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
@@ -4003,18 +4044,33 @@ class GraphManager:
               ``1 / (1 - rho)`` of the group's slowest mode, from the
               ratio of the last two residuals.  ``nan`` when the
               estimate was rejected (see ``"bound_valid"``).
-            - ``"error_estimate"`` : float — ``residual *
+            - ``"error_estimate"`` : float — ``residual * omega *
               amplification``, an estimate of ``||x - x*||`` in the
               same norm: how far the returned state is from the fixed
-              point, rather than how far the last pass moved.  Falls
-              back to ``residual`` when the estimate was rejected.
-            - ``"bound_valid"`` : bool — whether the contraction ratio
-              was usable this step.  ``False`` on a non-monotone
-              (non-normal) sequence, on a zero or non-finite
-              predecessor, and at ``max_iterations=1``, where there is
-              no pair of residuals to take a ratio of.  The criterion
-              then falls back to the raw residual test, which is what
-              ``converged`` reports.
+              point, rather than how far the last pass moved.
+              ``omega`` is the relaxation factor under
+              ``acceleration="fixed"`` and 1 otherwise — the series is
+              over the steps the iterate takes, and over-relaxation
+              makes those longer than the residual that is measured.
+              Falls back to ``residual`` when the estimate was
+              rejected.  **It is an estimate, not a bound**: it can
+              understate, and by large factors — see ``"bound_valid"``
+              and
+              ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+            - ``"bound_valid"`` : bool — whether the contraction
+              *ratio* was usable this step.  ``False`` on a
+              non-monotone (non-normal) sequence, on a zero or
+              non-finite predecessor, and at ``max_iterations=1``,
+              where there is no pair of residuals to take a ratio of.
+              The criterion then falls back to the raw residual test,
+              which is what ``converged`` reports.  ``True`` does
+              **not** certify the estimate: three mechanisms break it
+              that this flag cannot see (a measure that is not a
+              metric, a ``rho`` read from a faster mode than the one
+              holding the remaining error, and Aitken's / IQN's
+              uncorrected step scale).  The worst measured
+              understatement with ``bound_valid=True`` is 122x.  See
+              :func:`_fixed_point_while` for all three.
             - ``"gradient_error_bound"`` : float — how far the IFT
               adjoint may be from a finite difference of this group's
               own forward, ``residual * cond(I - dF/dx)`` estimated
@@ -4022,7 +4078,9 @@ class GraphManager:
               number as ``"error_estimate"``: both are
               ``(I - dF/dx)^-1`` applied to a residual).  ``inf`` when
               ``bound_valid`` is ``False`` — no contraction was
-              observed, so nothing bounds the disagreement.
+              observed, so nothing bounds the disagreement.  Being the
+              same number, it inherits every way ``"error_estimate"``
+              can understate.
             - ``"converged"`` : bool — the *error estimate* met the
               group's threshold (``tolerance`` for the L2 norm, ``1.0``
               for the mixed / interface norms).  ``False`` means the
@@ -4035,13 +4093,15 @@ class GraphManager:
             met the criterion rather than on the update it went on to
             produce, so recomputing ``||F(x) - x||`` on the state you
             were handed reproduces ``"residual"``.  Since 0.4.0 it is
-            also a *bound on the distance to the fixed point* and not
-            only on the last step: the threshold is applied to
-            ``residual / (1 - rho)`` with ``rho`` measured from the
-            residual sequence, which is what MADD-ANO-005 recorded as
-            missing.  Where the ratio is unusable the flag degrades to
-            the old residual test and says so through
-            ``"bound_valid"``.
+            also an *estimate of the distance to the fixed point* and
+            not only of the last step: the threshold is applied to
+            ``omega * residual / (1 - rho)`` with ``rho`` measured from
+            the residual sequence, which is what MADD-ANO-005 recorded
+            as missing.  Where the ratio is unusable the flag degrades
+            to the old residual test and says so through
+            ``"bound_valid"``.  It is strictly stronger than the
+            pre-0.4.0 flag in every case and still not a guarantee —
+            do not treat ``converged=True`` as certifying a distance.
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, return the same state and derive both values
@@ -4065,7 +4125,17 @@ class GraphManager:
                 # ``rho`` in ``[0, 1)``, so it is always >= 1; the
                 # solvers write 0.0 for "rejected".
                 valid = amp >= 1.0
-                error_estimate = residual * (amp if valid else 1.0)
+                # The geometric series is over the steps the iterate
+                # takes, which are ``relaxation`` times the residual
+                # that is measured under ``acceleration="fixed"``.
+                # Both solvers apply the same factor to the same
+                # criterion, so this reproduces their ``converged``.
+                scale = relaxation_step_scale(
+                    group.acceleration, group.relaxation,
+                )
+                error_estimate = (
+                    residual * max(scale * amp, 1.0) if valid else residual
+                )
                 threshold = (
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance

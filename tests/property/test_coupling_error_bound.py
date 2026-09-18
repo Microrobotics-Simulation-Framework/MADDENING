@@ -54,6 +54,7 @@ from hypothesis import strategies as st
 from maddening.core.coupling.acceleration import (
     coupling_residual_l2,
     coupling_residual_mixed,
+    relaxation_step_scale,
 )
 
 from tests.conftest import EXAMPLES_COSTLY
@@ -211,14 +212,18 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
 def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
     """The compatibility half of the change, as an exact statement.
 
-    ``error_estimate = residual * max(amplification, 1)`` and a valid
-    amplification is ``1/(1 - rho)`` with ``rho`` in ``[0, 1)``, so the
-    estimate is never below the residual.  Two consequences follow and
-    both are asserted here: a group that meets the new criterion also
-    meets the old one -- so D2's guarantee that ``converged=True``
-    describes the state you were handed is not weakened -- and a
-    rejected estimate degrades to exactly the old criterion rather than
-    to something unpredictable.
+    ``error_estimate = residual * max(omega * amplification, 1)``,
+    where ``omega`` is the step scale
+    (:func:`~maddening.core.coupling.acceleration.relaxation_step_scale`:
+    the relaxation factor under ``acceleration="fixed"``, 1 otherwise)
+    and a valid amplification is ``1/(1 - rho)`` with ``rho`` in
+    ``[0, 1)``.  The ``max`` is what keeps the estimate from dropping
+    below the residual under *under*-relaxation, and it is why the two
+    consequences asserted here survive ``omega``: a group that meets
+    the new criterion also meets the old one -- so D2's guarantee that
+    ``converged=True`` describes the state you were handed is not
+    weakened -- and a rejected estimate degrades to exactly the old
+    criterion rather than to something unpredictable.
     """
     gm = _diagnostics_recipe(recipe).build()
     gm.step()
@@ -231,8 +236,12 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
         note(f"{key}: {d}")
         if d["bound_valid"]:
             assert d["amplification"] >= 1.0
+            scale = relaxation_step_scale(
+                groups[key].acceleration, groups[key].relaxation,
+            )
             assert d["error_estimate"] == pytest.approx(
-                d["residual"] * d["amplification"], rel=1e-5,
+                d["residual"] * max(scale * d["amplification"], 1.0),
+                rel=1e-5,
             )
             assert d["gradient_error_bound"] == pytest.approx(
                 d["error_estimate"],

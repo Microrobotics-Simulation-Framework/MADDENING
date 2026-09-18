@@ -121,6 +121,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`solver="ift"` returns the iterate whose residual met the criterion**, as
+  `fori` always has, so `converged=True` names the state you were handed and
+  both solvers return it; every converged group's answer moves by one residual
 - **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
   timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
 - **`coupling_diagnostics()["residual"]` describes the state the step returned**

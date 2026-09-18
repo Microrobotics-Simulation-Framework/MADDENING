@@ -18,9 +18,34 @@ app = server.create_app()
 Run with uvicorn:
 
 ```bash
-uvicorn module:app --host 0.0.0.0 --port 8000
+uvicorn module:app --host 127.0.0.1 --port 8000
 # Interactive docs at http://localhost:8000/docs
 ```
+
+## Security: this API has no authentication
+
+There is no login, no API key and no TLS.  Every route below is open to
+anyone who can reach the port, including `DELETE /graph/nodes/{name}`,
+`POST /checkpoint/save` and `POST /cloud/launch` — which provisions paid
+GPU instances with the credentials stored on the host — while `/docs`
+publishes the full route list.  So:
+
+* **Bind it to `127.0.0.1`** (`--host 127.0.0.1`, or `MADDENING_HOST` for
+  the cloud entry point) and reach it from elsewhere through an SSH
+  tunnel: `ssh -L 8000:127.0.0.1:8000 user@host`.
+* **If it must listen on a network**, put an authenticating,
+  TLS-terminating reverse proxy in front of it and keep port 8000 closed
+  in the firewall / cloud security group.
+* Containers are the exception that proves the rule: a container bound to
+  `127.0.0.1` is unreachable even with `-p`, so the image binds `0.0.0.0`
+  and the *published port* is what you must keep private.  The server
+  logs a warning at startup whenever it binds a non-loopback address
+  (`maddening.api.server.warn_if_publicly_bound`).
+
+Request sizes are bounded (`n_steps` ≤ 100000, node integer parameters ≤
+10000000, bounded surrogate-training arguments; see `/openapi.json`) so
+one request cannot exhaust the host, but that is a backstop, not
+authentication.
 
 ## REST Endpoints
 

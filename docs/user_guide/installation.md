@@ -43,7 +43,7 @@ Install only what you need. Each extra adds one capability:
 | `viz` | Matplotlib 2D renderers | `pip install maddening[viz]` |
 | `terminal` | Rich terminal renderer (works over SSH) | `pip install maddening[terminal]` |
 | `network` | ZeroMQ remote transport | `pip install maddening[network]` |
-| `api` | FastAPI HTTP/WebSocket server | `pip install maddening[api]` |
+| `api` | FastAPI HTTP/WebSocket server (no authentication — bind it to `127.0.0.1` or front it with an authenticating proxy) | `pip install maddening[api]` |
 | `surrogates` | Neural surrogate training (equinox + optax) | `pip install maddening[surrogates]` |
 | `viz3d` | PyVista 3D server-side rendering | `pip install maddening[viz3d]` |
 | `gpu-viz` | pygfx GPU-accelerated 3D viewer | `pip install maddening[gpu-viz]` |

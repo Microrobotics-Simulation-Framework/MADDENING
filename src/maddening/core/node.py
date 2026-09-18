@@ -72,6 +72,142 @@ class BoundaryFluxSpec:
     output_units: str | None = None
 
 
+def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
+    """Merge ``getter(inner)`` over every node held as an attribute.
+
+    The shared machinery behind the forwarding defaults of
+    :attr:`SimulationNode.static_data` and
+    :meth:`SimulationNode.static_data_deps`: both must walk the same
+    attributes, qualify colliding keys the same way and terminate on the
+    same cycles, or a wrapper's dependency declaration stops lining up
+    with the statics it declares for.
+
+    Parameters
+    ----------
+    node : SimulationNode
+        The wrapper (or leaf) to collect from.
+    getter : callable
+        ``inner -> dict``, applied to each wrapped node.
+    guard : str
+        Name of the re-entrancy flag set on ``node`` for the duration of
+        the walk, so a reference cycle between two nodes terminates.
+
+    Returns
+    -------
+    dict
+        ``{}`` when ``node`` wraps nothing.  Otherwise the union of the
+        wrapped nodes' dicts, in attribute order.  Two wrapped nodes
+        contributing the same key keep both entries, the second
+        qualified by the attribute holding it, rather than one silently
+        displacing the other.
+    """
+    d = getattr(node, "__dict__", None)
+    # Fast path: a leaf node wraps nothing, and this runs per node per
+    # ``step()``.  Checked before the guard so a leaf never even grows
+    # the guard attribute.
+    if not d or not any(isinstance(v, SimulationNode) for v in d.values()):
+        return {}
+    if getattr(node, guard, False):
+        return {}
+    # ``object.__setattr__`` so a node built as a frozen dataclass can
+    # still carry the guard; a node that refuses it outright is only at
+    # risk from a reference cycle, which is not a shape the wrappers
+    # make.
+    try:
+        object.__setattr__(node, guard, True)
+    except (AttributeError, TypeError):
+        pass
+    try:
+        out: dict = {}
+        for attr, value in list(d.items()):
+            if not isinstance(value, SimulationNode):
+                continue
+            for key, item in getter(value).items():
+                while key in out:
+                    key = f"{attr}.{key}"
+                out[key] = item
+        return out
+    finally:
+        try:
+            object.__setattr__(node, guard, False)
+        except (AttributeError, TypeError):
+            pass
+
+
+def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
+    """Declared static-data dependencies that name a trainable parameter.
+
+    The rule
+    :meth:`~maddening.core.graph_manager.GraphManager.compile` refuses a
+    graph over, factored out so it can be asked of a node on its own.
+    See :meth:`SimulationNode.static_data_deps` for why such a
+    dependency is an error rather than a supported feature.
+
+    A declared dependency is a violation when the named parameter is
+    **both** a leaf of :meth:`SimulationNode.params_pytree` -- a value
+    the graph actually differentiates -- and left trainable by
+    :meth:`SimulationNode.param_specs`.  A structural parameter (an
+    ``int`` such as ``n_cells``, a ``str``, a ``bool``, a nested dict)
+    never reaches the parameter pytree, so nothing differentiates
+    through it and baking it into a static is the whole point of the
+    static channel.
+
+    ``node`` and the nodes it wraps are all walked, each resolved
+    against **its own** specs and pytree.  The forwarding default of
+    :meth:`SimulationNode.static_data_deps` means a wrapper republishes
+    what it wraps, but a wrapper is not obliged to republish
+    ``param_specs`` or ``params_pytree`` (``HybridNode`` does; a
+    hand-rolled one need not), so resolving an inner declaration against
+    the outer node alone would quietly find nothing.  A violation
+    visible at more than one level is reported once, at the outermost --
+    the node the graph knows by name.
+
+    Parameters
+    ----------
+    node : SimulationNode
+        The node to check.  Duck-typed objects missing any of the three
+        methods contribute nothing rather than raising, matching how
+        ``compile`` probes for the other node-contract hooks.
+
+    Returns
+    -------
+    list of (str, str, str)
+        ``(owner_name, static_data_key, param_key)``, in walk order.
+    """
+    out: list[tuple[str, str, str]] = []
+    reported: set[tuple[str, str]] = set()
+    seen: set[int] = set()
+    queue = [node]
+    while queue:
+        obj = queue.pop(0)
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        deps = getattr(obj, "static_data_deps", None)
+        specs_of = getattr(obj, "param_specs", None)
+        pytree_of = getattr(obj, "params_pytree", None)
+        if callable(deps) and callable(specs_of) and callable(pytree_of):
+            declared = deps() or {}
+            if declared:
+                specs = specs_of() or {}
+                leaves = set(pytree_of() or {})
+                owner = getattr(obj, "name", repr(obj))
+                for static_key in sorted(declared):
+                    for param_key in declared[static_key]:
+                        if param_key not in leaves:
+                            continue
+                        if not specs.get(param_key, ParamSpec()).trainable:
+                            continue
+                        if (static_key, param_key) in reported:
+                            continue
+                        reported.add((static_key, param_key))
+                        out.append((owner, static_key, param_key))
+        for value in list(getattr(obj, "__dict__", {}).values()):
+            if isinstance(value, SimulationNode):
+                queue.append(value)
+    return out
+
+
 @stability(StabilityLevel.STABLE)
 class SimulationNode(ABC):
     """Abstract base class for all simulation nodes.
@@ -263,6 +399,18 @@ class SimulationNode(ABC):
         them into the JIT-compiled HLO as constants, which is exactly
         what we want for a 1 GB FVM mesh.
 
+        Derived from a parameter
+        ------------------------
+        A static built in ``__init__`` from ``self.params`` goes stale
+        when that parameter is written: a live write does not mark the
+        graph dirty (interactive edits stay cheap that way) and
+        :meth:`static_data_hash` covers shape and dtype, never contents,
+        so the drift check cannot see it either.  Declare the link in
+        :meth:`static_data_deps`; ``compile()`` then refuses the one
+        case that is unfixable, a static derived from a *trainable*
+        parameter, which no amount of rebuilding could make
+        differentiable.
+
         Wrappers
         --------
         The default is **not** an empty dict for a node that wraps
@@ -324,37 +472,80 @@ class SimulationNode(ABC):
             second qualified by the attribute holding it, rather than
             one silently displacing the other and going unhashed.
         """
-        d = getattr(self, "__dict__", None)
-        # Fast path: a leaf node wraps nothing, and this runs per node
-        # per ``step()``.  Checked before the guard so a leaf never even
-        # grows the guard attribute.
-        if not d or not any(isinstance(v, SimulationNode) for v in d.values()):
-            return {}
-        if getattr(self, "_collecting_static_data", False):
-            return {}
-        # ``object.__setattr__`` so a node built as a frozen dataclass
-        # can still carry the guard; a node that refuses it outright is
-        # only at risk from a reference cycle, which is not a shape the
-        # wrappers make.
-        try:
-            object.__setattr__(self, "_collecting_static_data", True)
-        except (AttributeError, TypeError):
-            pass
-        try:
-            out: dict = {}
-            for attr, value in list(d.items()):
-                if not isinstance(value, SimulationNode):
-                    continue
-                for key, item in value.static_data.items():
-                    while key in out:
-                        key = f"{attr}.{key}"
-                    out[key] = item
-            return out
-        finally:
-            try:
-                object.__setattr__(self, "_collecting_static_data", False)
-            except (AttributeError, TypeError):
-                pass
+        return _merge_from_wrapped(
+            self, lambda inner: inner.static_data, "_collecting_static_data",
+        )
+
+    @stability(StabilityLevel.STABLE)
+    def static_data_deps(self) -> dict[str, tuple[str, ...]]:
+        """Which parameters each entry of :attr:`static_data` derives from.
+
+        Default: ``{}`` for a leaf node, and -- like :attr:`static_data`
+        and :meth:`invalidate_static_cache` -- the merged declaration of
+        every node this one wraps otherwise, keyed identically to the
+        forwarded ``static_data`` so the two line up.
+
+        Returns
+        -------
+        dict[str, tuple[str, ...]]
+            ``{static_data_key: (param_key, ...)}``.  A static with no
+            entry declares nothing: one built from literals, read from a
+            file, or passed in by the caller has no parameter to name.
+
+        What to declare
+        ---------------
+        The statics whose **contents the compiled step reads**, and for
+        each, the ``self.params`` keys those contents were computed
+        from.  Both halves are load-bearing:
+
+        * *contents*, not shape.  :meth:`static_data_hash` covers
+          ``(shape, dtype, replication, shard_axis)`` and deliberately
+          never the values, so a static rebuilt at the same shape from a
+          different parameter value is invisible to it.  A live write to
+          a parameter does not mark the graph dirty either -- that is
+          what makes interactive slider edits cheap.  This declaration
+          is the only place the link is written down.
+        * *read by the step*.  A static the node publishes but whose
+          values ``update()`` never looks at bakes nothing into the HLO,
+          so there is no derivative for the graph to lose and nothing to
+          declare.  ``HeatNode`` is exactly that case on its uniform
+          grid: ``grid_x`` is built from ``length``, but the uniform
+          Laplacian recomputes ``dx = length / n_cells`` from the
+          *traced* parameter and never reads ``grid_x``.
+
+        Why a trainable dependency is refused
+        -------------------------------------
+        :meth:`~maddening.core.graph_manager.GraphManager.compile`
+        raises when a declared dependency names a parameter that is both
+        a leaf of :meth:`params_pytree` and left trainable by
+        :meth:`param_specs`.  A static is baked into the compiled HLO as
+        a constant while a trainable parameter is traced; deriving the
+        first from the second means the gradient the graph reports is
+        missing the term through the static -- silently, and in exactly
+        the direction an optimiser is pushing.  You cannot have both, so
+        it is an error rather than a feature.  The two ways out are to
+        mark the parameter ``ParamSpec(trainable=False)``, or to stop
+        deriving the static from it and compute the quantity inside
+        ``update()`` from the traced parameter instead.
+
+        A structural parameter is never a violation: an ``int``, ``str``
+        or ``bool`` never reaches :meth:`params_pytree`, nothing
+        differentiates through it, and baking it is what the static
+        channel is for.
+
+        Notes
+        -----
+        Declaring a dependency does not yet *rebuild* anything.  A write
+        to a declared non-trainable dependency still leaves the static
+        as ``__init__`` built it; recovering it means reconstructing the
+        node.  The rebuild hook and the ``set_node_params`` integration
+        are D10 steps 4 and 5, deferred to 0.5.0.
+        """
+        return _merge_from_wrapped(
+            self,
+            lambda inner: inner.static_data_deps(),
+            "_collecting_static_data_deps",
+        )
 
     def static_data_hash(self) -> int:
         """Stable hash over :attr:`static_data` for JIT cache invalidation.

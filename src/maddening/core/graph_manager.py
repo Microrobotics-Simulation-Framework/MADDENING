@@ -3197,6 +3197,43 @@ class GraphManager:
                 "differentiable through the graph): %s", baked,
             )
 
+        # D10 step 3: a static derived from a *trainable* parameter is
+        # refused outright.  The static is baked into the HLO as a
+        # constant while the parameter is traced, so the gradient would
+        # be missing the term through the static -- silently, and in the
+        # direction an optimiser is pushing.  No rebuild hook can fix
+        # that, so the graph does not compile.
+        #
+        # Declared, not inferred: ``compile`` cannot see which values a
+        # traced closure reads, so ``static_data_deps`` is the node's own
+        # statement of provenance.  The walk reaches wrapped nodes, each
+        # resolved against its own specs, so a wrapper cannot hide one.
+        # Placed in the same region as the invalidation below: before
+        # ``_build_step_fn`` and before the static-data hash snapshot.
+        from maddening.core.node import static_data_dep_violations
+        for name, spec in self._nodes.items():
+            for owner, static_key, param_key in static_data_dep_violations(
+                spec.node
+            ):
+                where = (
+                    f"node {name!r}" if owner == name
+                    else f"node {name!r} (declared by the wrapped node {owner!r})"
+                )
+                raise ValueError(
+                    f"{where} declares static_data[{static_key!r}] as derived "
+                    f"from parameter {param_key!r}, which is trainable.  "
+                    f"static_data is baked into the compiled HLO as a "
+                    f"constant, and you cannot differentiate through a "
+                    f"constant: the gradient with respect to {param_key!r} "
+                    f"would silently omit the term through "
+                    f"{static_key!r}, so a fit would move {param_key!r} "
+                    f"while {static_key!r} stayed at its __init__ value.  "
+                    f"Either declare {param_key!r} as "
+                    f"ParamSpec(trainable=False), or stop deriving "
+                    f"{static_key!r} from it and compute the quantity "
+                    f"inside update() from the traced parameter instead."
+                )
+
         # A node may keep its own materialised copy of its static arrays
         # (the sharded wrappers cache the per-device placement, keyed on
         # the arrays' identity).  Such a key cannot see a static whose

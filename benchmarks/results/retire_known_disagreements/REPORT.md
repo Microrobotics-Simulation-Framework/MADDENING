@@ -126,10 +126,21 @@ the difference. Changing the default would change what is being measured, and
 the cleaner fix may be in `src/` — either auto-detection that covers the fields
 the returned state carries, or refusing to pair an interface-only criterion
 with an interface-only accelerated set. Both are the maintainer's call.
-Generalised beyond these ten rows in
-`tests/property/test_coupling_acceleration_agreement.py`, which asserts over
-generated graphs that an accelerator given the whole state agrees with plain
-iteration.
+
+**And it is necessary, not sufficient.** Stated over generated graphs in
+`tests/property/test_coupling_acceleration_agreement.py`, "an accelerator given
+every field agrees with plain iteration" holds under `convergence_norm="l2"`
+and is *false* under `"interface"`: a few hundred draws find a three-spring
+Jacobi group under Aitken at 5.2e-01, both solves reporting `converged` and the
+accelerated one reporting `residual` exactly zero with `bound_valid=False`.
+Widening `accelerated_fields` stops the accelerator leaving fields behind, but
+the criterion is still over the edge fields alone, so a group whose interface
+goes stationary while the rest of its state has not can still exit. The ten
+fixture rows close because `position` and `velocity` on a spring are one
+integration apart — a converged interface there *is* a converged state. On an
+arbitrary graph it is not. The guarantee belongs to the norm; so the
+recommendation to a user is the norm, and `accelerated_fields` is the
+narrower fix that happens to be enough for these fixtures.
 
 ## What tightening would cost, if it is wanted anyway
 

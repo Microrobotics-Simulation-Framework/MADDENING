@@ -509,8 +509,12 @@ ten `_KNOWN_DISAGREEMENTS` rows in
 field in `accelerated_fields` closes all ten at the same iteration
 count, and tightening `atol`/`rtol` — the remedy those entries first
 named — does not, because the criterion is already three decades inside
-its threshold when they stop.  Either accelerate the whole state or
-choose a norm that sees it (`"l2"`, `"mixed"`);
+its threshold when they stop.  Naming every field is necessary and not
+sufficient: the criterion is still over the edge fields alone, so a
+group whose interface goes stationary before the rest of its state has
+can still exit, and over generated graphs that is measurable at
+5.2e-01.  **Prefer a norm that sees the whole state** (`"l2"`,
+`"mixed"`);
 `benchmarks/results/retire_known_disagreements/REPORT.md` has the
 numbers, and `MADD-ANO-005` carries it as residual risk.
 

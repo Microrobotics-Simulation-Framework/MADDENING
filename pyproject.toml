@@ -244,6 +244,9 @@ filterwarnings = [
     # solver='fori' is deprecated; the fori-vs-ift parity tests keep
     # exercising it until it is removed.
     "ignore:CouplingGroup solver='fori' is deprecated:DeprecationWarning",
+    # calibrate()/tune_coupling_params() are deprecated in favour of
+    # maddening.sysid.fit; their own tests still exercise them until 0.5.0.
+    "ignore:maddening.core.simulation.calibration:DeprecationWarning",
     # ZMQ sockets not always cleanly closed in tests
     "ignore::ResourceWarning:zmq",
     "ignore::pytest.PytestUnraisableExceptionWarning",

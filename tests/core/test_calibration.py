@@ -10,6 +10,7 @@ Verifies that tune_coupling_params:
 import jax.numpy as jnp
 import pytest
 
+from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.simulation.calibration import TuneResult, tune_coupling_params
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
@@ -38,6 +39,30 @@ def _build_springs(**coupling_kwargs):
         **coupling_kwargs,
     )
     return gm
+
+
+class TestTuneCouplingParamsDeprecation:
+    """`tune_coupling_params` is deprecated in favour of `maddening.sysid.fit`."""
+
+    def test_calling_tune_coupling_params_warns_and_names_its_replacement(self):
+        """A caller who finds the grid search first is told, at the call
+        site, which tool replaces it and when this one goes away."""
+        with pytest.warns(DeprecationWarning) as record:
+            result = tune_coupling_params(
+                build_graph_fn=_build_springs,
+                param_grid={"tolerance": [1e-6], "max_iterations": [5]},
+                n_steps=2,
+            )
+
+        message = str(record[0].message)
+        assert "maddening.sysid.fit" in message
+        assert "0.5.0" in message
+        # Deprecated is not broken: it still searches the grid.
+        assert isinstance(result, TuneResult)
+        assert len(result.all_trials) == 1
+
+    def test_tune_coupling_params_is_tagged_deprecated_in_the_registry(self):
+        assert tune_coupling_params._stability_level is StabilityLevel.DEPRECATED
 
 
 class TestTuneCouplingParams:

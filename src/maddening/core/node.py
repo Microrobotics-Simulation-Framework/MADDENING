@@ -159,8 +159,10 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     ``param_specs`` or ``params_pytree`` (``HybridNode`` does; a
     hand-rolled one need not), so resolving an inner declaration against
     the outer node alone would quietly find nothing.  A violation
-    visible at more than one level is reported once, at the outermost --
-    the node the graph knows by name.
+    visible at more than one level is reported once, attributed to the
+    innermost node that declares it -- the one holding both the static
+    and the parameter, which is where the fix goes.  The graph supplies
+    the outer name it knows the node by.
 
     Parameters
     ----------
@@ -174,8 +176,11 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     list of (str, str, str)
         ``(owner_name, static_data_key, param_key)``, in walk order.
     """
-    out: list[tuple[str, str, str]] = []
-    reported: set[tuple[str, str]] = set()
+    # ``owner_of`` is overwritten as the walk descends, so the deepest
+    # node that declares a given violation is the one named; ``order``
+    # keeps the report in first-seen (outermost) order.
+    owner_of: dict[tuple[str, str], str] = {}
+    order: list[tuple[str, str]] = []
     seen: set[int] = set()
     queue = [node]
     while queue:
@@ -198,14 +203,13 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
                             continue
                         if not specs.get(param_key, ParamSpec()).trainable:
                             continue
-                        if (static_key, param_key) in reported:
-                            continue
-                        reported.add((static_key, param_key))
-                        out.append((owner, static_key, param_key))
+                        if (static_key, param_key) not in owner_of:
+                            order.append((static_key, param_key))
+                        owner_of[(static_key, param_key)] = owner
         for value in list(getattr(obj, "__dict__", {}).values()):
             if isinstance(value, SimulationNode):
                 queue.append(value)
-    return out
+    return [(owner_of[k], k[0], k[1]) for k in order]
 
 
 @stability(StabilityLevel.STABLE)

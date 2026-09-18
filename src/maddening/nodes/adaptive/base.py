@@ -788,12 +788,7 @@ class AdaptiveNode(SimulationNode):
         del boundary_inputs, dt  # the base class uses neither
         p = self._merged(params)
         mask = self.compute_active_set(state, p, prev=state["mask"])
-        mask = jax.lax.stop_gradient(jnp.asarray(mask, dtype=bool))
-        if mask.shape != (self.n_max,):
-            raise ValueError(
-                f"{type(self).__name__}.compute_active_set returned shape "
-                f"{mask.shape}; expected ({self.n_max},)"
-            )
+        mask = self._validated_mask(mask, is_cold_start=False)
         return self._solve_and_pack(state, mask, p)
 
     # ------------------------------------------------------------------
@@ -1029,13 +1024,90 @@ class AdaptiveNode(SimulationNode):
             **self.extra_initial_state(),
         }
         mask = self.compute_active_set(empty, merged, prev=None, is_cold_start=True)
-        mask = jax.lax.stop_gradient(jnp.asarray(mask, dtype=bool))
-        if mask.shape != (self.n_max,):
+        mask = self._validated_mask(mask, is_cold_start=True)
+        return self._solve_and_pack(empty, mask, merged)
+
+    def _validated_mask(self, mask: Any, *, is_cold_start: bool) -> jax.Array:
+        """Check a :meth:`compute_active_set` result against the contract,
+        then commit it under ``stop_gradient``.
+
+        Three ways a selection rule goes wrong, all of which used to be
+        accepted, and two of which no diagnostic can see afterwards:
+
+        * **wrong shape** -- the buffer is fixed size, so this is fatal;
+        * **a non-boolean dtype** -- scores or an ``argsort`` become
+          all-true under a bool cast and the node silently degenerates
+          into a full-basis solver (see finding 4 of the 0.4.0 adaptive
+          audit);
+        * **an empty active set** -- solves to ``c = 0`` with an exactly
+          zero gradient, which the diagnostics then misread as a Palais
+          symmetry trap.
+
+        Shape and dtype are static, so they are checked on every call,
+        traced or not.  Emptiness is a *value*, so it is checked only
+        when the mask is concrete -- eagerly, and in particular on the
+        cold-start path every ``initial_state()`` takes.  Under ``jit``
+        or ``vmap`` the mask is a tracer and there is nothing to read.
+        """
+        arr = jnp.asarray(mask)
+        if arr.shape != (self.n_max,):
             raise ValueError(
                 f"{type(self).__name__}.compute_active_set returned shape "
-                f"{mask.shape}; expected ({self.n_max},)"
+                f"{arr.shape}; expected ({self.n_max},)"
             )
-        return self._solve_and_pack(empty, mask, merged)
+        if not jnp.issubdtype(arr.dtype, jnp.bool_):
+            raise ValueError(
+                f"{type(self).__name__}.compute_active_set returned dtype "
+                f"{arr.dtype}; expected a boolean array.  The mask is the "
+                "active set itself, not a score: a float score array or an "
+                "argsort permutation is truthy on every non-zero entry, so "
+                "the node would quietly become a full-basis O(n_max) solver "
+                "while gradient_capture_ratio reported 1.00 -- because the "
+                "frozen set would *be* the full set -- and nothing else "
+                "would object.  Return the comparison rather than the "
+                "scores: `scores >= threshold`, or scatter the top-k "
+                "indices into a boolean buffer with "
+                "`jnp.zeros(n_max, bool).at[idx].set(True)`.  A 0/1 integer "
+                "mask is refused for the same reason; write `!= 0` if that "
+                "is what you meant."
+            )
+        concrete = self._concrete_mask(arr)
+        if concrete is not None and not concrete.any():
+            where = (
+                "at the cold start (is_cold_start=True)" if is_cold_start
+                else "during update"
+            )
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r}.compute_active_set "
+                f"returned an empty active set {where}.  An empty set is "
+                "refused rather than solved: the frozen solve returns c = 0 "
+                "with an exactly zero gradient, and every diagnostic then "
+                "misreads it -- gradient_capture_ratio measures 0.0 and "
+                "frozen_gradient_vanishes_at() is True, so a problem with no "
+                "symmetry at all is reported as a Palais trap and none of "
+                "the remedies that error names can help (the set stays empty "
+                "at every theta).  At a cold start the coefficients are all "
+                "zero, so a rule that thresholds |c| selects nothing: branch "
+                "on the is_cold_start argument and seed a non-empty set "
+                "there (the coarsest scale, or the top-k by score).  On "
+                "later calls keep it non-empty through the prev argument -- "
+                "the hysteresis idiom (start from prev, add above eps_add, "
+                "remove below eps_remove < eps_add) never empties a set that "
+                "started non-empty."
+            )
+        return jax.lax.stop_gradient(arr)
+
+    @staticmethod
+    def _concrete_mask(mask: jax.Array) -> Optional[np.ndarray]:
+        """``mask`` as a NumPy bool array, or ``None`` when it is traced."""
+        try:
+            return np.asarray(mask, dtype=bool)
+        except (
+            jax.errors.TracerArrayConversionError,
+            jax.errors.ConcretizationTypeError,
+            TypeError, ValueError,
+        ):
+            return None
 
     def _solve_and_pack(self, state: dict, mask: jax.Array, merged: dict) -> dict:
         new = self.solve_frozen(state, mask, merged)

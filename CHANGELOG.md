@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **A coupling group no longer reports `converged=True` with a small field far
   from its fixed point** — `atol` removes a field from the norm, so it defaults to
   `0.0` and is live under every norm — and `iterations` at the cap agrees by solver
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator fixes
+  exactly what the criterion measures — use a norm that sees the whole state
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

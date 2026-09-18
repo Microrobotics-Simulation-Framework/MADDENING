@@ -361,6 +361,7 @@ def profile_graph(
     external_inputs: Optional[dict] = None,
     *,
     measure_coupling: bool = True,
+    n_stat_steps: Optional[int] = None,
     trace: bool = False,
     trace_steps: int = 20,
     trace_dir: Optional[str] = None,
@@ -384,6 +385,18 @@ def profile_graph(
         iteration and time it, so ``coupling_overhead_ms`` is measured
         rather than inferred (costs one extra compile; the graph is
         restored afterwards).  Ignored without coupling groups.
+    n_stat_steps : int or None
+        Steps in the coupling-iteration statistics pass.  ``None``
+        keeps the historical behaviour: ``min(n_steps, 50)`` steps taken
+        from wherever the timed run left the state, which makes
+        ``coupling_iter_stats`` depend on ``n_steps`` twice over — the
+        sample count follows it, and so does the window's *position* in
+        the trajectory.  On a periodically driven graph that moves the
+        mean iteration count by tens of percent, which is a trap for
+        any caller that shortens a timing run believing the iteration
+        counts are properties of the step.  Passing a value pins both:
+        the state is reset and re-warmed first, so the statistics come
+        from the same window whatever ``n_steps`` is.
     trace : bool
         Record ``trace_steps`` steps with ``jax.profiler`` and attribute
         device kernel time to the graph's named scopes
@@ -453,7 +466,15 @@ def profile_graph(
     # _meta forces a device->host sync that must not pollute the timing).
     group_keys = _meta_group_keys(gm)
     if group_keys:
-        n_stat = min(n_steps, 50)
+        n_stat = min(n_steps, 50) if n_stat_steps is None else n_stat_steps
+        if n_stat_steps is not None:
+            # Pin the window's position as well as its length: without
+            # this the pass starts wherever the timed run happened to
+            # stop, which is n_warmup + n_steps into the trajectory.
+            gm.reset_state()
+            for _ in range(max(0, n_warmup)):
+                gm.step(external_inputs)
+            jax.block_until_ready(jax.tree.leaves(gm._state))
         iters = {k[0]: [] for k in group_keys}
         conv = {k[0]: [] for k in group_keys}
         for _ in range(n_stat):

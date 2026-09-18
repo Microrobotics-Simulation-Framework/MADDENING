@@ -243,6 +243,25 @@ anomalies:
       exactly.  That fallback is reported, not silent:
       coupling_diagnostics()['bound_valid'] is False and
       gradient_error_bound is +inf.
+      A second gap is about which state the bound is over rather than
+      how tight it is, and it is not reported at all.
+      convergence_norm="interface" takes the residual over the edge
+      source fields only, and accelerated_fields=None auto-detects that
+      same set, so an accelerated group measures exactly the fields its
+      quasi-Newton step just fixed and carries the rest of the state out
+      of the last raw pass.  error_estimate is then a correct bound on
+      the interface and says nothing about anything else.  Measured over
+      the coupling sweep's 350 rows, on an iqn-* row exiting on its
+      criterion: the interface field moves by at most 1.0e-04 while
+      velocity moves by up to 2.2 (median 7.1e-05, p90 0.31).  That is
+      the whole of the ten-row _KNOWN_DISAGREEMENTS list in
+      tests/core/test_coupling_fixture_invariants.py -- all ten are
+      iqn-* under the interface norm, naming every field in
+      accelerated_fields closes all ten at the same iteration count, and
+      tightening atol/rtol, which those entries first prescribed, does
+      not.  Under convergence_norm="l2", which is over every float
+      field, the same fixtures agree to 2e-05.  Evidence:
+      benchmarks/results/retire_known_disagreements/REPORT.md.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"

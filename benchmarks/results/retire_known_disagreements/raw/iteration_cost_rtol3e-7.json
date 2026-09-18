@@ -1,0 +1,65 @@
+{
+ "title": "rtol 1e-4 -> 3e-7",
+ "slices": {
+  "all": {
+   "before": {
+    "steps": 15800,
+    "mean_iters": 18.6676582278481,
+    "conv_frac": 0.905253164556962,
+    "at_cap": 1652
+   },
+   "after": {
+    "steps": 15800,
+    "mean_iters": 21.966772151898734,
+    "conv_frac": 0.8549367088607595,
+    "at_cap": 2478
+   },
+   "pct_iterations": 17.67288582093854
+  },
+  "interface": {
+   "before": {
+    "steps": 7900,
+    "mean_iters": 16.6673417721519,
+    "conv_frac": 0.9218987341772152,
+    "at_cap": 651
+   },
+   "after": {
+    "steps": 7900,
+    "mean_iters": 23.265569620253164,
+    "conv_frac": 0.8212658227848101,
+    "at_cap": 1477
+   },
+   "pct_iterations": 39.587763533629
+  },
+  "l2 (control)": {
+   "before": {
+    "steps": 7900,
+    "mean_iters": 20.667974683544305,
+    "conv_frac": 0.8886075949367088,
+    "at_cap": 1001
+   },
+   "after": {
+    "steps": 7900,
+    "mean_iters": 20.667974683544305,
+    "conv_frac": 0.8886075949367088,
+    "at_cap": 1001
+   },
+   "pct_iterations": 0.0
+  },
+  "interface + iqn": {
+   "before": {
+    "steps": 3160,
+    "mean_iters": 3.9177215189873418,
+    "conv_frac": 1.0,
+    "at_cap": 0
+   },
+   "after": {
+    "steps": 3160,
+    "mean_iters": 5.967405063291139,
+    "conv_frac": 0.9908227848101265,
+    "at_cap": 29
+   },
+   "pct_iterations": 52.318255250403865
+  }
+ }
+}

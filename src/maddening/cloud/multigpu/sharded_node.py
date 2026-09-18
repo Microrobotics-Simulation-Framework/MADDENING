@@ -34,6 +34,63 @@ from maddening.core.compliance.stability import stability
 from maddening.core.node import SimulationNode
 from maddening.core.static_data import StaticArray, coerce_static_data_value
 
+#: Mesh axis :class:`ShardedPointwiseNode` shards over (the 1-D default
+#: name of :func:`~maddening.cloud.multigpu.device_mesh.create_device_mesh`).
+_MESH_AXIS = "devices"
+
+
+def _check_shard_divisible(
+    *,
+    wrapper: str,
+    owner: str,
+    what: str,
+    spatial_axis: int,
+    extent: int,
+    mesh_axis: str,
+    n_devices: int,
+) -> None:
+    """Refuse a shard that JAX would split unevenly, in the caller's terms.
+
+    ``jax.device_put`` raises :class:`jax.errors.IndivisibleError` from
+    inside the sharding machinery, naming neither the node, the field,
+    the cell count nor the device count.  Both stencil wrappers validate
+    up front instead, so the failure arrives at construction with the
+    two numbers that have to agree and the three ways to make them.
+
+    Parameters
+    ----------
+    wrapper, owner, what : str
+        Wrapper class name, node name, and what is being sharded (e.g.
+        ``"state field 'f'"``), for the message.
+    spatial_axis, extent : int
+        The array axis being sharded and how many cells it has.
+    mesh_axis : str
+        Name of the mesh axis it is sharded over.
+    n_devices : int
+        How many devices that mesh axis has.
+
+    Raises
+    ------
+    ValueError
+        When *extent* is not a multiple of *n_devices*.
+    """
+    if n_devices <= 0 or extent % n_devices == 0:
+        return
+    nearest = ((extent // n_devices) + 1) * n_devices
+    divisors = sorted(d for d in range(1, n_devices + 1) if extent % d == 0)
+    raise ValueError(
+        f"{wrapper} cannot shard {what} of node {owner!r}: spatial axis "
+        f"{spatial_axis} has {extent} cells and mesh axis {mesh_axis!r} has "
+        f"{n_devices} devices, which does not divide it "
+        f"({extent} % {n_devices} == {extent % n_devices}).  A sharded axis "
+        f"is split evenly across the devices, so the cell count must be a "
+        f"multiple of the device count: resize that axis to a multiple of "
+        f"{n_devices} (the next one up is {nearest}), run on one of the "
+        f"device counts that do divide {extent} ({divisors}), or use "
+        "ShardedUnstructuredNode, which carries an explicit padded layout "
+        "and accepts any (device, cell) pair."
+    )
+
 
 def _accepts_params(node: SimulationNode) -> bool:
     """True when ``node.update`` declares a ``params`` keyword.
@@ -66,9 +123,34 @@ class ShardedPointwiseNode(SimulationNode):
     mesh : Mesh
         JAX device mesh (1-D, axis name ``"devices"``).
     shard_axes : int or tuple[int, ...]
-        Which axes of the state arrays to shard.  Only single-axis
-        sharding is implemented; multi-axis raises
+        Which axis of the state arrays to shard, as a 1-tuple (an ``int``
+        is accepted and wrapped).  Any single axis is honoured: the
+        partition spec puts the mesh axis at that position and replicates
+        the rest.  A state field with too few dimensions to have that
+        axis is replicated.  Multi-axis sharding raises
         :class:`NotImplementedError`.
+
+    Raises
+    ------
+    ValueError
+        If *node* is a stencil node, if the mesh has no ``"devices"``
+        axis, if *shard_axes* is not a non-negative axis index, or if the
+        sharded axis of a state field is not divisible by the device
+        count.
+
+    Notes
+    -----
+    ``initial_state`` is where the placement happens: it places every
+    state field onto the mesh with ``jax.device_put``.  ``update`` deliberately does neither
+    a ``device_put`` nor a ``shard_map`` -- the operation is pointwise, so
+    XLA's SPMD propagation keeps a sharded input sharded through it, and
+    forcing a placement would insert a resharding collective on every
+    step.  The consequence is that the wrapper follows the sharding of
+    the state it is *given*: feed it an unsharded array (a state that
+    round-tripped through a checkpoint, a host array from a REST write)
+    and the step runs on one device, silently and correctly.  Start from
+    ``initial_state`` -- ``GraphManager`` does -- or ``device_put`` the
+    state yourself with :attr:`sharding`.
     """
 
     def __init__(
@@ -87,11 +169,27 @@ class ShardedPointwiseNode(SimulationNode):
 
         if isinstance(shard_axes, int):
             shard_axes = (shard_axes,)
+        shard_axes = tuple(shard_axes)
 
         if len(shard_axes) > 1:
             raise NotImplementedError(
                 f"Multi-axis pointwise sharding (axes={shard_axes}) is "
                 "not yet implemented. Use a single shard axis."
+            )
+        if len(shard_axes) != 1 or int(shard_axes[0]) != shard_axes[0] \
+                or shard_axes[0] < 0:
+            raise ValueError(
+                f"shard_axes={shard_axes!r} must be a single non-negative "
+                "axis index (an int or a 1-tuple)."
+            )
+        shard_axis = int(shard_axes[0])
+        if _MESH_AXIS not in mesh.axis_names:
+            raise ValueError(
+                f"ShardedPointwiseNode shards over a mesh axis named "
+                f"{_MESH_AXIS!r}, which mesh.axis_names={mesh.axis_names} "
+                "does not have.  Build the mesh with "
+                "create_device_mesh(shape=(n,)) (its 1-D default axis name), "
+                "or use ShardedStencilNode, which takes an axis_map."
             )
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
@@ -104,10 +202,48 @@ class ShardedPointwiseNode(SimulationNode):
         self.params = node.params
         self._mesh = mesh
         self._shard_axes = shard_axes
-        self._sharding = NamedSharding(mesh, P("devices"))
+        self._shard_axis = shard_axis
+        # The requested axis, not always axis 0: ``P("devices")`` names
+        # the *first* array axis, so a caller asking for axis 1 used to
+        # get axis 0 sharded and an IndivisibleError blaming an axis they
+        # had not chosen.  Leading axes are replicated (``None``).
+        self._sharding = NamedSharding(
+            mesh, P(*([None] * shard_axis + [_MESH_AXIS])),
+        )
+        self._n_devices = int(mesh.shape[_MESH_AXIS])
+        self._validate_state_divisible(node)
         # Graph parameter contract: the wrapper is a params node exactly
         # when the node it wraps is one.
         self._inner_accepts_params = _accepts_params(node)
+
+    def _validate_state_divisible(self, node: SimulationNode) -> None:
+        """Refuse at construction what ``device_put`` would refuse later.
+
+        A node that cannot build its initial state yet (one waiting for
+        a ``static_data_provider``, say) is left alone: the same check
+        runs again in :meth:`initial_state`, where the arrays are real.
+        """
+        try:
+            state = node.initial_state()
+        except Exception:      # noqa: BLE001 - construction must not depend on it
+            return
+        self._check_state_divisible(state)
+
+    def _check_state_divisible(self, state: dict) -> None:
+        for field, arr in state.items():
+            if jnp.ndim(arr) <= self._shard_axis:
+                continue       # too few axes to shard: replicated
+            _check_shard_divisible(
+                wrapper=type(self).__name__, owner=self._inner.name,
+                what=f"state field {field!r}", spatial_axis=self._shard_axis,
+                extent=int(jnp.shape(arr)[self._shard_axis]),
+                mesh_axis=_MESH_AXIS, n_devices=self._n_devices,
+            )
+
+    @property
+    def sharding(self) -> NamedSharding:
+        """The placement ``initial_state`` gives every sharded field."""
+        return self._sharding
 
     def halo_width(self) -> dict[int, int]:
         """ShardedPointwiseNode only wraps pointwise nodes (no halo)."""
@@ -115,9 +251,10 @@ class ShardedPointwiseNode(SimulationNode):
 
     def initial_state(self) -> dict:
         state = self._inner.initial_state()
+        self._check_state_divisible(state)
         sharded = {}
         for field, arr in state.items():
-            if arr.ndim > self._shard_axes[0]:
+            if arr.ndim > self._shard_axis:
                 sharded[field] = jax.device_put(arr, self._sharding)
             else:
                 sharded[field] = arr
@@ -199,6 +336,25 @@ class ShardedStencilNode(SimulationNode):
         Boundary mode for halo exchange (``"periodic"``, ``"edge"``,
         or ``"zero"``).  Default ``"edge"`` -- replicate own edge.
         ``update_padded`` applies the physical BCs after the exchange.
+
+    Raises
+    ------
+    ValueError
+        If *node* is pointwise, if ``axis_map`` names a mesh axis the
+        mesh does not have or a spatial axis with no declared halo, or
+        if a sharded extent is not divisible by the devices on its mesh
+        axis (see the note below).
+
+    Notes
+    -----
+    **Each sharded extent must divide by the devices on its mesh axis.**
+    A pencil decomposition gives every device the same slab, so a 17-cell
+    axis over 3 devices has no layout; construction refuses it, naming
+    the cell count and the device count.  Pad the grid to a multiple,
+    choose a device count that divides it, or use
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`,
+    which carries an explicit padded layout and takes any (device, cell)
+    pair.  This is a property of the stencil path only.
     """
 
     def __init__(
@@ -263,6 +419,13 @@ class ShardedStencilNode(SimulationNode):
         # calls.  See ``_materialise_sharded_statics``.
         self._static_device_cache: Optional[tuple] = None
 
+        # A pencil decomposition splits each sharded axis evenly, so the
+        # grid extent has to be a multiple of the devices on that axis.
+        # Unvalidated, that surfaced as an IndivisibleError from inside
+        # ``device_put`` on the first ``initial_state`` or first step,
+        # naming neither the node nor either number.
+        self._check_divisible_extents()
+
         # Probe inner.update_padded's signature once.  Nodes ported to
         # v0.2.1 accept `static_padded=` and `shard_info=`; v0.2-era
         # nodes do not.  If the node has sharded statics declared but
@@ -283,7 +446,13 @@ class ShardedStencilNode(SimulationNode):
         # Graph parameter contract on the sharded path: an inner
         # ``update_padded(..., params=None)`` receives the node's entry of
         # ``GraphManager.params`` (replicated across shards).
-        self._inner_accepts_params = "params" in params
+        #
+        # ``or has_var_kw`` for the same reason as the two probes above,
+        # and it matters more here: a ``**kwargs`` node that did not get
+        # ``params`` silently fell back to its constructor constant, so
+        # the injected leaf never entered the trace and d(loss)/d(param)
+        # came back exactly 0.0 with no error anywhere.
+        self._inner_accepts_params = "params" in params or has_var_kw
         if self._sharded_static and not self._inner_accepts_static_padded:
             raise ValueError(
                 f"{type(node).__name__} declares sharded static_data "
@@ -303,8 +472,47 @@ class ShardedStencilNode(SimulationNode):
         """Same as the wrapped node -- sharding does not change the stencil."""
         return self._inner.halo_width()
 
+    def _check_divisible_extents(self, state: Optional[dict] = None) -> None:
+        """Refuse a grid this mesh cannot split evenly, naming both numbers.
+
+        Checks every state field and every sharded ``StaticArray`` on
+        each axis of ``axis_map``.  A node that cannot build its initial
+        state at construction time (one waiting for a
+        ``static_data_provider``) is skipped here and checked again in
+        :meth:`initial_state`, where the arrays are real.
+        """
+        if state is None:
+            try:
+                state = self._inner.initial_state()
+            except Exception:  # noqa: BLE001 - construction must not depend on it
+                state = {}
+        for mesh_axis, spatial_axis in self._axis_map.items():
+            n_devices = int(self._mesh.shape[mesh_axis])
+            for field, arr in state.items():
+                if jnp.ndim(arr) <= spatial_axis:
+                    continue
+                _check_shard_divisible(
+                    wrapper=type(self).__name__, owner=self._inner.name,
+                    what=f"state field {field!r}", spatial_axis=spatial_axis,
+                    extent=int(jnp.shape(arr)[spatial_axis]),
+                    mesh_axis=mesh_axis, n_devices=n_devices,
+                )
+            for key, static in self._sharded_static.items():
+                if static.shard_axis != spatial_axis:
+                    continue
+                shape = tuple(jnp.shape(static.value))
+                if spatial_axis >= len(shape):
+                    continue
+                _check_shard_divisible(
+                    wrapper=type(self).__name__, owner=self._inner.name,
+                    what=f"static array {key!r}", spatial_axis=spatial_axis,
+                    extent=int(shape[spatial_axis]),
+                    mesh_axis=mesh_axis, n_devices=n_devices,
+                )
+
     def initial_state(self) -> dict:
         state = self._inner.initial_state()
+        self._check_divisible_extents(state)
         return {
             field: jax.device_put(arr, self._sharding_for_field(arr))
             for field, arr in state.items()

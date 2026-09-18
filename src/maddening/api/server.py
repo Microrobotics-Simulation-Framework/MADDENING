@@ -50,6 +50,7 @@ except ImportError as _exc:
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+from maddening import __version__ as _maddening_version
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
 from maddening.viz.relay import StateRelay
@@ -329,7 +330,9 @@ class SimulationServer:
         app = FastAPI(
             title="MADDENING Simulation Server",
             description="HTTP/WebSocket API for the MADDENING simulation graph.",
-            version="0.3.0",
+            # The package version, not a separately maintained API
+            # version: this was pinned at "0.3.0" and went stale.
+            version=_maddening_version,
         )
 
         # -- visualization endpoints -----------------------------------------

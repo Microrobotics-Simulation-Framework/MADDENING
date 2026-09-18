@@ -4,6 +4,7 @@ import json
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from pxr import Usd
 
 from maddening.core.graph_manager import GraphManager
@@ -69,3 +70,114 @@ def test_stale_override_on_load_warns_instead_of_failing():
     assert any("renamed_away" in str(x.message) for x in w)
     gm2.compile()
     assert gm2.param_specs()["nodes"]["s"]["mass"].trainable is False
+
+
+# --------------------------------------------------------------------------
+# What a stage can and cannot represent.  Both from the independent audit of
+# 2026-09-19 (``params-io``; reproducers ``r20_misc.py``, ``r2_usd_params.py``).
+# --------------------------------------------------------------------------
+
+def test_a_param_the_encoder_cannot_represent_raises_instead_of_being_repred():
+    """``json.dumps(..., default=str)`` used to write a param's ``repr``.
+
+    The documented ``static_data_provider`` pattern stores an object in
+    ``self.params`` so it survives a checkpoint round trip; through USD it
+    came back as the string ``"<Provider ...>"``, while the config path
+    raised ``TypeError`` for the same graph.  The two serialisers now
+    agree, on the answer that fails at save time.
+    """
+    class _Provider:
+        def __repr__(self):
+            return "<Provider /data/mesh.vtu>"
+
+    gm = GraphManager()
+    node = SpringDamperNode("s", 0.01, stiffness=30.0)
+    node.params["provider"] = _Provider()
+    gm.add_node(node)
+
+    stage = Usd.Stage.CreateInMemory()
+    with pytest.raises(TypeError) as exc:
+        save_graph_to_usd(gm, stage)
+    assert "provider" in str(exc.value) and "'s'" in str(exc.value)
+
+
+class _ArrayParamNode(SpringDamperNode):
+    """A spring that also carries an array constant in ``params``."""
+
+    def __init__(self, name, timestep, *, empty_2d=None, **kwargs):
+        super().__init__(name, timestep, **kwargs)
+        self.params["empty_2d"] = np.asarray(
+            np.zeros((0, 3)) if empty_2d is None else empty_2d)
+
+
+_ARRAY_NODE_QUALNAME = f"{_ArrayParamNode.__module__}.{_ArrayParamNode.__qualname__}"
+
+
+def test_a_zero_size_array_param_keeps_its_shape_through_a_round_trip():
+    """``np.zeros((0, 3)).tolist()`` is ``[]``: every axis after a
+    zero-length one is lost unless the shape is recorded beside it."""
+    gm = GraphManager()
+    gm.add_node(_ArrayParamNode("s", 0.01, stiffness=30.0))
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    reloaded = load_graph_from_usd(
+        stage, node_registry={_ARRAY_NODE_QUALNAME: _ArrayParamNode})
+
+    assert np.asarray(reloaded.get_node("s").params["empty_2d"]).shape == (0, 3)
+
+
+def test_a_graph_with_no_degenerate_shapes_writes_no_extra_attribute():
+    gm = _gm()
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    attr = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
+        "maddening:paramArrayShapesJson")
+    assert not attr or not attr.Get()
+
+
+def test_an_external_inputs_declared_dtype_survives_a_round_trip():
+    """The stage carried a shape but no dtype, so an ``int32`` or ``bool``
+    boundary input came back ``float32``."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0))
+    gm.add_external_input("s", "anchor_position", shape=(), dtype=jnp.int32)
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    reloaded = load_graph_from_usd(stage)
+
+    assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("int32")
+
+
+def test_a_stage_without_a_dtype_attribute_loads_as_it_always_did():
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0))
+    gm.add_external_input("s", "anchor_position", shape=())
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    prim = stage.GetPrimAtPath("/Simulation/external_inputs/ext0")
+    prim.GetAttribute("maddening:dtype").Clear()          # a pre-0.4.0 stage
+
+    reloaded = load_graph_from_usd(stage)
+    assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("float32")
+
+
+def test_an_unknown_dtype_on_a_stage_warns_and_falls_back():
+    import warnings
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0))
+    gm.add_external_input("s", "anchor_position", shape=())
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    prim = stage.GetPrimAtPath("/Simulation/external_inputs/ext0")
+    prim.GetAttribute("maddening:dtype").Set("object")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        reloaded = load_graph_from_usd(stage)
+    assert any("object" in str(w.message) for w in caught)
+    assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("float32")

@@ -19,6 +19,17 @@ that a prim name may not, and may legally start with a digit.  The node's
 own name is therefore written to ``maddening:nodeName`` and restored from
 there; the prim name is only a path element.
 
+Backward compatibility
+----------------------
+
+Two attributes were added in 0.4.0 -- ``maddening:dtype`` on an external
+input (its declared dtype, which no stage carried before, so an ``int32``
+or ``bool`` input reloaded as ``float32``) and
+``maddening:paramArrayShapesJson`` on a node (the shapes of zero-size
+array params, which ``tolist()`` flattens away).  A stage written without
+either loads exactly as it did before: the dtype falls back to the
+declaration default and the param keeps the shape its nested lists imply.
+
 Trust boundary
 --------------
 
@@ -314,10 +325,20 @@ def save_graph_to_usd(
                 if spec.accepts_params else node_obj.params
             )
             prim.GetAttribute("maddening:paramsJson").Set(
-                json.dumps(
-                    _params_to_serializable(node_params), default=str
-                )
+                _params_json(node_params, node_name)
             )
+            lost = _degenerate_shapes(node_params)
+            if lost:
+                # ``np.zeros((0, 3)).tolist()`` is ``[]``: every axis after a
+                # zero-length one vanishes, and the param reloads as shape
+                # ``(0,)``.  Record those shapes beside the JSON (only when
+                # there are any, so no existing stage changes) and reshape on
+                # load.  An older reader ignores the attribute and behaves as
+                # it did before.
+                attr = prim.CreateAttribute(
+                    _PARAM_SHAPES_ATTR, Sdf.ValueTypeNames.String, custom=True,
+                )
+                attr.Set(json.dumps(lost, sort_keys=True))
             overrides = gm.param_spec_overrides().get(node_name)
             if overrides:
                 attr = prim.CreateAttribute(
@@ -395,6 +416,13 @@ def save_graph_to_usd(
             prim.GetAttribute("maddening:shape").Set(
                 Vt.IntArray(list(ext.shape))
             )
+            # The declared dtype, which the stage did not carry at all: an
+            # int32 or bool external input reloaded as float32.  Written as
+            # the dtype's name beside the shape, since the two are the same
+            # piece of information about the same array.
+            prim.CreateAttribute(
+                _EXT_DTYPE_ATTR, Sdf.ValueTypeNames.String, custom=True,
+            ).Set(_dtype_name(ext.dtype))
 
 
 # ------------------------------------------------------------------
@@ -479,6 +507,7 @@ def load_graph_from_usd(
                 continue
 
             params = json.loads(params_json) if params_json else {}
+            params = _restore_param_shapes(child, params)
             cls = _resolve_node_class(node_type, node_registry,
                                       allow_import=allow_import)
 
@@ -630,7 +659,15 @@ def load_graph_from_usd(
             target_field = child.GetAttribute("maddening:targetField").Get()
             shape_arr = child.GetAttribute("maddening:shape").Get()
             shape = tuple(shape_arr) if shape_arr else ()
-            gm.add_external_input(target_node, target_field, shape=shape)
+            dtype = _ext_dtype(child)
+            if dtype is None:
+                # A stage written before the attribute existed says nothing
+                # about the dtype, so it gets the declaration default, which
+                # is what such a stage has always loaded as.
+                gm.add_external_input(target_node, target_field, shape=shape)
+            else:
+                gm.add_external_input(target_node, target_field, shape=shape,
+                                      dtype=dtype)
 
     return gm
 
@@ -694,3 +731,107 @@ def _params_to_serializable(params: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+#: Shapes of zero-size array params, which ``tolist()`` cannot carry.
+_PARAM_SHAPES_ATTR = "maddening:paramArrayShapesJson"
+
+#: The declared dtype of an external input.
+_EXT_DTYPE_ATTR = "maddening:dtype"
+
+
+def _allowed_dtypes() -> dict[str, np.dtype]:
+    """The dtypes an external input may declare, by name.
+
+    An allowlist rather than ``np.dtype(name)`` on the stage's own string:
+    a stage is untrusted input, and ``np.dtype`` accepts far more than a
+    boundary array can sensibly be (object arrays, structured records).
+    """
+    import jax.numpy as jnp  # noqa: PLC0415 - keeps module import light
+    names: dict[str, np.dtype] = {}
+    for dt in (np.bool_, np.int8, np.int16, np.int32, np.int64,
+               np.uint8, np.uint16, np.uint32, np.uint64,
+               np.float16, np.float32, np.float64, jnp.bfloat16):
+        names[np.dtype(dt).name] = np.dtype(dt)
+    return names
+
+
+def _dtype_name(dtype) -> str:
+    """``dtype`` as the name the stage stores (``"int32"``, ``"bool"``)."""
+    return np.dtype(dtype).name
+
+
+def _ext_dtype(prim):
+    """The external input's declared dtype, or ``None`` for a stage that
+    does not carry one (every stage written before 0.4.0)."""
+    attr = prim.GetAttribute(_EXT_DTYPE_ATTR)
+    name = attr.Get() if attr else None
+    if not name:
+        return None
+    dtype = _allowed_dtypes().get(str(name))
+    if dtype is None:
+        import warnings  # noqa: PLC0415
+        warnings.warn(
+            f"ignoring external-input dtype {name!r} from the USD stage: not "
+            f"a dtype a boundary array may declare; using the default",
+            RuntimeWarning, stacklevel=2,
+        )
+    return dtype
+
+
+def _degenerate_shapes(params: dict) -> dict[str, list[int]]:
+    """``{key: shape}`` for every array param whose shape ``tolist()``
+    loses -- an array with a zero-length axis and more than one axis."""
+    out: dict[str, list[int]] = {}
+    for k, v in params.items():
+        shape = getattr(v, "shape", None)
+        if shape is not None and len(shape) > 1 and 0 in tuple(shape):
+            out[k] = [int(d) for d in shape]
+    return out
+
+
+def _restore_param_shapes(prim, params: dict) -> dict:
+    """Undo :func:`_degenerate_shapes` for a stage that recorded them."""
+    attr = prim.GetAttribute(_PARAM_SHAPES_ATTR)
+    raw = attr.Get() if attr else None
+    if not raw:
+        return params
+    for key, shape in json.loads(raw).items():
+        if key in params:
+            params[key] = np.asarray(params[key]).reshape(tuple(shape))
+    return params
+
+
+def _params_json(params: dict, node_name: str) -> str:
+    """The ``maddening:paramsJson`` text for one node's params.
+
+    No ``default=str``: a param the JSON encoder cannot represent used to
+    be written as its ``repr`` and reload as that string -- a
+    ``static_data_provider`` object came back as
+    ``"<Provider /data/mesh.vtu>"`` -- while ``GraphManager.to_dict`` +
+    ``json.dumps`` raised a ``TypeError`` for the same graph.  The two
+    serialisers now agree, and they agree on the answer that fails at save
+    time rather than on the one that fails much later somewhere else.
+    """
+    try:
+        return json.dumps(_params_to_serializable(params))
+    except TypeError as exc:
+        bad = sorted(
+            k for k, v in _params_to_serializable(params).items()
+            if not _json_representable(v)
+        )
+        raise TypeError(
+            f"node {node_name!r}: parameter(s) {bad} cannot be written to a "
+            f"USD stage ({exc}).  A param that is not JSON-representable has "
+            f"to be rebuilt by the node's constructor from something that "
+            f"is, or kept out of ``params``; writing its repr() would reload "
+            f"it as a string."
+        ) from exc
+
+
+def _json_representable(value) -> bool:
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True

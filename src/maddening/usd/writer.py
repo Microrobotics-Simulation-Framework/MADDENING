@@ -88,12 +88,13 @@ class USDWriter:
                 f"{type(node_obj).__module__}.{type(node_obj).__qualname__}"
             )
             prim.GetAttribute("maddening:timestep").Set(float(spec.timestep))
-            import json
+            # No ``default=str``: see ``_params_json`` in
+            # ``maddening.usd.serialization`` -- a param the encoder cannot
+            # represent used to be written as its repr() and reload as that
+            # string, while the config path raised for the same graph.
+            from maddening.usd.serialization import _params_json  # noqa: PLC0415
             prim.GetAttribute("maddening:paramsJson").Set(
-                json.dumps(
-                    _params_to_serializable(node_obj.params),
-                    default=str,
-                )
+                _params_json(node_obj.params, node_name)
             )
 
         self._prim_cache[node_name] = prim

@@ -153,9 +153,10 @@ def _resolve_node_class(
         import importlib
         try:
             mod = importlib.import_module(module_path)
-            cls = getattr(mod, class_name)
-            register_node_class(cls)
-            return cls
+            # Deliberately NOT register_node_class'd: opting in applies to
+            # the call that opted in.  Caching it would let a later load of
+            # an untrusted stage instantiate a class it never allowed.
+            return getattr(mod, class_name)
         except (ImportError, AttributeError):
             pass
     raise KeyError(

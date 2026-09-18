@@ -155,3 +155,19 @@ def test_a_graph_of_built_in_nodes_still_round_trips_with_no_registry():
 
     reloaded = load_graph_from_usd(stage)
     assert isinstance(reloaded.get_node("s"), SpringDamperNode)
+
+
+def test_allow_import_does_not_register_the_class_for_later_loads(
+        tmp_path, importable_module):
+    """Opting in applies to the call that opted in, not to the process.
+
+    Caching the imported class would let the *next* load of an untrusted
+    stage instantiate a class that load never allowed.
+    """
+    stage = _stage_naming(tmp_path, "usd_trust_payload.Payload")
+    with pytest.raises(Exception):
+        load_graph_from_usd(stage, allow_import=True)
+    assert "usd_trust_payload" in sys.modules       # the import did happen
+
+    with pytest.raises(KeyError):
+        load_graph_from_usd(_stage_naming(tmp_path, "usd_trust_payload.Payload"))

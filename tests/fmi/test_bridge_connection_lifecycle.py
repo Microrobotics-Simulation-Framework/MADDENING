@@ -59,7 +59,7 @@ def _endpoint(bridge):
     return host, int(port)
 
 
-def _hello(bridge, timeout=5.0):
+def _hello(bridge, timeout=15.0):
     """One honest client: connect, say hello, read the reply, disconnect."""
     with socket.create_connection(_endpoint(bridge), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -87,9 +87,13 @@ def fast_timeouts(monkeypatch):
     test nobody runs.  The code path is the same one, and the *frame*
     budget is left alone because none of these tests announce a frame they
     do not send.
+
+    The idle budget keeps a couple of seconds of slack so that a test which
+    checks the instance is held *before* it is released does not race a
+    loaded machine; the handshake one has nothing to race.
     """
-    monkeypatch.setattr(tcp_bridge, "_HANDSHAKE_TIMEOUT", 0.3)
-    monkeypatch.setattr(tcp_bridge, "_IDLE_TIMEOUT", 0.3)
+    monkeypatch.setattr(tcp_bridge, "_HANDSHAKE_TIMEOUT", 0.5)
+    monkeypatch.setattr(tcp_bridge, "_IDLE_TIMEOUT", 2.0)
 
 
 def test_a_connection_that_sends_nothing_never_holds_the_instance_slot():

@@ -284,3 +284,26 @@ def test_a_fit_that_does_take_a_step_still_reports_the_leaf_as_moved():
     changed = {k for k, v in _bits(res.params).items() if v != _bits(gm.params)[k]}
     assert "stiffness" in changed
     assert "initial_position" not in changed   # frozen by its ParamSpec
+
+
+# ---------------------------------------------------------------------------
+# FIMReport is keyword-only: inserting a field must not reassign the rest
+# ---------------------------------------------------------------------------
+
+
+def test_fim_report_cannot_be_built_positionally():
+    """``rank`` was inserted between ``eigvecs`` and ``cond`` during
+    0.4.0, so positional construction silently shifted every field after
+    it -- no ``TypeError``, no warning, and a wrong ``rank`` is a wrong
+    identifiability verdict.  ``kw_only`` is what stops the next inserted
+    field doing it again."""
+    from maddening.sysid import FIMReport
+
+    kwargs = dict(
+        fim=jnp.eye(2), eigvals=jnp.ones(2), eigvecs=jnp.eye(2),
+        rank=2, cond=1.0, crb=jnp.ones(2), param_names=("a", "b"),
+    )
+    report = FIMReport(**kwargs)
+    assert report.rank == 2 and report.cond == 1.0
+    with pytest.raises(TypeError):
+        FIMReport(*kwargs.values())            # type: ignore[misc]

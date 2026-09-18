@@ -124,6 +124,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`FIMReport` is keyword-only**: `rank` was inserted mid-dataclass this
+  release, so positional construction silently reassigned every field after it;
+  build it with keywords (every in-tree caller already did)
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`

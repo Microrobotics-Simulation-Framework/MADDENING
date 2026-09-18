@@ -294,9 +294,17 @@ def init_window_states(observations: dict, window: int) -> dict:
 
 
 @stability(StabilityLevel.EVOLVING)
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class FIMReport:
     """Fisher information of a residual with respect to the parameters.
+
+    Keyword-only by construction.  ``rank`` was inserted between
+    ``eigvecs`` and ``cond`` during 0.4.0, which moved every field after
+    it: positional construction then assigned ``cond`` to ``rank`` and so
+    on, with no ``TypeError`` and no warning, and a wrong ``rank`` is a
+    wrong identifiability verdict -- the same failure as the ``crb``
+    fail-safe inversion, arriving by a different route.  ``kw_only``
+    makes that class of break impossible, here and for the next field.
 
     ``eigvals`` ascend; ``eigvecs[:, i]`` is the direction for
     ``eigvals[i]`` in the (possibly relatively scaled) parameter space

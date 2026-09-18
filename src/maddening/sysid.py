@@ -147,7 +147,9 @@ def windowed_loss(
     sample_every : int
         Base steps between consecutive observation samples; ``>= 1``.
     external_inputs : dict, optional
-        Static external inputs (as in ``run_scan``).
+        Static external inputs, completed and validated as in
+        ``gm.step``: zeros for every declared input this does not
+        supply, and a ``ValueError`` for an undeclared ``node.field``.
     mask_unconverged : bool
         Multiply a window's loss by 0 when any coupling group exited at
         ``max_iterations`` unconverged during it (the IFT gradient is
@@ -173,7 +175,10 @@ def windowed_loss(
     if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
         gm.compile()
     step_fn = gm._build_step_fn()  # noqa: SLF001
-    ext = external_inputs if external_inputs is not None else gm._default_external_inputs()  # noqa: SLF001
+    # Completed and validated exactly as ``gm.step(external_inputs=)``
+    # does: a fit whose forcing was silently dropped by a typo would
+    # move the parameters to make up for the missing input.
+    ext = gm._resolve_external_inputs(external_inputs)  # noqa: SLF001
 
     observations = {k: v for k, v in observations.items() if k != _META_KEY}
     if sample_every <= 0:

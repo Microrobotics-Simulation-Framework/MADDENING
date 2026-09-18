@@ -851,6 +851,39 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 _META_KEY = "_meta"
 
 
+def _holds_tracer(state: dict) -> bool:
+    """Whether *state* came out of a JAX transform rather than a run.
+
+    One node is enough: the state of a graph stepped under a transform
+    is the transform's output, so a node's fields are tracers together
+    or not at all, and so are the nodes.  Scanning the first node's
+    fields rather than all of them keeps this off the per-step cost of a
+    large graph, while still catching a hand-written partial state whose
+    traced field is not the first one (the shape
+    ``set_node_state`` is given by a differentiable initial condition).
+    """
+    for value in state.values():
+        if isinstance(value, dict):
+            return any(isinstance(leaf, jax.core.Tracer) for leaf in value.values())
+        return isinstance(value, jax.core.Tracer)
+    return False
+
+
+def _outside_jax_trace() -> bool:
+    """Whether no JAX transform is currently active.
+
+    Best effort, on a private JAX helper: when it is not there the
+    answer is "cannot tell", which every caller reads as "do not
+    intervene".  Being wrong in that direction costs the old behaviour
+    (JAX's own ``UnexpectedTracerError`` later), never a wrong number.
+    """
+    try:
+        from jax._src import core as _jax_core
+        return bool(_jax_core.trace_state_clean())
+    except Exception:            # pragma: no cover - JAX internals moved
+        return False
+
+
 # ------------------------------------------------------------------
 # Floating-point-tolerant GCD
 # ------------------------------------------------------------------
@@ -2221,6 +2254,9 @@ class GraphManager:
         self.params: dict = {"nodes": {}, "mappings": {}}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
+        # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
+        self._state_traced = False
+        self._state_before_trace: Optional[dict] = None
 
     def _snapshot_params(self) -> dict:
         return {
@@ -2947,7 +2983,13 @@ class GraphManager:
         list of CouplingGroup
             The created coupling groups.
         """
+        # Clearing is itself a change to the compiled step, and
+        # ``add_coupling_group`` below is the only thing that used to set
+        # the flag -- so an ``auto_couple`` that found no cycles left the
+        # graph describing itself as uncoupled while still running the
+        # coupled step it was compiled with.
         self._coupling_groups.clear()
+        self._dirty = True
         sccs = find_strongly_connected_components(
             list(self._nodes.keys()), self._edges
         )
@@ -4036,14 +4078,81 @@ class GraphManager:
         return out
 
     # ------------------------------------------------------------------
+    # Escaped tracers
+    # ------------------------------------------------------------------
+
+    def _store_state(self, new_state: dict) -> None:
+        """Write *new_state* back, remembering whether it is traced.
+
+        ``step``, ``run``, ``run_scan`` and their siblings are stateful:
+        they assign their result into ``self._state``.  Under a JAX
+        transform that result is a pytree of tracers, so a loss that
+        calls one -- the recipe ``docs/user_guide/quickstart.md`` shows
+        -- left the graph holding tracers once the transform returned,
+        and every later ``step`` / ``run_scan`` / ``save_state`` failed
+        with an error pointing at JAX rather than at the framework.
+
+        The write still happens, because a Python loop of ``gm.step()``
+        *inside* a trace depends on it.  What is added is the state to
+        come back to: see :meth:`_recover_from_escaped_tracers`.
+        """
+        if _holds_tracer(new_state):
+            if not self._state_traced:
+                self._state_before_trace = self._state
+            self._state_traced = True
+        else:
+            self._state_traced = False
+            self._state_before_trace = None
+        self._state = new_state
+
+    def _recover_from_escaped_tracers(self) -> None:
+        """Put the graph back to the last untraced state, if it needs it.
+
+        Called from every entry point.  It costs one attribute test when
+        there is nothing to do, which is always except right after a
+        transform that stepped the graph.  Inside a transform it does
+        nothing, so a traced multi-step loop still works.
+        """
+        if not self._state_traced or not _outside_jax_trace():
+            return
+        restored = self._state_before_trace
+        self._state_traced = False
+        self._state_before_trace = None
+        if restored is None:            # pragma: no cover - defensive
+            return
+        self._state = restored
+        warnings.warn(
+            "the graph held JAX tracers left behind by a transform and has "
+            "been put back to the state it had before it.  step() / run() / "
+            "run_scan() assign their result into the graph, so a loss that "
+            "calls one leaves tracers in it when jax.grad returns; the "
+            "gradient itself is unaffected.  Set the state you want "
+            "explicitly (set_node_state / reset_state / load_state) after "
+            "differentiating if the recovered state is not the one you meant.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    # ------------------------------------------------------------------
     # Internal helpers for _meta stripping
     # ------------------------------------------------------------------
 
     def _user_state(self, full_state: dict) -> dict:
-        """Return state dict without the internal ``_meta`` key."""
-        if _META_KEY not in full_state:
-            return full_state
-        return {k: v for k, v in full_state.items() if k != _META_KEY}
+        """The caller's view of *full_state*: no internal ``_meta`` key,
+        and a fresh dict per node.
+
+        It used to hand back ``self._state`` itself for a graph with no
+        ``_meta`` (the common uncoupled, uniform-rate case), and the
+        per-node dicts even when it did copy the outer one, so a caller
+        clamping a value in the dict it was given rewrote the running
+        simulation.  The arrays are immutable and stay shared; only the
+        dicts are new, which is one small allocation per node per step.
+        """
+        return {
+            name: dict(fields) if type(fields) is dict else fields
+            for name, fields in full_state.items()
+            if name != _META_KEY
+        }
 
     def coupling_diagnostics(self) -> dict[str, dict]:
         """Return coupling convergence info from the last step.
@@ -4172,6 +4281,7 @@ class GraphManager:
         Returns the full state dict after the step (excluding internal
         metadata).
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4179,7 +4289,9 @@ class GraphManager:
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
-        self._state = self._compiled_step(self._state, external_inputs, params)
+        self._store_state(
+            self._compiled_step(self._state, external_inputs, params)
+        )
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -4207,6 +4319,7 @@ class GraphManager:
             or use a ``CommandReceiver`` with ``RealtimeRunner``.
             Completed and validated as in :meth:`step`.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4215,7 +4328,9 @@ class GraphManager:
         params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._state = self._compiled_step(self._state, external_inputs, params)
+            self._store_state(
+                self._compiled_step(self._state, external_inputs, params)
+            )
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
             if callback is not None:
@@ -4313,6 +4428,7 @@ class GraphManager:
             The final state of the graph after *n_steps* (excluding
             internal metadata).
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4340,7 +4456,7 @@ class GraphManager:
             return jax.jit(scan)
 
         fn = self._cached_scan(("run_scan", int(n_steps)), build)
-        self._state = fn(self._state, external_inputs, params)
+        self._store_state(fn(self._state, external_inputs, params))
         return self._user_state(self._state)
 
     def run_scan_with_history(
@@ -4379,6 +4495,7 @@ class GraphManager:
             ``(n_steps,)`` (or ``(n_steps, *field_shape)`` for
             non-scalar fields) holding the value **after** each step.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4404,7 +4521,7 @@ class GraphManager:
 
         fn = self._cached_scan(("run_scan_with_history", int(n_steps)), build)
         final_state, history = fn(self._state, external_inputs, params)
-        self._state = final_state
+        self._store_state(final_state)
         return self._user_state(final_state), self._user_state(history)
 
     # ------------------------------------------------------------------
@@ -4464,6 +4581,7 @@ class GraphManager:
             Only if ``return_history=True``.  Batched histories with
             shape ``(batch, n_steps, ...)`` on each leaf.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4651,6 +4769,8 @@ class GraphManager:
         dt_max: float = 0.1,
         external_inputs: Optional[dict[str, dict]] = None,
         callback: Optional[Callable] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict]:
         """Run with adaptive timestepping until *t_end*.
 
@@ -4674,6 +4794,9 @@ class GraphManager:
         callback : callable, optional
             Called after every *accepted* step with
             ``(sim_time, dt_used, state_dict)``.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.
 
         Returns
         -------
@@ -4688,6 +4811,7 @@ class GraphManager:
                 "Adaptive timestepping is incompatible with multi-rate "
                 "graphs.  All nodes must share the same timestep."
             )
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4707,7 +4831,7 @@ class GraphManager:
         dt_step_fn = self._build_dt_step_fn()
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
-        params = self.params
+        params = self._params_or_default(params)
 
         t = 0.0
         dt = dt_initial
@@ -4780,7 +4904,7 @@ class GraphManager:
                         callback(t, dt_min, self._user_state(state))
                     self._notify(EVENT_STEP, self._user_state(state))
 
-        self._state = state
+        self._store_state(state)
         info = {
             "n_steps": n_steps,
             "n_rejected": n_rejected,
@@ -4799,6 +4923,8 @@ class GraphManager:
         dt_min: float = 1e-8,
         dt_max: float = 0.1,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict[str, dict], dict]:
         """Adaptive timestepping via ``jax.lax.scan`` (differentiable).
 
@@ -4818,6 +4944,11 @@ class GraphManager:
         external_inputs : dict, optional
             Static external inputs.  Completed and validated as in
             :meth:`step`.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.  It is a traced argument of the scan, so
+            ``jax.grad`` reaches it without writing a tracer into
+            :attr:`params`.
 
         Returns
         -------
@@ -4830,6 +4961,7 @@ class GraphManager:
             raise RuntimeError(
                 "Adaptive timestepping is incompatible with multi-rate graphs."
             )
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
@@ -4861,10 +4993,10 @@ class GraphManager:
             jnp.array(rtol), jnp.array(dt_min), jnp.array(dt_max),
         )
         (final_state, final_t, final_dt, n_accepted), history = fn(
-            self._state, external_inputs, self.params, knobs,
+            self._state, external_inputs, self._params_or_default(params), knobs,
         )
 
-        self._state = final_state
+        self._store_state(final_state)
         info = {"n_steps": n_accepted, "final_t": final_t, "final_dt": final_dt}
         return self._user_state(final_state), history, info
 
@@ -4873,16 +5005,40 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     def get_node_state(self, name: str) -> dict:
+        """The node's current state fields.
+
+        A fresh dict, not the internal one: the arrays inside are
+        immutable and shared, but writing a new value into the dict you
+        are handed does not reach the simulation.  Use
+        :meth:`set_node_state` for that.
+        """
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         if name not in self._state:
             raise KeyError(f"No node named '{name}'.")
-        return self._state[name]
+        return dict(self._state[name])
 
     def set_node_state(self, name: str, state: dict) -> None:
+        """Overwrite one node's state fields.
+
+        A traced value is accepted -- writing the argument of a loss in
+        is how a differentiable initial condition is expressed -- and
+        noted, so the graph can be put back afterwards rather than
+        keeping the tracer (see ``_recover_from_escaped_tracers``).
+        """
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
-        self._state[name] = _strong_typed(state)
+        state = _strong_typed(state)
+        if _holds_tracer({name: state}) and not self._state_traced:
+            # Snapshot before the write, per node, so the recovery has
+            # something untraced to go back to.  Only on the tracer path,
+            # so an ordinary call allocates nothing extra.
+            self._state_before_trace = {
+                k: (dict(v) if type(v) is dict else v)
+                for k, v in self._state.items()
+            }
+            self._state_traced = True
+        self._state[name] = state
 
     def reset_state(self) -> None:
         """Reset every node to its ``initial_state()`` and the internal
@@ -4893,6 +5049,8 @@ class GraphManager:
         normalises them (weak types stripped), so the jitted step does not
         retrace after a reset, and ``_meta``'s structure is preserved.
         """
+        self._state_traced = False
+        self._state_before_trace = None
         for name, spec in self._nodes.items():
             self._state[name] = _strong_typed(spec.node.initial_state())
         meta = self._state.get(_META_KEY)
@@ -5183,6 +5341,7 @@ class GraphManager:
         See :func:`maddening.core.checkpoint.save_state` for details.
         """
         from maddening.core.simulation.checkpoint import save_state
+        self._recover_from_escaped_tracers()
         return save_state(self, path)
 
     def load_state(self, path) -> None:
@@ -5191,6 +5350,7 @@ class GraphManager:
         See :func:`maddening.core.checkpoint.load_state` for details.
         """
         from maddening.core.simulation.checkpoint import load_state
+        self._recover_from_escaped_tracers()
         load_state(self, path)
 
     # ------------------------------------------------------------------

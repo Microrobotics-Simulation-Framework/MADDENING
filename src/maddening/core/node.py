@@ -79,8 +79,12 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
     :attr:`SimulationNode.static_data` and
     :meth:`SimulationNode.static_data_deps`: both must walk the same
     attributes, qualify colliding keys the same way and terminate on the
-    same cycles, or a wrapper's dependency declaration stops lining up
-    with the statics it declares for.
+    same cycles, or a wrapper's dependency declaration stops describing
+    the statics it declares for.  Note that "the same way" is not the
+    same as "to the same keys": qualification fires on a collision
+    within the dict being merged, so a wrapper whose statics collide but
+    whose declarations do not ends up with two differently shaped key
+    sets.  See :meth:`SimulationNode.static_data_deps`.
 
     Parameters
     ----------
@@ -537,8 +541,22 @@ class SimulationNode(ABC):
 
         Default: ``{}`` for a leaf node, and -- like :attr:`static_data`
         and :meth:`invalidate_static_cache` -- the merged declaration of
-        every node this one wraps otherwise, keyed identically to the
-        forwarded ``static_data`` so the two line up.
+        every node this one wraps otherwise, keyed by the same rule.
+
+        The same *rule*, not necessarily the same *keys*.
+        ``_merge_from_wrapped`` qualifies a key with the attribute
+        holding it only when two wrapped nodes collide on it, and
+        colliding is a property of the dict being merged: a wrapper over
+        two nodes that both publish ``table``, where only the second
+        declares a dependency, publishes ``static_data`` keys
+        ``table`` and ``inner_b.table`` but a declaration under ``table``
+        alone.  Nothing consumes the pairing today --
+        :func:`static_data_dep_violations` walks every node separately
+        and resolves each declaration against that node's own pytree, so
+        a mis-keyed wrapper entry can neither hide nor invent a
+        violation -- and the D10 step-4 rebuild hook, which would key a
+        rebuild off exactly this pairing, has to make the qualification
+        unconditional before it can rely on it.
 
         Returns
         -------

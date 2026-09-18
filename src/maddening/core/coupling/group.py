@@ -45,18 +45,28 @@ class CouplingGroup:
     max_iterations : int
         Upper bound on iterations per timestep.
     tolerance : float
-        Convergence threshold on the L2 norm of state change between
-        successive iterations.  Used when ``convergence_norm="l2"``.
+        Convergence threshold under ``convergence_norm="l2"``.  Since
+        0.4.0 the L2 norm divides each field's change by that field's
+        own magnitude, so this is a *relative* tolerance; for fields of
+        order one it is the absolute threshold it used to be.
     convergence_norm : {"l2", "mixed", "interface"}
-        Norm used to check convergence.  ``"l2"`` uses a global L2
-        norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
-        per-field mixed absolute/relative norm (converged when the
-        norm <= 1.0).  ``"interface"`` checks consistency of
-        coupling-edge values between iterations.
+        Norm used to check convergence.  All three scale each field's
+        change by the field's own magnitude, so a group's verdict does
+        not depend on the units its quantities are written in.  ``"l2"``
+        uses a global L2 norm with ``tolerance`` as threshold;
+        ``"mixed"`` a per-field RMS of ``|dx| / (rtol * |v|)`` over
+        every float field, and ``"interface"`` the same over the
+        coupling-edge fields only (both converged when the norm
+        <= 1.0).
     atol : float
-        Absolute tolerance for the ``"mixed"`` norm.
+        Dead band, in each field's own units: a field whose magnitude
+        does not exceed ``atol`` counts as being at zero and leaves the
+        norm.  Set it to the field's noise floor.  Before 0.4.0 it was
+        a floor under the scale, which made every criterion absolute
+        for fields smaller than ``atol / rtol``.
     rtol : float
-        Relative tolerance for the ``"mixed"`` norm.
+        Relative change demanded of every field above the dead band,
+        under the ``"mixed"`` and ``"interface"`` norms.
     diagnostics : bool
         If True, store iteration count and final residual in the
         ``_meta`` key of the state dict after each step.

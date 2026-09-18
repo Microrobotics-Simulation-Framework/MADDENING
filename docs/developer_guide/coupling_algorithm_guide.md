@@ -26,6 +26,19 @@ how the per-step numbers are obtained; this page is about what they say.
 > history are not comparable, and neither is any Aitken figure quoted
 > from them.
 
+> **These numbers also pre-date the error-bound criterion.**  In 0.4.0
+> a group's threshold is applied to an estimate of the distance to the
+> fixed point, `residual / (1 - rho)`, rather than to the residual, and
+> every norm scales each field's change by that field's own magnitude.
+> Replaying the 350-row sweep across the change: mean iterations per
+> step +10.3%, 438 of 14 733 converged step-verdicts lost against 8
+> gained, and 12 of 350 rows that used to converge now exhaust their
+> cap — eleven of them `acceleration="fixed"` at ω = 0.5 or 0.8, which
+> halves every step and so has the largest gap between its residual and
+> its error.  Iteration counts and `converged_fraction` on this page are
+> therefore lower bounds; re-recording the baselines is queued
+> (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+
 ## Start here
 
 Pick the row that matches the *shape* of your graph.  Every recommendation

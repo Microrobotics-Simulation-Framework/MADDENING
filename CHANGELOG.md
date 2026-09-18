@@ -183,6 +183,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A wrapper now reports the `static_data` of the node it wraps**, so the
+  `static_data` drift check finally fires through `ShardedStencilNode`,
+  `HybridNode` and friends instead of hashing to `0` forever
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it

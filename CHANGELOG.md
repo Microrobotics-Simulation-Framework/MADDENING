@@ -201,6 +201,9 @@ guidance; the itemized changes follow.
 - **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
   `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
   1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator fixes
+  exactly what the criterion measures — use a norm that sees the whole state
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

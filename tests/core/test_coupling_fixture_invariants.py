@@ -180,53 +180,136 @@ _L2_AGREEMENT = 5e-3
 #: inheriting the interface rows' slack.
 _INTERFACE_AGREEMENT = 2.5e-2
 
-#: ``{(fixture, label): why}`` for configurations that do *not* reach
-#: the common fixed point, each with the defect that explains it.
-#: Entries are listed rather than tolerated by a wider threshold: the
-#: test asserts every entry is still disagreeing, so fixing the defect
-#: turns this file red with an instruction to delete the entry, and the
-#: measurement that caught the defect is never quietly thrown away.
-#: ``jac/aitken/l2`` on the grid fixture was an earlier entry — it
-#: disagreed by 20.6% while reporting itself converged — and the
-#: corrected Aitken exit criterion cleared it, which is how an entry
-#: leaves.
+@dataclasses.dataclass(frozen=True)
+class _Disagreement:
+    """One configuration that does not reach the common fixed point.
+
+    Parameters
+    ----------
+    measured : float
+        The deviation this row records, measured by
+        :func:`_assert_same_fixed_point` itself.  Pinned in *both*
+        directions: an entry that drops under its threshold is a fixed
+        defect and must be deleted, and an entry that grows past
+        :data:`_DRIFT_FACTOR` times this number is a second defect
+        hiding behind the first.
+    reachable : float
+        The smallest deviation the entry's own prescribed remedy
+        reaches *while the fixture still converges on every step* —
+        the best of ``rtol`` 1e-04, 1e-05, 1e-06 and 3e-07, 3e-07
+        being the tightest value at which no configuration of any of
+        the three fixtures exits at the cap.  Four of the ten come
+        inside the threshold there and six do not; what the four cost
+        is in the block comment below.  Documentation, not an
+        assertion: it is a measurement of a tree, and the assertion
+        that has to keep holding is ``measured``.
+    why : str
+        The defect.
+    """
+
+    measured: float
+    reachable: float
+    why: str
+
+
+#: ``{(fixture, label): _Disagreement}`` for configurations that do
+#: *not* reach the common fixed point, each with the defect that
+#: explains it.  Entries are listed rather than tolerated by a wider
+#: threshold: the test asserts every entry is still disagreeing, so
+#: fixing the defect turns this file red with an instruction to delete
+#: the entry, and the measurement that caught the defect is never
+#: quietly thrown away.  ``jac/aitken/l2`` on the grid fixture was an
+#: earlier entry — it disagreed by 20.6% while reporting itself
+#: converged — and the corrected Aitken exit criterion cleared it,
+#: which is how an entry leaves.
 #:
-#: **The IQN / interface rows below are the visible price of decision
-#: D2** (``plans/MADDENING_040_DECISIONS.md``): both solvers now return
-#: the iterate whose residual met the criterion instead of the update it
-#: went on to produce, and for IQN that discarded update is the
-#: quasi-Newton step.  The interface criterion is ``atol + rtol*|v|``
-#: with these fixtures' ``rtol=1e-4``, which is loose enough that the
-#: step was worth three orders of magnitude: measured on ``ring-8``
-#: ``gs/iqn-imvj5/interface``, the per-step deviation from a
-#: tolerance-1e-9 reference goes from 5e-07 to 6e-04, and 25 steps of a
-#: driven ring compound that into the numbers below.  The states are
-#: within their stated criterion at every step — ``converged=True`` is
-#: now exactly a statement about the returned state — so what these
-#: entries record is MADD-ANO-005, a residual criterion not bounding the
-#: distance to the fixed point, no longer masked by a free extra pass on
-#: the ``ift`` path.  The same rows under ``solver="fori"`` have always
-#: drifted (``ring-8 jac/iqn-ils/interface``: 5.16e-02 on
-#: ``release/0.4.0``); the invariant held only because these tests run
-#: the default solver.  Tightening ``atol``/``rtol`` on the fixtures
-#: closes them, and is the change that should retire these entries.
-_IQN_INTERFACE_D2 = (
-    "D2 (both solvers now return the measured iterate): the discarded "
-    "update was IQN's quasi-Newton step, and the interface criterion is "
-    "loose enough to stop before it. MADD-ANO-005, previously masked on "
-    "the ift path. Retire by tightening the fixture's atol/rtol."
+#: **These ten rows are one defect, and it is not the one they were
+#: first recorded under.**  They were entered as the visible price of
+#: decision D2 (``plans/MADDENING_040_DECISIONS.md``) — both solvers
+#: now return the iterate whose residual met the criterion rather than
+#: the update it went on to produce, and for IQN that discarded update
+#: is the quasi-Newton step — with the remedy "tighten the fixture's
+#: ``atol``/``rtol``".  Measured, that remedy does not retire them, and
+#: on four of the ten it does not move them at all
+#: (``benchmarks/results/retire_known_disagreements/REPORT.md``):
+#:
+#: * ``stiff-pair-0.5 gs/iqn-ils/interface`` returns the **same state
+#:   to the last bit** at ``rtol`` 1e-04, 1e-05 and 1e-06, in the same
+#:   3.00 iterations.  Its residual at the exit is 1.6e-07 of the
+#:   interface quantity — about one float32 ulp, three decades inside
+#:   its own threshold — so there is no tightening left to do: the
+#:   criterion is not what stops this row.
+#: * ``atol`` is inert on all three fixtures.  It is a dead band, and
+#:   every interface element here is orders of magnitude above it;
+#:   moving it from 1e-08 to 1e-12 changes no digit.
+#: * The tightest ``rtol`` at which every configuration still converges
+#:   on every step is 3e-07, and it retires four of the ten — the three
+#:   ``ring-8`` rows and ``chain-5 gs/iqn-imvj5`` — leaving six, all
+#:   four ``stiff-pair-0.5`` rows among them.  It is not free: across
+#:   the benchmark sweep's 350 rows at the registry's own caps it costs
+#:   **+17.7% iterations overall, +39.6% on the interface rows**, and
+#:   drops the converged fraction from 0.905 to 0.855 (0.922 to 0.821
+#:   on the interface rows) because those caps cannot pay for it — the
+#:   cap shortfall ``benchmarks/results/convergence_error_bound/``
+#:   already records, met from the other side.  The L2 rows do not move
+#:   at all.  1e-07 and 1e-08 retire one and two more, but ask float32
+#:   for exact bit stagnation and put whole rows at the cap.  Nothing
+#:   is tightened here: four entries is not what +17.7% of the sweep
+#:   buys, and the defect is not in the tolerance.
+#:
+#: What actually stops them is a blind spot the criterion and the
+#: accelerator share.  ``convergence_norm="interface"`` measures the
+#: edge source fields — ``position`` on these fixtures — and
+#: ``accelerated_fields`` auto-detects the *same* set, so the
+#: quasi-Newton step lands on ``position`` and ``velocity`` is left at
+#: whatever the raw pass produced, where nothing measures it.  Measured
+#: over the sweep, on an IQN row exiting on its criterion, ``position``
+#: moves by at most 1.0e-04 while ``velocity`` moves by up to 2.2.
+#: Give the accelerator the whole state (``accel_scope="all"``) and all
+#: ten agree — worst 5.3e-03, eight of them under 3e-03 — at the
+#: fixtures' existing ``rtol=1e-4`` and within 0.8% of the same
+#: iteration count.  That is a change to what the sweep measures, not a
+#: fixture tolerance, so it is the maintainer's call and not made here.
+#: The rows are MADD-ANO-005 either way: a residual criterion that does
+#: not bound the distance to the fixed point, here because it is not
+#: taken over the fields that moved.
+#:
+#: The same rows under ``solver="fori"`` have always drifted
+#: (``ring-8 jac/iqn-ils/interface``: 5.16e-02 on ``release/0.4.0``);
+#: the invariant held only because these tests run the default solver.
+_IQN_INTERFACE_BLIND_SPOT = (
+    "the interface criterion and the auto-detected accelerated set are "
+    "the same fields, so IQN's step lands on the interface and the rest "
+    "of the state is left a pass behind where nothing measures it. "
+    "MADD-ANO-005. Tightening atol/rtol does not reach it; accelerating "
+    "every field (accel_scope='all') closes it at no iteration cost."
 )
+
+
+def _blind_spot(measured, reachable):
+    return _Disagreement(measured, reachable, _IQN_INTERFACE_BLIND_SPOT)
+
+
+#: How far past its recorded deviation a listed row may drift before
+#: this file asks for it to be re-measured.  Four: these numbers moved
+#: by up to 1.5x between ``release/0.4.0`` and the error-bound
+#: criterion without any of them changing meaning, so a band that
+#: narrow would be noise, and one much wider would let a second defect
+#: land on top of a recorded one unnoticed.
+_DRIFT_FACTOR = 4.0
+
 _KNOWN_DISAGREEMENTS = {
-    ("stiff-pair-0.5", "gs/iqn-ils/interface"): _IQN_INTERFACE_D2,
-    ("stiff-pair-0.5", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
-    ("stiff-pair-0.5", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
-    ("stiff-pair-0.5", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
-    ("chain-5", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
-    ("chain-5", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
-    ("chain-5", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
-    ("ring-8", "gs/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
-    ("ring-8", "jac/iqn-ils/interface"): _IQN_INTERFACE_D2,
-    ("ring-8", "jac/iqn-imvj5/interface"): _IQN_INTERFACE_D2,
+    # measured here; best rtol reaches while every row still converges
+    ("stiff-pair-0.5", "gs/iqn-ils/interface"): _blind_spot(1.60e-01, 1.60e-01),
+    ("stiff-pair-0.5", "gs/iqn-imvj5/interface"): _blind_spot(4.58e-01, 3.15e-01),
+    ("stiff-pair-0.5", "jac/iqn-ils/interface"): _blind_spot(4.43e-01, 3.37e-01),
+    ("stiff-pair-0.5", "jac/iqn-imvj5/interface"): _blind_spot(5.61e-01, 3.14e-01),
+    ("chain-5", "gs/iqn-imvj5/interface"): _blind_spot(3.50e-01, 2.65e-04),
+    ("chain-5", "jac/iqn-ils/interface"): _blind_spot(2.55e-02, 2.55e-02),
+    ("chain-5", "jac/iqn-imvj5/interface"): _blind_spot(5.55e-01, 6.70e-02),
+    ("ring-8", "gs/iqn-imvj5/interface"): _blind_spot(2.25e+00, 2.72e-04),
+    ("ring-8", "jac/iqn-ils/interface"): _blind_spot(3.38e-02, 1.11e-03),
+    ("ring-8", "jac/iqn-imvj5/interface"): _blind_spot(1.69e+00, 5.11e-04),
 }
 
 
@@ -289,15 +372,22 @@ def _assert_same_fixed_point(fixture, norms, n_steps=25):
         deviations[config.label] = (
             _relative_spread(reference, state, ref_nodes), config)
 
-    drifted, repaired = [], []
+    drifted, repaired, worsened = [], [], []
     for label, (dev, config) in sorted(deviations.items()):
         limit = (_L2_AGREEMENT if config.convergence_norm == "l2"
                  else _INTERFACE_AGREEMENT)
         known = _KNOWN_DISAGREEMENTS.get((fixture, label))
-        if dev > limit and known is None:
-            drifted.append(f"{label} drifted {dev:.2e} (limit {limit:.0e})")
-        elif dev <= limit and known is not None:
-            repaired.append(f"{label} now agrees to {dev:.2e} ({known})")
+        if known is None:
+            if dev > limit:
+                drifted.append(
+                    f"{label} drifted {dev:.2e} (limit {limit:.0e})")
+        elif dev <= limit:
+            repaired.append(f"{label} now agrees to {dev:.2e} ({known.why})")
+        elif dev > known.measured * _DRIFT_FACTOR:
+            worsened.append(
+                f"{label} drifted {dev:.2e}, {dev / known.measured:.1f}x the "
+                f"{known.measured:.2e} recorded against it"
+            )
     assert not drifted, (
         f"{fixture}: these configurations left the gauss-seidel/none "
         f"trajectory after {n_steps} steps: " + "; ".join(drifted)
@@ -306,6 +396,14 @@ def _assert_same_fixed_point(fixture, norms, n_steps=25):
         f"{fixture}: " + "; ".join(repaired) + " — the defect recorded in "
         f"_KNOWN_DISAGREEMENTS is fixed; delete the entry so the "
         f"invariant is enforced again"
+    )
+    # A listed row is excused from the threshold, not from measurement.
+    # Without this, a second defect landing on top of a recorded one is
+    # invisible: the row was already failing, so it keeps passing.
+    assert not worsened, (
+        f"{fixture}: " + "; ".join(worsened) + " — a listed row is allowed "
+        f"to disagree by what _KNOWN_DISAGREEMENTS records, not by more; "
+        f"re-measure it or find the second defect"
     )
 
 
@@ -345,6 +443,45 @@ def test_every_configuration_reaches_the_same_fixed_point(fixture):
     the fast lane above covers the same invariant over a reduced grid.
     """
     _assert_same_fixed_point(fixture, ("l2", "interface"))
+
+
+def test_tightening_rtol_does_not_move_the_resistant_stiff_pair_row():
+    """The measurement the list rests on, re-run rather than quoted.
+
+    ``stiff-pair-0.5 gs/iqn-ils/interface`` exits with an interface
+    residual of ~1.6e-07 — about one float32 ulp of the quantity, three
+    decades inside its own threshold — so the criterion is not what
+    stops it, and a hundredfold tightening cannot move it.  Asserted as
+    bit equality of the returned state *and* of the iteration count: an
+    inert knob is inert in both.
+
+    This is the fast, two-node witness for the whole list.  The day it
+    fails, ``rtol`` has become live on this row and the remedy
+    ``_KNOWN_DISAGREEMENTS`` was first written under is worth retrying.
+    """
+    def _run_at(rtol):
+        config = dataclasses.replace(
+            cf.CouplingConfig(acceleration="iqn-ils",
+                              convergence_norm="interface"),
+            max_iterations=_REACH_CAP, rtol=rtol,
+        )
+        built = cf.FIXTURES["stiff-pair-0.5"].build(config)
+        state, diag = _run(built, 25)
+        return _flat(state, _group_nodes(built)), diag
+
+    loose, loose_diag = _run_at(1e-4)
+    tight, tight_diag = _run_at(1e-6)
+    key = "a+b"
+    assert loose_diag[key]["converged"] and tight_diag[key]["converged"]
+    assert int(loose_diag[key]["iterations"]) == int(
+        tight_diag[key]["iterations"]), (
+        "a 100x tighter rtol changed the iteration count, so the criterion "
+        "is live on this row after all"
+    )
+    np.testing.assert_array_equal(loose, tight, err_msg=(
+        "a 100x tighter rtol moved the returned state, so the criterion is "
+        "live on this row after all; re-measure _KNOWN_DISAGREEMENTS"
+    ))
 
 
 # ---------------------------------------------------------------------------

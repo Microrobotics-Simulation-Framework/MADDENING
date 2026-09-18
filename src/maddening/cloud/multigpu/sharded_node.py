@@ -256,18 +256,12 @@ class ShardedStencilNode(SimulationNode):
         # StaticArray declared with ``replication="shard"`` and validate
         # that its shard_axis lines up with one of the spatial axes this
         # wrapper actually shards.
-        self._sharded_static: dict[str, StaticArray] = {}
-        for k, v in node.static_data.items():
-            v_coerced = coerce_static_data_value(v, node_name=node.name, key=k)
-            if isinstance(v_coerced, StaticArray) and v_coerced.replication == "shard":
-                if v_coerced.shard_axis not in sharded_spatial:
-                    raise ValueError(
-                        f"StaticArray {k!r} declares shard_axis="
-                        f"{v_coerced.shard_axis} but {type(node).__name__} "
-                        f"shards spatial axes {sorted(sharded_spatial)} via "
-                        "ShardedStencilNode (per axis_map.values())."
-                    )
-                self._sharded_static[k] = v_coerced
+        self._sharded_static: dict[str, StaticArray] = (
+            self._classify_sharded_static(node.static_data)
+        )
+        # Per-device materialisation of those statics, cached across
+        # calls.  See ``_materialise_sharded_statics``.
+        self._static_device_cache: Optional[tuple] = None
 
         # Probe inner.update_padded's signature once.  Nodes ported to
         # v0.2.1 accept `static_padded=` and `shard_info=`; v0.2-era
@@ -595,6 +589,67 @@ class ShardedStencilNode(SimulationNode):
         self._sharded_cache[key] = fn
         return fn
 
+    def _classify_sharded_static(self, static_data) -> dict[str, StaticArray]:
+        """Pick the ``replication="shard"`` entries out of ``static_data``.
+
+        Validates that every such array's ``shard_axis`` is one of the
+        spatial axes this wrapper actually shards.  Called from
+        ``__init__`` and again whenever the inner node's static data
+        changes identity (see :meth:`_materialise_sharded_statics`).
+        """
+        sharded_spatial = set(self._axis_map.values())
+        out: dict[str, StaticArray] = {}
+        for k, v in static_data.items():
+            v_coerced = coerce_static_data_value(
+                v, node_name=self._inner.name, key=k,
+            )
+            if isinstance(v_coerced, StaticArray) and v_coerced.replication == "shard":
+                if v_coerced.shard_axis not in sharded_spatial:
+                    raise ValueError(
+                        f"StaticArray {k!r} declares shard_axis="
+                        f"{v_coerced.shard_axis} but "
+                        f"{type(self._inner).__name__} "
+                        f"shards spatial axes {sorted(sharded_spatial)} via "
+                        "ShardedStencilNode (per axis_map.values())."
+                    )
+                out[k] = v_coerced
+        return out
+
+    @staticmethod
+    def _static_cache_key(sharded: dict[str, StaticArray]) -> tuple:
+        """Identity key for a classified sharded-static dict.
+
+        ``id(sa.value)`` is the change signal: a node that rebuilds its
+        static arrays (a checkpoint restore through a
+        ``static_data_provider``, a ``replace_node`` that brings a new
+        mesh) hands back a *different* array object and the cache
+        misses.  Shape, dtype and ``shard_axis`` ride along so a
+        same-object-different-view case cannot slip through.  The
+        materialised dict keeps a reference to those very objects, so
+        an ``id`` can never be recycled while it is a live cache key.
+
+        What this deliberately does *not* see is a mutation of an array
+        in place.  ``SimulationNode.static_data`` requires the values to
+        be stable for a node instance, and ``static_data_hash`` (the
+        framework's existing invalidation signal) does not hash contents
+        either; a node that really does rewrite a static array in place
+        must call :meth:`invalidate_static_cache`.
+        """
+        return tuple(
+            (k, id(sharded[k].value), sharded[k].shape,
+             str(sharded[k].dtype), sharded[k].shard_axis)
+            for k in sorted(sharded)
+        )
+
+    @stability(StabilityLevel.STABLE)
+    def invalidate_static_cache(self) -> None:
+        """Drop the cached per-device copy of the sharded static arrays.
+
+        Call this after rewriting a sharded ``StaticArray``'s buffer in
+        place; replacing the array object is detected automatically.
+        """
+        self._static_device_cache = None
+
     def _materialise_sharded_statics(self) -> dict:
         """Per-device materialisation of every sharded StaticArray.
 
@@ -603,13 +658,50 @@ class ShardedStencilNode(SimulationNode):
         PartitionSpec puts the matching mesh-axis at the array's
         ``shard_axis``.  This is the "3a materialisation" step from the
         v0.2.1 plan -- v0.2.0 only stored ``shard_axis`` as metadata.
+
+        The result is cached: the statics do not change from step to
+        step, so re-partitioning and re-copying them on every public
+        ``update`` was pure host overhead on the interactive path (one
+        ``device_put`` per sharded array per frame).  The cache is keyed
+        on :meth:`_static_cache_key`, so a node that hands back a
+        different array -- or a different set of sharded keys -- is
+        picked up on the next call.
         """
+        sharded = self._classify_sharded_static(self._inner.static_data)
+        key = self._static_cache_key(sharded)
+        cached = self._static_device_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        # The inner node's sharded statics changed.  If their *structure*
+        # changed (a key appeared/disappeared, or moved axis) the closure
+        # built by ``_build_local_update`` and every shard_map compiled
+        # against it are stale too.
+        struct = tuple((k, sharded[k].shard_axis) for k in sorted(sharded))
+        prev_struct = tuple(
+            (k, self._sharded_static[k].shard_axis)
+            for k in sorted(self._sharded_static)
+        )
+        self._sharded_static = sharded
+        if struct != prev_struct:
+            self._local_update_fn = self._build_local_update()
+            self._sharded_cache.clear()
+
+        # ``ensure_compile_time_eval`` keeps the placement concrete even
+        # when this runs inside a trace (GraphManager compiles the step
+        # with the node's ``update`` in it).  Without it the cached value
+        # would be a tracer that escapes its trace -- and the statics are
+        # compile-time constants anyway, so evaluating them eagerly is
+        # exactly right.
         out: dict[str, jax.Array] = {}
-        for k, sa in self._sharded_static.items():
-            arr = jnp.asarray(sa.value)
-            spec = self._spec_for_static_key(k, arr)
-            sharding = NamedSharding(self._mesh, spec)
-            out[k] = jax.device_put(arr, sharding)
+        with jax.ensure_compile_time_eval():
+            for k, sa in sharded.items():
+                arr = jnp.asarray(sa.value)
+                spec = self._spec_for_static_key(k, arr)
+                sharding = NamedSharding(self._mesh, spec)
+                out[k] = jax.device_put(arr, sharding)
+        # ``sharded`` is retained so the ``id()``s in ``key`` stay pinned.
+        self._static_device_cache = (key, out, sharded)
         return out
 
     def update(

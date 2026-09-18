@@ -42,7 +42,14 @@ Three things happen per step:
 1. The wrapper takes each `StaticArray(replication="shard")` on
    the inner node and `device_put`s it with a `NamedSharding`
    whose `PartitionSpec` puts the matching mesh axis on the
-   array's `shard_axis` (cached by `static_data_hash`).
+   array's `shard_axis`.  This happens **once**, not per step: the
+   placement is cached and re-checked against the inner node's
+   `static_data` on every call, so a node that hands back a
+   different array object (a mesh rebuilt after a parameter write,
+   a `static_data_provider` reconstruction, a `replace_node`) is
+   picked up on the next `update`.  What the check cannot see is a
+   static rewritten *in place* — call
+   `wrapper.invalidate_static_cache()` if you do that.
 2. Inside `shard_map`, each device's slab is halo-exchanged along
    the matching spatial axis (boundary `"edge"` — static arrays
    don't evolve, so periodic wrap is wrong even if state uses

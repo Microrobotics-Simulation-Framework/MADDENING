@@ -152,8 +152,10 @@ _NAMED_PATHS = (
     "hop1.npy", "hop3.npy", "dirlink/secret.npy", "dirlink2/secret.npy", "loop.npy",
     # bytes an operating system argues about
     "\x00.npy", "own\x00.npy", "own.npy\x00.npy", "a\nb.npy", "a\rb.npy", "a\tb.npy",
-    # Unicode that normalises onto another path
-    unicodedata.normalize("NFD", "café.npy"), "ｏwn.npy", "own​.npy", "оwn.npy",
+    # Unicode that normalises onto another path, or is invisibly
+    # indistinguishable from one (NFD, fullwidth, zero-width, Cyrillic)
+    unicodedata.normalize("NFD", "café.npy"),
+    "\uff4fwn.npy", "own\u200b.npy", "\u043ewn.npy",
     # legal here, illegal on another filesystem
     "CON.npy", "own.npy ", " own.npy", "own.npy.", "own:1.npy", "own|1.npy",
     "own.npy/", "own.npy/.", "own.NPY",
@@ -307,7 +309,7 @@ def _mutated(draw, spec: dict) -> tuple[dict, str]:
         # A dict cannot hold the same key twice, so duplicate it under a
         # name a reader might treat as the same one.
         twin = draw(st.sampled_from((f"{key} ", f"{key}".upper(), f"{key}_",
-                                     f" {key}", f"{key}​")))
+                                     f" {key}", f"{key}\u200b")))
         parent[twin] = copy.deepcopy(value)
         return out, f"duplicate {path} as {twin!r}"
     if op == "alias":
@@ -530,9 +532,11 @@ def test_a_mutated_mapping_is_refused_by_name_or_loads_exactly_what_it_says(
     the recipe the file holds -- and, when the mutation left the recipe
     alone, stepping identically to the graph that was saved.
 
-    ``base_dir`` is an empty directory, never the working directory: a
-    mutation is free to invent an ``{"asset": ...}`` reference, and the
-    default resolver would look for it in the repository checkout.
+    ``base_dir`` is the sandbox, never the working directory: a mutation
+    is free to invent an ``{"asset": ...}`` reference, the default
+    resolver would look for it in the repository checkout, and pointing
+    it at a directory that really holds assets (and links out of itself)
+    is what lets an invented reference get far enough to be interesting.
     """
     recipe = data.draw(graph_recipes(require_mapping=True, max_nodes=3,
                                      allow_coupling_groups=False))
@@ -548,8 +552,7 @@ def test_a_mutated_mapping_is_refused_by_name_or_loads_exactly_what_it_says(
 
     mutated = copy.deepcopy(config)
     mutated["edges"][index]["mapping"] = mutated_mapping
-    base = sandbox["root"] / "empty"
-    base.mkdir(exist_ok=True)
+    base = sandbox["base"]
 
     try:
         reloaded = GraphManager.from_dict(mutated, recipe.registry, base_dir=base)
@@ -567,6 +570,13 @@ def test_a_mutated_mapping_is_refused_by_name_or_loads_exactly_what_it_says(
     assert MappingSpec.from_dict(built.to_dict()) == built, (
         "the rebuilt recipe does not survive being written out again"
     )
+    # ... and nothing it resolved came from outside the config directory.
+    resolve = reloaded.point_resolver(base)
+    for ref in built.points.values():
+        points = np.asarray(resolve(ref))
+        assert not (points.shape == CANARY.shape and np.array_equal(points, CANARY)), (
+            f"the mutated spec resolved {ref!r} to the canary outside {base}"
+        )
 
     if named == MappingSpec.from_dict(edge["mapping"]):
         # The mutation was cosmetic (a dropped ``shape``, a re-spelled
@@ -779,17 +789,17 @@ def test_a_mapped_edge_rewritten_to_asset_references_reloads_the_same_trajectory
 
 @settings(max_examples=EXAMPLES_STANDARD)
 @given(data=st.data())
-def test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt(data,
-                                                                            tmp_path_factory):
+def test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt(
+        data, tmp_path_factory):
     """The content hash is the only thing standing between "the file next
     to the config was edited" and "the operator quietly changed".  For
     any edit at all -- a different value, a different length, a different
     dtype -- the load must fail rather than rebuild."""
     original = np.asarray(data.draw(st.lists(st.integers(-20, 20), min_size=2,
                                              max_size=6)), dtype=np.float64)
+    dtype = data.draw(st.sampled_from(("float64", "float32", "int64")))
     changed = np.asarray(data.draw(st.lists(st.integers(-20, 20), min_size=1,
-                                            max_size=6)),
-                         dtype=data.draw(st.sampled_from(("float64", "float32", "int64"))))
+                                            max_size=6)), dtype=dtype)
     assume(point_array_digest(changed) != point_array_digest(original))
 
     base = tmp_path_factory.mktemp("edited")

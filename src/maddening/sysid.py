@@ -412,6 +412,50 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
     return mask
 
 
+def _physical_params(gm, start: dict, mask: Optional[dict], flat_u, unravel, idx):
+    """``theta -> physical params``, leaving the untouched leaves alone.
+
+    The optimisers carry only ``theta`` -- the ``ravel_pytree`` entries
+    the resolved ``mask`` selects -- so mapping back means
+    :meth:`GraphManager.constrain` over the *whole* tree, and for a
+    ``log`` or ``logit`` leaf that round trip is ``exp(log(p))`` in
+    float32, exact only to about one ulp.  A leaf the mask did not
+    select would therefore come back perturbed although no step touched
+    it (a ``HeatNode``'s ``thermal_diffusivity`` moved by ~1e-7
+    relative while only ``length`` was masked), and a bit comparison of
+    a calibration's input and output could not tell "not fitted" from
+    "fitted and barely moved".
+
+    So the returned tree takes every leaf outside the mask straight from
+    ``start``, bit for bit: the set is the exact complement of the mask
+    ``_masked_indices`` built ``idx`` from, not a second reading of what
+    the caller asked for.  (A ``trainable=False`` leaf already skipped
+    both maps; the gap this closes is the trainable-but-unmasked one.)
+
+    Returned as a closure because every fitter needs it twice -- for the
+    ``callback`` / observer pytree as well as the final one -- and the
+    two must agree.
+    """
+    leaves_start, treedef = jax.tree.flatten(start)
+    flags = None
+    if mask is not None:
+        flags = [bool(f) for f in jax.tree.leaves(mask)]
+        if len(flags) != len(leaves_start):
+            raise ValueError("mask must have the same tree structure as params")
+
+    def to_params(theta):
+        full = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+        if flags is None:
+            return full
+        return jax.tree.unflatten(treedef, [
+            fitted if keep else untouched
+            for untouched, fitted, keep
+            in zip(leaves_start, jax.tree.leaves(full), flags)
+        ])
+
+    return to_params
+
+
 def _inverse_noise_std(noise_std, residual):
     """``1 / sigma`` flattened like ``ravel_pytree(residual)``, or ``None``.
 
@@ -541,11 +585,16 @@ def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class FitResult:
-    """Outcome of :func:`fit`.
+    """Outcome of :func:`fit`, :func:`fit_lm` and
+    :func:`fit_multiple_shooting`.
 
     ``params`` is a physical pytree (already mapped back through
     ``GraphManager.constrain``); ``losses[i]`` is the loss *before*
     update ``i``; ``converged`` is whether ``losses[-1] <= tol``.
+
+    Every leaf outside the resolved mask is the value that went in, bit
+    for bit -- not merely close -- so comparing a fit's input and output
+    leaf by leaf says exactly which constants the calibration touched.
     """
     params: dict
     losses: np.ndarray
@@ -621,6 +670,7 @@ def fit(
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
+    to_params = _physical_params(gm, start, mask, flat_u, unravel, idx)
     theta0 = flat_u[idx]
 
     def objective(theta):
@@ -652,7 +702,7 @@ def fit(
                 f"non-finite loss or gradient at iteration {i} (loss={loss_f})"
             )
         if callback is not None or progress is not None:
-            current = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+            current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
@@ -662,7 +712,7 @@ def fit(
             break
         theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
 
-    final = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+    final = to_params(theta)
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
     )
@@ -710,6 +760,7 @@ def fit_lm(
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
+    to_params = _physical_params(gm, start, mask, flat_u, unravel, idx)
     theta = flat_u[idx]
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
 
@@ -743,7 +794,7 @@ def fit_lm(
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
         if callback is not None or progress is not None:
-            current = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+            current = to_params(theta)
             if callback is not None:
                 callback(i, loss, current)
             if progress is not None:
@@ -769,7 +820,7 @@ def fit_lm(
             converged = accepted and step_norm < step_tol
             break
 
-    final = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+    final = to_params(theta)
     return FitResult(params=final, losses=np.asarray(losses), converged=converged, n_iter=i)
 
 
@@ -819,6 +870,7 @@ def fit_multiple_shooting(
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
+    to_params = _physical_params(gm, start, mask, flat_u, unravel, idx)
     theta0 = flat_u[idx]
     ws_flat0, unravel_ws = ravel_pytree(ws0)
 
@@ -852,7 +904,7 @@ def fit_multiple_shooting(
                 or not bool(jnp.all(jnp.isfinite(g_s))):
             raise FloatingPointError(f"non-finite loss or gradient at iteration {i}")
         if callback is not None or progress is not None:
-            current = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+            current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
@@ -864,6 +916,6 @@ def fit_multiple_shooting(
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
 
-    final = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+    final = to_params(theta)
     return (FitResult(params=final, losses=np.asarray(losses), converged=converged, n_iter=i),
             unravel_ws(ws))

@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
   over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
   window wider than the data instead of returning a meaningless loss
+- **Measured guidance for choosing coupling options**: eight graph fixtures and
+  a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
+  `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window
 - **Coupling groups are serialisable**: `to_dict` / `from_dict` carry a
   `coupling_groups` key with all 19 `CouplingGroup` fields, and the USD stage
   carries the same set, so a reloaded graph solves the way the saved one did

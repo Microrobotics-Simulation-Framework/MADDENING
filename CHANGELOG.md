@@ -171,6 +171,9 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `maddening.core.simulation.calibration.calibrate` and
+  `tune_coupling_params` warn and are removed in 0.5.0; use
+  `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
 - `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
@@ -186,6 +189,9 @@ guidance; the itemized changes follow.
 - **A wrapper now reports the `static_data` of the node it wraps**, so the
   `static_data` drift check finally fires through `ShardedStencilNode`,
   `HybridNode` and friends instead of hashing to `0` forever
+- **`fit`/`fit_lm`/`fit_multiple_shooting` refuse a `mask` that names a leaf its
+  `ParamSpec` freezes**: it was optimised unclipped in physical coordinates and
+  could leave its bounds — make the parameter trainable in the spec instead
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it

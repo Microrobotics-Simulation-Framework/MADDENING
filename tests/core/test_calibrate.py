@@ -12,10 +12,39 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.simulation.calibration import CalibrateResult, calibrate
 from maddening.core.simulation.integrators import rk4_step
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+
+
+class TestCalibrateDeprecation:
+    """`calibrate` is deprecated in favour of `maddening.sysid.fit`."""
+
+    def test_calling_calibrate_warns_and_names_its_replacement(self):
+        """A caller who finds `calibrate` first is told, at the call site,
+        which tool replaces it and when this one goes away."""
+        def forward(params):
+            return params["x"]
+
+        with pytest.warns(DeprecationWarning) as record:
+            result = calibrate(
+                forward_fn=forward,
+                initial_params={"x": jnp.array(0.0)},
+                reference_trajectory=jnp.array(1.0),
+                n_iters=2,
+            )
+
+        message = str(record[0].message)
+        assert "maddening.sysid.fit" in message
+        assert "0.5.0" in message
+        # Deprecated is not broken: it still optimises.
+        assert isinstance(result, CalibrateResult)
+        assert len(result.loss_history) == 2
+
+    def test_calibrate_is_tagged_deprecated_in_the_stability_registry(self):
+        assert calibrate._stability_level is StabilityLevel.DEPRECATED
 
 
 class TestCalibrateBasic:

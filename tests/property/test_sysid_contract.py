@@ -419,30 +419,67 @@ class TestTrainableContract:
         # initial conditions are declared non-trainable by the node itself
         assert after["initial_position"] == before["initial_position"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "An explicit ``mask`` that marks a leaf whose ParamSpec says "
-        "trainable=False is honoured by ``_masked_indices`` but ignored by "
-        "``GraphManager.unconstrain``/``constrain``, which pass "
-        "non-trainable leaves through untouched.  Adam therefore moves that "
-        "leaf in PHYSICAL coordinates with no transform and no clipping, so "
-        "``fit``'s documented guarantee -- 'a positive parameter cannot "
-        "cross zero and a bounded one cannot leave its interval' -- does "
-        "not hold, and ``fit`` returns a params pytree its own "
-        "``gm.check_params`` rejects.  Fixing it is an API decision: either "
-        "``mask`` may not widen the trainable set, or constrain/unconstrain "
-        "must follow the mask rather than the spec."))
-    def test_a_mask_that_overrides_a_frozen_spec_still_respects_its_bounds(self):
+    @given(fitter=st.sampled_from(["adam", "lm", "multiple_shooting"]))
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_a_mask_may_not_widen_the_trainable_set(self, fitter):
+        """Every fitter refuses a ``mask`` that contradicts a frozen spec.
+
+        ``unconstrain``/``constrain`` apply a leaf's transform and bounds
+        only when its :class:`ParamSpec` is trainable, so a mask that
+        *widened* the trainable set had the optimiser step the leaf in
+        physical coordinates with nothing clipping it: ``damping`` declared
+        ``bounds=(0, 1)`` reached 6.5 and ``fit`` returned a pytree its own
+        ``check_params`` rejects.  The spec is the single source of truth
+        for what may move, so the mask is refused rather than allowed to
+        route around it -- and the error names the leaf, because the fix is
+        to change that leaf's spec.
+        """
+        gm = _spring_gm()
+        gm.set_param_spec("s", "damping",
+                          ParamSpec(trainable=False, bounds=(0.0, 1.0)))
+        mask = jax.tree.map(lambda _: False, gm.params)
+        mask["nodes"]["s"]["damping"] = True
+        start = _with_params(gm, "s", {"damping": 0.5})
+        obs = _observe(gm, 12, start)
+        obs_fn = (lambda h: h["s"]["position"])
+
+        with pytest.raises(ValueError) as excinfo:
+            if fitter == "adam":
+                fit(gm, lambda p: -10.0 * p["nodes"]["s"]["damping"],
+                    params=start, mask=mask, n_iter=40, lr=0.1)
+            elif fitter == "lm":
+                fit_lm(gm, lambda p: p["nodes"]["s"]["damping"][None],
+                       params=start, mask=mask, n_iter=2)
+            else:
+                fit_multiple_shooting(gm, obs, obs_fn=obs_fn, window=4,
+                                      params=start, mask=mask, n_iter=2)
+        message = str(excinfo.value)
+        # Actionable without reading the source: which leaf, what the spec
+        # says, and that the spec -- not the mask -- is where to change it.
+        assert "damping" in message and "'s'" in message, message
+        assert "trainable=False" in message, message
+        assert "set_param_spec" in message, message
+
+    def test_a_frozen_leaf_made_trainable_in_the_spec_respects_its_bounds(self):
+        """The fix the refusal advertises actually activates the bounds.
+
+        This is the invariant the mask used to break, restated against the
+        contract that replaced it: with ``trainable=True`` in the spec the
+        bounded leaf is genuinely clipped, so a loss that pulls on it
+        forever still leaves a pytree ``check_params`` accepts.
+        """
         gm = _spring_gm()
         # ``bounds=(0, 1)`` with no transform: ``constrain`` clips a
         # trainable leaf into the interval, and nothing clips a frozen one.
         gm.set_param_spec("s", "damping",
-                          ParamSpec(trainable=False, bounds=(0.0, 1.0)))
+                          ParamSpec(trainable=True, bounds=(0.0, 1.0)))
         mask = jax.tree.map(lambda _: False, gm.params)
         mask["nodes"]["s"]["damping"] = True
         start = _with_params(gm, "s", {"damping": 0.5})
         res = fit(gm, lambda p: -10.0 * p["nodes"]["s"]["damping"],
                   params=start, mask=mask, n_iter=40, lr=0.1)
         gm.check_params(res.params)
+        assert 0.0 <= float(res.params["nodes"]["s"]["damping"]) <= 1.0
 
 
 def _strictly_inside(spec: ParamSpec, leaf) -> bool:

@@ -169,20 +169,19 @@ class AdaptiveNodeBlindnessError(RuntimeError):
     :meth:`AdaptiveNode.check_gradient_capture`) in exactly two cases:
 
     * the gradient-capture ratio is below
-      :attr:`AdaptiveNode.gradient_capture_threshold` **and**
-      :meth:`AdaptiveNode.frozen_gradient_vanishes_at` is ``True`` --
-      the frozen gradient carries no usable descent information, which
-      is what a Palais fixed point of the problem's symmetry looks
-      like, though an ordinary stationary point looks the same; or
-    * the node was constructed with ``on_blind="raise"``, which opts
-      into a hard failure for a low ratio of any cause.
+      :attr:`AdaptiveNode.gradient_capture_threshold` and the node was
+      constructed with ``on_blind="raise"``; or
+    * :meth:`AdaptiveNode.cold_start` could not raise the ratio above
+      the threshold with one :meth:`AdaptiveNode.symmetry_break`.
 
-    A low ratio that ``frozen_gradient_vanishes_at`` returns ``False``
-    at is a *budget* problem (the active set is too small to reproduce
-    the full-basis gradient) and only warns by default.
-
-    :meth:`AdaptiveNode.cold_start` also raises this when the ratio
-    stays low after one :meth:`AdaptiveNode.symmetry_break`.
+    Under the default ``on_blind="warn"`` a low ratio only ever
+    **warns**, whatever its cause.  Until 0.4.0 the trap branch raised
+    even under ``"warn"``, on the premise that
+    :meth:`AdaptiveNode.frozen_gradient_vanishes_at` *established* a
+    Palais fixed point.  It does not -- it is a necessary condition, and
+    it fires at any stationary point of the frozen objective, including
+    the optimum a successful fit converges to.  Refusing there would
+    hard-error a user through the escape hatch they had chosen.
     """
 
 
@@ -225,12 +224,11 @@ class AdaptiveNode(SimulationNode):
     on_blind : {"warn", "raise", "ignore"}, default "warn"
         What :meth:`check_gradient_capture` does when the ratio is below
         the threshold.  ``"warn"`` emits a :class:`UserWarning` naming
-        the measured ratio, the threshold and the remedies, and still
-        raises :class:`AdaptiveNodeBlindnessError` when
-        ``frozen_gradient_vanishes_at`` is ``True`` as well (a frozen
-        gradient with no usable descent information -- the signature of
-        a Palais fixed point).  ``"raise"`` raises for a low ratio of
-        any cause.
+        the measured ratio, the threshold, which of the two causes the
+        evidence points at and the remedies -- and does **not** raise,
+        whichever cause it is.  ``"raise"`` raises for a low ratio of
+        any cause; it is the strict setting, and the only one that
+        refuses to construct.
         ``"ignore"`` skips the diagnostic entirely.  Recorded in
         ``self.params`` so it survives a round trip.
     dtype : optional
@@ -669,8 +667,8 @@ class AdaptiveNode(SimulationNode):
         Selects the active set with ``is_cold_start=True``, solves on
         it, and -- when ``blindness_gate`` is on -- runs
         :meth:`check_gradient_capture` at the constructor parameters.
-        By default a low ratio *warns*; it raises only for a confirmed
-        Palais trap or under ``on_blind="raise"``.
+        A low ratio *warns* under the default ``on_blind="warn"``,
+        whatever its cause, and raises only under ``on_blind="raise"``.
 
         The check sees the **constructor** parameters.  Once the node is
         in a graph the live values live in ``gm.params["nodes"][name]``;
@@ -714,10 +712,9 @@ class AdaptiveNode(SimulationNode):
         Raises
         ------
         AdaptiveNodeBlindnessError
-            When the ratio is below
-            :attr:`gradient_capture_threshold` and either
-            :meth:`frozen_gradient_vanishes_at` is ``True`` or the
-            policy is ``"raise"``.
+            When the ratio is below :attr:`gradient_capture_threshold`
+            **and** the policy is ``"raise"``.  Under ``"warn"`` a low
+            ratio only warns, whatever its cause.
         """
         policy = self.on_blind if on_blind is None else on_blind
         if policy not in self.ON_BLIND_POLICIES:
@@ -760,7 +757,7 @@ class AdaptiveNode(SimulationNode):
             f"{self.gradient_capture_threshold:.3f} at {where}."
         )
         if trapped:
-            raise AdaptiveNodeBlindnessError(
+            message = (
                 f"{head}  frozen_gradient_vanishes_at() is True: the "
                 "frozen-set gradient is negligible against its own rate of "
                 "change along the escape direction, so it carries no usable "
@@ -776,26 +773,36 @@ class AdaptiveNode(SimulationNode):
                 "whether you have simply converged (|grad J_full| small "
                 "too) or whether the active set is degenerate; neither is "
                 "helped by a perturbation.  Pass on_blind='ignore' (or "
-                "blindness_gate=False) to proceed anyway."
+                "blindness_gate=False) to silence this check."
             )
-        budget = (
-            f"{head}  frozen_gradient_vanishes_at() is False, which rules "
-            "a symmetry trap out: the active-set budget is too small to "
-            "reproduce the "
-            "full-basis gradient here.  The ratio tracks the budget (on the "
-            "1-D sine toy at n_max=256 it measures 0.16 at k=4, 0.57 at "
-            "k=8, 0.85 at k=16 and 1.00 from k=32, at every n). Remedies: "
-            "raise the active-set budget; or accept a frozen gradient that "
-            "captures this fraction of the full one and silence the check "
-            "with gradient_capture_threshold=<lower>, on_blind='ignore' or "
-            "blindness_gate=False.  cold_start() / symmetry_break() do "
-            "*not* help here -- they move along the full-basis gradient, "
-            "which at a budget-limited point lowers the ratio further "
-            "(measured 0.565 -> 0.060)."
-        )
+        else:
+            message = (
+                f"{head}  frozen_gradient_vanishes_at() is False, which rules "
+                "a symmetry trap out: the active-set budget is too small to "
+                "reproduce the "
+                "full-basis gradient here.  The ratio tracks the budget (on the "
+                "1-D sine toy at n_max=256 it measures 0.16 at k=4, 0.57 at "
+                "k=8, 0.85 at k=16 and 1.00 from k=32, at every n). Remedies: "
+                "raise the active-set budget; or accept a frozen gradient that "
+                "captures this fraction of the full one and silence the check "
+                "with gradient_capture_threshold=<lower>, on_blind='ignore' or "
+                "blindness_gate=False.  cold_start() / symmetry_break() do "
+                "*not* help here -- they move along the full-basis gradient, "
+                "which at a budget-limited point lowers the ratio further "
+                "(measured 0.565 -> 0.060)."
+            )
+        # ``"warn"`` warns, whatever the cause.  It used to raise on the
+        # trap branch even here, on the grounds that a Palais fixed point
+        # was the one cause the diagnostic could *establish* -- and that
+        # premise is false (see frozen_gradient_vanishes_at).  The check
+        # also fires at an ordinary interior optimum, so the old behaviour
+        # hard-errored a user at the moment their fit converged, through
+        # the escape hatch they had explicitly chosen, with a message
+        # asserting a symmetry that was not there.  ``on_blind="raise"``
+        # is the strict setting and still raises for either cause.
         if policy == "raise":
-            raise AdaptiveNodeBlindnessError(budget)
-        warnings.warn(budget, UserWarning, stacklevel=2)
+            raise AdaptiveNodeBlindnessError(message)
+        warnings.warn(message, UserWarning, stacklevel=2)
         return ratio
 
     def update(
@@ -910,7 +917,10 @@ class AdaptiveNode(SimulationNode):
         Values above ``1`` are over-amplified but direction-accurate.
         Returns ``1.0`` as a sentinel when the full gradient itself is
         negligible (an interior extremum of ``J``), where the ratio is
-        undefined.
+        undefined.  On the way there it warns if the full-basis gradient
+        with respect to a **trainable** leaf is *bitwise* zero -- see
+        :meth:`_warn_on_bitwise_zero_full_gradient`, the only cheap oracle
+        for a parameter baked into a constant in ``__init__``.
 
         The active set is re-selected at ``params`` rather than read from
         ``state["mask"]``: a mask chosen at a healthy point otherwise
@@ -923,11 +933,76 @@ class AdaptiveNode(SimulationNode):
         mask = self._selected_mask(state, params)
         g_frozen = self._objective_gradient(state, params, mask)
         g_full = self.compute_full_basis_gradient(state, params)
+        self._warn_on_bitwise_zero_full_gradient(g_full)
         n_full = _tree_norm(g_full)
         scale = 1.0 + _tree_norm(self._pytree(params))
         if n_full < 1e-12 * scale:
             return 1.0
         return float(_tree_norm(g_frozen) / n_full)
+
+    def _warn_on_bitwise_zero_full_gradient(self, g_full: dict) -> None:
+        """Flag a trainable leaf whose full-basis gradient is *exactly* zero.
+
+        A parameter the objective is genuinely flat in returns a **small**
+        gradient; a *bitwise* ``0.0`` means the parameter is not in the
+        computation graph at all.  Far and away the commonest cause in an
+        ``AdaptiveNode`` is a basis array built in ``__init__`` from that
+        parameter: the array is then a Python constant, holding the
+        constructor's float rather than the traced value the graph
+        injects, and nothing downstream of it is a function of the
+        parameter.  ``jax.grad`` returns ``0.0`` and a central finite
+        difference returns ``0.0`` too -- both read the same baked numbers
+        -- so the usual oracle agrees with the wrong answer and
+        ``compile()`` has nothing to object to.  ``static_data_deps``
+        cannot see it either: that guard only walks arrays published
+        through ``static_data``, and only ones whose provenance the
+        subclass declared.
+
+        An exact zero is not proof: a problem whose objective is *exactly*
+        symmetric in a parameter produces one honestly.  The warning says
+        so and names both readings.
+
+        Eager-only, like :meth:`_warn_on_non_finite_off_mask`: under a
+        trace there is nothing to read.  Non-trainable leaves are skipped
+        -- :meth:`_objective_gradient` zeroes those by construction.
+        """
+        if not _DIAGNOSTICS_ENABLED:
+            return
+        dead = []
+        for key in sorted(g_full):
+            if not self._trainable(key):
+                continue
+            try:
+                arr = np.asarray(g_full[key])
+            except (
+                jax.errors.TracerArrayConversionError,
+                jax.errors.ConcretizationTypeError,
+                TypeError, ValueError,
+            ):
+                return  # traced: nothing to inspect
+            if arr.size and bool(np.all(arr == 0.0)):
+                dead.append(key)
+        if not dead:
+            return
+        warnings.warn(
+            f"{type(self).__name__} {self.name!r}: the full-basis gradient "
+            f"with respect to trainable parameter(s) {dead} is exactly 0.0 "
+            "(bitwise, not merely small).  A parameter the objective is "
+            "flat in gives a small gradient, not a bitwise zero, so this "
+            "usually means the parameter is not in the computation at all: "
+            "an array used by solve_frozen or objective was built in "
+            "__init__ from it and is now a constant holding the "
+            "constructor's value.  jax.grad and a finite difference both "
+            "return 0.0 there -- they read the same baked numbers -- so "
+            "this check is the only cheap way to see it.  Recompute that "
+            "array inside solve_frozen / objective from the params "
+            "argument, or declare the parameter ParamSpec(trainable=False) "
+            "if it is genuinely not fitted.  If the objective really is "
+            "exactly symmetric in "
+            f"{dead}, this is honest and you can silence it with "
+            "blindness_gate=False or set_adaptive_diagnostics(False).",
+            UserWarning, stacklevel=3,
+        )
 
     @stability(StabilityLevel.DEPRECATED)
     def blindness_ratio(self, state: dict, params: Optional[dict] = None) -> float:

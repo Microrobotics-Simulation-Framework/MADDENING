@@ -238,11 +238,12 @@ A = self.mask_safe(mask, A, fill=0.0)            # columns
   `check_gradient_capture()` at those parameters.
 - `check_gradient_capture(params=None, *, state=None, on_blind=None)`: measure
   the ratio and apply the policy. A low ratio **warns** (naming the measured
-  value, the threshold and the remedies) and raises only when
-  `frozen_gradient_vanishes_at` is also true — the signature of a Palais fixed
-  point — or when the node was built with `on_blind="raise"`. `gm.add_node`
-  therefore still fails loudly at a trap, and no longer rejects a small
-  active-set budget, which is the point of an adaptive solver.
+  value, the threshold, which of the two causes the evidence points at, and
+  the remedies). Under the default `on_blind="warn"` it **never raises** —
+  including at a trap. `on_blind="raise"` is the strict setting and refuses a
+  low ratio of any cause. So `gm.add_node` warns rather than failing at a
+  trap, and does not reject a small active-set budget either, which is the
+  point of an adaptive solver.
   **It evaluates the parameters you hand it**: `initial_state` sees the
   constructor's, so after seeding a graph call
   `node.check_gradient_capture(gm.params["nodes"][name])` — that is the point
@@ -256,7 +257,7 @@ A = self.mask_safe(mask, A, fill=0.0)            # columns
 
 | Method | Cost | Use |
 |---|---|---|
-| `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`) |
+| `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`). Also warns when the full-basis gradient for a **trainable** leaf is *bitwise* zero — see *Precomputed basis arrays* |
 | `frozen_gradient_vanishes_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | Is the frozen gradient negligible against its own rate of change? A Palais trap implies this, so **`False` rules a trap out**; `True` does not establish one — an ordinary stationary point, including the optimum a successful fit ends at, gives the same answer. Reliable for exact traps, not for partial blindness. `is_trapped_at` is a deprecated alias |
 | `symmetry_break(state, params=None, *, delta=None) -> params` | 1 full gradient | Step `delta` (default `blindness_break_delta`) along the unit full-basis gradient; trainable leaves only |
 | `check_gradient_capture(params=None, ...) -> float or None` | as above, memoised | The policy wrapper the cold start uses; call it yourself at `gm.params["nodes"][name]` |
@@ -323,14 +324,26 @@ check still refuses to construct through.
 
 ## Failure modes
 
-- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.** The
-  ratio was low *and* `frozen_gradient_vanishes_at` was true at the
-  constructor parameters (or you asked for `on_blind="raise"`). If the problem
-  really does have a symmetry fixing those parameters, use `cold_start()` and
-  seed `gm.params` with the returned pytree, or perturb them yourself. If it
-  does not, you are at an ordinary stationary point or a degenerate active set
-  and no perturbation helps — proceed with `on_blind="ignore"`. A failed
-  `add_node` is a no-op, so the name is free for the retry.
+- **A `UserWarning` naming a Palais fixed point, from `add_node` /
+  `initial_state`.** The ratio was low *and* `frozen_gradient_vanishes_at` was
+  true. That is a necessary condition for a symmetry trap, not a sufficient
+  one, so the default policy warns rather than refusing — read it, then decide
+  which case you are in. If the operator, source and objective really do share
+  a symmetry fixing these parameters, use `cold_start()` and seed `gm.params`
+  with the returned pytree, or perturb them yourself. If they do not, you are
+  at an ordinary stationary point (have you just converged?) or at a
+  degenerate active set, and no perturbation helps.
+- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.** You
+  built the node with `on_blind="raise"`, the strict setting, and the ratio is
+  below `gradient_capture_threshold`. Same two causes; the error names which
+  one the evidence points at. A failed `add_node` is a no-op, so the name is
+  free for the retry. (`cold_start()` also raises this when one
+  `symmetry_break` does not lift the ratio.)
+- **A `UserWarning` that the full-basis gradient for a parameter is *exactly*
+  `0.0`.** Not "small" — bitwise zero, which means the parameter is not in the
+  computation at all. Almost always an array built in `__init__` from it; see
+  *Precomputed basis arrays* above. `jax.grad` and a finite difference both
+  return `0.0`, so this warning is the only cheap oracle for it.
 - **A `UserWarning` about the gradient-capture ratio.** Not a trap: your
   active-set budget does not reproduce the full-basis gradient at these
   parameters. See *Diagnostics* above for the remedies, in order.

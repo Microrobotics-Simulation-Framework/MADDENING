@@ -124,9 +124,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
-- **`AdaptiveNode` tightens its subclass contract**: `compute_active_set` must
-  return a non-empty **boolean** mask (a score array or an `argsort` is refused),
-  and `is_trapped_at` is now `frozen_gradient_vanishes_at` (alias warns)
+- **`AdaptiveNode` tightens its subclass contract and loosens its gate**:
+  `compute_active_set` must return a non-empty **boolean** mask; `is_trapped_at`
+  is now `frozen_gradient_vanishes_at`; `on_blind="warn"` no longer ever raises
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`
@@ -204,8 +204,8 @@ guidance; the itemized changes follow.
 
 ### Fixed
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
-  it registers the node, so an `initial_state()` that raises (an `AdaptiveNode`
-  at a Palais trap) no longer wedges the graph with a ghost `step()` dies on
+  it registers the node, so an `initial_state()` that raises no longer wedges
+  the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state

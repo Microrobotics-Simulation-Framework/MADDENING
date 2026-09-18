@@ -14,9 +14,13 @@ tests below pin what each of them does and does not establish.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
+
+from maddening.core.params import ParamSpec
 
 from maddening.nodes.adaptive import AdaptiveNodeBlindnessError
 
@@ -62,13 +66,102 @@ def test_gradient_capture_ratio_sentinel_when_full_gradient_vanishes():
     node.compute_full_basis_gradient = lambda state, params=None: {
         k: jnp.zeros_like(v) for k, v in node.params_pytree().items()
     }
-    assert node.gradient_capture_ratio(s) == 1.0
+    # A bitwise-zero full gradient on a trainable leaf is warned about on
+    # the way to the sentinel -- see the baked-constant tests below.
+    with pytest.warns(UserWarning, match="exactly 0.0"):
+        assert node.gradient_capture_ratio(s) == 1.0
 
 
 def test_gradient_capture_ratio_on_a_dense_operator_is_finite():
     node = MaskedDenseNode(blindness_gate=False)
     r = node.gradient_capture_ratio(node.initial_state())
     assert 0.0 <= r < 10.0
+
+
+# -- the bitwise-zero full gradient (a parameter baked into a constant) -----------
+
+class _BakedSensorNode(PoissonSineTopKNode):
+    """The documented "build the basis once in ``__init__``" pattern applied
+    to a **trainable** parameter.
+
+    The toy bakes ``_phi_sensor`` from ``sensor_x``, which is legal only
+    because it also declares ``sensor_x`` non-trainable.  Flipping that one
+    declaration is the whole defect: the objective still reads the baked
+    row, so it is not a function of ``sensor_x`` at all.
+    """
+
+    def param_specs(self):
+        return {**super().param_specs(), "sensor_x": ParamSpec()}
+
+
+def test_a_parameter_baked_into_a_constant_is_warned_about_by_name():
+    """``jax.grad`` and a central finite difference both return 0.0 here --
+    they read the same baked numbers -- so this is the only cheap oracle."""
+    node = _BakedSensorNode(n=64, k=16, theta=0.42, blindness_gate=False)
+    state = node.initial_state()
+    g = node.compute_full_basis_gradient(state)
+    assert float(g["sensor_x"]) == 0.0          # bitwise, not merely small
+    assert float(g["theta"]) != 0.0             # the honest leaf is untouched
+
+    with pytest.warns(UserWarning, match="exactly 0.0") as record:
+        node.gradient_capture_ratio(state)
+    message = str(record[0].message)
+    assert "'sensor_x'" in message
+    assert "theta" not in message.split("parameter(s)")[1].split(")")[0]
+    assert "__init__" in message                # names the likely cause
+    assert "ParamSpec(trainable=False)" in message   # and both remedies
+    assert "recompute" in message.lower()
+
+
+def test_a_genuine_near_stationary_point_is_not_warned_about():
+    """The discrimination the warning rests on: a direction the objective is
+    genuinely flat in gives a *small* gradient, not a *bitwise* zero.
+
+    Evaluated at the frozen objective's own stationary point -- the same
+    point at which ``frozen_gradient_vanishes_at`` returns ``True`` -- so
+    this pins that the two diagnostics disagree exactly where they should.
+    """
+    node = PoissonSineTopKNode(n=256, k=64, theta=0.30, sigma=0.04,
+                               sensor_x=1.0 / 3.0, blindness_gate=False)
+    state = node.initial_state()
+    params = {"theta": jnp.asarray(0.343973370458)}
+    g = node.compute_full_basis_gradient(state, params)
+    assert 0.0 < abs(float(g["theta"])) < 1e-8, float(g["theta"])
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        node.gradient_capture_ratio(state, params)
+    assert not [w for w in record if "exactly 0.0" in str(w.message)], [
+        str(w.message)[:120] for w in record
+    ]
+
+
+def test_a_non_trainable_baked_parameter_is_not_warned_about():
+    """Both shipped toys bake from non-trainable or structural values; that
+    is legal and must stay silent, or the warning is noise."""
+    node = PoissonSineTopKNode(n=64, k=16, theta=0.42, blindness_gate=False)
+    state = node.initial_state()
+    g = node.compute_full_basis_gradient(state)
+    assert float(g["sensor_x"]) == 0.0          # baked, but declared untrainable
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        node.gradient_capture_ratio(state)
+    assert not [w for w in record if "exactly 0.0" in str(w.message)]
+
+
+def test_the_bitwise_zero_warning_respects_the_global_diagnostics_switch():
+    from maddening.nodes.adaptive import set_adaptive_diagnostics
+
+    node = _BakedSensorNode(n=64, k=16, theta=0.42, blindness_gate=False)
+    state = node.initial_state()
+    previous = set_adaptive_diagnostics(False)
+    try:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            node.gradient_capture_ratio(state)
+        assert not [w for w in record if "exactly 0.0" in str(w.message)]
+    finally:
+        set_adaptive_diagnostics(previous)
 
 
 # -- frozen_gradient_vanishes_at --------------------------------------------------
@@ -145,12 +238,22 @@ def test_symmetry_break_escapes_the_trap_in_one_step():
 
 # -- cold-start gate ------------------------------------------------------------------
 
-def test_initial_state_raises_only_at_an_established_trap():
-    """A confirmed Palais fixed point is the one cause the diagnostics can
-    establish, so it is the one that still fails construction."""
+def test_the_default_policy_warns_at_a_trap_and_only_on_blind_raise_raises():
+    """``on_blind="warn"`` means warn, whatever the cause.
+
+    The trap branch used to raise even under ``"warn"``, justified by the
+    claim that a Palais fixed point was the one cause the diagnostic could
+    *establish*.  It cannot (see ``frozen_gradient_vanishes_at``): the same
+    check fires at an ordinary interior optimum, so the old behaviour
+    hard-errored a user at the moment their fit converged, through the
+    escape hatch they had explicitly chosen.  ``"raise"`` is the strict
+    setting and still refuses.
+    """
     PoissonSineTopKNode(theta=0.42).initial_state()
-    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+    with pytest.warns(UserWarning, match="Palais fixed point"):
         PoissonSineTopKNode(theta=0.5).initial_state()
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+        PoissonSineTopKNode(theta=0.5, on_blind="raise").initial_state()
     PoissonSineTopKNode(theta=0.5, blindness_gate=False).initial_state()
     PoissonSineTopKNode(theta=0.5, on_blind="ignore").initial_state()
 
@@ -285,8 +388,10 @@ def test_check_gradient_capture_evaluates_the_parameters_it_is_handed():
     check must accept the ones actually in use."""
     node = PoissonSineTopKNode(theta=0.42, n=64, k=16)
     assert node.check_gradient_capture() > node.gradient_capture_threshold
-    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+    with pytest.warns(UserWarning, match="Palais fixed point"):
         node.check_gradient_capture({"theta": jnp.asarray(0.5)})
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+        node.check_gradient_capture({"theta": jnp.asarray(0.5)}, on_blind="raise")
     assert node.check_gradient_capture(
         {"theta": jnp.asarray(0.5)}, on_blind="ignore",
     ) is None

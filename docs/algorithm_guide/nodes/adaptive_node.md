@@ -106,8 +106,9 @@ every $n_{\max}$. A low $\rho$ therefore means *either* too small a budget
 direction, re-selects, and asks whether the frozen gradient is negligible
 against its own rate of change — separates them in one direction only: a
 `False` rules a trap out, a `True` is equally consistent with an ordinary
-stationary point of the frozen objective. The cold-start check warns for the
-budget case and raises when the frozen gradient has also collapsed.
+stationary point of the frozen objective. Because it establishes neither
+cause, the cold-start check *warns* for both under the default policy and
+names which one the evidence points at; `on_blind="raise"` refuses.
 
 ## Discretization
 
@@ -137,7 +138,7 @@ budget case and raises when the frozen gradient has also collapsed.
 | Cold-start state at the constructor parameters | `maddening.nodes.adaptive.base.AdaptiveNode.initial_state` | Selection with `is_cold_start=True`, solve, blindness gate |
 | $\nabla_\theta J_{\text{full}}$ | `maddening.nodes.adaptive.base.AdaptiveNode.compute_full_basis_gradient` | Default: `jax.grad` of `objective` through `solve_frozen` with an all-true mask |
 | Gradient-capture ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.gradient_capture_ratio` | Active set re-selected at the evaluated $\theta$; sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible. `blindness_ratio` is a deprecated alias |
-| Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | Warns on a low ratio; raises only when `frozen_gradient_vanishes_at` is also true or `on_blind="raise"` |
+| Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | A low ratio warns under the default `"warn"`, whatever its cause, naming which of the two the evidence points at; only `"raise"` refuses |
 | Double-`where` guard for a masked operand | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | Sanitises the *input* of an operation that is singular off the active set |
 | Vanishing-frozen-gradient check | `maddening.nodes.adaptive.base.AdaptiveNode.frozen_gradient_vanishes_at` | Re-thresholded finite difference along the escape direction. Necessary for a Palais trap, not sufficient: `False` rules one out, `True` also fires at an ordinary stationary point. `is_trapped_at` is a deprecated alias |
 | Escape step $\theta + \delta\, g_{\text{full}}/\|g_{\text{full}}\|$ | `maddening.nodes.adaptive.base.AdaptiveNode.symmetry_break` | Trainable leaves only (`ParamSpec.trainable`) |

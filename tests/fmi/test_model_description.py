@@ -190,3 +190,60 @@ def test_interface_mapping_on_an_edge_leaves_the_model_description_unchanged(
     mapped = build_model_description(gm, model_name="m").to_xml()
     assert mapped == plain                 # ...and never reach the FMU interface
 
+
+
+class TestXmlLexicalForms:
+    """Every attribute the description emits is a valid XML Schema literal.
+
+    ``repr(float("inf"))`` is ``'inf'``, which is not an ``xs:float``
+    value, so an FMU carrying a non-finite parameter start or an infinite
+    declared bound was malformed.  (Audit params-io 2026-09-19,
+    ``r11_fmi_desc.py``.)
+    """
+
+    @staticmethod
+    def _graph_with(**params):
+        from maddening.core.graph_manager import GraphManager
+        from maddening.nodes.spring import SpringDamperNode
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", 0.01, **params))
+        gm.compile()
+        return gm
+
+    def test_a_non_finite_start_uses_the_schema_spelling(self):
+        gm = self._graph_with(stiffness=float("inf"), damping=float("nan"))
+        md = build_model_description(gm, model_name="P")
+        starts = {v.name: v.start for v in md.variables
+                  if v.causality == "parameter"}
+        assert starts["s.params.stiffness"] == "INF"
+        assert starts["s.params.damping"] == "NaN"
+        xml = md.to_xml()
+        assert 'start="INF"' in xml and 'start="NaN"' in xml
+        assert 'start="inf"' not in xml and 'start="nan"' not in xml
+
+    def test_an_infinite_bound_is_left_out_rather_than_written_as_inf(self):
+        from maddening.core.params import ParamSpec
+        gm = self._graph_with(stiffness=30.0)
+        gm.set_param_spec("s", "stiffness",
+                          ParamSpec(bounds=(float("-inf"), float("inf"))))
+        md = build_model_description(gm, model_name="P")
+        xml = md.to_xml()
+        assert "-inf" not in xml and 'min="-INF"' not in xml
+        assert 'max="INF"' not in xml
+
+
+class TestFMIVariableIsKeywordOnly:
+    """``node`` and ``field`` were inserted between ``unit`` and ``shape``
+    in 0.4.0, so a positional call written against 0.3.x bound the shape to
+    ``node`` with no error at all.  Keyword-only makes that a TypeError."""
+
+    def test_positional_construction_is_a_type_error(self):
+        with pytest.raises(TypeError):
+            FMIVariable("plant.x", 1, "float32", "output", "continuous",
+                        "", "m", (3,))
+
+    def test_keyword_construction_is_unchanged(self):
+        v = FMIVariable(name="plant.x", value_reference=1, dtype="float32",
+                        causality="output", variability="continuous",
+                        unit="m", shape=(3,))
+        assert v.shape == (3,) and v.node is None

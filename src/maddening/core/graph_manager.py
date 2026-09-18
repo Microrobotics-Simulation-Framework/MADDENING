@@ -239,6 +239,16 @@ class ExternalInputSpec:
 # of tracers extracted by ``jax.closure_convert`` at the call site.
 
 
+def _bound_helpers():
+    # Lazy: ``maddening.core.coupling.acceleration`` imports jax at
+    # module scope and ``graph_manager`` is imported eagerly.
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        error_amplification,
+        estimated_error,
+    )
+    return error_amplification, estimated_error
+
+
 def _F_dispatch(step_pure, x, consts):
     # Trampoline: forwards to a closure-converted pure function and
     # keeps only the next iterate.  Kept top-level so the custom_jvp
@@ -264,8 +274,29 @@ def _fixed_point_while(
 
     ``step_pure(x, *consts) -> (F(x), residual)`` is the closure-converted
     one-pass function; ``residual`` is the group's configured convergence
-    measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm),
-    compared against the static ``threshold``.  The loop always runs at
+    measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm).
+
+    **The criterion is an error bound, not a residual test.**  What is
+    compared against the static ``threshold`` is not ``r_k`` but an
+    estimate of the distance to the fixed point,
+    ``r_k / (1 - rho)``, with ``rho = r_k / r_{k-1}`` taken from the
+    two residuals the loop already has (see
+    :func:`~maddening.core.coupling.acceleration.error_amplification`).
+    ``converged=True`` therefore means "within ``threshold`` of the
+    fixed point" rather than "the last step was smaller than
+    ``threshold``" — the gap MADD-ANO-005 recorded.  The estimate is
+    never smaller than ``r_k``, so this criterion is never looser than
+    the raw one it replaces: a group that stops here would have
+    stopped under the old rule too, possibly later.
+
+    On a non-monotone sequence the ratio is meaningless, so it is
+    rejected (``rho >= 1``, a zero predecessor, a non-finite residual)
+    and the raw residual test stands in, with
+    ``coupling_diagnostics()['bound_valid']`` recording that it did.
+    When ``rho`` approaches 1 the bound diverges, which is the honest
+    answer — a group that is barely contracting *is* far from its fixed
+    point — and it costs iterations that the old criterion did not
+    charge.  The loop always runs at
     least one body iteration and at most ``max_iter - 1``, so the number
     of state updates at the cap (first pass + body iterations) equals
     ``max_iter`` — the same budget as the legacy fori path.  An exit
@@ -337,10 +368,12 @@ def _fixed_point_while(
     residual sequence is ever measured dipping, add the name to
     ``_TWO_PASS_EXIT``.
 
-    Returns ``(x_star, n_iters, final_res, (V, W))``: ``n_iters`` is the
-    number of body iterations run (as a float, for the diagnostics
-    carry) and ``(V, W)`` the IQN secant matrices (an empty tuple for
-    other accelerations).
+    Returns ``(x_star, n_iters, final_res, final_amp, (V, W))``:
+    ``n_iters`` is the number of body iterations run (as a float, for
+    the diagnostics carry), ``final_amp`` the amplification
+    ``1/(1 - rho)`` of the pair of residuals that ends on ``x_star``
+    (``0.0`` where the estimate was rejected), and ``(V, W)`` the IQN
+    secant matrices (an empty tuple for other accelerations).
 
     ``final_res`` is the number ``coupling_diagnostics``' ``converged``
     flag and ``strict_convergence`` are derived from, so it has to be
@@ -430,39 +463,54 @@ def _fixed_point_while(
     # -- is unchanged for every acceleration that is not on it.
     two_pass_exit = acceleration in _TWO_PASS_EXIT
 
-    def cond(carry):
-        _x, _x_meas, res, prev, i, _acc = carry
-        first = i == jnp.int32(0)
-        above = res > threshold
+    amplification, error_of = _bound_helpers()
+
+    def _met(res, res_prev):
+        """The stopping criterion: the *estimated distance to the fixed
+        point* is at or below ``threshold``, not merely the last step."""
+        est = error_of(res, amplification(res, res_prev))
+        met = est <= threshold
         if two_pass_exit:
-            above = jnp.logical_or(above, prev[0] > threshold)
+            # The streak the Aitken guard wants, with the current pass
+            # held to the estimate and its predecessor to the raw
+            # residual it was able to measure.  ``est >= res`` always,
+            # so this is strictly stronger than the pair of raw tests
+            # it replaces.
+            met = jnp.logical_and(met, res_prev <= threshold)
+        return met
+
+    def cond(carry):
+        _x, _x_meas, res, res_prev, i, _acc = carry
+        first = i == jnp.int32(0)
+        above = jnp.logical_not(_met(res, res_prev))
         keep_going = jnp.logical_and(above, i < max_iter - 1)
         return jnp.logical_or(first, keep_going)
 
     def body(carry):
-        x, _x_meas, res_prev, _prev, i, acc = carry
+        x, _x_meas, res_prev, _res_prev2, i, acc = carry
         x_raw, res = step_pure(x, *consts)
         if idx is None:
             x_new, acc = accelerate(x, x_raw, acc, i)
         else:
             x_new_sub, acc = accelerate(x[idx], x_raw[idx], acc, i)
             x_new = x_raw.at[idx].set(x_new_sub)
-        prev = (res_prev,) if two_pass_exit else ()
         # ``x`` is the iterate ``res`` is a measurement of; carrying it
         # is what lets a criterion exit hand back the state its own
-        # criterion passed on.  See the docstring.
-        return x_new, x, res, prev, i + jnp.int32(1), acc
+        # criterion passed on.  See the docstring.  ``res_prev`` is now
+        # carried for every acceleration, not only the two-pass ones:
+        # the error bound needs the ratio of consecutive residuals.
+        return x_new, x, res, res_prev, i + jnp.int32(1), acc
 
     # The seed is the residual of the pass that produced ``x0``, not
     # ``inf``: the streak the guard tests then has a first member even
     # when the loop only runs one body (``max_iter == 2``), so the
     # guard is provable at every cap instead of being switched off at
     # the smallest one.  ``cond`` forces the first body regardless, so
-    # this value only ever reaches the criterion through ``prev``.
+    # this value only ever reaches the criterion as the ``r_{k-1}``
+    # of the first ratio.
     seed = jnp.asarray(first_res, dtype)
-    init = (x0, x0, seed, (seed,) if two_pass_exit else (),
-            jnp.int32(0), acc0)
-    x_next, x_meas, final_res, prev, n_iters, acc = jax.lax.while_loop(
+    init = (x0, x0, seed, seed, jnp.int32(0), acc0)
+    x_next, x_meas, final_res, res_prev, n_iters, acc = jax.lax.while_loop(
         cond, body, init
     )
     # Did the loop leave on its criterion, or because it ran out of
@@ -482,21 +530,26 @@ def _fixed_point_while(
     # ``x_next`` is exactly the one that most often crossed the
     # threshold -- so ``x_next`` is returned and one evaluation of
     # ``F`` measures it.  See the docstring.
-    if two_pass_exit:
-        criterion_met = jnp.logical_and(
-            final_res <= threshold, prev[0] <= threshold,
-        )
-    else:
-        criterion_met = final_res <= threshold
+    criterion_met = _met(final_res, res_prev)
     x_star = jnp.where(criterion_met, x_meas, x_next)
-    final_res = jax.lax.cond(
+    loop_res = final_res
+
+    def _measure_at_cap(_x):
+        r = step_pure(_x, *consts)[1]
+        return r, amplification(r, loop_res)
+
+    # ``final_amp`` has to describe the pair that ends on the state
+    # being returned.  On the criterion that pair is
+    # ``(res_prev, final_res)``; at the cap the extra evaluation makes
+    # ``(final_res, res(x_star))`` the consecutive pair instead.
+    final_res, final_amp = jax.lax.cond(
         criterion_met,
-        lambda _x: final_res,
-        lambda _x: step_pure(_x, *consts)[1],
+        lambda _x: (loop_res, amplification(loop_res, res_prev)),
+        _measure_at_cap,
         x_star,
     )
     vw = (acc[0], acc[1]) if is_iqn else ()
-    return x_star, n_iters.astype(dtype), final_res, vw
+    return x_star, n_iters.astype(dtype), final_res, final_amp, vw
 
 
 def _ift_solve_impl(
@@ -505,7 +558,8 @@ def _ift_solve_impl(
 ):
     """Returns ``(x_star, aux)`` with ``x_star = F(x_star, *consts)``.
 
-    ``aux = (n_iters, final_res, (V, W))`` is forward-only bookkeeping
+    ``aux = (n_iters, final_res, final_amp, (V, W))`` is forward-only
+    bookkeeping
     from :func:`_fixed_point_while` (diagnostics and IQN secant matrices
     for cross-timestep reuse); it carries a zero derivative.
 
@@ -553,11 +607,11 @@ def _ift_solve_impl(
     the path taken to reach ``x*``.  ``linear_solver`` selects the
     tangent/adjoint solver — see ``_ift_linear_solve``.
     """
-    x_star, n_iters, final_res, vw = _fixed_point_while(
+    x_star, n_iters, final_res, final_amp, vw = _fixed_point_while(
         step_pure, x0, consts, accel_init, first_res, threshold, max_iter,
         acceleration, relaxation, n_reuse, sub_idx,
     )
-    return x_star, (n_iters, final_res, vw)
+    return x_star, (n_iters, final_res, final_amp, vw)
 
 
 
@@ -854,6 +908,8 @@ def _run_coupled_block_impl(
         coupling_residual_interface,
         coupling_residual_l2,
         coupling_residual_mixed,
+        error_amplification,
+        estimated_error,
         fixed_relaxation,
         flatten_coupled_state,
         iqn_ils_update,
@@ -1190,7 +1246,19 @@ def _run_coupled_block_impl(
                     s_new, s_old, group_node_names,
                     group.atol, group.rtol,
                 )
-            return coupling_residual_l2(s_new, s_old, group_node_names)
+            return coupling_residual_l2(
+                s_new, s_old, group_node_names, group.atol,
+            )
+
+    def _estimate(residual, prev_residual):
+        """``(estimated distance to the fixed point, amplification)``.
+
+        The criterion both solvers stop on.  See
+        :func:`_fixed_point_while` for the argument and for what
+        happens when the ratio is rejected.
+        """
+        amp = error_amplification(residual, prev_residual)
+        return estimated_error(residual, amp), amp
 
     # Convergence threshold depends on norm type
     conv_threshold_value = (
@@ -1261,6 +1329,12 @@ def _run_coupled_block_impl(
             # pass, and the profiler's one-iteration variant depends on
             # it.  So this cap reports its single measurement.
             single_r = _compute_residual(state_after_first, new_state_inner)
+            # One pass means one residual and no ratio, so there is no
+            # error bound to be had: the amplification is reported
+            # rejected (``0.0``) and the criterion falls back to the
+            # raw residual test.  A caller who wants the bound has to
+            # allow the group a second pass.
+            single_amp = jnp.zeros_like(single_r)
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
                 import equinox as eqx  # noqa: PLC0415
@@ -1271,7 +1345,11 @@ def _run_coupled_block_impl(
                     # second form lets the one state the IFT gradient
                     # is certainly invalid at through silently.  See
                     # the ift branch below.
-                    sub, jnp.logical_not(single_r <= conv_threshold_value),
+                    sub,
+                    jnp.logical_not(
+                        estimated_error(single_r, single_amp)
+                        <= conv_threshold_value
+                    ),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "
@@ -1287,7 +1365,7 @@ def _run_coupled_block_impl(
             # would contradict itself.  ``solver="fori"`` keeps its own
             # ``diagnostics=True`` gate.
             if group.solver == "ift" or group.diagnostics:
-                return r, (jnp.array(1.0), single_r), None
+                return r, (jnp.array(1.0), single_r, single_amp), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1449,7 +1527,7 @@ def _run_coupled_block_impl(
             else:
                 accel_init, n_reuse = (), 0
 
-            x_star_full, (n_iters, final_res, vw) = _ift_solve(
+            x_star_full, (n_iters, final_res, final_amp, vw) = _ift_solve(
                 step_pure, x0_full, consts, accel_init,
                 jnp.asarray(first_r, x0_full.dtype),
                 conv_threshold_value,
@@ -1477,7 +1555,10 @@ def _run_coupled_block_impl(
                     # ``coupling_diagnostics()`` already reads NaN as
                     # ``converged=False``; the guard has to agree.
                     x_star_full,
-                    jnp.logical_not(final_res <= conv_threshold_value),
+                    jnp.logical_not(
+                        estimated_error(final_res, final_amp)
+                        <= conv_threshold_value
+                    ),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "
@@ -1486,12 +1567,11 @@ def _run_coupled_block_impl(
                     "coupling_diagnostics().",
                 )
             final = _merge(template_state, _embed(x_star_full), jnp.array(False))
-            return final, (n_iters, final_res), (vw if vw else None)
+            return final, (n_iters, final_res, final_amp), (vw if vw else None)
 
         if group.solver == "ift":
-            final_state, (iter_count, final_res), vw = _run_ift_forward(
-                state_after_first
-            )
+            (final_state, (iter_count, final_res, final_amp),
+             vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
@@ -1499,7 +1579,7 @@ def _run_coupled_block_impl(
             # scalars are already in the carry, and the converged flag
             # is what tells a training loop that the IFT gradient
             # through this step is trustworthy.
-            diag_data = (iter_count, final_res)
+            diag_data = (iter_count, final_res, final_amp)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -1520,12 +1600,15 @@ def _run_coupled_block_impl(
 
             if track_diag:
                 def body_fn(i, carry):
-                    (s_cur, converged, prev_below, icount, fres,
-                     omega, prev_r) = carry
+                    (s_cur, converged, prev_below, prev_res, icount, fres,
+                     famp, omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
-                    new_converged = converged | (below & prev_below)
+                    est, amp = _estimate(residual, prev_res)
+                    new_converged = converged | (
+                        (est <= conv_threshold) & prev_below
+                    )
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel, new_omega, cur_r = aitken_relaxation(
@@ -1536,26 +1619,32 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    return (s_merged, new_converged, below, new_count,
-                            new_res, new_omega, cur_r)
+                    new_amp = jnp.where(converged, famp, amp)
+                    return (s_merged, new_converged, below, residual,
+                            new_count, new_res, new_amp, new_omega, cur_r)
 
                 init_carry = (
-                    state_after_first, jnp.array(False), first_below,
-                    jnp.array(1.0), first_r,
+                    state_after_first, jnp.array(False), first_below, first_r,
+                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
                     jnp.array(1.0), jnp.zeros(n_dof),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                iter_count, final_res = final_carry[3], final_carry[4]
+                iter_count, final_res = final_carry[4], final_carry[5]
+                final_amp = final_carry[6]
             else:
                 def body_fn(i, carry):
-                    s_cur, converged, prev_below, omega, prev_r = carry
+                    (s_cur, converged, prev_below, prev_res,
+                     omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
-                    new_converged = converged | (below & prev_below)
+                    est, _amp = _estimate(residual, prev_res)
+                    new_converged = converged | (
+                        (est <= conv_threshold) & prev_below
+                    )
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel, new_omega, cur_r = aitken_relaxation(
@@ -1564,10 +1653,11 @@ def _run_coupled_block_impl(
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
-                    return s_merged, new_converged, below, new_omega, cur_r
+                    return (s_merged, new_converged, below, residual,
+                            new_omega, cur_r)
 
                 init_carry = (
-                    state_after_first, jnp.array(False), first_below,
+                    state_after_first, jnp.array(False), first_below, first_r,
                     jnp.array(1.0), jnp.zeros(n_dof),
                 )
                 final_carry = jax.lax.fori_loop(
@@ -1582,11 +1672,12 @@ def _run_coupled_block_impl(
 
             if track_diag:
                 def body_fn(i, carry):
-                    (s_cur, converged, icount, fres,
+                    (s_cur, converged, prev_res, icount, fres, famp,
                      V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     (x_new, nV, nW, nnc,
@@ -1600,12 +1691,14 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    return (s_merged, new_converged, new_count, new_res,
+                    new_amp = jnp.where(converged, famp, amp)
+                    return (s_merged, new_converged, residual, new_count,
+                            new_res, new_amp,
                             nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
-                    jnp.array(1.0), first_r,
+                    state_after_first, jnp.array(False), first_r,
+                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
                     init_V, init_W, init_ncols,
                     jnp.zeros(n_dof), init_flat,
                     jnp.array(1.0), jnp.zeros(n_dof),
@@ -1614,15 +1707,17 @@ def _run_coupled_block_impl(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                iter_count, final_res = final_carry[2], final_carry[3]
-                final_V, final_W = final_carry[4], final_carry[5]
+                iter_count, final_res = final_carry[3], final_carry[4]
+                final_amp = final_carry[5]
+                final_V, final_W = final_carry[6], final_carry[7]
             else:
                 def body_fn(i, carry):
-                    (s_cur, converged,
+                    (s_cur, converged, prev_res,
                      V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, _amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     (x_new, nV, nW, nnc,
@@ -1634,11 +1729,11 @@ def _run_coupled_block_impl(
                     s_partial = _unflatten(x_new, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
-                    return (s_merged, new_converged,
+                    return (s_merged, new_converged, residual,
                             nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
+                    state_after_first, jnp.array(False), first_r,
                     init_V, init_W, init_ncols,
                     jnp.zeros(n_dof), init_flat,
                     jnp.array(1.0), jnp.zeros(n_dof),
@@ -1647,17 +1742,18 @@ def _run_coupled_block_impl(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                final_V, final_W = final_carry[2], final_carry[3]
+                final_V, final_W = final_carry[3], final_carry[4]
 
         elif group.acceleration == "fixed":
             omega_val = group.relaxation
 
             if track_diag:
                 def body_fn(i, carry):
-                    s_cur, converged, icount, fres = carry
+                    s_cur, converged, prev_res, icount, fres, famp = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel = fixed_relaxation(x_old, x_raw, omega_val)
@@ -1666,32 +1762,36 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    return s_merged, new_converged, new_count, new_res
+                    new_amp = jnp.where(converged, famp, amp)
+                    return (s_merged, new_converged, residual, new_count,
+                            new_res, new_amp)
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
-                    jnp.array(1.0), first_r,
+                    state_after_first, jnp.array(False), first_r,
+                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                iter_count, final_res = final_carry[2], final_carry[3]
+                iter_count, final_res = final_carry[3], final_carry[4]
+                final_amp = final_carry[5]
             else:
                 def body_fn(i, carry):
-                    s_cur, converged = carry
+                    s_cur, converged, prev_res = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, _amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
                     x_rel = fixed_relaxation(x_old, x_raw, omega_val)
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
-                    return s_merged, new_converged
+                    return s_merged, new_converged, residual
 
-                init_carry = (state_after_first, jnp.array(False))
+                init_carry = (state_after_first, jnp.array(False), first_r)
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
@@ -1701,34 +1801,39 @@ def _run_coupled_block_impl(
             # No acceleration ("none")
             if track_diag:
                 def body_fn(i, carry):
-                    s_cur, converged, icount, fres = carry
+                    s_cur, converged, prev_res, icount, fres, famp = carry
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    return s_merged, new_converged, new_count, new_res
+                    new_amp = jnp.where(converged, famp, amp)
+                    return (s_merged, new_converged, residual, new_count,
+                            new_res, new_amp)
 
                 init_carry = (
-                    state_after_first, jnp.array(False),
-                    jnp.array(1.0), first_r,
+                    state_after_first, jnp.array(False), first_r,
+                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                iter_count, final_res = final_carry[2], final_carry[3]
+                iter_count, final_res = final_carry[3], final_carry[4]
+                final_amp = final_carry[5]
             else:
                 def body_fn(i, carry):
-                    s_cur, converged = carry
+                    s_cur, converged, prev_res = carry
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
-                    new_converged = converged | (residual <= conv_threshold)
+                    est, _amp = _estimate(residual, prev_res)
+                    new_converged = converged | (est <= conv_threshold)
                     s_merged = _merge(s_cur, s_new, new_converged)
-                    return s_merged, new_converged
+                    return s_merged, new_converged, residual
 
-                init_carry = (state_after_first, jnp.array(False))
+                init_carry = (state_after_first, jnp.array(False), first_r)
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
@@ -1744,10 +1849,16 @@ def _run_coupled_block_impl(
         # Keeping the rule identical on both solvers is what makes
         # ``solver`` invisible in ``coupling_diagnostics()``.
         if track_diag:
-            final_res = jax.lax.cond(
+            loop_res = final_res
+
+            def _measure_at_cap(_s):
+                r = _compute_residual(one_pass(_s), _s)
+                return r, error_amplification(r, loop_res)
+
+            final_res, final_amp = jax.lax.cond(
                 final_carry[1],
-                lambda _s: final_res,
-                lambda _s: _compute_residual(one_pass(_s), _s),
+                lambda _s: (loop_res, final_amp),
+                _measure_at_cap,
                 final_state,
             )
 
@@ -1759,7 +1870,7 @@ def _run_coupled_block_impl(
         # Write diagnostics to _meta if requested
         diag_data = None
         if track_diag:
-            diag_data = (iter_count, final_res)
+            diag_data = (iter_count, final_res, final_amp)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -1868,7 +1979,7 @@ def _run_coupled_block_impl(
     # built by hand without ``_meta`` keeps its structure.  The legacy
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
-        iter_count, final_res = diag_data
+        iter_count, final_res, final_amp = diag_data
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
@@ -1876,6 +1987,9 @@ def _run_coupled_block_impl(
                 iter_count, dtype=jnp.int32
             ),
             f"coupling_{group_key}_residual": final_res,
+            f"coupling_{group_key}_amplification": jnp.asarray(
+                final_amp, dtype=jnp.asarray(final_res).dtype
+            ),
         }
 
     # Store V/W matrices for IQN-IMVJ Jacobian reuse
@@ -3090,6 +3204,11 @@ class GraphManager:
                             continue
                         break
                     meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=res_dtype)
+                    # The amplification 1/(1-rho) the error bound is
+                    # built from; 0.0 reads as "no usable estimate".
+                    meta[f"coupling_{key}_amplification"] = jnp.array(
+                        0.0, dtype=res_dtype
+                    )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -3728,21 +3847,49 @@ class GraphManager:
               At ``max_iterations=1`` it is the distance the single
               pass moved, which is the same thing measured one pass
               earlier.
-            - ``"converged"`` : bool — that residual met the group's
-              threshold (``tolerance`` for the L2 norm, ``1.0`` for the
-              mixed / interface norms).  ``False`` means the group hit
-              ``max_iterations`` *and* the state it returned is still
-              outside the threshold; under ``solver="ift"`` the
-              gradient through that step is then unreliable.
+            - ``"amplification"`` : float — the estimated
+              ``1 / (1 - rho)`` of the group's slowest mode, from the
+              ratio of the last two residuals.  ``nan`` when the
+              estimate was rejected (see ``"bound_valid"``).
+            - ``"error_estimate"`` : float — ``residual *
+              amplification``, an estimate of ``||x - x*||`` in the
+              same norm: how far the returned state is from the fixed
+              point, rather than how far the last pass moved.  Falls
+              back to ``residual`` when the estimate was rejected.
+            - ``"bound_valid"`` : bool — whether the contraction ratio
+              was usable this step.  ``False`` on a non-monotone
+              (non-normal) sequence, on a zero or non-finite
+              predecessor, and at ``max_iterations=1``, where there is
+              no pair of residuals to take a ratio of.  The criterion
+              then falls back to the raw residual test, which is what
+              ``converged`` reports.
+            - ``"gradient_error_bound"`` : float — how far the IFT
+              adjoint may be from a finite difference of this group's
+              own forward, ``residual * cond(I - dF/dx)`` estimated
+              along the observed slowest mode (numerically the same
+              number as ``"error_estimate"``: both are
+              ``(I - dF/dx)^-1`` applied to a residual).  ``inf`` when
+              ``bound_valid`` is ``False`` — no contraction was
+              observed, so nothing bounds the disagreement.
+            - ``"converged"`` : bool — the *error estimate* met the
+              group's threshold (``tolerance`` for the L2 norm, ``1.0``
+              for the mixed / interface norms).  ``False`` means the
+              group hit ``max_iterations`` *and* the state it returned
+              is still outside the threshold; under ``solver="ift"``
+              the gradient through that step is then unreliable.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
             met the criterion rather than on the update it went on to
             produce, so recomputing ``||F(x) - x||`` on the state you
-            were handed reproduces the number reported here.  It is
-            *not* a bound on the distance to the fixed point, which is
-            larger by up to ``1/(1 - rho)`` for a group contracting at
-            ``rho`` — see ``MADD-ANO-005``.
+            were handed reproduces ``"residual"``.  Since 0.4.0 it is
+            also a *bound on the distance to the fixed point* and not
+            only on the last step: the threshold is applied to
+            ``residual / (1 - rho)`` with ``rho`` measured from the
+            residual sequence, which is what MADD-ANO-005 recorded as
+            missing.  Where the ratio is unusable the flag degrades to
+            the old residual test and says so through
+            ``"bound_valid"``.
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, return the same state and derive both values
@@ -3758,8 +3905,15 @@ class GraphManager:
             key = "+".join(sorted(group.nodes))
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
+            amp_key = f"coupling_{key}_amplification"
             if iter_key in meta:
                 residual = float(meta[res_key])
+                amp = float(meta.get(amp_key, 0.0))
+                # A valid amplification is ``1/(1 - rho)`` with
+                # ``rho`` in ``[0, 1)``, so it is always >= 1; the
+                # solvers write 0.0 for "rejected".
+                valid = amp >= 1.0
+                error_estimate = residual * (amp if valid else 1.0)
                 threshold = (
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance
@@ -3767,7 +3921,13 @@ class GraphManager:
                 result[key] = {
                     "iterations": int(meta[iter_key]),
                     "residual": residual,
-                    "converged": residual <= threshold,
+                    "amplification": amp if valid else float("nan"),
+                    "error_estimate": error_estimate,
+                    "bound_valid": valid,
+                    "gradient_error_bound": (
+                        error_estimate if valid else float("inf")
+                    ),
+                    "converged": error_estimate <= threshold,
                 }
         return result
 
@@ -4499,7 +4659,9 @@ class GraphManager:
                 if key in ("step_count", "sub_step") or key.endswith("_iterations") \
                         or key.endswith("_pred_count"):
                     meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_residual"):
+                elif key.endswith("_residual") or key.endswith(
+                    "_amplification"
+                ):
                     meta[key] = jnp.zeros_like(value)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.

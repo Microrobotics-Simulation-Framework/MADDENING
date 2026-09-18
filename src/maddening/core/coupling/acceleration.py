@@ -36,53 +36,56 @@ def float_fields_of(state: dict[str, dict], node_names) -> dict[str, tuple[str, 
     }
 
 
+def _field_reference(new_val, old_val):
+    """The field's own magnitude, used as the scale of its criterion.
+
+    ``max |v|`` over the whole field rather than element by element:
+    the question a convergence criterion answers is "has *this
+    quantity* stopped moving", and a quantity is one field, not one
+    array entry.  Taking the maximum over both iterates makes the
+    reference monotone in the iterate rather than oscillating with it.
+    """
+    return jnp.maximum(jnp.max(jnp.abs(new_val)), jnp.max(jnp.abs(old_val)))
+
+
+def _scaled_change(new_val, old_val, atol: float, rtol: float):
+    """``(|dx| / (rtol * ref), active)`` for one field.
+
+    ``active`` is the dead band: a field whose own magnitude does not
+    exceed ``atol`` is *at zero within the tolerance the caller
+    declared*, and contributes nothing.  That is the only place an
+    absolute number enters, and it is the only place one can: "how
+    small is indistinguishable from zero" is the one question that
+    genuinely has units.  Everywhere above the dead band the criterion
+    is a ratio, so it says the same thing whether a force is quoted in
+    newtons or micronewtons.
+
+    Dividing is safe by construction — the denominator is only ever
+    used where ``ref > atol``, and elsewhere the ``where`` selects a
+    zero contribution — so a field that is legitimately at zero neither
+    divides by something tiny nor blocks convergence forever.
+    """
+    ref = _field_reference(new_val, old_val)
+    scale = rtol * ref
+    active = jnp.logical_and(ref > atol, scale > 0)
+    safe = jnp.where(active, scale, jnp.ones_like(scale))
+    diff = jnp.abs(new_val - old_val)
+    return jnp.where(active, diff / safe, jnp.zeros_like(diff)), active
+
+
 def coupling_residual_l2(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
     node_names: list[str],
+    atol: float = 1e-8,
 ) -> jnp.ndarray:
-    """Compute the L2 norm of state change between iterations.
+    """L2 norm of the *relative* state change between iterations.
 
-    Parameters
-    ----------
-    s_new : dict
-        New iteration state.
-    s_old : dict
-        Previous iteration state.
-    node_names : list of str
-        Node names to include in the norm.
-
-    Returns
-    -------
-    jnp.ndarray
-        Scalar L2 norm.
-    """
-    total = jnp.array(0.0)
-    for nn in node_names:
-        for field_name in s_new[nn]:
-            if not _is_float_leaf(s_new[nn][field_name]):
-                continue        # counters / flags / keys: not part of the norm
-            diff = s_new[nn][field_name] - s_old[nn][field_name]
-            total = total + jnp.sum(diff ** 2)
-    return jnp.sqrt(total)
-
-
-def coupling_residual_mixed(
-    s_new: dict[str, dict],
-    s_old: dict[str, dict],
-    node_names: list[str],
-    atol: float,
-    rtol: float,
-) -> jnp.ndarray:
-    """Compute a mixed absolute/relative convergence norm.
-
-    Uses the formula::
-
-        err_i = |new_i - old_i| / (atol + rtol * max(|new_i|, |old_i|))
-
-    Returns the RMS norm.  Convergence is achieved when the result
-    is <= 1.0.  This is the same pattern used by the adaptive
-    timestepping error estimator.
+    Each field's change is divided by the field's own magnitude before
+    the norm is taken, so the number is dimensionless and a group whose
+    fields happen to be quoted in small units is held to the same
+    standard as one quoted in large ones.  For fields of order one this
+    is the unscaled ``||dx||`` it replaces.
 
     Parameters
     ----------
@@ -93,9 +96,73 @@ def coupling_residual_mixed(
     node_names : list of str
         Node names to include in the norm.
     atol : float
-        Absolute tolerance.
+        Dead band: a field whose magnitude does not exceed ``atol`` is
+        treated as being at zero and contributes nothing.  See
+        :func:`_scaled_change`.
+
+    Returns
+    -------
+    jnp.ndarray
+        Scalar norm, compared against ``CouplingGroup.tolerance``, which
+        is therefore a *relative* tolerance.
+    """
+    total = jnp.array(0.0)
+    for nn in node_names:
+        for field_name in s_new[nn]:
+            new_val = s_new[nn][field_name]
+            if not _is_float_leaf(new_val):
+                continue        # counters / flags / keys: not part of the norm
+            old_val = s_old[nn][field_name]
+            if jnp.asarray(new_val).size == 0:
+                continue
+            # ``rtol=1.0``: the L2 norm carries its threshold in
+            # ``tolerance``, so the scale here is the bare magnitude.
+            scaled, _active = _scaled_change(new_val, old_val, atol, 1.0)
+            total = total + jnp.sum(scaled ** 2)
+    return jnp.sqrt(total)
+
+
+def coupling_residual_mixed(
+    s_new: dict[str, dict],
+    s_old: dict[str, dict],
+    node_names: list[str],
+    atol: float,
+    rtol: float,
+) -> jnp.ndarray:
+    """Scale-aware RMS convergence norm over every float field.
+
+    Uses the formula::
+
+        err_i = |new_i - old_i| / (rtol * ref_field)
+
+    where ``ref_field = max |v|`` over the field, and a field whose
+    ``ref_field`` does not exceed ``atol`` is treated as being at zero
+    and is left out of the norm entirely.  Converged when the result is
+    <= 1.0.
+
+    This replaces the elementwise ``atol + rtol * |v_i|`` scale, which
+    was ``atol`` alone — an absolute criterion — for every field
+    smaller than ``atol / rtol``.  A 1.7e-05 N force against the default
+    ``atol=1e-8`` was being asked to move by less than 6e-04 of itself,
+    not by less than ``rtol``, and satisfied that on its first pass
+    while still percent-sized from its fixed point.  Above the dead band
+    the new scale is a pure ratio, so ``rtol`` means the same thing in
+    every field's units; for fields well above ``atol / rtol`` the two
+    formulas agree to within ``1 + atol/(rtol*|v|)``.
+
+    Parameters
+    ----------
+    s_new : dict
+        New iteration state.
+    s_old : dict
+        Previous iteration state.
+    node_names : list of str
+        Node names to include in the norm.
+    atol : float
+        Dead band, in the field's own units: below this a field counts
+        as zero.
     rtol : float
-        Relative tolerance.
+        Relative change demanded of every field above the dead band.
 
     Returns
     -------
@@ -110,13 +177,11 @@ def coupling_residual_mixed(
             old_val = s_old[nn][field_name]
             if not _is_float_leaf(new_val):
                 continue        # counters / flags / keys: not part of the norm
-            diff = jnp.abs(new_val - old_val)
-            scale = atol + rtol * jnp.maximum(
-                jnp.abs(new_val), jnp.abs(old_val)
-            )
-            scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
+            if jnp.asarray(new_val).size == 0:
+                continue
+            scaled, active = _scaled_change(new_val, old_val, atol, rtol)
             sum_sq = sum_sq + jnp.sum(scaled ** 2)
-            count = count + scaled.size
+            count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
 
 
@@ -127,11 +192,14 @@ def coupling_residual_interface(
     atol: float = 1e-8,
     rtol: float = 1e-6,
 ) -> jnp.ndarray:
-    """Check interface consistency rather than iterate change.
+    """Interface consistency, on the scale of each interface quantity.
 
     Computes the difference in interface values (edge source fields)
     between two successive iterations.  Only the fields that appear
-    on intra-group edges are compared.
+    on intra-group edges are compared.  The scaling is the one
+    :func:`coupling_residual_mixed` documents: relative to the
+    quantity's own magnitude, with ``atol`` as a dead band rather than
+    as a floor under the scale.
 
     Parameters
     ----------
@@ -142,9 +210,10 @@ def coupling_residual_interface(
     interface_edges : list of EdgeSpec
         Edges internal to the coupling group.
     atol : float
-        Absolute tolerance.
+        Dead band, in the interface quantity's own units.
     rtol : float
-        Relative tolerance.
+        Relative change demanded of every interface quantity above the
+        dead band.
 
     Returns
     -------
@@ -161,14 +230,59 @@ def coupling_residual_interface(
         if edge.transform is not None:
             new_val = edge.transform(new_val)
             old_val = edge.transform(old_val)
-        diff = jnp.abs(new_val - old_val)
-        scale = atol + rtol * jnp.maximum(
-            jnp.abs(new_val), jnp.abs(old_val)
-        )
-        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
+        if jnp.asarray(new_val).size == 0:
+            continue
+        scaled, active = _scaled_change(new_val, old_val, atol, rtol)
         sum_sq = sum_sq + jnp.sum(scaled ** 2)
-        count = count + scaled.size
+        count = count + jnp.where(active, scaled.size, 0)
     return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+
+
+# ------------------------------------------------------------------
+# Distance to the fixed point, estimated from the residual sequence
+# ------------------------------------------------------------------
+
+def error_amplification(residual, prev_residual):
+    """Estimate ``1 / (1 - rho)`` from two consecutive residuals.
+
+    For a linear contraction with rate ``rho``, the distance from the
+    current iterate to the fixed point is bounded by
+    ``||x_k - x*|| <= r_k / (1 - rho)`` (sum the remaining steps of a
+    geometric series), and ``rho`` is free: it is ``r_k / r_{k-1}``.
+    Written as ``r_{k-1} / (r_{k-1} - r_k)`` so the cancellation
+    happens between the two measured numbers rather than against 1.
+
+    Returns ``0.0`` — an impossible amplification, since a valid one is
+    always ``>= 1`` — when the estimate must be rejected: a
+    non-decreasing residual (``rho >= 1``, so there is no contraction
+    to extrapolate), a zero or non-finite predecessor, or a non-finite
+    current residual.  Callers fall back to the raw residual test and
+    report that they did; see
+    ``GraphManager.coupling_diagnostics``' ``bound_valid``.  Rejecting
+    is deliberate: the ratio is meaningless on a non-monotone sequence,
+    which is exactly the non-normal case that motivated the
+    re-measurement in decision D2, and a trusted bad estimate is worse
+    than an honest fallback.
+    """
+    den = prev_residual - residual
+    ok = jnp.logical_and(
+        jnp.logical_and(prev_residual > 0, den > 0),
+        jnp.logical_and(jnp.isfinite(residual), jnp.isfinite(prev_residual)),
+    )
+    safe = jnp.where(ok, den, jnp.ones_like(den))
+    return jnp.where(ok, prev_residual / safe, jnp.zeros_like(residual))
+
+
+def estimated_error(residual, amplification):
+    """``residual * amplification``, with a rejected estimate read as 1.
+
+    The quantity a convergence criterion should be testing: an estimate
+    of ``||x - x*||`` in the group's own norm, rather than of how far
+    the last pass moved.  Never smaller than ``residual``, so a group
+    that meets this criterion also meets the raw residual test it
+    replaces.
+    """
+    return residual * jnp.maximum(amplification, jnp.ones_like(amplification))
 
 
 # ------------------------------------------------------------------

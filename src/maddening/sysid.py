@@ -604,6 +604,7 @@ def _check_noise_std(sig, original) -> None:
         "for unweighted sensitivities."
     )
 
+
 def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float]):
     """``(rank, crb)`` from the eigendecomposition of a Fisher matrix.
 

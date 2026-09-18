@@ -1,0 +1,536 @@
+#!/usr/bin/env python
+"""Generate the SOUP evidence summary tables from their machine-readable sources.
+
+``docs/validation/soup_package.md`` and
+``docs/validation/framework_verification.md`` are the IEC 62304 SOUP /
+MDCG evidence set.  Both used to carry hand-maintained summary tables
+sitting next to the machine-readable file they summarise --
+``known_anomalies.yaml`` and the ``@verification_benchmark`` registry --
+and both had drifted from it (2 of 5 anomalies, 1 of 4 benchmarks, and
+a version identification two to three releases stale).  For a
+regulatory artifact "it drifted" is itself the finding, so the tables
+are no longer written by hand.
+
+Every table this script owns lives between a pair of markers::
+
+    <!-- BEGIN GENERATED: known-anomalies -->
+    ...
+    <!-- END GENERATED: known-anomalies -->
+
+Text outside those markers is prose and is left alone.
+
+Sources
+-------
+``pyproject.toml``
+    Version, licence, Python floor, base dependencies, build backend,
+    repository URL -- everything in the Software Identification table.
+``CITATION.cff``
+    Release date (a pre-release version has none).
+``docs/validation/known_anomalies.yaml``
+    The anomaly registry.  This file is the source; the script only
+    reads it.
+``maddening.compliance.get_benchmark_registry()``
+    The verification benchmark registry, populated by importing the
+    test modules in ``BENCHMARK_MODULES``.
+``tests/``
+    Which test packages exist.
+
+Usage
+-----
+::
+
+    python scripts/generate_soup_tables.py            # rewrite in place
+    python scripts/generate_soup_tables.py --check    # fail on drift
+
+``--check`` is what ``tests/compliance/test_soup_evidence.py`` runs, so
+CI fails on a stale table instead of shipping one.
+
+Cross-file consistency is checked in both modes: the registry header
+and ``CITATION.cff`` must name the version ``pyproject.toml`` names, an
+``open`` anomaly must not record a closed ``affected_versions`` range,
+and every test module registering a ``MADD-VER-`` benchmark must be in
+``BENCHMARK_MODULES`` (otherwise it would silently drop out of the
+index -- the drift this script exists to stop).
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import os
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+# Force CPU JAX: importing the benchmark modules pulls JAX in, and this
+# runs in the docs/compliance job, not on an accelerator.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC = REPO_ROOT / "src"
+sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(REPO_ROOT))  # so `tests.…` imports resolve
+
+import yaml  # noqa: E402  (after sys.path setup)
+
+SOUP_PACKAGE = REPO_ROOT / "docs" / "validation" / "soup_package.md"
+FRAMEWORK_VERIFICATION = REPO_ROOT / "docs" / "validation" / "framework_verification.md"
+ANOMALY_REGISTRY = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+CITATION = REPO_ROOT / "CITATION.cff"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+TESTS = REPO_ROOT / "tests"
+
+#: Test modules whose import populates the verification benchmark
+#: registry.  ``_check_benchmark_modules_are_complete`` scans ``tests/``
+#: for ``benchmark_id="MADD-VER-`` and fails if one is missing here, so
+#: a newly registered benchmark cannot quietly vanish from the index.
+BENCHMARK_MODULES: tuple[str, ...] = (
+    "tests.verification.test_heat_analytical",
+    "tests.cloud.multigpu.test_lbm_poiseuille",
+    "tests.nodes.adaptive.test_verification",
+)
+
+#: Prefix that marks a benchmark as MADDENING's own (CONTRIBUTING.md).
+#: ``tests/compliance/test_validation_benchmark.py`` registers
+#: ``TEST-VER-*`` entries into the same global registry while it runs,
+#: so the filter is what makes the generated table order-independent.
+BENCHMARK_PREFIX = "MADD-VER-"
+
+#: What each top-level package under ``tests/`` covers.  Which packages
+#: exist comes from the tree, and
+#: ``_check_test_directories_are_described`` fails if a package appears
+#: with no entry here -- the old hand-written table listed 7 of 12.
+TEST_DIRECTORY_SCOPE: dict[str, str] = {
+    "adaptive": "Adaptive timestepping: Richardson extrapolation, PI controller",
+    "api": "FastAPI server, WebSocket, binary encoding, server-side rendering",
+    "cloud": "Distributed execution: multi-GPU sharding, halo exchange, "
+             "resume transport, checkpoint download",
+    "compliance": "Compliance infrastructure: metadata, anomaly validator, "
+                  "stability decorator, benchmark registry, provenance",
+    "core": "Core framework: GraphManager, scheduling, coupling, params, "
+            "checkpoint, sweep, solver utilities",
+    "fmi": "FMI/FMU export and import: model description, binary frames, "
+           "parameter variables",
+    "nodes": "Physics node correctness: HeatNode, LBMNode, LBMPipeNode, "
+             "RigidBody2DNode, SpringDamperNode, AdaptiveNode",
+    "property": "Hypothesis property tests over generated graphs, meshes and "
+                "coupling configurations",
+    "surrogates": "Neural {term}`surrogate <Surrogate>` training, "
+                  "architectures, dataset generation",
+    "usd": "USD stage serialization and round-trips, geometry sources, "
+           "interface mappings",
+    "verification": "Registered verification benchmarks (analytical "
+                    "comparisons, convergence studies)",
+    "viz": "Visualization backends, ZMQ transport, serialization",
+}
+
+#: Facts about the package that pyproject does not carry.
+FULL_NAME = (
+    "Modular Automatic Differentiation and Data Enhanced "
+    "Neural-network INteracting Graph"
+)
+INSTALL_COMMAND = "`pip install maddening`"
+
+_PRERELEASE_RE = re.compile(r"(?:a|b|rc|\.dev|\.post)\d*$")
+
+
+# --------------------------------------------------------------------
+# Sources
+# --------------------------------------------------------------------
+
+
+def read_pyproject() -> dict:
+    with PYPROJECT.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def read_registry() -> dict:
+    with ANOMALY_REGISTRY.open() as fh:
+        return yaml.safe_load(fh)
+
+
+def read_citation() -> dict:
+    with CITATION.open() as fh:
+        return yaml.safe_load(fh)
+
+
+def package_version(pyproject: dict) -> str:
+    return str(pyproject["project"]["version"])
+
+
+def is_prerelease(version: str) -> bool:
+    return bool(_PRERELEASE_RE.search(version))
+
+
+def load_benchmarks() -> dict:
+    """Import the benchmark-bearing test modules and return the registry."""
+    import importlib
+
+    for module in BENCHMARK_MODULES:
+        importlib.import_module(module)
+
+    from maddening.compliance import get_benchmark_registry
+
+    return {
+        bid: bm
+        for bid, bm in get_benchmark_registry().items()
+        if bid.startswith(BENCHMARK_PREFIX)
+    }
+
+
+def test_packages() -> list[str]:
+    """Return the names of the packages under ``tests/`` that hold tests.
+
+    Membership only.  A file *count* per package would be exact and
+    would also make every PR that adds a test file conflict on this
+    document -- the CHANGELOG lesson, applied to a table.  What drifted
+    was which packages were listed at all (7 of 12); that is what is
+    pinned.  A per-run test count belongs in the CI job log and in the
+    release notes, which are written once at release time.
+    """
+    out = []
+    for child in sorted(TESTS.iterdir()):
+        if not child.is_dir() or child.name.startswith((".", "_")):
+            continue
+        if any(child.rglob("test_*.py")):
+            out.append(child.name)
+    return out
+
+
+# --------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------
+
+
+def _cell(text: object) -> str:
+    """Render a value as a Markdown table cell."""
+    s = " ".join(str(text).split())
+    return s.replace("|", "\\|")
+
+
+def _table(headers: list[str], rows: list[list[object]]) -> str:
+    out = ["| " + " | ".join(headers) + " |",
+           "|" + "|".join("---" for _ in headers) + "|"]
+    for row in rows:
+        out.append("| " + " | ".join(_cell(c) for c in row) + " |")
+    return "\n".join(out)
+
+
+def _enum(value: object) -> str:
+    """Render a schema enum verbatim, in backticks.
+
+    Prettifying (``context_dependent`` -> "Context-dependent") makes the
+    cell un-greppable against the YAML it came from, which is the one
+    thing a reader checking this document against the registry wants to
+    do.  The value is printed as the schema spells it.
+    """
+    if value in (None, ""):
+        return "—"
+    return f"`{value}`"
+
+
+def render_software_identification(pyproject: dict, citation: dict) -> str:
+    project = pyproject["project"]
+    version = package_version(pyproject)
+
+    if is_prerelease(version):
+        release_date = "unreleased (development build)"
+    else:
+        released = citation.get("date-released")
+        release_date = str(released) if released else "—"
+
+    deps = ", ".join(project.get("dependencies", ()))
+    backend = pyproject.get("build-system", {}).get("build-backend", "")
+    repo = project.get("urls", {}).get("Repository", "")
+
+    rows = [
+        ["Name", "MADDENING"],
+        ["Full Name", FULL_NAME],
+        ["Version", version],
+        ["Release Date", release_date],
+        ["Licence", project.get("license", "")],
+        ["Source Repository", repo],
+        ["Python Version", project.get("requires-python", "")],
+        ["Base Dependencies", deps],
+        ["Build System", backend.split(".")[0] if backend else ""],
+        ["Install", INSTALL_COMMAND],
+    ]
+    return _table(["Field", "Value"], rows)
+
+
+def render_known_anomalies(registry: dict) -> str:
+    rows = []
+    for a in registry.get("anomalies", []):
+        status = _enum(a.get("resolution_status"))
+        resolved_in = a.get("resolution_version")
+        if resolved_in:
+            status = f"{status} (in {resolved_in})"
+        rows.append([
+            a.get("anomaly_id", "—"),
+            a.get("title", "—"),
+            _enum(a.get("severity")),
+            _enum(a.get("safety_relevance")),
+            status,
+            a.get("affected_versions", "—"),
+        ])
+    table = _table(
+        ["ID", "Title", "Severity", "Safety Relevance", "Status",
+         "Affected Versions"],
+        rows,
+    )
+    n = len(rows)
+    n_open = sum(
+        1 for a in registry.get("anomalies", [])
+        if a.get("resolution_status") == "open"
+    )
+    return (
+        f"{table}\n\n"
+        f"*{n} anomalies registered, {n_open} open.  Rationale, workaround, "
+        f"affected components and verification evidence for each: "
+        f"`known_anomalies.yaml`.*"
+    )
+
+
+def render_benchmarks(benchmarks: dict) -> str:
+    rows = []
+    for bid, bm in sorted(benchmarks.items()):
+        test = bm.test_function or "—"
+        rows.append([
+            bid,
+            bm.node_type,
+            _enum(bm.benchmark_type.value),
+            bm.acceptance_criteria,
+            f"`{test}`",
+        ])
+    table = _table(
+        ["Benchmark ID", "Node", "Type", "Acceptance Criteria", "Test"],
+        rows,
+    )
+    return f"{table}\n\n*{len(rows)} benchmarks registered.*"
+
+
+def render_test_organization(packages: list[str]) -> str:
+    rows = [
+        [f"`tests/{name}/`", TEST_DIRECTORY_SCOPE.get(name, "—")]
+        for name in packages
+    ]
+    return _table(["Directory", "Scope"], rows)
+
+
+def render_test_suite(pyproject: dict, packages: list[str]) -> str:
+    jax_spec = next(
+        (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
+        "",
+    )
+    rows = [
+        ["Test runner", "pytest"],
+        ["CI system", "GitHub Actions"],
+        ["Python versions", "3.11, 3.12 (floor: "
+                            f"{pyproject['project'].get('requires-python', '')})"],
+        ["JAX", f"pinned to 0.10.2 in CI; `{jax_spec}` supported"],
+        ["Backend", "CPU (GPU tests are not run in CI — MADD-ANO-001)"],
+        ["Test packages", f"{len(packages)} — listed below"],
+    ]
+    return _table(["Field", "Value"], rows)
+
+
+# --------------------------------------------------------------------
+# Consistency checks
+# --------------------------------------------------------------------
+
+
+def _check_versions(pyproject: dict, registry: dict, citation: dict) -> list[str]:
+    version = package_version(pyproject)
+    errors = []
+    declared = str(registry.get("maddening_version", ""))
+    if declared != version:
+        errors.append(
+            f"{ANOMALY_REGISTRY.relative_to(REPO_ROOT)}: maddening_version is "
+            f"{declared!r}, but pyproject.toml says {version!r}"
+        )
+    cited = str(citation.get("version", ""))
+    if cited != version:
+        errors.append(
+            f"{CITATION.relative_to(REPO_ROOT)}: version is {cited!r}, but "
+            f"pyproject.toml says {version!r}"
+        )
+    if is_prerelease(version) and citation.get("date-released"):
+        errors.append(
+            f"{CITATION.relative_to(REPO_ROOT)}: date-released is set while "
+            f"the version ({version}) is a pre-release, which has no release "
+            f"date; drop the field until the release is tagged"
+        )
+    return errors
+
+
+def _check_open_anomalies_are_open_ended(registry: dict) -> list[str]:
+    """An open anomaly must not record a closed ``affected_versions``.
+
+    ``affected_versions: "0.1.0"`` beside ``resolution_status: open``
+    says two incompatible things: that the defect is still present and
+    that it stopped being present after 0.1.0.  The first is what
+    ``open`` means, so the range has to stay open-ended (``>=X``) until
+    closure evidence arrives.  Both MADD-ANO-001 and MADD-ANO-002 sat
+    in that state for three releases.
+    """
+    errors = []
+    for a in registry.get("anomalies", []):
+        if a.get("resolution_status") != "open":
+            continue
+        affected = str(a.get("affected_versions", "")).strip()
+        if not affected.startswith(">="):
+            errors.append(
+                f"{a.get('anomaly_id')}: resolution_status is 'open' but "
+                f"affected_versions is {affected!r}, which closes the range.  "
+                f"An open anomaly's range has no upper bound — write "
+                f"'>={affected}' or close the anomaly."
+            )
+    return errors
+
+
+def _check_test_directories_are_described(packages: list[str]) -> list[str]:
+    """Every test package must have a scope description, and vice versa."""
+    errors = []
+    for name in packages:
+        if name not in TEST_DIRECTORY_SCOPE:
+            errors.append(
+                f"tests/{name}/ holds tests but has no entry in "
+                f"TEST_DIRECTORY_SCOPE in {Path(__file__).name}; add one so it "
+                f"appears in framework_verification.md"
+            )
+    for name in TEST_DIRECTORY_SCOPE:
+        if name not in packages:
+            errors.append(
+                f"TEST_DIRECTORY_SCOPE describes tests/{name}/, which holds no "
+                f"test files; drop the entry"
+            )
+    return errors
+
+
+def _check_benchmark_modules_are_complete() -> list[str]:
+    """Every test module registering a MADD-VER benchmark must be listed."""
+    listed = {m.replace(".", "/") + ".py" for m in BENCHMARK_MODULES}
+    errors = []
+    for path in sorted(TESTS.rglob("test_*.py")):
+        if 'benchmark_id="' + BENCHMARK_PREFIX not in path.read_text():
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel not in listed:
+            errors.append(
+                f"{rel} registers a {BENCHMARK_PREFIX} benchmark but is not in "
+                f"BENCHMARK_MODULES in {Path(__file__).name}, so it would be "
+                f"missing from framework_verification.md"
+            )
+    return errors
+
+
+# --------------------------------------------------------------------
+# Marker splicing
+# --------------------------------------------------------------------
+
+
+def _marker_re(name: str) -> re.Pattern:
+    return re.compile(
+        r"(?P<begin><!-- BEGIN GENERATED: " + re.escape(name) + r"[^>]*-->\n)"
+        r"(?P<body>.*?)"
+        r"(?P<end><!-- END GENERATED: " + re.escape(name) + r" -->)",
+        re.DOTALL,
+    )
+
+
+def splice(text: str, name: str, body: str, path: Path) -> str:
+    pattern = _marker_re(name)
+    if not pattern.search(text):
+        raise SystemExit(
+            f"{path.relative_to(REPO_ROOT)}: no "
+            f"'<!-- BEGIN GENERATED: {name} -->' / "
+            f"'<!-- END GENERATED: {name} -->' pair found"
+        )
+    # A function replacement is used deliberately: `re.sub` does not
+    # process escapes in what a function returns, so a cell containing
+    # `\|` survives intact.
+    return pattern.sub(
+        lambda m: m.group("begin") + body + "\n" + m.group("end"),
+        text,
+        count=1,
+    )
+
+
+def build() -> tuple[dict[Path, str], list[str]]:
+    """Return the desired content of each owned file, and any errors."""
+    pyproject = read_pyproject()
+    registry = read_registry()
+    citation = read_citation()
+    benchmarks = load_benchmarks()
+    packages = test_packages()
+
+    errors = (
+        _check_versions(pyproject, registry, citation)
+        + _check_open_anomalies_are_open_ended(registry)
+        + _check_test_directories_are_described(packages)
+        + _check_benchmark_modules_are_complete()
+    )
+
+    soup = SOUP_PACKAGE.read_text()
+    soup = splice(soup, "software-identification",
+                  render_software_identification(pyproject, citation),
+                  SOUP_PACKAGE)
+    soup = splice(soup, "known-anomalies",
+                  render_known_anomalies(registry), SOUP_PACKAGE)
+
+    fv = FRAMEWORK_VERIFICATION.read_text()
+    fv = splice(fv, "test-suite",
+                render_test_suite(pyproject, packages),
+                FRAMEWORK_VERIFICATION)
+    fv = splice(fv, "test-organization",
+                render_test_organization(packages), FRAMEWORK_VERIFICATION)
+    fv = splice(fv, "verification-benchmarks",
+                render_benchmarks(benchmarks), FRAMEWORK_VERIFICATION)
+
+    return {SOUP_PACKAGE: soup, FRAMEWORK_VERIFICATION: fv}, errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check", action="store_true",
+        help="exit non-zero if a committed file differs from a fresh "
+             "generation, printing the diff; write nothing",
+    )
+    args = parser.parse_args()
+
+    wanted, errors = build()
+
+    failures = list(errors)
+    for path, content in wanted.items():
+        current = path.read_text()
+        if current == content:
+            continue
+        rel = path.relative_to(REPO_ROOT)
+        if args.check:
+            diff = difflib.unified_diff(
+                current.splitlines(keepends=True),
+                content.splitlines(keepends=True),
+                fromfile=f"{rel} (committed)",
+                tofile=f"{rel} (generated)",
+            )
+            failures.append(
+                f"{rel} is stale — regenerate with "
+                f"`python scripts/generate_soup_tables.py`:\n" + "".join(diff)
+            )
+        else:
+            path.write_text(content)
+            print(f"wrote {rel}")
+
+    if failures:
+        for f in failures:
+            print(f"ERROR: {f}", file=sys.stderr)
+        return 1
+
+    print("OK: SOUP evidence tables match their sources")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

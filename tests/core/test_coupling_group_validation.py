@@ -272,24 +272,37 @@ def test_tolerance_under_l2_is_silent():
     assert _warnings_from(tolerance=1e-9) == []  # "l2" is the default
 
 
-@pytest.mark.parametrize(
-    "kwargs", [{"atol": 1e-10}, {"rtol": 1e-9}, {"atol": 1e-10, "rtol": 1e-9}]
-)
-def test_atol_rtol_set_under_l2_warn(kwargs):
-    """The reverse footgun: ``"l2"`` never reads ``atol`` or ``rtol``.
+@pytest.mark.parametrize("kwargs", [{"rtol": 1e-9}, {"atol": 1e-10, "rtol": 1e-9}])
+def test_rtol_set_under_l2_warns(kwargs):
+    """The reverse footgun: ``"l2"`` never reads ``rtol``.
 
-    ``coupling_residual_l2`` does not take them as arguments at all, so
-    an ``atol`` tightened under the default norm is as dead as a
+    ``coupling_residual_l2`` hard-codes the ratio's denominator to the
+    field's bare magnitude and carries its threshold in ``tolerance``,
+    so an ``rtol`` tightened under the default norm is as dead as a
     ``tolerance`` tightened under ``"interface"``.
     """
-    with pytest.warns(UserWarning, match=r"CouplingGroup\.(atol|rtol)"):
+    with pytest.warns(UserWarning, match=r"CouplingGroup\.rtol"):
         CouplingGroup(nodes=NODES, **kwargs)
 
 
-def test_inert_atol_rtol_warning_names_tolerance_as_the_live_knob():
-    (w,) = _warnings_from(atol=1e-10, rtol=1e-9)
+def test_atol_set_under_l2_is_silent_because_the_l2_norm_reads_it():
+    """The warning that sent users away from the only live knob.
+
+    ``coupling_residual_l2`` takes ``atol`` and drops every field at or
+    below it out of the norm entirely, so under ``"l2"`` it decides
+    which fields the residual is measuring at all.  Telling the caller
+    it is ignored -- and, under ``filterwarnings = ["error"]``, making
+    it unsettable -- left a group with a small unconverged field no way
+    to be held to it.
+    """
+    assert _warnings_from(atol=1e-10) == []
+    assert _warnings_from(convergence_norm="l2", atol=1e-3) == []
+
+
+def test_inert_rtol_warning_names_tolerance_as_the_live_knob():
+    (w,) = _warnings_from(rtol=1e-9)
     msg = str(w.message)
-    assert "atol and rtol" in msg, msg
+    assert "rtol" in msg, msg
     assert "tolerance" in msg, msg
     assert "l2" in msg, msg
 
@@ -297,7 +310,7 @@ def test_inert_atol_rtol_warning_names_tolerance_as_the_live_knob():
 def test_default_atol_rtol_under_l2_are_silent():
     """The overwhelmingly common group -- all defaults -- says nothing."""
     assert _warnings_from() == []
-    assert _warnings_from(atol=1e-8, rtol=1e-6) == []  # the declared defaults
+    assert _warnings_from(atol=0.0, rtol=1e-6) == []  # the declared defaults
 
 
 def test_round_trip_through_to_dict_does_not_warn_twice():

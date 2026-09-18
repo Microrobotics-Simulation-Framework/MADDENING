@@ -56,9 +56,9 @@ class CouplingGroup:
         order one it is the absolute threshold it used to be.
 
         Read **only** when ``convergence_norm="l2"``.  The other two
-        norms carry their tolerances in ``atol`` / ``rtol`` and test
-        against a fixed threshold of ``1.0``, so setting this away from
-        its default under those norms is inert and warns
+        norms carry their tolerance in ``rtol`` and test against a
+        fixed threshold of ``1.0``, so setting this away from its
+        default under those norms is inert and warns
         (``UserWarning``).
     convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  All three scale each field's
@@ -71,19 +71,26 @@ class CouplingGroup:
         <= 1.0).
     atol : float
         Dead band, in each field's own units: a field whose magnitude
-        does not exceed ``atol`` counts as being at zero and leaves the
-        norm.  Set it to the field's noise floor.  Before 0.4.0 it was
-        a floor under the scale, which made every criterion absolute
-        for fields smaller than ``atol / rtol``.
+        does not exceed ``atol`` counts as being at zero, **leaves the
+        norm entirely** and is no longer held to any criterion.  Set it
+        to the field's noise floor if you have one; the default of
+        ``0.0`` asserts none, and excludes only a field with no scale
+        at all.
 
-        Read **only** by the ``"mixed"`` and ``"interface"`` norms;
-        setting it away from its default under ``convergence_norm="l2"``
-        is inert and warns (``UserWarning``) — tighten ``tolerance``
-        instead.
+        Read by **all three** norms.  Before 0.4.0 it was a floor under
+        the scale, where a value above a field's magnitude merely
+        loosened that field's criterion; since 0.4.0 it removes the
+        field, so the same value silently drops an unconverged field
+        out of ``residual`` and no ``tolerance`` can contradict the
+        resulting ``converged=True``.  That is why the default asserts
+        nothing and why raising it is a claim about *your* units.
     rtol : float
         Relative change demanded of every field above the dead band,
         under the ``"mixed"`` and ``"interface"`` norms.  Read **only**
-        by those two, on the same terms as ``atol``.
+        by those two -- ``"l2"`` fixes the ratio's denominator at the
+        field's bare magnitude and carries its threshold in
+        ``tolerance`` -- so setting it away from its default under
+        ``convergence_norm="l2"`` is inert and warns (``UserWarning``).
     diagnostics : bool
         If True, store iteration count and final residual in the
         ``_meta`` key of the state dict after each step.
@@ -217,7 +224,7 @@ class CouplingGroup:
     max_iterations: int = 10
     tolerance: float = 1e-6
     convergence_norm: Literal["l2", "mixed", "interface"] = "l2"
-    atol: float = 1e-8
+    atol: float = 0.0
     rtol: float = 1e-6
     diagnostics: bool = False
     acceleration: Literal[
@@ -425,9 +432,13 @@ class _InertRule:
     ----------
     fields : tuple of str
         The :class:`CouplingGroup` field names this rule governs.
-        ``atol`` and ``rtol`` share a rule because they share a fate and
-        a message: they go live and dead together under the same norm,
-        and two warnings for one mistake is one too many.
+        Several share a rule when they share a fate and a message --
+        the five knobs a single-pass group never reads go dead
+        together, and two warnings for one mistake is one too many.
+        ``atol`` and ``rtol`` used to be paired here and are not any
+        more: the 0.4.0 dead band made ``atol`` live under every norm
+        while ``rtol`` stayed hard-coded to ``1.0`` under ``"l2"``, so
+        the pair no longer shares a fate.
     live : callable
         ``live(group)`` is True when this group's configuration actually
         reads those fields.  Each predicate mirrors a read site in
@@ -446,19 +457,26 @@ class _InertRule:
     message: Callable[[CouplingGroup, tuple[str, ...]], str]
 
 
-def _inert_atol_rtol_message(
+def _inert_rtol_message(
     group: CouplingGroup, names: tuple[str, ...]
 ) -> str:
-    """``atol`` / ``rtol`` under the one norm that is never handed them."""
-    setting = " and ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    """``rtol`` under the one norm that hard-codes its denominator.
+
+    ``atol`` is deliberately *not* here.  It was, until the 0.4.0 dead
+    band: ``coupling_residual_l2`` takes ``atol`` and drops every field
+    at or below it out of the norm, so telling the caller it is ignored
+    sent them away from the only knob that governs which fields their
+    L2 residual is even measuring.
+    """
     return (
-        f"CouplingGroup.{setting} "
-        f"{'are' if len(names) > 1 else 'is'} ignored under "
-        "convergence_norm='l2', which tests the global L2 norm "
-        "of the state change against tolerance alone.  Set "
-        "tolerance to control convergence under this norm, or "
-        "choose convergence_norm='mixed' or 'interface' to make "
-        "atol and rtol live."
+        f"CouplingGroup.rtol={group.rtol!r} is ignored under "
+        "convergence_norm='l2', which divides each field's change by "
+        "that field's bare magnitude and tests the resulting L2 norm "
+        "against tolerance.  Set tolerance to control convergence "
+        "under this norm, or choose convergence_norm='mixed' or "
+        "'interface' to make rtol live.  (atol is read under every "
+        "norm: it is the dead band that decides which fields are in "
+        "the norm at all.)"
     )
 
 
@@ -501,9 +519,12 @@ def _gated_on(
 #: Each ``live`` predicate mirrors the read site that decides it, so a
 #: rule is wrong only if the solver changed under it:
 #:
-#: * ``atol`` / ``rtol`` -- ``_compute_residual`` passes them to the
-#:   mixed and interface residuals only; ``coupling_residual_l2`` does
-#:   not take them.
+#: * ``rtol`` -- ``_compute_residual`` passes it to the mixed and
+#:   interface residuals only; ``coupling_residual_l2`` hard-codes the
+#:   ratio's denominator to the field's bare magnitude (``rtol=1.0``)
+#:   and carries its threshold in ``tolerance``.  ``atol`` is *not* on
+#:   this list: all three residuals take it as the dead band, so it is
+#:   live under every norm.
 #: * ``tolerance`` -- ``conv_threshold_value`` is ``1.0`` for the mixed
 #:   and interface norms and ``float(group.tolerance)`` otherwise.
 #: * ``relaxation`` -- ``_accelerate`` and the fori path both read it
@@ -523,9 +544,9 @@ def _gated_on(
 #:   ``_run_ift_forward``, which only ``solver="ift"`` calls.
 _INERT_RULES: tuple[_InertRule, ...] = (
     _InertRule(
-        fields=("atol", "rtol"),
+        fields=("rtol",),
         live=lambda g: g.convergence_norm != "l2",
-        message=_inert_atol_rtol_message,
+        message=_inert_rtol_message,
     ),
     _InertRule(
         fields=("tolerance",),

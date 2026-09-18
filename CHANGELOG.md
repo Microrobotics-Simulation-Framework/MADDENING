@@ -198,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A coupling group with a small unconverged field no longer reports
+  `converged=True`**: `atol` *removes* a field from the norm, so it now defaults
+  to `0.0` and is live under every norm — set it to your field's noise floor
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

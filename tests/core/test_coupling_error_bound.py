@@ -324,6 +324,145 @@ def test_a_field_that_is_legitimately_zero_does_not_block_the_group():
     )
 
 
+class _TwoScale(SimulationNode):
+    """``big <- gb*ub + bias_big`` and ``small <- gs*us + bias_small``.
+
+    One node, two fields, as many decades apart as the caller asks for
+    -- the shape the dead band was measured swallowing.  The two fields
+    do not interact, so each one's fixed point is the scalar
+    ``bias / (1 - gain**2)`` of its own cycle and the group's answer can
+    be checked field by field.
+    """
+
+    def __init__(self, name, gain_big, gain_small, bias_big, bias_small):
+        super().__init__(name=name, timestep=1.0, gain_big=gain_big,
+                         gain_small=gain_small, bias_big=bias_big,
+                         bias_small=bias_small)
+
+    def initial_state(self):
+        return {"big": jnp.asarray(0.0, jnp.float32),
+                "small": jnp.asarray(0.0, jnp.float32)}
+
+    def state_fields(self):
+        return ["big", "small"]
+
+    def boundary_input_spec(self):
+        z = jnp.float32(0.0)
+        return {"ub": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=z),
+                "us": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=z)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {
+            "big": (jnp.asarray(p["gain_big"]) * boundary_inputs["ub"]
+                    + jnp.asarray(p["bias_big"])),
+            "small": (jnp.asarray(p["gain_small"]) * boundary_inputs["us"]
+                      + jnp.asarray(p["bias_small"])),
+        }
+
+
+def _two_scale_graph(small_bias, *, small_gain=0.5, big_gain=0.0, **group_kw):
+    """A two-node cycle carrying one O(1) field and one tiny one.
+
+    ``big_gain=0.0`` is the audit's fixture: the large field reaches its
+    fixed point on the first pass and contributes nothing to any later
+    residual, so whether the group keeps iterating is decided by the
+    small field alone.  That is what made the dead band's exclusion
+    visible as a wrong answer rather than as a slightly loose one.
+    """
+    gm = GraphManager()
+    gm.add_node(_TwoScale("a", gain_big=big_gain, gain_small=small_gain,
+                          bias_big=1.0, bias_small=small_bias))
+    gm.add_node(_TwoScale("b", gain_big=big_gain, gain_small=small_gain,
+                          bias_big=0.0, bias_small=0.0))
+    for src, dst in (("a", "b"), ("b", "a")):
+        gm.add_edge(source=src, target=dst, source_field="big",
+                    target_field="ub")
+        gm.add_edge(source=src, target=dst, source_field="small",
+                    target_field="us")
+    kw = dict(diagnostics=True, max_iterations=40)
+    kw.update(group_kw)
+    if kw.get("convergence_norm", "l2") == "l2":
+        kw.setdefault("tolerance", 1e-6)
+    gm.add_coupling_group(["a", "b"], **kw)
+    gm.compile()
+    return gm
+
+
+def _fixed_point(bias, gain):
+    """``a``'s value at the fixed point of ``a = g*b + bias, b = g*a``."""
+    return bias / (1.0 - gain ** 2)
+
+
+@pytest.mark.parametrize("norm", ["l2", "mixed", "interface"])
+def test_a_small_field_far_from_its_fixed_point_is_not_reported_converged(norm):
+    """The defect, pinned at the magnitude it was measured at.
+
+    ``atol`` used to default to ``1e-8``, which is a perfectly ordinary
+    magnitude for a physical quantity in SI units -- the group here
+    carries an O(1) field and an O(1e-9) one, and a 1.7e-05 N drag
+    force is the case ``coupling_residual_mixed``'s own docstring is
+    written around.  The dead band dropped the small field out of the
+    norm, so the group met its criterion on the large field alone and
+    returned after one pass reporting ``residual=0.0,
+    error_estimate=0.0, converged=True`` with the small field 50% from
+    its fixed point.  No ``tolerance`` could contradict a residual of
+    exactly zero, and the one knob that could -- ``atol`` -- was the
+    knob ``CouplingGroup`` warned was ignored.
+
+    Both halves are asserted: the small field arrives, and it took more
+    than the one pass the defect stopped after.  Under every norm,
+    because the dead band lives in the shared ``_scaled_change`` and
+    all three residuals call it.
+    """
+    kw = {"convergence_norm": norm}
+    if norm != "l2":
+        kw["rtol"] = 1e-6
+    gm = _two_scale_graph(1e-9, **kw)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    exact_small = _fixed_point(1e-9, 0.5)
+    small = float(gm.get_node_state("a")["small"])
+    assert float(gm.get_node_state("a")["big"]) == pytest.approx(
+        _fixed_point(1.0, 0.0), rel=1e-4,
+    ), "fixture premise: the large field converges on the first pass"
+    assert small == pytest.approx(exact_small, rel=1e-3), (
+        f"the small field is {abs(small - exact_small) / exact_small:.0%} "
+        f"from its fixed point while the group reports {d}"
+    )
+    assert d["iterations"] > 1, (
+        "one pass cannot converge a field with a contraction of 0.25"
+    )
+
+
+def test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it():
+    """Raising ``atol`` is the opt-in, and it is honoured.
+
+    The dead band is not being removed -- a field at the noise floor
+    should not dominate a relative norm -- it is being made a statement
+    the caller makes about their own units.  Here the small field
+    contracts at 0.98 per pass, so it is nowhere near its fixed point
+    within the cap and, in the norm, it holds the whole group there.
+    Declaring it noise with ``atol`` above its magnitude releases the
+    group; leaving ``atol`` at its default does not.  That difference
+    is the knob doing its job, and under the default norm, where the
+    library used to warn that it did nothing.
+    """
+    declared = _two_scale_graph(1e-9, small_gain=0.98, atol=1e-8)
+    default = _two_scale_graph(1e-9, small_gain=0.98)
+    declared.step()
+    default.step()
+    d_declared = declared.coupling_diagnostics()["a+b"]
+    d_default = default.coupling_diagnostics()["a+b"]
+    assert d_declared["converged"] is True, (
+        "a field the caller called zero cannot hold the group"
+    )
+    assert d_default["converged"] is False, (
+        "fixture premise: undeclared, the small field is what holds it"
+    )
+    assert d_declared["iterations"] < d_default["iterations"]
+
+
 # ---------------------------------------------------------------------------
 # The gradient-trust bound
 # ---------------------------------------------------------------------------

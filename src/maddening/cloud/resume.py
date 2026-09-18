@@ -16,8 +16,11 @@ local save/load/manifest module.
 Supported URL schemes (a closed allow-list; anything else is a
 ``ValueError``):
 
-* ``file://`` (and bare POSIX paths) — local file copy.  The path is
-  percent-decoded (``%20`` is a space).
+* ``file://`` — local file copy; the URL path is percent-decoded
+  (``%20`` is a space), as a URL requires.
+* a bare POSIX path — local file copy of exactly that path, with **no**
+  percent-decoding: ``%`` is an ordinary character in a POSIX filename,
+  so ``/tmp/a%20b.npz`` is the file of that name, not ``/tmp/a b.npz``.
 * ``http://`` / ``https://`` — HTTP GET via the stdlib ``urllib`` with a
   timeout.
 * ``s3://``, ``s3a://``, ``gs://``, ``gcs://``, ``az://``, ``abfs://``,
@@ -101,8 +104,10 @@ def download_and_load_state(
         Location of the ``.npz`` checkpoint.  Exactly these schemes are
         accepted (closed allow-list):
 
-        * ``file://`` — local file path (a bare POSIX path is treated
-          the same); the path is percent-decoded.
+        * ``file://`` — local file path; the URL path is percent-decoded
+          (``%20`` is a space).  A bare POSIX path is accepted too and
+          is used verbatim: ``%`` is a legal character in a filename, so
+          decoding it would look for a file the caller did not name.
         * ``http://`` / ``https://`` — HTTP GET with *timeout*.
         * ``s3://``, ``s3a://``, ``gs://``, ``gcs://``, ``az://``,
           ``abfs://``, ``abfss://``, ``adl://``, ``azure://``,
@@ -168,8 +173,14 @@ def download_and_load_state(
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
     try:
-        # Local filename = last URL path component.
-        fname = Path(urllib.parse.unquote(parsed.path)).name or "checkpoint.npz"
+        # Local filename = last path component, decoded for a real URL
+        # and verbatim for a bare path -- the same rule _local_path
+        # applies to the source, so the two halves of this function
+        # cannot disagree about what the caller named.
+        source_path = parsed.path if parsed.scheme else url
+        if parsed.scheme:
+            source_path = urllib.parse.unquote(source_path)
+        fname = Path(source_path).name or "checkpoint.npz"
         local_npz = dest_dir / fname
         local_manifest = local_npz.with_suffix(local_npz.suffix + ".manifest.json")
 
@@ -222,7 +233,15 @@ def _manifest_url_for(url: str) -> str:
 
 
 def _local_path(parsed: urllib.parse.SplitResult, url: str) -> Path:
-    """Filesystem path for a ``file://`` URL or a bare path."""
+    """Filesystem path for a ``file://`` URL or a bare path.
+
+    A ``file://`` URL is percent-decoded, because that is what its
+    encoding means.  A bare path is *not*: ``%`` is an ordinary
+    character in a POSIX filename, and decoding it would send the caller
+    to a file they did not name (and, for ``%2e%2e``, to a directory
+    they did not name).  The caller who wants decoding has said so by
+    writing a URL.
+    """
     if parsed.scheme == "":
         return Path(url)
     if parsed.netloc not in ("", "localhost"):

@@ -89,17 +89,24 @@ class TestSimRunIsBounded:
         assert r.status_code == 422
         assert "n_steps" in r.text
 
-    def test_non_positive_step_count_is_422(self):
+    def test_zero_steps_is_a_no_op_not_an_error(self):
+        # A caller stepping a loop to zero gets the current state back, which
+        # is what the stateful REST model in tests/property encodes.
         c = _client()
-        assert c.post("/sim/run?n_steps=0").status_code == 422
-        assert c.post("/sim/run?n_steps=-5").status_code == 422
+        before = c.get("/graph/state").json()
+        r = c.post("/sim/run?n_steps=0")
+        assert r.status_code == 200
+        assert r.json() == before
+
+    def test_negative_step_count_is_422(self):
+        assert _client().post("/sim/run?n_steps=-5").status_code == 422
 
     def test_the_limit_is_published_in_the_schema(self):
         schema = _client().get("/openapi.json").json()
         params = schema["paths"]["/sim/run"]["post"]["parameters"]
         n_steps = next(p for p in params if p["name"] == "n_steps")
         assert n_steps["schema"]["maximum"] == MAX_RUN_STEPS
-        assert n_steps["schema"]["minimum"] == 1
+        assert n_steps["schema"]["minimum"] == 0
 
 
 class TestAddNodeIsBounded:
@@ -140,6 +147,21 @@ class TestAddNodeIsBounded:
         })
         assert r.status_code == 201, r.text
         assert "h" in _node_names(c)
+
+    def test_an_integer_too_large_to_be_a_float_stays_a_400_not_finite(self):
+        # JSON allows an integer literal of any length.  One that float()
+        # cannot represent is the unusable constant the finiteness check
+        # already owns, and it keeps that check's documented 400 rather than
+        # being re-reported as an oversized dimension.
+        c = _client()
+        r = c.post(
+            "/graph/nodes",
+            content=(b'{"type":"HeatNode","name":"n","timestep":0.01,'
+                     b'"params":{"thermal_diffusivity": ' + b"9" * 400 + b'}}'),
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 400, r.text
+        assert "finite" in r.json()["detail"]
 
     def test_a_large_float_is_not_treated_as_a_dimension(self):
         # A float is a physical constant; only integers become shapes.

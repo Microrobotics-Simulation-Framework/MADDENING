@@ -144,6 +144,14 @@ def _oversized_param(value: Any, path: str = "") -> Optional[str]:
     because a parameter may itself be a large array.  Floats are not
     bounded: a float is a physical constant, not a dimension, and any cap
     on one would be arbitrary.
+
+    This check and :func:`_non_finite_param` partition the numbers rather
+    than racing for them: an integer literal too large to be a ``float``
+    at all (JSON allows one of any length) is *not* a dimension anyone
+    could mean, it is the unusable constant ``_non_finite_param`` already
+    owns, so it is left to that check and its 400 "value must be finite".
+    What this function rejects is the plausible-but-too-big dimension,
+    and it does so from the request model, as a 422.
     """
     total = 0
     stack: list[tuple[Any, str]] = [(value, path)]
@@ -163,6 +171,12 @@ def _oversized_param(value: Any, path: str = "") -> Optional[str]:
         if isinstance(item, bool):
             continue
         if isinstance(item, int) and abs(item) > MAX_NODE_PARAM_INT:
+            try:
+                usable = math.isfinite(float(item))
+            except (OverflowError, ValueError):
+                usable = False
+            if not usable:
+                continue  # _non_finite_param's 400, not ours
             return (f"params.{where or 'value'}: integer magnitude must be at "
                     f"most {MAX_NODE_PARAM_INT} (a node turns one into an array "
                     f"dimension; this server is unauthenticated)")
@@ -853,11 +867,13 @@ class SimulationServer:
         @app.post("/sim/run", tags=["sim"])
         def sim_run(
             n_steps: int = Query(
-                100, ge=1, le=MAX_RUN_STEPS,
-                description="Steps to run synchronously.  Bounded because "
-                            "the request holds a worker for its whole "
-                            "duration and cannot be cancelled; for a longer "
-                            "run use POST /sim/start.",
+                100, ge=0, le=MAX_RUN_STEPS,
+                description="Steps to run synchronously.  Zero is a no-op "
+                            "that returns the current state.  The upper "
+                            "bound exists because the request holds a "
+                            "worker for its whole duration and cannot be "
+                            "cancelled; for a longer run use POST "
+                            "/sim/start.",
             ),
         ):
             try:

@@ -43,9 +43,11 @@ publishes the full route list.  So:
   (`maddening.api.server.warn_if_publicly_bound`).
 
 Request sizes are bounded (`n_steps` ≤ 100000, node integer parameters ≤
-10000000, bounded surrogate-training arguments; see `/openapi.json`) so
-one request cannot exhaust the host, but that is a backstop, not
-authentication.
+10000000 and ≤ 20000000 state elements per node, bounded
+surrogate-training arguments; see `/openapi.json`) so one request cannot
+exhaust the host, but that is a backstop, not authentication.  Over-size
+is a 422; a non-finite constructor constant remains the 400 it has always
+been.
 
 ## REST Endpoints
 

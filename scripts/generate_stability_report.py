@@ -38,6 +38,7 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.core.coupling.mapping",
     "maddening.core.params",
     "maddening.core.solver_utils",
+    "maddening.core.simulation.calibration",
     "maddening.core.simulation.compile_cache",
     "maddening.core.simulation.profiler",
     "maddening.cloud.multigpu.sharded_node",

@@ -171,6 +171,9 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `maddening.core.simulation.calibration.calibrate` and
+  `tune_coupling_params` warn and are removed in 0.5.0; use
+  `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
 - `CouplingGroup.solver="fori"` emits `DeprecationWarning`; removed in the
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is

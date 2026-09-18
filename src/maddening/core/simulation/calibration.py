@@ -9,15 +9,21 @@ Provides:
 - ``calibrate``: differentiable parameter recovery using inline
   physics with JAX-traced parameters.  Uses ``jax.grad`` to
   minimise a loss function over node/physics parameters.
+
+Both are deprecated in favour of :func:`maddening.sysid.fit` and are
+removed in 0.5.0.
 """
 
 from __future__ import annotations
 
-from copy import deepcopy
+import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 import jax.numpy as jnp
+
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 @dataclass
@@ -52,6 +58,7 @@ def _make_param_grid(param_grid: dict[str, list]) -> list[dict]:
     return [dict(zip(keys, vals)) for vals in combos]
 
 
+@stability(StabilityLevel.DEPRECATED)
 def tune_coupling_params(
     build_graph_fn: Callable[..., Any],
     param_grid: dict[str, list],
@@ -62,6 +69,9 @@ def tune_coupling_params(
     external_inputs: Optional[dict] = None,
 ) -> TuneResult:
     """Try different coupling parameters and return the best.
+
+    .. deprecated::
+        Use :func:`maddening.sysid.fit` instead.  Removed in 0.5.0.
 
     Builds the graph multiple times with different coupling
     parameters, runs each for *n_steps*, and compares accuracy
@@ -103,6 +113,15 @@ def tune_coupling_params(
     TuneResult
         The best configuration and all trial results.
     """
+    warnings.warn(
+        "maddening.core.simulation.calibration.tune_coupling_params is "
+        "deprecated; use maddening.sysid.fit, which optimises the graph "
+        "params pytree under ParamSpec bounds and a trainable mask.  "
+        "Removed in 0.5.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # Default metric: sum of all state values
     if state_metric is None:
         def state_metric(state):
@@ -221,6 +240,7 @@ class CalibrateResult:
     converged: bool
 
 
+@stability(StabilityLevel.DEPRECATED)
 def calibrate(
     forward_fn: Callable,
     initial_params: dict[str, jnp.ndarray],
@@ -232,6 +252,9 @@ def calibrate(
     verbose: bool = False,
 ) -> CalibrateResult:
     """Differentiable parameter recovery using JAX gradient descent.
+
+    .. deprecated::
+        Use :func:`maddening.sysid.fit` instead.  Removed in 0.5.0.
 
     Optimises physics parameters by minimising a loss function that
     measures deviation from reference data.  The ``forward_fn`` must
@@ -277,6 +300,14 @@ def calibrate(
     ...     reference_trajectory=jnp.array(-4.905),  # true g=-9.81
     ... )
     """
+    warnings.warn(
+        "maddening.core.simulation.calibration.calibrate is deprecated; "
+        "use maddening.sysid.fit, which optimises the graph params pytree "
+        "under ParamSpec bounds and a trainable mask.  Removed in 0.5.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     import jax
 
     if loss_fn is None:
@@ -317,6 +348,12 @@ def calibrate(
             for k in params
         }
 
+    # Always False: the loop returns early on the first loss below
+    # ``tolerance``, so the last recorded loss is one that failed that
+    # same test (and an empty history means ``n_iters <= 0``).  Left as
+    # written -- reporting the loss *after* the final update would need
+    # an extra objective evaluation and would change both the returned
+    # flag and the length of ``loss_history``.
     return CalibrateResult(
         params=params,
         loss_history=loss_history,

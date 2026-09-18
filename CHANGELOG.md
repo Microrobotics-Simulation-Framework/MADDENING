@@ -198,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
+  a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
+  values that invert their meaning now raise; `params_pytree` keeps float64 under x64
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

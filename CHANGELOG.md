@@ -186,6 +186,8 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
+  read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and
   `tune_coupling_params` warn and are removed in 0.5.0; use
   `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
@@ -319,6 +321,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **The committed stability report is compared with a fresh generation** in
+  CI: it had rotted to 42 of 85 surfaces, hiding every deprecation.  Four
+  surfaces that warn deprecated now carry the `DEPRECATED` tag
 - **The coupled adjoint-identity property stops scaling by a cancelling
   inner product**: it divides by the norm of the terms contracted, not by
   the value they produce, which removes a latent float32 flake

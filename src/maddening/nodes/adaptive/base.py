@@ -929,6 +929,7 @@ class AdaptiveNode(SimulationNode):
             return 1.0
         return float(_tree_norm(g_frozen) / n_full)
 
+    @stability(StabilityLevel.DEPRECATED)
     def blindness_ratio(self, state: dict, params: Optional[dict] = None) -> float:
         """Deprecated alias of :meth:`gradient_capture_ratio`.
 
@@ -996,6 +997,7 @@ class AdaptiveNode(SimulationNode):
         proxy = _tree_norm(g0) / (rate + 1e-30)
         return bool(proxy < 1e-2)
 
+    @stability(StabilityLevel.DEPRECATED)
     def is_trapped_at(
         self, state: dict, params: Optional[dict] = None, *, eps: float = 1e-3,
     ) -> bool:

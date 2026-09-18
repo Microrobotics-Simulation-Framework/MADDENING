@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING, Any, Optional
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
 
@@ -460,6 +463,7 @@ def load_state_with_manifest(
         return {}
 
 
+@stability(StabilityLevel.DEPRECATED)
 def download_and_load_state(
     graph_manager: "GraphManager",
     url: str,

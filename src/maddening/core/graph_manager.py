@@ -219,6 +219,42 @@ class ExternalInputSpec:
     shape: tuple
     dtype: Any = jnp.float32
 
+    def to_dict(self) -> dict:
+        """Serialise for :meth:`GraphManager.to_dict`.
+
+        ``dtype`` is written by name (``"int32"``, ``"float32"``).  It
+        used to be left out, so an ``int32`` input reloaded as
+        ``float32`` — a node using it as an index then failed on the
+        reloaded graph, and one doing arithmetic with it got a different
+        trace.  Every field of this dataclass has a slot here, and
+        ``tests/core/test_external_input_serialisation.py`` asserts that from
+        ``dataclasses.fields`` so the next field added cannot be dropped
+        silently.
+        """
+        return {
+            "target_node": self.target_node,
+            "target_field": self.target_field,
+            "shape": list(self.shape),
+            "dtype": jnp.dtype(self.dtype).name,
+        }
+
+    @classmethod
+    def from_dict(cls, config: dict) -> "ExternalInputSpec":
+        """Rebuild from :meth:`to_dict`.
+
+        ``dtype`` is optional: a config written before it was recorded
+        reloads at ``float32``, which is what such a graph got then.
+        """
+        return cls(
+            target_node=config["target_node"],
+            target_field=config["target_field"],
+            shape=tuple(config.get("shape", ())),
+            dtype=(
+                jnp.dtype(config["dtype"]) if config.get("dtype") is not None
+                else jnp.float32
+            ),
+        )
+
 
 # ------------------------------------------------------------------
 # Implicit-function-theorem fixed-point solver
@@ -4927,14 +4963,7 @@ class GraphManager:
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
-            "external_inputs": [
-                {
-                    "target_node": ei.target_node,
-                    "target_field": ei.target_field,
-                    "shape": list(ei.shape),
-                }
-                for ei in self._external_inputs
-            ],
+            "external_inputs": [ei.to_dict() for ei in self._external_inputs],
             # Every field of every group, or the key is absent: a config
             # that carried only some of a group's solver settings would
             # reload as a graph that *runs* differently -- a fixed point
@@ -5013,10 +5042,12 @@ class GraphManager:
                         f"mapped edge keys): {exc}"
                     ) from exc
         for ei in config.get("external_inputs", []):
+            spec = ExternalInputSpec.from_dict(ei)
             gm.add_external_input(
-                target_node=ei["target_node"],
-                target_field=ei["target_field"],
-                shape=tuple(ei.get("shape", ())),
+                target_node=spec.target_node,
+                target_field=spec.target_field,
+                shape=spec.shape,
+                dtype=spec.dtype,
             )
         for i, cg in enumerate(config.get("coupling_groups", [])):
             # Straight back through ``add_coupling_group``, so a loaded

@@ -195,6 +195,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
+  `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
+  `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
   and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead

@@ -153,8 +153,8 @@ class CouplingConfig:
     ) -> dict:
         """Build the ``add_coupling_group`` keyword arguments.
 
-        Only the tolerance knobs the configured norm actually reads are
-        emitted: ``"l2"`` tests against ``tolerance`` and never sees
+        Only the knobs this configuration actually reads are emitted.
+        The tolerances: ``"l2"`` tests against ``tolerance`` and never sees
         ``atol`` / ``rtol``, while ``"mixed"`` and ``"interface"`` scale
         the residual by ``atol`` / ``rtol`` and never see ``tolerance``.
         Passing all three used to put a dead number in every sweep row,
@@ -169,11 +169,18 @@ class CouplingConfig:
             ),
             "convergence_norm": self.convergence_norm,
             "acceleration": self.acceleration,
-            "relaxation": self.relaxation,
             "iteration_mode": self.iteration_mode,
-            "jacobian_reuse": self.jacobian_reuse,
             "accelerated_fields": accelerated_fields,
         }
+        # Same rule for the acceleration knobs: only ``"fixed"`` reads
+        # ``relaxation`` and only ``"iqn-imvj"`` reads
+        # ``jacobian_reuse``, and a sweep row that carries the other's
+        # number reads as if it had been part of the configuration
+        # under test.  ``CouplingGroup`` warns about exactly that.
+        if self.acceleration == "fixed":
+            kwargs["relaxation"] = self.relaxation
+        if self.acceleration == "iqn-imvj":
+            kwargs["jacobian_reuse"] = self.jacobian_reuse
         if self.convergence_norm == "l2":
             kwargs["tolerance"] = (
                 self.tolerance if self.tolerance is not None else tolerance

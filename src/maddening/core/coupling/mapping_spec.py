@@ -28,10 +28,13 @@ A point set is described by reference, not inlined:
     stage lives in (``base_dir``).  Absolute paths and ``..`` components
     are refused, symlinks are resolved and the resolved file must still
     lie under the resolved ``base_dir``, so a config cannot read outside
-    its own directory.  The file's header is read first and an array
-    larger than :data:`MAX_ASSET_BYTES` (or larger than the file that
-    claims to hold it) is refused before anything is allocated; only
-    bool / integer / float arrays are accepted;
+    its own directory.  That resolved path is then opened **once**
+    (``O_NOFOLLOW``), and the size check, the header and the data all
+    come from that one descriptor, so no second lookup of the name can
+    land on a different file.  An array larger than
+    :data:`MAX_ASSET_BYTES` (or larger than the file that claims to hold
+    it) is refused before anything is allocated; only bool / integer /
+    float arrays are accepted;
 ``{"inline": [[...], ...], "dtype": "float64"}`` (or a plain list)
     the points themselves, only for small sets — at most
     :data:`INLINE_POINT_LIMIT` points and :data:`INLINE_ELEMENT_LIMIT`
@@ -59,7 +62,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -385,6 +390,58 @@ def make_point_resolver(graph=None, base_dir=None) -> Callable[[dict], np.ndarra
 # ---------------------------------------------------------------------------
 
 
+#: ``O_NOFOLLOW`` refuses a final path component that is a symlink;
+#: ``O_NONBLOCK`` keeps a FIFO with an asset's name from hanging the
+#: open until someone writes to it.  Both are POSIX-only: on a platform
+#: without them the open degrades to a plain one (and the containment
+#: check below still applies), which is why the path handling here is
+#: only claimed to hold on POSIX.
+_ASSET_OPEN_FLAGS = (os.O_RDONLY
+                     | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+
+
+def _open_asset(real: Path, rel: str) -> tuple[Any, os.stat_result]:
+    """The asset file opened **once**, as ``(file object, stat result)``.
+
+    Everything downstream — the size cap, the "is it a regular file"
+    check, the header and the data — must come from this one descriptor.
+    Resolving the path and then opening it by path again leaves a window
+    (time of check to time of use) in which a writer in the config
+    directory can swap the checked file for a symlink, so the resolved
+    path is opened once and never named again:
+
+    * ``O_NOFOLLOW`` refuses a final component that is a symlink.
+      ``real`` came out of :meth:`Path.resolve`, so in the honest case it
+      is never one — including when the *reference* named a symlink,
+      because that link was already followed to its target.  The flag
+      therefore only fires on a component that became a link after the
+      resolution, i.e. on the race.
+    * :func:`os.fstat` on the descriptor, rather than ``stat`` on the
+      path, decides what was actually opened.
+
+    ``O_NOFOLLOW`` covers only the last component, so the containment
+    check on the resolved path (which walks the parent directories)
+    stays where it is.
+    """
+    try:
+        fd = os.open(real, _ASSET_OPEN_FLAGS)
+    except OSError as exc:
+        raise PointReferenceError(
+            f"cannot open point asset {rel!r} ({real}): {exc}; the file was removed, "
+            f"replaced by a symlink or made unreadable after its path was resolved"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise PointReferenceError(f"point asset {rel!r} ({real}) is not a file")
+        fp = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fp, info
+
+
 def _load_asset(base: Path, ref: dict) -> np.ndarray:
     rel = ref["asset"]
     base_real = base.resolve()
@@ -402,15 +459,17 @@ def _load_asset(base: Path, ref: dict) -> np.ndarray:
             f"asset {rel!r} resolves to {real}, outside the config directory "
             f"{base_real}; symlinks are followed and the file must stay under it"
         )
-    if not real.is_file():
-        raise PointReferenceError(f"point asset {rel!r} ({real}) is not a file")
     where = f"asset {rel!r}"
-    if Path(rel).suffix.lower() == ".npz":
-        return _load_npz_member(real, ref, where)
-    with open(real, "rb") as fp:
+    fp, info = _open_asset(real, rel)
+    try:
+        if Path(rel).suffix.lower() == ".npz":
+            return _load_npz_member(fp, ref, where)
         shape, dtype = _read_npy_header(fp, where)
-        _check_declared_size(shape, dtype, where, available=real.stat().st_size - fp.tell())
-    return np.asarray(np.load(real, allow_pickle=False))
+        _check_declared_size(shape, dtype, where, available=info.st_size - fp.tell())
+        fp.seek(0)
+        return np.asarray(np.load(fp, allow_pickle=False))
+    finally:
+        fp.close()
 
 
 def _read_npy_header(fp, where: str) -> tuple[tuple, np.dtype]:
@@ -454,9 +513,16 @@ def _check_declared_size(shape: tuple, dtype: np.dtype, where: str,
         )
 
 
-def _load_npz_member(real: Path, ref: dict, where: str) -> np.ndarray:
+def _load_npz_member(fp, ref: dict, where: str) -> np.ndarray:
+    """A member of a ``.npz`` archive, read from an already-open ``fp``.
+
+    ``fp`` is the descriptor :func:`_open_asset` returned: the zip
+    directory and the member data come from the same open file, so the
+    uncompressed-size check cannot be aimed at a different archive than
+    the one that is decompressed.
+    """
     try:
-        with zipfile.ZipFile(real) as zf:
+        with zipfile.ZipFile(fp) as zf:
             infos = {}
             for info in zf.infolist():
                 name = info.filename[:-4] if info.filename.endswith(".npy") else info.filename
@@ -479,13 +545,14 @@ def _load_npz_member(real: Path, ref: dict, where: str) -> np.ndarray:
                     f"more than MAX_ASSET_BYTES={MAX_ASSET_BYTES} "
                     f"({MAX_ASSET_BYTES >> 20} MiB); refused before decompression"
                 )
-            with zf.open(info) as fp:
-                shape, dtype = _read_npy_header(fp, member)
+            with zf.open(info) as member_fp:
+                shape, dtype = _read_npy_header(member_fp, member)
                 _check_declared_size(shape, dtype, member,
-                                     available=info.file_size - fp.tell())
+                                     available=info.file_size - member_fp.tell())
     except zipfile.BadZipFile as exc:
         raise PointReferenceError(f"{where} is not a valid .npz (zip) archive: {exc}") from exc
-    with np.load(real, allow_pickle=False) as data:
+    fp.seek(0)
+    with np.load(fp, allow_pickle=False) as data:
         return np.asarray(data[key])
 
 

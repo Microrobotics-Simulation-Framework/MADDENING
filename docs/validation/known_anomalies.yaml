@@ -1,6 +1,10 @@
+# The version this registry describes.  `scripts/generate_soup_tables.py
+# --check` (run by tests/compliance/test_soup_evidence.py) fails if
+# `maddening_version` drifts from the version in pyproject.toml, so a release
+# bump has to come through here too.
 schema_version: "1.0"
-maddening_version: "0.1.0"
-generated_date: "2026-03-12"
+maddening_version: "0.4.0.dev0"
+generated_date: "2026-09-19"
 
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -11,6 +15,13 @@ anomalies:
       during compilation of the streaming step, triggered by matmul/einsum
       operations on 3D+ arrays.  The CPU backend is unaffected.  The workaround
       is to use the CPU backend (JAX_PLATFORMS=cpu).
+      Re-verification status as of 0.4.0: not re-run.  The jaxlib version named
+      here is below the supported floor (pyproject pins jaxlib >=0.10,<0.13), and
+      neither CI nor the development environment has a CUDA jaxlib installed, so
+      no run on a supported GPU stack has been made.  The entry therefore stays
+      open on the precautionary reading -- nothing has been shown to fix it --
+      and `affected_versions` is open-ended rather than closed at the version
+      where it was first seen.  Closing it needs a GPU run on a supported jaxlib.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -22,7 +33,7 @@ anomalies:
       execution and whether a fallback path exists.  CPU execution is unaffected.
     affected_components:
       - "maddening.nodes.lbm_pipe.LBMPipeNode"
-    affected_versions: "0.1.0"
+    affected_versions: ">=0.1.0"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
     resolution_status: "open"
     github_issue: null
@@ -35,6 +46,12 @@ anomalies:
       the explicit finite-difference scheme becomes unstable and produces silently
       incorrect results (temperature values that grow without bound).  There is no
       warning or error — the simulation runs but the output is wrong.
+      Re-verified at 0.4.0.dev0 and still live: on a 20-cell rod of length 1.0
+      with thermal_diffusivity=0.01 and a half-sine initial profile, a Fourier
+      number Fo = dt*alpha/dx^2 of 5.0 gives max|T| = nan after 60 steps and
+      emits no warning of any kind, while Fo = 0.4 and Fo = 0.5 decay normally
+      (0.516 and 0.437).  The constructor accepts the unstable timestep without
+      comment.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -48,8 +65,13 @@ anomalies:
       checks would catch the divergence.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
-    affected_versions: "0.1.0"
-    workaround: "Manually verify CFL condition: dt * alpha / dx^2 < 0.5"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Check the stability condition before constructing the node:
+      timestep * thermal_diffusivity / dx**2 < 0.5, with
+      dx = length / n_cells.  The constructor parameter is
+      `thermal_diffusivity` (there is no `alpha=` keyword — passing one is a
+      TypeError), and `timestep` is the value the check applies to.
     resolution_status: "open"
     github_issue: null
 
@@ -96,7 +118,7 @@ anomalies:
     affected_components:
       - "maddening.nodes.adaptive.base.AdaptiveNode"
       - "maddening.nodes.adaptive.base.AdaptiveNode.update"
-    affected_versions: "0.4.0"
+    affected_versions: ">=0.4.0"
     workaround: >
       Use the largest active-set budget the problem affords (the omitted term
       decays with it, to ~1e-8 of |J| at k=64 on the reference problem); add

@@ -198,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The four `scripts/check_*.py` compliance gates now fail on the defects they
+  exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
+  `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state

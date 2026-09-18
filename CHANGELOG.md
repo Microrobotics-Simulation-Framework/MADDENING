@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
+  over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
+  window wider than the data instead of returning a meaningless loss
 - **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
   wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
   invariants over generated meshes; two audit findings pinned as strict xfails

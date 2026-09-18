@@ -123,13 +123,14 @@ def windowed_loss(
         Maps a state pytree with a leading time axis to the measured
         quantities (a pytree of arrays, same leading axis).
     window : int
-        Samples per window.  ``T - 1`` must be a multiple of it.  Every
+        Samples per window.  ``T - 1`` must be a multiple of it, and it
+        must lie in ``[1, T - 1]`` (``T == 1`` has nothing to fit).  Every
         window starts from the ground-truth sample at its start and
         integrates ``window * sample_every`` steps; the loss compares the
         ``window`` simulated samples against the next ``window``
         observations.
     sample_every : int
-        Base steps between consecutive observation samples.
+        Base steps between consecutive observation samples; ``>= 1``.
     external_inputs : dict, optional
         Static external inputs (as in ``run_scan``).
     mask_unconverged : bool
@@ -160,10 +161,21 @@ def windowed_loss(
     ext = external_inputs if external_inputs is not None else gm._default_external_inputs()  # noqa: SLF001
 
     observations = {k: v for k, v in observations.items() if k != _META_KEY}
+    if sample_every <= 0:
+        # ``lax.scan(length=0)`` would advance the simulation by nothing
+        # and compare each window's *initial* state against the next
+        # ``window`` observations: a plausible-looking number that is not
+        # a loss.
+        raise ValueError(f"sample_every={sample_every} must be >= 1")
     T = _leading_len(observations)
-    if window <= 0 or (T - 1) % window != 0:
+    if window <= 0 or (T - 1) % window != 0 or window > T - 1:
+        # ``window > T - 1`` is only reachable at ``T == 1``, where every
+        # window "divides" ``T - 1 == 0``.  The scan below is still traced
+        # once for zero windows, so it used to die inside
+        # ``dynamic_slice_in_dim`` instead of saying what was wrong.
         raise ValueError(
-            f"window={window} must divide T-1={T - 1} (T={T} samples)"
+            f"window={window} must divide T-1={T - 1} and lie in "
+            f"[1, T-1] (T={T} samples)"
         )
     n_windows = (T - 1) // window
 
@@ -257,8 +269,10 @@ def init_window_states(observations: dict, window: int) -> dict:
     measured user state at every window start (leading axis ``n_windows``)."""
     observations = {k: v for k, v in observations.items() if k != _META_KEY}
     T = _leading_len(observations)
-    if window <= 0 or (T - 1) % window != 0:
-        raise ValueError(f"window={window} must divide T-1={T - 1}")
+    if window <= 0 or (T - 1) % window != 0 or window > T - 1:
+        raise ValueError(
+            f"window={window} must divide T-1={T - 1} and lie in [1, T-1]"
+        )
     n_windows = (T - 1) // window
     return jax.tree.map(lambda x: x[: n_windows * window : window], observations)
 

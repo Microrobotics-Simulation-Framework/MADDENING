@@ -204,6 +204,9 @@ guidance; the itemized changes follow.
 - **The four `scripts/check_*.py` compliance gates now fail on the defects they
   exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
   `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
+- **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
+  "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
+  `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid
 - **Do not pair `convergence_norm="interface"` with the auto-detected
   `accelerated_fields`**: both are the edge fields, so an accelerator fixes
   exactly what the criterion measures — use a norm that sees the whole state

@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
 
+from maddening.core.coupling.acceleration import estimated_error
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_spec_for`` is the one place that resolves a params path to its
@@ -212,10 +213,6 @@ def windowed_loss(
         meta = state.get(_META_KEY, {})
         for key, amp_key, thr in thresholds:
             if key in meta:
-                from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-                    estimated_error,
-                )
-
                 amp = meta.get(amp_key, jnp.zeros_like(meta[key]))
                 ok = ok & (estimated_error(meta[key], amp) <= thr)
         return ok

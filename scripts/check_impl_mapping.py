@@ -152,6 +152,38 @@ def check_guide(md_path: str, relpath: str) -> tuple[int, list[str], list[str]]:
     return checked, errors, notes
 
 
+def check_pinned(
+    per_file: dict[str, int],
+    min_mappings: dict[str, int],
+    repo_root: str,
+) -> list[str]:
+    """Check the pinned per-guide minimums against the repository.
+
+    Runs regardless of the directory that was scanned, so that a guide
+    deleted outright still fails rather than dropping out of the count.
+    """
+    errors: list[str] = []
+    for pinned, minimum in sorted(min_mappings.items()):
+        abspath = os.path.join(repo_root, pinned)
+        if not os.path.isfile(abspath):
+            errors.append(
+                f"{pinned}: pinned in MIN_MAPPINGS but the file does not exist"
+            )
+            continue
+        found = per_file.get(pinned)
+        if found is None:
+            found, errs, _ = check_guide(abspath, pinned)
+            errors.extend(errs)
+        if found < minimum:
+            errors.append(
+                f"{pinned}: {found} implementation mapping(s) found, at least "
+                f"{minimum} expected -- a row or the whole table has gone "
+                f"missing (update MIN_MAPPINGS only if the guide legitimately "
+                f"shrank)"
+            )
+    return errors
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     guide_dir = argv[0] if argv else os.path.join(_REPO_ROOT, DEFAULT_GUIDE_DIR)
@@ -180,26 +212,7 @@ def main(argv=None) -> int:
             errors.extend(errs)
             notes.extend(ns)
 
-    # Pinned minimums, checked against the repository regardless of the
-    # directory that was scanned: a vanished guide has to fail.
-    for pinned, minimum in sorted(MIN_MAPPINGS.items()):
-        abspath = os.path.join(_REPO_ROOT, pinned)
-        if not os.path.isfile(abspath):
-            errors.append(
-                f"{pinned}: pinned in MIN_MAPPINGS but the file does not exist"
-            )
-            continue
-        found = per_file.get(pinned)
-        if found is None:
-            found, errs, _ = check_guide(abspath, pinned)
-            errors.extend(errs)
-        if found < minimum:
-            errors.append(
-                f"{pinned}: {found} implementation mapping(s) found, at least "
-                f"{minimum} expected -- a row or the whole table has gone "
-                f"missing (update MIN_MAPPINGS only if the guide legitimately "
-                f"shrank)"
-            )
+    errors.extend(check_pinned(per_file, MIN_MAPPINGS, _REPO_ROOT))
 
     for n in notes:
         print(f"NOTE: {n}")

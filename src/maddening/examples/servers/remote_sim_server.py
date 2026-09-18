@@ -9,25 +9,19 @@ the results.
 Usage
 -----
     # On the simulation machine:
-    python maddening/examples/remote_sim_server.py
+    python -m maddening.examples.servers.remote_sim_server
 
     # To allow remote connections, specify the bind address:
-    python maddening/examples/remote_sim_server.py --bind tcp://*:5555
+    python -m maddening.examples.servers.remote_sim_server --bind tcp://*:5555
 
     # For SSH tunnel usage (most common in HPC):
     #   1. On your local machine:  ssh -L 5555:localhost:5555 user@hpc-node
-    #   2. On the HPC node:        python maddening/examples/remote_sim_server.py
-    #   3. On your local machine:  python maddening/examples/remote_viz_client.py
+    #   2. On the HPC node:        python -m maddening.examples.servers.remote_sim_server
+    #   3. On your local machine:  python -m maddening.examples.servers.remote_viz_client
 """
 
-import sys
-import os
 import argparse
 import time
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode

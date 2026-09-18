@@ -8,13 +8,12 @@ real-time via WebSocket.
 
 Usage::
 
-    python maddening/examples/interactive_graph_server.py
+    python -m maddening.examples.servers.interactive_graph_server
 
 Then open http://localhost:8000/viz/graph in your browser.
 """
 
 import sys
-sys.path.insert(0, ".")
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode

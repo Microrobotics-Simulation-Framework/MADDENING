@@ -7,19 +7,10 @@ The simulation is fully JIT-compiled through JAX.
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/bouncing_ball.py
+    python -m maddening.examples.basics.bouncing_ball
 """
 
-import sys
 import os
-
-# Ensure the project root is on the path so ``import maddening`` works
-# even when invoked directly.
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax
 import jax.numpy as jnp
@@ -134,8 +125,8 @@ def main() -> None:
         ax2.set_xlabel("Time (s)")
 
         plt.tight_layout()
-        plt.savefig(os.path.join(_project_root, "bouncing_ball_result.png"), dpi=150)
-        print(f"Plot saved to {os.path.join(_project_root, 'bouncing_ball_result.png')}")
+        plt.savefig(os.path.join(os.getcwd(), "bouncing_ball_result.png"), dpi=150)
+        print(f"Plot saved to {os.path.join(os.getcwd(), 'bouncing_ball_result.png')}")
     except ImportError:
         print("matplotlib not available, skipping plot.")
 

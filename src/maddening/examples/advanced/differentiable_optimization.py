@@ -18,17 +18,10 @@ differentiates through the entire compiled graph step function.
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/differentiable_optimization.py
+    python -m maddening.examples.advanced.differentiable_optimization
 """
 
-import sys
 import os
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax
 import jax.numpy as jnp
@@ -193,7 +186,7 @@ def main() -> None:
 
         plt.suptitle("Differentiable Optimization through MADDENING Graph", fontsize=13)
         plt.tight_layout()
-        out_path = os.path.join(_project_root, "differentiable_optimization_result.png")
+        out_path = os.path.join(os.getcwd(), "differentiable_optimization_result.png")
         plt.savefig(out_path, dpi=150)
         print(f"Plot saved to {out_path}")
     except ImportError:

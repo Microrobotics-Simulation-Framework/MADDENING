@@ -19,17 +19,8 @@ The demo compares the trajectories from both approaches.
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/coupling_demo.py
+    python -m maddening.examples.coupling.coupling_demo
 """
-
-import sys
-import os
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax.numpy as jnp
 

@@ -8,20 +8,10 @@ trajectories if matplotlib is available.
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/parameter_sweep_demo.py
+    python -m maddening.examples.advanced.parameter_sweep_demo
 """
 
-import sys
 import os
-
-# Ensure project root is on the path.
-_project_root = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
-)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import jax.numpy as jnp
 
@@ -133,7 +123,7 @@ def main() -> None:
         ax.set_xlim(0, n_steps * 0.01)
         plt.tight_layout()
 
-        out_path = os.path.join(_project_root, "parameter_sweep_result.png")
+        out_path = os.path.join(os.getcwd(), "parameter_sweep_result.png")
         plt.savefig(out_path, dpi=150)
         print(f"\nPlot saved to {out_path}")
     except ImportError:

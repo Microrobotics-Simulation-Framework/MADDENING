@@ -1,10 +1,12 @@
 # maddening.examples
 
-All examples assume you are in the project root with the venv activated:
+Every example runs as a module against an installed `maddening`, from any
+working directory.  Scripts that save a plot or a USD file write it into the
+current working directory.
 
 ```bash
-cd /home/nick/MSF/MADDENING
-source ../venvs/.maddening/bin/activate
+pip install -e .            # or: pip install maddening
+python -m maddening.examples.basics.bouncing_ball
 ```
 
 ## Directory Structure

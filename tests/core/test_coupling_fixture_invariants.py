@@ -230,6 +230,27 @@ _KNOWN_DISAGREEMENTS = {
 }
 
 
+#: Iteration cap for the "same fixed point" lanes, overriding whatever
+#: the registry bakes in.  Those lanes assert that *every* configuration
+#: is inside the fixture's reach, and under 0.4.0's error-bound
+#: criterion ``acceleration="fixed"`` at omega = 0.5 is not inside the
+#: registry's caps: under-relaxation halves every step by construction,
+#: so the residual is worth at least twice itself in error and often
+#: six times.  Measured at the registry's caps, ``jac/fixed0.5/l2``
+#: leaves ``chain-5`` at an error estimate of 1.5e-04 (residual
+#: 2.4e-05) and ``heterogeneous-2000`` at 1.3e-04 (Gauss-Seidel) /
+#: 5.2e-03 (Jacobi), all against a 1e-04 threshold.  120 clears every
+#: spring configuration and 60 every grid one; the grid gets the
+#: smaller number because 2 000 cells x 24 configurations is what makes
+#: this file slow.
+#:
+#: The *registry's* caps are what the benchmark sweep reports against
+#: and are deliberately unchanged: what a group costs at a given cap is
+#: a measurement, and this is a test premise.
+_REACH_CAP = 120
+_REACH_CAP_GRID = 60
+
+
 def _fixture_build(name):
     """Builder for *name*, including the test-only reduced grid fixture."""
     if name == "heterogeneous-2000":
@@ -237,21 +258,14 @@ def _fixture_build(name):
         # 2 000 cells keeps the property that matters here — one
         # large-state node among small ones, four orders of magnitude of
         # scale in one group — at a couple of seconds.
-        #
-        # The cap is raised from the registry's 20 because the fixture's
-        # premise is "inside every configuration's reach", and under
-        # 0.4.0's error-bound criterion ``fixed`` at omega = 0.5 is not
-        # inside it in 20 passes: under-relaxation halves every step by
-        # construction, so its residual is worth at least twice itself
-        # in error, and the group exits the cap at an estimate of
-        # 1.3e-04 (Gauss-Seidel) / 5.2e-03 (Jacobi) against a 1e-04
-        # threshold.  40 is enough for every configuration; 60 leaves
-        # headroom.  The registry's own cap is what the benchmark
-        # sweep reports against and is deliberately not changed here.
         return lambda config: cf.build_heterogeneous(
-            dataclasses.replace(config, max_iterations=60), n_cells=2000,
+            dataclasses.replace(config, max_iterations=_REACH_CAP_GRID),
+            n_cells=2000,
         )
-    return cf.FIXTURES[name].build
+    build = cf.FIXTURES[name].build
+    return lambda config: build(
+        dataclasses.replace(config, max_iterations=_REACH_CAP)
+    )
 
 
 def _assert_same_fixed_point(fixture, norms, n_steps=25):

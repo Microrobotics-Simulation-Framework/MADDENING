@@ -1,0 +1,4 @@
+# The root .gitignore drops *.jsonl repo-wide (scratch run logs).  The
+# raw sweep records here are deliverables, not scratch: they are what
+# lets the comparison be recomputed without replaying both trees.
+!raw/*.jsonl

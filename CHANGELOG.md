@@ -266,12 +266,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
-- **The mapping-spec resolver is tested against generated input**
-  (`tests/property/test_mapping_spec_resolver.py`): for any mutation of a
-  serialised spec, `from_dict` is refused with the offending edge named or
-  loads exactly the recipe the file holds, and no asset path escapes the
-  config directory.  A malformed `kind` now says so instead of raising
-  `TypeError: unhashable type`
+- **Mapping-spec resolver, against generated input** (11 properties): a
+  mutated spec is refused naming the edge or loads exactly the recipe on
+  disk, and no generated asset path escapes the config directory
 - **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
   `tests/fmi/c/`): unit binary plain and under ASan/UBSan, a self-checking
   deterministic fuzz harness, valgrind, a libFuzzer campaign, FMPy against

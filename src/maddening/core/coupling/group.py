@@ -15,12 +15,17 @@ convergence.
 Supports multiple convergence norms, acceleration methods (Aitken,
 fixed relaxation, IQN-ILS, IQN-IMVJ), Jacobi iteration mode, and
 subcycling for mixed-timestep coupling groups.
+
+Any one configuration reads only some of a group's eighteen settings.
+A knob the rest of the configuration never reads warns at construction
+rather than turning silently; the rules are in ``_INERT_RULES``.
 """
 
 from __future__ import annotations
 
+import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from typing import (
     Any,
@@ -79,7 +84,9 @@ class CouplingGroup:
     relaxation : float
         Constant relaxation factor for ``acceleration="fixed"``.
         ``1.0`` is no relaxation, ``< 1`` is under-relaxation,
-        ``> 1`` is over-relaxation.
+        ``> 1`` is over-relaxation.  Read **only** under that
+        acceleration; setting it away from its default under any other
+        is inert and warns (``UserWarning``).
     iteration_mode : str
         ``"gauss-seidel"`` updates nodes sequentially (each sees
         current-iteration values from earlier nodes).
@@ -94,12 +101,16 @@ class CouplingGroup:
         bare field name instead of a one-element tuple, an empty
         mapping and a mapping naming only foreign nodes all raise
         ``ValueError`` here rather than failing inside the traced
-        coupling loop.
+        coupling loop.  Read **only** under the two IQN accelerations;
+        supplying it under any other is inert and warns
+        (``UserWarning``).
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
         Fast nodes take multiple sub-steps per coupling iteration.
     boundary_interpolation : str
         Time interpolation of boundary conditions during subcycling.
+        Read **only** when ``subcycling=True``; setting it away from
+        its default otherwise is inert and warns (``UserWarning``).
         ``"constant"`` holds values constant, ``"linear"`` linearly
         interpolates between previous and current iteration values,
         ``"quadratic"`` uses quadratic Lagrange interpolation through
@@ -108,10 +119,14 @@ class CouplingGroup:
     jacobian_reuse : int
         For ``"iqn-imvj"``: number of V/W columns retained from the
         previous timestep.  ``0`` means no reuse (same as IQN-ILS).
+        Read **only** under that acceleration; setting it away from its
+        default under any other is inert and warns (``UserWarning``).
     waveform_iterations : int
         For subcycling groups: number of waveform relaxation
         iterations.  ``1`` is current behaviour (single pass),
-        ``> 1`` iterates over entire sub-step windows.
+        ``> 1`` iterates over entire sub-step windows.  Read **only**
+        when ``subcycling=True``; setting it away from its default
+        otherwise is inert and warns (``UserWarning``).
     predictor : str
         Extrapolation of the coupling initial guess from previous
         converged states.  ``"none"`` uses the current state (default),
@@ -157,7 +172,9 @@ class CouplingGroup:
         the condition is only reported via
         ``GraphManager.coupling_diagnostics()["converged"]`` when
         ``diagnostics=True``.  Recommended True for training and
-        calibration runs.
+        calibration runs.  Read **only** under ``solver="ift"``;
+        setting it True under ``"fori"`` is inert and warns
+        (``UserWarning``).
     linear_solver : {"gmres", "dense"}
         Backend used by the ``"ift"`` derivative rule to solve the
         tangent system ``(I - dF/dx) x_dot = rhs`` (and, transposed,
@@ -169,7 +186,10 @@ class CouplingGroup:
         config option (O(N^2) memory, O(N^3) compute — only viable
         for small groups).  The ``MADDENING_IFT_DENSE_SOLVE=1`` env
         var forces ``"dense"`` regardless of this setting and
-        overrides for triage.
+        overrides for triage.  Read **only** under ``solver="ift"``,
+        the only path that solves a tangent system; setting it away
+        from its default under ``"fori"`` is inert and warns
+        (``UserWarning``).
 
         Note on BiCGStab: lineax 0.0.7 ships ``lineax.BiCGStab``, but
         it returns NaN when driving a ``FunctionLinearOperator`` (the
@@ -311,7 +331,7 @@ class CouplingGroup:
                     "group auto-detect its interface fields, or name at "
                     "least one field on one node in the group."
                 )
-        self._warn_about_inert_tolerances()
+        self._warn_about_inert_settings()
         if self.solver == "fori":
             warnings.warn(
                 "CouplingGroup solver='fori' is deprecated and will be "
@@ -319,34 +339,38 @@ class CouplingGroup:
                 "solver='ift' exits early on convergence and supports "
                 "forward- and reverse-mode AD.",
                 DeprecationWarning,
-                stacklevel=3,
+                stacklevel=_caller_stacklevel(),
             )
 
-    def _warn_about_inert_tolerances(self) -> None:
-        """Warn when a tolerance knob this group's norm never reads was set.
+    def _warn_about_inert_settings(self) -> None:
+        """Warn about every knob this group's configuration never reads.
 
-        Each ``convergence_norm`` reads exactly one of the two tolerance
-        settings and ignores the other outright:
+        A ``CouplingGroup`` carries eighteen settings and any one
+        configuration reads only some of them.  The convergence norm
+        picks one of two tolerance knobs; the acceleration method picks
+        whether ``relaxation``, ``jacobian_reuse`` and
+        ``accelerated_fields`` mean anything; ``subcycling`` gates
+        ``waveform_iterations`` and ``boundary_interpolation``; and the
+        solver gates ``linear_solver`` and ``strict_convergence``.
+        Nothing rejects the unread setting, and nothing used to report
+        it, so the knob turned silently.
 
-        * ``"l2"`` compares the global L2 state change against
-          ``tolerance``; ``atol`` and ``rtol`` are never passed to it.
-        * ``"mixed"`` and ``"interface"`` fold ``atol`` and ``rtol``
-          into the residual itself and then test it against a threshold
-          hard-coded to ``1.0``; ``tolerance`` is never read.
+        Tightening ``tolerance`` from 1e-4 to 1e-14 on an
+        ``"interface"`` group changes no digit of the answer -- which
+        reads exactly like a solver converging to a different fixed
+        point, and has already been written up as one, in a decisions
+        document, and acted on.  An inert control proves nothing; this
+        says so at the call site while the user can still act on it.
+        The same failure was available through six more knobs, so the
+        rules live in one table (:data:`_INERT_RULES`) keyed off the
+        *read sites* in ``graph_manager``, not off this docstring.
 
-        Nothing rejects the unread setting, and nothing reports it, so
-        the knob turns silently.  Tightening ``tolerance`` from 1e-4 to
-        1e-14 on an ``"interface"`` group changes no digit of the
-        answer — which reads exactly like a solver converging to a
-        different fixed point, and has already been written up as one.
-        An inert control proves nothing; this warning says so at the
-        call site while the user can still act on it.
-
-        Only a *deliberate* setting warns.  A group that names a norm
-        and leaves the other knobs alone has done nothing wrong, so the
-        test is against the field's declared default rather than a
-        record of what the caller passed — a frozen dataclass keeps no
-        such record, and a sentinel default would have to survive
+        Only a *deliberate* setting warns.  A group that names a norm,
+        an acceleration or a solver and leaves the knobs the others
+        would have read alone has done nothing wrong, so the test is
+        against the field's declared default rather than a record of
+        what the caller passed -- a frozen dataclass keeps no such
+        record, and a sentinel default would have to survive
         :meth:`to_dict`, the USD schema and every ``float(...)`` read of
         these fields.  The one case it cannot see is an explicit value
         that equals the default, which is also the one case where the
@@ -355,43 +379,222 @@ class CouplingGroup:
         through :meth:`to_dict` / :func:`coupling_group_kwargs` quiet:
         it re-passes every field by name, defaults included.
         """
-        if self.convergence_norm == "l2":
-            inert = [
-                name for name in ("atol", "rtol")
+        for rule in _INERT_RULES:
+            if rule.live(self):
+                continue
+            named = tuple(
+                name for name in rule.fields
                 if getattr(self, name) != _FIELD_DEFAULTS[name]
-            ]
-            if inert:
-                warnings.warn(
-                    f"CouplingGroup.{' and '.join(inert)} "
-                    f"{'are' if len(inert) > 1 else 'is'} ignored under "
-                    "convergence_norm='l2', which tests the global L2 norm "
-                    "of the state change against tolerance alone.  Set "
-                    "tolerance to control convergence under this norm, or "
-                    "choose convergence_norm='mixed' or 'interface' to make "
-                    "atol and rtol live.",
-                    UserWarning,
-                    stacklevel=4,
-                )
-        elif self.tolerance != _FIELD_DEFAULTS["tolerance"]:
+            )
+            if not named:
+                continue
             warnings.warn(
-                f"CouplingGroup.tolerance={self.tolerance!r} is ignored "
-                f"under convergence_norm={self.convergence_norm!r}, whose "
-                "residual is already scaled by atol and rtol and is tested "
-                "against a fixed threshold of 1.0.  Set atol and rtol to "
-                "control convergence under this norm, or choose "
-                "convergence_norm='l2' to make tolerance live.",
+                rule.message(self, named),
                 UserWarning,
-                stacklevel=4,
+                stacklevel=_caller_stacklevel(),
             )
 
 
 #: Declared default of every :class:`CouplingGroup` field, used by
-#: ``_warn_about_inert_tolerances`` to tell a deliberately-set tolerance
-#: knob from one the caller never touched.  ``nodes`` has no default and
-#: maps to ``dataclasses.MISSING``; nothing looks it up.
+#: ``_warn_about_inert_settings`` to tell a deliberately-set knob from
+#: one the caller never touched.  ``nodes`` has no default and maps to
+#: ``dataclasses.MISSING``; nothing looks it up.
 _FIELD_DEFAULTS: dict[str, Any] = {
     f.name: f.default for f in fields(CouplingGroup)
 }
+
+
+@dataclass(frozen=True)
+class _InertRule:
+    """One knob -- or one inseparable pair -- and the setting that reads it.
+
+    Attributes
+    ----------
+    fields : tuple of str
+        The :class:`CouplingGroup` field names this rule governs.
+        ``atol`` and ``rtol`` share a rule because they share a fate and
+        a message: they go live and dead together under the same norm,
+        and two warnings for one mistake is one too many.
+    live : callable
+        ``live(group)`` is True when this group's configuration actually
+        reads those fields.  Each predicate mirrors a read site in
+        ``maddening.core.graph_manager``; see :data:`_INERT_RULES` for
+        where.
+    message : callable
+        ``message(group, names)`` builds the warning for the subset of
+        ``fields`` the caller set away from its default.  Every message
+        names the field, the value it was given, the setting that makes
+        it inert and the setting that would make it live -- the four
+        things needed to act on it without opening the source.
+    """
+
+    fields: tuple[str, ...]
+    live: Callable[[CouplingGroup], bool]
+    message: Callable[[CouplingGroup, tuple[str, ...]], str]
+
+
+def _inert_atol_rtol_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """``atol`` / ``rtol`` under the one norm that is never handed them."""
+    setting = " and ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    return (
+        f"CouplingGroup.{setting} "
+        f"{'are' if len(names) > 1 else 'is'} ignored under "
+        "convergence_norm='l2', which tests the global L2 norm "
+        "of the state change against tolerance alone.  Set "
+        "tolerance to control convergence under this norm, or "
+        "choose convergence_norm='mixed' or 'interface' to make "
+        "atol and rtol live."
+    )
+
+
+def _inert_tolerance_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """``tolerance`` under a norm whose threshold is hard-coded to 1.0."""
+    return (
+        f"CouplingGroup.tolerance={group.tolerance!r} is ignored "
+        f"under convergence_norm={group.convergence_norm!r}, whose "
+        "residual is already scaled by atol and rtol and is tested "
+        "against a fixed threshold of 1.0.  Set atol and rtol to "
+        "control convergence under this norm, or choose "
+        "convergence_norm='l2' to make tolerance live."
+    )
+
+
+def _gated_on(
+    gate: str, reason: str, remedy: str
+) -> Callable[[CouplingGroup, tuple[str, ...]], str]:
+    """Message builder for a knob read only under one setting of ``gate``.
+
+    Every knob below is gated on exactly one other field, so one
+    sentence shape serves them all and the messages read alike:
+    *what you set*, *what made it inert*, *what to set instead*.
+    """
+    def build(group: CouplingGroup, names: tuple[str, ...]) -> str:
+        (name,) = names
+        return (
+            f"CouplingGroup.{name}={getattr(group, name)!r} is ignored "
+            f"under {gate}={getattr(group, gate)!r}, which {reason}.  "
+            f"{remedy} to make {name} live, or leave {name} at its "
+            f"default ({_FIELD_DEFAULTS[name]!r})."
+        )
+
+    return build
+
+
+#: Every :class:`CouplingGroup` knob that only some configurations read.
+#: Each ``live`` predicate mirrors the read site that decides it, so a
+#: rule is wrong only if the solver changed under it:
+#:
+#: * ``atol`` / ``rtol`` -- ``_compute_residual`` passes them to the
+#:   mixed and interface residuals only; ``coupling_residual_l2`` does
+#:   not take them.
+#: * ``tolerance`` -- ``conv_threshold_value`` is ``1.0`` for the mixed
+#:   and interface norms and ``float(group.tolerance)`` otherwise.
+#: * ``relaxation`` -- ``_accelerate`` and the fori path both read it
+#:   under ``acceleration == "fixed"`` alone; Aitken and the IQN
+#:   methods derive their own factor.
+#: * ``jacobian_reuse`` -- ``_iqn_warm_start`` returns zeros before
+#:   reaching it unless ``acceleration == "iqn-imvj"``.
+#: * ``accelerated_fields`` -- ``accel_fields`` is ``None`` unless
+#:   ``acceleration`` is one of the two IQN methods.  (``compile()``
+#:   still validates the names whatever the acceleration, so a typo is
+#:   caught either way; it just does not change the solve.)
+#: * ``waveform_iterations`` -- ``n_waveform`` is ``1`` unless the group
+#:   subcycles.
+#: * ``boundary_interpolation`` -- the interpolation flags are only
+#:   computed inside the ``if use_subcycling:`` block.
+#: * ``linear_solver`` / ``strict_convergence`` -- both are read inside
+#:   ``_run_ift_forward``, which only ``solver="ift"`` calls.
+_INERT_RULES: tuple[_InertRule, ...] = (
+    _InertRule(
+        fields=("atol", "rtol"),
+        live=lambda g: g.convergence_norm != "l2",
+        message=_inert_atol_rtol_message,
+    ),
+    _InertRule(
+        fields=("tolerance",),
+        live=lambda g: g.convergence_norm == "l2",
+        message=_inert_tolerance_message,
+    ),
+    _InertRule(
+        fields=("relaxation",),
+        live=lambda g: g.acceleration == "fixed",
+        message=_gated_on(
+            "acceleration",
+            "applies no constant relaxation factor; only "
+            "acceleration='fixed' scales the update by relaxation, and "
+            "aitken and the IQN methods derive their own factor",
+            "Choose acceleration='fixed'",
+        ),
+    ),
+    _InertRule(
+        fields=("jacobian_reuse",),
+        live=lambda g: g.acceleration == "iqn-imvj",
+        message=_gated_on(
+            "acceleration",
+            "starts every timestep from empty secant matrices; only "
+            "acceleration='iqn-imvj' carries V/W columns across "
+            "timesteps",
+            "Choose acceleration='iqn-imvj'",
+        ),
+    ),
+    _InertRule(
+        fields=("accelerated_fields",),
+        live=lambda g: g.acceleration in ("iqn-ils", "iqn-imvj"),
+        message=_gated_on(
+            "acceleration",
+            "solves no quasi-Newton problem to select fields for; only "
+            "acceleration='iqn-ils' and 'iqn-imvj' accelerate over an "
+            "interface subset",
+            "Choose acceleration='iqn-ils' or 'iqn-imvj'",
+        ),
+    ),
+    _InertRule(
+        fields=("waveform_iterations",),
+        live=lambda g: g.subcycling,
+        message=_gated_on(
+            "subcycling",
+            "takes one pass per coupling iteration; waveform relaxation "
+            "repeats a whole sub-step window, which only a subcycled "
+            "group has",
+            "Set subcycling=True",
+        ),
+    ),
+    _InertRule(
+        fields=("boundary_interpolation",),
+        live=lambda g: g.subcycling,
+        message=_gated_on(
+            "subcycling",
+            "resolves boundary inputs once per coupling iteration, with "
+            "no intermediate time to interpolate to",
+            "Set subcycling=True",
+        ),
+    ),
+    _InertRule(
+        fields=("linear_solver",),
+        live=lambda g: g.solver == "ift",
+        message=_gated_on(
+            "solver",
+            "differentiates straight through the iterates and solves no "
+            "tangent system",
+            "Choose solver='ift'",
+        ),
+    ),
+    _InertRule(
+        fields=("strict_convergence",),
+        live=lambda g: g.solver == "ift",
+        message=_gated_on(
+            "solver",
+            "returns the derivative of the iterate it stopped on rather "
+            "than of a fixed point, so there is no IFT gradient to "
+            "guard",
+            "Choose solver='ift'",
+        ),
+    ),
+)
 
 
 def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
@@ -427,6 +630,50 @@ def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
             node: tuple(flds) for node, flds in accelerated.items()
         }
     return list(nodes), kwargs
+
+
+#: Frames belonging to this package are construction machinery, never
+#: the line a reader of a warning can change.  Compared against a
+#: frame's ``__name__``, not its filename, so an editable install, a
+#: worktree and a wheel all answer the same.
+_PACKAGE = "maddening"
+
+
+def _caller_stacklevel() -> int:
+    """``stacklevel`` landing a warning on the first frame outside MADDENING.
+
+    A constant cannot do this job.  The frame that wrote
+    ``CouplingGroup(...)`` is three above a warning raised in
+    :meth:`CouplingGroup._warn_about_inert_settings` (the helper,
+    ``__post_init__``, the generated ``__init__``); the frame that wrote
+    ``gm.add_coupling_group(...)`` is four, ``gm.auto_couple()`` five,
+    and a config or USD load more again.  A constant tuned for one of
+    them points every other case at library source -- and
+    ``graph_manager.py``'s construction line is not something the reader
+    can act on, which is most of what makes a warning worth emitting.
+
+    So the stack is walked instead: the first frame whose module is
+    outside the ``maddening`` package is the user's.  A stack that is
+    package frames all the way up (an example module run as the entry
+    point) falls back to its outermost frame rather than off the end,
+    where :mod:`warnings` would attribute the message to ``sys``.
+    """
+    try:
+        frame = sys._getframe(1)  # the frame that will call warnings.warn
+    except (AttributeError, ValueError):  # pragma: no cover - not CPython
+        # Without frame introspection, point at the caller of whatever
+        # called us -- right for a direct ``CouplingGroup(...)``.
+        return 3
+    level = 1
+    while True:
+        module = frame.f_globals.get("__name__", "")
+        if module != _PACKAGE and not module.startswith(_PACKAGE + "."):
+            return level
+        parent = frame.f_back
+        if parent is None:
+            return level
+        frame = parent
+        level += 1
 
 
 def _literal_options(ann: object) -> Optional[tuple]:

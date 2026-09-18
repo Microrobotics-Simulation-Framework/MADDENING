@@ -3079,6 +3079,20 @@ class GraphManager:
 
         self._compiled_step = jax.jit(_counted_step)
 
+        # A node may keep its own materialised copy of its static arrays
+        # (the sharded wrappers cache the per-device placement, keyed on
+        # the arrays' identity).  Such a key cannot see a static whose
+        # buffer was rewritten in place, and the cache lives on the node,
+        # so without this the step just rebuilt would be traced against
+        # the previous buffer.  ``compile()`` is the framework's explicit
+        # "rebuild everything", so it has to reach those caches too; it
+        # runs rarely, and the cost is one device_put per sharded static
+        # per compile.
+        for spec in self._nodes.values():
+            invalidate = getattr(spec.node, "invalidate_static_cache", None)
+            if callable(invalidate):
+                invalidate()
+
         # Snapshot static_data hashes so we can detect drift.
         self._static_data_hashes = {
             name: spec.node.static_data_hash()

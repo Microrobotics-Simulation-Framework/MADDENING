@@ -386,3 +386,126 @@ def test_replace_node_brings_its_own_static(monkeypatch):
     assert not np.allclose(old_next, new_next), (
         "the replacement node's mask never reached the update"
     )
+
+
+# ---------------------------------------------------------------------------
+# compile() is the framework's "rebuild everything"; it has to reach the
+# one change the identity key cannot see.  These two run on a single
+# device so they are not skipped on a 1-CPU CI runner.
+# ---------------------------------------------------------------------------
+
+
+class InPlaceMaskDiffusion1D(SimulationNode):
+    """1-D diffusion whose sharded mask is a NumPy buffer.
+
+    Unlike :class:`ScaledMaskDiffusion1D` the buffer is writable, so a
+    test can rewrite it *in place* -- the one change
+    ``ShardedStencilNode``'s identity-keyed static cache cannot see.
+    """
+
+    def __init__(self, name: str, n: int):
+        super().__init__(name=name, timestep=0.01)
+        self._n = int(n)
+        self._mask = np.ones(int(n), dtype=np.float32)
+
+    @property
+    def static_data(self) -> dict:
+        return {
+            "mask": StaticArray(
+                value=self._mask, replication="shard", shard_axis=0,
+            ),
+        }
+
+    def halo_width(self) -> dict[int, int]:
+        return {0: 1}
+
+    def state_fields(self) -> list[str]:
+        return ["f"]
+
+    def initial_state(self) -> dict:
+        return {"f": jnp.asarray(
+            np.linspace(0.0, 1.0, self._n).astype(np.float32)
+        )}
+
+    def update(self, state, boundary_inputs, dt):
+        f = state["f"]
+        f_pad = jnp.pad(f, 1, mode="edge")
+        lap = f_pad[2:] - 2 * f_pad[1:-1] + f_pad[:-2]
+        return {"f": f + 0.1 * jnp.asarray(self._mask) * lap * dt}
+
+    def update_padded(
+        self, state_padded, boundary_inputs, dt, *,
+        static_padded=None, shard_info=None,
+    ):
+        f_pad = state_padded["f"]
+        m_pad = static_padded["mask"]
+        lap = f_pad[2:] - 2 * f_pad[1:-1] + f_pad[:-2]
+        f_new = f_pad[1:-1] + 0.1 * m_pad[1:-1] * lap * dt
+        return {"f": jnp.pad(f_new, 1, mode="edge")}
+
+
+def test_compile_rematerialises_a_static_rewritten_in_place():
+    """``gm.compile()`` must not bake in the previous static buffer.
+
+    The per-device placement is cached on the *node*, keyed on the array's
+    identity, so a buffer rewritten in place is invisible to it.  That is
+    the accepted trade-off for a steady-state ``update``, but ``compile()``
+    is the framework's explicit "throw everything away and rebuild": it
+    rebuilds the step, clears the scan cache and re-snapshots the
+    static-data hashes, so it has to drop the materialised statics too.
+    Otherwise the freshly traced step closes over the old buffer and every
+    later step is silently wrong.
+    """
+    inner = InPlaceMaskDiffusion1D("d", n=N_CELLS)
+    mesh = create_device_mesh(shape=(1,))
+    wrapper = ShardedStencilNode(
+        inner, mesh, axis_map={"devices": 0}, boundary="edge",
+    )
+    gm = GraphManager()
+    gm.add_node(wrapper)
+    gm.compile()
+    gm.step()
+    start = np.asarray(gm.get_node_state("d")["f"]).copy()
+
+    # A mask of zeros freezes the field: the step becomes the identity.
+    inner._mask[:] = 0.0
+    gm.compile()
+    gm.set_node_state("d", {"f": jnp.asarray(start)})
+    gm.step()
+
+    np.testing.assert_allclose(
+        np.asarray(gm.get_node_state("d")["f"]), start, rtol=0, atol=0,
+        err_msg="compile() traced the step against the pre-rewrite mask",
+    )
+
+
+def test_compile_invalidates_every_node_static_cache():
+    """The hook is called for each node that offers it.
+
+    Pins the contract itself (rather than one wrapper's behaviour), so a
+    future node that caches a materialisation gets the same treatment.
+    """
+    class _Recorder(SimulationNode):
+        def __init__(self) -> None:
+            super().__init__(name="rec", timestep=0.1)
+            self.invalidations = 0
+
+        def state_fields(self) -> list[str]:
+            return ["x"]
+
+        def initial_state(self) -> dict:
+            return {"x": jnp.array(0.0, dtype=jnp.float32)}
+
+        def update(self, state, boundary_inputs, dt):
+            return {"x": state["x"] + dt}
+
+        def invalidate_static_cache(self) -> None:
+            self.invalidations += 1
+
+    node = _Recorder()
+    gm = GraphManager()
+    gm.add_node(node)
+    gm.compile()
+    assert node.invalidations == 1
+    gm.compile()
+    assert node.invalidations == 2

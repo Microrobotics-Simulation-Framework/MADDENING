@@ -313,8 +313,11 @@ class ShardedUnstructuredNode(SimulationNode):
 
         Call this after rewriting a partitioned ``StaticArray``'s buffer
         in place; replacing the array object is detected automatically.
+        The ``super()`` call forwards to the wrapped node, so a cache
+        further in is dropped too.
         """
         self._static_device_cache = None
+        super().invalidate_static_cache()
 
     def _materialise_partitioned_statics(self) -> dict:
         """Per-device materialisation of every partitioned StaticArray.

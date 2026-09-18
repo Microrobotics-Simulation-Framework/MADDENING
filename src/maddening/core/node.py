@@ -302,6 +302,55 @@ class SimulationNode(ABC):
                 items.append((str(k), repr(v)))
         return hash(tuple(items))
 
+    @stability(StabilityLevel.STABLE)
+    def invalidate_static_cache(self) -> None:
+        """Drop any cached materialisation of this node's static data.
+
+        Part of the node contract rather than a duck-typed hook: a node
+        that keeps a derived copy of :attr:`static_data` (the sharded
+        wrappers cache the per-device placement) overrides this to drop
+        it, and :meth:`~maddening.core.graph_manager.GraphManager.compile`
+        calls it on every node so that a rebuild is a clean slate.
+
+        The default is a no-op for the node itself and **forwards to every
+        node this one wraps**, found by scanning the instance attributes
+        for :class:`SimulationNode` values.  Without that, a cache one
+        level down -- a ``ShardedStencilNode`` inside a
+        :class:`~maddening.core.simulation.hybrid_node.HybridNode`, say --
+        is invisible to the graph, which sees only the outermost object
+        and would trace a rebuilt step against the previous buffer.
+        Re-entrancy is guarded, so a cycle between two nodes terminates.
+
+        A wrapper that overrides this must call ``super()`` so the chain
+        keeps going.  A node that holds its inner nodes in a list or dict
+        rather than in a plain attribute must forward to them itself.
+
+        Notes
+        -----
+        Cheap and idempotent by contract: it runs once per node per
+        ``compile()``, and the cost of a re-materialisation is paid
+        lazily on the next trace, not here.
+        """
+        if getattr(self, "_invalidating_static_cache", False):
+            return
+        # ``object.__setattr__`` so a node built as a frozen dataclass
+        # can still carry the guard; a node that refuses it outright
+        # (``__slots__``) cannot hold a back-reference either, so
+        # forwarding without a guard is still finite.
+        try:
+            object.__setattr__(self, "_invalidating_static_cache", True)
+        except (AttributeError, TypeError):
+            pass
+        try:
+            for value in list(getattr(self, "__dict__", {}).values()):
+                if isinstance(value, SimulationNode):
+                    value.invalidate_static_cache()
+        finally:
+            try:
+                object.__setattr__(self, "_invalidating_static_cache", False)
+            except (AttributeError, TypeError):
+                pass
+
     # ------------------------------------------------------------------
     # UQ interface (Section 9.4)
     # ------------------------------------------------------------------

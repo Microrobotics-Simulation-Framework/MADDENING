@@ -3086,8 +3086,14 @@ class GraphManager:
         # so without this the step just rebuilt would be traced against
         # the previous buffer.  ``compile()`` is the framework's explicit
         # "rebuild everything", so it has to reach those caches too; it
-        # runs rarely, and the cost is one device_put per sharded static
-        # per compile.
+        # runs rarely, and the cost is one re-materialisation per sharded
+        # static per compile, paid lazily on the next trace.
+        #
+        # ``invalidate_static_cache`` is a ``SimulationNode`` contract
+        # method whose default forwards to any node this one wraps, so a
+        # cache nested inside a wrapper (a sharded node inside a
+        # HybridNode) is reached too.  The getattr probe stays for the
+        # duck-typed node objects the graph also accepts.
         for spec in self._nodes.values():
             invalidate = getattr(spec.node, "invalidate_static_cache", None)
             if callable(invalidate):

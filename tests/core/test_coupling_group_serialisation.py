@@ -107,7 +107,6 @@ def test_every_field_round_trips_through_a_config():
     assert after == before
 
 
-@inert_tolerance_is_the_point
 def test_the_non_default_fixture_is_non_default_in_every_field():
     """Guards the guard: if one of these values ever became the default,
     the round trip above would stop testing that field."""

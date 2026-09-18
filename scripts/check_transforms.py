@@ -45,12 +45,24 @@ _DEFAULT_ROOTS = ("src/maddening", "tests")
 # Deliberate negative tests: a call site that names a transform which must
 # *not* resolve, because the test asserts that the lookup raises.  Keyed by
 # (path relative to the project root, transform name) so that a typo
-# anywhere else in the same file is still caught.
+# anywhere else in the same file is still caught, with a one-line reason so
+# a deliberate exemption stays distinguishable from an accumulated one.
+#
+# Add an entry only for a test whose *subject* is the failure -- never to
+# quiet a name that should have been registered.  `tests/compliance/
+# test_gate_scripts.py::TestTransformAllowlist` caps the size, requires the
+# reason, and fails an entry whose file no longer names that transform.
 _ALLOWED_UNRESOLVABLE = {
-    # Asserts that GraphManager.add_edge raises KeyError for an unknown
-    # transform name -- the name is required to be absent from the registry.
-    ("tests/core/test_transforms.py", "this_does_not_exist"),
+    ("tests/core/test_transforms.py", "this_does_not_exist"):
+        "asserts GraphManager.add_edge raises KeyError on an unknown name",
+    ("tests/core/test_graph_mutation_atomicity.py", "no_such_transform"):
+        "asserts add_edge fails atomically on an unknown name; the entry is "
+        "inert until fix/adaptive-contract lands the file",
 }
+# A ceiling, not a target.  Two entries is the natural number of "prove the
+# lookup raises" tests; a third is plausible, a tenth means the gate is
+# being worked around rather than the code fixed.
+_MAX_ALLOWED_UNRESOLVABLE = 5
 
 
 def _call_name(func: ast.expr) -> str | None:

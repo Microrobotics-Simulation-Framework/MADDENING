@@ -354,3 +354,50 @@ class TestTransformGateConstantBinding:
         )
         # Nothing in scope -> the empty-scope guard, not a false positive.
         assert transforms_gate.main([str(tmp_path)]) == 1
+
+
+class TestTransformAllowlist:
+    """The allowlist must stay a short list of deliberate negative tests.
+
+    Two tests so far assert that `add_edge` rejects an unregistered
+    transform, so their names have to be absent from the registry.  A third
+    is plausible.  These guards keep the list readable and keep a dead entry
+    from sitting there looking deliberate.
+    """
+
+    def test_every_entry_carries_a_reason(self, transforms_gate):
+        for key, reason in transforms_gate._ALLOWED_UNRESOLVABLE.items():
+            assert isinstance(reason, str) and reason.strip(), key
+
+    def test_the_allowlist_stays_small(self, transforms_gate):
+        allowlist = transforms_gate._ALLOWED_UNRESOLVABLE
+        cap = transforms_gate._MAX_ALLOWED_UNRESOLVABLE
+        assert len(allowlist) <= cap, (
+            f"{len(allowlist)} allowlisted transform references (cap {cap}). "
+            f"Each one is a hole in the gate; fix the call site instead of "
+            f"raising the cap."
+        )
+
+    def test_no_entry_is_stale(self, transforms_gate):
+        """An entry whose file no longer names that transform is dead.
+
+        A file that does not exist yet is fine: an entry may land before the
+        branch that introduces the test it exempts.
+        """
+        for (relpath, name) in transforms_gate._ALLOWED_UNRESOLVABLE:
+            path = REPO_ROOT / relpath
+            if not path.is_file():
+                continue
+            refs, _local = transforms_gate.scan_file(path)
+            assert name in {n for _lineno, n in refs}, (
+                f"{relpath} no longer references transform '{name}'; remove "
+                f"the allowlist entry"
+            )
+
+    def test_an_allowlisted_pair_does_not_exempt_the_same_name_elsewhere(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "other_file.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="this_does_not_exist")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1

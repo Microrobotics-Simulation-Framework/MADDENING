@@ -186,6 +186,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A `CouplingGroup` tolerance its norm never reads now warns** instead of
+  turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
+  and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead
 - **`strict_convergence` no longer ignores a diverged group that overflowed**:
   a NaN residual raises like any other failure instead of passing silently,
   which is what `coupling_diagnostics()` already reported for it

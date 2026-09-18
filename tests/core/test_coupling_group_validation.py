@@ -13,9 +13,11 @@ re-validates each Literal field against its declared options and raises
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
-from maddening.core.coupling.group import CouplingGroup
+from maddening.core.coupling.group import CouplingGroup, coupling_group_kwargs
 
 
 NODES = frozenset({"a", "b"})
@@ -193,3 +195,110 @@ def test_accelerated_fields_accepts_tuples_and_none():
         nodes=NODES, accelerated_fields={"a": ("position",), "b": ()}
     )
     assert g.accelerated_fields == {"a": ("position",), "b": ()}
+
+
+# ---------------------------------------------------------------------------
+# 5. A tolerance knob the chosen norm never reads warns at construction.
+# ---------------------------------------------------------------------------
+#
+# ``"l2"`` tests the global L2 state change against ``tolerance`` and is
+# never handed ``atol`` / ``rtol``; ``"mixed"`` and ``"interface"`` fold
+# ``atol`` / ``rtol`` into the residual and test it against a threshold
+# hard-coded to 1.0, never reading ``tolerance``.  Nothing used to say so,
+# so the unread knob turned silently: an investigation into a 2.14%
+# discrepancy reported that tightening ``tolerance`` from 1e-4 to 1e-14 on
+# an interface-norm group left every digit unchanged and concluded the
+# solvers converge to different fixed points.  The control was inert.
+
+
+def _warnings_from(**kwargs):
+    """Every warning raised by constructing a group with ``kwargs``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        CouplingGroup(nodes=NODES, **kwargs)
+    return caught
+
+
+@pytest.mark.parametrize("norm", ["mixed", "interface"])
+def test_tolerance_set_under_a_norm_that_ignores_it_warns(norm):
+    """``tolerance`` is dead under ``"mixed"`` / ``"interface"``."""
+    with pytest.warns(UserWarning, match=r"CouplingGroup\.tolerance"):
+        CouplingGroup(nodes=NODES, convergence_norm=norm, tolerance=1e-9)
+
+
+@pytest.mark.parametrize("norm", ["mixed", "interface"])
+def test_inert_tolerance_warning_names_the_live_knobs_and_the_norm(norm):
+    """The message is actionable without opening the source.
+
+    It has to say which norm is in force (the user may have set it far
+    from the ``tolerance=`` line, or inherited it from a config) and
+    which settings do work under that norm.
+    """
+    (w,) = _warnings_from(convergence_norm=norm, tolerance=1e-9)
+    msg = str(w.message)
+    assert "atol" in msg and "rtol" in msg, msg
+    assert norm in msg, msg
+    assert "1e-09" in msg, msg
+
+
+def test_default_tolerance_under_an_ignoring_norm_is_silent():
+    """Choosing a norm is not a mistake; only a dead setting is.
+
+    A group that names ``"interface"`` and leaves ``tolerance`` alone has
+    done nothing the user needs to hear about, and nagging it would train
+    people to filter the warning that matters.
+    """
+    assert _warnings_from(convergence_norm="interface") == []
+    assert _warnings_from(convergence_norm="mixed", atol=1e-10) == []
+
+
+def test_tolerance_under_l2_is_silent():
+    """Under ``"l2"`` the knob is live, so setting it is correct usage."""
+    assert _warnings_from(convergence_norm="l2", tolerance=1e-9) == []
+    assert _warnings_from(tolerance=1e-9) == []  # "l2" is the default
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"atol": 1e-10}, {"rtol": 1e-9}, {"atol": 1e-10, "rtol": 1e-9}]
+)
+def test_atol_rtol_set_under_l2_warn(kwargs):
+    """The reverse footgun: ``"l2"`` never reads ``atol`` or ``rtol``.
+
+    ``coupling_residual_l2`` does not take them as arguments at all, so
+    an ``atol`` tightened under the default norm is as dead as a
+    ``tolerance`` tightened under ``"interface"``.
+    """
+    with pytest.warns(UserWarning, match=r"CouplingGroup\.(atol|rtol)"):
+        CouplingGroup(nodes=NODES, **kwargs)
+
+
+def test_inert_atol_rtol_warning_names_tolerance_as_the_live_knob():
+    (w,) = _warnings_from(atol=1e-10, rtol=1e-9)
+    msg = str(w.message)
+    assert "atol and rtol" in msg, msg
+    assert "tolerance" in msg, msg
+    assert "l2" in msg, msg
+
+
+def test_default_atol_rtol_under_l2_are_silent():
+    """The overwhelmingly common group -- all defaults -- says nothing."""
+    assert _warnings_from() == []
+    assert _warnings_from(atol=1e-8, rtol=1e-6) == []  # the declared defaults
+
+
+def test_round_trip_through_to_dict_does_not_warn_twice():
+    """Reloading a stored group is not a second chance to nag.
+
+    ``to_dict`` writes every field and ``coupling_group_kwargs`` passes
+    every field back by name, defaults included.  Because the check
+    compares against the declared default rather than tracking what the
+    caller passed, a group that was quiet when written stays quiet when
+    it comes back.
+    """
+    g = CouplingGroup(nodes=NODES, convergence_norm="mixed", atol=1e-10)
+    nodes, kwargs = coupling_group_kwargs(g.to_dict())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        back = CouplingGroup(nodes=frozenset(nodes), **kwargs)
+    assert caught == []
+    assert back == g

@@ -538,7 +538,7 @@ class FmuTcpBridge:
         out: dict[str, dict[str, Any]] = {}
         for var in self._md.variables:
             if var.causality == "input" and not var.is_clock:
-                node, _, field = var.name.partition(".")
+                node, field = var.node_field()
                 out.setdefault(node, {})[field] = jnp.zeros(var.shape or (), dtype=var.dtype)
         return out
 
@@ -581,7 +581,7 @@ class FmuTcpBridge:
                     caps[f"p/{section}/{owner}/{k}"] = int(np.asarray(v).nbytes)
         for var in self._md.variables:
             if var.causality == "input":
-                node, _, field = var.name.partition(".")
+                node, field = var.node_field()
                 caps[f"i/{node}/{field}"] = int(np.zeros(var.shape or (), var.dtype).nbytes)
         return {k: v + _NPY_SLACK for k, v in caps.items()}
 
@@ -710,7 +710,7 @@ class FmuTcpBridge:
             if var.causality == "parameter":
                 param_updates[var.name] = self._in_dtype(var, arr)
             elif var.causality == "input":
-                node, _, field = var.name.partition(".")
+                node, field = var.node_field()
                 input_updates.append((node, field, self._in_dtype(var, arr)))
             else:
                 raise ValueError(f"variable {var.name!r} ({var.causality}) is read-only")
@@ -753,7 +753,7 @@ class FmuTcpBridge:
             elif var.causality == "parameter":
                 parts.append(np.asarray(params[var.name], dtype=np.float64).ravel())
             elif var.causality == "input":
-                node, _, field = var.name.partition(".")
+                node, field = var.node_field()
                 val = self._inputs.get(node, {}).get(field)
                 if val is None:
                     val = np.zeros(var.shape or (), dtype=np.float64)
@@ -761,7 +761,7 @@ class FmuTcpBridge:
             elif var.is_clock:
                 parts.append(np.zeros(1, dtype=np.float64))
             else:
-                node, _, field = var.name.partition(".")
+                node, field = var.node_field()
                 parts.append(np.asarray(self._sidecar.state[node][field],
                                         dtype=np.float64).ravel())
         if not parts:

@@ -20,8 +20,17 @@ subcycling for mixed-timestep coupling groups.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Literal, Optional, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Any,
+    Literal,
+    Optional,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 
 @dataclass(frozen=True)
@@ -38,7 +47,7 @@ class CouplingGroup:
     tolerance : float
         Convergence threshold on the L2 norm of state change between
         successive iterations.  Used when ``convergence_norm="l2"``.
-    convergence_norm : str
+    convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  ``"l2"`` uses a global L2
         norm with ``tolerance`` as threshold.  ``"mixed"`` uses a
         per-field mixed absolute/relative norm (converged when the
@@ -70,7 +79,11 @@ class CouplingGroup:
     accelerated_fields : dict or None
         For ``"iqn-ils"``: which fields per node participate in the
         quasi-Newton problem.  ``None`` auto-detects from coupling
-        edges (interface fields only).
+        edges (interface fields only).  Otherwise a mapping
+        ``{node: (field, ...)}``; a non-mapping, or a value given as a
+        bare field name instead of a one-element tuple, raises
+        ``ValueError`` here rather than failing inside the traced
+        coupling loop.
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
         Fast nodes take multiple sub-steps per coupling iteration.
@@ -147,7 +160,7 @@ class CouplingGroup:
     nodes: frozenset[str]
     max_iterations: int = 10
     tolerance: float = 1e-6
-    convergence_norm: str = "l2"
+    convergence_norm: Literal["l2", "mixed", "interface"] = "l2"
     atol: float = 1e-8
     rtol: float = 1e-6
     diagnostics: bool = False
@@ -167,6 +180,37 @@ class CouplingGroup:
     solver: Literal["fori", "ift"] = "ift"
     strict_convergence: bool = False
     linear_solver: Literal["gmres", "dense"] = "gmres"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Every field of this group as JSON-compatible plain data.
+
+        Driven by ``dataclasses.fields`` rather than a hand-written list
+        of keys: a solver setting added to this class in future is
+        carried by the config the moment it exists, and the failure this
+        method was written to close — a group that serialises to *some*
+        of its configuration and silently solves differently when it
+        comes back — cannot return by omission.
+
+        Two fields are not already plain data:
+
+        * ``nodes`` is a ``frozenset``, written as a **sorted** list so
+          one group always produces one spelling;
+        * ``accelerated_fields`` maps a node to a tuple of field names,
+          written as a dict of lists.
+
+        The other seventeen are ``int``, ``float``, ``bool`` or ``str``
+        and are written as they are.  :func:`coupling_group_kwargs` is
+        the inverse.
+        """
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.name == "nodes":
+                value = sorted(value)
+            elif f.name == "accelerated_fields" and value is not None:
+                value = {node: list(flds) for node, flds in sorted(value.items())}
+            out[f.name] = value
+        return out
 
     def __post_init__(self) -> None:
         """Validate that ``Literal``-typed string fields hold permitted values.
@@ -198,6 +242,32 @@ class CouplingGroup:
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
                 )
+        if self.accelerated_fields is not None:
+            # Shape, before anything reads the mapping.  A non-mapping
+            # used to reach ``.values()`` and surface as
+            # ``AttributeError: 'list' object has no attribute
+            # 'values'`` from inside ``__post_init__``; a bare string
+            # value passed every check here and only failed at compile
+            # time, as ``accelerated_fields['a'] names ['p', 'o', 's',
+            # ...]`` -- the field name iterated character by character.
+            if not isinstance(self.accelerated_fields, Mapping):
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields must be a mapping of "
+                    "{node: (field, ...)}, got "
+                    f"{type(self.accelerated_fields).__name__}: "
+                    f"{self.accelerated_fields!r}."
+                )
+            bad = sorted(
+                k for k, v in self.accelerated_fields.items()
+                if isinstance(v, str)
+            )
+            if bad:
+                raise ValueError(
+                    "CouplingGroup.accelerated_fields values must be "
+                    "sequences of field names, but "
+                    f"{bad} map to a bare string.  Wrap a single field "
+                    'in a tuple: {"node": ("field",)}.'
+                )
         if self.solver == "fori":
             warnings.warn(
                 "CouplingGroup solver='fori' is deprecated and will be "
@@ -207,6 +277,41 @@ class CouplingGroup:
                 DeprecationWarning,
                 stacklevel=3,
             )
+
+
+def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Split a serialised group into the ``(nodes, kwargs)`` pair that
+    :meth:`~maddening.core.graph_manager.GraphManager.add_coupling_group`
+    takes.
+
+    The inverse of :meth:`CouplingGroup.to_dict`, and the one place both
+    readers (config and USD) turn stored data back into constructor
+    arguments.  Only the two fields that are not plain data are
+    converted: ``accelerated_fields``'s lists become the tuples the
+    dataclass declares, and ``nodes`` comes back out as the positional
+    argument.
+
+    Nothing else is validated here on purpose.  ``add_coupling_group`` checks
+    the node names against the graph and the group against the groups
+    already registered, and ``CouplingGroup.__post_init__`` checks every
+    enum, so a hand-edited file is rejected by exactly the code that
+    rejects a hand-written call — with one loader, not two.
+    """
+    kwargs = dict(d)
+    nodes = kwargs.pop("nodes")
+    if isinstance(nodes, str):
+        # ``list("rod_a")`` is five one-letter node names, and the failure
+        # that follows talks about a node called 'r'.  The one conversion
+        # here that can go quietly wrong, so it is the one thing checked.
+        raise TypeError(
+            f"'nodes' is a list of node names, not the string {nodes!r}"
+        )
+    accelerated = kwargs.get("accelerated_fields")
+    if accelerated is not None:
+        kwargs["accelerated_fields"] = {
+            node: tuple(flds) for node, flds in accelerated.items()
+        }
+    return list(nodes), kwargs
 
 
 def _literal_options(ann: object) -> Optional[tuple]:

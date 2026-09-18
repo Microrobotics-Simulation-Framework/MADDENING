@@ -43,13 +43,21 @@ class MaddeningCouplingGroup "MaddeningCouplingGroup" (
     int maddening:maxIterations = 10
     double maddening:tolerance = 1e-6
     string maddening:convergenceNorm = "l2"
+    double maddening:atol = 1e-8 (doc = "Absolute tolerance of the mixed norm")
+    double maddening:rtol = 1e-6 (doc = "Relative tolerance of the mixed norm")
     string maddening:acceleration = "none"
     double maddening:relaxation = 1.0
     string maddening:iterationMode = "gauss-seidel"
+    string maddening:acceleratedFieldsJson = "" (doc = "Per-node quasi-Newton fields as JSON; empty means auto-detect")
     bool maddening:subcycling = false
     string maddening:boundaryInterpolation = "linear"
+    int maddening:jacobianReuse = 0 (doc = "IQN-IMVJ columns kept across timesteps")
+    int maddening:waveformIterations = 1 (doc = "Waveform relaxation passes when subcycling")
     bool maddening:diagnostics = false
     string maddening:predictor = "none"
+    string maddening:solver = "ift" (doc = "Fixed-point solver: ift or fori")
+    bool maddening:strictConvergence = false (doc = "Raise when the group exits at max_iterations unconverged")
+    string maddening:linearSolver = "gmres" (doc = "IFT tangent-system backend")
 }
 
 class MaddeningExternalInput "MaddeningExternalInput" (

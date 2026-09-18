@@ -35,6 +35,23 @@ from maddening.core.node import SimulationNode
 from maddening.core.static_data import StaticArray, coerce_static_data_value
 
 
+def _accepts_params(node: SimulationNode) -> bool:
+    """True when ``node.update`` declares a ``params`` keyword.
+
+    Uses the node's own :meth:`SimulationNode.accepts_params` when it has
+    one and falls back to signature inspection for duck-typed nodes, so
+    the wrapper answers exactly what the graph would have answered for
+    the unwrapped node.
+    """
+    probe = getattr(node, "accepts_params", None)
+    if callable(probe):
+        return bool(probe())
+    try:
+        return "params" in inspect.signature(node.update).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 @stability(StabilityLevel.STABLE)
 class ShardedPointwiseNode(SimulationNode):
     """Data-parallel wrapper for a pointwise :class:`SimulationNode`.
@@ -79,9 +96,18 @@ class ShardedPointwiseNode(SimulationNode):
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
+        # One node, one params dict: the wrapper and the node it wraps
+        # share it, so a write through any surface (REST, sysid, a
+        # recompile) reaches the ``self.params`` the inner ``update``
+        # actually reads.  A copy silently strands the write on the
+        # wrapper.
+        self.params = node.params
         self._mesh = mesh
         self._shard_axes = shard_axes
         self._sharding = NamedSharding(mesh, P("devices"))
+        # Graph parameter contract: the wrapper is a params node exactly
+        # when the node it wraps is one.
+        self._inner_accepts_params = _accepts_params(node)
 
     def halo_width(self) -> dict[int, int]:
         """ShardedPointwiseNode only wraps pointwise nodes (no halo)."""
@@ -97,7 +123,17 @@ class ShardedPointwiseNode(SimulationNode):
                 sharded[field] = arr
         return sharded
 
-    def update(self, state: dict, boundary_inputs: dict, dt: float) -> dict:
+    def update(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        """Delegate to the wrapped node, forwarding injected ``params``.
+
+        ``params`` (the node's entry of ``GraphManager.params``) is
+        handed to an inner ``update(..., params=)``; a node on the
+        3-argument contract is called without it.
+        """
+        if self._inner_accepts_params and params is not None:
+            return self._inner.update(state, boundary_inputs, dt, params=params)
         return self._inner.update(state, boundary_inputs, dt)
 
     def state_fields(self) -> list[str]:
@@ -105,6 +141,17 @@ class ShardedPointwiseNode(SimulationNode):
 
     def boundary_input_spec(self):
         return self._inner.boundary_input_spec()
+
+    # -- graph parameter contract (proxied to the inner node) -----------
+
+    def accepts_params(self) -> bool:
+        return self._inner_accepts_params
+
+    def params_pytree(self) -> dict:
+        return self._inner.params_pytree() if self._inner_accepts_params else {}
+
+    def param_specs(self) -> dict:
+        return self._inner.param_specs() if self._inner_accepts_params else {}
 
     def to_dict(self) -> dict:
         d = self._inner.to_dict() if hasattr(self._inner, "to_dict") else {}
@@ -188,6 +235,9 @@ class ShardedStencilNode(SimulationNode):
 
         super().__init__(name=node.name, timestep=node.delta_t, **node.params)
         self._inner = node
+        # Share the inner node's params dict rather than copying it, so a
+        # write through any surface reaches the code that reads it.
+        self.params = node.params
         self._mesh = mesh
         self._axis_map = dict(axis_map)
         self._boundary = boundary

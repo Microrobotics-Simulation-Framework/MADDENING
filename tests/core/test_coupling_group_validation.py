@@ -1,8 +1,8 @@
 """Construction-time validation of ``CouplingGroup``'s Literal-typed fields.
 
 The fields ``solver``, ``acceleration``, ``iteration_mode``,
-``boundary_interpolation``, ``predictor`` and ``linear_solver`` are annotated
-``typing.Literal[...]``, but Python treats that purely as a type-checker hint
+``boundary_interpolation``, ``predictor``, ``linear_solver`` and
+``convergence_norm`` are annotated ``typing.Literal[...]``, but Python treats that purely as a type-checker hint
 at runtime — a typo like ``acceleration="aitkin"`` would silently set the
 field to that string and the runtime dispatch (``if group.acceleration ==
 "aitken": ...``) would simply fail to match, with the group quietly falling
@@ -37,6 +37,12 @@ def test_solver_valid(value):
 def test_acceleration_valid(value):
     g = CouplingGroup(nodes=NODES, acceleration=value)
     assert g.acceleration == value
+
+
+@pytest.mark.parametrize("value", ["l2", "mixed", "interface"])
+def test_convergence_norm_valid(value):
+    g = CouplingGroup(nodes=NODES, convergence_norm=value)
+    assert g.convergence_norm == value
 
 
 @pytest.mark.parametrize("value", ["gauss-seidel", "jacobi"])
@@ -74,6 +80,7 @@ def test_linear_solver_valid(value):
         ("solver", "for"),               # missing 'i'
         ("acceleration", "aitkin"),      # 'i' vs 'e'
         ("iteration_mode", "jacopi"),    # 'p' vs 'b'
+        ("convergence_norm", "mixxed"),  # doubled 'x'
         ("boundary_interpolation", "lineer"),
         ("predictor", "qaudratic"),      # transposed
         ("linear_solver", "gmrs"),       # missing 'e'
@@ -115,6 +122,7 @@ def test_default_construction_succeeds():
     assert g.solver == "ift"
     assert g.acceleration == "none"
     assert g.iteration_mode == "gauss-seidel"
+    assert g.convergence_norm == "l2"
     assert g.boundary_interpolation == "linear"
     assert g.predictor == "none"
     assert g.linear_solver == "gmres"
@@ -148,3 +156,40 @@ def test_subcycling_quadratic_predictor_config():
     )
     assert g.boundary_interpolation == "quadratic"
     assert g.predictor == "quadratic"
+
+
+# ---------------------------------------------------------------------------
+# 4. ``accelerated_fields`` is checked for shape, not only for content.
+# ---------------------------------------------------------------------------
+
+def test_accelerated_fields_rejects_a_non_mapping():
+    """A non-mapping is a ``ValueError``, not an ``AttributeError``.
+
+    The validator reads the mapping's values, so a list used to escape
+    as ``AttributeError: 'list' object has no attribute 'values'``
+    raised from inside ``__post_init__`` -- the wrong exception type,
+    naming an internal call rather than the setting.
+    """
+    with pytest.raises(ValueError, match="must be a mapping"):
+        CouplingGroup(nodes=NODES, accelerated_fields=["a"])
+
+
+def test_accelerated_fields_rejects_a_bare_string_value():
+    """``{"a": "position"}`` names a field, not a sequence of fields.
+
+    A string is iterable, so it survived construction and reached the
+    traced coupling loop as a per-character field list
+    (``names ['p', 'o', 's', ...]``) -- exactly the deep, confusing
+    failure this validation exists to prevent.
+    """
+    with pytest.raises(ValueError, match="bare string"):
+        CouplingGroup(nodes=NODES, accelerated_fields={"a": "position"})
+
+
+def test_accelerated_fields_accepts_tuples_and_none():
+    """The shape checks reject nothing that was valid before."""
+    assert CouplingGroup(nodes=NODES).accelerated_fields is None
+    g = CouplingGroup(
+        nodes=NODES, accelerated_fields={"a": ("position",), "b": ()}
+    )
+    assert g.accelerated_fields == {"a": ("position",), "b": ()}

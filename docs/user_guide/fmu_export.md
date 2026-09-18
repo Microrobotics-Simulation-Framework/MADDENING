@@ -48,7 +48,11 @@ instantiation.
 and unit from the target node's `boundary_input_spec`); parameters are
 `<node>.params.<key>` with `ParamSpec` bounds as `min` / `max`.  Setting a
 parameter goes through the sidecar's bounds check, so an importer cannot
-drive the graph with a constant it declares invalid.
+drive the graph with a constant it declares invalid.  A node name may
+itself contain a `.` (`tank.1`, `hx.hot`): the variable carries its
+`(node, field)` pair, so the bridge never has to guess where the name
+splits, and an export in which two nodes would spell the same variable
+name is refused naming both.
 
 **Transport.**  Each message is a 4-byte big-endian length prefix followed
 by one frame: a JSON object (`{"op": "set"|"get"|"step"|"get_state"|

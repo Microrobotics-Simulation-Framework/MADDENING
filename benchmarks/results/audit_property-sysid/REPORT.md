@@ -29,11 +29,14 @@ Hypothesis profile (`EXAMPLES_CHEAP/STANDARD/COSTLY = 200/50/20`).
   factor of 2, the inverted mask, the inverted noise model and both halves
   of the new validation were caught. The 5 survivors are all outside this
   file's declared scope, and 4 of the 5 are pinned elsewhere in the repo.
-* **The tolerances hold up**, with one caveat: the `1e-7` float64 claim is
-  sound, the `1e-2` float32 claim is sound but its stated margin is wrong by
-  a factor of ~4 (see MIN-1).
+* **The tolerances still discriminate**: the `1e-7` float64 claim is sound
+  (~160x headroom, and a sign error or a lost chain-rule factor is eight
+  orders above it), and the `1e-2` float32 bound still catches a factor of 2
+  and a sign flip. But the quoted worst case behind the `1e-2` bound is out
+  by a factor of ten, and the real worst case I measured lands 0.03% below
+  the bound (MAJ-3).
 
-**Two things need action before this merges:**
+**Three things need action before this merges (two are fixed here):**
 
 1. **MAJ-1 — the branch is red.** `TestCalibrate::
    test_a_parameter_the_forward_ignores_is_bit_identical_afterwards` fails on
@@ -46,7 +49,12 @@ Hypothesis profile (`EXAMPLES_CHEAP/STANDARD/COSTLY = 200/50/20`).
    it, and would `XPASS` (i.e. fail) if the premise line were repaired
    naively.
 
-Both are fixed on `fix/property-sysid-audit`.
+3. **MAJ-3 — the rollout finite-difference assertion has no margin left.**
+   Measured worst case 9.997e-03 against a 1.000e-02 bound over 126
+   configurations. Reported, deliberately not fixed: widening a tolerance is
+   the author's call, and it spends detection power.
+
+MAJ-1 and MAJ-2 are fixed on `fix/property-sysid-audit`.
 
 ---
 
@@ -118,20 +126,21 @@ The docstring claims "1e-2 relative to the matrix's own scale, against a worst
 case of 1e-3 measured over 25 random spring configurations at a relative step
 of 3e-3".
 
-Measured over 55 usable configurations drawn from the test's own strategy
-(stiffness 1-200, damping 0.1-10, mass 0.5-5, position ±5, velocity ±2,
-n ∈ {20,40}, same `h = 3e-3(1+|θ|)` and the same step-actually-taken
-correction):
+Measured over 126 usable configurations (two seeds, 55 + 71) drawn from the
+test's own strategy (stiffness 1-200, damping 0.1-10, mass 0.5-5, position ±5,
+velocity ±2, n ∈ {20,40}, same `h = 3e-3(1+|θ|)` and the same
+step-actually-taken correction):
 
 ```
-worst |F - F_fd|.max() / scale = 3.59e-03      (test bound: 1e-2)
-median                         = 2.72e-04
-p90                            = 8.87e-04
-worst config: k=107.9 c=4.57 m=4.81 x0=4.54 v0=1.19 n=20
+seed 1 (55 usable):  worst 3.59e-03   median 2.72e-04   p90 8.87e-04
+seed 7 (71 usable):  worst 9.997e-03  median 1.61e-04   p90 8.72e-04
+                           ^^^^^^^^^ the assertion bound is 1.000e-02
+worst config: k=115.3 c=0.493 m=4.107 x0=4.60 v0=1.416 n=20
 ```
 
-So the *typical* case matches the claimed 1e-3, but the **worst case is 3.6x
-worse than stated and only 2.8x below the assertion bound**. See MIN-1.
+The *typical* case is better than the claimed 1e-3, but the **observed worst
+case is 10x worse than stated and sits 0.03% below the assertion bound** — a
+near-miss, not a margin. See MAJ-3.
 
 Is `1e-2` still able to catch a real defect? `F` here is 2x2 and symmetric:
 
@@ -142,12 +151,13 @@ Is `1e-2` still able to catch a real defect? `F` here is 2x2 and symmetric:
   properties cannot distinguish `J` from `Jᵀ` numerically because `JᵀJ` is
   symmetric by construction. Worth knowing, but not a gap this file can close.
 * **wrong sign on one parameter** — flips only the off-diagonal, so the
-  detectable signal is `2|F_ds| / max|F|`. Reported in the script output
-  appended below; for the spring, damping and stiffness sensitivities are
-  strongly correlated, so `2|F_ds|` is a large fraction of `max|F|` and the
-  bound catches it comfortably. It would *not* catch a sign error on a
-  parameter whose sensitivity happens to be orthogonal to the other's —
-  a limitation inherent to a 2x2 `JᵀJ` check, not to the tolerance.
+  detectable signal is `2|F_ds| / max|F|`. Measured over the same 126
+  configurations: `min = 5.19e-02`, `median = 5.81e-01`, **0% of
+  configurations below the 1e-2 bound**. So yes, the loose bound still
+  catches a sign error — with a worst-case margin of ~5x, which is what
+  constrains how far the bound could be widened (MAJ-3). It would *not*
+  catch a sign error on a parameter whose sensitivity is orthogonal to the
+  other's — inherent to a 2x2 `JᵀJ` check, not to the tolerance.
 
 
 ### 1d. Mutation testing — which seeded defects the suite noticed
@@ -356,22 +366,33 @@ instead. The `reason` text needed no change; it was accurate all along.
 
 ### MINOR (reported, not fixed)
 
-#### MIN-1 — the module docstring overstates the rollout finite-difference margin
+#### MAJ-3 (risk, not fixed) — the rollout finite-difference assertion has no margin left
 
 `tests/property/test_sysid_contract.py:38-45` states "a worst case of 1e-3
-measured over 25 random spring configurations at a relative step of 3e-3". I
-measured **3.59e-03** over 55 usable configurations from the same strategy
-(median 2.7e-4, p90 8.9e-4). The `1e-2` assertion bound is therefore only
-**2.8x above the observed worst case**, not 10x. Under the `ci` profile
-(`EXAMPLES_COSTLY = 80`) the search is 4x deeper than the 20 examples I
-observed, so this is a plausible future flake. Either widen the bound with the
-measurement written down, or tighten the strategy (the worst cases cluster at
-high stiffness with large initial displacement). The *claim* the test makes is
-still sound; only the quoted margin is wrong.
+measured over 25 random spring configurations at a relative step of 3e-3", and
+asserts `np.abs(F - F_fd).max() <= 1e-2 * scale`.
 
-Correcting a measured number in a docstring is a one-line change, but the
-brief asks for minor findings to be reported rather than fixed, so the
-docstring is left as the author wrote it.
+Over 126 configurations drawn from the test's own strategy I measured a worst
+case of **9.997e-03** against a bound of **1.000e-02** — the assertion would
+have held by 0.03%. The distribution has a long right tail (median 1.6e-4,
+p90 8.7e-4) driven by high stiffness with a large initial displacement, where
+float32 cancellation in the rollout dominates the central difference. The
+quoted worst case of 1e-3 is out by a factor of ten.
+
+Eight repeat runs of the property itself with a *cleared* Hypothesis database
+all passed (20 examples each, dev profile), so I have a near-miss and not an
+observed failure. Extrapolating from the sample, roughly 1 draw in 126 lands
+within a factor of 1.001 of the bound, which at `EXAMPLES_COSTLY = 80` under
+the `ci` profile is a meaningful per-run failure probability.
+
+**Not fixed, deliberately.** The only fixes are to widen the bound or narrow
+the strategy, and both are calls about detection power that belong to the
+author: at `3e-2` the margin over a sign-flip on one parameter's Jacobian
+column drops from ~5x to ~1.7x (measured above). What is unambiguously wrong
+is the quoted measurement; that one line should be corrected whichever way the
+bound goes. The imprecision is in the *oracle* (a float32 central difference),
+not in `fim`, so widening does not hide a defect in the code under test — but
+it does spend the test's remaining power.
 
 #### MIN-2 — `continuity_weight < 0` is silently ignored
 
@@ -501,3 +522,43 @@ The same harness with the original strategy falsifies it, and with the naive
 `allow_subnormal=False` (width 64) still falsifies it.
 
 CI runs the full suite; I did not.
+
+---
+
+## Appendix — what was run
+
+```
+# baseline + filtering statistics (dev profile)
+cd <WT> && PYTHONPATH=<WT>/src JAX_PLATFORMS=cpu PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python -m pytest tests/property/test_sysid_contract.py -q -p no:cacheprovider -rs \
+  -p hypothesis.extra.pytestplugin --hypothesis-show-statistics
+# -> .x..x.......x............F...   26 passed, 3 xfailed, 1 FAILED   (MAJ-1)
+
+# the three xfails, unmasked
+  python -m pytest <the three node ids> -q --runxfail
+
+# mutation campaign: 18 exact-string mutations of src/maddening/sysid.py,
+# each applied, tested with -x against the properties that could see it, then
+# reverted with `git checkout --` and `git status --porcelain src/maddening`
+# asserted empty.  Harness + logs in the session scratchpad.
+
+# measurements (standalone scripts, session scratchpad):
+#   400 draws of the analytic residual in float64  -> 1b
+#   126 spring rollouts, two seeds                 -> 1c, MAJ-3
+#   20 000 float32 log round trips                 -> _ROUND_TRIP_RTOL check
+#   20 fresh 50-example searches, database=None    -> MAJ-1 fix verification
+#   8 repeats of the rollout FD property with a cleared .hypothesis  -> MAJ-3
+
+# compliance
+  python scripts/check_anomalies.py      OK
+  python scripts/check_impl_mapping.py   OK
+  python scripts/check_citations.py      OK
+  python scripts/check_transforms.py     OK
+```
+
+The worktree's `.hypothesis/` database was cleared at the end of the audit
+(it had accumulated counterexamples produced by the seeded mutations, which
+are not real failures and would only slow future runs down).
+
+`git status` at hand-off: clean apart from this report and the one test-file
+commit. `src/maddening/` is byte-identical to `test/property-sysid`.

@@ -58,13 +58,35 @@ def _call_name(func: ast.expr) -> str | None:
     return getattr(func, "attr", None) or getattr(func, "id", None)
 
 
+def _module_level_string_constants(tree: ast.AST) -> dict[str, str]:
+    """Module-level ``NAME = "literal"`` bindings.
+
+    ``transform=EXTRACT_LAST`` is as much a string reference as
+    ``transform="extract_last"``; binding the name to a constant first used
+    to hide it from the scan.
+    """
+    constants: dict[str, str] = {}
+    body = getattr(tree, "body", [])
+    for stmt in body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if not (isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)):
+            continue
+        for target in stmt.targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = stmt.value.value
+    return constants
+
+
 def find_transform_string_refs(tree: ast.AST) -> list[tuple[int, str]]:
-    """Find string literals used as ``transform=`` arguments on edge calls.
+    """Find string references used as ``transform=`` arguments on edge calls.
 
     Returns a list of ``(line_number, string_value)`` pairs.  Only edge
     constructors are considered: ``ParamSpec(transform="log")`` is a
     parameter reparametrisation, not an edge transform.
     """
+    constants = _module_level_string_constants(tree)
     results = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -72,9 +94,13 @@ def find_transform_string_refs(tree: ast.AST) -> list[tuple[int, str]]:
         if _call_name(node.func) not in _EDGE_CALLS:
             continue
         for kw in node.keywords:
-            if kw.arg == "transform" and isinstance(kw.value, ast.Constant):
+            if kw.arg != "transform":
+                continue
+            if isinstance(kw.value, ast.Constant):
                 if isinstance(kw.value.value, str):
                     results.append((kw.value.lineno, kw.value.value))
+            elif isinstance(kw.value, ast.Name) and kw.value.id in constants:
+                results.append((kw.value.lineno, constants[kw.value.id]))
     return results
 
 

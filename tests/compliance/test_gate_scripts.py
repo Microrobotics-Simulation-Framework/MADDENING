@@ -321,3 +321,36 @@ class TestAnomalyGate:
     def test_the_repository_registry_passes_with_the_prefix_ci_uses(self):
         result = _run("check_anomalies", "--prefix", "MADD-ANO-")
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTransformGateConstantBinding:
+    """A name bound to a string constant is still a string reference."""
+
+    def test_a_transform_bound_to_a_module_constant_is_checked(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "indirect.py").write_text(
+            'GHOST = "no_such_transform"\n'
+            'gm.add_edge("a", "b", "x", "y", transform=GHOST)\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_constant_naming_a_registered_transform_passes(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "indirect_ok.py").write_text(
+            'LAST = "extract_last"\n'
+            'gm.add_edge("a", "b", "x", "y", transform=LAST)\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_a_callable_passed_by_name_is_not_a_string_reference(
+        self, transforms_gate, tmp_path
+    ):
+        """``transform=my_fn`` is a function object, not a registry lookup."""
+        (tmp_path / "callable_arg.py").write_text(
+            "def my_fn(x):\n    return x\n"
+            'gm.add_edge("a", "b", "x", "y", transform=my_fn)\n'
+        )
+        # Nothing in scope -> the empty-scope guard, not a false positive.
+        assert transforms_gate.main([str(tmp_path)]) == 1

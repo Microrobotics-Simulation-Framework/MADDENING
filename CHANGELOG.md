@@ -198,6 +198,10 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Do not pair `convergence_norm="interface"` with the auto-detected
+  `accelerated_fields`**: both are the edge fields, so an accelerator's step
+  lands on exactly what the criterion measures and the rest of the state
+  drifts unchecked — name every field, or use the `"l2"` or `"mixed"` norm
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
   and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead

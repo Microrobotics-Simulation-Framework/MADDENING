@@ -495,6 +495,25 @@ to fall back on: IQN is simply not affordable.  On `expensive-pair` it
 costs **91–148x** the plain step for 0.05 of an iteration under the
 interface norm, and under the L2 norm `gs/iqn-ils` converged on only
 75% of steps.
+
+Third, and this one is an accuracy caveat rather than a cost one:
+**do not pair the auto-detected `accelerated_fields` with
+`convergence_norm="interface"`.**  Both are the edge source fields, so
+the quasi-Newton step lands on exactly the fields the criterion then
+measures, and every other field of the group is carried out of the last
+raw pass with nothing looking at it.  Measured over the sweep, on an
+`iqn-*` row exiting on its criterion, the interface field moves by at
+most 1.0e-04 while `velocity` moves by up to **2.2**.  This is what the
+ten `_KNOWN_DISAGREEMENTS` rows in
+`tests/core/test_coupling_fixture_invariants.py` are; naming every
+field in `accelerated_fields` closes all ten at the same iteration
+count, and tightening `atol`/`rtol` — the remedy those entries first
+named — does not, because the criterion is already three decades inside
+its threshold when they stop.  Either accelerate the whole state or
+choose a norm that sees it (`"l2"`, `"mixed"`);
+`benchmarks/results/retire_known_disagreements/REPORT.md` has the
+numbers, and `MADD-ANO-005` carries it as residual risk.
+
 ## Do all these configurations agree?
 
 The sweep records `fixed_point_agreement` per fixture: the largest

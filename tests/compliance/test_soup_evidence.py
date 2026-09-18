@@ -99,14 +99,43 @@ def test_the_version_is_identified_the_same_way_everywhere():
     ) == []
 
 
-def test_an_open_anomaly_does_not_record_a_closed_version_range():
-    """`open` and `affected_versions: "0.1.0"` cannot both be true.
+def test_an_unresolved_anomaly_does_not_record_a_closed_version_range():
+    """A reachable defect and a closed version range cannot both be true.
 
     MADD-ANO-001 and MADD-ANO-002 sat in exactly that state for three
     releases: still reproducible, but recorded as affecting only the
-    version they were first seen in.
+    version they were first seen in.  MADD-ANO-005 was the worse case --
+    `partially_resolved` with `<=0.3.0`, asserting 0.4.0 is clean while
+    its own `residual_risk` describes the path on which the pre-0.4.0
+    behaviour returns.  Only `resolved` and `duplicate` may close a
+    range; anything else, including a status nobody has enumerated, may
+    not.
     """
-    assert gen._check_open_anomalies_are_open_ended(gen.read_registry()) == []
+    assert gen._check_unresolved_anomalies_are_open_ended(
+        gen.read_registry()
+    ) == []
+
+
+@pytest.mark.parametrize("status", ["open", "partially_resolved", "wont_fix",
+                                    "probably fine tbh"])
+def test_a_closed_range_is_refused_for_every_unresolved_status(status):
+    registry = {"anomalies": [{
+        "anomaly_id": "MADD-ANO-999",
+        "resolution_status": status,
+        "affected_versions": "0.1.0",
+    }]}
+    errors = gen._check_unresolved_anomalies_are_open_ended(registry)
+    assert len(errors) == 1 and "MADD-ANO-999" in errors[0]
+
+
+@pytest.mark.parametrize("status", ["resolved", "duplicate"])
+def test_a_closed_range_is_allowed_once_the_defect_is_gone(status):
+    registry = {"anomalies": [{
+        "anomaly_id": "MADD-ANO-999",
+        "resolution_status": status,
+        "affected_versions": "0.3.0, 0.3.1",
+    }]}
+    assert gen._check_unresolved_anomalies_are_open_ended(registry) == []
 
 
 @pytest.mark.parametrize(

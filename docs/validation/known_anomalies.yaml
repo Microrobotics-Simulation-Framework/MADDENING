@@ -242,7 +242,7 @@ anomalies:
       - "maddening.core.coupling.group.CouplingGroup.tolerance"
       - "maddening.core.coupling.group.CouplingGroup.strict_convergence"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
-    affected_versions: "<=0.3.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       On 0.3.x and earlier, calibrate the criterion once per problem
       instead of trusting it: solve the same step at tolerance t and at

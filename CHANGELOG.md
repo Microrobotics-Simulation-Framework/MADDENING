@@ -354,8 +354,8 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
-- Open anomalies now record an open-ended `affected_versions` (`>=0.1.0`,
-  `>=0.4.0`) instead of the version they were first seen in; ANO-002's
+- Every anomaly whose defect is still reachable now records an open-ended
+  `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had
 - MADD-ANO-005: `converged=True` is a residual test, not a bound on the
   distance to the fixed point -- calibrate it by re-solving at a 100x tighter

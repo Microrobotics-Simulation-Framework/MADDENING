@@ -50,7 +50,7 @@ CI fails on a stale table instead of shipping one.
 
 Cross-file consistency is checked in both modes: the registry header
 and ``CITATION.cff`` must name the version ``pyproject.toml`` names, an
-``open`` anomaly must not record a closed ``affected_versions`` range,
+unresolved anomaly must not record a closed ``affected_versions`` range,
 and every test module registering a ``MADD-VER-`` benchmark must be in
 ``BENCHMARK_MODULES`` (otherwise it would silently drop out of the
 index -- the drift this script exists to stop).
@@ -100,6 +100,16 @@ BENCHMARK_MODULES: tuple[str, ...] = (
 #: ``TEST-VER-*`` entries into the same global registry while it runs,
 #: so the filter is what makes the generated table order-independent.
 BENCHMARK_PREFIX = "MADD-VER-"
+
+#: The only ``resolution_status`` values that may record a closed
+#: ``affected_versions`` range.  See
+#: ``_check_unresolved_anomalies_are_open_ended``.  Note that the
+#: registry uses ``partially_resolved``, which
+#: ``maddening.core.compliance.anomaly.ResolutionStatus`` does not
+#: define -- the status field is not enum-checked anywhere today, so
+#: this deliberately defaults an unrecognised status to "unresolved"
+#: rather than trusting the spelling.
+_STATUSES_THAT_MAY_CLOSE_A_RANGE = frozenset({"resolved", "duplicate"})
 
 #: What each top-level package under ``tests/`` covers.  Which packages
 #: exist comes from the tree, and
@@ -400,27 +410,40 @@ def _check_versions(pyproject: dict, registry: dict, citation: dict) -> list[str
     return errors
 
 
-def _check_open_anomalies_are_open_ended(registry: dict) -> list[str]:
-    """An open anomaly must not record a closed ``affected_versions``.
+def _check_unresolved_anomalies_are_open_ended(registry: dict) -> list[str]:
+    """An unresolved anomaly must not record a closed ``affected_versions``.
 
     ``affected_versions: "0.1.0"`` beside ``resolution_status: open``
     says two incompatible things: that the defect is still present and
     that it stopped being present after 0.1.0.  The first is what
     ``open`` means, so the range has to stay open-ended (``>=X``) until
-    closure evidence arrives.  Both MADD-ANO-001 and MADD-ANO-002 sat
-    in that state for three releases.
+    closure evidence arrives.  MADD-ANO-001 and MADD-ANO-002 sat in that
+    state for three releases.
+
+    The rule is an allowlist rather than a check for ``open``, because
+    ``open`` is not the only status that means "reachable in the version
+    you are running".  MADD-ANO-005 recorded ``<=0.3.0`` while its own
+    ``residual_risk`` describes a fallback path on which the pre-0.4.0
+    behaviour returns: a range that asserts "you are not affected" where
+    a reachable path says otherwise is worse than a stale one, because
+    it is confidently wrong rather than merely old.  ``wont_fix`` is in
+    the same position by definition.  Only ``resolved`` (the defect is
+    gone) and ``duplicate`` (the range lives on the other entry) may
+    close a range, and an unrecognised status is treated as unresolved.
     """
     errors = []
     for a in registry.get("anomalies", []):
-        if a.get("resolution_status") != "open":
+        status = a.get("resolution_status")
+        if status in _STATUSES_THAT_MAY_CLOSE_A_RANGE:
             continue
         affected = str(a.get("affected_versions", "")).strip()
         if not affected.startswith(">="):
             errors.append(
-                f"{a.get('anomaly_id')}: resolution_status is 'open' but "
-                f"affected_versions is {affected!r}, which closes the range.  "
-                f"An open anomaly's range has no upper bound — write "
-                f"'>={affected}' or close the anomaly."
+                f"{a.get('anomaly_id')}: resolution_status is {status!r}, which "
+                f"leaves the defect reachable, but affected_versions is "
+                f"{affected!r}, which closes the range.  Write an open-ended "
+                f"range ('>=X') and let the prose carry the condition, or "
+                f"resolve the anomaly."
             )
     return errors
 
@@ -504,7 +527,7 @@ def build() -> tuple[dict[Path, str], list[str]]:
 
     errors = (
         _check_versions(pyproject, registry, citation)
-        + _check_open_anomalies_are_open_ended(registry)
+        + _check_unresolved_anomalies_are_open_ended(registry)
         + _check_test_directories_are_described(packages)
         + _check_benchmark_modules_are_complete()
     )

@@ -1,9 +1,16 @@
-# D2 — `ift` returns the iterate its criterion passed: state at power-off
+# D2 — `ift` returns the iterate its criterion passed
 
 Branch `fix/converged-returns-measured-iterate`, forked from
-`origin/repro/ift-fori-divergence` (PR 46) @ `4a6f26a`.  Snapshot taken
-2026-09-18 under an unplanned power-off; the code and tests are complete
-and green, the **sweep quantification is not finished**.
+`origin/repro/ift-fori-divergence` (PR 46) @ `4a6f26a`.
+
+**Everything this branch set out to do is done.**  The fix, the tests
+and the housekeeping were finished on 2026-09-18 before an unplanned
+power-off; the sweep quantification that the power-off interrupted was
+redone and completed later the same day, 350 of 350 rows on both trees
+— see "DONE — the sweep replay" below and `REPORT.md`.  What is left is
+a decision for the maintainer, not work: the `_KNOWN_DISAGREEMENTS`
+entries under "THE FINDING THAT NEEDS A DECISION", and whether
+`stiff-pair-1.2` under `iqn-*`/`interface` should stay as it is.
 
 ## DONE — the fix itself (commit `6866695`)
 
@@ -113,49 +120,84 @@ stores genuine columns.  That is *not* addressed here and is why `ift`
 and `fori` IMVJ trajectories still differ across timesteps even though
 they now agree within a step.
 
-## NOT DONE — the sweep replay (the "quantify what moves" deliverable)
+## DONE — the sweep replay (2026-09-18, a later session)
 
-Harness written and working, run **incomplete at power-off: 72 of 350
-rows on the "before" tree, 0 on the "after" tree.**  Nothing usable was
-produced; no `.npz` was written.  All of it lived in the session
-scratchpad (`/tmp/claude-1000/.../scratchpad/work`) and is gone.
+**Complete: 350 of 350 rows on both trees.**  Written up in
+`REPORT.md`; the numbers are in `comparison.json` / `comparison.md` and
+`exit_analysis.json` / `exit_analysis.md`, and the raw per-step records
+in `raw/before.jsonl` and `raw/after.jsonl` so the comparison can be
+recomputed without replaying either tree.  Harness: `replay_sweep.py`,
+`diff_sweep.py`, `exit_analysis.py`, all in this directory and all
+committed.  The run took minutes per tree, not the ~55 the lost attempt
+estimated: recording what each coupling group returned is far cheaper
+than profiling it, which is what `bench_coupling_sweep` spends its time
+on.
 
-To redo it (roughly 55 min per tree on this laptop, CPU, the two trees
-sequentially):
+To redo it from scratch:
 
-1. Export the pre-fix source once:
-   `git archive 4a6f26a src | tar -x -C <scratch>/before`
-2. A replay script that, for every `sweep_configs(("l2","interface"))`
-   entry with `acceleration != "none"` (350 rows over the 18 fast
-   fixtures; skip jacobi on `mixed-modes`, which is `mode_fixed`), builds
-   the fixture, runs `spec.warmup` then `min(spec.steps, 50)` steps,
-   and records per group from `gm.coupling_diagnostics()` each step:
-   iterations mean/min/max, `at_cap_fraction` (`iters >= cap - 1`),
-   `converged_fraction`, the last residual — plus the concatenated
-   float state of the coupled nodes.  **No timings** (other agents share
-   the box).
-3. Run it under `PYTHONPATH=<scratch>/before/src` and under
-   `PYTHONPATH=<wt>/src`, then diff.
+    git archive 4a6f26a src | tar -x -C <scratch>/before
+    cd benchmarks/results/d2_converged_returns_measured_iterate
+    PYTHONPATH=<scratch>/before/src JAX_PLATFORMS=cpu python \
+        replay_sweep.py --out raw/before.jsonl
+    PYTHONPATH=<wt>/src JAX_PLATFORMS=cpu python \
+        replay_sweep.py --out raw/after.jsonl
+    python diff_sweep.py raw/before.jsonl raw/after.jsonl \
+        --out comparison.json --markdown comparison.md
+    python exit_analysis.py raw/before.jsonl raw/after.jsonl \
+        --out exit_analysis.json --markdown exit_analysis.md
 
-Expected shape of the answer, stated as a prediction so it can be
-checked rather than assumed:
+`replay_sweep.py` skips rows already present in its `--out` file, so it
+is restartable; `--start` / `--limit` cut it into chunks.
 
-- **Iteration counts and converged fractions should not move at all**
-  for a single step — `cond` is untouched.  Any movement is the returned
-  state feeding the next timestep, so it accumulates over the 50-step
-  window; the 72 rows measured on the "before" tree are only a baseline,
-  not a comparison.
-- **The state moves on every row that exits on its criterion.**  Rows
-  with `at_cap_fraction == 1.0` must be bit-identical; that is the
-  sharpest available check that the harness is sound.
-- Single-step magnitude is one residual: ~`residual/||x||` for
-  `acceleration="none"`, and up to three decades more for `iqn-*` under
-  the interface norm (measured 6e-04 on ring-8, above).
+Two departures from the recipe above, both deliberate and both recorded
+in the harness docstrings.  `warmup` is 0 for every fixture, so both
+trees start from the identical deterministic initial state and the
+state after step 1 is the uncompounded single-exit shift the brief
+asked for.  Rows run in a staircase order over (fixture, configuration)
+rather than fixture by fixture, so any prefix is a near-complete
+rectangle of the grid — which, with a commit every 50 rows, is what
+makes another power-off cost minutes.
 
-A one-step variant of the same harness (`warmup=0`, one step, from the
-deterministic initial state, so both trees start identical) is the clean
-way to get the *uncompounded* "relative shift in the returned state on a
-converged exit" the brief asks for; a 5-fixture subset is enough.
+Headline: **the quantity the group was converging on moves by less than
+the tolerance it was given** (interface fields, worst case 1.9e-04
+relative against the fixtures' `rtol=1e-4`; under `l2` the shift is
+exactly one residual, median ratio 1.0000 over 148 rows).  **A state
+field the criterion never looked at is not bounded that way**: under
+`iqn-*` with `convergence_norm="interface"`, `velocity` moves by a
+median of 1.7% and by up to 79% on a non-divergent fixture.  Every one
+of the fifteen largest single-step shifts is an `iqn-*` interface-norm
+row.
+
+The two predictions:
+
+- **"Iteration counts and converged fractions do not move for a single
+  step" — HELD**, 350/350 on both, exactly.  Over the 50-step window
+  166 rows land on a different iteration count and one row
+  (`chain-50 jac/aitken/l2`) on a different converged flag, which is
+  the returned state changing the next timestep's problem.
+- **"Rows with `at_cap_fraction == 1.0` must be bit-identical" —
+  FAILED, 16 of 17.**  The proxy is wrong, not the fix.
+  `at_cap_fraction` is the profiler's `iters >= cap - 1`, and `cond`
+  stops at `i >= max_iter - 1`, so a group meeting its criterion on the
+  last pass the cap allows is counted as at-cap while having taken a
+  criterion exit.  `chain-50 jac/fixed0.8/l2` is exactly that: 59
+  iterations on all 30 steps, residual dipping below `tolerance=1e-4`
+  on step 27 alone, states differing from step 27 alone.  Restated
+  about the flag rather than the proxy the invariant holds: all 16 rows
+  that never report `converged=True` are bit-identical over the whole
+  window, and all 39 rows unconverged at step 0 are identical after
+  step 1.  There is a ~1 float32 ULP floor under "bit-identical" —
+  two rows differ by 4e-08 / 1e-07 on an unconverged step because the
+  added `jnp.where` changes the HLO and XLA rounds differently.
+
+`stiff-pair-1.2` (built past the convergence limit on purpose) is the
+one alarming row and deserves the maintainer's eye: under
+`gs/iqn-ils/interface` it reports `converged=True` on all ten steps in
+both trees at three iterations, and the fixed tree's state norm runs
+115 -> 5.3e+04 where the pre-fix tree's stayed bounded at 35 -> 12.
+The fix removes an accidental damping that was hiding a divergence the
+interface criterion never noticed.  That is `MADD-ANO-005`, which this
+branch deliberately left open.
 
 ## Not touched
 

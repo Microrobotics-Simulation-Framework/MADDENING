@@ -1,5 +1,7 @@
 ## Sweep comparison (350 rows of 350)
 
+### All rows
+
 - `rows_compared`: 350
 - `rows_ok`: 350
 - `rows_failed`: 0
@@ -11,7 +13,11 @@
 - `rows_at_cap_fraction_1`: 17
 - `rows_at_cap_fraction_1_bit_identical`: 16
 - `prediction2_at_cap_bit_identical_holds`: False
-- `at_cap_violations`: `[{"fixture": "chain-50", "label": "jac/fixed0.8/l2", "first_differing_step": 27, "rel_step1_l2": 0.0, "converged_fraction_before": 0.03333333333333333}]`
+- `at_cap_violations`: `[{"fixture": "chain-50", "label": "jac/fixed0.8/l2", "first_differing_step": 27, "first_difference_on_a_converged_step": true, "rel_step1_l2": 0.0, "converged_fraction_before": 0.03333333333333333}]`
+- `rows_never_reporting_converged`: 16
+- `rows_never_reporting_converged_bit_identical`: 16
+- `prediction2_restated_holds`: False
+- `restated_violations`: `[{"fixture": "chain-5", "label": "jac/fixed0.5/l2", "first_differing_step": 1}, {"fixture": "star-4", "label": "jac/fixed0.5/l2", "first_differing_step": 1}]`
 - `rows_that_move`: 334
 - `rows_bit_identical`: 16
 - `rows_with_a_converged_exit`: 334
@@ -25,6 +31,36 @@
 - `worst_final_row`: `{"fixture": "stiff-pair-1.2", "label": "gs/iqn-ils/interface", "rel_l2": 4468.814332002661}`
 - `rows_only_in_before`: `[]`
 - `rows_only_in_after`: `[]`
+
+### Excluding `stiff-pair-1.2` (built to diverge)
+
+- `rows_compared`: 330
+- `rows_ok`: 330
+- `rows_failed`: 0
+- `rows_with_step0_iterations_identical`: 330
+- `rows_with_step0_converged_identical`: 330
+- `rows_with_window_iterations_identical`: 164
+- `rows_with_window_converged_identical`: 329
+- `prediction1_single_step_holds`: True
+- `rows_at_cap_fraction_1`: 5
+- `rows_at_cap_fraction_1_bit_identical`: 4
+- `prediction2_at_cap_bit_identical_holds`: False
+- `at_cap_violations`: `[{"fixture": "chain-50", "label": "jac/fixed0.8/l2", "first_differing_step": 27, "first_difference_on_a_converged_step": true, "rel_step1_l2": 0.0, "converged_fraction_before": 0.03333333333333333}]`
+- `rows_never_reporting_converged`: 4
+- `rows_never_reporting_converged_bit_identical`: 4
+- `prediction2_restated_holds`: False
+- `restated_violations`: `[{"fixture": "chain-5", "label": "jac/fixed0.5/l2", "first_differing_step": 1}, {"fixture": "star-4", "label": "jac/fixed0.5/l2", "first_differing_step": 1}]`
+- `rows_that_move`: 326
+- `rows_bit_identical`: 4
+- `rows_with_a_converged_exit`: 326
+- `rel_step1_l2_median`: 1.291e-06
+- `rel_step1_l2_p90`: 1.453e-02
+- `rel_step1_l2_max`: 7.900e-01
+- `rel_final_l2_median`: 3.025e-05
+- `rel_final_l2_p90`: 6.055e-02
+- `rel_final_l2_max`: 8.964e-01
+- `worst_step1_row`: `{"fixture": "stiff-pair-0.95", "label": "jac/iqn-ils/interface", "rel_l2": 0.7899693056363033}`
+- `worst_final_row`: `{"fixture": "stiff-pair-0.95", "label": "jac/iqn-imvj5/interface", "rel_l2": 0.8963625495117571}`
 
 ### By acceleration
 

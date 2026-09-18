@@ -142,6 +142,21 @@ def compare(b: dict, a: dict) -> dict:
     out["bit_identical_all_steps"] = all(same)
     out["first_differing_step"] = (None if all(same)
                                    else int(same.index(False)))
+
+    # The sound version of "a row that never exits on its criterion is
+    # bit-identical".  ``at_cap_fraction == 1.0`` is *not* that row:
+    # the profiler counts ``iters >= cap - 1`` as at-cap, and a group
+    # can meet its criterion on the last pass the cap allows, which is
+    # a criterion exit with ``iterations == cap - 1``.  What cannot
+    # happen is a state changing on a step every group reported
+    # unconverged, because the changed line is then not reached.
+    conv_any = [any(bool(b["groups"][k]["converged"][s])
+                    for k in b["group_keys"])
+                for s in range(b["n_steps"])]
+    out["never_reports_converged"] = not any(conv_any)
+    fd = out["first_differing_step"]
+    out["first_difference_on_a_converged_step"] = (
+        None if fd is None else bool(conv_any[fd]))
     # A row that never exits on its criterion never reaches the changed
     # line; the residual it reports is the only thing the fix could have
     # touched, and it does not touch it.
@@ -193,9 +208,28 @@ def summarise(cmps: list[dict]) -> dict:
         "at_cap_violations": [
             {"fixture": c["fixture"], "label": c["label"],
              "first_differing_step": c["first_differing_step"],
+             "first_difference_on_a_converged_step":
+                 c["first_difference_on_a_converged_step"],
              "rel_step1_l2": c["rel_step1"]["l2"],
              "converged_fraction_before": c["converged_fraction_before"]}
             for c in at_cap if not c["bit_identical_all_steps"]],
+        # Prediction 2, restated so that it is about the changed line
+        # rather than about a proxy for it.
+        "rows_never_reporting_converged": sum(
+            c["never_reports_converged"] for c in ok),
+        "rows_never_reporting_converged_bit_identical": sum(
+            c["bit_identical_all_steps"] for c in ok
+            if c["never_reports_converged"]),
+        "prediction2_restated_holds": all(
+            (c["bit_identical_all_steps"] if c["never_reports_converged"]
+             else c["first_difference_on_a_converged_step"] is not False)
+            for c in ok),
+        "restated_violations": [
+            {"fixture": c["fixture"], "label": c["label"],
+             "first_differing_step": c["first_differing_step"]}
+            for c in ok
+            if (not c["bit_identical_all_steps"]
+                and c["first_difference_on_a_converged_step"] is False)],
         # Magnitude
         "rows_that_move": len(moved),
         "rows_bit_identical": len(ok) - len(moved),
@@ -273,23 +307,34 @@ def main() -> int:
     by_norm = _by_group(cmps, lambda c: c["convergence_norm"])
     by_fixture = _by_group(cmps, lambda c: c["fixture"])
 
-    doc = {"summary": summary, "by_acceleration": by_accel,
+    # ``stiff-pair-1.2`` is built past the convergence limit on purpose
+    # (gain 1.2, "a divergent group grows the state by ~rho**max_it
+    # every step").  It dominates every maximum, so the percentiles are
+    # reported with and without it.
+    divergent = {"stiff-pair-1.2"}
+    summary_stable = summarise([c for c in cmps
+                                if c["fixture"] not in divergent])
+    doc = {"summary": summary,
+           "summary_excluding_divergent_fixture": summary_stable,
+           "by_acceleration": by_accel,
            "by_norm": by_norm, "by_fixture": by_fixture, "rows": cmps}
     if args.out:
         args.out.write_text(json.dumps(doc, indent=1, sort_keys=False) + "\n")
     if args.markdown:
         lines = [f"## Sweep comparison ({summary['rows_compared']} rows"
                  f" of 350)", ""]
-        for k, v in summary.items():
-            if k in ("at_cap_violations", "worst_step1_row",
-                     "worst_final_row", "rows_only_in_before",
-                     "rows_only_in_after"):
-                lines.append(f"- `{k}`: `{json.dumps(v)}`")
-            elif isinstance(v, float):
-                lines.append(f"- `{k}`: {v:.3e}")
-            else:
-                lines.append(f"- `{k}`: {v}")
-        lines.append("")
+        for title, block in (("All rows", summary),
+                             ("Excluding `stiff-pair-1.2` (built to "
+                              "diverge)", summary_stable)):
+            lines += [f"### {title}", ""]
+            for k, v in block.items():
+                if isinstance(v, (list, dict)):
+                    lines.append(f"- `{k}`: `{json.dumps(v)}`")
+                elif isinstance(v, float):
+                    lines.append(f"- `{k}`: {v:.3e}")
+                else:
+                    lines.append(f"- `{k}`: {v}")
+            lines.append("")
         lines += _table(by_accel, "By acceleration")
         lines += _table(by_norm, "By convergence norm")
         lines += _table(by_fixture, "By fixture")

@@ -84,9 +84,14 @@ def _contracting_graph(*, scale=1.0, solver="ift", **group_kw):
     gm.add_node(_Affine("b", gain=0.5, bias=0.0, scale=scale))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
-    kw = dict(diagnostics=True, solver=solver, max_iterations=20,
-              tolerance=1e-4)
+    kw = dict(diagnostics=True, solver=solver, max_iterations=20)
     kw.update(group_kw)
+    # ``tolerance`` is read only under the "l2" norm, and setting a knob a
+    # norm never reads warns (fatally, under `filterwarnings = ["error"]`).
+    # Default it only where it is live, so a caller choosing "mixed" or
+    # "interface" does not inherit an inert one from this helper.
+    if kw.get("convergence_norm", "l2") == "l2":
+        kw.setdefault("tolerance", 1e-4)
     gm.add_coupling_group(["a", "b"], **kw)
     gm.compile()
     return gm
@@ -271,7 +276,11 @@ def test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in(norm):
     it satisfied its criterion on pass one while still percent-sized
     from its fixed point.
     """
-    kw = dict(convergence_norm=norm, tolerance=1e-4, atol=1e-12, rtol=1e-4)
+    # Only the knobs this norm reads: "l2" reads ``tolerance`` (supplied
+    # by the helper), the other two read ``atol``/``rtol``.
+    kw = dict(convergence_norm=norm)
+    if norm != "l2":
+        kw.update(atol=1e-12, rtol=1e-4)
     big = _contracting_graph(scale=1.0, **kw)
     small = _contracting_graph(scale=1e-6, **kw)
     big.step()

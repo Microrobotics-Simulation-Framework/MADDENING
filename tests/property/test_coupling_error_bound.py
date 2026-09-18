@@ -98,20 +98,30 @@ def _tightened(recipe):
     decides which fields are in the norm at all, so moving it would
     measure the distance in different units from the ones the group's
     own threshold is quoted in.
+
+    Only the knob the drawn norm actually reads is tightened.  ``"l2"``
+    reads ``tolerance`` and never sees ``rtol``; ``"mixed"`` and
+    ``"interface"`` read ``rtol`` and never see ``tolerance``.  Moving
+    the inert one would be a no-op on the reference *and* would trip
+    ``CouplingGroup``'s inert-knob ``UserWarning``, which
+    ``filterwarnings = ["error"]`` makes fatal -- so the reference would
+    fail to build rather than be loose.
     """
+    def _tighter(g):
+        live = ({"tolerance": g.tolerance * _REFERENCE_FACTOR}
+                if g.convergence_norm == "l2"
+                else {"rtol": g.rtol * _REFERENCE_FACTOR})
+        return dataclasses.replace(
+            g,
+            max_iterations=_REFERENCE_CAP,
+            diagnostics=True,
+            strict_convergence=False,
+            **live,
+        )
+
     return dataclasses.replace(
         recipe,
-        coupling_groups=tuple(
-            dataclasses.replace(
-                g,
-                max_iterations=_REFERENCE_CAP,
-                tolerance=g.tolerance * _REFERENCE_FACTOR,
-                rtol=g.rtol * _REFERENCE_FACTOR,
-                diagnostics=True,
-                strict_convergence=False,
-            )
-            for g in recipe.coupling_groups
-        ),
+        coupling_groups=tuple(_tighter(g) for g in recipe.coupling_groups),
     )
 
 

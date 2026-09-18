@@ -212,6 +212,9 @@ class TestLoadGraphFromUSD:
         arr = jnp.array([1.0, 2.0, 3.0])
         assert float(edge.transform(arr)) == 3.0
 
+    # ``tolerance`` is dead under ``convergence_norm="mixed"``; both are
+    # set here to prove the stage carries them, not to configure a solve.
+    @pytest.mark.filterwarnings("ignore:CouplingGroup.tolerance:UserWarning")
     def test_round_trip_coupling_group(self):
         """Save and reload coupling groups."""
         gm1 = GraphManager()
@@ -332,9 +335,16 @@ class TestLoadGraphFromUSD:
         assert abs(slow_node.delta_t - 0.01) < 1e-10
 
 
+@pytest.mark.filterwarnings("ignore:CouplingGroup.tolerance:UserWarning")
 class TestCouplingGroupFields:
     """A coupling group on a stage carries the same nineteen fields as the
     config does.
+
+    ``NON_DEFAULT`` below is deliberately an inconsistent configuration:
+    ``tolerance`` is dead under ``convergence_norm="mixed"`` and
+    ``CouplingGroup`` warns about it, but every field has to differ from
+    its default or the round trip stops testing that field.  Hence the
+    class-wide filter -- it is the fixture that is odd, not the group.
 
     The stage used to store eleven of them, so a graph saved with an IQN
     acceleration, a jacobian-reuse window and a strict-convergence

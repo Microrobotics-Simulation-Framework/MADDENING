@@ -652,15 +652,29 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
             for m in members
         )
 
+    # Only the tolerance knob the drawn norm actually reads is varied.
+    # ``"l2"`` tests against ``tolerance`` and never sees ``atol`` /
+    # ``rtol``; ``"mixed"`` and ``"interface"`` scale the residual by
+    # ``atol`` / ``rtol`` and never see ``tolerance``.  ``CouplingGroup``
+    # warns about a knob its norm ignores, so drawing all three would
+    # generate recipes no user would write -- and, under
+    # ``filterwarnings = ["error"]``, would fail two thirds of the graphs
+    # built here on a warning about the graph rather than about the
+    # property.  Both branches occur across examples, so every field
+    # still takes a non-default value somewhere in the search.
+    norm = draw(st.sampled_from(COUPLING_NORMS))
+    live_l2 = norm == "l2"
     return CouplingGroupRecipe(
         nodes=tuple(m.name for m in members),
         # Two or more, so a quasi-Newton method has a secant column to
         # allocate; small, because every iteration is a traced node update.
         max_iterations=draw(st.integers(min_value=2, max_value=6)),
-        tolerance=draw(st.sampled_from([1e-8, 1e-6, 1e-3])),
-        convergence_norm=draw(st.sampled_from(COUPLING_NORMS)),
-        atol=draw(st.sampled_from([1e-8, 1e-5])),
-        rtol=draw(st.sampled_from([1e-6, 1e-3])),
+        tolerance=(
+            draw(st.sampled_from([1e-8, 1e-6, 1e-3])) if live_l2 else 1e-6
+        ),
+        convergence_norm=norm,
+        atol=1e-8 if live_l2 else draw(st.sampled_from([1e-8, 1e-5])),
+        rtol=1e-6 if live_l2 else draw(st.sampled_from([1e-6, 1e-3])),
         diagnostics=draw(st.booleans()),
         acceleration=draw(st.sampled_from(COUPLING_ACCELERATIONS)),
         relaxation=draw(st.sampled_from([0.5, 0.8, 1.0])),

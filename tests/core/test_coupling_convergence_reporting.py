@@ -503,13 +503,15 @@ def test_the_aitken_guard_is_answerable_at_every_cap(cap):
     does not arrive the group measures what it returns instead of
     trusting the single value.
 
-    Concretely, with ``tolerance=0.5`` the pass before the loop is at
-    1.118 and the first pass inside it at 0.2795.  ``none`` stops on
-    that one value and reports it.  Aitken may not, so at caps 2 and 3
-    it reports the measured residual of the state it returns, which is
-    a smaller, different number -- the guard is doing something.
+    Concretely, with ``tolerance=0.75`` the pass before the loop is at
+    1.414 in the group's (scale-aware) norm and the first pass inside
+    it at 0.283, whose error bound is 0.512.  ``none`` stops on that
+    one value and reports it.  Aitken may not -- its streak still holds
+    the 1.414 -- so at caps 2 and 3 it reports the measured residual of
+    the state it returns, which is a smaller, different number: the
+    guard is doing something.
     """
-    tol = 0.5
+    tol = 0.75
     verdicts = {}
     for acceleration in ("none", "aitken"):
         gm = _affine_graph(acceleration=acceleration, max_iterations=cap,

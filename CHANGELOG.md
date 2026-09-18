@@ -121,6 +121,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`converged=True` means "within `tolerance` of the fixed point"**, not "the
+  last step was small": the threshold is tested against `residual / (1 - rho)`
+  and every norm is now relative, so expect more iterations and retune `atol`
 - **`solver="ift"` returns the iterate whose residual met the criterion**, as
   `fori` always has, so `converged=True` names the state you were handed and
   both solvers return it; every converged group's answer moves by one residual

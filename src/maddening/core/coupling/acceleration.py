@@ -242,15 +242,33 @@ def coupling_residual_interface(
 # Distance to the fixed point, estimated from the residual sequence
 # ------------------------------------------------------------------
 
-def error_amplification(residual, prev_residual):
-    """Estimate ``1 / (1 - rho)`` from two consecutive residuals.
+def error_amplification(residual, prev_residual, prev2_residual=None):
+    """Estimate ``1 / (1 - rho)`` from the last two or three residuals.
 
     For a linear contraction with rate ``rho``, the distance from the
     current iterate to the fixed point is bounded by
     ``||x_k - x*|| <= r_k / (1 - rho)`` (sum the remaining steps of a
     geometric series), and ``rho`` is free: it is ``r_k / r_{k-1}``.
-    Written as ``r_{k-1} / (r_{k-1} - r_k)`` so the cancellation
-    happens between the two measured numbers rather than against 1.
+
+    That one-step ratio is the estimate the brief calls unreliable, and
+    the case that breaks it is *alternation*, not growth.  A non-normal
+    group whose residuals run ``0.5, 5, 0.25, 2.5`` is converging at
+    ``rho = 0.71`` per pass, but every second one-step ratio reads
+    ``0.05`` and flatters the bound by a factor of fourteen.  So the
+    rate taken is the worst of the one-step ratio and the two-step
+    ``sqrt(r_k / r_{k-2})``, which is the same number on a monotone
+    geometric sequence and is immune to alternation:
+
+        rho = max(r_k / r_{k-1}, sqrt(r_k / r_{k-2}))
+
+    Written as ``r_{k-1} / (r_{k-1} - r_k)`` where it can be, so the
+    cancellation happens between two measured numbers rather than
+    against 1.
+
+    ``prev2_residual`` defaults to ``prev_residual``, which is what the
+    first pass of a loop has; the two-step term is then
+    ``sqrt`` of the one-step one, i.e. slightly conservative, which is
+    the right way to be wrong about a rate nothing has confirmed yet.
 
     Returns ``0.0`` — an impossible amplification, since a valid one is
     always ``>= 1`` — when the estimate must be rejected: a
@@ -259,18 +277,25 @@ def error_amplification(residual, prev_residual):
     current residual.  Callers fall back to the raw residual test and
     report that they did; see
     ``GraphManager.coupling_diagnostics``' ``bound_valid``.  Rejecting
-    is deliberate: the ratio is meaningless on a non-monotone sequence,
-    which is exactly the non-normal case that motivated the
-    re-measurement in decision D2, and a trusted bad estimate is worse
-    than an honest fallback.
+    is deliberate: a trusted bad estimate is worse than an honest
+    fallback, and the fallback is exactly the criterion that shipped
+    before 0.4.0.
     """
-    den = prev_residual - residual
-    ok = jnp.logical_and(
-        jnp.logical_and(prev_residual > 0, den > 0),
-        jnp.logical_and(jnp.isfinite(residual), jnp.isfinite(prev_residual)),
+    if prev2_residual is None:
+        prev2_residual = prev_residual
+    finite = jnp.logical_and(
+        jnp.isfinite(residual),
+        jnp.logical_and(jnp.isfinite(prev_residual),
+                        jnp.isfinite(prev2_residual)),
     )
-    safe = jnp.where(ok, den, jnp.ones_like(den))
-    return jnp.where(ok, prev_residual / safe, jnp.zeros_like(residual))
+    positive = jnp.logical_and(prev_residual > 0, prev2_residual > 0)
+    usable = jnp.logical_and(finite, positive)
+    safe1 = jnp.where(usable, prev_residual, jnp.ones_like(prev_residual))
+    safe2 = jnp.where(usable, prev2_residual, jnp.ones_like(prev2_residual))
+    rho = jnp.maximum(residual / safe1, jnp.sqrt(residual / safe2))
+    ok = jnp.logical_and(usable, rho < 1)
+    den = jnp.where(ok, 1.0 - rho, jnp.ones_like(rho))
+    return jnp.where(ok, 1.0 / den, jnp.zeros_like(residual))
 
 
 def estimated_error(residual, amplification):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -225,11 +226,46 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         graph_manager.set_node_state(node_name, new_state)
 
     # Restore _meta if present in the checkpoint.
+    #
+    # Merged over the compiled graph's own ``_meta``, never substituted
+    # for it.  The key set is the *graph's*: a checkpoint written before
+    # ``predictor=`` was turned on carries fewer keys, and replacing the
+    # dict dropped the ones the recompiled graph had just seeded --
+    # ``step()`` survived that (it rebuilds ``_meta`` each call) while
+    # ``run_scan`` died on a carry-structure mismatch, the one place the
+    # execution paths disagreed.  A key the checkpoint carries and this
+    # graph does not is stale (its coupling group is gone) and is
+    # dropped; a key whose shape no longer fits keeps the graph's freshly
+    # seeded value, since every ``_meta`` entry but the step counter is a
+    # warm start that is only ever an accelerator.
     raw_state = graph_manager._state  # noqa: SLF001
     if meta_keys:
-        raw_state[_META_KEY] = {
-            field: jnp.array(arr) for field, arr in meta_keys.items()
-        }
+        live_meta = raw_state.get(_META_KEY) or {}
+        merged = dict(live_meta)
+        dropped, reshaped = [], []
+        for field, arr in meta_keys.items():
+            if field not in live_meta:
+                dropped.append(field)
+                continue
+            want = jnp.asarray(live_meta[field])
+            if tuple(np.shape(arr)) != tuple(want.shape):
+                reshaped.append(field)
+                continue
+            merged[field] = jnp.asarray(arr, dtype=want.dtype)
+        if merged:
+            raw_state[_META_KEY] = merged
+        if dropped or reshaped:
+            detail = []
+            if dropped:
+                detail.append(f"not present in this graph: {sorted(dropped)}")
+            if reshaped:
+                detail.append(f"shape no longer fits: {sorted(reshaped)}")
+            warnings.warn(
+                "checkpoint _meta entries ignored (" + "; ".join(detail) + "); "
+                "this graph's freshly compiled values are used instead",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     # A checkpoint without ``_meta`` (written by a graph that had none)
     # keeps the freshly compiled ``_meta`` of *this* graph: a multirate
     # step counter or coupling history seeded at zero is the right start,

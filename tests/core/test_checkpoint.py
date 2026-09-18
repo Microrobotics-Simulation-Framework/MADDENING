@@ -309,3 +309,68 @@ class TestConvenienceMethods:
             np.asarray(gm.get_node_state("ball")["position"]),
             saved_pos,
         )
+
+
+class TestMetaMerge:
+    """``load_state`` merges ``_meta``; it does not substitute for it.
+
+    ``step()`` rebuilds ``_meta`` on every call, so it tolerates a state
+    missing a key the compiled graph seeds.  ``run_scan`` cannot: the key
+    set is the scan carry's pytree structure.  A checkpoint whose ``_meta``
+    replaced the graph's was therefore the one place the execution paths
+    disagreed -- one worked, the other died inside ``lax.scan``.
+    """
+
+    @staticmethod
+    def _coupled(predictor="none"):
+        from maddening.nodes.spring import SpringDamperNode
+
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("a", 0.01, initial_position=1.0))
+        gm.add_node(SpringDamperNode("b", 0.01, initial_position=0.0))
+        gm.add_edge("a", "b", "position", "anchor_position")
+        gm.add_edge("b", "a", "position", "anchor_position")
+        gm.add_coupling_group(["a", "b"], diagnostics=True, predictor=predictor)
+        gm.compile()
+        return gm
+
+    def test_every_execution_path_accepts_a_resumed_state(self, tmp_path):
+        """Resume into a graph with *more* ``_meta`` keys than the file."""
+        src = self._coupled()
+        src.run(3)
+        path = save_state(src, tmp_path / "plain")
+
+        gm = self._coupled(predictor="linear")
+        seeded = set(gm._state["_meta"])
+        load_state(gm, path)
+        assert set(gm._state["_meta"]) == seeded
+
+        gm.step()
+        gm.run_scan(3)
+        gm.run_scan_with_history(3)
+
+    def test_a_meta_key_this_graph_does_not_have_is_dropped_with_a_warning(
+        self, tmp_path,
+    ):
+        """A stale warm start must not ride along into the scan carry."""
+        src = self._coupled(predictor="linear")
+        src.run(3)
+        path = save_state(src, tmp_path / "pred")
+
+        gm = self._coupled()
+        with pytest.warns(RuntimeWarning, match="not present in this graph"):
+            load_state(gm, path)
+        assert not any("_pred_" in k for k in gm._state["_meta"])
+        gm.run_scan(3)
+
+    def test_the_keys_both_sides_have_are_restored(self, tmp_path):
+        gm = _make_multirate_graph()
+        gm.compile()
+        gm.run(7)
+        path = save_state(gm, tmp_path / "mr")
+        gm.run(5)
+
+        other = _make_multirate_graph()
+        other.compile()
+        load_state(other, path)
+        assert int(other._state["_meta"]["step_count"]) == 7

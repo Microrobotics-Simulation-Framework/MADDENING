@@ -280,6 +280,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **The coupled adjoint-identity property stops scaling by a cancelling
+  inner product**: it divides by the norm of the terms contracted, not by
+  the value they produce, which removes a latent float32 flake
 - **Mapping-spec resolver, against generated input** (11 properties): a
   mutated spec is refused naming the edge or loads exactly the recipe on
   disk, and no generated asset path escapes the config directory

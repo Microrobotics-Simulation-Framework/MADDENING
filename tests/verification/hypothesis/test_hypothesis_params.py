@@ -436,8 +436,31 @@ class TestAdjointIdentity:
         lhs = sum(jnp.vdot(a, b) for a, b in zip(jax.tree.leaves(jv), jax.tree.leaves(w)))
         rhs = sum(jnp.vdot(a, b) for a, b in zip(jax.tree.leaves(v), jax.tree.leaves(jtw)))
         lhs, rhs = float(lhs), float(rhs)
-        scale = max(abs(lhs), abs(rhs), 1e-3)
-        assert abs(lhs - rhs) / scale < 1e-4, (lhs, rhs)
+
+        # Scale by the magnitude of the terms being contracted, not by the
+        # value that comes out.  Both sides are inner products that can
+        # cancel to far less than the vectors going into them, while the
+        # float32 rounding error stays set by those vectors -- so dividing
+        # by ``max(|lhs|, |rhs|, ...)`` measures cancellation rather than
+        # adjoint error, and a floor only fixes where it blows up, not
+        # that it does.
+        #
+        # Measured on the coupled fixture: under the old denominator the
+        # ratio has median 9.4e-8 but a tail reaching 1.29e-4 against its
+        # own 1e-4 bound (seed 8560, n_steps=2, where both dot products
+        # land near -9.2545e-4 and differ by 1.285e-7 -- float32 eps is
+        # 1.2e-7, i.e. it was asking for agreement at the noise floor).
+        # Under the norm product the same case is 1.75e-8, unremarkable
+        # against a median of 1.2e-8 and a worst case of 7.6e-8 over 78
+        # others.  The bound below therefore keeps better than an order of
+        # magnitude of headroom, and a genuinely wrong adjoint is O(1)
+        # here, so nothing is given up by moving it.
+        def _norm(tree):
+            return float(jnp.sqrt(
+                sum(jnp.vdot(x, x) for x in jax.tree.leaves(tree))))
+
+        scale = max(_norm(jv) * _norm(w), _norm(v) * _norm(jtw), 1e-30)
+        assert abs(lhs - rhs) / scale < 1e-6, (lhs, rhs, scale)
 
     @given(
         seed=st.integers(min_value=0, max_value=2**31),

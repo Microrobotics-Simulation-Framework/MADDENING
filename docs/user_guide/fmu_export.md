@@ -146,6 +146,48 @@ under the same one.
 (8 bytes per value) over loopback, measured by
 `tests/fmi/test_binary_frames.py::test_million_element_get_binary_is_faster_than_json`.
 
+## The trust boundary
+
+The importer is **untrusted**.  Bind the bridge to `127.0.0.1` unless the
+network is trusted, and know what the bridge does and does not promise.
+
+**Nothing on the socket is unpickled or evaluated.**  The FMU-state blob
+is an `npz` of plain arrays read with `allow_pickle=False`, and its
+archive directory is checked before anything is decompressed.
+
+**No wait on a connection is unbounded.**  A connection holds the
+bridge's single FMU instance for as long as it lives, so each wait has a
+finite budget: ten seconds to begin the first frame, five minutes of
+silence between frames once the peer has spoken, and two minutes to
+finish a frame whose length it has announced.  Overrunning any of them
+ends the connection exactly as EOF does.  The instance slot is claimed
+when a peer sends its first complete frame, not when it connects, so a
+peer that connects and says nothing — a crashed importer, a dropped
+link, a port scan — claims nothing.  At most sixteen connection threads
+are live at once; further connections are closed on accept.  `stop()`
+shuts every live connection down and joins its worker.
+
+**A value that `set` refuses, `set_state` refuses too.**  Both doors
+into the state and parameter tree apply the same checks: every value
+must be finite and representable in the dtype of the array it replaces,
+and every parameter must lie inside its declared `ParamSpec` bounds —
+the `min` / `max` the model description advertises.  An importer
+therefore cannot use an FMU-state archive to install a constant the
+graph declares invalid.
+
+```{warning}
+The consequence is that a snapshot of a *diverged* model — one whose
+state holds `inf` or `NaN` — does not restore.  The error names the
+field.
+```
+
+**`FmuSidecar.handle` is not part of this.**  It speaks a pickled
+request/response protocol, so unpickling a request runs whatever
+produced the bytes.  It refuses to run unless the sidecar was built with
+`SidecarConfig(..., allow_pickle_rpc=True)`, which is only appropriate
+for an in-process caller you trust as much as your own code.  The FMU
+does not use it.
+
 ## Why TCP + JSON, and when ZMQ would be worth it
 
 The v0.3.0 plan called the sidecar protocol "ZMQ".  The shipped wrapper

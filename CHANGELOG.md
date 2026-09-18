@@ -124,6 +124,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
+  between `unit` and `shape`, so a positional call silently bound the wrong
+  fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`
@@ -336,6 +339,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
+  bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
+  stage no longer imports the class it names — pass `node_registry=` to allow one
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory

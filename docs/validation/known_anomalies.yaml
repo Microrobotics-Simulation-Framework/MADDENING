@@ -249,3 +249,54 @@ anomalies:
       - "tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in"
       - "tests/property/test_coupling_error_bound.py::test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-006"
+    title: "Non-finite numbers are written as non-standard JSON tokens"
+    description: >
+      Three serialisers hand a non-finite float to json.dumps with its
+      default allow_nan=True, which writes the bare tokens NaN, Infinity
+      and -Infinity: GraphManager.to_dict() (a ParamSpec with an infinite
+      bound), the USD maddening:paramsJson attribute (a non-finite node
+      param), and the FmuTcpBridge JSON wire (a get reply carrying a
+      non-finite state value, which a diverged model produces).  Those
+      tokens are not JSON.  Python reads them back, and the FMU's C
+      wrapper parses them with strtod, so every round trip inside
+      MADDENING is exact; any other reader of a saved config, a .usda or
+      the documented sidecar protocol rejects the document.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No value is lost or altered inside MADDENING, and the failure in
+      another reader is a parse error, not a wrong number: a strict JSON
+      parser refuses the document rather than mis-reading it.  The
+      relevance is to a downstream product that reads a MADDENING config
+      or stage with a non-Python toolchain, or that writes its own
+      sidecar client, and that treats a non-finite value as data rather
+      than as a fault to be handled.
+    affected_components:
+      - "maddening.serialization.config.to_dict"
+      - "maddening.usd.serialization.save_graph_to_usd"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "<=0.4.0"
+    workaround: >
+      Keep parameters finite -- an infinite ParamSpec bound means "no
+      bound", which is also what leaving the bound None means, and a
+      non-finite parameter value is refused by ParamSpec.check anyway.
+      A client reading the sidecar wire in another language should
+      negotiate protocol 2 and read values from the binary frames, which
+      carry raw float64 and represent every value exactly.
+    resolution_status: "open"
+    residual_risk: >
+      Closing it needs a format decision rather than a fix.  JSON has no
+      literal for NaN, so the value must either be encoded (a tagged
+      object, which no existing reader of a MADDENING config or stage
+      understands) or dropped (null, which loses it).  On the FMI wire a
+      tagged form would also break the shipped C wrapper, which parses
+      values with strtod and would reject a quoted token.  That is a
+      maintainer's call about a shipped format, not a bug fix, so it is
+      recorded here instead of being made unilaterally.
+    verification:
+      - "benchmarks/results/audit_040_final/params-io/repro/r16_spec_roundtrip_gaps.py"
+      - "benchmarks/results/audit_040_final/params-io/repro/r2_usd_params.py"
+      - "benchmarks/results/audit_040_final/params-io/repro/r20_misc.py"
+    github_issue: null

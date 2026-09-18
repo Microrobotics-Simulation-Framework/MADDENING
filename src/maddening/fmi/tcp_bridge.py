@@ -973,6 +973,6 @@ class FmuTcpBridge:
         return np.concatenate(parts)
 
 
-__all__ = ["FmuTcpBridge", "PROTOCOL_VERSION", "decode_binary", "encode_binary",
-           "recv_frame", "recv_message", "recv_raw", "send_binary", "send_message",
-           "state_of", "values_of"]
+__all__ = ["FmuTcpBridge", "PROTOCOL_VERSION", "checked_value", "decode_binary",
+           "encode_binary", "recv_frame", "recv_message", "recv_raw", "send_binary",
+           "send_message", "state_of", "values_of"]

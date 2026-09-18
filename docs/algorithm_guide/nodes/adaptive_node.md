@@ -102,9 +102,12 @@ gradient the frozen set reproduces, and it is driven mostly by the active-set
 budget: at a fixed, entirely non-symmetric $\theta = 0.42$ on the 1-D toy it
 measures 0.16 / 0.57 / 0.85 / 1.00 at $K = 4 / 8 / 16 / 32$, identically at
 every $n_{\max}$. A low $\rho$ therefore means *either* too small a budget
-*or* a trap, and only `is_trapped_at` — which perturbs along the escape
-direction and re-selects — separates them. The cold-start check warns for the
-first case and raises only for the second.
+*or* a trap. `frozen_gradient_vanishes_at` — which perturbs along the escape
+direction, re-selects, and asks whether the frozen gradient is negligible
+against its own rate of change — separates them in one direction only: a
+`False` rules a trap out, a `True` is equally consistent with an ordinary
+stationary point of the frozen objective. The cold-start check warns for the
+budget case and raises when the frozen gradient has also collapsed.
 
 ## Discretization
 
@@ -134,9 +137,9 @@ first case and raises only for the second.
 | Cold-start state at the constructor parameters | `maddening.nodes.adaptive.base.AdaptiveNode.initial_state` | Selection with `is_cold_start=True`, solve, blindness gate |
 | $\nabla_\theta J_{\text{full}}$ | `maddening.nodes.adaptive.base.AdaptiveNode.compute_full_basis_gradient` | Default: `jax.grad` of `objective` through `solve_frozen` with an all-true mask |
 | Gradient-capture ratio $\rho$ | `maddening.nodes.adaptive.base.AdaptiveNode.gradient_capture_ratio` | Active set re-selected at the evaluated $\theta$; sentinel `1.0` when $\|\nabla J_{\text{full}}\|$ is negligible. `blindness_ratio` is a deprecated alias |
-| Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | Warns on a low ratio; raises only when `is_trapped_at` confirms a trap or `on_blind="raise"` |
+| Cold-start policy (warn / raise / ignore) | `maddening.nodes.adaptive.base.AdaptiveNode.check_gradient_capture` | Warns on a low ratio; raises only when `frozen_gradient_vanishes_at` is also true or `on_blind="raise"` |
 | Double-`where` guard for a masked operand | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | Sanitises the *input* of an operation that is singular off the active set |
-| Binary trap check | `maddening.nodes.adaptive.base.AdaptiveNode.is_trapped_at` | Re-thresholded finite difference along the escape direction |
+| Vanishing-frozen-gradient check | `maddening.nodes.adaptive.base.AdaptiveNode.frozen_gradient_vanishes_at` | Re-thresholded finite difference along the escape direction. Necessary for a Palais trap, not sufficient: `False` rules one out, `True` also fires at an ordinary stationary point. `is_trapped_at` is a deprecated alias |
 | Escape step $\theta + \delta\, g_{\text{full}}/\|g_{\text{full}}\|$ | `maddening.nodes.adaptive.base.AdaptiveNode.symmetry_break` | Trainable leaves only (`ParamSpec.trainable`) |
 | Gated cold start with one escape attempt | `maddening.nodes.adaptive.base.AdaptiveNode.cold_start` | Raises `AdaptiveNodeBlindnessError` on a persistent trap |
 
@@ -164,7 +167,7 @@ first case and raises only for the second.
 | `n_max` | 16 – 256 | Toy problems in the test suite (1-D sine basis, dense SPD system) |
 | Active fraction `K / n_max` | 0.016 – 1.0 | Top-K budgets 4 – 256 of 256 modes, all constructible with the default cold-start policy. Below `K / n_max` ≈ 0.1 the gradient-capture ratio falls under the 0.7 threshold and construction *warns* (it is not rejected); the missing first-order term is then percent-level — see the row below |
 | Jump contribution to $dJ/d\theta$ | $2.5\times10^{-1}$ (K=8) → $\sim10^{-8}$ (K=64) | Fraction of $\|J\|$ omitted by the returned gradient per unit $\theta$, 1-D sine toy over $[0.40, 0.42]$. Treat the frozen gradient as trustworthy only in the large-budget end of this range |
-| Trainable parameters | 1 | The diagnostic constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `is_trapped_at` between optimiser steps |
+| Trainable parameters | 1 | The diagnostic constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `frozen_gradient_vanishes_at` between optimiser steps, reading a `False` as "not a trap" rather than a `True` as "trap" |
 | `gradient_capture_threshold` | 0.7 | Spike round 6; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
 | `blindness_break_delta` | 0.05 | Spike round 7; escapes the 1-D trap (minimum 0.03) and the 2-D traps tested |
 
@@ -189,9 +192,14 @@ first case and raises only for the second.
    `check_gradient_capture(gm.params["nodes"][name])` after seeding a graph —
    and routine monitoring is the caller's policy.
 3. **A low gradient-capture ratio is usually a budget, not a trap.** The ratio
-   cannot distinguish them; `is_trapped_at` can, and `cold_start()` /
-   `symmetry_break()` help only in the trap case (at a budget-limited point
-   the audited case went 0.565 → 0.060).
+   cannot distinguish them, and neither diagnostic *establishes* a trap:
+   `frozen_gradient_vanishes_at` returning `False` rules one out, but a `True`
+   also fires at any stationary point of the frozen objective — including the
+   optimum a successful fit converges to, measured at `theta = 0.343973` on
+   the 1-D toy, whose only reflection fixed point is `theta = 0.5`. Establish
+   the symmetry from the operator, source and objective. `cold_start()` /
+   `symmetry_break()` help only in the genuine trap case (at a budget-limited
+   point the audited case went 0.565 → 0.060).
 4. **Masked operands poison the gradient, not the value.** `solve_frozen` that
    evaluates a singular expression on inactive entries returns a clean forward
    pass and a `NaN` gradient; the base class cannot repair it. Use

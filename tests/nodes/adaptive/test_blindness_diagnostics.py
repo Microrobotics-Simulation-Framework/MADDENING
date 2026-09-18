@@ -1,17 +1,20 @@
-"""gradient_capture_ratio / is_trapped_at / symmetry_break / cold-start
+"""gradient_capture_ratio / frozen_gradient_vanishes_at / symmetry_break / cold-start
 diagnostic on the spike's constructed cases (top-|b|, K=16, sensor at x=1/3).
 
 Known points from ``plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md``:
 theta=0.42 ratio ~0.86 (good), theta=0.48 ~0.17 (partially blind),
 theta=0.5 exactly 0 (Palais trap of the reflection x -> 1 - x).
 
-The ratio is a budget-adequacy measurement, not a symmetry test: the
-tests below pin both what it does measure and what only
-``is_trapped_at`` can establish.
+The ratio is a budget-adequacy measurement, not a symmetry test, and
+``frozen_gradient_vanishes_at`` is not one either: a Palais trap implies
+a vanishing frozen gradient, so a ``False`` rules a trap out, but a
+``True`` is equally consistent with an ordinary stationary point.  The
+tests below pin what each of them does and does not establish.
 """
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -68,12 +71,47 @@ def test_gradient_capture_ratio_on_a_dense_operator_is_finite():
     assert 0.0 <= r < 10.0
 
 
-# -- is_trapped_at ----------------------------------------------------------------
+# -- frozen_gradient_vanishes_at --------------------------------------------------
 
-def test_is_trapped_at_fires_only_at_the_exact_trap():
+def test_the_frozen_gradient_vanishes_at_the_trap_and_not_at_healthy_points():
     for theta, expected in [(0.5, True), (0.42, False), (0.48, False)]:
         node, s = _node_and_state(theta)
-        assert node.is_trapped_at(s) is expected, theta
+        assert node.frozen_gradient_vanishes_at(s) is expected, theta
+
+
+def test_a_false_rules_a_trap_out_but_a_true_does_not_establish_one():
+    """The claim the check used to make -- "the one diagnostic that can
+    *establish* a symmetry trap" -- fails in the direction it was used in.
+
+    At the frozen objective's interior stationary point it returns ``True``
+    on a toy whose only reflection fixed point is ``theta = 0.5``.  That
+    point is where a *successful* optimisation ends, and the algorithm guide
+    tells users to run this between optimiser steps, so the false positive
+    sits on the happy path.  Pinned so nobody restores the stronger wording.
+    """
+    # Located once with brentq on dJ_frozen/dtheta over [0.30, 0.37] (0.4.0
+    # adaptive audit).  Pinned rather than re-solved: the test then needs no
+    # root finder and no scipy.
+    theta_star = 0.343973370458
+    node = PoissonSineTopKNode(n=256, k=64, theta=0.30, sigma=0.04,
+                               sensor_x=1.0 / 3.0, blindness_gate=False)
+    state = node.initial_state()
+
+    def frozen_objective(x):
+        out = node.update(state, {}, 1.0, params={"theta": x})
+        return node.objective(out, {**node.params, "theta": x})
+
+    g = float(jax.grad(frozen_objective)(jnp.asarray(theta_star)))
+    assert abs(g) < 1e-10, f"theta* is not stationary: dJ/dtheta = {g:.3e}"
+    assert node.frozen_gradient_vanishes_at(
+        state, {"theta": jnp.asarray(theta_star)}) is True
+
+
+def test_is_trapped_at_is_a_deprecated_alias_that_warns_and_delegates():
+    node, s = _node_and_state(0.5)
+    with pytest.warns(DeprecationWarning, match="frozen_gradient_vanishes_at"):
+        old = node.is_trapped_at(s)
+    assert old is node.frozen_gradient_vanishes_at(s)
 
 
 # -- symmetry_break -----------------------------------------------------------------
@@ -118,8 +156,9 @@ def test_initial_state_raises_only_at_an_established_trap():
 
 
 def test_a_low_ratio_that_is_not_a_trap_only_warns_and_names_the_remedies():
-    """theta=0.48 measures ~0.17 but ``is_trapped_at`` is False: a
-    partially-blind point is a legitimate construction, not a failure."""
+    """theta=0.48 measures ~0.17 but the frozen gradient does not vanish
+    there: a partially-blind point is a legitimate construction, not a
+    failure."""
     node = PoissonSineTopKNode(theta=0.48)
     with pytest.warns(UserWarning) as record:
         state = node.initial_state()
@@ -127,7 +166,7 @@ def test_a_low_ratio_that_is_not_a_trap_only_warns_and_names_the_remedies():
     assert state["c"].shape == (256,)
     assert "0.1" in message                      # the measured ratio
     assert "0.700" in message                    # the threshold
-    assert "not* a symmetry trap" in message
+    assert "rules a symmetry trap out" in message
     assert "raise the active-set budget" in message
     assert "cold_start() / symmetry_break() do" in message  # and why they do not help
     assert "gradient_capture_threshold" in message and "on_blind" in message
@@ -141,7 +180,7 @@ def test_gate_threshold_is_configurable():
 
 
 def test_opt_in_raising_turns_a_low_ratio_into_an_error():
-    with pytest.raises(AdaptiveNodeBlindnessError, match="not\\* a symmetry trap"):
+    with pytest.raises(AdaptiveNodeBlindnessError, match="rules a symmetry trap out"):
         PoissonSineTopKNode(theta=0.48, on_blind="raise").initial_state()
 
 
@@ -178,13 +217,13 @@ def test_cold_start_raises_on_a_persistent_trap():
 def test_gradient_capture_ratio_tracks_the_active_set_budget_not_symmetry(n):
     """At a fixed, entirely non-symmetric theta the ratio is a function of
     the budget k and is essentially independent of the basis size n, while
-    ``is_trapped_at`` correctly reports no trap.  Pinning this stops the
-    two questions being conflated again."""
+    ``frozen_gradient_vanishes_at`` correctly reports no trap.  Pinning
+    this stops the two questions being conflated again."""
     ratios = {}
     for k in (4, 8, 16, 32):
         node, state, r = _ratio(n, k)
         ratios[k] = r
-        assert not node.is_trapped_at(state), (n, k)
+        assert not node.frozen_gradient_vanishes_at(state), (n, k)
     assert ratios[4] < ratios[8] < ratios[16] < ratios[32]
     # The spike/audit numbers, reproduced at every n.
     assert ratios[4] == pytest.approx(0.163, abs=0.01)

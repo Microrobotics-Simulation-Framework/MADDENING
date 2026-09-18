@@ -11,10 +11,11 @@ bulk-chasing, hierarchical refinement. It gives a subclass three things:
   derivative of the objective with the active set held fixed, routed through
   `maddening.core.solver_utils.ift_linear_solve`;
 - the **cold-start diagnostics**: how much of the full-basis gradient your
-  active set reproduces (`gradient_capture_ratio`), and whether the parameters
-  sit at a Palais fixed point of the problem's symmetry, where the frozen
-  gradient is exactly zero in the direction an optimiser needs
-  (`is_trapped_at`).
+  active set reproduces (`gradient_capture_ratio`), and whether the frozen
+  gradient has collapsed relative to its own rate of change
+  (`frozen_gradient_vanishes_at`) — the signature of a Palais fixed point of
+  the problem's symmetry, where the frozen gradient is exactly zero in the
+  direction an optimiser needs.
 
 > **Stability.** `AdaptiveNode`, `AdaptiveNodeBlindnessError` and
 > `ift_linear_solve` are **not** `STABLE`. The node surfaces are
@@ -159,9 +160,9 @@ injected (traced, differentiable) values are ignored.
   `check_gradient_capture()` at those parameters.
 - `check_gradient_capture(params=None, *, state=None, on_blind=None)`: measure
   the ratio and apply the policy. A low ratio **warns** (naming the measured
-  value, the threshold and the remedies) and raises only when `is_trapped_at`
-  confirms a Palais fixed point — the one cause the diagnostics can establish
-  — or when the node was built with `on_blind="raise"`. `gm.add_node`
+  value, the threshold and the remedies) and raises only when
+  `frozen_gradient_vanishes_at` is also true — the signature of a Palais fixed
+  point — or when the node was built with `on_blind="raise"`. `gm.add_node`
   therefore still fails loudly at a trap, and no longer rejects a small
   active-set budget, which is the point of an adaptive solver.
   **It evaluates the parameters you hand it**: `initial_state` sees the
@@ -178,12 +179,23 @@ injected (traced, differentiable) values are ignored.
 | Method | Cost | Use |
 |---|---|---|
 | `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`) |
-| `is_trapped_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | The only check that can *establish* a symmetry trap; reliable for exact traps, not for partial blindness |
+| `frozen_gradient_vanishes_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | Is the frozen gradient negligible against its own rate of change? A Palais trap implies this, so **`False` rules a trap out**; `True` does not establish one — an ordinary stationary point, including the optimum a successful fit ends at, gives the same answer. Reliable for exact traps, not for partial blindness. `is_trapped_at` is a deprecated alias |
 | `symmetry_break(state, params=None, *, delta=None) -> params` | 1 full gradient | Step `delta` (default `blindness_break_delta`) along the unit full-basis gradient; trainable leaves only |
 | `check_gradient_capture(params=None, ...) -> float or None` | as above, memoised | The policy wrapper the cold start uses; call it yourself at `gm.params["nodes"][name]` |
 
-`blindness_ratio()` is a deprecated alias of `gradient_capture_ratio()` and
-warns. All of them are host-side (they return Python scalars or concrete
+`blindness_ratio()` is a deprecated alias of `gradient_capture_ratio()`, and
+`is_trapped_at()` of `frozen_gradient_vanishes_at()`; both warn.
+
+**What a positive `frozen_gradient_vanishes_at` does not tell you.** Nothing in
+it looks at the mask, at a group action or at a fixed-point set: it is a
+necessary condition for a Palais trap, never a sufficient one. On the 1-D sine
+toy it returns `True` at the interior stationary point `theta = 0.343973`,
+whose only reflection fixed point is `theta = 0.5` — i.e. it fires exactly
+where a successful optimisation stops. Before concluding "trap", rule out the
+ordinary explanations: you have converged (`gradient_capture_ratio` returns its
+`1.0` sentinel when the full gradient is negligible too), or the active set is
+degenerate. The symmetry itself is a property of the operator, source and
+objective, and you establish it from the problem, not from this number. All of them are host-side (they return Python scalars or concrete
 pytrees) and are never called inside the traced step.
 
 **A low ratio is usually a budget, not a trap.** At a fixed, entirely
@@ -200,8 +212,9 @@ The constants — `gradient_capture_threshold = 0.7` (deprecated alias
 are class attributes with constructor overrides. They are not parameter
 leaves: they steer diagnostics, they are not physics a fit could identify.
 `D_threshold` is advisory: above that many trainable parameters, run
-`is_trapped_at` between optimiser steps rather than relying on the cold start
-alone.
+`frozen_gradient_vanishes_at` between optimiser steps rather than relying on
+the cold start alone — reading a `False` as "not a trap", not a `True` as
+"trap".
 
 **Cost.** The diagnostic costs two gradient evaluations, one of them
 full-basis — measured 8–10x the cost of an unguarded `initial_state()` — and
@@ -232,11 +245,14 @@ check still refuses to construct through.
 
 ## Failure modes
 
-- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.**
-  `is_trapped_at` confirmed a Palais fixed point at the constructor
-  parameters (or you asked for `on_blind="raise"`). Use `cold_start()` and
-  seed `gm.params` with the returned pytree, or perturb the parameters
-  yourself.
+- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.** The
+  ratio was low *and* `frozen_gradient_vanishes_at` was true at the
+  constructor parameters (or you asked for `on_blind="raise"`). If the problem
+  really does have a symmetry fixing those parameters, use `cold_start()` and
+  seed `gm.params` with the returned pytree, or perturb them yourself. If it
+  does not, you are at an ordinary stationary point or a degenerate active set
+  and no perturbation helps — proceed with `on_blind="ignore"`. A failed
+  `add_node` is a no-op, so the name is free for the retry.
 - **A `UserWarning` about the gradient-capture ratio.** Not a trap: your
   active-set budget does not reproduce the full-basis gradient at these
   parameters. See *Diagnostics* above for the remedies, in order.

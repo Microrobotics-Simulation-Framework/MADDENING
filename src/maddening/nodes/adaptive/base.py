@@ -75,11 +75,14 @@ The base class therefore provides a diagnostic and a mitigation:
   active-set-budget adequacy**: how much of the full-basis gradient the
   frozen set reproduces.  A symmetry trap drives it to ``0``, but so
   does a budget too small for the objective, and the ratio alone cannot
-  tell the two apart -- :meth:`AdaptiveNode.is_trapped_at` can.  (The
-  spike's name for it, ``blindness_ratio``, is kept as a deprecated
-  alias.)
-* :meth:`AdaptiveNode.is_trapped_at` -- a binary check that *can*
-  establish a Palais fixed point;
+  tell the two apart on its own.  (The spike's name for it,
+  ``blindness_ratio``, is kept as a deprecated alias.)
+* :meth:`AdaptiveNode.frozen_gradient_vanishes_at` -- a binary check
+  that the frozen gradient is negligible against its own rate of
+  change.  A Palais fixed point implies that, so a ``False`` rules a
+  trap out; a ``True`` does not establish one, because an ordinary
+  stationary point looks the same.  ``is_trapped_at`` is kept as a
+  deprecated alias of it;
 * :meth:`AdaptiveNode.symmetry_break` -- an anisotropic perturbation of
   the parameters along the *full-basis* gradient, which (unlike
   isotropic noise) leaves the fixed-point set in one step.  It helps at
@@ -167,15 +170,16 @@ class AdaptiveNodeBlindnessError(RuntimeError):
 
     * the gradient-capture ratio is below
       :attr:`AdaptiveNode.gradient_capture_threshold` **and**
-      :meth:`AdaptiveNode.is_trapped_at` confirms a Palais fixed point
-      of the problem's symmetry -- the one cause the diagnostics can
-      actually establish; or
+      :meth:`AdaptiveNode.frozen_gradient_vanishes_at` is ``True`` --
+      the frozen gradient carries no usable descent information, which
+      is what a Palais fixed point of the problem's symmetry looks
+      like, though an ordinary stationary point looks the same; or
     * the node was constructed with ``on_blind="raise"``, which opts
       into a hard failure for a low ratio of any cause.
 
-    A low ratio that ``is_trapped_at`` does not confirm is a
-    *budget* problem (the active set is too small to reproduce the
-    full-basis gradient) and only warns by default.
+    A low ratio that ``frozen_gradient_vanishes_at`` returns ``False``
+    at is a *budget* problem (the active set is too small to reproduce
+    the full-basis gradient) and only warns by default.
 
     :meth:`AdaptiveNode.cold_start` also raises this when the ratio
     stays low after one :meth:`AdaptiveNode.symmetry_break`.
@@ -222,9 +226,11 @@ class AdaptiveNode(SimulationNode):
         What :meth:`check_gradient_capture` does when the ratio is below
         the threshold.  ``"warn"`` emits a :class:`UserWarning` naming
         the measured ratio, the threshold and the remedies, and still
-        raises :class:`AdaptiveNodeBlindnessError` for the one cause the
-        diagnostic can establish (``is_trapped_at`` confirming a Palais
-        fixed point).  ``"raise"`` raises for a low ratio of any cause.
+        raises :class:`AdaptiveNodeBlindnessError` when
+        ``frozen_gradient_vanishes_at`` is ``True`` as well (a frozen
+        gradient with no usable descent information -- the signature of
+        a Palais fixed point).  ``"raise"`` raises for a low ratio of
+        any cause.
         ``"ignore"`` skips the diagnostic entirely.  Recorded in
         ``self.params`` so it survives a round trip.
     dtype : optional
@@ -254,8 +260,9 @@ class AdaptiveNode(SimulationNode):
         0.03).
     D_threshold : int
         ``5``.  Number of trainable parameters above which the cold-start
-        check alone is insufficient and :meth:`is_trapped_at` should be
-        run between optimiser steps as well (spike round 5).  The base
+        check alone is insufficient and
+        :meth:`frozen_gradient_vanishes_at` should be run between
+        optimiser steps as well (spike round 5).  The base
         class does not enforce a monitoring policy; subclasses and
         optimisation loops read this constant to decide theirs.
 
@@ -315,7 +322,8 @@ class AdaptiveNode(SimulationNode):
             "constructor parameters, not a graph's live pytree",
             "gradient_capture_ratio measures active-set-budget adequacy, "
             "not symmetry alone: a low ratio means either too small a "
-            "budget or a trap, and only is_trapped_at separates them",
+            "budget or a trap; frozen_gradient_vanishes_at rules a trap "
+            "out when it is False, but a True does not establish one",
             "gradient_capture_ratio and symmetry_break cost a full-basis "
             "gradient (the expensive solve adaptivity exists to avoid); "
             "they are host-side diagnostics, not traceable",
@@ -554,8 +562,8 @@ class AdaptiveNode(SimulationNode):
 
         Typically a sensor reading or integral of the solved field.
         Required by :meth:`gradient_capture_ratio`,
-        :meth:`is_trapped_at`, :meth:`symmetry_break` and the cold-start
-        diagnostic; :meth:`update` never calls it.
+        :meth:`frozen_gradient_vanishes_at`, :meth:`symmetry_break` and
+        the cold-start diagnostic; :meth:`update` never calls it.
 
         Deliberately **not** ``@abstractmethod`` (unlike
         :meth:`compute_active_set` and :meth:`solve_frozen`): it is
@@ -694,7 +702,7 @@ class AdaptiveNode(SimulationNode):
         AdaptiveNodeBlindnessError
             When the ratio is below
             :attr:`gradient_capture_threshold` and either
-            :meth:`is_trapped_at` confirms a Palais fixed point or the
+            :meth:`frozen_gradient_vanishes_at` is ``True`` or the
             policy is ``"raise"``.
         """
         policy = self.on_blind if on_blind is None else on_blind
@@ -728,7 +736,7 @@ class AdaptiveNode(SimulationNode):
             state = self._cold_start_state(self._merged(params))
         trapped = self._trapped_cache.get(key) if key is not None else None
         if trapped is None:
-            trapped = self.is_trapped_at(state, params)
+            trapped = self.frozen_gradient_vanishes_at(state, params)
             if key is not None:
                 self._trapped_cache[key] = trapped
         where = "the constructor parameters" if params is None else "the supplied parameters"
@@ -739,18 +747,27 @@ class AdaptiveNode(SimulationNode):
         )
         if trapped:
             raise AdaptiveNodeBlindnessError(
-                f"{head}  is_trapped_at() confirms a Palais fixed point of "
-                "the problem's symmetry: the frozen-set gradient has no "
-                "component in the escape direction, and no selection rule "
-                "can supply one.  Remedies: cold_start() (one "
-                "symmetry_break along the full-basis gradient) and seed "
-                "gm.params with the pytree it returns, or perturb the "
-                "parameters yourself.  Pass on_blind='ignore' (or "
+                f"{head}  frozen_gradient_vanishes_at() is True: the "
+                "frozen-set gradient is negligible against its own rate of "
+                "change along the escape direction, so it carries no usable "
+                "descent information here.  That is what a Palais fixed "
+                "point of the problem's symmetry looks like -- but it is a "
+                "necessary condition, not a sufficient one, and an ordinary "
+                "stationary point of the objective produces it too.  If the "
+                "operator, source and objective do share a symmetry that "
+                "fixes these parameters, the remedy is cold_start() (one "
+                "symmetry_break along the full-basis gradient) and seeding "
+                "gm.params with the pytree it returns, or perturbing the "
+                "parameters yourself.  If they do not, check instead "
+                "whether you have simply converged (|grad J_full| small "
+                "too) or whether the active set is degenerate; neither is "
+                "helped by a perturbation.  Pass on_blind='ignore' (or "
                 "blindness_gate=False) to proceed anyway."
             )
         budget = (
-            f"{head}  is_trapped_at() is False, so this is *not* a symmetry "
-            "trap: the active-set budget is too small to reproduce the "
+            f"{head}  frozen_gradient_vanishes_at() is False, which rules "
+            "a symmetry trap out: the active-set budget is too small to "
+            "reproduce the "
             "full-basis gradient here.  The ratio tracks the budget (on the "
             "1-D sine toy at n_max=256 it measures 0.16 at k=4, 0.57 at "
             "k=8, 0.85 at k=16 and 1.00 from k=32, at every n). Remedies: "
@@ -807,8 +824,9 @@ class AdaptiveNode(SimulationNode):
         4. Raise :class:`AdaptiveNodeBlindnessError` if the ratio is
            still low.
 
-        This is the remedy for a **Palais trap** (check with
-        :meth:`is_trapped_at` first).  It is *not* a remedy for a ratio
+        This is the remedy for a **Palais trap** (rule one out with
+        :meth:`frozen_gradient_vanishes_at` first, then confirm the
+        symmetry from the problem itself).  It is *not* a remedy for a ratio
         held down by too small an active-set budget: the perturbation
         moves along the full-basis gradient, which in the audited
         budget-limited case lowered the ratio from 0.565 to 0.060.
@@ -844,8 +862,9 @@ class AdaptiveNode(SimulationNode):
             f"{ratio:.3f} is still below the threshold "
             f"{self.gradient_capture_threshold:.3f} after one "
             f"symmetry_break of delta={self.blindness_break_delta}.  Either "
-            "the parameters are bound to a Palais fixed point (check "
-            "is_trapped_at) -- perturb them and retry -- or the active-set "
+            "the parameters are bound to a Palais fixed point (rule one "
+            "out with frozen_gradient_vanishes_at) -- perturb them and "
+            "retry -- or the active-set "
             "budget, not the symmetry, is what holds the ratio down, and "
             "no perturbation will fix that."
         )
@@ -870,7 +889,9 @@ class AdaptiveNode(SimulationNode):
           function of ``k`` alone, 0.16/0.57/0.85/1.00 at k=4/8/16/32,
           at every ``n``); or
         * the parameters sit at a Palais fixed point of the problem's
-          symmetry (:meth:`is_trapped_at` establishes this one).
+          symmetry (:meth:`frozen_gradient_vanishes_at` rules this one
+          out when it is ``False``; a ``True`` is consistent with it but
+          does not establish it).
 
         Values above ``1`` are over-amplified but direction-accurate.
         Returns ``1.0`` as a sentinel when the full gradient itself is
@@ -908,23 +929,43 @@ class AdaptiveNode(SimulationNode):
         )
         return self.gradient_capture_ratio(state, params)
 
-    def is_trapped_at(
+    def frozen_gradient_vanishes_at(
         self, state: dict, params: Optional[dict] = None, *, eps: float = 1e-3,
     ) -> bool:
-        """Cheap binary Palais-trap check (re-thresholded finite difference).
+        """Is the frozen-set gradient negligible against its own rate of change?
 
         Perturbs the parameters by ``eps`` along the full-basis gradient,
-        re-selects the active set there, and compares the frozen
-        gradient at the two points.  At a trap both frozen gradients are
-        (near) zero while their variation rate is not, so the proxy
-        ``|g_0| / (|g_eps - g_0| / eps)`` collapses; the check fires
-        below ``1e-2``.  Spike round 7: reliable for exact traps, not a
-        continuous estimator of partial blindness -- use
-        :meth:`gradient_capture_ratio` for that.
+        re-selects the active set there, and compares the frozen gradient
+        at the two points.  Returns ``True`` when the proxy
+        ``|g_0| / (|g_eps - g_0| / eps)`` falls below ``1e-2``: the frozen
+        gradient is flat where its own variation is not.  Spike round 7:
+        reliable for exact traps, not a continuous estimator of partial
+        blindness -- use :meth:`gradient_capture_ratio` for that.
 
-        This is the one diagnostic that can *establish* a symmetry trap,
-        so it is what separates "the active-set budget is too small" from
-        "no selection rule can help you here".
+        What a ``True`` establishes, and what it does not
+        ------------------------------------------------
+        A Palais fixed point of the problem's symmetry produces exactly
+        this signature, so a ``False`` **rules a trap out** -- which is
+        what makes the check worth running.  The converse does not hold.
+        Nothing in the expression looks at the mask's contents, at a group
+        action or at a fixed-point set, and the same collapse appears at
+        *any* stationary point of the frozen objective, symmetric or not
+        -- including the interior optimum a successful fit ends at
+        (``dJ_frozen/dtheta = 2.6e-14`` at ``theta = 0.343973`` on the 1-D
+        sine toy, whose only reflection fixed point is ``theta = 0.5``).
+        It is a necessary condition for a trap, never a sufficient one.
+
+        Read a ``True`` as "the frozen gradient carries no usable descent
+        information at these parameters", and establish the *cause*
+        separately -- from the symmetry of the operator, source and
+        objective, which is a property of the problem and not of this
+        number.  Before deciding it is a trap, rule out the two ordinary
+        explanations: the optimiser has converged (``|grad J_full|`` is
+        small too -- :meth:`gradient_capture_ratio` returns its ``1.0``
+        sentinel there), or the active set is degenerate.  An *empty*
+        active set produced the same signature until 0.4.0; it is now
+        refused by the ``compute_active_set`` contract before it can reach
+        this check.
 
         Returns
         -------
@@ -940,6 +981,27 @@ class AdaptiveNode(SimulationNode):
         rate = _tree_norm(jax.tree.map(lambda a, b: a - b, g_eps, g0)) / eps
         proxy = _tree_norm(g0) / (rate + 1e-30)
         return bool(proxy < 1e-2)
+
+    def is_trapped_at(
+        self, state: dict, params: Optional[dict] = None, *, eps: float = 1e-3,
+    ) -> bool:
+        """Deprecated alias of :meth:`frozen_gradient_vanishes_at`.
+
+        The name asserted a cause the measurement cannot establish: a
+        Palais symmetry trap implies a vanishing frozen gradient, but an
+        ordinary stationary point produces one too.  See
+        :meth:`frozen_gradient_vanishes_at`.
+        """
+        warnings.warn(
+            "AdaptiveNode.is_trapped_at() is deprecated: it measures "
+            "whether the frozen-set gradient is negligible against its own "
+            "rate of change, which a Palais trap implies but which does not "
+            "imply a Palais trap -- an ordinary stationary point, including "
+            "a converged optimum, fires it too.  Use "
+            "frozen_gradient_vanishes_at().",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.frozen_gradient_vanishes_at(state, params, eps=eps)
 
     def symmetry_break(
         self, state: dict, params: Optional[dict] = None, *, delta: Optional[float] = None,

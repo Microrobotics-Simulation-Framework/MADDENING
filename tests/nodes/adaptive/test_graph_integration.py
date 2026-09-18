@@ -95,11 +95,32 @@ def test_add_node_at_an_established_trap_fails_loudly():
         gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16))
 
 
+def test_a_refused_add_node_leaves_the_graph_addable_under_the_same_name():
+    """The developer guide's recovery from a trap is to perturb the
+    parameters and re-add.  ``add_node`` used to register the node before
+    calling ``initial_state()``, so the refusal left a ghost and the name
+    was taken for good.  (The graph-level invariant lives in
+    ``tests/core/test_graph_mutation_atomicity.py``; this pins the path the
+    guide actually documents.)"""
+    gm = GraphManager()
+    with pytest.raises(AdaptiveNodeBlindnessError):
+        gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16))
+    assert list(gm.node_names) == []
+    node = PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16,
+                               blindness_gate=False)
+    _, params = node.cold_start()
+    gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=float(params["theta"]),
+                                    n=64, k=16))
+    assert list(gm.node_names) == ["adaptive"]
+    gm.compile()
+    gm.step()
+
+
 def test_add_node_at_a_budget_limited_point_succeeds_with_a_warning():
     """A small active-set budget is the whole point of an adaptive solver:
     it must not be a construction-time failure (audit A3)."""
     gm = GraphManager()
-    with pytest.warns(UserWarning, match="not\\* a symmetry trap"):
+    with pytest.warns(UserWarning, match="rules a symmetry trap out"):
         gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.42, n=64, k=4))
     gm.compile()
     assert int(gm.run_scan(1)["adaptive"]["mask"].sum()) == 4

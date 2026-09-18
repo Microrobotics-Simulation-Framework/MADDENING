@@ -124,9 +124,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
-- **`AdaptiveNode.compute_active_set` must return a non-empty boolean mask**:
-  a score array, an `argsort` or an empty set is now refused with the remedy
-  named, instead of silently disabling adaptivity or faking a symmetry trap
+- **`AdaptiveNode` tightens its subclass contract**: `compute_active_set` must
+  return a non-empty **boolean** mask (a score array or an `argsort` is refused),
+  and `is_trapped_at` is now `frozen_gradient_vanishes_at` (alias warns)
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`

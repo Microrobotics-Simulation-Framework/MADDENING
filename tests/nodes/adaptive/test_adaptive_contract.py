@@ -320,7 +320,7 @@ def test_diagnostics_can_be_disabled_globally():
     previous = set_adaptive_diagnostics(False)
     try:
         assert not adaptive_diagnostics_enabled()
-        # A trap that would otherwise raise constructs silently.
+        # A trap that would otherwise warn constructs silently.
         state = PoissonSineTopKNode(theta=0.5, n=64, k=16).initial_state()
         assert state["c"].shape == (64,)
     finally:

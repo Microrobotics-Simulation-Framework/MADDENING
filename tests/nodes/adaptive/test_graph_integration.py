@@ -89,10 +89,20 @@ def test_checkpoint_round_trip_restores_coefficients_and_mask(tmp_path):
     assert np.array_equal(np.asarray(restored["c"]), np.asarray(saved["c"]))
 
 
-def test_add_node_at_an_established_trap_fails_loudly():
+def test_add_node_at_a_trap_warns_by_default_and_refuses_under_on_blind_raise():
+    """The default policy is ``"warn"``, and it now warns here too: the
+    vanishing-frozen-gradient check is necessary for a Palais trap, not
+    sufficient, so refusing through the user's chosen escape hatch would
+    also refuse a converged optimum.  ``on_blind="raise"`` still refuses."""
     gm = GraphManager()
-    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+    with pytest.warns(UserWarning, match="Palais fixed point"):
         gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16))
+    assert list(gm.node_names) == ["adaptive"]
+
+    gm2 = GraphManager()
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+        gm2.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16,
+                                         on_blind="raise"))
 
 
 def test_a_refused_add_node_leaves_the_graph_addable_under_the_same_name():
@@ -104,7 +114,8 @@ def test_a_refused_add_node_leaves_the_graph_addable_under_the_same_name():
     guide actually documents.)"""
     gm = GraphManager()
     with pytest.raises(AdaptiveNodeBlindnessError):
-        gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16))
+        gm.add_node(PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16,
+                                        on_blind="raise"))
     assert list(gm.node_names) == []
     node = PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16,
                                blindness_gate=False)
@@ -150,8 +161,10 @@ def test_the_diagnostic_can_be_run_at_the_live_graph_parameters_at_a_trap():
     live["theta"] = jnp.asarray(0.5)          # the graph now sits on the trap
     gm.run_scan(1)
     assert node.gradient_capture_ratio(gm.get_node_state("adaptive"), live) < 0.01
-    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+    with pytest.warns(UserWarning, match="Palais fixed point"):
         node.check_gradient_capture(live)
+    with pytest.raises(AdaptiveNodeBlindnessError, match="Palais fixed point"):
+        node.check_gradient_capture(live, on_blind="raise")
 
 
 def test_reset_state_does_not_re_pay_for_the_diagnostic():

@@ -289,6 +289,24 @@ def _fixed_point_while(
     the raw one it replaces: a group that stops here would have
     stopped under the old rule too, possibly later.
 
+    **Caveat on the derivation.**  ``r_k / (1 - rho)`` is the sum of a
+    geometric series of remaining step lengths, which bounds the
+    distance to the fixed point only if step lengths add --- i.e. under
+    the triangle inequality.  The 0.4.0 measures divide each field's
+    change by that field's own magnitude, and a scale that depends on
+    the pair being compared is *not* a metric: the inequality fails
+    when the iterate detours through a state orders of magnitude
+    larger than its neighbours (pinned by
+    ``test_the_triangle_inequality_does_not_hold``).  That is the price
+    of units-invariance and it was paid deliberately.
+
+    The bound is therefore rigorous where the iterate's scale is stable
+    across the tail --- which is the regime it is applied in, since a
+    converging iteration does not take that detour --- and is an
+    estimate rather than a guarantee where the scale moves by orders of
+    magnitude between passes.  ``bound_valid`` does not detect this;
+    it reports an unusable *ratio*, not an unstable *scale*.
+
     On a non-monotone sequence the ratio is meaningless, so it is
     rejected (``rho >= 1``, a zero predecessor, a non-finite residual)
     and the raw residual test stands in, with

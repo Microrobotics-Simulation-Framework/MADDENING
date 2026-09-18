@@ -167,6 +167,13 @@ array is refused before anything is allocated when it would exceed
 genuinely large interface), when the header claims more data than the
 file holds, or when its dtype is not bool / integer / float.
 
+The resolved path is opened exactly once, with `O_NOFOLLOW`, and the
+size check (`fstat` on that descriptor), the header and the data all
+come from it — re-opening the name would let a writer in the config
+directory swap the checked file for a symlink in between.  A reference
+that *names* a symlink is unaffected: the link is followed by the
+resolution, and it is the target that is opened.
+
 A `{"node": ...}` reference resolves through `gm.get_node(name)`: the
 node's `static_data[key]` first (a `StaticArray` is unwrapped), then an
 array-valued constructor parameter `node.params[key]`; a scalar (0-d) or

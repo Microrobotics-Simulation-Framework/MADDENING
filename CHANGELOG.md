@@ -166,6 +166,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Examples no longer save plots into the installed package** (they broke on
+  a read-only install): output goes to the working directory, usage lines use
+  `python -m maddening.examples...`, and a smoke test pins both
 - **A coupling group no longer reports convergence it has not reached**:
   `acceleration="aitken"` needs the threshold met on two consecutive passes
   (a lone dip is not arrival), `max_iterations=1` reports its real residual

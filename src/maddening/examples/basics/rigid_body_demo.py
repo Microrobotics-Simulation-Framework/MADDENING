@@ -14,17 +14,8 @@ The results are verified against analytical solutions for:
 
 Usage
 -----
-    cd /home/nick/MSF/MADDENING
-    source ../venvs/.maddening/bin/activate
-    python maddening/examples/rigid_body_demo.py
+    python -m maddening.examples.basics.rigid_body_demo
 """
-
-import sys
-import os
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 import math
 

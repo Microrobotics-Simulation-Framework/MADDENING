@@ -9,25 +9,19 @@ state using any available backend.
 Usage
 -----
     # Terminal only (works over SSH, no GUI needed):
-    python maddening/examples/remote_viz_client.py
+    python -m maddening.examples.servers.remote_viz_client
 
     # With matplotlib scene:
-    python maddening/examples/remote_viz_client.py --mode scene
+    python -m maddening.examples.servers.remote_viz_client --mode scene
 
     # Connect to a specific address:
-    python maddening/examples/remote_viz_client.py --connect tcp://hpc-node:5555
+    python -m maddening.examples.servers.remote_viz_client --connect tcp://hpc-node:5555
 
     # SSH tunnel setup (run this first on your local machine):
     #   ssh -L 5555:localhost:5555 user@hpc-node
 """
 
-import sys
-import os
 import argparse
-
-_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
 from maddening.viz.network import NetworkReceiver
 

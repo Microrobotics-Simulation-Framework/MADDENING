@@ -6,7 +6,7 @@ Sets up a ball-spring-table-heat system demonstrating multi-node graph
 coupling, then serves the interactive web UI.
 
 Usage:
-    python maddening/examples/launch_app.py
+    python -m maddening.examples.servers.launch_app
     # Then open http://localhost:8000/viz/app
 """
 

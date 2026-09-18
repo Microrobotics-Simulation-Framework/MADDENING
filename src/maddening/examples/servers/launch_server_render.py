@@ -14,7 +14,7 @@ This architecture is ideal for:
 
 Usage::
 
-    python maddening/examples/launch_server_render.py
+    python -m maddening.examples.servers.launch_server_render
 
 Then open http://localhost:8000/viz/render in a browser.
 

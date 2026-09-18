@@ -514,11 +514,11 @@ Typical SSH tunnel setup:
 ssh -L 5555:localhost:5555 user@hpc-node
 
 # Terminal 2 — on the HPC node (or in the SSH session):
-python maddening/examples/remote_sim_server.py
+python -m maddening.examples.servers.remote_sim_server
 
 # Terminal 3 — local machine:
-python maddening/examples/remote_viz_client.py          # terminal mode
-python maddening/examples/remote_viz_client.py --mode scene  # matplotlib
+python -m maddening.examples.servers.remote_viz_client              # terminal
+python -m maddening.examples.servers.remote_viz_client --mode scene # matplotlib
 ```
 
 ### Thread Safety Note

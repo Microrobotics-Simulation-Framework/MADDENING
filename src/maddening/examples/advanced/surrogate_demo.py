@@ -9,7 +9,7 @@ Demonstrates the full pipeline:
     4. Compare trajectories
 
 Usage:
-    python maddening/examples/surrogate_demo.py
+    python -m maddening.examples.advanced.surrogate_demo
 """
 
 import os

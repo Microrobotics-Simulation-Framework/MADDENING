@@ -18,7 +18,7 @@ Controls:
 
 Usage::
 
-    python maddening/examples/lbm_pipe_replay.py
+    python -m maddening.examples.servers.lbm_pipe_replay
 
 Requirements::
 
@@ -85,6 +85,25 @@ def make_propeller(nx, ny, nz, prop_x, prop_radius_frac, pipe_radius,
 
 
 def main():
+    # Check the optional renderers up front: the simulation below takes
+    # tens of seconds, and discovering a missing extra only afterwards
+    # throws that work away.
+    try:
+        import pygfx  # noqa: F401
+        import rendercanvas  # noqa: F401
+    except ImportError:
+        print("This example requires the GPU viewer. "
+              "Install with: pip install maddening[gpu-viz]")
+        import sys; sys.exit(1)
+    try:
+        import pyvista  # noqa: F401
+    except ImportError:
+        print("This example requires PyVista for the pipe/propeller meshes. "
+              "Install with: pip install maddening[viz3d]")
+        import sys; sys.exit(1)
+
+    from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
+
     print("=" * 60)
     print("  MADDENING LBM Pipe -- Post-Simulation Replay Demo")
     print("=" * 60)
@@ -154,8 +173,6 @@ def main():
 
     # --- Open replay viewer ---
     print("\nSetting up GPU 3D replay viewer...")
-
-    from maddening.viz.backends.pygfx_viewer import GPUHistoryViewer
 
     playback_fps = 30
     # camera_up=(0,0,1) so z-axis (gravity direction) appears vertical

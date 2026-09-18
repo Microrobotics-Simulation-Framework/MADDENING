@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from maddening.core.graph_manager import GraphManager, ExternalInputSpec
 from maddening.core.edge import EdgeSpec
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.nodes.ball import BallNode
 from maddening.nodes.table import TableNode
 
@@ -467,6 +468,81 @@ class TestExternalInputs:
         spec = ExternalInputSpec("b", "force", (), jnp.float32)
         assert spec.target_node == "b"
         assert spec.target_field == "force"
+
+
+class TestExternalInputsAreCompletedAndValidated:
+    """``external_inputs`` is as strict as ``params`` on the same call.
+
+    ``_validate_params`` rejects an unknown node, an unknown key, a
+    missing key and a missing node, each with a paragraph of
+    explanation.  ``external_inputs`` used to accept anything: a typo'd
+    node or field name was dropped in silence, and an omitted input was
+    not zero-filled but simply absent from ``boundary_inputs``, so the
+    node fell back to its own default.
+    """
+
+    @staticmethod
+    def _graph():
+        class _Reader(SimulationNode):
+            def initial_state(self):
+                return {"y": jnp.array(0.0)}
+
+            def update(self, state, boundary_inputs, dt):
+                f = boundary_inputs.get("f", jnp.array(100.0))
+                g = boundary_inputs.get("g", jnp.array(200.0))
+                return {"y": f + g}
+
+            def boundary_input_spec(self):
+                return {"f": BoundaryInputSpec(shape=(), description="f"),
+                        "g": BoundaryInputSpec(shape=(), description="g")}
+
+        gm = GraphManager()
+        gm.add_node(_Reader(name="s", timestep=0.01))
+        gm.add_external_input("s", "f", shape=())
+        gm.add_external_input("s", "g", shape=())
+        gm.compile()
+        return gm
+
+    def test_an_omitted_input_is_zero_filled_like_the_none_case(self):
+        gm = self._graph()
+        assert float(gm.step()["s"]["y"]) == 0.0
+        assert float(gm.step({})["s"]["y"]) == 0.0
+        assert float(gm.step({"s": {"f": jnp.array(1.0)}})["s"]["y"]) == 1.0
+
+    @pytest.mark.parametrize("bad", [
+        {"s": {"force": jnp.array(1.0)}},       # field typo
+        {"spring": {"f": jnp.array(1.0)}},      # node typo
+        {"s": {"undeclared": jnp.array(1.0)}},  # never declared
+    ])
+    def test_an_unknown_name_is_refused_and_the_declared_ones_named(self, bad):
+        gm = self._graph()
+        with pytest.raises(ValueError) as excinfo:
+            gm.step(bad)
+        message = str(excinfo.value)
+        assert "s.f" in message and "s.g" in message
+
+    def test_every_run_method_validates_the_same_way(self):
+        gm = self._graph()
+        bad = {"s": {"force": jnp.array(1.0)}}
+        for call in (
+            lambda: gm.step(bad),
+            lambda: gm.run(2, external_inputs=bad),
+            lambda: gm.run_scan(2, bad),
+            lambda: gm.run_scan_with_history(2, bad),
+            lambda: gm.run_sweep(2, {"s": {"y": jnp.zeros(2)}},
+                                 external_inputs=bad),
+            lambda: gm.run_adaptive(0.05, external_inputs=bad),
+            lambda: gm.run_adaptive_scan(0.05, external_inputs=bad),
+        ):
+            with pytest.raises(ValueError, match="does not declare"):
+                call()
+
+    def test_a_graph_declaring_nothing_still_refuses_a_stray_name(self):
+        gm = GraphManager()
+        gm.add_node(BallNode(name="b", timestep=0.01))
+        gm.compile()
+        with pytest.raises(ValueError, match="does not declare"):
+            gm.step({"b": {"force": jnp.array(1.0)}})
 
 
 # ------------------------------------------------------------------

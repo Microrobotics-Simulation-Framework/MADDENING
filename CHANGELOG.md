@@ -204,6 +204,9 @@ guidance; the itemized changes follow.
 - **The static-data/trainable-parameter refusal now reads `set_param_spec`
   overrides**, in both directions: unfreezing a declared parameter re-arms the
   refusal instead of yielding a wrong gradient, and freezing one clears it
+- **`external_inputs` is now as strict as `params`**: an undeclared `node.field`
+  raises instead of being dropped in silence, an omitted one is zero-filled, and
+  a declared `dtype` survives `to_dict`/`from_dict` instead of reloading float32
 - **Every `CouplingGroup` knob its configuration ignores now warns** — `relaxation`,
   `jacobian_reuse`, `accelerated_fields`, `waveform_iterations`,
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line

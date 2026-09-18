@@ -3988,6 +3988,53 @@ class GraphManager:
             ext.setdefault(ei.target_node, {})[ei.target_field] = leaf
         return ext
 
+    def _resolve_external_inputs(
+        self, external_inputs: Optional[dict[str, dict]],
+    ) -> dict[str, dict]:
+        """Complete and validate a caller's ``external_inputs``.
+
+        ``None`` means "zeros for every declared input", which was
+        already documented.  A *partial* dict now means the same for the
+        inputs it omits, rather than leaving them out of
+        ``boundary_inputs`` altogether and letting the node fall back to
+        its own default -- a 98 N difference in the case that found this,
+        with nothing said about it anywhere.
+
+        An unknown ``(node, field)`` pair is an error naming the declared
+        ones.  A typo'd node or field name used to be accepted in
+        silence, which is exactly the failure mode ``_validate_params``
+        spends a paragraph per case avoiding for the ``params`` argument
+        of the very same call.
+        """
+        if external_inputs is None:
+            return self._default_external_inputs()
+        declared = {
+            (ei.target_node, ei.target_field) for ei in self._external_inputs
+        }
+        unknown = sorted(
+            f"{node}.{field}"
+            for node, fields in external_inputs.items()
+            for field in fields
+            if (node, field) not in declared
+        )
+        if unknown:
+            known = sorted(f"{n}.{f}" for n, f in declared)
+            raise ValueError(
+                f"external_inputs names {unknown}, which this graph does not "
+                f"declare; declared external inputs: {known or ['(none)']}.  "
+                f"An undeclared name never reaches the node, so accepting it "
+                f"would mean the value silently did nothing.  Declare it with "
+                f"add_external_input(), or fix the name."
+            )
+        if not declared:
+            return external_inputs
+        # Complete from the per-compile zero cache.  Fresh outer dicts,
+        # like ``_default_external_inputs``: callers may edit them.
+        out: dict[str, dict] = {}
+        for node, fields in self._default_external_inputs().items():
+            out[node] = {**fields, **external_inputs.get(node, {})}
+        return out
+
     # ------------------------------------------------------------------
     # Internal helpers for _meta stripping
     # ------------------------------------------------------------------
@@ -4114,7 +4161,9 @@ class GraphManager:
         external_inputs : dict, optional
             Values injected from outside the graph, structured as
             ``{node_name: {field_name: value, ...}, ...}``.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
         params : dict, optional
             Graph parameter pytree (see :attr:`params`).  ``None`` uses
             :attr:`params`.  Passing a modified pytree changes node
@@ -4127,8 +4176,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         self._state = self._compiled_step(self._state, external_inputs, params)
@@ -4157,13 +4205,13 @@ class GraphManager:
             Static external inputs applied every step.  For dynamic
             inputs that change each step, use :meth:`step` in a loop
             or use a ``CommandReceiver`` with ``RealtimeRunner``.
+            Completed and validated as in :meth:`step`.
         """
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         for i in range(n_steps):
@@ -4253,7 +4301,9 @@ class GraphManager:
             Number of base-rate simulation steps to execute.
         external_inputs : dict, optional
             Static external inputs applied identically every step.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
         params : dict, optional
             Graph parameter pytree; ``None`` uses :attr:`params`.
 
@@ -4267,8 +4317,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         # External inputs and params are *arguments* of the jitted scan,
@@ -4313,7 +4362,9 @@ class GraphManager:
             Number of base-rate simulation steps to execute.
         external_inputs : dict, optional
             Static external inputs applied identically every step.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
 
         Returns
         -------
@@ -4332,8 +4383,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         def build():
@@ -4389,6 +4439,7 @@ class GraphManager:
             runs 3 simulations with initial positions 1, 2, 3.
         external_inputs : dict, optional
             Static external inputs (not batched — same for all runs).
+            Completed and validated as in :meth:`step`.
         return_history : bool
             If True, return ``(final_states, histories)`` where
             histories has shape ``(batch, n_steps, ...)``.
@@ -4417,8 +4468,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         # Every other entry point carries ``self._state``, which
@@ -4619,7 +4669,8 @@ class GraphManager:
         dt_min, dt_max : float
             Timestep bounds.
         external_inputs : dict, optional
-            Static external inputs applied every step.
+            Static external inputs applied every step.  Completed and
+            validated as in :meth:`step`.
         callback : callable, optional
             Called after every *accepted* step with
             ``(sim_time, dt_used, state_dict)``.
@@ -4641,8 +4692,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
 
         from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
 
@@ -4766,7 +4816,8 @@ class GraphManager:
         dt_initial, atol, rtol, dt_min, dt_max : float
             Same as :meth:`run_adaptive`.
         external_inputs : dict, optional
-            Static external inputs.
+            Static external inputs.  Completed and validated as in
+            :meth:`step`.
 
         Returns
         -------
@@ -4783,8 +4834,7 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
 
         from maddening.core.simulation.adaptive import AdaptiveConfig
 

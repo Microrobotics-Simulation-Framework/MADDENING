@@ -13,11 +13,15 @@ re-validates each Literal field against its declared options and raises
 
 from __future__ import annotations
 
+import inspect
 import warnings
+from pathlib import Path
 
 import pytest
 
 from maddening.core.coupling.group import CouplingGroup, coupling_group_kwargs
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.spring import SpringDamperNode
 
 
 NODES = frozenset({"a", "b"})
@@ -55,7 +59,11 @@ def test_iteration_mode_valid(value):
 
 @pytest.mark.parametrize("value", ["constant", "linear", "quadratic"])
 def test_boundary_interpolation_valid(value):
-    g = CouplingGroup(nodes=NODES, boundary_interpolation=value)
+    # With ``subcycling=True``, the setting that reads it: there is no
+    # time to interpolate over without sub-steps, so a group that names
+    # an interpolation and does not subcycle is a dead setting and warns.
+    g = CouplingGroup(nodes=NODES, boundary_interpolation=value,
+                      subcycling=True)
     assert g.boundary_interpolation == value
 
 
@@ -189,10 +197,16 @@ def test_accelerated_fields_rejects_a_bare_string_value():
 
 
 def test_accelerated_fields_accepts_tuples_and_none():
-    """The shape checks reject nothing that was valid before."""
+    """The shape checks reject nothing that was valid before.
+
+    Under an IQN acceleration, the only one that reads the mapping:
+    naming fields for a group that solves no quasi-Newton problem is a
+    dead setting and warns.
+    """
     assert CouplingGroup(nodes=NODES).accelerated_fields is None
     g = CouplingGroup(
-        nodes=NODES, accelerated_fields={"a": ("position",), "b": ()}
+        nodes=NODES, acceleration="iqn-ils",
+        accelerated_fields={"a": ("position",), "b": ()},
     )
     assert g.accelerated_fields == {"a": ("position",), "b": ()}
 
@@ -302,3 +316,250 @@ def test_round_trip_through_to_dict_does_not_warn_twice():
         back = CouplingGroup(nodes=frozenset(nodes), **kwargs)
     assert caught == []
     assert back == g
+
+
+# ---------------------------------------------------------------------------
+# 6. The rest of the family: every knob only some configurations read.
+# ---------------------------------------------------------------------------
+#
+# ``tolerance`` was not special, only the one that got caught.  Six more
+# settings are read under exactly one other setting and ignored outright
+# under the rest, and each was as able to make a control look live while
+# it did nothing.  The read sites (in ``maddening.core.graph_manager``):
+#
+# * ``relaxation``            -- ``acceleration="fixed"`` only;
+# * ``jacobian_reuse``        -- ``acceleration="iqn-imvj"`` only;
+# * ``accelerated_fields``    -- the two IQN accelerations only;
+# * ``waveform_iterations``   -- ``subcycling=True`` only;
+# * ``boundary_interpolation``-- ``subcycling=True`` only;
+# * ``linear_solver``         -- ``solver="ift"`` only;
+# * ``strict_convergence``    -- ``solver="ift"`` only.
+
+#: ``(field, deliberate value, configuration that ignores it,
+#:   configuration that reads it, the setting the message must name)``.
+INERT_KNOBS = [
+    pytest.param(
+        "relaxation", 0.5, {"acceleration": "aitken"},
+        {"acceleration": "fixed"}, "acceleration='fixed'", id="relaxation",
+    ),
+    pytest.param(
+        "jacobian_reuse", 2, {"acceleration": "iqn-ils"},
+        {"acceleration": "iqn-imvj"}, "acceleration='iqn-imvj'",
+        id="jacobian_reuse",
+    ),
+    pytest.param(
+        "accelerated_fields", {"a": ("position",)}, {"acceleration": "aitken"},
+        {"acceleration": "iqn-ils"}, "acceleration='iqn-ils'",
+        id="accelerated_fields",
+    ),
+    pytest.param(
+        "waveform_iterations", 3, {"subcycling": False},
+        {"subcycling": True}, "subcycling=True", id="waveform_iterations",
+    ),
+    pytest.param(
+        "boundary_interpolation", "quadratic", {"subcycling": False},
+        {"subcycling": True}, "subcycling=True", id="boundary_interpolation",
+    ),
+    pytest.param(
+        "linear_solver", "dense", {"solver": "fori"},
+        {"solver": "ift"}, "solver='ift'", id="linear_solver",
+    ),
+    pytest.param(
+        "strict_convergence", True, {"solver": "fori"},
+        {"solver": "ift"}, "solver='ift'", id="strict_convergence",
+    ),
+]
+
+
+def _inert_warnings(**kwargs):
+    """The inert-knob ``UserWarning``s raised by constructing a group.
+
+    Filtered to ``UserWarning`` because ``solver="fori"`` -- half the
+    "ignored" configurations below -- also raises its own
+    ``DeprecationWarning``, which is about the solver, not the knob.
+    """
+    return [
+        w for w in _warnings_from(**kwargs)
+        if issubclass(w.category, UserWarning)
+        and not issubclass(w.category, DeprecationWarning)
+    ]
+
+
+@pytest.mark.parametrize("field,value,dead,live,names", INERT_KNOBS)
+def test_knob_set_under_a_configuration_that_ignores_it_warns(
+    field, value, dead, live, names,
+):
+    """The warning fires on the deliberate setting, at construction."""
+    with pytest.warns(UserWarning, match=rf"CouplingGroup\.{field}"):
+        CouplingGroup(nodes=NODES, **dead, **{field: value})
+
+
+@pytest.mark.parametrize("field,value,dead,live,names", INERT_KNOBS)
+def test_inert_knob_warning_names_the_value_and_the_live_setting(
+    field, value, dead, live, names,
+):
+    """Actionable without opening the source.
+
+    The user may have set the knob far from the setting that killed it,
+    or inherited either from a config, so the message has to carry both
+    ends: the value that will not be used, and the setting that would
+    use it.
+    """
+    (w,) = _inert_warnings(**dead, **{field: value})
+    msg = str(w.message)
+    assert f"{field}={value!r}" in msg, msg
+    assert names in msg, msg
+
+
+@pytest.mark.parametrize("field,value,dead,live,names", INERT_KNOBS)
+def test_knob_left_at_its_default_is_silent(field, value, dead, live, names):
+    """Choosing an acceleration, a solver or no subcycling is not a mistake.
+
+    Only a dead *setting* is.  Nagging every group that does not use
+    quasi-Newton about ``jacobian_reuse`` would train people to filter
+    the warning that matters.
+    """
+    assert _inert_warnings(**dead) == []
+
+
+@pytest.mark.parametrize("field,value,dead,live,names", INERT_KNOBS)
+def test_knob_under_the_configuration_that_reads_it_is_silent(
+    field, value, dead, live, names,
+):
+    """Under the setting that reads it, setting it is correct usage."""
+    assert _inert_warnings(**live, **{field: value}) == []
+
+
+def test_two_dead_knobs_produce_two_warnings():
+    """One message per mistake, not one per group.
+
+    ``solver="fori"`` kills ``linear_solver`` and ``strict_convergence``
+    together, and a user who set both has two things to undo.
+    """
+    caught = _inert_warnings(
+        solver="fori", linear_solver="dense", strict_convergence=True,
+    )
+    heads = sorted(str(w.message).split("=")[0] for w in caught)
+    assert heads == [
+        "CouplingGroup.linear_solver", "CouplingGroup.strict_convergence",
+    ]
+
+
+def test_every_compatible_live_knob_together_is_silent():
+    """A group that uses everything it sets says nothing.
+
+    Six of the seven can be live at once; ``relaxation`` cannot join
+    them, because the acceleration that reads it is not one of the two
+    that read ``jacobian_reuse`` and ``accelerated_fields``.  If this
+    warns, a rule is gated on the wrong field.
+    """
+    assert _inert_warnings(
+        acceleration="iqn-imvj", jacobian_reuse=2,
+        accelerated_fields={"a": ("position",)},
+        subcycling=True, waveform_iterations=3,
+        boundary_interpolation="quadratic",
+        solver="ift", linear_solver="dense", strict_convergence=True,
+    ) == []
+
+
+def test_full_round_trip_of_a_quiet_group_stays_quiet():
+    """Every field written out and passed back by name must not warn.
+
+    The round trip re-passes defaults explicitly, so a rule that tested
+    "was this argument given?" rather than "is it the default?" would
+    turn every reload into a warning storm.
+    """
+    g = CouplingGroup(
+        nodes=NODES, acceleration="fixed", relaxation=0.5, subcycling=True,
+        waveform_iterations=3,
+    )
+    nodes, kwargs = coupling_group_kwargs(g.to_dict())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        back = CouplingGroup(nodes=frozenset(nodes), **kwargs)
+    assert caught == []
+    assert back == g
+
+
+# ---------------------------------------------------------------------------
+# 7. The warning points at the line the user wrote.
+# ---------------------------------------------------------------------------
+#
+# A ``UserWarning`` is a message to whoever can act on it, and the only
+# line they can act on is their own.  ``CouplingGroup(...)`` is three
+# frames below the warning, ``gm.add_coupling_group(...)`` four and
+# ``gm.auto_couple()`` five, so a fixed ``stacklevel`` -- which is what
+# these warnings had -- can be right for at most one of them.  It was
+# right for the direct construction, which meant every warning reached
+# through ``GraphManager`` was attributed to ``graph_manager.py``'s own
+# ``CouplingGroup(...)`` line: a file the reader does not own, at a line
+# that says nothing about which group or which knob.
+
+
+def _line_of_next_statement() -> int:
+    """The line number of the statement after the call to this function."""
+    return inspect.currentframe().f_back.f_lineno + 1
+
+
+def _cycle_of_two_springs() -> GraphManager:
+    """Two spring nodes in a 2-cycle; no coupling group yet."""
+    gm = GraphManager()
+    for name, pos in (("spring_a", 0.0), ("spring_b", 2.0)):
+        gm.add_node(SpringDamperNode(
+            name=name, timestep=0.001, stiffness=50.0, damping=1.0,
+            mass=1.0, rest_length=1.0, initial_position=pos,
+        ))
+    gm.add_edge("spring_a", "spring_b", "position", "anchor_position")
+    gm.add_edge("spring_b", "spring_a", "position", "anchor_position")
+    return gm
+
+
+def test_inert_knob_warning_points_at_the_direct_construction():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        expected = _line_of_next_statement()
+        CouplingGroup(nodes=NODES, relaxation=0.5)
+    (w,) = caught
+    assert Path(w.filename) == Path(__file__)
+    assert w.lineno == expected
+
+
+def test_inert_knob_warning_points_at_the_add_coupling_group_call():
+    """Not at ``graph_manager.py``, which is where it used to land."""
+    gm = _cycle_of_two_springs()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        expected = _line_of_next_statement()
+        gm.add_coupling_group(["spring_a", "spring_b"], relaxation=0.5)
+    (w,) = [x for x in caught if issubclass(x.category, UserWarning)]
+    assert Path(w.filename) == Path(__file__), w.filename
+    assert w.lineno == expected
+
+
+def test_inert_knob_warning_points_at_the_auto_couple_call():
+    """One frame deeper again: ``auto_couple`` calls ``add_coupling_group``."""
+    gm = _cycle_of_two_springs()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        expected = _line_of_next_statement()
+        gm.auto_couple(waveform_iterations=3)
+    (w,) = [x for x in caught if issubclass(x.category, UserWarning)]
+    assert Path(w.filename) == Path(__file__), w.filename
+    assert w.lineno == expected
+
+
+def test_fori_deprecation_warning_points_at_the_users_call_too():
+    """The same defect, in the warning next to it in ``__post_init__``.
+
+    ``solver="fori"`` is a setting a user migrates off; a deprecation
+    notice attributed to library source tells them nothing about which
+    of their groups to change.
+    """
+    gm = _cycle_of_two_springs()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        expected = _line_of_next_statement()
+        gm.add_coupling_group(["spring_a", "spring_b"], solver="fori")
+    (w,) = [x for x in caught if issubclass(x.category, DeprecationWarning)]
+    assert Path(w.filename) == Path(__file__), w.filename
+    assert w.lineno == expected

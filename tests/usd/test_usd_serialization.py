@@ -335,16 +335,27 @@ class TestLoadGraphFromUSD:
         assert abs(slow_node.delta_t - 0.01) < 1e-10
 
 
-@pytest.mark.filterwarnings("ignore:CouplingGroup.tolerance:UserWarning")
+#: ``NON_DEFAULT`` is deliberately an inconsistent configuration, and has
+#: to be: no group a user would write can hold every field away from its
+#: default at once, because ``convergence_norm``, ``acceleration`` and
+#: ``solver`` each read one of two knobs and ignore the other.
+#: ``CouplingGroup`` warns about every knob its configuration ignores,
+#: which is the point of the warning and exactly wrong for a fixture
+#: whose job is to differ from the default in all eighteen fields.  The
+#: opt-out names the five, and only the tests built from the fixture
+#: carry it: a *sixth* inert knob is a real finding and still fails.
+inert_knobs_are_the_point = pytest.mark.filterwarnings(
+    "ignore:CouplingGroup.tolerance:UserWarning",
+    "ignore:CouplingGroup.relaxation:UserWarning",
+    "ignore:CouplingGroup.jacobian_reuse:UserWarning",
+    "ignore:CouplingGroup.linear_solver:UserWarning",
+    "ignore:CouplingGroup.strict_convergence:UserWarning",
+)
+
+
 class TestCouplingGroupFields:
     """A coupling group on a stage carries the same nineteen fields as the
     config does.
-
-    ``NON_DEFAULT`` below is deliberately an inconsistent configuration:
-    ``tolerance`` is dead under ``convergence_norm="mixed"`` and
-    ``CouplingGroup`` warns about it, but every field has to differ from
-    its default or the round trip stops testing that field.  Hence the
-    class-wide filter -- it is the fixture that is odd, not the group.
 
     The stage used to store eleven of them, so a graph saved with an IQN
     acceleration, a jacobian-reuse window and a strict-convergence
@@ -414,6 +425,7 @@ class TestCouplingGroupFields:
         covered |= {"nodes", "accelerated_fields"}
         assert covered == {f.name for f in fields(CouplingGroup)}
 
+    @inert_knobs_are_the_point
     def test_every_field_round_trips_through_a_stage(self):
         from dataclasses import fields
 
@@ -434,6 +446,7 @@ class TestCouplingGroupFields:
         for name, value in self.NON_DEFAULT.items():
             assert getattr(default, name) != value, name
 
+    @inert_knobs_are_the_point
     def test_the_stage_and_the_config_describe_the_same_group(self):
         """Two spellings of one graph: a field that only one of them keeps
         is a field the other silently drops."""
@@ -452,9 +465,14 @@ class TestCouplingGroupFields:
         gm1 = GraphManager()
         for name in ("a1", "a2", "b1", "b2"):
             gm1.add_node(HeatNode(name, 0.01, n_cells=4))
-        gm1.add_coupling_group(["a1", "a2"], max_iterations=4, acceleration="aitken")
-        gm1.add_coupling_group(["b1", "b2"], max_iterations=30, acceleration="fixed",
-                               relaxation=0.4, jacobian_reuse=2, linear_solver="dense")
+        # Each group sets only knobs its own acceleration and solver read
+        # -- ``jacobian_reuse`` under ``"fixed"`` was a dead setting, and
+        # the point here is that two *live* configurations stay apart.
+        gm1.add_coupling_group(["a1", "a2"], max_iterations=4,
+                               acceleration="fixed", relaxation=0.4)
+        gm1.add_coupling_group(["b1", "b2"], max_iterations=30,
+                               acceleration="iqn-imvj", jacobian_reuse=2,
+                               linear_solver="dense")
 
         stage = Usd.Stage.CreateInMemory()
         save_graph_to_usd(gm1, stage)
@@ -474,8 +492,11 @@ class TestCouplingGroupFields:
 
         path = tmp_path / "old_stage.usda"
         gm1 = self._two_rods()
-        gm1.add_coupling_group(["rod_a", "rod_b"], max_iterations=25, tolerance=1e-9,
-                               convergence_norm="mixed", acceleration="aitken",
+        # ``acceleration="fixed"`` rather than ``"aitken"``: ``relaxation``
+        # has to be authored on the stage for this test to prove the old
+        # attributes still load, and only ``"fixed"`` reads it.
+        gm1.add_coupling_group(["rod_a", "rod_b"], max_iterations=25,
+                               convergence_norm="mixed", acceleration="fixed",
                                relaxation=0.8, iteration_mode="jacobi",
                                subcycling=True, boundary_interpolation="quadratic",
                                diagnostics=True, predictor="linear")
@@ -497,7 +518,8 @@ class TestCouplingGroupFields:
 
         group = gm2._coupling_groups[0]
         assert group.max_iterations == 25
-        assert group.acceleration == "aitken"
+        assert group.acceleration == "fixed"
+        assert group.relaxation == pytest.approx(0.8)
         assert group.iteration_mode == "jacobi"
         assert group.boundary_interpolation == "quadratic"
         assert group.predictor == "linear"

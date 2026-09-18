@@ -33,14 +33,24 @@ Drawn since ``to_dict`` learned to write them.  A group is two or three
 nodes -- preferably ones an edge already joins, since a group whose
 members exchange nothing reaches its fixed point on the first pass and
 exercises the serialiser without exercising the solver -- and a drawn
-value for every other field but one.  Combinations that are
-merely *pointless* are drawn anyway (a relaxation factor with
-``acceleration="none"``, a ``jacobian_reuse`` window with no
-quasi-Newton method, ``waveform_iterations`` without subcycling): the
-group accepts them, they have to survive a round trip, and a serialiser
-that drops a field because it is inert in one configuration drops it in
-the configuration where it is not.  Two combinations are genuinely
-*invalid* and therefore never drawn:
+value for every other field but one.
+
+A setting is drawn away from its default only under the configuration
+that *reads* it: ``relaxation`` under ``acceleration="fixed"``,
+``jacobian_reuse`` and ``accelerated_fields`` under the quasi-Newton
+methods, ``waveform_iterations`` and ``boundary_interpolation`` under
+``subcycling=True``, ``linear_solver`` under ``solver="ift"``, and the
+tolerance knobs under the norm that reads them.  Combinations that are
+merely pointless used to be drawn anyway -- the group accepted them,
+and a serialiser that drops a field because it is inert in one
+configuration drops it in the configuration where it is not -- but
+``CouplingGroup`` now warns about a knob its configuration ignores, and
+under ``filterwarnings = ["error"]`` that fails the graph over the
+*recipe* rather than over the property.  The round-trip coverage
+survives because the gating configuration is itself drawn: every field
+still takes a non-default value somewhere in the search, and has to
+come back.  Two combinations are genuinely *invalid* and therefore
+never drawn:
 
 * **mixed timesteps without subcycling.**  ``validate()`` rejects it by
   name, so a group over nodes of different timesteps always sets
@@ -640,8 +650,14 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
     mixed_dt = len({m.timestep for m in members}) > 1
     subcycling = True if mixed_dt else draw(st.booleans())
 
+    # Drawn before the knobs it gates.  Only the two quasi-Newton
+    # methods read ``accelerated_fields``, ``jacobian_reuse`` is
+    # ``iqn-imvj`` alone, and ``relaxation`` is ``"fixed"`` alone.
+    acceleration = draw(st.sampled_from(COUPLING_ACCELERATIONS))
+    is_iqn = acceleration in ("iqn-ils", "iqn-imvj")
+
     accelerated = None
-    if draw(st.booleans()):
+    if is_iqn and draw(st.booleans()):
         # Only state fields of the group's own nodes: ``compile()``
         # rejects anything else, and rightly.
         accelerated = tuple(
@@ -664,6 +680,8 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
     # still takes a non-default value somewhere in the search.
     norm = draw(st.sampled_from(COUPLING_NORMS))
     live_l2 = norm == "l2"
+    # Same rule for the other five gated knobs, and the same reason.
+    solver = draw(st.sampled_from(COUPLING_SOLVERS))
     return CouplingGroupRecipe(
         nodes=tuple(m.name for m in members),
         # Two or more, so a quasi-Newton method has a secant column to
@@ -676,20 +694,34 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
         atol=1e-8 if live_l2 else draw(st.sampled_from([1e-8, 1e-5])),
         rtol=1e-6 if live_l2 else draw(st.sampled_from([1e-6, 1e-3])),
         diagnostics=draw(st.booleans()),
-        acceleration=draw(st.sampled_from(COUPLING_ACCELERATIONS)),
-        relaxation=draw(st.sampled_from([0.5, 0.8, 1.0])),
+        acceleration=acceleration,
+        relaxation=(
+            draw(st.sampled_from([0.5, 0.8, 1.0]))
+            if acceleration == "fixed" else 1.0
+        ),
         iteration_mode=draw(st.sampled_from(COUPLING_ITERATION_MODES)),
         accelerated_fields=accelerated,
         subcycling=subcycling,
-        boundary_interpolation=draw(st.sampled_from(COUPLING_INTERPOLATIONS)),
-        jacobian_reuse=draw(st.integers(min_value=0, max_value=3)),
-        waveform_iterations=draw(st.sampled_from([1, 2])),
+        boundary_interpolation=(
+            draw(st.sampled_from(COUPLING_INTERPOLATIONS))
+            if subcycling else "linear"
+        ),
+        jacobian_reuse=(
+            draw(st.integers(min_value=0, max_value=3))
+            if acceleration == "iqn-imvj" else 0
+        ),
+        waveform_iterations=(
+            draw(st.sampled_from([1, 2])) if subcycling else 1
+        ),
         predictor=draw(st.sampled_from(COUPLING_PREDICTORS)),
         # 'fori' is deprecated, not removed: it is still a configuration a
         # stored graph can name, so it is still one a round trip has to
         # carry.  (Its DeprecationWarning is filtered in pyproject.toml.)
-        solver=draw(st.sampled_from(COUPLING_SOLVERS)),
-        linear_solver=draw(st.sampled_from(COUPLING_LINEAR_SOLVERS)),
+        solver=solver,
+        linear_solver=(
+            draw(st.sampled_from(COUPLING_LINEAR_SOLVERS))
+            if solver == "ift" else "gmres"
+        ),
         # ``strict_convergence`` is the one field left at its default, and
         # visibly so: True turns a group that exits at ``max_iterations``
         # still unconverged into a runtime error, which no generator can

@@ -313,6 +313,56 @@ def test_default_atol_rtol_under_l2_are_silent():
     assert _warnings_from(atol=0.0, rtol=1e-6) == []  # the declared defaults
 
 
+@pytest.mark.parametrize("kwargs", [
+    {"acceleration": "aitken"},
+    {"relaxation": 0.5},
+    {"jacobian_reuse": 2},
+    {"accelerated_fields": {"a": ("x",)}},
+    {"linear_solver": "dense"},
+])
+def test_the_acceleration_family_warns_at_a_cap_of_one(kwargs):
+    """``max_iterations=1`` returns before any of them is reached.
+
+    ``_run_coupling_inner`` takes one staggered pass and returns, ahead
+    of the accelerator's construction and ahead of ``_run_ift_forward``
+    -- so a cap of one makes the whole acceleration family and
+    ``linear_solver`` dead whatever else the group says.  It is the one
+    inert case that was decidable from the declared fields and was not
+    being reported.
+    """
+    with pytest.warns(UserWarning, match="max_iterations=1"):
+        CouplingGroup(nodes=NODES, max_iterations=1, **kwargs)
+
+
+def test_a_cap_of_one_reports_its_dead_knobs_in_a_single_message():
+    """One mistake, one message, even though two rules could speak.
+
+    ``relaxation`` is gated on ``acceleration="fixed"`` as well as on
+    the cap.  Here the acceleration is right and the cap is what kills
+    it, so the acceleration-gated rule stands down: a message saying
+    ``relaxation is ignored under acceleration='fixed'`` would be false
+    twice over.
+    """
+    (w,) = _warnings_from(max_iterations=1, acceleration="fixed",
+                          relaxation=0.5)
+    msg = str(w.message)
+    assert "acceleration='fixed'" in msg, msg
+    assert "relaxation=0.5" in msg, msg
+    assert "max_iterations=1" in msg, msg
+
+
+def test_strict_convergence_survives_a_cap_of_one():
+    """The single-pass branch checks it, so it is not in that family.
+
+    ``max_iterations=1`` used to leave the seeded ``_meta`` zeros in
+    place, which read as ``converged=True`` whatever the state; the
+    branch now measures its own residual *and* honours
+    ``strict_convergence`` on the ift path.  Warning that the flag is
+    ignored there would send a user to turn off their only guard.
+    """
+    assert _warnings_from(max_iterations=1, strict_convergence=True) == []
+
+
 def test_round_trip_through_to_dict_does_not_warn_twice():
     """Reloading a stored group is not a second chance to nag.
 

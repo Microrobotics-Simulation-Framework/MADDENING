@@ -1361,6 +1361,15 @@ def _run_coupled_block_impl(
             # request about cost -- one staggered pass has to cost one
             # pass, and the profiler's one-iteration variant depends on
             # it.  So this cap reports its single measurement.
+            #
+            # ``solver="ift"`` never reaches ``_ift_solve`` here, so the
+            # gradient is straight through the one pass rather than the
+            # implicit-function derivative of a fixed point.  That is
+            # the only derivative available -- one pass defines no fixed
+            # point to differentiate -- and it is what ``"fori"`` gives
+            # too, which is why the solvers still agree.  Documented on
+            # ``CouplingGroup.max_iterations``; ``strict_convergence``
+            # is checked below so the caller still hears about it.
             single_r = _compute_residual(state_after_first, new_state_inner)
             # One pass means one residual and no ratio, so there is no
             # error bound to be had: the amplification is reported
@@ -3316,6 +3325,37 @@ class GraphManager:
                         f"accelerated_fields[{nn!r}] names {bad}: not a state field "
                         f"of {nn!r} (state fields: {sorted(have)})"
                     )
+
+        # ``subcycling=True`` on a group whose nodes all share a
+        # timestep is demoted to ``use_subcycling = False`` in
+        # ``_run_coupled_block_impl``, which leaves
+        # ``waveform_iterations`` and ``boundary_interpolation`` dead
+        # while ``CouplingGroup``'s own ``subcycling`` predicate says
+        # they are live.  The group cannot see that -- it does not know
+        # its members' timesteps -- so the rule is enforced here, where
+        # the nodes are known and the first step has not run yet.
+        from maddening.core.coupling.group import (
+            _FIELD_DEFAULTS,
+            inert_uniform_timestep_message,
+        )
+        _SUBCYCLED_ONLY = ("waveform_iterations", "boundary_interpolation")
+        for g in self._coupling_groups:
+            if not g.subcycling:
+                continue        # the CouplingGroup rule already covers it
+            timesteps = {self._nodes[nn].timestep for nn in g.nodes
+                         if nn in self._nodes}
+            if len(timesteps) > 1:
+                continue        # genuinely subcycled: the knobs are live
+            named = tuple(
+                name for name in _SUBCYCLED_ONLY
+                if getattr(g, name) != _FIELD_DEFAULTS[name]
+            )
+            if named:
+                warnings.warn(
+                    inert_uniform_timestep_message(g, named),
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         # Persistent XLA cache, if the user asked for one via the env var
         # (see maddening.core.simulation.compile_cache).

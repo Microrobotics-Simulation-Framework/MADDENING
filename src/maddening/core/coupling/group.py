@@ -48,7 +48,19 @@ class CouplingGroup:
         Names of the nodes that participate in the coupling group.
         All must belong to the same graph and form (part of) a cycle.
     max_iterations : int
-        Upper bound on iterations per timestep.
+        Upper bound on coupling passes per timestep.
+
+        ``1`` is a different branch, not merely the smallest cap: the
+        group takes one staggered pass and returns before the
+        accelerator is built and before the IFT solver is entered.  So
+        ``acceleration``, ``relaxation``, ``jacobian_reuse``,
+        ``accelerated_fields`` and ``linear_solver`` are all inert there
+        and warn (``UserWarning``), and ``solver="ift"`` differentiates
+        straight through that single pass rather than through a fixed
+        point -- the same derivative ``"fori"`` would give, since there
+        is no fixed point to apply the implicit function theorem at.
+        ``strict_convergence`` is still honoured, and still reports
+        that the pass did not converge.
     tolerance : float
         Convergence threshold under ``convergence_norm="l2"``.  Since
         0.4.0 the L2 norm divides each field's change by that field's
@@ -494,6 +506,55 @@ def _inert_tolerance_message(
     )
 
 
+def inert_uniform_timestep_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """``waveform_iterations`` / ``boundary_interpolation`` on a group
+    that asked to subcycle but has nothing to subcycle.
+
+    Not in :data:`_INERT_RULES` and not decidable in
+    ``__post_init__``: ``_run_coupled_block_impl`` sets
+    ``use_subcycling = False`` when every member node shares a
+    timestep, and a :class:`CouplingGroup` does not know its members'
+    timesteps.  ``GraphManager.compile`` does, and calls this there --
+    which is still before the first step, so the caller can act on it.
+    """
+    setting = ", ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    return (
+        f"CouplingGroup.{setting} "
+        f"{'are' if len(names) > 1 else 'is'} ignored on coupling group "
+        f"{sorted(group.nodes)}: subcycling=True was demoted because "
+        "every node in the group has the same timestep, so the group "
+        "takes one pass per coupling iteration and there is no "
+        "intermediate time to interpolate to.  Give the group nodes of "
+        "differing timesteps to make them live, or drop "
+        "subcycling=True."
+    )
+
+
+def _inert_single_pass_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """The knobs a one-pass group never reaches.
+
+    ``_run_coupling_inner`` returns after ``one_pass`` when
+    ``max_iterations <= 1``, before the accelerator is constructed and
+    before ``_run_ift_forward`` is entered.  So a cap of one makes the
+    whole acceleration family and ``linear_solver`` dead at once, and
+    it does so *ahead* of the settings that normally gate them -- which
+    is why this rule speaks instead of theirs, rather than as well as.
+    """
+    setting = ", ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    return (
+        f"CouplingGroup.{setting} "
+        f"{'are' if len(names) > 1 else 'is'} ignored under "
+        f"max_iterations={group.max_iterations!r}: one staggered pass "
+        "returns before any accelerator is built and before the IFT "
+        "solver is entered, so nothing reads them.  Raise "
+        "max_iterations above 1 to make them live."
+    )
+
+
 def _gated_on(
     gate: str, reason: str, remedy: str
 ) -> Callable[[CouplingGroup, tuple[str, ...]], str]:
@@ -542,7 +603,22 @@ def _gated_on(
 #:   computed inside the ``if use_subcycling:`` block.
 #: * ``linear_solver`` / ``strict_convergence`` -- both are read inside
 #:   ``_run_ift_forward``, which only ``solver="ift"`` calls.
+#: * ``acceleration`` / ``relaxation`` / ``jacobian_reuse`` /
+#:   ``accelerated_fields`` / ``linear_solver`` -- all five are dead at
+#:   ``max_iterations <= 1``, which returns from ``_run_coupling_inner``
+#:   after the single pass, before the accelerator exists and before
+#:   ``_run_ift_forward`` runs.  That cap is checked *first*, and the
+#:   four acceleration-gated rules stand down for it (``live`` is True
+#:   at the cap), so one mistake still gets one message.
+#:   ``strict_convergence`` is *not* in that set: the single-pass
+#:   branch checks it on the ift path.
 _INERT_RULES: tuple[_InertRule, ...] = (
+    _InertRule(
+        fields=("acceleration", "relaxation", "jacobian_reuse",
+                "accelerated_fields", "linear_solver"),
+        live=lambda g: g.max_iterations > 1,
+        message=_inert_single_pass_message,
+    ),
     _InertRule(
         fields=("rtol",),
         live=lambda g: g.convergence_norm != "l2",
@@ -555,7 +631,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("relaxation",),
-        live=lambda g: g.acceleration == "fixed",
+        live=lambda g: g.max_iterations <= 1 or g.acceleration == "fixed",
         message=_gated_on(
             "acceleration",
             "applies no constant relaxation factor; only "
@@ -566,7 +642,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("jacobian_reuse",),
-        live=lambda g: g.acceleration == "iqn-imvj",
+        live=lambda g: g.max_iterations <= 1 or g.acceleration == "iqn-imvj",
         message=_gated_on(
             "acceleration",
             "starts every timestep from empty secant matrices; only "
@@ -577,7 +653,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("accelerated_fields",),
-        live=lambda g: g.acceleration in ("iqn-ils", "iqn-imvj"),
+        live=lambda g: g.max_iterations <= 1 or g.acceleration in ("iqn-ils", "iqn-imvj"),
         message=_gated_on(
             "acceleration",
             "solves no quasi-Newton problem to select fields for; only "
@@ -609,7 +685,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("linear_solver",),
-        live=lambda g: g.solver == "ift",
+        live=lambda g: g.max_iterations <= 1 or g.solver == "ift",
         message=_gated_on(
             "solver",
             "differentiates straight through the iterates and solves no "

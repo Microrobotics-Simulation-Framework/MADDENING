@@ -266,6 +266,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Mapping-spec resolver, against generated input** (11 properties): a
+  mutated spec is refused naming the edge or loads exactly the recipe on
+  disk, and no generated asset path escapes the config directory
 - **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
   `tests/fmi/c/`): unit binary plain and under ASan/UBSan, a self-checking
   deterministic fuzz harness, valgrind, a libFuzzer campaign, FMPy against

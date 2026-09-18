@@ -3213,6 +3213,10 @@ class GraphManager:
 
     def compile(self) -> None:
         """Topologically sort the graph and JIT-compile the step function."""
+        # Preserving the state across the rebuild is only safe if the
+        # state is usable; a graph still holding a transform's tracers
+        # goes back to the state it had before it first.
+        self._recover_from_escaped_tracers()
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:

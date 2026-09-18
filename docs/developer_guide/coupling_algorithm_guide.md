@@ -39,6 +39,17 @@ how the per-step numbers are obtained; this page is about what they say.
 > therefore lower bounds; re-recording the baselines is queued
 > (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
 
+> **And they pre-date the relaxation correction.**  That estimate sums
+> the steps the iterate takes, and under `acceleration="fixed"` a step
+> is `relaxation` times the residual that is measured, which the first
+> version left out.  The criterion is now `ω · residual / (1 - rho)`.
+> It therefore moved in *both* directions for `fixed` rows: ω < 1 was
+> being held to a criterion `1/ω` too strict — which is where the
+> eleven capped rows above came from — and ω > 1 to one `ω` too loose,
+> understating its distance from the fixed point by that factor (0.51x
+> at ω = 1.95).  Expect the ω = 0.5 / 0.8 rows to converge again and
+> the over-relaxed rows to cost more passes than the figures here.
+
 ## Start here
 
 Pick the row that matches the *shape* of your graph.  Every recommendation

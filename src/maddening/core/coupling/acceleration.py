@@ -280,6 +280,24 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     is deliberate: a trusted bad estimate is worse than an honest
     fallback, and the fallback is exactly the criterion that shipped
     before 0.4.0.
+
+    **What a non-rejected rate does not promise.**  This rate describes
+    the mode that dominates the *step*, which is not always the mode
+    that dominates the remaining error.  On a two-mode contraction the
+    residual sequence is a clean geometric decay at the fast rate until
+    the fast mode's amplitude falls below the slow one's, and over that
+    stretch it is *indistinguishable* from a single-mode decay — the
+    consecutive ratios are stationary, so the ``sqrt`` term above
+    agrees with the one-step term and a longer window would agree with
+    both.  Measured on modes ``(0.999, 0.2)``: ``rho`` reads 0.2 while
+    the distance still to travel is 122x the estimate that rate
+    produces.  Nothing computable from the residual norms alone
+    separates that from a genuine 0.2 contraction; it needs the
+    spectrum.  So a rate this function accepts is an estimate, and
+    ``bound_valid`` reports a usable *ratio*, not a valid *bound*.  The
+    full list of what the estimate rests on is in
+    ``graph_manager._fixed_point_while``; the decision it feeds is in
+    ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
     """
     if prev2_residual is None:
         prev2_residual = prev_residual

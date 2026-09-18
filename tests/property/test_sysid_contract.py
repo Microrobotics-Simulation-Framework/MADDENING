@@ -1091,11 +1091,14 @@ class TestMultipleShootingLoss:
 # free-standing ``forward_fn`` with no ParamSpec, no bounds, no trainable
 # mask and no graph; ``tune_coupling_params`` is an eager grid search.
 # Nothing under ``src/`` imports either, ``maddening.core.simulation``
-# does not re-export them, no example or document mentions them, and the
-# only callers in the tree are their own two unit-test modules.  They
-# are, on that evidence, vestigial -- but they are importable from a
-# public module, so until they are deprecated they get the same
-# treatment as anything else here: what they promise is what they do.
+# does not re-export them, and no example or document mentions them:
+# their only callers in the tree are their own two unit-test modules and
+# this one.  Both are now ``StabilityLevel.DEPRECATED`` and warn towards
+# ``maddening.sysid.fit``, for removal in 0.5.0 -- but a deprecated
+# function is still an importable public one until then, and the
+# migration it asks for is exactly what these properties describe, so it
+# gets the same treatment as anything else here: what it promises is
+# what it does.
 
 
 class TestCalibrate:

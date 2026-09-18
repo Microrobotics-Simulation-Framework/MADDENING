@@ -16,6 +16,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+#: Shared secret for WebRTC signaling tokens.  Unset means no client can
+#: authenticate against the signaling server (see :class:`SelkiesSession`).
+STREAM_SECRET_ENV = "MADDENING_STREAM_SECRET"
+
 
 def main() -> None:
     """Cloud entrypoint: configure and run the simulation server."""
@@ -40,11 +44,15 @@ def main() -> None:
     cloud_config = CloudConfig.from_dict(config) if config else CloudConfig()
     stream_config = cloud_config.stream_config
 
-    # Create streaming session
+    # Create streaming session.  The signaling server authenticates every
+    # client against this secret, so a deployment that wants a remote
+    # viewer must set MADDENING_STREAM_SECRET and share it with that
+    # viewer; without it the session generates a random secret nobody
+    # holds and every signaling connection is rejected.
     session: Optional[object] = None
     try:
         from maddening.cloud.selkies_session import SelkiesSession
-        session = SelkiesSession()
+        session = SelkiesSession(secret=os.environ.get(STREAM_SECRET_ENV, ""))
         logger.info("Using SelkiesSession for streaming")
     except ImportError:
         logger.warning("GStreamer not available; streaming disabled")

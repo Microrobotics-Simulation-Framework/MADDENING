@@ -336,6 +336,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **The signaling WebSocket now authenticates the client** (CRITICAL): it
+  validated the server's own token, so anything that reached :8443 was let in
+  — set `MADDENING_STREAM_SECRET` so a legitimate viewer can present a token
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory

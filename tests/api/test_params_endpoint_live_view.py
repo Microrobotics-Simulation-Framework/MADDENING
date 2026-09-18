@@ -72,3 +72,34 @@ def test_put_before_first_compile_is_validated_like_after():
     gm.check_params()
     assert float(gm.params["nodes"]["s"]["stiffness"]) == 45.0
     assert type(gm._nodes["s"].node.params["stiffness"]) is float
+
+
+def test_a_param_write_reaches_an_already_cached_run_scan():
+    """A slider write must not be served past by the cached scan program.
+
+    ``run_scan`` builds its ``lax.scan`` once per ``compile()`` and reuses
+    it; the params pytree is an argument of that program, not a constant
+    baked into it, so a ``PUT`` between two scans changes the trajectory
+    without rebuilding anything.
+    """
+    gm = GraphManager()
+    # Off the rest length, so the trajectory actually depends on stiffness.
+    gm.add_node(SpringDamperNode(
+        "s", 0.01, stiffness=30.0, damping=2.0, initial_position=0.5,
+    ))
+    gm.compile()
+    start = dict(gm.get_node_state("s"))
+
+    soft = float(gm.run_scan(10)["s"]["position"])
+    assert gm.scan_trace_count == 1
+
+    c = _client(gm)
+    assert c.put("/graph/params/s",
+                 json={"params": {"stiffness": 400.0}}).status_code == 200
+
+    gm.set_node_state("s", start)
+    stiff = float(gm.run_scan(10)["s"]["position"])
+    assert gm.scan_trace_count == 1, "the PUT rebuilt the cached scan"
+    assert soft != pytest.approx(stiff), (
+        "the cached scan served the pre-PUT stiffness"
+    )

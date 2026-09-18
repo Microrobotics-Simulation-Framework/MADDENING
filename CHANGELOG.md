@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
   over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
   window wider than the data instead of returning a meaningless loss
+- **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
+  wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
+  invariants over generated meshes; two audit findings pinned as strict xfails
 - **Measured guidance for choosing coupling options**: eight graph fixtures and
   a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
   `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window
@@ -118,6 +121,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **The interactive path stops redoing host work**: sharded wrappers place
+  their static arrays on device once, not per `update`, and `run_scan` and its
+  siblings compile once per `compile()`, not per call (`gm.scan_trace_count`)
 - **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
   at its default settings could not be differentiated on a base install.
   `pip install maddening` is enough; the now-empty `[ift]` extra still resolves
@@ -263,6 +269,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Mapping-spec resolver, against generated input** (11 properties): a
+  mutated spec is refused naming the edge or loads exactly the recipe on
+  disk, and no generated asset path escapes the config directory
 - **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
   `tests/fmi/c/`): unit binary plain and under ASan/UBSan, a self-checking
   deterministic fuzz harness, valgrind, a libFuzzer campaign, FMPy against

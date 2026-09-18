@@ -114,6 +114,25 @@ def _finite(lo, hi):
                      allow_infinity=False)
 
 
+def _finite_f32_normal(lo, hi):
+    """``_finite`` restricted to values that are *normal in float32*.
+
+    XLA's CPU backend runs with denormals flushed to zero, so for a
+    float32 subnormal ``p`` even ``p - lr * 0.0`` evaluates to ``0.0``
+    (``jnp.float32(1.6e-43) + 0.0`` is ``0.0`` here).  A *bit*-identity
+    claim about a parameter no optimiser touched is therefore false in
+    that corner for reasons that belong to the backend's floating-point
+    mode rather than to the code under test, and false on CPU but not
+    necessarily elsewhere.  ``allow_subnormal=False`` alone is not
+    enough: it is read at the strategy's ``width``, so at the default
+    64 it still yields ``1.3e-42`` -- an ordinary float64 and a float32
+    subnormal.  ``width=32`` moves both the generation and the
+    subnormal test to the precision these parameters are stored in.
+    """
+    return st.floats(min_value=lo, max_value=hi, allow_nan=False,
+                     allow_infinity=False, width=32, allow_subnormal=False)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -315,15 +334,23 @@ class TestTrainableContract:
         "behaviour is pinned rather than changed."))
     def test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit(self):
         gm = _spring_gm()
-        # ``SpringDamperNode`` declares stiffness and damping as positive
-        # constants, i.e. ``transform='log'``.
-        assert gm.param_specs()["nodes"]["s"]["damping"].transform == "log"
+        # ``SpringDamperNode`` declares *stiffness* and *mass* as positive
+        # constants (``transform='log'``); ``damping`` is bounded below but
+        # carries no transform, and an untransformed leaf round-trips
+        # exactly -- so damping is the one spring constant that could not
+        # show this.  The leaf under test must also be a value ``exp(log
+        # .))`` moves: 1.0 and 2.5 are fixed points in float32, 30.0 is not
+        # (it comes back as 30.000001907348633).
+        specs = gm.param_specs()["nodes"]["s"]
+        assert specs["stiffness"].transform == "log"
+        assert specs["damping"].transform is None
         mask = jax.tree.map(lambda _: False, gm.params)
-        mask["nodes"]["s"]["stiffness"] = True
-        before = float(gm.params["nodes"]["s"]["damping"])
-        result = fit(gm, lambda p: p["nodes"]["s"]["stiffness"] ** 2,
+        mask["nodes"]["s"]["damping"] = True
+        before = float(gm.params["nodes"]["s"]["stiffness"])
+        assert before == 30.0
+        result = fit(gm, lambda p: p["nodes"]["s"]["damping"] ** 2,
                      mask=mask, n_iter=1, lr=0.05)
-        assert float(result.params["nodes"]["s"]["damping"]) == before
+        assert float(result.params["nodes"]["s"]["stiffness"]) == before
 
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -1058,7 +1085,8 @@ class TestCalibrate:
         assert abs(float(result.params["x"]) - x_true) <= \
             abs(x0 - x_true) + 1e-5
 
-    @given(a=_finite(0.5, 2.0), x0=_finite(-3.0, 3.0), ghost=_finite(-3.0, 3.0),
+    @given(a=_finite(0.5, 2.0), x0=_finite(-3.0, 3.0),
+           ghost=_finite_f32_normal(-3.0, 3.0),
            n_iters=st.integers(min_value=1, max_value=20))
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_a_parameter_the_forward_ignores_is_bit_identical_afterwards(

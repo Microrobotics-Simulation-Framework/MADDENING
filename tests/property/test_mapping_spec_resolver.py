@@ -810,3 +810,35 @@ def test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt(
                        {"source_points": ref, "target_points": ref})
     with pytest.raises(PointReferenceError, match="differs from the points"):
         spec.build(make_point_resolver(base_dir=base))
+
+
+# ---------------------------------------------------------------------------
+# An extended-precision corner that needs a decision, not a patch
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(np.dtype(np.longdouble).itemsize <= 8,
+                    reason="this platform's longdouble is float64, so there is no "
+                           "extended-precision case to make")
+@pytest.mark.xfail(strict=True, reason=(
+    "An inline point set of an extended-precision float is accepted and then "
+    "cannot be written: `arr.tolist()` on a float128 array yields np.longdouble "
+    "objects, which json.dumps refuses, so `to_dict` produces a config no writer "
+    "can save.  `point_array_digest` is unstable for the same dtype as well -- the "
+    "padding bytes of an 80-bit value in a 16-byte slot are not zeroed, so two "
+    "arrays that compare equal can hash differently and a reference to them is "
+    "rejected at random.  Fixing it is an API decision this test does not take: "
+    "either narrow _NUMERIC_KINDS / _inlineable to the widths tolist() renders as "
+    "Python scalars (refusing float128 points with a message naming the asset form), "
+    "or keep accepting them and make both the inline form and the digest canonical "
+    "(store float128 as bytes, hash the value bytes only).  Reachable two ways: a "
+    "factory handed a np.longdouble point set inlines it, and a hand-written config "
+    "may say \"dtype\": \"float128\"."))
+def test_an_inline_extended_precision_point_set_survives_being_written_out():
+    """Whatever ``normalise_point_reference`` accepts, ``to_dict`` has to be
+    able to write."""
+    import json  # noqa: PLC0415 -- only this decision-pending case needs it
+
+    points = np.array([1.0, 2.0, 3.0], dtype=np.longdouble)
+    ref = normalise_point_reference({"inline": points.tolist(), "dtype": "float128"},
+                                    name="points")
+    json.dumps(ref)

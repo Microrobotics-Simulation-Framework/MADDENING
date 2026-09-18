@@ -87,11 +87,19 @@ def assert_param_specs_identical(expected: dict, actual: dict) -> None:
 def structure(gm) -> dict[str, Any]:
     """The graph's topology as plain data: node identities and timesteps,
     every ``EdgeSpec`` field (transform name, units, additive flag,
-    mapping recipe, ordinal) and the external-input declarations.
+    mapping recipe, ordinal), the external-input declarations and every
+    field of every coupling group.
 
     This is what a reload has to reproduce *besides* the numbers, and it
     is where a serialiser that silently renames or drops something shows
     up.
+
+    Coupling groups are sorted by node set rather than kept in
+    registration order: two graphs that iterate the same groups are the
+    same graph, and the order they were declared in is not something a
+    format owes.  Their *contents* are compared exactly -- a group that
+    comes back with one setting changed solves differently, which is why
+    they are here at all.
     """
     return {
         "nodes": [
@@ -103,11 +111,15 @@ def structure(gm) -> dict[str, Any]:
             (ei.target_node, ei.target_field, tuple(ei.shape))
             for ei in gm._external_inputs  # noqa: SLF001 -- no public accessor
         ],
+        "coupling_groups": sorted(
+            (g.to_dict() for g in gm._coupling_groups),  # noqa: SLF001
+            key=lambda d: d["nodes"],
+        ),
     }
 
 
 def assert_structure_identical(expected: dict, actual: dict) -> None:
-    for key in ("nodes", "edges", "external_inputs"):
+    for key in ("nodes", "edges", "external_inputs", "coupling_groups"):
         assert expected[key] == actual[key], (
             f"structure[{key!r}] differs:\n  expected {expected[key]}\n  actual   {actual[key]}"
         )

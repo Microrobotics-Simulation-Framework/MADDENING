@@ -29,12 +29,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ``lineax`` is imported lazily inside ``_ift_linear_solve`` — it pulls in
-# equinox + optax transitively, which we do NOT want to make a hard
-# module-load-time dependency.  Only users who opt into ``solver='ift'``
-# trigger the lineax import path.
+# ``lineax`` is a base dependency (v0.4.0) but is still imported lazily
+# inside ``_ift_linear_solve``: it pulls in equinox + jaxtyping, an order
+# of magnitude more import time than ``import maddening`` itself costs.
+# Only users who opt into ``solver='ift'`` pay it.  The import needs no
+# guard — a missing lineax is now an installation fault, not a
+# user-recoverable "install the extra" condition.
 
-from maddening.core.coupling import CouplingGroup
+from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     float_fields_of,
     state_float_image,
@@ -139,26 +141,6 @@ class _ResolvedParams(NamedTuple):
     is passed, baked constants otherwise."""
     nodes: dict
     mappings: dict
-
-
-def _import_lineax():
-    """``import lineax`` with an actionable error when it is missing.
-
-    The matrix-free Krylov adjoint of the IFT solver (``linear_solver=
-    "gmres" | "bicgstab"``) needs lineax; it is an optional dependency
-    (``pip install maddening[ift]``) so the base install stays light.
-    """
-    try:
-        import lineax as lx  # noqa: PLC0415  (lazy by design)
-    except ImportError as e:
-        raise ImportError(
-            "lineax is required for the matrix-free Krylov adjoint of the "
-            "coupling solver (solver='ift' with linear_solver='gmres' or "
-            "'bicgstab').  Install it with:  pip install maddening[ift]\n"
-            "Or use linear_solver='dense' (no lineax dependency; it builds "
-            "the coupling Jacobian explicitly, slower on large groups)."
-        ) from e
-    return lx
 
 
 def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
@@ -545,10 +527,12 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         return jnp.linalg.solve(A, b)
 
     def _krylov(mv, b):
-        # Lazy import — keeps lineax (and its equinox/optax transitive
-        # deps) out of module load time.  Only callers who opt into
+        # Lazy import — lineax is a base dependency (v0.4.0) but its
+        # equinox/jaxtyping transitive deps cost an order of magnitude
+        # more import time than ``import maddening`` does, so keep it
+        # out of module load time.  Only callers who opt into
         # ``solver='ift'`` pay this import cost.
-        lx = _import_lineax()
+        import lineax as lx  # noqa: PLC0415  (lazy by design)
 
         atol = 1e-8 + rtol * jnp.max(jnp.abs(b))
         op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
@@ -1372,8 +1356,8 @@ def _run_coupled_block_impl(
                 str(group.linear_solver),
             )
             if group.strict_convergence:
-                # Lazy: equinox ships with lineax, which this path
-                # already requires.
+                # Lazy for import time only: equinox is a transitive
+                # dependency of lineax, which is a base dependency.
                 import equinox as eqx  # noqa: PLC0415
 
                 x_star_full = eqx.error_if(
@@ -4242,6 +4226,13 @@ class GraphManager:
         Only the *recipe* is written, so live weights that were trained
         or hand-edited away from it would be lost: a ``UserWarning``
         naming the edge says so, pointing at :meth:`save_state`.
+
+        ``coupling_groups`` carries *every* field of every group (see
+        :meth:`~maddening.core.coupling.group.CouplingGroup.to_dict`),
+        and is absent when the graph has none.  Partial would be worse
+        than nothing: a group that came back missing its acceleration or
+        its iteration cap would still be a group, and would quietly
+        solve the same graph a different way.
         """
         if strict_mappings:
             from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
@@ -4275,6 +4266,15 @@ class GraphManager:
                 }
                 for ei in self._external_inputs
             ],
+            # Every field of every group, or the key is absent: a config
+            # that carried only some of a group's solver settings would
+            # reload as a graph that *runs* differently -- a fixed point
+            # iterated to convergence becoming a single staggered pass --
+            # without anything saying so.  Absent, like ``param_specs``,
+            # when there is nothing to say, so an uncoupled graph writes
+            # exactly the config it wrote before this key existed.
+            **({"coupling_groups": [g.to_dict() for g in self._coupling_groups]}
+               if self._coupling_groups else {}),
         }
 
     @classmethod
@@ -4301,6 +4301,13 @@ class GraphManager:
         edge.key, "H", ParamSpec())`` — trainable mapping weights) and
         those slots only exist once the edge does; node overrides do not
         depend on the edges, so the order is safe for them too.
+
+        ``coupling_groups`` are rebuilt with :meth:`add_coupling_group`,
+        so a stored group is checked exactly like a hand-written one; a
+        group that cannot be rebuilt — an unknown node, a node already
+        in another group, a misspelled enum — raises ``ValueError``
+        naming the group and what is wrong with it.  A config without
+        the key (one written before it existed) loads unchanged.
         """
         gm = cls()
         for nd in config["nodes"]:
@@ -4342,6 +4349,30 @@ class GraphManager:
                 target_field=ei["target_field"],
                 shape=tuple(ei.get("shape", ())),
             )
+        for i, cg in enumerate(config.get("coupling_groups", [])):
+            # Straight back through ``add_coupling_group``, so a loaded
+            # group is checked by the same code as a hand-written one:
+            # the node names against this graph, the node set against the
+            # groups already registered, and every enum by
+            # ``CouplingGroup.__post_init__``.  What those checks do not
+            # know is *which* group of a multi-group config they are
+            # talking about, which is the only thing that makes a
+            # hand-edited file actionable -- so name it here.
+            try:
+                nodes, kwargs = coupling_group_kwargs(cg)
+                gm.add_coupling_group(nodes, **kwargs)
+            except (KeyError, TypeError, ValueError) as exc:
+                named = ""
+                if isinstance(cg, dict) and isinstance(cg.get("nodes"), (list, tuple)):
+                    named = f" (nodes {sorted(cg['nodes'])})"
+                # ``str(KeyError)`` is the *repr* of its message; unwrap it,
+                # and say what a bare missing key means.
+                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                if isinstance(exc, KeyError) and detail == "nodes":
+                    detail = "it has no 'nodes' key"
+                raise ValueError(
+                    f"coupling_groups[{i}]{named} cannot be rebuilt: {detail}"
+                ) from exc
         return gm
 
     @staticmethod

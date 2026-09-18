@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **Measured guidance for choosing coupling options**: eight graph fixtures and
   a full option sweep behind `docs/developer_guide/coupling_algorithm_guide.md`;
   `profile_graph` gains `n_stat_steps` to pin the coupling-statistics window
+- **Coupling groups are serialisable**: `to_dict` / `from_dict` carry a
+  `coupling_groups` key with all 19 `CouplingGroup` fields, and the USD stage
+  carries the same set, so a reloaded graph solves the way the saved one did
 - **Graph parameter pytree**: the compiled step is `step_fn(state,
   external_inputs, params)`, so node constants are traced inputs that
   `jax.grad` reaches and that change without a recompile.  Opt a node in with
@@ -96,8 +99,8 @@ guidance; the itemized changes follow.
   `coupling_diagnostics()` reports `"converged"` per group, and
   `CouplingGroup.strict_convergence` raises on an unconverged exit (off by
   default — the IFT gradient is invalid there)
-- The IFT Krylov adjoint raises an actionable `ImportError` naming `pip
-  install maddening[ift]` when lineax is missing
+- The IFT Krylov adjoint needs `lineax`, which is a base dependency as of
+  this release (it was an optional extra when this entry was first written)
 - Node verification: `verify_node` gains `params_consistent` /
   `params_gradient_finite` / `params_effective` and a `SKIP` status
   (`SimulationNode.accepts_params()` exposes the probe);
@@ -112,6 +115,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
+  at its default settings could not be differentiated on a base install.
+  `pip install maddening` is enough; the now-empty `[ift]` extra still resolves
 - **Version is now `0.4.0.dev0`** (was `0.3.1`) so a development build is
   distinguishable from the last release.  `maddening.__version__` prefers
   installed distribution metadata, so an editable install predating this
@@ -166,6 +172,9 @@ guidance; the itemized changes follow.
 - **A coupling group no longer reports convergence it has not reached**:
   `acceleration="aitken"` needs the threshold met on two consecutive passes
   (a lone dip is not arrival), `max_iterations=1` reports its real residual
+- Sharded pointwise nodes honour parameter writes again (`PUT /graph/params`)
+- `POST /surrogate/deactivate` restores every edge field, or changes nothing
+- A `.` in a node name no longer misroutes that node's FMU inputs and outputs
 - **FMU export of a real graph had no inputs and a wrong step size**: inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep
@@ -277,7 +286,7 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
-- MADD-ANO-004: `converged=True` is a residual test, not a bound on the
+- MADD-ANO-005: `converged=True` is a residual test, not a bound on the
   distance to the fixed point -- calibrate it by re-solving at a 100x tighter
   tolerance (minor, open, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at

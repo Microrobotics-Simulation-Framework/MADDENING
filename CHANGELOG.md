@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
+  over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
+  window wider than the data instead of returning a meaningless loss
 - **Coupling groups are serialisable**: `to_dict` / `from_dict` carry a
   `coupling_groups` key with all 19 `CouplingGroup` fields, and the USD stage
   carries the same set, so a reloaded graph solves the way the saved one did

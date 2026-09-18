@@ -42,6 +42,31 @@ A point set is described by reference, not inlined:
     factories inline automatically when no reference is given and the
     set is that small.
 
+Accepted dtypes
+---------------
+Whatever the reference form, a point set must be a bool, integer or
+float array of at most :data:`_MAX_ELEMENT_BYTES` bytes per element:
+``bool``, ``int8``…``int64``, ``uint8``…``uint64``, ``float16``,
+``float32``, ``float64``.  Complex, string, object and datetime arrays
+are refused, and so is **extended precision** — ``np.longdouble``,
+spelled ``float96`` on 32-bit x86 and ``float128`` on x86-64 and
+aarch64.  An extended-precision point set is refused with an error that
+says so, *not* narrowed to ``float64``: it cannot be written
+(``arr.tolist()`` yields ``np.longdouble`` objects and ``json.dumps``
+refuses them) and its :func:`point_array_digest` is not stable (the
+padding bytes of an 80-bit value in a 16-byte slot are not zeroed, so
+arrays that compare equal can hash differently).  Silently narrowing it
+would hide a precision loss the caller did not ask for, which is a
+well-known source of hard-to-trace numerical bugs; the refusal names the
+dtype and the fix (``np.asarray(points, dtype=np.float64)``).
+
+This is a limit of the serialised form, not a judgement about extended
+precision.  If a real interface ever needs it, it can be added later
+behind the same API — a composite inline representation (the value
+bytes, or a mantissa / exponent pair, as JSON-safe integers) together
+with a canonical digest, or an FFI path that formats and hashes the
+value itself.  Nothing in this module assumes 8 bytes is the last word.
+
 ``sha256`` is the content hash (:func:`point_array_digest`: dtype,
 shape and bytes) of the array the factory was actually given.  The
 factories record it; :func:`build_mapping` refuses a reference that
@@ -93,6 +118,16 @@ MAX_ASSET_BYTES = 256 * 1024 * 1024
 #: integer, float).  Complex, string, object and datetime arrays are
 #: refused both inline and from assets.
 _NUMERIC_KINDS = "biuf"
+
+#: Widest element (bytes) a point set may have.  Every bool / integer /
+#: float of at most this width is rendered by ``ndarray.tolist()`` as a
+#: *Python* scalar, which ``json.dumps`` can write and which round-trips
+#: through a config; an extended-precision float (``np.longdouble``:
+#: ``float96`` on 32-bit x86, ``float128`` on x86-64 and aarch64) does
+#: not, and its digest is not stable either.  Such point sets are
+#: refused — never narrowed behind the user's back — by
+#: :func:`_check_element_width`.
+_MAX_ELEMENT_BYTES = 8
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -150,6 +185,67 @@ class MappingRebuildError(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# Accepted element widths
+# ---------------------------------------------------------------------------
+
+
+def _check_element_width(dtype: Any, where: str, *, what: str = "dtype") -> None:
+    """Refuse an extended-precision point set, loudly.
+
+    A bool / integer / float of at most :data:`_MAX_ELEMENT_BYTES` bytes
+    per element survives everything a spec does with it.  An
+    extended-precision float (``np.longdouble``) survives neither step,
+    so it is rejected here rather than quietly narrowed to ``float64``:
+    a silent narrowing is the kind of precision loss that turns into a
+    scientific-computing bug nobody can trace, and an explicit constraint
+    is honest about what the format can carry.
+
+    Parameters
+    ----------
+    dtype : numpy.dtype or dtype-like
+        The dtype to check.
+    where : str
+        What is being checked, used as the prefix of the message (an
+        argument name, a node field, an asset path).
+    what : str, optional
+        How to call the dtype in the message, e.g. ``"inline dtype"``.
+
+    Raises
+    ------
+    PointReferenceError
+        If ``dtype`` is wider than :data:`_MAX_ELEMENT_BYTES`.
+
+    Notes
+    -----
+    The limit is a property of the *serialised* form, not of the
+    physics.  Extended precision could be supported later without
+    changing any of this — a composite representation (the value bytes,
+    or a mantissa / exponent pair, written as JSON-safe integers) or an
+    FFI path that hashes and formats the value itself — if a real
+    interface ever needs it.  Nothing here is built on the assumption
+    that 8 bytes is the last word.
+    """
+    dtype = np.dtype(dtype)
+    if dtype.itemsize <= _MAX_ELEMENT_BYTES:
+        return
+    raise PointReferenceError(
+        f"{where}: {what} {dtype.name!r} is an extended-precision float "
+        f"({dtype.itemsize} bytes per element) and is not supported for point sets, "
+        f"which are limited to bool / integer / float dtypes of at most "
+        f"{_MAX_ELEMENT_BYTES} bytes (float16 / float32 / float64).  It is refused "
+        f"rather than narrowed to float64 behind your back, because it cannot "
+        f"round-trip: json.dumps cannot write it, since arr.tolist() on a "
+        f"{dtype.name} array yields np.longdouble objects rather than Python floats, "
+        f"so the config could not be saved; and point_array_digest is unstable for "
+        f"it, because np.longdouble leaves the padding bytes of its slot "
+        f"(an 80-bit value in {dtype.itemsize} bytes on x86-64) unzeroed, so two "
+        f"arrays that compare equal can hash differently and a reference to them is "
+        f"rejected at random.  If you do not need the extra precision, convert the "
+        f"points yourself: np.asarray(points, dtype=np.float64)."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Content hashes
 # ---------------------------------------------------------------------------
 
@@ -162,8 +258,13 @@ def point_array_digest(array: Any) -> str:
     dtype (including byte order), the same shape and bitwise-equal
     elements; this is what the ``sha256`` entry of a point reference
     records and what the rebuild checks.
+
+    An extended-precision array is a :class:`PointReferenceError`: the
+    guarantee above does not hold for it (see
+    :data:`_MAX_ELEMENT_BYTES`), so returning a digest would be a lie.
     """
     arr = np.ascontiguousarray(np.asarray(array))
+    _check_element_width(arr.dtype, "point set")
     h = hashlib.sha256()
     h.update(arr.dtype.str.encode("ascii"))
     h.update(repr(tuple(int(s) for s in arr.shape)).encode("ascii"))
@@ -283,6 +384,7 @@ def _inline_array(ref: dict, name: str) -> np.ndarray:
         raise PointReferenceError(
             f"{name}: inline dtype {dtype_name!r} is not a bool / integer / float dtype"
         )
+    _check_element_width(dtype, name, what="inline dtype")
     try:
         arr = np.asarray(raw, dtype=dtype)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -315,6 +417,7 @@ def _check_relative(rel: str, name: str) -> None:
 
 def _inlineable(arr: np.ndarray) -> bool:
     return (arr.ndim >= 1 and arr.dtype.kind in _NUMERIC_KINDS
+            and arr.dtype.itemsize <= _MAX_ELEMENT_BYTES
             and arr.shape[0] <= INLINE_POINT_LIMIT and arr.size <= INLINE_ELEMENT_LIMIT
             and (arr.dtype.kind != "f" or bool(np.all(np.isfinite(arr)))))
 
@@ -329,8 +432,14 @@ def reference_for_array(array: Any, ref: Any, *, name: str, inline_ok: bool = Tr
     ``ref`` is ``None``: the points are inlined when there are at most
     :data:`INLINE_POINT_LIMIT` of them (and ``inline_ok``), else
     ``None`` — the mapping is then usable but not serialisable.
+
+    An extended-precision point set is a :class:`PointReferenceError`,
+    not a quiet ``None``: it can be neither written nor hashed (see
+    :data:`_MAX_ELEMENT_BYTES`), and "not serialisable" would leave the
+    caller guessing which of the several reasons applied.
     """
     arr = np.asarray(array)
+    _check_element_width(arr.dtype, name)
     if ref is None:
         if not inline_ok or not _inlineable(arr):
             return None
@@ -498,6 +607,7 @@ def _check_declared_size(shape: tuple, dtype: np.dtype, where: str,
         raise PointReferenceError(
             f"{where}: dtype {dtype} is not a bool / integer / float dtype"
         )
+    _check_element_width(dtype, where)
     n_bytes = math.prod(int(s) for s in shape) * dtype.itemsize
     if n_bytes > MAX_ASSET_BYTES:
         raise PointReferenceError(
@@ -594,6 +704,7 @@ def _node_field(graph, node_name: str, field_name: str) -> np.ndarray:
                 f"node {node_name!r} {source} {field_name!r} has dtype {arr.dtype}, "
                 f"not a numeric point set"
             )
+        _check_element_width(arr.dtype, f"node {node_name!r} {source} {field_name!r}")
         return arr
 
     if field_name in static:

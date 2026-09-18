@@ -258,6 +258,37 @@ class HeatNode(SimulationNode):
             ),
         }
 
+    def static_data_deps(self) -> dict[str, tuple[str, ...]]:
+        """Where ``grid_x``'s contents come from, per grid.
+
+        The provenance genuinely differs between the two branches of
+        ``__init__``, so the declaration does too.
+
+        * **Non-uniform** (``grid_points`` given): ``grid_x`` *is*
+          ``grid_points``, and the variable-dx Laplacian reads it.
+          ``grid_points`` is ``ParamSpec(trainable=False)`` -- the grid
+          fixes the stencil and is never fitted -- so this is a legal
+          dependency, and declaring it is what will let the rebuild hook
+          (D10 steps 4 and 5) know the array has to be reconstructed
+          when the geometry is rewritten.
+        * **Uniform** (the default): nothing is declared, because
+          nothing is read.  ``grid_x`` is built here from ``length`` and
+          ``n_cells``, but ``_compute_laplacian`` takes ``dx = length /
+          n_cells`` from the *traced* ``length`` and never touches
+          ``grid_x``, so no value derived from ``length`` is baked into
+          the step and the gradient through ``length`` is complete.
+
+        That separation is what keeps ``length`` trainable.  Were the
+        uniform path to start reading ``grid_x``, this method would have
+        to name ``length`` and ``compile()`` would refuse the graph --
+        correctly, because the gradient would at that point be missing
+        the term through the grid.  See
+        :meth:`~maddening.core.node.SimulationNode.static_data_deps`.
+        """
+        if self._is_nonuniform:
+            return {"grid_x": ("grid_points",)}
+        return {}
+
     def param_specs(self) -> dict[str, ParamSpec]:
         return {
             **super().param_specs(),

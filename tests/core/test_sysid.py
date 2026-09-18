@@ -135,13 +135,19 @@ def test_fim_identifiable_pair_has_finite_condition_number(spring):
     rep = fim(_residual_fn(gm, obs, names), sub)
     assert rep.param_names == ("['damping']", "['stiffness']")
     assert np.isfinite(rep.cond) and rep.cond < 1e6, rep.cond
+    assert rep.rank == 2, rep.eigvals
     assert bool(jnp.all(jnp.isfinite(rep.crb)))
 
 
 def test_fim_flags_unidentifiable_scale_direction(spring):
     """With position-only data, k, c, m enter only as k/m and c/m: scaling
     all three together is invisible.  In relative coordinates that is the
-    direction (1, 1, 1)/sqrt(3), and its eigenvalue must be ~0."""
+    direction (1, 1, 1)/sqrt(3), and its eigenvalue must be ~0.
+
+    All three parameters lie partly along that direction, so none of
+    them has a finite Cramer-Rao bound: the data pins two combinations
+    of k, c and m and leaves the overall scale free.
+    """
     gm, obs = spring
     names = ("stiffness", "damping", "mass")
     sub = {n: gm.params["nodes"]["s"][n] for n in names}
@@ -151,6 +157,8 @@ def test_fim_flags_unidentifiable_scale_direction(spring):
     v = np.asarray(rep.eigvecs[:, 0])
     assert abs(abs(v @ np.ones(3) / np.sqrt(3.0))) > 0.99, v
     assert rep.cond > 1e4
+    assert rep.rank == 2, rep.eigvals
+    assert bool(jnp.all(jnp.isinf(rep.crb))), rep.crb
 
 
 # ---------------------------------------------------------------------------

@@ -300,13 +300,33 @@ class FIMReport:
 
     ``eigvals`` ascend; ``eigvecs[:, i]`` is the direction for
     ``eigvals[i]`` in the (possibly relatively scaled) parameter space
-    ordered as ``param_names``.  ``crb`` is the Cramér–Rao lower bound on
-    each parameter's variance (unit noise variance; relative variance
-    under ``scale="relative"``), ``NaN`` where the FIM is singular.
+    ordered as ``param_names``.
+
+    ``rank`` counts the directions the data actually resolves: the
+    eigenvalues strictly above ``rank_rtol * eigvals[-1]``, where
+    ``rank_rtol`` defaults to ``n * eps`` for ``n`` parameters at the
+    matrix's own precision -- the relative form
+    ``numpy.linalg.matrix_rank`` uses.  ``rank < len(param_names)`` says
+    the data leaves that many independent parameter combinations
+    undetermined.  Unlike ``cond`` the verdict does not move when the
+    residual is rescaled (by ``noise_std``, say), because the threshold
+    scales with the matrix; a float32 ``cond`` can flip between a finite
+    number and ``inf`` under exactly that rescaling.
+
+    ``crb`` is the Cramér–Rao lower bound on each parameter's variance
+    (unit noise variance; relative variance under ``scale="relative"``).
+    It is ``+inf`` for every parameter with support in the null space --
+    no unbiased estimator of such a parameter has finite variance, since
+    the data cannot separate it from the combinations that null space
+    mixes it with -- and the diagonal of the inverse over the resolved
+    subspace for the rest.  ``+inf`` rather than ``NaN`` because it
+    fails safe: ``crb < threshold`` is then False for an unidentifiable
+    parameter instead of quietly propagating a ``NaN``.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
     eigvecs: jnp.ndarray
+    rank: int
     cond: float
     crb: jnp.ndarray
     param_names: tuple[str, ...]
@@ -490,6 +510,81 @@ def _inverse_noise_std(noise_std, residual):
     )
     return 1.0 / ravel_pytree(sig)[0]
 
+def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float]):
+    """``(rank, crb)`` from the eigendecomposition of a Fisher matrix.
+
+    Parameters
+    ----------
+    eigvals, eigvecs : array
+        Ascending eigenvalues and their orthonormal columns, as
+        ``jnp.linalg.eigh`` returns them for the symmetric PSD ``F``.
+    rank_rtol : float, optional
+        Eigenvalues at or below ``rank_rtol * eigvals[-1]`` count as
+        zero.  ``None`` uses ``n * eps`` at the matrix's own precision.
+
+    Notes
+    -----
+    Two thresholds are involved and they measure different things.
+
+    The first is on the eigenvalues and decides which *directions* the
+    data resolves.  It has to be relative to the largest eigenvalue:
+    ``eigh`` returns each eigenvalue with an absolute error of order
+    ``eps * ||F||``, so anything below that is noise whatever units the
+    residual carries -- it can even come back negative, as the spring's
+    ``(stiffness, damping, mass)`` scale direction does.  ``n * eps`` is
+    the form ``numpy.linalg.matrix_rank`` uses (``max(shape) * eps``,
+    and ``F`` is square).  The cutoff sits at ``eps`` rather than
+    ``sqrt(eps)`` because ``F = JᵀJ`` has already squared the
+    conditioning of ``J``: a direction below ``sqrt(eps)`` in ``J`` is
+    below ``eps`` here, and forming ``F`` is what lost it.  Being
+    relative is also what keeps ``rank`` steady where ``cond`` is not --
+    dividing the residual by a large ``noise_std`` can round the
+    smallest eigenvalue of a float32 matrix to exactly zero and send
+    ``cond`` to ``inf``, but it moves the eigenvalue and the threshold
+    together.
+
+    The second is on the null-space projector ``P = V₀ V₀ᵀ`` and decides
+    which *parameters* those unresolved directions spoil.  The bound on
+    parameter ``i`` is infinite as soon as ``eᵢ`` has any component
+    outside the range of ``F``, so the test is ``diag(P)ᵢ > 0`` rather
+    than "is ``eᵢ`` the weakest eigenvector": a parameter spread over
+    several near-null directions has a small component in each and would
+    survive a per-eigenvector test while being wholly unidentifiable.
+    The projector is also the better conditioned object -- whenever two
+    independent combinations are invisible the null eigenvalues are
+    degenerate, which leaves the individual null eigenvectors arbitrary
+    within the subspace but not their projector.  ``diag(P)`` is a sum
+    of squared direction cosines, hence dimensionless and in ``[0, 1]``;
+    a parameter genuinely orthogonal to the null space measures 0 there,
+    so ``n * eps`` clears the floor by orders of magnitude and still
+    catches a component of relative length ``sqrt(n * eps)`` (5e-4 of
+    the direction, in float32).
+    """
+    dtype = jnp.asarray(eigvals).dtype
+    ev = np.asarray(eigvals, dtype=np.float64)
+    vecs = np.asarray(eigvecs, dtype=np.float64)
+    n = int(ev.size)
+    eps = float(np.finfo(dtype).eps)
+    if rank_rtol is None:
+        rank_rtol = n * eps
+    else:
+        rank_rtol = float(rank_rtol)
+        if not np.isfinite(rank_rtol) or rank_rtol < 0.0:
+            raise ValueError(
+                "rank_rtol must be a finite non-negative number, got "
+                f"{rank_rtol!r}")
+    resolved = ev > max(float(ev[-1]), 0.0) * rank_rtol
+    rank = int(resolved.sum())
+    # The inverse over the resolved subspace, diag(V Λ⁻¹ Vᵀ) with the
+    # null directions dropped.  Built from the eigendecomposition
+    # already in hand rather than from ``pinv`` so that ``crb`` and
+    # ``rank`` agree on what is singular by construction: ``pinv``
+    # applies a cutoff of its own, which need not be this one.
+    crb = ((vecs[:, resolved] ** 2) / ev[resolved]).sum(axis=1)
+    support = (vecs[:, ~resolved] ** 2).sum(axis=1)
+    crb = np.where(support > n * eps, np.inf, crb)
+    return rank, jnp.asarray(crb, dtype=dtype)
+
 
 @stability(StabilityLevel.EVOLVING)
 def fim(
@@ -499,6 +594,7 @@ def fim(
     scale: Optional[str] = "relative",
     mask: Optional[dict] = None,
     noise_std: Optional[Any] = None,
+    rank_rtol: Optional[float] = None,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -538,6 +634,22 @@ def fim(
         so ``F = Jᵀ Σ⁻¹ J`` and ``crb`` is the Cramér–Rao bound in the
         parameters' own units (relative variance under
         ``scale="relative"``) rather than "per unit noise variance".
+    rank_rtol : float, optional
+        Relative tolerance deciding which directions the data resolves:
+        an eigenvalue at or below ``rank_rtol * max(eigvals)`` counts as
+        zero, and the parameters with support in the directions it
+        rejects get an infinite ``crb``.  The default, ``n * eps`` for
+        ``n`` parameters at the matrix's precision, is the relative form
+        ``numpy.linalg.matrix_rank`` uses and the point below which
+        ``eigh`` is reporting its own rounding error; raise it to
+        declare a merely ill-conditioned direction unidentifiable too.
+
+    Returns
+    -------
+    FIMReport
+        Notably ``rank``, the number of resolved directions, and
+        ``crb``, which is ``+inf`` for a parameter the unresolved ones
+        leave undetermined.  See :class:`FIMReport`.
     """
     flat, unravel = ravel_pytree(params)
     idx = _masked_indices(params, mask)
@@ -560,14 +672,13 @@ def fim(
     eigvals, eigvecs = jnp.linalg.eigh(F)
     lo, hi = float(eigvals[0]), float(eigvals[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
-    crb = jnp.diag(jnp.linalg.pinv(F))
-    crb = jnp.where(jnp.isfinite(crb), crb, jnp.nan)
+    rank, crb = _rank_and_crb(eigvals, eigvecs, rank_rtol)
     names = _param_names(params)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     return FIMReport(
-        fim=F, eigvals=eigvals, eigvecs=eigvecs, cond=cond, crb=crb,
-        param_names=names,
+        fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
+        crb=crb, param_names=names,
     )
 
 

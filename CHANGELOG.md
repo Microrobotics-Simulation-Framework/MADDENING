@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`SimulationNode.static_data_deps()`** declares which parameters a
+  `static_data` array was derived from; `compile()` now refuses a graph whose
+  static derives from a *trainable* parameter — freeze it or stop deriving it
 - **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
   over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
   window wider than the data instead of returning a meaningless loss
@@ -124,6 +127,9 @@ guidance; the itemized changes follow.
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`
+- **Extended-precision point sets are refused, never silently narrowed**: a
+  `MappingSpec` reference of `float128` / `np.longdouble` (unwritable as JSON,
+  unstable to hash) raises; pass `np.asarray(points, dtype=np.float64)` instead
 - **`solver="ift"` returns the iterate whose residual met the criterion**, as
   `fori` always has, so `converged=True` names the state you were handed and
   both solvers return it; every converged group's answer moves by one residual
@@ -192,6 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fim` reports an unidentifiable parameter as `+inf`, not a tight bound**:
+  `crb` was `diag(pinv(F))`, which is small in the null space; the new
+  `FIMReport.rank` counts the directions the data resolves (`rank_rtol=`)
 - **A fit returns the leaves it did not fit, bit for bit**: `fit`, `fit_lm` and
   `fit_multiple_shooting` copy every leaf outside the mask from the starting
   pytree, so comparing before and after says exactly what a calibration touched

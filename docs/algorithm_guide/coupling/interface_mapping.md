@@ -158,14 +158,49 @@ the `label` hyper-parameter.  Reading `describe()` back with
 |-----------|-------------|
 | `{"node": "<name>", "field": "<key>"}` | the node's `static_data[key]` (a `StaticArray` is unwrapped) or, failing that, an array-valued constructor parameter `node.params[key]` — e.g. `{"node": "rod", "field": "grid_x"}` for a `HeatNode` |
 | `{"asset": "<path>.npy"}`, `{"asset": "<path>.npz", "key": "<member>"}` | a NumPy file, **relative to the directory the config / stage lives in** (`from_dict(..., base_dir=)`; `load_graph_from_usd` defaults to the stage file's directory).  Absolute paths and `..` are refused; the path is then `resolve()`d and the *resolved* file must still lie under the resolved `base_dir`, so a symlink (to a file or to a directory) that leaves it is refused too.  `key` selects an `.npz` member and is an error on a `.npy`. |
-| `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) points and `INLINE_ELEMENT_LIMIT` (1024) numbers in total, finite, of a bool / integer / float dtype |
+| `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) points and `INLINE_ELEMENT_LIMIT` (1024) numbers in total, finite, of an accepted dtype (below) |
+
+#### Accepted dtypes
+
+Whatever the reference form, a point set must be a bool, integer or float
+array of **at most 8 bytes per element**: `bool`, `int8`…`int64`,
+`uint8`…`uint64`, `float16`, `float32`, `float64`.  Complex, string,
+object and datetime arrays are refused, and so is **extended precision** —
+`numpy.longdouble`, spelled `float96` on 32-bit x86 and `float128` on
+x86-64 and aarch64.
+
+An extended-precision point set is **refused with an error, not narrowed
+to `float64`**.  It fails both halves of what a reference has to do:
+`arr.tolist()` yields `numpy.longdouble` objects that `json.dumps` cannot
+write, so the config could not be saved; and `point_array_digest` is not
+stable for it, because the padding bytes of an 80-bit value in its
+16-byte slot are not zeroed, so two arrays that compare equal can hash
+differently and a reference to them is rejected at random.  Downcasting
+quietly would hide a precision loss you did not ask for — a well-known
+source of numerical bugs that are very hard to trace back to their cause
+— so the error names the dtype and the fix:
+
+```python
+mapping = rbf_mapping(np.asarray(fluid_pts, dtype=np.float64),
+                      np.asarray(solid_pts, dtype=np.float64))
+```
+
+This is a limit of the *serialised* form, not a judgement about extended
+precision, and it is not a closed door.  If a real interface ever needs
+it, extended precision can be supported later behind the same API — a
+composite inline representation (the value bytes, or a mantissa /
+exponent pair, written as JSON-safe integers) together with a canonical
+digest, or an FFI path that formats and hashes the value itself.  Nothing
+in the current format assumes 8 bytes is the last word; the constraint is
+explicit today so that you can trust what a saved config holds.
 
 Asset files are read defensively, because a config is untrusted input:
 the `.npy` header (or the `.npz` directory entry) is read first and the
 array is refused before anything is allocated when it would exceed
 `MAX_ASSET_BYTES` (256 MiB — a module constant you can raise for a
 genuinely large interface), when the header claims more data than the
-file holds, or when its dtype is not bool / integer / float.
+file holds, or when its dtype is not an accepted one — including
+extended precision, which is caught from the header before any read.
 
 The resolved path is opened exactly once, with `O_NOFOLLOW`, and the
 size check (`fstat` on that descriptor), the header and the data all

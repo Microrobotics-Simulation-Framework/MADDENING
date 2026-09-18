@@ -2,36 +2,69 @@
 """CI bridge: verify Implementation Mapping tables in algorithm guides.
 
 Parses each algorithm guide's Implementation Mapping Markdown table,
-extracts function qualified names from the "Implementation" column,
-and verifies via importlib + getattr() that each name resolves to an
-existing callable.
+extracts every backticked ``maddening.*`` qualified name from its rows, and
+verifies that each one resolves to an existing callable that the named
+class actually defines.
+
+Three things this gate has to get right, because each was a hole:
+
+* **Own ``__dict__``, not the MRO.**  ``getattr`` walks base classes, so a
+  row naming ``HeatNode.update`` kept resolving after the concrete method
+  was renamed -- ``SimulationNode.update`` answered instead.  A row may opt
+  into inherited behaviour by saying "inherited" in the row; the gate then
+  allows it and says which base it came from.
+* **Every symbol in a row**, not just the first, and every row must carry a
+  code reference at all -- dropping the backticks used to drop the row.
+* **A pinned minimum per guide**, so a table that vanishes fails instead of
+  quietly lowering the count.
 
 Usage:
-    python scripts/check_impl_mapping.py [docs/algorithm_guide/nodes/]
+    python scripts/check_impl_mapping.py [docs/algorithm_guide/]
 
 Exits 0 if all mappings resolve, nonzero if any are stale.
 """
 
-import importlib
 import os
 import re
 import sys
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_HERE)
+
 # Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+
+from maddening.compliance._validate import resolve_dotted_name  # noqa: E402
+
+DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
+
+# Minimum number of resolvable ``maddening.*`` references per guide, keyed by
+# path relative to the repository root.  Pinned so that a deleted table, or a
+# row that loses its backticks, fails instead of reporting a smaller "OK".
+# Raise a number when a guide gains rows; never lower one to make CI pass.
+MIN_MAPPINGS = {
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 5,
+    os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
+}
+
+_QNAME = re.compile(r"`(maddening\.[^`]+)`")
+_CODE_SPAN = re.compile(r"`[^`]+`")
+# A Markdown table cell may contain an escaped pipe.  Splitting on a bare
+# ``|`` mangled every row holding LaTeX like ``\|g\|``, which shifted the
+# Implementation column out of cell 1 and made the row invisible to the gate.
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
 
-def extract_qualified_names(md_path: str) -> list[tuple[str, str]]:
-    """Extract (equation_term, qualified_name) pairs from a Markdown table.
+def _split_row(line: str) -> list[str]:
+    """Split a Markdown table row into cells, honouring ``\\|`` escapes."""
+    return [c.strip() for c in _UNESCAPED_PIPE.split(line)[1:-1]]
 
-    Looks for a section called "Implementation Mapping" and parses the
-    table rows. Extracts qualified names matching the pattern
-    ``module.path.ClassName.method_name`` from the Implementation column.
-    """
+
+def extract_rows(md_path: str) -> list[list[str]]:
+    """Return the data rows of the Implementation Mapping table, as cell lists."""
     with open(md_path) as f:
         content = f.read()
 
-    # Find the Implementation Mapping section
     section_match = re.search(
         r"## Implementation Mapping\s*\n(.*?)(?=\n## |\Z)",
         content,
@@ -42,93 +75,147 @@ def extract_qualified_names(md_path: str) -> list[tuple[str, str]]:
 
     section = section_match.group(1)
 
-    # Parse table rows (skip header and separator)
     rows = []
     for line in section.strip().split("\n"):
         line = line.strip()
         if not line.startswith("|"):
             continue
-        cells = [c.strip() for c in line.split("|")[1:-1]]
-        if len(cells) >= 2:
-            rows.append(cells)
-
-    # Skip header row and separator
-    data_rows = []
-    for row in rows:
-        # Skip separator rows (|---|---|---|)
-        if all(set(c) <= {"-", " ", ":"} for c in row):
+        cells = _split_row(line)
+        if len(cells) < 2:
             continue
-        # Skip header row
-        if row[0].lower().startswith("equation") or row[1].lower().startswith("implementation"):
+        # Separator rows (|---|---|---|)
+        if all(set(c) <= {"-", " ", ":"} for c in cells):
             continue
-        data_rows.append(row)
+        # Header row
+        if (cells[0].lower().startswith("equation")
+                or cells[1].lower().startswith("implementation")):
+            continue
+        rows.append(cells)
 
-    # Extract qualified names from the Implementation column
-    # Pattern: module.path.ClassName.method or module.path.ClassName
-    qname_pattern = re.compile(r"`(maddening\.[^`]+)`")
+    return rows
 
+
+def extract_qualified_names(md_path: str) -> list[tuple[str, str]]:
+    """Extract ``(equation_term, qualified_name)`` pairs from a guide.
+
+    Every backticked ``maddening.*`` span in the row is returned, not only
+    the first: a row may trace one equation term to two functions.
+    """
     results = []
-    for row in data_rows:
-        term = row[0]
-        impl = row[1]
-        match = qname_pattern.search(impl)
-        if match:
-            qname = match.group(1).rstrip("`).,(")
-            results.append((term, qname))
-
+    for cells in extract_rows(md_path):
+        term = cells[0]
+        for match in _QNAME.finditer(" | ".join(cells)):
+            results.append((term, match.group(1).rstrip("`).,( ")))
     return results
 
 
-def resolve_qualified_name(qname: str) -> bool:
-    """Check if a qualified name resolves to an existing callable."""
-    parts = qname.split(".")
-
-    # Try progressively longer module paths
-    for i in range(len(parts) - 1, 0, -1):
-        module_path = ".".join(parts[:i])
-        attr_path = parts[i:]
-        try:
-            mod = importlib.import_module(module_path)
-            obj = mod
-            for attr in attr_path:
-                obj = getattr(obj, attr)
-            return True
-        except (ImportError, AttributeError):
-            continue
-
-    return False
-
-
-def main():
-    guide_dir = sys.argv[1] if len(sys.argv) > 1 else "docs/algorithm_guide/nodes/"
-
-    if not os.path.isdir(guide_dir):
-        print(f"Directory not found: {guide_dir}")
-        sys.exit(1)
-
-    errors = []
+def check_guide(md_path: str, relpath: str) -> tuple[int, list[str], list[str]]:
+    """Check one guide.  Returns ``(n_checked, errors, notes)``."""
+    errors: list[str] = []
+    notes: list[str] = []
     checked = 0
 
-    for fname in sorted(os.listdir(guide_dir)):
-        if not fname.endswith(".md") or fname.startswith("_"):
+    for cells in extract_rows(md_path):
+        term = cells[0]
+        impl = cells[1]
+        # A row whose Implementation cell carries no code span at all traces
+        # its equation term to nothing.  Dropping the backticks used to make
+        # the row invisible to this gate.
+        if not _CODE_SPAN.search(impl):
+            errors.append(
+                f"{relpath}: row '{term}' has no code reference in its "
+                f"Implementation column"
+            )
             continue
 
-        fpath = os.path.join(guide_dir, fname)
-        mappings = extract_qualified_names(fpath)
-
-        for term, qname in mappings:
+        row_text = " | ".join(cells)
+        allow_inherited = "inherited" in row_text.lower()
+        for match in _QNAME.finditer(row_text):
+            qname = match.group(1).rstrip("`).,( ")
             checked += 1
-            if not resolve_qualified_name(qname):
-                errors.append(f"{fname}: '{qname}' (for term '{term}') does not resolve")
+            res = resolve_dotted_name(
+                qname,
+                require_own=not allow_inherited,
+                require_callable=True,
+            )
+            if not res.ok:
+                errors.append(
+                    f"{relpath}: '{qname}' (for term '{term}') does not "
+                    f"resolve: {res.reason}"
+                )
+            elif res.inherited_from:
+                notes.append(
+                    f"{relpath}: '{qname}' (for term '{term}') is inherited "
+                    f"from {res.inherited_from}, as the row states"
+                )
+
+    return checked, errors, notes
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    guide_dir = argv[0] if argv else os.path.join(_REPO_ROOT, DEFAULT_GUIDE_DIR)
+
+    if not os.path.isdir(guide_dir):
+        print(f"Directory not found: {guide_dir}", file=sys.stderr)
+        return 1
+
+    errors: list[str] = []
+    notes: list[str] = []
+    checked = 0
+    per_file: dict[str, int] = {}
+
+    # Recursive: the scope used to be a non-recursive listdir of
+    # docs/algorithm_guide/nodes/, so a guide in any other subdirectory was
+    # invisible to the gate.
+    for root, _dirs, files in os.walk(guide_dir):
+        for fname in sorted(files):
+            if not fname.endswith(".md") or fname.startswith("_"):
+                continue
+            fpath = os.path.join(root, fname)
+            relpath = os.path.relpath(fpath, _REPO_ROOT)
+            n, errs, ns = check_guide(fpath, relpath)
+            checked += n
+            per_file[relpath] = n
+            errors.extend(errs)
+            notes.extend(ns)
+
+    # Pinned minimums, checked against the repository regardless of the
+    # directory that was scanned: a vanished guide has to fail.
+    for pinned, minimum in sorted(MIN_MAPPINGS.items()):
+        abspath = os.path.join(_REPO_ROOT, pinned)
+        if not os.path.isfile(abspath):
+            errors.append(
+                f"{pinned}: pinned in MIN_MAPPINGS but the file does not exist"
+            )
+            continue
+        found = per_file.get(pinned)
+        if found is None:
+            found, errs, _ = check_guide(abspath, pinned)
+            errors.extend(errs)
+        if found < minimum:
+            errors.append(
+                f"{pinned}: {found} implementation mapping(s) found, at least "
+                f"{minimum} expected -- a row or the whole table has gone "
+                f"missing (update MIN_MAPPINGS only if the guide legitimately "
+                f"shrank)"
+            )
+
+    for n in notes:
+        print(f"NOTE: {n}")
 
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
-        print(f"\n{len(errors)} stale mapping(s) found out of {checked} checked", file=sys.stderr)
-        sys.exit(1)
+        print(
+            f"\n{len(errors)} stale mapping(s) found out of {checked} checked",
+            file=sys.stderr,
+        )
+        return 1
 
     print(f"OK: {checked} implementation mapping(s) verified across {guide_dir}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

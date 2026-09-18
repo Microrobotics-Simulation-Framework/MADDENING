@@ -112,6 +112,11 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
+  timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
+- **`coupling_diagnostics()["residual"]` describes the state the step returned**
+  and no longer depends on `solver`; a group that arrives on its last pass now
+  reports `converged=True` instead of raising under `strict_convergence`
 - **`lineax` is a base dependency**, not the `[ift]` extra: a coupling group
   at its default settings could not be differentiated on a base install.
   `pip install maddening` is enough; the now-empty `[ift]` extra still resolves

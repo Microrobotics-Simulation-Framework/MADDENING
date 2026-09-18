@@ -129,8 +129,11 @@ class CouplingGroup:
     strict_convergence : bool
         For ``solver="ift"``: if True, raise a runtime error (via
         ``equinox.error_if``, jit-safe) when the group exits at
-        ``max_iterations`` without meeting its threshold, since the
-        gradient through that step is then invalid.  Default False:
+        ``max_iterations`` and the state it returns is still outside
+        its threshold, since the gradient through that step is then
+        invalid.  The test is on that state's own residual, so a group
+        that arrives on its last pass runs rather than raising (see
+        ``GraphManager.coupling_diagnostics``).  Default False:
         the condition is only reported via
         ``GraphManager.coupling_diagnostics()["converged"]`` when
         ``diagnostics=True``.  Recommended True for training and

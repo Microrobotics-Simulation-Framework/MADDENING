@@ -749,6 +749,100 @@ class TestMultirateRecompile:
         assert not gm.is_multirate
         assert _META_KEY not in gm._state
 
+    def test_recompile_preserves_the_sub_step_phase(self):
+        """A mid-run structural edit must not change the trajectory.
+
+        ``step_count`` is what decides which sub-steps a node with a rate
+        divider > 1 fires on, so a recompile that zeroed it re-phased the
+        whole schedule: declaring one unused, zero-valued external input
+        halfway through moved the ball's final velocity by 33 %.  The
+        edit here changes no physics, so the run has to be bit-identical
+        to the uninterrupted one.
+        """
+        def build(with_ext):
+            gm = GraphManager()
+            gm.add_node(TableNode("table", 0.01, position=0.0))
+            gm.add_node(BallNode("ball", 0.03, initial_position=1.0))
+            gm.add_edge("table", "ball", "position", "table_position")
+            if with_ext:
+                gm.add_external_input("table", "unused", shape=())
+            gm.compile()
+            return gm
+
+        ref = build(True)
+        ref.run(8)
+
+        gm = build(False)
+        gm.run(4)
+        assert int(gm._state[_META_KEY]["step_count"]) == 4
+        gm.add_external_input("table", "unused", shape=())   # dirties the graph
+        gm.run(4)
+
+        assert int(gm._state[_META_KEY]["step_count"]) == 8
+        for field, expected in ref.get_node_state("ball").items():
+            assert jnp.array_equal(gm.get_node_state("ball")[field], expected), field
+
+    def test_recompile_restarts_the_phase_when_rate_dividers_change(self):
+        """A counter whose meaning changed is not worth preserving.
+
+        The sub-step phase is only meaningful relative to the dividers it
+        indexes; when those move, continuing the count would fire nodes
+        on sub-steps chosen for the previous schedule.
+        """
+        gm = GraphManager()
+        gm.add_node(CounterNode(name="a", timestep=0.02))
+        gm.add_node(CounterNode(name="b", timestep=0.04))
+        gm.compile()
+        gm.run(4)
+        assert gm.rate_dividers == {"a": 1, "b": 2}
+        assert int(gm._state[_META_KEY]["step_count"]) == 4
+
+        # The base timestep halves, so every surviving divider doubles.
+        gm.add_node(CounterNode(name="c", timestep=0.03))
+        gm.compile()
+        assert gm.rate_dividers == {"a": 2, "b": 4, "c": 3}
+        assert int(gm._state[_META_KEY]["step_count"]) == 0
+
+    def test_adding_a_node_does_not_re_phase_the_ones_already_running(self):
+        """The dividers of the surviving nodes are what the phase means.
+
+        ``add_node`` + ``add_edge`` mid-run is the scenario
+        ``docs/user_guide/parameters.md`` calls transparent, so a new node
+        arriving at a rate that changes nobody else's divider must leave
+        the running schedule alone.
+        """
+        gm = GraphManager()
+        gm.add_node(CounterNode(name="a", timestep=0.01))
+        gm.add_node(CounterNode(name="b", timestep=0.03))
+        gm.compile()
+        gm.run(4)
+
+        gm.add_node(CounterNode(name="c", timestep=0.02))
+        gm.compile()
+        assert gm.rate_dividers == {"a": 1, "b": 3, "c": 2}
+        assert int(gm._state[_META_KEY]["step_count"]) == 4
+
+    def test_recompile_drops_meta_of_a_removed_coupling_group(self):
+        """Preserving ``_meta`` must not preserve a key with no owner.
+
+        A stale diagnostic key would otherwise ride in the scan carry
+        forever, and ``coupling_diagnostics()`` would report a group the
+        graph no longer has.
+        """
+        gm = GraphManager()
+        gm.add_node(AccumulatorNode(name="a", timestep=0.01))
+        gm.add_node(AccumulatorNode(name="b", timestep=0.01))
+        gm.add_coupling_group(["a", "b"], diagnostics=True)
+        gm.compile()
+        gm.step()
+        assert any(k.startswith("coupling_") for k in gm._state[_META_KEY])
+
+        gm.remove_coupling_group(["a", "b"])
+        gm.compile()
+        assert not any(
+            k.startswith("coupling_") for k in gm._state.get(_META_KEY, {})
+        )
+
 
 # ------------------------------------------------------------------
 # Multi-rate with cycles (back-edge staggering)

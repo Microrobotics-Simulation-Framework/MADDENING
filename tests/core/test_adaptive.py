@@ -629,3 +629,56 @@ class TestAdaptiveWithCoupling:
         assert jnp.isfinite(jnp.array(float(state["spring"]["position"])))
         assert jnp.isfinite(jnp.array(float(state["ball"]["velocity"])))
         assert jnp.isfinite(jnp.array(float(state["spring"]["velocity"])))
+
+
+# ==================================================================
+# TestAdaptiveTakesParams
+# ==================================================================
+
+class TestAdaptiveTakesParams:
+    """``docs/user_guide/parameters.md``: *every* run method takes ``params=``.
+
+    Five of the seven did; the two adaptive ones read ``self.params``
+    directly, so the only way to differentiate ``run_adaptive_scan``
+    with respect to a constant was to write the tracer into
+    ``gm.params`` -- which works, and leaves the graph holding a tracer.
+    """
+
+    @staticmethod
+    def _graph():
+        gm = GraphManager()
+        gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=10.0))
+        gm.compile()
+        return gm
+
+    def _with_gravity(self, gm, g):
+        p = jax.tree.map(lambda x: x, gm.params)
+        p["nodes"]["ball"]["gravity"] = g
+        return p
+
+    def test_run_adaptive_accepts_params(self):
+        gm = self._graph()
+        default = gm.run_adaptive(t_end=0.05)[0]["ball"]["position"]
+        gm.reset_state()
+        same = gm.run_adaptive(
+            t_end=0.05, params=self._with_gravity(gm, jnp.asarray(GRAVITY)),
+        )[0]["ball"]["position"]
+        assert float(same) == pytest.approx(float(default), rel=1e-6)
+
+        gm.reset_state()
+        weaker = gm.run_adaptive(
+            t_end=0.05, params=self._with_gravity(gm, jnp.asarray(GRAVITY / 2)),
+        )[0]["ball"]["position"]
+        assert float(weaker) > float(default)
+
+    def test_run_adaptive_scan_is_differentiable_without_touching_gm_params(self):
+        gm = self._graph()
+
+        def loss(g):
+            return gm.run_adaptive_scan(
+                t_end=0.05, max_steps=8, params=self._with_gravity(gm, g),
+            )[0]["ball"]["position"]
+
+        grad = float(jax.grad(loss)(jnp.asarray(GRAVITY)))
+        assert grad > 0.0                      # more gravity, lower ball
+        assert not isinstance(gm.params["nodes"]["ball"]["gravity"], jax.core.Tracer)

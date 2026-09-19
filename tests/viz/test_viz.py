@@ -178,3 +178,92 @@ class TestRealtimeRunner:
         time.sleep(0.2)
         runner.stop()
         assert runner.sim_time > 0.0
+
+
+# ------------------------------------------------------------------
+# RealtimeRunner: a bad remote command must not take the session
+# ------------------------------------------------------------------
+
+class _ScriptedReceiver:
+    """A ``CommandReceiver`` stand-in that replays a fixed command."""
+
+    def __init__(self, command):
+        self.command = command
+        self.calls = 0
+
+    def latest_commands(self):
+        self.calls += 1
+        return self.command
+
+
+def _graph_with_a_declared_input():
+    gm = GraphManager()
+    gm.add_node(TableNode(name="table", timestep=0.01, position=0.0))
+    gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=5.0))
+    gm.add_edge("table", "ball", "position", "table_position")
+    gm.add_external_input("ball", "external_force", shape=())
+    gm.compile()
+    return gm
+
+
+class TestRunnerSurvivesABadCommand:
+    """A rejected command is reported; the runner keeps stepping.
+
+    Since v0.4.0 ``GraphManager.step`` refuses an external input the
+    graph does not declare rather than dropping it in silence.  That is
+    right -- a control input that quietly does nothing is the worse
+    failure -- but the command dict comes off the wire from a remote
+    controller, and a typo there must not kill the daemon thread and
+    cost the operator every subsequent frame.
+    """
+
+    def test_a_typod_command_is_rejected_and_the_loop_survives(self, caplog):
+        gm = _graph_with_a_declared_input()
+        relay = StateRelay()
+        relay.attach(gm)
+        runner = RealtimeRunner(
+            gm, relay, time_scale=100.0,
+            command_receiver=_ScriptedReceiver({"ball": {"externl_force": 1.0}}),
+        )
+        with caplog.at_level("ERROR", logger="maddening.viz.runner"):
+            runner.start()
+            time.sleep(0.2)
+            runner.stop()
+
+        assert runner.rejected_commands > 0
+        assert runner.sim_time > 0.0, "the runner stopped stepping"
+        t, snap = relay.latest_snapshot()
+        assert snap is not None and t > 0.0
+
+        # Loud: the offending name and the reason are both in the log ...
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("externl_force" in m for m in messages), messages
+        assert any("does not declare" in m for m in messages), messages
+        # ... and said once, not once per frame.
+        assert len([m for m in messages if "rejected external command" in m]) == 1
+
+    def test_a_declared_command_is_passed_through(self):
+        gm = _graph_with_a_declared_input()
+        relay = StateRelay()
+        relay.attach(gm)
+        runner = RealtimeRunner(
+            gm, relay, time_scale=100.0,
+            command_receiver=_ScriptedReceiver(
+                {"ball": {"external_force": jnp.array(0.0)}}
+            ),
+        )
+        runner.start()
+        time.sleep(0.15)
+        runner.stop()
+        assert runner.rejected_commands == 0
+        assert runner.sim_time > 0.0
+
+    def test_a_rejected_command_steps_with_zeros_not_a_partial_one(self):
+        """The fallback is the documented "no commands" behaviour."""
+        gm = _graph_with_a_declared_input()
+        runner = RealtimeRunner(gm, StateRelay(), time_scale=100.0)
+        assert runner._accepted_commands({"ball": {"nope": 1.0}}) is None
+        assert runner.rejected_commands == 1
+        good = {"ball": {"external_force": jnp.array(1.0)}}
+        assert runner._accepted_commands(good) is good
+        assert runner._accepted_commands(None) is None

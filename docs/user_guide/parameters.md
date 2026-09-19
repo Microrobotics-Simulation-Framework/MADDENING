@@ -98,6 +98,14 @@ dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
 way back to the constructor snapshot.  A checkpoint loaded before the
 first compile compiles the graph so its params are not lost.
 
+The graph's *state* survives the same recompile, and so does the
+internal bookkeeping that goes with it: a multi-rate graph keeps its
+sub-step phase and a coupling group keeps its predictor history and IQN
+warm start, so a mid-run edit changes no number.  Only a change that
+moves a node's rate divider restarts the phase, because the sub-step it
+counts then means something else.  `gm.reset_state()` is the explicit
+way to zero all of it.
+
 A *partial* pytree passed to `gm.step(params=...)` / `gm.run_scan` /
 `gm.run` is completed from the **live** `gm.params` (a missing node or
 key keeps its calibrated value, not its constructor constant).  The raw

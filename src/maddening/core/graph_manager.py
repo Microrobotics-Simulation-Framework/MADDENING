@@ -3976,13 +3976,16 @@ class GraphManager:
             ``"bound_valid"``.
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
-            same passes, stop on the same pass, return the same state
-            and derive every value here by the same rule, so migrating
-            a graph between them does not move the answer or the
-            verdict.
+            same passes, stop on the same pass and derive every value
+            here by the same rule, so migrating a graph between them
+            does not move the answer or the verdict.  The returned
+            state agrees to float32 round-off -- bit-identical on most
+            graphs, and 7.3e-07 relative in the worst of 480
+            configurations of a subcycled multi-rate group, none of
+            which disagreed on ``converged``.
 
-            **The reported ``"residual"`` is the one number that can
-            still move, and only by float32 round-off.**  Every norm
+            **The reported ``"residual"`` is the one number that moves
+            further than that, and only by float32 round-off.**  Every norm
             here divides ``F(x) - x`` by a scale, so it is a
             *cancellation*: near the fixed point the numerator is the
             difference of two nearly equal float32 states, and one unit

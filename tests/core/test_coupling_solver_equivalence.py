@@ -432,10 +432,12 @@ def test_both_gradients_agree_once_the_forward_has_converged():
 # The two solvers cannot avoid rounding differently: ``"ift"`` runs its passes
 # in a ``lax.while_loop`` (it has to, to exit early) and ``"fori"`` in a
 # ``lax.fori_loop``, and XLA compiles the two bodies to differently rounded
-# arithmetic.  Measured on ``_multirate_graph`` below, the *same* compiled map
-# applied to the *same* input vector differs by one ulp on two of ten float32
-# components between the two loops -- which moves the reported residual from
-# 1.04e-05 to exactly 0.0, with both solvers returning the same state and both
+# arithmetic.  Measured on ``_multirate_graph`` below: the *same* map applied
+# to the *same* input vector moves two of ten float32 components by one ulp
+# under one compilation (1.8626e-09, which is exactly
+# ``np.spacing(float32(node_1.angle))``) and leaves all ten bit-identical
+# under the other.  That is the difference between reporting 1.04e-05 and
+# reporting exactly 0.0, with both solvers returning the same state and both
 # reporting ``converged=True``.
 #
 # So the contract is: same passes, same state, same verdict; and the reported
@@ -450,12 +452,23 @@ _F32_EPS = float(np.finfo(np.float32).eps)
 
 #: Ulps of slack on the floor.  One ulp is the *minimum* two differently
 #: compiled copies of a pass can differ by; a subcycled pass is a scan over
-#: four coupled updates, so a few accumulate.  Eight is the worst measured
-#: over a 480-cell sweep of the fixture below (caps 1-6, one to three
-#: waveform iterations, four accelerations, both iteration modes, both
-#: comparable norms, one and two steps) with room to spare, and it is still
-#: ~1e-3 of the mixed norm's threshold of 1.0 -- far too small to let a real
-#: convergence disagreement through.
+#: four coupled updates, so a few can accumulate.
+#:
+#: Measured, not guessed: over a 480-cell sweep of the fixture below (caps
+#: 1-6, one to three waveform iterations, four accelerations, both iteration
+#: modes, both comparable norms, one and two steps) the worst solver-to-solver
+#: residual disagreement was **0.82 of a one-ulp floor** -- 82 cells disagreed
+#: by more than ``rel=1e-4`` and not one exceeded a single ulp.  Eight is an
+#: order of magnitude above that, which is the margin a float32 cancellation
+#: needs to survive a different CPU or a different XLA release.
+#:
+#: It stays a real gate at that width.  Under the mixed norm it is
+#: ``8 * eps / rtol``, ~1e-3 of that norm's threshold of 1.0; adding 0.01 to
+#: one solver's reported residual fails 25 of the 26 cases below.  Under the
+#: L2 norm it is ``8 * eps * sqrt(n)``, which for a small group is a few 1e-6
+#: and so can *exceed* a tight ``tolerance``: an L2 group whose tolerance is
+#: at or below the norm's float32 resolution has a criterion made of rounding,
+#: and no comparison of two such residuals can say more than that.
 _ULP_SLACK = 8.0
 
 
@@ -587,6 +600,14 @@ def _multirate_run(solver, steps=1, **overrides):
             {n: dict(gm.get_node_state(n)) for n in _MULTIRATE_NODES})
 
 
+#: Floor on the scale a state difference is divided by.  ``rod`` starts at
+#: ``initial_y=1.19e-07`` and ``initial_x=0.0``, where a pure relative
+#: measure reads one subnormal of difference as O(1).  Below this the check
+#: is absolute instead, which at the 1e-5 tolerance it is used with is
+#: 1e-11 -- orders above the few ulps float32 can put there.
+_STATE_SCALE_FLOOR = 1e-6
+
+
 def _state_gap(a, b):
     """Largest relative difference between two returned states."""
     worst = 0.0
@@ -594,7 +615,8 @@ def _state_gap(a, b):
         for field in a[node]:
             x = np.asarray(a[node][field], np.float64)
             y = np.asarray(b[node][field], np.float64)
-            scale = max(np.max(np.abs(x)), np.max(np.abs(y)), 1e-30)
+            scale = max(np.max(np.abs(x)), np.max(np.abs(y)),
+                        _STATE_SCALE_FLOOR)
             worst = max(worst, float(np.max(np.abs(x - y)) / scale))
     return worst
 
@@ -618,6 +640,14 @@ def test_a_converged_multirate_group_returns_one_state_from_either_solver():
     measured bit-for-bit identical on the reference platform.  Only the
     *measurement* of how far that state is from the fixed point moved,
     because at 1e-05 in this norm the measurement is rounding.
+
+    What this cannot see, and does not claim to: D2 itself.  This group
+    is converged to float32, so the successor ``ift`` used to return
+    instead of the measured iterate is ~1e-08 away relatively -- below
+    any state tolerance worth writing.  Reverting D2 leaves every
+    assertion here green and fails 33 of the affine-cycle tests above,
+    which is where that contract is guarded.  This fixture guards the
+    *reporting* contract in the regime the affine cycle never reaches.
     """
     d_ift, s_ift = _multirate_run("ift")
     d_fori, s_fori = _multirate_run("fori")

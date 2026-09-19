@@ -129,6 +129,15 @@ def _tightened(recipe):
     )
 
 
+#: Floor on the scale a state difference is divided by.  A generated
+#: graph can leave a field at 1e-20 or at exactly zero, where a pure
+#: relative measure reads a one-subnormal difference as O(1) and the
+#: comparison becomes noise about nothing.  Below this the check is
+#: absolute instead, which at the 1e-5 tolerance it is used with is
+#: 1e-11 -- orders above the few ulps float32 can put there.
+_STATE_SCALE_FLOOR = 1e-6
+
+
 def _state_gap(a: dict, b: dict, nodes: list[str]) -> float:
     """Largest relative difference between two returned states."""
     worst = 0.0
@@ -136,7 +145,8 @@ def _state_gap(a: dict, b: dict, nodes: list[str]) -> float:
         for field in a[node]:
             x = np.asarray(a[node][field], np.float64)
             y = np.asarray(b[node][field], np.float64)
-            scale = max(np.max(np.abs(x)), np.max(np.abs(y)), 1e-30)
+            scale = max(np.max(np.abs(x)), np.max(np.abs(y)),
+                        _STATE_SCALE_FLOOR)
             worst = max(worst, float(np.max(np.abs(x - y)) / scale))
     return worst
 

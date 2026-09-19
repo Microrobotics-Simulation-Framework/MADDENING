@@ -3124,26 +3124,44 @@ class GraphManager:
         CouplingGroup
             The created coupling group descriptor.
         """
-        for name in nodes:
-            if name not in self._nodes:
-                raise KeyError(f"No node named '{name}'.")
-        # Check for overlap with existing coupling groups
         new_set = frozenset(nodes)
+        # Check for overlap with existing coupling groups
         for existing in self._coupling_groups:
             overlap = new_set & existing.nodes
             if overlap:
                 raise ValueError(
                     f"Nodes {overlap} already belong to a coupling group."
                 )
-        group = CouplingGroup(
-            nodes=new_set,
-            max_iterations=max_iterations,
-            tolerance=tolerance,
-            **kwargs,
+        group = self._make_coupling_group(
+            nodes, max_iterations, tolerance, **kwargs
         )
         self._coupling_groups.append(group)
         self._dirty = True
         return group
+
+    def _make_coupling_group(
+        self,
+        nodes: Sequence[str],
+        max_iterations: int = 10,
+        tolerance: float = 1e-6,
+        **kwargs,
+    ) -> CouplingGroup:
+        """Validate and construct a group without registering it.
+
+        Everything that can refuse a group -- an unknown node name,
+        ``CouplingGroup``'s own validation of the knobs -- happens here,
+        so a caller replacing several groups at once can build them all
+        before it touches the graph.
+        """
+        for name in nodes:
+            if name not in self._nodes:
+                raise KeyError(f"No node named '{name}'.")
+        return CouplingGroup(
+            nodes=frozenset(nodes),
+            max_iterations=max_iterations,
+            tolerance=tolerance,
+            **kwargs,
+        )
 
     def remove_coupling_group(self, nodes: Sequence[str]) -> None:
         """Remove a coupling group by its node set."""
@@ -3180,24 +3198,25 @@ class GraphManager:
         list of CouplingGroup
             The created coupling groups.
         """
-        # Clearing is itself a change to the compiled step, and
-        # ``add_coupling_group`` below is the only thing that used to set
-        # the flag -- so an ``auto_couple`` that found no cycles left the
-        # graph describing itself as uncoupled while still running the
-        # coupled step it was compiled with.  Flagged before the clear:
-        # a graph marked dirty whose groups are unchanged costs one
-        # recompile, the reverse costs a wrong step.
-        self._dirty = True
-        self._coupling_groups.clear()
+        # Every group built before any of them is registered.  The old
+        # order cleared the groups first and built them one at a time, so
+        # a ``kwargs`` the ``CouplingGroup`` constructor refuses -- a
+        # misspelled knob -- destroyed the groups the graph already had
+        # and put nothing back.  Clearing is itself a change to the
+        # compiled step, so the dirty flag is part of the same commit:
+        # ``add_coupling_group`` used to be the only thing that set it,
+        # and an ``auto_couple`` that found no cycles left the graph
+        # describing itself as uncoupled while still running the coupled
+        # step it was compiled with.
         sccs = find_strongly_connected_components(
             list(self._nodes.keys()), self._edges
         )
-        groups = []
-        for scc in sccs:
-            g = self.add_coupling_group(
-                scc, max_iterations, tolerance, **kwargs
-            )
-            groups.append(g)
+        groups = [
+            self._make_coupling_group(scc, max_iterations, tolerance, **kwargs)
+            for scc in sccs
+        ]
+        self._coupling_groups[:] = groups
+        self._dirty = True
         return groups
 
     # ------------------------------------------------------------------
@@ -4000,19 +4019,27 @@ class GraphManager:
                 "with iteration_mode='jacobi'"
             )
 
-        self._multigpu_mesh = create_device_mesh(
+        # Mesh and device map into locals, committed together below.
+        # ``assign_nodes_to_devices`` and ``EdgeSpec.to_dict`` can raise,
+        # and a mesh committed on its own leaves ``validate_sharding``
+        # judging the nodes against a mesh the graph is not using while
+        # the step still runs on the previous device map -- with
+        # ``_dirty`` never set, so nothing recompiles to reconcile them.
+        mesh = create_device_mesh(
             n_devices, shape=mesh_shape, axis_names=mesh_axes
         )
-        n = len(self._multigpu_mesh.devices.reshape(-1))
+        n = len(mesh.devices.reshape(-1))
 
         coupling_sets = [set(g.nodes) for g in self._coupling_groups]
         edges_dicts = [e.to_dict() for e in self._edges]
-        self._multigpu_device_map = assign_nodes_to_devices(
+        device_map = assign_nodes_to_devices(
             node_names=list(self._nodes.keys()),
             edges=edges_dicts,
             coupling_groups=coupling_sets,
             n_devices=n,
         )
+        self._multigpu_mesh = mesh
+        self._multigpu_device_map = device_map
         self._dirty = True
 
     def _committed_plan(self) -> "_StepPlan":

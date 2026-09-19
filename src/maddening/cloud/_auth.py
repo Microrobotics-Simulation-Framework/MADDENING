@@ -22,6 +22,16 @@ def validate_session_token(
     token: str,
     secret: str,
 ) -> bool:
-    """Validate *token* against *session_id* using constant-time compare."""
+    """Validate *token* against *session_id* using constant-time compare.
+
+    *token* is whatever the client presented, so it may be empty or
+    contain any character: both operands are compared as UTF-8 bytes
+    because :func:`hmac.compare_digest` refuses non-ASCII ``str``
+    arguments, and a client must not be able to raise ``TypeError``
+    inside an authentication check by sending a non-ASCII token.
+    """
     expected = generate_session_token(session_id, secret)
-    return hmac.compare_digest(token, expected)
+    return hmac.compare_digest(
+        token.encode("utf-8", "surrogatepass"),
+        expected.encode("utf-8"),
+    )

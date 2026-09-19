@@ -60,6 +60,7 @@ except ImportError as _exc:
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
+from maddening import __version__ as _maddening_version
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
@@ -515,7 +516,9 @@ class SimulationServer:
         app = FastAPI(
             title="MADDENING Simulation Server",
             description="HTTP/WebSocket API for the MADDENING simulation graph.",
-            version="0.3.0",
+            # The package version, not a separately maintained API
+            # version: this was pinned at "0.3.0" and went stale.
+            version=_maddening_version,
         )
 
         # -- visualization endpoints -----------------------------------------
@@ -1140,6 +1143,23 @@ class SimulationServer:
             # rather than being left with the original node, half its edges
             # and no compiled step.
             snapshot = _graph_structure_snapshot(self.gm)
+            # A mapped edge's weights live in ``gm.params["mappings"][key]``,
+            # and its ParamSpec overrides under the same key; ``remove_node``
+            # drops both, and the ``compile()`` below re-snapshots the
+            # weights from the mapping object -- silently reverting a fit
+            # made while the surrogate was active.  Read them off the *live*
+            # graph, which is where such a fit landed.
+            live_mappings = (self.gm.params or {}).get("mappings") or {}
+            saved_mapping_params = {
+                edge.key: dict(live_mappings[edge.key])
+                for edge in orig_edges
+                if edge.mapping is not None and edge.key in live_mappings
+            }
+            saved_edge_specs = {
+                edge.key: dict(self.gm._param_spec_overrides[edge.key])
+                for edge in orig_edges
+                if edge.key in self.gm._param_spec_overrides
+            }
             problems: list[str] = []
             try:
                 try:
@@ -1153,17 +1173,10 @@ class SimulationServer:
                         # Every EdgeSpec field, not just the endpoints: a
                         # dropped ``mapping`` breaks the shapes, and a
                         # dropped ``additive`` silently overwrites a
-                        # boundary input the graph used to add to.
-                        self.gm.add_edge(
-                            source=edge.source_node, target=edge.target_node,
-                            source_field=edge.source_field,
-                            target_field=edge.target_field,
-                            transform=edge.transform,
-                            additive=edge.additive,
-                            source_units=edge.source_units,
-                            target_units=edge.target_units,
-                            mapping=edge.mapping,
-                        )
+                        # boundary input the graph used to add to.  Derived
+                        # from the dataclass, so a field added to EdgeSpec
+                        # cannot quietly stop being restored here.
+                        self.gm.add_edge(**edge.add_edge_kwargs())
                     except Exception as exc:  # noqa: BLE001 - reported below
                         problems.append(f"edge {edge.key}: {exc}")
                 for ei in orig_ext:
@@ -1176,6 +1189,23 @@ class SimulationServer:
                             f"external input {ei.target_node}.{ei.target_field}: {exc}")
                 if problems:
                     raise RuntimeError("; ".join(problems))
+                restored_keys = {e.key for e in self.gm._edges}
+                missing = sorted(set(saved_mapping_params) - restored_keys)
+                if missing:
+                    # ``add_edge`` recomputes ``ordinal``, and the key it
+                    # builds from it names the weights' slot: put them back
+                    # under a key no edge answers to and they are attached
+                    # to nothing, or to the wrong edge.
+                    raise RuntimeError(
+                        f"restored edges do not carry the saved mapping "
+                        f"key(s) {missing}"
+                    )
+                if saved_mapping_params:
+                    self.gm.params.setdefault("mappings", {}).update(
+                        saved_mapping_params)
+                for edge_key, overrides in saved_edge_specs.items():
+                    for param_key, spec in overrides.items():
+                        self.gm.set_param_spec(edge_key, param_key, spec)
                 self.gm.compile()
             except Exception as exc:
                 _restore_graph_structure(self.gm, snapshot)

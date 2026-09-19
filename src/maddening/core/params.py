@@ -109,8 +109,35 @@ class ParamSpec:
     def _lo(self) -> float:
         return 0.0 if self.bounds[0] is None else float(self.bounds[0])
 
+    def _require_floating(self, dtype) -> None:
+        """A ``log`` / ``logit`` leaf has to be floating.
+
+        :meth:`to_constrained`'s identity branch goes out of its way to
+        keep a leaf's dtype -- "a leaf's dtype is part of the pytree
+        contract" -- and the transform branches cannot: ``log`` of an
+        ``int32`` leaf is float, nothing downstream remembers it was an
+        integer, and ``constrain(unconstrain(p))`` comes back float
+        (``logit`` also comes back 2.4e-7 off), which is exactly the
+        identity this module's docstring states for the whole tree.  So
+        refuse the combination instead of quietly changing a dtype: a
+        parameter an optimiser moves continuously through ``exp`` or
+        ``sigmoid`` is not an integer parameter.
+        """
+        if not jnp.issubdtype(dtype, jnp.floating):
+            raise ValueError(
+                f"ParamSpec.transform={self.transform!r} needs a floating-point "
+                f"leaf, got dtype {dtype}. The transform maps the leaf through "
+                "exp/sigmoid, so constrain(unconstrain(p)) cannot return the "
+                "integer it started from, and this module promises that round "
+                "trip over the whole tree. Either store the parameter as a "
+                "float, or declare it with transform=None (bounds are still "
+                "enforced, by clipping, and the dtype is preserved)."
+            )
+
     def to_unconstrained(self, p):
         p = jnp.asarray(p)
+        if self.transform in ("log", "logit"):
+            self._require_floating(p.dtype)
         if self.transform == "log":
             return jnp.log(p - self._lo())
         if self.transform == "logit":

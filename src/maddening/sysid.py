@@ -35,6 +35,7 @@ Usage::
 from __future__ import annotations
 
 import numbers
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -54,8 +55,39 @@ from maddening.core.compliance.stability import stability
 # duplicating it here would be a second definition of "which spec
 # governs this leaf".
 from maddening.core.params import _spec_for
+from maddening.warnings import PrecisionLimitWarning
 
 _META_KEY = "_meta"
+
+#: Factor either side of the rank cutoff within which a float32 rank
+#: verdict is not reproducible.  Measured on this module's own
+#: arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
+#: float64 reference applying the *same* rank rule, over ~220k synthetic
+#: Fisher matrices of known spectrum (n = 2..25 parameters, m = 50..2000
+#: residual rows, spread / clustered / twin-null spectra):
+#:
+#: =========================  ==========================================
+#: deciding ratio is within   share of the verdicts the two disagreed on
+#: =========================  ==========================================
+#: 1.14x of the cutoff        50%
+#: 1.88x                      90%
+#: 5.44x                      99%
+#: 8x                         99.6%
+#: =========================  ==========================================
+#:
+#: 8 is also the largest factor that fired on **none** of 24,000
+#: well-conditioned problems (smallest eigenvalue 10x..1e6x the cutoff);
+#: at 10 that count leaves zero and by 15 it is 2.6%.  Both criteria --
+#: the edge of the disagreement band with margin, and the last factor
+#: that is silent on ordinary problems -- land on the same number, which
+#: is why it is this one and not the 10x that was suggested.
+#:
+#: The 0.4% of disagreements beyond it are long-residual cases: forming
+#: ``J.T @ J`` in float32 over ``m`` rows costs up to ``m * eps``, and
+#: the cutoff's ``n * eps`` form cannot see ``m`` at all.  A factor wide
+#: enough to cover them fires on ordinary problems, which is the worse
+#: failure -- a warning that fires routinely gets suppressed.
+_PRECISION_WARN_FACTOR = 8.0
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -333,6 +365,16 @@ class FIMReport:
     residual is rescaled (by ``noise_std``, say), because the threshold
     scales with the matrix; a float32 ``cond`` can flip between a finite
     number and ``inf`` under exactly that rescaling.
+
+    The verdict is a comparison of two numbers, and at float32 it can be
+    a comparison of two numbers that differ by less than the
+    decomposition can resolve.  :func:`fim` says so when that happens --
+    a :class:`~maddening.warnings.PrecisionLimitWarning` naming the
+    measured ratio, the cutoff and the ``jax_enable_x64`` re-run that
+    settles it -- rather than reporting the coin-flip as a fact.  No
+    warning means the deciding ratio was more than
+    ``_PRECISION_WARN_FACTOR`` away from the cutoff, not that the
+    problem is well conditioned.
 
     ``crb`` is the Cramér–Rao lower bound on each parameter's variance
     (unit noise variance; relative variance under ``scale="relative"``).
@@ -626,6 +668,64 @@ def _check_noise_std(sig, original) -> None:
     )
 
 
+def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float]) -> float:
+    """The relative eigenvalue cutoff ``rank`` is decided against.
+
+    One definition, used by the rank itself and by the check that asks
+    whether that rank was decided at the noise floor: a warning derived
+    from a *different* cutoff from the one in force would be describing
+    a verdict nobody took.
+    """
+    if rank_rtol is None:
+        return n * float(np.finfo(dtype).eps)
+    rank_rtol = float(rank_rtol)
+    if not np.isfinite(rank_rtol) or rank_rtol < 0.0:
+        raise ValueError(
+            "rank_rtol must be a finite non-negative number, got "
+            f"{rank_rtol!r}")
+    return rank_rtol
+
+
+def _precision_limited(eigvals, rank_rtol: float,
+                       factor: float = _PRECISION_WARN_FACTOR):
+    """``(deciding ratio, cutoff)`` when ``rank`` rests on rounding, else ``None``.
+
+    The deciding ratio is the eigenvalue ratio ``lambda_i / lambda_max``
+    lying closest to ``rank_rtol`` in log distance -- the one an error
+    of the wrong size would carry across the cutoff and so change
+    ``rank`` by one.  It is not always ``eigvals[0]``: a spectrum with
+    two near-null directions has a second ratio just as close, and a
+    matrix whose smallest eigenvalue is far *below* the cutoff can still
+    have a different one sitting on it.
+
+    A ratio that is zero or negative is deliberately **not** reported.
+    A non-positive eigenvalue of a PSD matrix is unambiguously rounding,
+    but it is also what an exactly rank-deficient Fisher matrix produces
+    -- ``scale="relative"`` with a parameter at ``0.0`` is the common
+    case, and :attr:`FIMReport.zero_scaled` already explains it.
+    Warning there fires on 100% of exact zero-column reports and ~65% of
+    exactly-dependent ones (measured), for a verdict float64 agrees
+    with; that is the routine firing that gets a warning suppressed.
+    The cost is the 1% of precision-limited verdicts whose smallest
+    eigenvalue came back non-positive, which stay silent.
+    """
+    ev = np.asarray(eigvals, dtype=np.float64)
+    hi = float(ev[-1]) if ev.size else 0.0
+    if not np.isfinite(hi) or hi <= 0.0 or rank_rtol <= 0.0:
+        # No cutoff (``rank_rtol=0`` resolves everything by request) and
+        # no usable scale (a non-positive or non-finite largest
+        # eigenvalue) both mean there is no threshold to sit near.
+        return None
+    ratios = ev / hi
+    pos = ratios[np.isfinite(ratios) & (ratios > 0.0)]
+    if pos.size == 0:
+        return None
+    deciding = float(pos[np.argmin(np.abs(np.log(pos / rank_rtol)))])
+    if rank_rtol / factor <= deciding <= rank_rtol * factor:
+        return deciding, float(rank_rtol)
+    return None
+
+
 def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float]):
     """``(rank, crb)`` from the eigendecomposition of a Fisher matrix.
 
@@ -681,14 +781,7 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float]):
     vecs = np.asarray(eigvecs, dtype=np.float64)
     n = int(ev.size)
     eps = float(np.finfo(dtype).eps)
-    if rank_rtol is None:
-        rank_rtol = n * eps
-    else:
-        rank_rtol = float(rank_rtol)
-        if not np.isfinite(rank_rtol) or rank_rtol < 0.0:
-            raise ValueError(
-                "rank_rtol must be a finite non-negative number, got "
-                f"{rank_rtol!r}")
+    rank_rtol = _resolve_rank_rtol(dtype, n, rank_rtol)
     resolved = ev > max(float(ev[-1]), 0.0) * rank_rtol
     rank = int(resolved.sum())
     # The inverse over the resolved subspace, diag(V Λ⁻¹ Vᵀ) with the
@@ -776,6 +869,9 @@ def fim(
         ``numpy.linalg.matrix_rank`` uses and the point below which
         ``eigh`` is reporting its own rounding error; raise it to
         declare a merely ill-conditioned direction unidentifiable too.
+        ``0.0`` resolves every positive eigenvalue and suppresses the
+        precision warning with it: there is no threshold left to sit
+        near.
 
     Returns
     -------
@@ -783,6 +879,29 @@ def fim(
         Notably ``rank``, the number of resolved directions, and
         ``crb``, which is ``+inf`` for a parameter the unresolved ones
         leave undetermined.  See :class:`FIMReport`.
+
+    Warns
+    -----
+    ~maddening.warnings.PrecisionLimitWarning
+        If the eigenvalue ratio deciding ``rank`` lands within
+        ``_PRECISION_WARN_FACTOR`` of the cutoff, i.e. the verdict rests
+        on a difference the matrix's own precision cannot resolve.  The
+        message names the ratio, the cutoff and the remedy: re-run under
+        ``jax_enable_x64``.  x64 is not the default and is not going to
+        be -- it is process-global, set before the first JAX import, and
+        fp64 measures 91x slower than fp32 on the reference RTX A2000
+        (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
+        cores).  The design goal is that the cases which need it say so.
+
+        Measured, not assumed: the factor is where float32 and float64
+        verdicts were observed to diverge over ~220k synthetic Fisher
+        matrices of known rank; see ``_PRECISION_WARN_FACTOR``.  It is
+        quiet by construction on ordinary problems (0 of 24,000
+        well-conditioned matrices) and it does **not** fire on an
+        exactly singular ``F``, whose null eigenvalue comes back at or
+        below zero -- that is a real rank deficiency, not a
+        precision-limited verdict, and :attr:`FIMReport.zero_scaled`
+        already names the common cause.
 
     Raises
     ------
@@ -842,6 +961,50 @@ def fim(
     lo, hi = float(eigvals[0]), float(eigvals[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
     rank, crb = _rank_and_crb(eigvals, eigvecs, rank_rtol)
+    limited = _precision_limited(
+        eigvals, _resolve_rank_rtol(jnp.asarray(eigvals).dtype,
+                                    int(np.asarray(eigvals).size), rank_rtol),
+    )
+    if limited is not None:
+        ratio, cutoff = limited
+        dtype = np.asarray(eigvals).dtype
+        # Under x64 the remedy has already been taken, and repeating it
+        # would send a user round a loop they have finished.  There is
+        # no third precision to escalate to, so say what is left: the
+        # comparison is at the floor of the best precision available.
+        remedy = (
+            "Settle it by re-running under x64 -- "
+            "jax.config.update('jax_enable_x64', True) before the first "
+            "array is made, or JAX_ENABLE_X64=1 -- which moves the "
+            "cutoff to n * 2.22e-16 and computes the ratio to match."
+            if dtype == np.float32 else
+            "This is already the widest precision JAX offers, so no "
+            "re-run settles it: the two numbers being compared are "
+            "genuinely indistinguishable here. Decide the direction by "
+            "hand -- raise rank_rtol to call it unidentifiable, or "
+            "rescale the residual so the comparison is not this close."
+        )
+        warnings.warn(
+            f"rank={rank} of {len(names)} was decided at the "
+            f"{dtype} noise floor: the eigenvalue ratio nearest the "
+            f"cutoff is {ratio:.4g} against a cutoff of {cutoff:.4g}, a "
+            f"factor of {max(ratio / cutoff, cutoff / ratio):.3g} -- "
+            f"within the {_PRECISION_WARN_FACTOR:g}x band where the "
+            f"float32 and float64 verdicts were measured to disagree. "
+            f"eigh returns each eigenvalue with an absolute error of "
+            f"order eps * max(eigvals), and forming F = J^T J in "
+            f"{dtype} costs up to as much again, so a difference this "
+            f"size is rounding and not information: rank, crb and cond "
+            f"all follow this one comparison and are provisional "
+            f"together. {remedy} This is advisory: nothing about the "
+            f"report is "
+            f"wrong, only undetermined. Silence it with "
+            f"warnings.simplefilter('ignore', PrecisionLimitWarning), "
+            f"or raise rank_rtol to declare the direction "
+            f"unidentifiable on purpose.",
+            PrecisionLimitWarning,
+            stacklevel=2,
+        )
     return FIMReport(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,

@@ -342,8 +342,11 @@ guidance; the itemized changes follow.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected via `-m "not
-  slow"`).  Slow-marked tests deferred to a longer pre-release pass
+- Full MADDENING test suite at `c51cd6a`: **3440 tests collected**, 3413 under
+  `-m "not slow"` (27 deselected).  A collection count, not a pass count — see
+  `docs/release_notes/v0.4.0.md` for the last full CI run.  This line
+  previously carried v0.2.1's "1680 passed, 3 skipped"; it is edited in place
+  rather than appended because a false count is not fixed by adding a true one
 - Sharded `StaticArray` acceptance on a 4-device virtual mesh: bit-compatible
   with the single-device baseline, 50-step convergence, construction-time
   validation, `shard_info` delivery
@@ -353,6 +356,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Cloud surface**: the signaling WebSocket validated its own token, not the
+  client's (CRITICAL; set `MADDENING_STREAM_SECRET`), and the unauthenticated
+  API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory

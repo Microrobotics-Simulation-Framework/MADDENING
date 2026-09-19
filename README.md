@@ -113,6 +113,18 @@ job.teardown()
 
 Docker image: `ghcr.io/microrobotics-simulation-framework/maddening-cloud:latest`
 
+**The HTTP API on port 8000 has no authentication and no TLS.** The cloud
+image binds `0.0.0.0` and the launcher opens port 8000 in the provider's
+firewall, so a default launch puts a fully graph-mutating API — including
+`POST /cloud/launch`, which provisions paid GPU instances with your stored
+credentials — on a public address. Keep 8000 out of `ports:` in your job
+config and reach the API through an SSH tunnel
+(`ssh -L 8000:127.0.0.1:8000 root@<vm> -p <ssh-port>`), or front it with an
+authenticating, TLS-terminating proxy. Locally, bind it to `127.0.0.1`
+(`uvicorn module:app --host 127.0.0.1`, or `MADDENING_HOST=127.0.0.1`). The
+server warns at startup whenever it binds a non-loopback address. See
+[`src/maddening/api/README.md`](src/maddening/api/README.md).
+
 ## For MIME Developers
 
 MADDENING is designed to be extended by MIME. See:

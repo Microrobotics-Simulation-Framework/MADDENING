@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Draw-rejection audit** (`scripts/audit_property_rejection.py`): measures what
+  fraction of each property test's Hypothesis draws `assume`/`.filter` throws
+  away, and fails CI over the gate — run it before narrowing a strategy
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships

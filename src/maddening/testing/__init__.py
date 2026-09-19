@@ -8,12 +8,18 @@ Install the ``[verify]`` extra to use this module::
 
     pip install maddening[verify]
 
-Two sub-modules:
+Three sub-modules:
 
 - :mod:`maddening.testing.verification` — ``verify_node`` battery
   (finite outputs, preserved structure, determinism, jit/eager
   agreement, finite gradients, plus opt-in bounds / energy / custom
   invariants), each failure shrunk to a minimal counterexample.
+- :mod:`maddening.testing.mms` — ``verify_node_order`` /
+  ``assert_node_order_verified``: the Method of Manufactured Solutions,
+  measuring the observed order of convergence against the order the
+  node declares.  The battery above compares the code to itself and so
+  cannot see a wrong discretisation; this one compares it to the
+  mathematics.
 - :mod:`maddening.testing.strategies` — Hypothesis strategies that
   generate states, boundary inputs and timesteps from a node's declared
   interface, for writing your own ``@given`` tests.

@@ -19,7 +19,12 @@ Supports:
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -147,6 +152,20 @@ class HeatNode(SimulationNode):
         description="1D heat diffusion on a rod with Dirichlet BCs",
         governing_equations="dT/dt = alpha * d^2T/dx^2 + S",
         discretization="Explicit finite difference, 2nd or 4th-order central in space, 1st-order forward Euler in time",
+        # The default (``stencil_order=2``) claim; the per-instance
+        # ``discretization_order()`` below reports the configured stencil.
+        discretization_order=DiscretizationOrder(
+            spatial=2.0,
+            temporal=1.0,
+            notes=(
+                "Central differences of order ``stencil_order`` in space, "
+                "forward Euler in time.  The spatial claim holds for the "
+                "boundary convention the code implements -- Dirichlet data "
+                "sampled at the first and last *cell centre* (x = dx/2 and "
+                "L - dx/2), not at the rod ends; supplying T(0) and T(L) "
+                "instead measures order 1 (MADD-ANO-007)."
+            ),
+        ),
         assumptions=(
             "Constant thermal diffusivity (no temperature dependence)",
             "1D geometry (rod)",
@@ -288,6 +307,37 @@ class HeatNode(SimulationNode):
         if self._is_nonuniform:
             return {"grid_x": ("grid_points",)}
         return {}
+
+    def discretization_order(self) -> DiscretizationOrder:
+        """Order of accuracy claimed for *this* instance's stencil.
+
+        ``stencil_order`` is a constructor argument, so the claim is
+        per-instance and the class-level
+        :attr:`NodeMeta.discretization_order` can only carry the
+        default.  :func:`maddening.testing.mms.declared_order` prefers
+        this hook for exactly that reason.
+
+        Returns
+        -------
+        DiscretizationOrder
+            ``spatial`` is the configured ``stencil_order``;
+            ``temporal`` is 1 (forward Euler).
+
+        Notes
+        -----
+        The ``stencil_order=4`` claim is **not met**: the Method of
+        Manufactured Solutions measures order 1.0 for it, because the
+        two left/right ghost cells are populated one cell out of
+        position.  The claim is left at 4 deliberately -- it is what
+        the scheme is meant to deliver, and moving it to 1 would hide
+        the defect rather than record it.  See MADD-ANO-008 and the
+        strict xfail in ``tests/verification/test_mms_order.py``.
+        """
+        return DiscretizationOrder(
+            spatial=float(self.params.get("stencil_order", 2)),
+            temporal=1.0,
+            notes=type(self).meta.discretization_order.notes,
+        )
 
     def param_specs(self) -> dict[str, ParamSpec]:
         return {

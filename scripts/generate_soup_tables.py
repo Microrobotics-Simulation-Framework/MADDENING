@@ -91,6 +91,7 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 #: a newly registered benchmark cannot quietly vanish from the index.
 BENCHMARK_MODULES: tuple[str, ...] = (
     "tests.verification.test_heat_analytical",
+    "tests.verification.test_mms_order",
     "tests.cloud.multigpu.test_lbm_poiseuille",
     "tests.nodes.adaptive.test_verification",
 )

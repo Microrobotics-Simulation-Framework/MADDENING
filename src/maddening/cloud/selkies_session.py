@@ -7,8 +7,10 @@ and system GStreamer libraries.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+import urllib.parse
 import uuid
 from typing import Any, Callable, Optional
 
@@ -44,6 +46,127 @@ def _check_gstreamer() -> bool:
 
 HAS_GSTREAMER = property(lambda self: _check_gstreamer())
 
+#: WebSocket close code for a policy violation (RFC 6455 §7.4.1).
+_CLOSE_POLICY_VIOLATION = 1008
+
+
+def _header_value(headers: Any, name: str) -> str:
+    """The single value of request header *name*, or ``""``.
+
+    A header sent more than once is treated as absent rather than
+    resolved to one of its values: a request that disagrees with itself
+    about its own credential must not be authenticated.
+    """
+    if headers is None:
+        return ""
+    get_all = getattr(headers, "get_all", None)
+    try:
+        values = list(get_all(name)) if get_all is not None else None
+        if values is None:
+            value = headers.get(name)
+            values = [] if value is None else [value]
+    except Exception:  # noqa: BLE001 - a malformed header set is "no header"
+        return ""
+    return values[0] if len(values) == 1 else ""
+
+
+def _client_token(request: Any, path: str = "") -> str:
+    """The session token the signaling client presented, or ``""``.
+
+    Two carriers are accepted, checked in this order:
+
+    * ``Authorization: Bearer <token>`` -- preferred, because a header
+      does not land in proxy access logs the way a query string does.
+    * ``?token=<token>`` on the request target.
+
+    Parameters
+    ----------
+    request : object or None
+        The connection's request object (``websockets`` exposes
+        ``.path`` and ``.headers``).  ``None`` falls back to *path*.
+    path : str, optional
+        Request target, used when *request* carries no ``path`` (older
+        ``websockets`` releases pass it to the handler separately).
+
+    Returns
+    -------
+    str
+        The presented token, or ``""`` when the client presented none,
+        presented more than one, or presented an unparsable target.
+        The empty string never validates, so "absent" and "wrong" take
+        the same rejection path.
+    """
+    header = _header_value(getattr(request, "headers", None), "Authorization")
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        return value.strip()
+
+    target = getattr(request, "path", None) or path or ""
+    try:
+        query = urllib.parse.urlsplit(target).query
+        tokens = urllib.parse.parse_qs(query).get("token", [])
+    except ValueError:
+        return ""
+    return tokens[0] if len(tokens) == 1 else ""
+
+
+def _make_signaling_handler(
+    session_id: str,
+    secret: str,
+    get_input_handler: Callable[[], Optional[Callable[[dict[str, Any]], None]]],
+):
+    """Build the signaling WebSocket handler for one session.
+
+    The returned coroutine authenticates the *client* before relaying
+    anything: it reads the token the client presented (see
+    :func:`_client_token`) and validates that token -- not the server's
+    own -- against *session_id* and *secret* with
+    :func:`maddening.cloud._auth.validate_session_token`, which compares
+    in constant time.  An absent, malformed, wrong or
+    wrong-session token is closed with 1008 before the first message is
+    read.
+
+    Parameters
+    ----------
+    session_id : str
+        The session the token must be bound to.
+    secret : str
+        Shared HMAC secret.
+    get_input_handler : callable
+        Called per message to fetch the current input handler, so a
+        handler installed after ``start()`` is still used.
+
+    Returns
+    -------
+    callable
+        ``async (ws) -> None``, suitable for ``websockets.serve``.
+    """
+
+    async def handler(ws) -> None:
+        request = getattr(ws, "request", None)
+        token = _client_token(request, getattr(ws, "path", "") or "")
+        if not validate_session_token(session_id, token, secret):
+            logger.warning(
+                "Rejected signaling connection for session %s: %s",
+                session_id,
+                "no token presented" if not token else "invalid token",
+            )
+            await ws.close(_CLOSE_POLICY_VIOLATION, "Invalid token")
+            return
+        try:
+            async for msg in ws:
+                # Relay SDP/ICE messages
+                input_handler = get_input_handler()
+                if input_handler and isinstance(msg, str):
+                    try:
+                        input_handler(json.loads(msg))
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:  # noqa: BLE001 - a dropped client is not an error
+            logger.debug("Signaling connection closed", exc_info=True)
+
+    return handler
+
 
 class SelkiesSession(StreamingSession):
     """GStreamer-based WebRTC streaming session.
@@ -51,7 +174,15 @@ class SelkiesSession(StreamingSession):
     Parameters
     ----------
     secret : str
-        Shared secret for HMAC-SHA256 token authentication.
+        Shared secret for HMAC-SHA256 token authentication.  Every
+        signaling client must present
+        ``generate_session_token(session_id, secret)`` -- as
+        ``Authorization: Bearer <token>`` or ``?token=<token>`` -- or the
+        connection is closed with 1008.  Left empty, a random per-process
+        secret is generated: the session then still runs, but no client
+        can compute a token, so only an in-process caller holding
+        :attr:`session_token` can connect.  Pass the secret you shared
+        with the client.
     signaling_port : int
         Port for the embedded WebSocket signaling server.
     """
@@ -70,6 +201,15 @@ class SelkiesSession(StreamingSession):
             )
 
         self._secret = secret or uuid.uuid4().hex
+        if not secret:
+            logger.warning(
+                "SelkiesSession was constructed without a shared secret; a "
+                "random one was generated. Signaling clients cannot compute a "
+                "token from a secret nobody holds, so every external "
+                "connection will be rejected. Pass secret=... (the cloud "
+                "entry point reads MADDENING_STREAM_SECRET) to let a client "
+                "in.",
+            )
         self._signaling_port = signaling_port
         self._alive = False
         self._config: Optional[StreamConfig] = None
@@ -92,11 +232,9 @@ class SelkiesSession(StreamingSession):
         self._config = config
         self._session_id = uuid.uuid4().hex[:12]
 
-        token = generate_session_token(self._session_id, self._secret)
-
         try:
             self._build_pipeline(config)
-            self._start_signaling_server(token)
+            self._start_signaling_server()
         except Exception as exc:
             raise StreamStartError(f"Failed to start GStreamer pipeline: {exc}")
 
@@ -109,6 +247,22 @@ class SelkiesSession(StreamingSession):
         )
         self._alive = True
         return self._info
+
+    @property
+    def session_token(self) -> str:
+        """The token a client must present to the signaling server.
+
+        Empty before :meth:`start` assigns a session id.  A client that
+        holds the shared secret can derive this itself with
+        :func:`maddening.cloud._auth.generate_session_token` from the
+        session id in :attr:`StreamInfo.signaling_url`; this property is
+        the in-process route for a caller that owns the session and has
+        to hand the token to a viewer (it is a credential -- do not log
+        it).
+        """
+        if not self._session_id:
+            return ""
+        return generate_session_token(self._session_id, self._secret)
 
     def stop(self) -> None:
         if self._pipeline is not None:
@@ -218,9 +372,13 @@ class SelkiesSession(StreamingSession):
         """Attempt GstCudaMemory zero-copy push."""
         raise NotImplementedError("GstCudaMemory zero-copy not yet implemented")
 
-    def _start_signaling_server(self, token: str) -> None:
+    def _start_signaling_server(self) -> None:
         """Start embedded WebSocket signaling server in a daemon thread."""
         import asyncio
+
+        handler = _make_signaling_handler(
+            self._session_id, self._secret, lambda: self._input_handler,
+        )
 
         async def _run_server():
             try:
@@ -228,26 +386,6 @@ class SelkiesSession(StreamingSession):
             except ImportError:
                 logger.warning("websockets not installed; signaling server disabled")
                 return
-
-            async def handler(ws):
-                # Validate token on connection
-                path = ws.request.path if hasattr(ws, 'request') else ""
-                # Simple bearer token check from query param
-                if f"token={token}" not in (ws.request.query_string if hasattr(ws.request, 'query_string') else path):
-                    if not validate_session_token(self._session_id, token, self._secret):
-                        await ws.close(1008, "Invalid token")
-                        return
-                try:
-                    async for msg in ws:
-                        # Relay SDP/ICE messages
-                        if self._input_handler and isinstance(msg, str):
-                            import json
-                            try:
-                                self._input_handler(json.loads(msg))
-                            except (ValueError, TypeError):
-                                pass
-                except Exception:
-                    pass
 
             server = await websockets.serve(handler, "0.0.0.0", self._signaling_port)
             await server.wait_closed()

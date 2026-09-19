@@ -1,0 +1,84 @@
+420 rows compared
+
+== 'Gauss-Seidel needs 1.7-1.9x fewer iterations than Jacobi' ==
+   (guide 'Start here' row 1 and contradiction 1/2 tables; gs/none/l2 vs jac/none/l2)
+fixture           gs old  gs new  jac old  jac new ratio old ratio new   guide
+chain-2             5.58    6.06     9.42    11.12      1.69      1.83    1.69
+chain-20           23.74   26.40    40.74    47.30      1.72      1.79    1.72
+chain-5            13.36   15.28    23.60    28.66      1.77      1.88    1.77
+chain-50           30.80   33.83    53.03    53.77      1.72      1.59    1.72
+ring-16            15.57   17.27    26.73    32.63      1.72      1.89        
+ring-4             11.40   12.44    20.18    23.46      1.77      1.89        
+ring-8             12.90   14.16    22.46    25.98      1.74      1.83        
+slow-drift          3.18    3.34     6.14     6.80      1.93      2.04        
+star-16            22.90   24.83    42.40    47.63      1.85      1.92        
+star-2             20.46   23.10    37.34    44.80      1.83      1.94        
+star-4             20.84   23.20    38.38    45.48      1.84      1.96        
+star-8             21.72   24.06    40.22    46.76      1.85      1.94        
+stiff-pair-0.25     4.44    4.98     7.62     8.38      1.72      1.68        
+stiff-pair-0.5      7.84    8.24    13.86    16.16      1.77      1.96        
+stiff-pair-0.8     20.80   22.34    37.98    44.14      1.83      1.98        
+stiff-pair-0.95    58.42   59.00    59.00    59.00      1.01      1.00        
+stiff-pair-1.2     11.00   11.00    11.00    11.00      1.00      1.00        
+
+== "the interface norm removes -5% to 31% of the iterations" (gs/none) ==
+fixture           l2 old  if old  cut old |  l2 new  if new  cut new
+chain-2             5.58    4.84    13.3% |    6.06    4.96    18.2%
+chain-20           23.74   16.66    29.8% |   26.40   18.88    28.5%
+chain-5            13.36   10.44    21.9% |   15.28   11.36    25.7%
+chain-50           30.80   23.03    25.2% |   33.83   25.97    23.3%
+mixed-modes        13.25   10.15    23.4% |   15.20   11.05    27.3%
+ring-16            15.57   11.57    25.7% |   17.27   12.70    26.4%
+ring-4             11.40    9.10    20.2% |   12.44    9.64    22.5%
+ring-8             12.90    9.80    24.0% |   14.16   10.58    25.3%
+slow-drift          3.18    3.34    -5.0% |    3.34    3.64    -9.0%
+star-16            22.90   15.90    30.6% |   24.83   18.23    26.6%
+star-2             20.46   14.82    27.6% |   23.10   17.16    25.7%
+star-4             20.84   14.78    29.1% |   23.20   17.08    26.4%
+star-8             21.72   15.08    30.6% |   24.06   17.38    27.8%
+stiff-pair-0.25     4.44    3.56    19.8% |    4.98    3.60    27.7%
+stiff-pair-0.5      7.84    6.08    22.4% |    8.24    6.30    23.5%
+stiff-pair-0.8     20.80   15.58    25.1% |   22.34   17.90    19.9%
+stiff-pair-0.95    58.42   49.60    15.1% |   59.00   57.72     2.2%
+stiff-pair-1.2     11.00   11.00     0.0% |   11.00   11.00     0.0%
+  range recorded: -5% to 31%   range now: -9% to 28%   guide says -5% to 31%
+
+== 'fixed point that barely moves -> jacobi / fixed w=0.8 / l2' ==
+   guide: slow-drift jacobi L2  6.14 -> 4.30 (w=0.5) -> 3.46 (w=0.8), best config
+   slow-drift      jac/none/l2              old   6.14 it cv 100%   new   6.80 it cv 100%
+   slow-drift      jac/fixed0.5/l2          old   4.30 it cv 100%   new   4.56 it cv 100%
+   slow-drift      jac/fixed0.8/l2          old   3.46 it cv 100%   new   3.62 it cv 100%
+   slow-drift      jac/none/interface       old   6.40 it cv 100%   new   7.20 it cv 100%
+   slow-drift      jac/fixed0.5/interface   old   4.54 it cv 100%   new   5.00 it cv 100%
+   slow-drift      jac/fixed0.8/interface   old   3.84 it cv 100%   new   4.00 it cv 100%
+
+== 'not one Gauss-Seidel row beats its unrelaxed counterpart on iterations' ==
+   violations at HEAD: none — claim still holds
+
+== rows that converged in the recorded file and no longer do ==
+   chain-20         jac/aitken/l2               100% ->   98%
+   chain-5          jac/fixed0.5/l2             100% ->   10%
+   mixed-modes      gs/iqn-ils/l2               100% ->   98%
+   ring-16          jac/none/l2                 100% ->   97%
+   ring-4           jac/fixed0.5/l2             100% ->   94%
+   ring-8           jac/fixed0.5/interface      100% ->   94%
+   star-16          gs/fixed0.5/l2              100% ->   93%
+   star-16          jac/fixed0.8/interface      100% ->   93%
+   star-16          jac/fixed0.8/l2             100% ->   20%
+   star-2           jac/fixed0.8/interface      100% ->   98%
+   star-2           jac/fixed0.8/l2             100% ->   88%
+   star-4           jac/fixed0.8/interface      100% ->   98%
+   star-4           jac/fixed0.8/l2             100% ->   82%
+   star-8           gs/fixed0.5/l2              100% ->   94%
+   star-8           jac/fixed0.8/interface      100% ->   98%
+   star-8           jac/fixed0.8/l2             100% ->   40%
+   stiff-pair-0.8   jac/fixed0.8/interface      100% ->   98%
+   stiff-pair-0.8   jac/fixed0.8/l2             100% ->   92%
+   18 of 420 rows
+
+== 'Aitken cannot exit in fewer than four [iterations]' ==
+   aitken rows below 4.0 at HEAD: [('stiff-pair-0.25', 'gs/aitken/interface', 3.96)]
+
+== overall ==
+   mean iterations ratio new/old: 1.083  median 1.051  max 1.32
+   rows with more iterations: 323, fewer: 22, unchanged: 75

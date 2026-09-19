@@ -1,0 +1,20 @@
+== 1. resumed trajectory vs uninterrupted trajectory ==
+   uninterrupted (10 steps): [0.4012631 1.        1.5987369 2.1974738]
+   4 + resume + 6 steps    : [0.4012631 1.        1.5987369 2.1974738]
+   max abs diff = 0.000e+00  OK
+
+== 2. truncated checkpoint (simulating an interrupted upload) ==
+   skip_integrity_check=False: CheckpointIntegrityError: SHA-256 mismatch for /tmp/audit_resume2_h2a1q5ew/trunc.npz: manifest says a4a41a83694c…, file h
+   skip_integrity_check=True: BadZipFile: File is not a zip file
+
+== 3. bit-flipped checkpoint, same length ==
+   skip_integrity_check=False: CheckpointIntegrityError: SHA-256 mismatch for /tmp/audit_resume2_h2a1q5ew/corrupt.npz: manifest says a4a41a83694c…, file
+   skip_integrity_check=True: BadZipFile: Bad offset for central directory
+
+== 4. .npz present, manifest never written (crash mid-save) ==
+   skip_integrity_check=False: FileNotFoundError: No manifest beside checkpoint: /tmp/audit_resume2_h2a1q5ew/nomanifest.npz.manifest.json
+   skip_integrity_check=True: LOADED, manifest={}
+
+== 5. 8 concurrent download_and_load_state() from one file:// URL ==
+   8 succeeded, 0 failed
+   all results identical: True

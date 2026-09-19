@@ -1,0 +1,19 @@
+== A. /sim/run: no upper bound on n_steps ==
+   /sim/profile clamps n_steps to [1,1000] (server.py:995).
+   /sim/run (server.py:657-663) passes n_steps straight to gm.run().
+   n_steps=100    -> 200 in   0.142s  (1420.6 us/step)
+   n_steps=1000   -> 200 in   0.041s  (  40.9 us/step)
+   n_steps=10000  -> 200 in   0.390s  (  39.0 us/step)
+   Timings are from a machine shared with other agents; the finding is
+   the linear scaling in an unclamped, caller-chosen n_steps, not the
+   absolute numbers.  A single request with n_steps=10**9 occupies a
+   worker thread for ~days with no way to cancel it over the API.
+
+== B. add_node: caller chooses the state array size ==
+   RSS before:    234.1 MB
+   n=1000000     -> 201   RSS now    243.4 MB (+    9.3 MB)   expected array 4 MB
+   n=10000000    -> 201   RSS now    285.5 MB (+   51.4 MB)   expected array 40 MB
+   n=100000000   -> 201   RSS now    668.6 MB (+  434.5 MB)   expected array 400 MB
+   _non_finite_param() rejects a non-finite float but nothing bounds an
+   integer that becomes an array dimension; _dry_run_node traces
+   abstractly so it never notices the size.

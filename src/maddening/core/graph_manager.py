@@ -4161,11 +4161,14 @@ class GraphManager:
         if not self._state_traced or not _outside_jax_trace():
             return
         restored = self._state_before_trace
+        if restored is None:            # pragma: no cover - defensive
+            self._state_traced = False
+            return
+        # State first, flags after, so a graph that somehow failed to be
+        # put back is still marked as holding tracers and tries again.
+        self._state = restored
         self._state_traced = False
         self._state_before_trace = None
-        if restored is None:            # pragma: no cover - defensive
-            return
-        self._state = restored
         warnings.warn(
             "the graph held JAX tracers left behind by a transform and has "
             "been put back to the state it had before it.  step() / run() / "

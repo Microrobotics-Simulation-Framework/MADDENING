@@ -556,8 +556,7 @@ def declared_order(node: Any) -> DiscretizationOrder | None:
 def _undeclared_detail(node: Any, axis: RefinementAxis) -> str:
     return (
         f"{type(node).__name__} declares no {axis.order_attribute} order of "
-        f"accuracy, so "
-        f"there is nothing to measure against.  Set "
+        f"accuracy, so there is nothing to measure against.  Set "
         f"NodeMeta(discretization_order=DiscretizationOrder("
         f"{axis.order_attribute}=...)) on the class, or override "
         f"discretization_order() on the instance when the order depends on "

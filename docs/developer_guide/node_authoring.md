@@ -506,7 +506,7 @@ These are pre-registered and always available:
 
 ### CI validation
 
-The `scripts/check_transforms.py` CI script scans production code for string transform references and verifies they resolve in the registry. Run it alongside the other compliance checks:
+The `scripts/check_transforms.py` CI script scans `src/maddening/` and `tests/` for string transform references and verifies that each one resolves — in the global registry, or via a `@register_transform` call in the same file. Run it alongside the other compliance checks:
 
 ```bash
 python scripts/check_transforms.py

@@ -15,13 +15,29 @@ anomalies:
       during compilation of the streaming step, triggered by matmul/einsum
       operations on 3D+ arrays.  The CPU backend is unaffected.  The workaround
       is to use the CPU backend (JAX_PLATFORMS=cpu).
-      Re-verification status as of 0.4.0: not re-run.  The jaxlib version named
-      here is below the supported floor (pyproject pins jaxlib >=0.10,<0.13), and
-      neither CI nor the development environment has a CUDA jaxlib installed, so
-      no run on a supported GPU stack has been made.  The entry therefore stays
-      open on the precautionary reading -- nothing has been shown to fix it --
-      and `affected_versions` is open-ended rather than closed at the version
-      where it was first seen.  Closing it needs a GPU run on a supported jaxlib.
+      Resolved in 0.4.0, by the dependency floor moving past the affected jaxlib
+      rather than by any change to MADDENING's own code.  Versions 0.1.0 to
+      0.3.1 pinned `jax>=0.4,<0.6`, which permits the affected jaxlib 0.5.1;
+      0.4.0 pins `jax>=0.10,<0.13`, which does not.  The old pin was held back
+      deliberately, for compile-time reasons on a MIME experiment, and that
+      constraint no longer applies.
+
+      Re-verified on GPU, 2026-09-19, on the earliest supported stack available:
+      jax and jaxlib 0.11.2, bundled CUDA runtime 12.9.79, driver 595.84, on an
+      RTX A2000 8GB.  `LBMPipeNode` compiled and stepped with no segfault at
+      6x5x5 and at 32x16x16 -- the larger grid exercising the 3D einsum named
+      above -- and eleven steps left every state field finite.  GPU and CPU
+      results after five steps agreed to 2.4e-07 relative, which is float32
+      roundoff (eps ~ 1.19e-07), so the GPU path is correct and not merely
+      non-crashing.
+
+      Two limits on that evidence, recorded rather than glossed.  The fix cannot
+      be attributed to one change: both jaxlib (0.5.1 -> 0.11.2) and the CUDA
+      runtime (12.2 -> 12.9) moved between the recorded failure and this run.
+      And the original configuration cannot be reconstructed under the current
+      floor, so the anomaly as written is not directly falsifiable; what has been
+      shown is that it does not occur on any configuration a user of 0.4.0 can
+      install.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -33,9 +49,9 @@ anomalies:
       execution and whether a fallback path exists.  CPU execution is unaffected.
     affected_components:
       - "maddening.nodes.lbm_pipe.LBMPipeNode"
-    affected_versions: ">=0.1.0"
+    affected_versions: "<=0.3.1"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
-    resolution_status: "open"
+    resolution_status: "resolved"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-002"

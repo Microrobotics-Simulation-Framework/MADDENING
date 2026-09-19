@@ -160,6 +160,35 @@ def _leaf_values(tree):
     return [np.asarray(leaf) for leaf in jax.tree.leaves(tree)]
 
 
+def _bound_at_leaf_precision(bound, leaf):
+    """``bound`` rounded to the precision ``leaf`` actually carries.
+
+    A ``ParamSpec`` bound is a Python float, i.e. a float64; the
+    parameter it bounds lives at the graph's working precision.
+    ``to_constrained`` clips with ``jnp.clip(u, lo, hi).astype(u.dtype)``,
+    so a fit pushed onto its bound comes back as *the bound in the leaf's
+    dtype* -- and for a bound no float32 can hold, that is up to half an
+    ulp on the wrong side of the float64 number it was clipped to.  The
+    draw ``lo = 1.6977594293117515`` returns ``1.6977593898773193``:
+    8 significant figures of agreement, 2.3e-8 relative, and
+    ``value >= lo`` is False.
+
+    Comparing a float32 leaf against a float64 bound asks the leaf for
+    precision it does not carry, and it is stricter than the contract
+    being tested: :meth:`ParamSpec.check` compares a weakly-typed Python
+    bound against the leaf, i.e. *in the leaf's dtype*, and accepts this
+    value -- ``gm.check_params`` passes on the very pytree the assertion
+    then rejected.  Rounding the bound the same way forgives the sub-ulp
+    landing and nothing else: an escape of one whole ulp still fails, so
+    the property keeps its teeth.
+
+    The dtype comes from the leaf rather than being pinned to float32 so
+    that the claim stays true under ``jax_enable_x64``, where the
+    parameters are float64 and the bound is then exact.
+    """
+    return float(np.asarray(bound, dtype=jnp.asarray(leaf).dtype))
+
+
 def _moved(before, after):
     """Paths whose leaf is not bit-identical between two params pytrees."""
     return {
@@ -626,11 +655,54 @@ class TestBoundsAndTransforms:
             res = fit(gm, lambda p: direction * 50.0 * p["nodes"]["s"]["stiffness"],
                       n_iter=n_iter, lr=0.5)
             gm.check_params(res.params)
-            value = float(res.params["nodes"]["s"]["stiffness"])
+            leaf = res.params["nodes"]["s"]["stiffness"]
+            value = float(leaf)
             assert np.isfinite(value)
+            # At the leaf's own precision: a fit driven onto its bound
+            # returns the bound *cast to the parameter's dtype*, which for
+            # a bound no float32 can hold sits a fraction of an ulp the
+            # wrong side of the float64 the spec declares.  See
+            # ``_bound_at_leaf_precision``.
             if spec.bounds[1] is not None:
-                assert value <= spec.bounds[1]
-            assert value >= spec.bounds[0]
+                assert value <= _bound_at_leaf_precision(spec.bounds[1], leaf), (
+                    value, spec.bounds[1])
+            assert value >= _bound_at_leaf_precision(spec.bounds[0], leaf), (
+                value, spec.bounds[0])
+
+
+    def test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision(self):
+        """The draw that made the property above flake, pinned.
+
+        ``lo = 1.6977594293117515`` has no float32 representation, so a
+        fit clipped onto it returns ``1.6977593898773193`` -- 0.33 ulp
+        below the declared bound.  Hypothesis searches fresh every run,
+        so without this case the fix is only re-checked when a draw
+        happens to land on an unrepresentable bound again; in CI that is
+        an intermittent failure, which is the shape that gets re-run
+        until green instead of read.
+        """
+        lo, hi = 1.6977594293117515, 6.0
+        assert float(np.float32(lo)) < lo, "draw no longer exercises the case"
+        spec = ParamSpec(bounds=(lo, hi))
+        gm = _spring_gm(stiffness=0.5 * (lo + hi))
+        gm.set_param_spec("s", "stiffness", spec)
+        for key in ("damping", "mass", "rest_length"):
+            gm.set_param_spec("s", key, ParamSpec(trainable=False))
+
+        res = fit(gm, lambda p: 50.0 * p["nodes"]["s"]["stiffness"],
+                  n_iter=6, lr=0.5)
+        # The library's own contract accepts it...
+        gm.check_params(res.params)
+        leaf = res.params["nodes"]["s"]["stiffness"]
+        value = float(leaf)
+        # ...the fit really did land on the bound, in float32...
+        assert value == float(np.float32(lo)), value
+        # ...so the assertion has to be made at that precision.
+        assert value >= _bound_at_leaf_precision(lo, leaf)
+        # Non-vacuity: the rounding forgives a sub-ulp landing, not a
+        # parameter that actually left its bounds.
+        ulp = float(np.spacing(np.float32(lo)))
+        assert not (value - ulp >= _bound_at_leaf_precision(lo, leaf))
 
 
 # ---------------------------------------------------------------------------

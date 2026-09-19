@@ -60,34 +60,60 @@ from maddening.warnings import PrecisionLimitWarning
 _META_KEY = "_meta"
 
 #: Factor either side of the rank cutoff within which a float32 rank
-#: verdict is not reproducible.  Measured on this module's own
-#: arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
-#: float64 reference applying the *same* rank rule, over ~220k synthetic
-#: Fisher matrices of known spectrum (n = 2..25 parameters, m = 50..2000
-#: residual rows, spread / clustered / twin-null spectra):
+#: verdict is treated as not reproducible.  Measured on this module's
+#: own arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
+#: float64 reference applying the *same* rank rule, over ~500k synthetic
+#: Fisher matrices of known spectrum (n = 2..25 parameters, m = 20..2000
+#: residual rows, spread / clustered / twin-null spectra).
 #:
-#: =========================  ==========================================
-#: deciding ratio is within   share of the verdicts the two disagreed on
-#: =========================  ==========================================
-#: 1.14x of the cutoff        50%
-#: 1.88x                      90%
-#: 5.44x                      99%
-#: 8x                         99.6%
-#: =========================  ==========================================
+#: The band is narrow.  Binned by the matrix's *true* eigenvalue ratio,
+#: the two precisions disagree only here:
 #:
-#: 8 is also the largest factor that fired on **none** of 24,000
-#: well-conditioned problems (smallest eigenvalue 10x..1e6x the cutoff);
-#: at 10 that count leaves zero and by 15 it is 2.6%.  Both criteria --
-#: the edge of the disagreement band with margin, and the last factor
-#: that is silent on ordinary problems -- land on the same number, which
-#: is why it is this one and not the 10x that was suggested.
+#: ====================  =====================
+#: true ratio / cutoff   disagreement rate
+#: ====================  =====================
+#: 0.32 -- 0.46          0.0003
+#: 0.46 -- 0.68          0.005
+#: 0.68 -- 1.0           0.050
+#: 1.0  -- 1.47          0.075
+#: 1.47 -- 2.15          0.0013
+#: 2.15 and above        0.0000
+#: ====================  =====================
 #:
-#: The 0.4% of disagreements beyond it are long-residual cases: forming
-#: ``J.T @ J`` in float32 over ``m`` rows costs up to ``m * eps``, and
-#: the cutoff's ``n * eps`` form cannot see ``m`` at all.  A factor wide
-#: enough to cover them fires on ordinary problems, which is the worse
-#: failure -- a warning that fires routinely gets suppressed.
-_PRECISION_WARN_FACTOR = 8.0
+#: so the band is ``[0.46x, 2.15x]`` -- a factor of about 2.2, and
+#: symmetric, which is what a rounding error of a fixed size either side
+#: of a threshold should look like.
+#:
+#: The threshold sits **at** that edge rather than beyond it, because a
+#: margin is not free here.  Fire rate on verdicts the two precisions
+#: *agree* about, by true ratio:
+#:
+#: =========  ======  ======  ======  ======  ======
+#: factor     2x..5x  5x..10x  10x+   recall  ---
+#: =========  ======  ======  ======  ======  ======
+#: 2.0        0.028   0.000   0.000   0.857
+#: 2.5        0.234   0.000   0.000   0.899
+#: 3.0        0.445   0.000   0.000   0.926
+#: 4.0        0.759   0.002   0.000   0.951
+#: 8.0        1.000   0.675   0.000   0.963
+#: =========  ======  ======  ======  ======  ======
+#:
+#: Each step of margin past 2 buys a few points of recall for an order
+#: of magnitude of false firing on well-determined verdicts -- at 8 it
+#: fires on two thirds of ordinary 5x..10x reports, which this project's
+#: own spring-damper identification tests produce routinely (they fired
+#: at 4.3x, 6.1x and 7.8x).  A warning that fires routinely gets
+#: suppressed, which is worse than silence, so quietness wins the tie.
+#:
+#: The accepted cost is the ~14% of precision-limited verdicts that stay
+#: silent.  They are dominated by long residuals: forming ``J.T @ J`` in
+#: float32 over ``m`` rows costs up to ``m * eps``, the cutoff's
+#: ``n * eps`` form cannot see ``m`` at all, and the resulting outliers
+#: reach 361x the cutoff -- no symmetric factor reaches them without
+#: warning on everything.  Widening ``rank_rtol`` to ``max(n, m) * eps``
+#: would be the real fix and is a change to ``rank`` itself, not to a
+#: warning about it.
+_PRECISION_WARN_FACTOR = 2.0
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -686,9 +712,23 @@ def _resolve_rank_rtol(dtype, n: int, rank_rtol: Optional[float]) -> float:
     return rank_rtol
 
 
-def _precision_limited(eigvals, rank_rtol: float,
+def _precision_limited(eigvals, rank_rtol: float, eps_floor: float,
                        factor: float = _PRECISION_WARN_FACTOR):
     """``(deciding ratio, cutoff)`` when ``rank`` rests on rounding, else ``None``.
+
+    Two conditions, and the second is the one that keeps this honest.
+    The ratio has to be within ``factor`` of the cutoff **and** at the
+    precision floor ``eps_floor`` (``n * eps``, the intrinsic resolution
+    of the decomposition).  Under the default ``rank_rtol`` the two
+    coincide and the second is implied.  They come apart the moment a
+    caller *raises* ``rank_rtol``, which is a modelling decision -- "I
+    call anything below 1e-3 unidentifiable in practice" -- and not a
+    statement about arithmetic: an eigenvalue ratio of 2e-4 against a
+    1e-3 cutoff is a close call, but it is a close call between two
+    numbers float32 knows to three more decimal places, and warning
+    about precision there would be simply wrong.  Lowering
+    ``rank_rtol`` below the floor goes the other way and still warns,
+    correctly: a cutoff under the noise floor makes every verdict noise.
 
     The deciding ratio is the eigenvalue ratio ``lambda_i / lambda_max``
     lying closest to ``rank_rtol`` in log distance -- the one an error
@@ -721,7 +761,8 @@ def _precision_limited(eigvals, rank_rtol: float,
     if pos.size == 0:
         return None
     deciding = float(pos[np.argmin(np.abs(np.log(pos / rank_rtol)))])
-    if rank_rtol / factor <= deciding <= rank_rtol * factor:
+    if (rank_rtol / factor <= deciding <= rank_rtol * factor
+            and deciding <= factor * eps_floor):
         return deciding, float(rank_rtol)
     return None
 
@@ -893,15 +934,24 @@ def fim(
         (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
         cores).  The design goal is that the cases which need it say so.
 
-        Measured, not assumed: the factor is where float32 and float64
-        verdicts were observed to diverge over ~220k synthetic Fisher
-        matrices of known rank; see ``_PRECISION_WARN_FACTOR``.  It is
-        quiet by construction on ordinary problems (0 of 24,000
-        well-conditioned matrices) and it does **not** fire on an
-        exactly singular ``F``, whose null eigenvalue comes back at or
-        below zero -- that is a real rank deficiency, not a
-        precision-limited verdict, and :attr:`FIMReport.zero_scaled`
-        already names the common cause.
+        Measured, not assumed: the factor is the edge of the band where
+        float32 and float64 verdicts were observed to diverge over
+        ~500k synthetic Fisher matrices of known rank; see
+        ``_PRECISION_WARN_FACTOR`` for the distribution and for the
+        false-firing cost of every wider choice.  It is quiet on
+        ordinary problems -- no fire at all above five times the cutoff
+        -- and it does **not** fire on an exactly singular ``F``, whose
+        null eigenvalue comes back at or below zero: that is a real rank
+        deficiency, not a precision-limited verdict, and
+        :attr:`FIMReport.zero_scaled` already names the common cause.
+        Nor does it fire on a close call against a ``rank_rtol`` the
+        caller raised, which is a modelling threshold and not a
+        statement about arithmetic.
+
+        It is not exhaustive: about 14% of precision-limited verdicts
+        stay silent, nearly all of them long-residual cases where the
+        error in forming ``J.T @ J`` scales with the number of residual
+        rows and the ``n * eps`` cutoff cannot see it.
 
     Raises
     ------
@@ -961,9 +1011,11 @@ def fim(
     lo, hi = float(eigvals[0]), float(eigvals[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
     rank, crb = _rank_and_crb(eigvals, eigvecs, rank_rtol)
+    n_params = int(np.asarray(eigvals).size)
     limited = _precision_limited(
-        eigvals, _resolve_rank_rtol(jnp.asarray(eigvals).dtype,
-                                    int(np.asarray(eigvals).size), rank_rtol),
+        eigvals,
+        _resolve_rank_rtol(eigvals.dtype, n_params, rank_rtol),
+        n_params * float(np.finfo(np.asarray(eigvals).dtype).eps),
     )
     if limited is not None:
         ratio, cutoff = limited

@@ -442,7 +442,7 @@ def test_the_warning_names_the_eigenvalue_nearest_the_cutoff():
     cutoff = 3 * eps
     # smallest is 1e-4 of the cutoff; the middle one is sitting on it
     ev = jnp.asarray([1e-4 * cutoff, 1.1 * cutoff, 1.0], dtype=jnp.float32)
-    limited = _precision_limited(ev, cutoff)
+    limited = _precision_limited(ev, cutoff, cutoff)
     assert limited is not None
     ratio, cut = limited
     assert cut == cutoff
@@ -497,3 +497,86 @@ def test_under_x64_the_message_does_not_send_the_user_round_again():
     assert "float64 noise floor" in msg
     assert "jax_enable_x64" not in msg
     assert "widest precision" in msg
+
+
+@contextlib.contextmanager
+def _x64():
+    """``jax_enable_x64`` for the duration of the block.
+
+    Process-global and normally set before the first JAX import, which
+    is exactly why the warning recommends it rather than doing it:
+    flipping it changes every library in the process.
+    """
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+def test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict():
+    """The warning is only actionable if its remedy works.
+
+    The float32 report calls the 2.08e-07 direction unresolved because
+    that ratio is under a 2.38e-07 cutoff.  Under x64 the cutoff drops
+    to ``n * 2.22e-16``, the same direction clears it by nine decades,
+    and the answer is rank 2 with a finite bound -- so the warning's
+    "re-run under x64 to settle it" is a claim this test holds it to,
+    not a form of words.  It is also the non-vacuity check on the
+    warning: the two precisions really do answer differently here.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+        f32 = _linear_fim(2.08e-07)
+    assert f32.rank == 1 and not np.isfinite(np.asarray(f32.crb)).any()
+
+    with _x64():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            f64 = _linear_fim(2.08e-07, dtype=jnp.float64)
+    assert f64.rank == 2
+    assert np.isfinite(np.asarray(f64.crb)).all()
+
+
+def test_under_x64_the_warning_stops_recommending_x64():
+    """A verdict at the *float64* floor has no wider precision to
+    escalate to, so repeating the x64 advice would send a reader round a
+    loop they have already finished.  The message has to say what is
+    actually left to do instead."""
+    cutoff = 2 * float(np.finfo(np.float64).eps)
+    with _x64():
+        with pytest.warns(PrecisionLimitWarning) as rec:
+            report = _linear_fim(0.9 * cutoff, dtype=jnp.float64)
+    assert report.rank == 1
+    msg = str(rec[0].message)
+    assert "float64" in msg
+    assert "jax_enable_x64" not in msg
+    assert "widest precision" in msg
+
+
+def test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit():
+    """Raising ``rank_rtol`` moves the cutoff decades above the noise
+    floor, and a close call there is not a close call about precision.
+
+    ``rank_rtol=1e-3`` says "I call anything below 1e-3 unidentifiable
+    in practice".  An eigenvalue ratio of 4e-4 against that cutoff is
+    within a factor of 2.5 of it -- but float32 knows both numbers to
+    three further decimal places, so the verdict is exact and warning
+    about rounding would be simply wrong.  The band is anchored to
+    ``n * eps``, not to whatever cutoff the caller picked.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(4e-4, rank_rtol=1e-3)
+    assert report.rank == 1          # 4e-4 is below the 1e-3 cutoff
+
+
+def test_a_rank_rtol_under_the_noise_floor_still_warns():
+    """The guard cuts one way only.  Lowering ``rank_rtol`` below
+    ``n * eps`` asks for a cutoff finer than the decomposition can
+    resolve, so every verdict at it is rounding -- the case the warning
+    exists for, reached from the other side."""
+    eps = float(np.finfo(np.float32).eps)
+    with pytest.warns(PrecisionLimitWarning):
+        _linear_fim(0.4 * eps, rank_rtol=0.5 * eps)

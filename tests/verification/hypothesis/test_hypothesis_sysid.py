@@ -649,6 +649,16 @@ class TestPrecisionLimitedRank:
     it can be a comparison of two numbers that differ by less than the
     decomposition resolves.  The contract is that such a verdict
     announces itself and an ordinary one stays quiet.
+
+    Every generator here keeps ``m`` small.  That is not convenience:
+    the error in forming ``F = J.T @ J`` in float32 grows with the
+    number of residual rows while the ``n * eps`` cutoff does not see
+    ``m`` at all, so at long residuals a precision-limited verdict can
+    land arbitrarily far from the cutoff and no factor catches it.  The
+    measured miss rate over the full sweep is ~14%, essentially all of
+    it there; at ``m <= 64`` it was 0 in 200,000 draws.  Claiming the
+    property over long residuals would be claiming something measured
+    to be false.
     """
 
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -707,7 +717,8 @@ class TestPrecisionLimitedRank:
         report, warned = _fim_of(J64)
         assume(warned)
         ev = np.asarray(report.eigvals, dtype=np.float64)
-        ratios = ev / max(float(ev[-1]), 0.0) if float(ev[-1]) > 0 else ev
+        assert float(ev[-1]) > 0.0
+        ratios = ev / float(ev[-1])
         inside = [r for r in ratios
                   if r > 0 and cutoff / _PRECISION_WARN_FACTOR
                   <= r <= cutoff * _PRECISION_WARN_FACTOR]
@@ -729,9 +740,10 @@ class TestPrecisionLimitedRank:
             self, n, m, log_ratio, seed):
         """A warning that fires routinely gets suppressed, which is
         worse than silence.  This is the property that keeps the other
-        two worth having, and it is the one that fixed the factor: 8x is
-        the largest band that fired on none of 24,000 well-conditioned
-        matrices in the sweep behind ``_PRECISION_WARN_FACTOR``.
+        two worth having, and it is the constraint that fixed the
+        factor: every widening past 2x multiplied the fire rate on
+        verdicts float64 agrees with, reaching two thirds of ordinary
+        5x..10x reports at the 8x first tried.
         """
         J64, _ = _fisher_with_known_ratio(n, max(m, n),
                                           float(np.exp(log_ratio)), seed)
@@ -740,3 +752,38 @@ class TestPrecisionLimitedRank:
              f"rank={report.rank}")
         assert not warned
         assert report.rank == n
+
+    def test_the_threshold_still_separates_the_two_populations(self):
+        """A calibration gate, not a property: fixed seed, no
+        hypothesis.
+
+        ``_PRECISION_WARN_FACTOR`` is a measured number, and the thing
+        that would silently rot is its *separation* -- someone widens it
+        to catch one more case and it starts firing on ordinary work, or
+        narrows it and it stops catching anything.  Neither shows up in
+        a test that only asks whether a particular matrix warns.  So
+        this one measures both rates over a fixed population and holds
+        them to floors well inside the measured values (recall 1.00 and
+        far-field fire rate 0.0000 over six seeds at calibration).
+        """
+        rng = np.random.default_rng(20260919)
+        dis = caught = far = fired = 0
+        for n in (2, 3, 5):
+            cutoff = n * _EPS32
+            for m in (12, 40):
+                for _ in range(150):
+                    rc = float(np.exp(rng.uniform(np.log(0.2), np.log(50.0))))
+                    J64, _ = _fisher_with_known_ratio(
+                        n, m, rc, int(rng.integers(0, 2**31 - 1)))
+                    report, warned = _fim_of(J64)
+                    rank64 = _rank_at(np.linalg.eigh(J64.T @ J64)[0], cutoff)
+                    if report.rank != rank64:
+                        dis += 1
+                        caught += warned
+                    elif rc >= 5.0:
+                        far += 1
+                        fired += warned
+        note(f"disagreements={dis} caught={caught} far={far} fired={fired}")
+        assert dis >= 5, f"population produced too few disagreements ({dis})"
+        assert caught / dis >= 0.75, (caught, dis)
+        assert fired / max(far, 1) <= 0.02, (fired, far)

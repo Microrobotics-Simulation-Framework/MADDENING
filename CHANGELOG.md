@@ -410,6 +410,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
+  0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
+  0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07
 - Every anomaly whose defect is still reachable now records an open-ended
   `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had

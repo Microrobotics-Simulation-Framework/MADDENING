@@ -10,6 +10,18 @@ Green's-function solution
 2007 ch. 2): with every mode active the sine-Galerkin solution must
 match it, and the top-K adaptive solution must converge to it as the
 budget K grows.
+
+The convergence criterion is deliberately *not* "strictly decreasing in
+K".  Top-K selection on a non-nested basis does not nest: the K = 8 set
+is not a superset of the K = 4 set, so a mode that mattered can be
+dropped when the budget grows.  Swept over
+``theta in {0.20 ... 0.70} x x_s in {0.25, 1/3, 0.5, 0.75}`` and both
+selection rules, 9 of 48 configurations are non-monotone -- including
+``theta = 0.42, x_s = 0.5``, one grid point from the asserted one.  What
+*is* robust over all 48: K = 32 gives the smallest of the four errors, it
+is below ``1e-6`` (measured max ``2.05e-7``), and it is at least two
+orders of magnitude below the K = 4 error (measured minimum ratio 473).
+That is what the benchmark asserts.
 """
 
 from __future__ import annotations
@@ -67,8 +79,12 @@ def test_verify_node_battery_passes(make):
     benchmark_type=BenchmarkType.ANALYTICAL,
     acceptance_criteria=(
         "Full-basis (K = n = 256) L2 relative error < 1e-4 on the grid and "
-        "sensor error < 1e-6; top-K sensor error strictly decreasing over "
-        "K in (4, 8, 16, 32) and < 1e-4 at K = 32"
+        "sensor error < 1e-6; over K in (4, 8, 16, 32) the K = 32 sensor "
+        "error is the smallest of the four, is < 1e-6, and is at least two "
+        "orders of magnitude below the K = 4 error.  Not strictly "
+        "decreasing in K: top-K on a non-nested basis means the K = 8 set "
+        "is not a superset of the K = 4 set (9 of 48 swept configurations "
+        "are non-monotone)"
     ),
     references=("LeVeque2007: Green's function for the 1-D two-point BVP",),
 )
@@ -87,12 +103,42 @@ def test_adaptive_solve_matches_greens_function_and_converges_in_k():
     j_full = float(full.objective(s, full.params))
     assert abs(j_full - j_ref) < 1e-6, (j_full, j_ref)
 
-    errors = []
-    for k in (4, 8, 16, 32):
-        node = PoissonSineTopKNode(n=n, k=k, theta=THETA, sigma=SIGMA, blindness_gate=False)
-        errors.append(abs(float(node.objective(node.initial_state(), node.params)) - j_ref))
-    assert all(a > b for a, b in zip(errors, errors[1:])), errors
-    assert errors[-1] < 1e-4, errors
+    errors = _top_k_sensor_errors(n, (4, 8, 16, 32), THETA, j_ref)
+    # Not `all(a > b for a, b in zip(errors, errors[1:]))`: the selection is
+    # non-nested, so the error is not monotone in K.  See the module
+    # docstring and test_top_k_sensor_error_is_not_monotone_in_k.
+    assert errors[-1] == min(errors), errors
+    assert errors[-1] < 1e-6, errors
+    assert errors[-1] * 100.0 <= errors[0], errors
+
+
+def _top_k_sensor_errors(n, budgets, theta, j_ref, x_s=1.0 / 3.0):
+    """Sensor-reading error against the Green's-function value, per budget."""
+    out = []
+    for k in budgets:
+        node = PoissonSineTopKNode(n=n, k=k, theta=theta, sigma=SIGMA,
+                                   sensor_x=x_s, blindness_gate=False)
+        out.append(abs(float(node.objective(node.initial_state(), node.params))
+                       - j_ref))
+    return out
+
+
+def test_top_k_sensor_error_is_not_monotone_in_k():
+    """The criterion MADD-VER-004 used to claim -- strictly decreasing in K --
+    is false one grid point away from the point it was asserted at.
+
+    Top-K on a non-nested basis does not nest: the K = 8 active set is not a
+    superset of the K = 4 set, so growing the budget can drop a mode that was
+    carrying the sensor reading.  Pinned here so the stronger wording is not
+    restored; the trend it replaces (K = 32 smallest, below 1e-6, two orders
+    below K = 4) is asserted by the benchmark itself.
+    """
+    x_s = 0.5
+    j_ref = float(_greens_reference(np.array([x_s]), THETA, SIGMA)[0])
+    errors = _top_k_sensor_errors(256, (4, 8, 16, 32), THETA, j_ref, x_s=x_s)
+    assert not all(a > b for a, b in zip(errors, errors[1:])), errors
+    # ... and the trend the benchmark does assert still holds here
+    assert errors[-1] == min(errors) and errors[-1] < 1e-6, errors
 
 
 def test_benchmark_is_registered():

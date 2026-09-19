@@ -26,7 +26,10 @@ from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
 
-@stability(StabilityLevel.EXPERIMENTAL)
+# Deprecated since v0.3.0: the constructor warns on every instantiation
+# (see the class docstring), so the published stability level has to say so
+# -- a surface a user is told to stop using is not "experimental".
+@stability(StabilityLevel.DEPRECATED)
 class RigidBody2DNode(SimulationNode):
     """A 2D rigid body subject to forces and torques.
 
@@ -82,7 +85,7 @@ class RigidBody2DNode(SimulationNode):
     meta = NodeMeta(
         algorithm_id="MADD-NODE-004",
         algorithm_version="1.0.0",
-        stability=StabilityLevel.EXPERIMENTAL,
+        stability=StabilityLevel.DEPRECATED,
         description="2D rigid body with translational and rotational dynamics",
         governing_equations="F = m*a; τ = I*α; semi-implicit Euler integration",
         discretization="Semi-implicit Euler (1st-order)",

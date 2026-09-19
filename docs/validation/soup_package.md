@@ -60,14 +60,14 @@ stale copy fails CI rather than shipping.
 <!-- BEGIN GENERATED: known-anomalies -- scripts/generate_soup_tables.py; do not edit by hand -->
 | ID | Title | Severity | Safety Relevance | Status | Affected Versions |
 |---|---|---|---|---|---|
-| MADD-ANO-001 | LBM GPU segfault on CUDA 12.2 + jaxlib 0.5.1 | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-001 | LBM GPU segfault on CUDA 12.2 + jaxlib 0.5.1 | `major` | `context_dependent` | `resolved` | <=0.3.1 |
 | MADD-ANO-002 | HeatNode CFL stability not enforced at runtime | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-003 | AdaptiveNode frozen-set gradient omits a first-order term at active-set switches | `major` | `context_dependent` | `open` | >=0.4.0 |
 | MADD-ANO-004 | ShardedPointwiseNode ignored every parameter write; PUT /graph/params answered 200 without changing the physics | `major` | `context_dependent` | `resolved` (in 0.4.0) | 0.3.0, 0.3.1 |
 | MADD-ANO-005 | A coupling group's converged flag was a residual test, not a bound on the distance to the fixed point | `minor` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-006 | Non-finite numbers are written as non-standard JSON tokens | `minor` | `context_dependent` | `open` | >=0.1.0 |
 
-*6 anomalies registered, 4 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*6 anomalies registered, 3 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

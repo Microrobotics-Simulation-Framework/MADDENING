@@ -341,6 +341,14 @@ anomalies:
       wrapper parses them with strtod, so every round trip inside
       MADDENING is exact; any other reader of a saved config, a .usda or
       the documented sidecar protocol rejects the document.
+
+      Two of the three sites are as old as the project: v0.1.0's USD
+      writer already called json.dumps with its default allow_nan=True,
+      and GraphManager.to_dict has always returned a dict whose caller
+      serialises it the same way.  The third, the FMI JSON wire, arrived
+      with FmuTcpBridge in 0.4.0.  The range is open-ended because the
+      defect is still reachable in the current version, not because
+      every version is affected on every surface.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -355,7 +363,7 @@ anomalies:
       - "maddening.serialization.config.to_dict"
       - "maddening.usd.serialization.save_graph_to_usd"
       - "maddening.fmi.tcp_bridge.FmuTcpBridge"
-    affected_versions: "<=0.4.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       Keep parameters finite -- an infinite ParamSpec bound means "no
       bound", which is also what leaving the bound None means, and a

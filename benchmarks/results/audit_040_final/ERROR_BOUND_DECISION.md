@@ -1,8 +1,8 @@
 # `error_estimate` / `bound_valid`: what they can honestly be called in 0.4.0
 
 Written for the maintainer's decision. Renaming or demoting a diagnostics
-field that PR 58 moved 438 verdicts with is not a subagent's call, so this
-recommends and does not act. Everything below is measured on
+field whose criterion moved 438 of 14 733 converged step-verdicts when it
+landed is not a subagent's call, so this recommends and does not act. Everything below is measured on
 `release/0.4.0` at `fix/coupling-bound-and-adjoint`; reproducers are in
 `benchmarks/results/audit_040_final/coupling/`.
 
@@ -25,7 +25,7 @@ fail with `bound_valid=True`.**
 
 | # | Condition | Checked? | Worst measured understatement |
 |---|-----------|----------|-------------------------------|
-| 1 | the measure obeys the triangle inequality | no | unbounded in principle; `test_the_triangle_inequality_does_not_hold` |
+| 1 | the measure obeys the triangle inequality | no | unbounded in principle; `test_the_triangle_inequality_does_not_hold`, already recorded |
 | 2 | `rho` is at least the asymptotic rate | **no** | **122x** (modes `(0.999, 0.2)`, `tolerance=1e-4`) |
 | 3 | the step scale is the one applied | partly | was 1.97x (`fixed`, omega=1.95) — **fixed on this branch**; still 2.04x under `aitken`, 4.5x under `iqn-*` |
 | 4 | the ratio is monotone and finite | **yes** | this is all `bound_valid` reports |

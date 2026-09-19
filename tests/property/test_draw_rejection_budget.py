@@ -265,13 +265,16 @@ def test_the_gate_sits_where_the_risk_turns_over(audit):
     hundred property tests run on every push will not see it this decade.
     Above 70% the same probability is 7e-3, which for a suite this size is a
     red CI every few weeks.  The measured distribution of this repository's
-    two property suites puts every test at or under 25% after the fixes in
-    this branch, so the gate also leaves real headroom for an honest test
-    that drifts a little.
+    two property suites puts every test at or under 26.6% after the fixes in
+    this branch, so the gate also leaves real headroom -- about 1.5x -- for
+    sampling noise and for an honest test that drifts a little.  At 80
+    examples that noise is worth several points on its own: the same four
+    ``TestFIM`` tests measured 8/16/18/22% in one ci run and 16/24/26/27% in
+    the next, which is why the gate is not set snugly against the maximum.
     """
     assert audit.health_check_failure_probability(audit.MAX_REJECTION) < 1e-11
     assert audit.health_check_failure_probability(0.70) > 1e-3
-    assert 0.25 < audit.MAX_REJECTION < 0.70
+    assert 0.266 < audit.MAX_REJECTION < 0.70
 
 
 def test_the_overrun_gate_is_set_from_the_risk_not_from_the_tree(audit):

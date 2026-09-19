@@ -77,8 +77,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # ``tests/property/test_draw_rejection_budget.py`` for the derivation.  In
 # short: over 170 tests that draw, the filter rate before this branch had a
 # median of 0.0%, a p90 of 13.0% and a maximum of 42.9%; after it the worst
-# is 22.3%.  0.40 is ~1.8x that worst case, so it will not fire on sampling
-# noise, and ``HealthCheck.filter_too_much``'s per-run probability at 0.40 is
+# is 26.6%.  0.40 is ~1.5x that worst case, so it will not fire on sampling
+# noise -- which at 80 examples is worth several points on its own --
+# and ``HealthCheck.filter_too_much``'s per-run probability at 0.40 is
 # 1.8e-12 -- a test sitting exactly on the gate is still safe, while one at
 # 0.70 is at 7e-3 and one at 0.85 at 61%.
 MAX_REJECTION = 0.40

@@ -12,6 +12,8 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,7 +23,13 @@ from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
-from maddening.sysid import fim, observations_from_history, windowed_loss
+from maddening.sysid import (
+    _PRECISION_WARN_FACTOR,
+    fim,
+    observations_from_history,
+    windowed_loss,
+)
+from maddening.warnings import PrecisionLimitWarning
 from tests.conftest import EXAMPLES_COSTLY
 
 DT = 0.01
@@ -585,3 +593,150 @@ class TestMultipleShooting:
             bad = jax.tree.map(lambda x: x, ws)
             bad["s"]["position"] = bad["s"]["position"].at[1].add(0.3)
             assert float(ms(p_truth, bad)) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# The precision-limit warning on ``fim``'s rank verdict
+# ---------------------------------------------------------------------------
+
+
+_EPS32 = float(np.finfo(np.float32).eps)
+
+
+def _fisher_with_known_ratio(n, m, ratio_x_cutoff, seed):
+    """A linear residual whose Fisher matrix has a *known* float64
+    smallest-to-largest eigenvalue ratio, placed at ``ratio_x_cutoff``
+    times the cutoff ``fim`` will decide rank against.
+
+    Built in float64 and handed to ``fim`` as float32, so the float64
+    reference below is the same matrix at the other precision rather
+    than a different matrix.
+    """
+    rng = np.random.default_rng(seed)
+    cutoff = n * _EPS32
+    mid = np.geomspace(1e-3, 1.0, max(n - 1, 1))
+    mid[-1] = 1.0                       # geomspace(a, b, 1) is [a], not [b]
+    lam = np.sort(np.concatenate([[ratio_x_cutoff * cutoff], mid]))[:n]
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    return (U * np.sqrt(lam)) @ V.T, cutoff
+
+
+def _rank_at(eigvals, cutoff):
+    ev = np.asarray(eigvals, dtype=np.float64)
+    return int((ev > max(float(ev[-1]), 0.0) * cutoff).sum())
+
+
+def _fim_of(J64):
+    n = J64.shape[1]
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+
+    def residual_fn(p):
+        return A @ jnp.stack([p[k] for k in keys])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = fim(residual_fn, params, scale=None)
+    warned = any(isinstance(w.message, PrecisionLimitWarning) for w in caught)
+    return report, warned
+
+
+class TestPrecisionLimitedRank:
+    """``fim``'s ``rank`` is a comparison of two numbers, and in float32
+    it can be a comparison of two numbers that differ by less than the
+    decomposition resolves.  The contract is that such a verdict
+    announces itself and an ordinary one stays quiet.
+    """
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=6),
+        m=st.integers(min_value=2, max_value=64),
+        # log-uniform across the cutoff: both verdicts occur, and
+        # disagreements are common enough for the property to bite
+        log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_a_verdict_the_two_precisions_disagree_about_warns(
+            self, n, m, log_ratio, seed):
+        """The property the whole feature is: where float32 and float64
+        arithmetic reach *different* ranks from the same matrix under
+        the same rank rule, the float32 answer was decided by rounding,
+        and saying so is the only thing that lets a user act.
+
+        Both verdicts apply the float32 cutoff.  Comparing each
+        precision's own default cutoff instead would be a different
+        question with a useless answer: those disagree for every ratio
+        between ``n * 2.2e-16`` and ``n * 1.2e-07``, nine decades of
+        merely ill-conditioned problems, and a warning over all of them
+        is the routine firing that gets warnings suppressed.
+        """
+        J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
+                                               float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        rank64 = _rank_at(np.linalg.eigh(J64.T @ J64)[0], cutoff)
+        note(f"n={n} m={m} ratio/cutoff={np.exp(log_ratio):.4g} "
+             f"rank32={report.rank} rank64={rank64} warned={warned}")
+        if report.rank != rank64:
+            assert warned, (
+                f"rank={report.rank} in float32 but {rank64} in float64 "
+                f"under the same cutoff {cutoff:.4g}, and nothing said so; "
+                f"eigvals={np.asarray(report.eigvals)}"
+            )
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=6),
+        m=st.integers(min_value=2, max_value=64),
+        log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_a_warning_is_always_backed_by_a_ratio_inside_the_band(
+            self, n, m, log_ratio, seed):
+        """The other half: a warning that fires anywhere else would be
+        noise.  Whenever it fires, some eigenvalue ratio really is
+        within the measured factor of the cutoff -- and the number the
+        message quotes is that ratio, not ``eigvals[0]``, which can be
+        decades away from the comparison being made.
+        """
+        J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
+                                               float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        assume(warned)
+        ev = np.asarray(report.eigvals, dtype=np.float64)
+        ratios = ev / max(float(ev[-1]), 0.0) if float(ev[-1]) > 0 else ev
+        inside = [r for r in ratios
+                  if r > 0 and cutoff / _PRECISION_WARN_FACTOR
+                  <= r <= cutoff * _PRECISION_WARN_FACTOR]
+        assert inside, (
+            f"warned with no ratio inside "
+            f"[{cutoff / _PRECISION_WARN_FACTOR:.4g}, "
+            f"{cutoff * _PRECISION_WARN_FACTOR:.4g}]: {ratios}"
+        )
+
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    @given(
+        n=st.integers(min_value=2, max_value=8),
+        m=st.integers(min_value=2, max_value=64),
+        # 1e2 .. 1e6 times the cutoff: ordinary, well-conditioned work
+        log_ratio=st.floats(min_value=np.log(1e2), max_value=np.log(1e6)),
+        seed=st.integers(min_value=0, max_value=2**31 - 1),
+    )
+    def test_an_ordinary_well_conditioned_problem_is_never_warned_about(
+            self, n, m, log_ratio, seed):
+        """A warning that fires routinely gets suppressed, which is
+        worse than silence.  This is the property that keeps the other
+        two worth having, and it is the one that fixed the factor: 8x is
+        the largest band that fired on none of 24,000 well-conditioned
+        matrices in the sweep behind ``_PRECISION_WARN_FACTOR``.
+        """
+        J64, _ = _fisher_with_known_ratio(n, max(m, n),
+                                          float(np.exp(log_ratio)), seed)
+        report, warned = _fim_of(J64)
+        note(f"n={n} m={m} ratio/cutoff={np.exp(log_ratio):.4g} "
+             f"rank={report.rank}")
+        assert not warned
+        assert report.rank == n

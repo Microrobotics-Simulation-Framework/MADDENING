@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`fim` says when `rank` was decided at the float32 noise floor**: a
+  `PrecisionLimitWarning` naming the eigenvalue ratio, the cutoff and the
+  `jax_enable_x64` re-run that settles it.  Quiet on well-conditioned problems
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships

@@ -420,12 +420,9 @@ def compile_counts(
     external_inputs: Optional[dict] = None,
     params: Optional[dict] = None,
     scan_steps: int = 0,
+    warmup_steps: int = 4,
 ) -> CompileCounts:
     """Measure :class:`CompileCounts` for a compiled graph.
-
-    The graph is stepped once first if it has never been stepped, since
-    ``retrace_count`` is 0 until then and a graph that has not run has
-    no compiled program to inspect.
 
     Parameters
     ----------
@@ -439,6 +436,17 @@ def compile_counts(
     scan_steps : int
         When positive, also build a ``run_scan`` program of this length
         and count it.  Costs one scan compile.
+    warmup_steps : int
+        Steps to run before reading the counts.  **A single step is not
+        enough**, and the default is 4 for a specific reason: the retrace
+        bugs this repository has actually had did not retrace on the
+        first step.  The weak-typed-seed bug fixed in
+        ``tests/core/test_step_retrace.py`` traced once on step 1, again
+        on step 2 when a weak leaf came back strongly typed, and a third
+        time on step 3 for leaves that only changed later.  Measured
+        after one step it looks perfectly healthy.  Pass ``0`` when the
+        caller has already run the graph far enough, as
+        :func:`profile_graph` has.
 
     Returns
     -------
@@ -447,6 +455,12 @@ def compile_counts(
 
     Notes
     -----
+    The graph is left ``warmup_steps`` steps further on than it was
+    found: warming up is the price of a meaningful retrace count, and
+    silently rewinding it would hide that from the caller.  The scan
+    measurement is different -- it advances the graph by ``scan_steps``
+    purely as an implementation detail -- so that one *is* rolled back.
+
     Lowering the step to read its jaxpr and its HLO re-enters
     ``jax.jit``, which serves both from its jaxpr cache and so does not
     retrace a warm graph.  ``_n_traces`` is nevertheless snapshotted and
@@ -460,12 +474,16 @@ def compile_counts(
     if gm._dirty or gm._compiled_step is None:
         gm.compile()
 
-    resolved_ext = gm._resolve_external_inputs(external_inputs)
-    resolved_params = gm._params_or_default(params)
-
+    for _ in range(max(0, warmup_steps)):
+        gm.step(external_inputs, params=params)
+    # A graph nobody has stepped has a retrace count of 0 and no compiled
+    # program to lower; one step is the floor even when warmup is off.
     if gm.trace_count == 0:
         gm.step(external_inputs, params=params)
-        jax.block_until_ready(jax.tree.leaves(gm._state))
+    jax.block_until_ready(jax.tree.leaves(gm._state))
+
+    resolved_ext = gm._resolve_external_inputs(external_inputs)
+    resolved_params = gm._params_or_default(params)
 
     counts = CompileCounts(retrace_count=int(gm.trace_count))
 
@@ -761,8 +779,14 @@ def profile_graph(
     # so anywhere after it the retrace count would describe the
     # profiler's own recompile instead of the run that was just timed.
     if counts:
+        # ``warmup_steps=0``: the timed run above has already stepped the
+        # graph ``n_warmup + n_steps`` times, well past the point where a
+        # late retrace would have shown up, and stepping further here
+        # would move the window the coupling statistics below are taken
+        # from.
         report.counts = compile_counts(
             gm, external_inputs=external_inputs, scan_steps=count_scan_steps,
+            warmup_steps=0,
         )
 
     # Dispatch floor: a jitted identity on the same pytree.

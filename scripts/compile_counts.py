@@ -271,9 +271,10 @@ def measure() -> dict:
         )
     workloads = {}
     for name, (build, scan_steps) in WORKLOADS.items():
-        gm = build()
-        gm.step()
-        workloads[name] = compile_counts(gm, scan_steps=scan_steps).as_dict()
+        # ``compile_counts`` warms up for four steps by default, which is
+        # what makes a retrace on the second or third step visible here;
+        # see its docstring for why one step would not be enough.
+        workloads[name] = compile_counts(build(), scan_steps=scan_steps).as_dict()
     return {
         "_comment": (
             "Deterministic compilation counts. Regenerate with "
@@ -394,7 +395,19 @@ def main(argv: list[str] | None = None) -> int:
         "--show", action="store_true",
         help="print the measured counts and write nothing",
     )
+    parser.add_argument(
+        "--baseline", type=Path, default=BASELINE,
+        help="baseline file to check against or write (default: the "
+             "committed one).  Not a way to weaken the gate -- it exists so "
+             "the gate's own mutation test can point --check at a "
+             "deliberately wrong baseline and prove it fails.",
+    )
     args = parser.parse_args(argv)
+    baseline_path: Path = args.baseline
+    try:
+        shown_path = baseline_path.relative_to(REPO_ROOT)
+    except ValueError:
+        shown_path = baseline_path
 
     fresh = measure()
 
@@ -403,23 +416,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.check:
-        if not BASELINE.exists():
+        if not baseline_path.exists():
             print(
-                f"{BASELINE.relative_to(REPO_ROOT)} is missing -- create it "
-                f"with `{REGENERATE}`",
+                f"{shown_path} is missing -- create it with `{REGENERATE}`",
                 file=sys.stderr,
             )
             return 1
-        baseline = json.loads(BASELINE.read_text())
+        baseline = json.loads(baseline_path.read_text())
         problems = compare(baseline, fresh)
         if problems:
-            print(
-                f"Compilation counts drifted from "
-                f"{BASELINE.relative_to(REPO_ROOT)}:\n",
-                file=sys.stderr,
-            )
-            for p in problems:
-                print(f"  - {p}", file=sys.stderr)
+            print(f"Compilation counts drifted from {shown_path}:\n",
+                  file=sys.stderr)
+            for problem in problems:
+                print(f"  - {problem}", file=sys.stderr)
             print(
                 f"\nBaseline:\n{_render(baseline)}\n\nMeasured:\n"
                 f"{_render(fresh)}\n\nIf the change is intended, regenerate "
@@ -428,12 +437,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"{BASELINE.relative_to(REPO_ROOT)}: counts match.")
+        print(f"{shown_path}: counts match.")
         return 0
 
-    BASELINE.parent.mkdir(parents=True, exist_ok=True)
-    BASELINE.write_text(json.dumps(fresh, indent=2) + "\n")
-    print(f"wrote {BASELINE.relative_to(REPO_ROOT)}\n")
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps(fresh, indent=2) + "\n")
+    print(f"wrote {shown_path}\n")
     print(_render(fresh))
     return 0
 

@@ -560,16 +560,21 @@ def test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit():
     floor, and a close call there is not a close call about precision.
 
     ``rank_rtol=1e-3`` says "I call anything below 1e-3 unidentifiable
-    in practice".  An eigenvalue ratio of 4e-4 against that cutoff is
-    within a factor of 2.5 of it -- but float32 knows both numbers to
-    three further decimal places, so the verdict is exact and warning
-    about rounding would be simply wrong.  The band is anchored to
-    ``n * eps``, not to whatever cutoff the caller picked.
+    in practice".  An eigenvalue ratio of 7e-4 against that cutoff is
+    *inside* the factor-2 band around it -- and float32 knows both
+    numbers to three further decimal places, so the verdict is exact and
+    warning about rounding would be simply wrong.  The band is anchored
+    to ``n * eps`` as well as to the cutoff, and that second anchor is
+    the only thing stopping this.
+
+    The ratio is deliberately inside the multiplicative band: at 4e-4 it
+    would fall outside anyway and the test would pass with the anchor
+    deleted, which is how the first version of it escaped a mutation.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error", PrecisionLimitWarning)
-        report = _linear_fim(4e-4, rank_rtol=1e-3)
-    assert report.rank == 1          # 4e-4 is below the 1e-3 cutoff
+        report = _linear_fim(7e-4, rank_rtol=1e-3)
+    assert report.rank == 1          # 7e-4 is below the 1e-3 cutoff
 
 
 def test_a_rank_rtol_under_the_noise_floor_still_warns():
@@ -580,3 +585,26 @@ def test_a_rank_rtol_under_the_noise_floor_still_warns():
     eps = float(np.finfo(np.float32).eps)
     with pytest.warns(PrecisionLimitWarning):
         _linear_fim(0.4 * eps, rank_rtol=0.5 * eps)
+
+
+def test_a_negative_eigenvalue_does_not_mask_a_ratio_that_is_on_the_cutoff():
+    """What the "positive ratios only" filter is actually for.
+
+    A PSD matrix whose smallest eigenvalue comes back negative is
+    reporting rounding, and that eigenvalue is *closest* to the cutoff
+    by any distance measure that admits it -- ``log`` of a negative is
+    NaN, and ``argmin`` over an array holding a NaN returns the NaN.  So
+    letting non-positive ratios into the search does not make them warn;
+    it makes them **hijack** the search and hide a genuine in-band ratio
+    sitting further up the spectrum.  Silence on a verdict that really
+    is at the floor, caused by the guard meant to describe it.
+    """
+    from maddening.sysid import _precision_limited
+
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = 3 * eps
+    ev = jnp.asarray([-2.0 * eps, 1.3 * cutoff, 1.0], dtype=jnp.float32)
+    limited = _precision_limited(ev, cutoff, cutoff)
+    assert limited is not None, "the in-band ratio was masked"
+    ratio, _ = limited
+    assert abs(ratio / (1.3 * cutoff) - 1.0) < 1e-3, ratio

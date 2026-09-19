@@ -64,18 +64,16 @@ multi-term fit would all agree with both. **No function of the residual
 norms separates the valid case from the invalid one.** Recovering the
 slow mode needs information the residual sequence does not contain.
 
-**Not fixed — condition 3 for `aitken` and `iqn-*`.** Aitken's relaxation
-factor is re-derived per pass and clipped to `[0.01, 2.0]`; it saturates
-at 2.0 on the audit fixture and the estimate understates by **2.04x**.
-IQN understates by **4.5x**, but by mechanism 2 rather than 3: a
-superlinear residual sequence reads `rho -> 0`, so `amplification`
-collapses to 1 while the true remaining error is still
-`1/(1 - rho_spectral)` of the residual. Correcting Aitken means carrying
-a dynamic scalar through both solvers' loop carries and the `_meta`
-payload, and the value that matters is the one the *next* step will use,
-which nothing has measured — so it would buy an estimate, not a bound. A
-static `2.0` would be a bound and would tighten the criterion for every
-Aitken group in the library. Both are documented on
+**Not fixed — condition 3 for `aitken` and `iqn-*`.** Aitken's factor is
+re-derived per pass and clipped to `[0.01, 2.0]`; it saturates at 2.0 on
+the audit fixture and understates by **2.04x**. IQN understates by
+**4.5x**, but by mechanism 2: a superlinear sequence reads `rho -> 0`, so
+`amplification` collapses to 1 while the true remaining error is still
+`1/(1 - rho_spectral)` of the residual. Correcting Aitken means carrying a
+dynamic scalar through both solvers' carries and the `_meta` payload, and
+the value that matters is the one the *next* step will use — an estimate,
+not a bound. A static `2.0` would be a bound and would tighten the
+criterion for every Aitken group. Both are documented on
 `relaxation_step_scale` rather than corrected.
 
 ## Is there a statable condition the code could check?
@@ -91,12 +89,11 @@ I looked for one and could not find one that is both sound and cheap.
   condition 1). Cost is a handful of extra JVPs per group per step,
   available only under `"ift"`, and it is a new numerical component —
   post-0.4.0.
-* **Conservative fallback: sound, but it is a different product.**
-  Reporting `+inf` unless the spectrum is known would make the field
-  useless and would fail every `strict_convergence` run.
+* **Conservative fallback: sound, but a different product.** Reporting
+  `+inf` unless the spectrum is known would fail every
+  `strict_convergence` run.
 
-So for 0.4.0 the quantity is an estimate. The question is only what it is
-called.
+So for 0.4.0 the quantity is an estimate. The question is what it is called.
 
 ## Recommendation in full
 
@@ -131,15 +128,12 @@ called.
 
 ## Tests that pin this
 
-* `tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor`
-  — the omega fix, parametrised over 0.5 … 1.9.
-* `tests/property/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor`
-  — the same over a generated (gain, omega) grid, with the exact
-  `mu >= 0` tightness statement.
-* `tests/core/…::test_the_estimate_is_never_smaller_than_the_distance_it_estimates`
-  and its property twin — **strict xfail**, the audit's case pinned with
-  `@example`. When condition 2 is fixed these XPASS and fail the suite,
-  which is the signal to revisit this memo.
-* `tests/core/…::test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged`
-  — pins the 122x and the un-flagged `bound_valid=True`, so a partial
-  improvement is visible rather than silently still-failing.
+`test_the_estimate_is_invariant_to_the_relaxation_factor` (example +
+property) pins the omega fix and the exact `mu >= 0` tightness relation.
+`test_the_estimate_is_never_smaller_than_the_distance_it_estimates`
+(example + property) is a **strict xfail** with the audit's case pinned
+by `@example`: when condition 2 is fixed it XPASSes and fails the suite,
+which is the signal to revisit this memo.
+`test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged` pins
+the 122x itself, so a partial improvement is visible rather than
+silently still-failing.

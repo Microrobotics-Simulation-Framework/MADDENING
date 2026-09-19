@@ -109,10 +109,18 @@ def extract_qualified_names(md_path: str) -> list[tuple[str, str]]:
     return results
 
 
-def check_guide(md_path: str, relpath: str) -> tuple[int, list[str], list[str]]:
-    """Check one guide.  Returns ``(n_checked, errors, notes)``."""
+def check_guide(
+    md_path: str, relpath: str
+) -> tuple[int, list[str], list[str], list[str]]:
+    """Check one guide.  Returns ``(n_checked, errors, notes, skipped)``.
+
+    ``n_checked`` counts only references this environment could actually
+    resolve; one that needs an uninstalled optional subpackage lands in
+    ``skipped`` and is not counted as verified.
+    """
     errors: list[str] = []
     notes: list[str] = []
+    skipped: list[str] = []
     checked = 0
 
     for cells in extract_rows(md_path):
@@ -138,7 +146,17 @@ def check_guide(md_path: str, relpath: str) -> tuple[int, list[str], list[str]]:
                 require_own=not allow_inherited,
                 require_callable=True,
             )
-            if not res.ok:
+            if res.unavailable:
+                # An optional subpackage this environment cannot import.
+                # Not checked is not the same as not there; saying "stale"
+                # here would make a guide for a USD or viz node impossible
+                # to keep green in a CI that installs only [ci].
+                checked -= 1
+                skipped.append(
+                    f"{relpath}: '{qname}' (for term '{term}') was NOT "
+                    f"checked -- {res.reason}"
+                )
+            elif not res.ok:
                 errors.append(
                     f"{relpath}: '{qname}' (for term '{term}') does not "
                     f"resolve: {res.reason}"
@@ -149,7 +167,7 @@ def check_guide(md_path: str, relpath: str) -> tuple[int, list[str], list[str]]:
                     f"from {res.inherited_from}, as the row states"
                 )
 
-    return checked, errors, notes
+    return checked, errors, notes, skipped
 
 
 def check_pinned(
@@ -172,7 +190,7 @@ def check_pinned(
             continue
         found = per_file.get(pinned)
         if found is None:
-            found, errs, _ = check_guide(abspath, pinned)
+            found, errs, _notes, _skipped = check_guide(abspath, pinned)
             errors.extend(errs)
         if found < minimum:
             errors.append(
@@ -194,6 +212,7 @@ def main(argv=None) -> int:
 
     errors: list[str] = []
     notes: list[str] = []
+    skipped: list[str] = []
     checked = 0
     per_file: dict[str, int] = {}
 
@@ -206,16 +225,19 @@ def main(argv=None) -> int:
                 continue
             fpath = os.path.join(root, fname)
             relpath = os.path.relpath(fpath, _REPO_ROOT)
-            n, errs, ns = check_guide(fpath, relpath)
+            n, errs, ns, sk = check_guide(fpath, relpath)
             checked += n
             per_file[relpath] = n
             errors.extend(errs)
             notes.extend(ns)
+            skipped.extend(sk)
 
     errors.extend(check_pinned(per_file, MIN_MAPPINGS, _REPO_ROOT))
 
     for n in notes:
         print(f"NOTE: {n}")
+    for sk in skipped:
+        print(f"NOTE: {sk}")
 
     if errors:
         for e in errors:
@@ -226,7 +248,11 @@ def main(argv=None) -> int:
         )
         return 1
 
-    print(f"OK: {checked} implementation mapping(s) verified across {guide_dir}")
+    suffix = f", {len(skipped)} not checked" if skipped else ""
+    print(
+        f"OK: {checked} implementation mapping(s) verified{suffix} "
+        f"across {guide_dir}"
+    )
     return 0
 
 

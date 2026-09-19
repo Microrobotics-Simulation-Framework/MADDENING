@@ -206,6 +206,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A compliance gate no longer calls an optional subpackage's symbol stale**:
+  a `maddening.usd.*` reference in an environment without the `usd` extra is
+  reported as *not checked*, with the extra named, instead of failing the run
 - **The four `scripts/check_*.py` compliance gates now fail on the defects they
   exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
   `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them

@@ -65,30 +65,79 @@ class Resolution(NamedTuple):
     #: Name of the base class an attribute was actually found on, when it is
     #: not defined on the class the dotted name names.
     inherited_from: Optional[str] = None
+    #: Top-level package whose absence stopped the name being checked at all,
+    #: e.g. ``"pxr"`` for a ``maddening.usd.*`` symbol in an environment
+    #: without the ``usd`` extra.  When this is set, ``ok`` is false but the
+    #: reference is *unverified*, not known-stale: the caller must not report
+    #: it as broken.
+    unavailable: Optional[str] = None
 
 
-def _import_longest_prefix(parts: list[str]):
+class _PrefixImport(NamedTuple):
+    """Result of walking a dotted name's module prefixes."""
+
+    module: object = None
+    attrs: tuple[str, ...] = ()
+    #: A real import failure seen at a *longer* prefix than the one that
+    #: imported.  Kept even when a shorter prefix succeeds.
+    error: Optional[str] = None
+    #: Top-level package named by that failure, when it was a missing import.
+    missing_dependency: Optional[str] = None
+
+
+def _import_longest_prefix(parts: list[str]) -> _PrefixImport:
     """Import the longest importable module prefix of a dotted name.
 
-    Returns ``(module, remaining_attrs, error)``.  ``error`` is set only
-    when an import failed for a reason other than "this component is an
-    attribute, not a module" -- a missing third-party dependency, say, which
-    must not be reported as a stale reference.
+    An import can fail for three very different reasons, and telling them
+    apart is the whole point of this function:
+
+    * ``import maddening.nodes.heat.HeatNode`` fails because the last
+      component is an attribute, not a module.  Expected -- keep shortening,
+      and say nothing.
+    * ``import maddening.usd.serialization`` fails because the ``usd`` extra
+      is not installed.  The name cannot be *checked* here; it is not stale.
+      This arrives in two shapes: a bare ``ModuleNotFoundError(name='pxr')``,
+      and the ``ImportError("maddening.usd requires 'usd-core' ...")`` that
+      ``maddening/usd/__init__.py`` raises in its place -- which carries no
+      ``name`` at all, so both have to be handled.
+    * anything else raised during import is a broken module, and stays a
+      hard error.
+
+    A shorter prefix almost always imports after the second kind of failure
+    (``maddening`` itself always does), and the accumulated error used to be
+    thrown away at that point -- so a missing optional dependency was
+    reported as ``'maddening' has no attribute 'usd'``, a stale-reference
+    message about a symbol that exists.  The error and the package that
+    caused it now travel back with the successful shorter prefix.
     """
     error = None
+    missing = None
     for i in range(len(parts), 0, -1):
         modpath = ".".join(parts[:i])
         try:
-            return importlib.import_module(modpath), parts[i:], None
-        except ModuleNotFoundError as exc:
-            # ``import maddening.nodes.heat.HeatNode`` raises with
-            # ``exc.name == "maddening.nodes.heat.HeatNode"``: expected, keep
-            # shortening.  ``exc.name == "fastapi"`` is a real problem.
-            if exc.name and not modpath.startswith(exc.name):
-                error = f"importing {modpath} failed: {exc}"
+            mod = importlib.import_module(modpath)
+        except ImportError as exc:
+            name = getattr(exc, "name", None)
+            # "No module named 'maddening.nodes.heat.HeatNode'" -- the tail is
+            # an attribute.  Keep shortening; this is not a failure.
+            if (isinstance(exc, ModuleNotFoundError)
+                    and name and modpath.startswith(name)):
+                continue
+            # Overwrite rather than keep the first: prefixes are tried
+            # longest-first, so the last real failure is the shortest one --
+            # ``maddening.usd`` rather than ``maddening.usd.serialization.f``.
+            # That is the subpackage boundary, and the message it raises is
+            # the one that names the extra to install.
+            error = f"importing {modpath} failed: {exc}"
+            # The third-party package when we know it, else the module that
+            # refused to import.  Either way it is a label for "unavailable
+            # here", not a claim about the reference.
+            missing = name.split(".")[0] if name else modpath
         except Exception as exc:  # pragma: no cover - defensive
             error = f"importing {modpath} raised {type(exc).__name__}: {exc}"
-    return None, None, error
+        else:
+            return _PrefixImport(mod, tuple(parts[i:]), error, missing)
+    return _PrefixImport(None, (), error, missing)
 
 
 def resolve_dotted_name(
@@ -118,14 +167,32 @@ def resolve_dotted_name(
         ``ok`` is false with a ``reason`` when the name does not resolve.
         ``inherited_from`` names the defining base class when an attribute
         was found only through the MRO, whether or not that was allowed.
+        ``unavailable`` names a missing third-party package when the name
+        could not be *checked* here at all -- that is not a stale reference
+        and callers must not report it as one.
     """
     parts = qname.split(".")
     if len(parts) < 2:
         return Resolution(False, f"'{qname}' is not a dotted name")
 
-    mod, attrs, error = _import_longest_prefix(parts)
+    found = _import_longest_prefix(parts)
+    mod, attrs = found.module, found.attrs
+
+    def _unverified() -> Resolution:
+        return Resolution(
+            False,
+            f"'{qname}' could not be checked in this environment: "
+            f"{found.error}",
+            None,
+            found.missing_dependency,
+        )
+
     if mod is None:
-        return Resolution(False, error or f"no importable module in '{qname}'")
+        if found.missing_dependency:
+            return _unverified()
+        return Resolution(
+            False, found.error or f"no importable module in '{qname}'"
+        )
 
     obj = mod
     inherited_from = None
@@ -133,6 +200,19 @@ def resolve_dotted_name(
     for attr in attrs:
         parent = obj
         if not hasattr(parent, attr):
+            # A longer prefix failed to import, and the walk from the shorter
+            # one cannot get past it: a submodule is not an attribute of its
+            # package until it has been imported.  Whatever stopped that
+            # import is the real answer -- "has no attribute" describes the
+            # symptom and blames the wrong thing.
+            if found.missing_dependency:
+                return _unverified()
+            if found.error:
+                # A module that exists and raises: a defect, and a hard
+                # failure, but report what actually happened.
+                return Resolution(
+                    False, f"'{qname}' could not be resolved: {found.error}"
+                )
             return Resolution(False, f"'{seen}' has no attribute '{attr}'")
         if isinstance(parent, type) and attr not in parent.__dict__:
             owner = next(
@@ -217,6 +297,7 @@ def validate_anomaly_registry(
     prefix: str = "",
     repo_root: Optional[str] = None,
     resolve_references: bool = True,
+    notes: Optional[list[str]] = None,
 ) -> list[str]:
     """Validate a known_anomalies.yaml file against the anomaly schema.
 
@@ -237,6 +318,12 @@ def validate_anomaly_registry(
         import and every ``verification`` entry must name a real test file
         and a real ``def``.  A registry pointing at code that no longer
         exists is the failure this list is kept to prevent.
+    notes : list of str, optional
+        Appended to, never read.  A reference that could not be *checked*
+        here -- a ``maddening.usd`` symbol in an environment without the
+        ``usd`` extra -- is recorded here rather than in the returned
+        errors, because "I could not look" is not "this is broken".
+        Callers that care about coverage should surface these.
 
     Returns
     -------
@@ -324,11 +411,24 @@ def validate_anomaly_registry(
             components = [components]
         for comp in components:
             res = resolve_dotted_name(str(comp))
-            if not res.ok:
-                errors.append(
-                    f"{aid}: affected_components entry '{comp}' does not "
-                    f"resolve ({res.reason})"
-                )
+            if res.ok:
+                continue
+            if res.unavailable:
+                # An optional subpackage this environment cannot import.
+                # Asserting the reference is stale would be a false
+                # statement in a compliance artefact, and would make every
+                # anomaly touching maddening.usd or maddening.viz
+                # unrecordable in a CI that installs only [ci].
+                if notes is not None:
+                    notes.append(
+                        f"{aid}: affected_components entry '{comp}' was NOT "
+                        f"checked -- {res.reason}"
+                    )
+                continue
+            errors.append(
+                f"{aid}: affected_components entry '{comp}' does not "
+                f"resolve ({res.reason})"
+            )
 
         # verification entries must name a real test file and a real def.
         verification = a.get("verification") or []

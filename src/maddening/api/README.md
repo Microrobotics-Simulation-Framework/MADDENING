@@ -89,6 +89,17 @@ been.
 
 ## REST Endpoints
 
+Every path below needs `Authorization: Bearer <token>` when the bind is
+not loopback; `/healthz` and `/viz/*` never do.
+
+### Meta
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/healthz` | Liveness probe: `{status, version}`. Never authenticated — a container probe holds no credential, and the answer says nothing about the graph |
+| GET | `/viz/app`, `/viz/graph`, `/viz/render` | The bundled UIs. Never authenticated: they hold no secret, and a page that could not load could not ask for the token. Open `?token=<token>` to hand one to the page |
+| GET | `/viz/auth.js` | The pages' token helper |
+
 ### Graph Structure
 
 | Method | Path | Description |
@@ -127,6 +138,11 @@ been.
 | `/ws/state` | Streams state snapshots at ~30 Hz as JSON `{sim_time, state}` |
 
 ## Example curl Commands
+
+These talk to `localhost`, so they need no token.  Against a non-loopback
+server add `-H "Authorization: Bearer $MADDENING_API_TOKEN"` to every
+`curl`, and pass the same header to `websockets.connect` via
+`additional_headers=`.
 
 ```bash
 # Get graph structure

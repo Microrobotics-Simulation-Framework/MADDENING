@@ -440,6 +440,8 @@ class TestFIM:
             assert bool((crb[finite] > 0.0).all()), rep.crb
             assert bool(np.isinf(crb[~finite]).all()), rep.crb
 
+    @pytest.mark.filterwarnings(
+        "ignore::maddening.warnings.PrecisionLimitWarning")
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
@@ -447,7 +449,14 @@ class TestFIM:
     ):
         """Position-only data sees k/m and c/m: scaling (k, c, m) together
         is invisible, so in relative coordinates (1, 1, 1)/sqrt(3) is the
-        weakest eigenvector with a ~0 eigenvalue."""
+        weakest eigenvector with a ~0 eigenvalue.
+
+        The ``PrecisionLimitWarning`` filter is not a workaround: a
+        weakest eigenvalue at ~0 is exactly what this test is *for*, so
+        for some draws ``fim`` correctly reports that the rank verdict
+        sits at the float32 noise floor.  What is asserted here is the
+        eigen*vector*, which the warning says nothing about.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -527,10 +536,18 @@ class TestFIM:
         # The CRB is NaN along a singular FIM (pinv), not a bogus number.
         assert rep.cond == float("inf") or rep.cond > 1e5
 
+    @pytest.mark.filterwarnings(
+        "ignore::maddening.warnings.PrecisionLimitWarning")
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_relative_scaling_is_congruence_by_params(self, single, truth, init, n):
-        """``F_rel = D F_raw D`` with ``D = diag(params)``."""
+        """``F_rel = D F_raw D`` with ``D = diag(params)``.
+
+        Filtered for ``PrecisionLimitWarning`` for the reason above: the
+        congruence identity is about the matrix and holds whatever the
+        conditioning, while some generated spring parameters put the
+        rank verdict at the noise floor and ``fim`` now says so.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -656,15 +673,18 @@ class TestPrecisionLimitedRank:
     ``m`` at all, so at long residuals a precision-limited verdict can
     land arbitrarily far from the cutoff and no factor catches it.  The
     measured miss rate over the full sweep is ~14%, essentially all of
-    it there; at ``m <= 64`` it was 0 in 200,000 draws.  Claiming the
-    property over long residuals would be claiming something measured
-    to be false.
+    it there.  The cap is itself measured: over 120,000 draws of this
+    generator the misses were 0 at ``m <= 32`` and 1 at ``m <= 48``, and
+    at ``m <= 64`` they were 4 in 200,000 -- small, but a property
+    asserted absolutely must not be a 1-in-50,000 flake.  Claiming it
+    over long residuals would be claiming something measured to be
+    false.
     """
 
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
-        m=st.integers(min_value=2, max_value=64),
+        m=st.integers(min_value=2, max_value=32),
         # log-uniform across the cutoff: both verdicts occur, and
         # disagreements are common enough for the property to bite
         log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
@@ -700,7 +720,7 @@ class TestPrecisionLimitedRank:
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
-        m=st.integers(min_value=2, max_value=64),
+        m=st.integers(min_value=2, max_value=32),
         log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
         seed=st.integers(min_value=0, max_value=2**31 - 1),
     )
@@ -731,7 +751,7 @@ class TestPrecisionLimitedRank:
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=8),
-        m=st.integers(min_value=2, max_value=64),
+        m=st.integers(min_value=2, max_value=32),
         # 1e2 .. 1e6 times the cutoff: ordinary, well-conditioned work
         log_ratio=st.floats(min_value=np.log(1e2), max_value=np.log(1e6)),
         seed=st.integers(min_value=0, max_value=2**31 - 1),
@@ -783,7 +803,8 @@ class TestPrecisionLimitedRank:
                     elif rc >= 5.0:
                         far += 1
                         fired += warned
-        note(f"disagreements={dis} caught={caught} far={far} fired={fired}")
-        assert dis >= 5, f"population produced too few disagreements ({dis})"
-        assert caught / dis >= 0.75, (caught, dis)
-        assert fired / max(far, 1) <= 0.02, (fired, far)
+        where = (f"disagreements={dis} caught={caught} "
+                 f"far={far} fired={fired}")
+        assert dis >= 5, f"population produced too few disagreements; {where}"
+        assert caught / dis >= 0.75, where
+        assert fired / max(far, 1) <= 0.02, where

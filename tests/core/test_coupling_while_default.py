@@ -232,9 +232,46 @@ def test_forward_and_reverse_ad_through_previously_excluded_configs(cfg):
     assert float(g) != 0.0
 
 
-def test_step_cost_does_not_scale_with_max_iterations():
+def test_the_passes_run_do_not_scale_with_max_iterations():
     """Early exit: raising the cap on an easily converging group must not
-    raise the per-step cost proportionally (the fori path was linear)."""
+    raise the work done (the fori path ran the cap out every step).
+
+    Asserted on the pass count rather than the clock.  The claim is that
+    the solver stops when it has converged, and the reported iteration
+    count *is* that claim -- the fori path this replaced reports the cap,
+    so a regression to it fails here.  A wall-clock ratio measured the
+    same thing indirectly and could be defeated by a busy runner: on a
+    shared CI machine it once read 3.27x against a 3.0x bound while the
+    idle-box ratio is 0.97-1.31.
+    """
+    counts = {}
+    for max_iterations in (3, 60, 200):
+        gm = _rods(max_iterations=max_iterations, tolerance=1e-6,
+                   diagnostics=True)
+        for _ in range(3):
+            gm.step()
+        diag = gm.coupling_diagnostics()
+        assert diag, "the group reports no diagnostics"
+        for key, value in diag.items():
+            assert value["converged"], (max_iterations, key, value)
+            counts.setdefault(key, {})[max_iterations] = int(value["iterations"])
+
+    for key, by_cap in counts.items():
+        assert len(set(by_cap.values())) == 1, (key, by_cap)
+        # Guard the assertion itself: a group that exits on its first pass
+        # would satisfy cap-invariance without exercising early exit.
+        assert 1 < next(iter(by_cap.values())) < 3, (key, by_cap)
+
+
+@pytest.mark.slow
+def test_step_cost_does_not_scale_with_max_iterations():
+    """The same claim on the clock, kept as a coarse smoke check.
+
+    Marked slow and given a wide bound because it measures ~1e-4 s per
+    step, where one scheduler hiccup dominates the number.  It is here to
+    catch a catastrophic regression, not to measure anything; the precise
+    claim is tested above.
+    """
     import time
 
     def timed(max_iterations):
@@ -248,4 +285,4 @@ def test_step_cost_does_not_scale_with_max_iterations():
         return (time.perf_counter() - t0) / 20
 
     t_small, t_large = timed(3), timed(60)
-    assert t_large < 3.0 * t_small, (t_small, t_large)
+    assert t_large < 8.0 * t_small, (t_small, t_large)

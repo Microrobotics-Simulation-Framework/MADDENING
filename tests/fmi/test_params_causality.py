@@ -39,7 +39,13 @@ def gm():
     return g
 
 
-def _sidecar(gm):
+def _sidecar(gm, *, allow_pickle_rpc=False):
+    """A sidecar for ``gm``.
+
+    ``allow_pickle_rpc`` is the opt-in ``FmuSidecar.handle`` needs: it
+    unpickles its request, so it refuses to run without it.  Only the two
+    tests that exercise that wire protocol pass it.
+    """
     md = build_model_description(gm, model_name="m")
     return md, FmuSidecar(SidecarConfig(
         schema_token=md.instantiation_token,
@@ -47,6 +53,7 @@ def _sidecar(gm):
         initial_state=gm._state,
         params=gm.params,
         param_specs=gm.param_specs(),
+        allow_pickle_rpc=allow_pickle_rpc,
     ))
 
 
@@ -154,7 +161,7 @@ class TestSidecar:
         assert float(deserialize_fmu_state(snap, expected_schema_token="t")["n"]["x"]) == 2.0
 
     def test_wire_protocol_get_set_params(self, gm):
-        _, sc = _sidecar(gm)
+        _, sc = _sidecar(gm, allow_pickle_rpc=True)
         status, got = pickle.loads(sc.handle(pickle.dumps(("get_params",))))
         assert status == "ok" and float(got["spring.params.damping"]) == 2.0
         status, _ = pickle.loads(sc.handle(pickle.dumps(("set_params", {"spring.params.damping": 5.0}))))
@@ -208,7 +215,7 @@ class TestBoundsThroughFMI:
         assert unbounded.get("min") is None and unbounded.get("max") is None
 
     def test_set_params_rejects_out_of_bounds_atomically(self, gm):
-        _, sc = _sidecar(gm)
+        _, sc = _sidecar(gm, allow_pickle_rpc=True)
         before = {k: np.asarray(v).copy() for k, v in sc.get_params().items()}
         with pytest.raises(ValueError, match="ball.params.elasticity.*above bound"):
             sc.set_params({"spring.params.damping": 9.0,

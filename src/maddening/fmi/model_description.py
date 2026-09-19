@@ -33,6 +33,7 @@ What's deferred:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 import xml.etree.ElementTree as ET
@@ -76,9 +77,17 @@ _CAUSALITIES = {
 _VARIABILITIES = {"constant", "fixed", "tunable", "discrete", "continuous"}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class FMIVariable:
     """A single entry in the FMU's ``<ModelVariables>`` section.
+
+    Construction is **keyword-only**.  ``node`` and ``field`` were added
+    in 0.4.0 between ``unit`` and ``shape``, so a positional call written
+    against 0.3.x -- ``FMIVariable("plant.x", 1, "float32", "output",
+    "continuous", "", "m", (3,))`` -- silently bound the shape to ``node``
+    and left ``shape`` empty.  Keyword-only turns that into a
+    ``TypeError`` at the call, and stops any later field ever doing it
+    again.
 
     Attributes
     ----------
@@ -302,10 +311,13 @@ class ModelDescription:
                 v_el.set("unit", var.unit)
             if var.start is not None:
                 v_el.set("start", var.start)
-            if var.min is not None:
-                v_el.set("min", repr(float(var.min)))
-            if var.max is not None:
-                v_el.set("max", repr(float(var.max)))
+            # An infinite bound is "no bound", which FMI spells by leaving
+            # the attribute out -- and ``min="-inf"`` was not a valid
+            # ``xs:float`` literal in the first place.
+            if var.min is not None and math.isfinite(var.min):
+                v_el.set("min", _xs_float(float(var.min)))
+            if var.max is not None and math.isfinite(var.max):
+                v_el.set("max", _xs_float(float(var.max)))
             if var.shape:
                 # FMI 3.0 dynamic arrays — emit one <Dimension> per axis.
                 for dim in var.shape:
@@ -364,6 +376,22 @@ def _ensure_stable_only_or_opt_in(
     ):
         return True
     return False
+
+
+def _xs_float(x: float) -> str:
+    """``x`` as an XML Schema ``float`` / ``double`` literal.
+
+    ``repr(float("inf"))`` is ``'inf'``, which is not an ``xs:float``
+    lexical value, so an FMU carrying a non-finite parameter start used
+    to fail schema validation.  The three special values have their own
+    spellings (``INF``, ``-INF``, ``NaN``); everything else is ``repr``
+    as before, which round-trips a double exactly.
+    """
+    if math.isnan(x):
+        return "NaN"
+    if math.isinf(x):
+        return "INF" if x > 0 else "-INF"
+    return repr(x)
 
 
 def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
@@ -702,7 +730,7 @@ def build_model_description(
                 dtype = str(getattr(leaf, "dtype", "float32"))
                 shape = tuple(getattr(leaf, "shape", ()) or ())
                 flat = np.asarray(leaf).ravel()
-                start = " ".join(repr(float(x)) for x in flat)
+                start = " ".join(_xs_float(float(x)) for x in flat)
                 variables.append(FMIVariable(
                     name=name,
                     value_reference=next_vr,

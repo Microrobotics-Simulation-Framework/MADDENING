@@ -13,6 +13,19 @@ paying XLA's startup cost on every FMU instantiation.
 Wire format
 ~~~~~~~~~~~
 
+.. warning::
+
+   :meth:`FmuSidecar.handle` speaks a **pickled** request/response
+   protocol, and unpickling a request executes whatever the sender put
+   in it.  It is therefore **off by default** since 0.4.0: a sidecar has
+   to be built with ``SidecarConfig(allow_pickle_rpc=True)`` before
+   ``handle`` will answer at all, and that opt-in is only ever
+   appropriate for an in-process caller whose bytes you already trust as
+   much as your own code.  Nothing in MADDENING calls it: the shipped
+   transport is :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, which
+   speaks length-prefixed JSON and raw arrays and never unpickles
+   anything.
+
 Every message is a length-prefixed bytes blob; the payload is a
 Python pickle.  Two message kinds:
 
@@ -105,7 +118,16 @@ class SidecarConfig:
         :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
         declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
         description advertises), so an importer cannot drive the step
-        with a constant the graph declares invalid.
+        with a constant the graph declares invalid.  The FMU-state
+        archive path in
+        :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks against the
+        same declarations, so neither door into the parameter tree is
+        wider than the other.
+    allow_pickle_rpc : bool, default False
+        Let :meth:`FmuSidecar.handle` serve the pickled RPC protocol.
+        Unpickling a request runs arbitrary code from whoever supplied
+        the bytes, so ``handle`` refuses unless this is set; the TCP
+        bridge does not use it and does not need it.
     """
     schema_token: str
     step_fn: Callable[..., dict]
@@ -113,6 +135,7 @@ class SidecarConfig:
     unknown_fn: Optional[Callable[[Any], Any]] = None
     params: Optional[dict] = None
     param_specs: Optional[dict] = None
+    allow_pickle_rpc: bool = False
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -139,6 +162,19 @@ class FmuSidecar:
     @property
     def params(self) -> Optional[dict]:
         return self._params
+
+    @property
+    def param_specs(self) -> Optional[dict]:
+        """The ``ParamSpec`` tree this sidecar validates against, if any.
+
+        ``{"nodes": {name: {key: ParamSpec}}, "mappings": {...}}``, the
+        layout :meth:`GraphManager.param_specs` returns.  Exposed so that
+        every writer into the parameter tree -- ``set_params`` here and
+        the FMU-state archive in
+        :meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state` --
+        checks against the same declarations.
+        """
+        return self._config.param_specs
 
     # -- High-level handlers -------------------------------------------------
 
@@ -241,7 +277,32 @@ class FmuSidecar:
         returned as ``("err", traceback_string)`` so the C wrapper
         can surface the failure to the FMI runtime via
         ``fmi3Status`` without losing the Python traceback.
+
+        .. warning::
+
+           ``pickle.loads`` on the request executes whatever produced the
+           bytes.  This method therefore refuses to run unless the
+           sidecar was built with
+           ``SidecarConfig(allow_pickle_rpc=True)``.  The shipped
+           transport, :class:`maddening.fmi.tcp_bridge.FmuTcpBridge`,
+           does not go through here; prefer it.
+
+        Raises
+        ------
+        RuntimeError
+            If the sidecar was not built with ``allow_pickle_rpc=True``.
         """
+        if not self._config.allow_pickle_rpc:
+            raise RuntimeError(
+                "FmuSidecar.handle speaks a pickled protocol, and unpickling "
+                "a request executes whatever produced it.  It is disabled "
+                "unless the sidecar is built with "
+                "SidecarConfig(..., allow_pickle_rpc=True), which is only "
+                "appropriate for an in-process caller you trust as much as "
+                "your own code.  The shipped FMU transport is "
+                "maddening.fmi.tcp_bridge.FmuTcpBridge, which never "
+                "unpickles anything.",
+            )
         try:
             payload = pickle.loads(request)
         except Exception as exc:  # pragma: no cover — pickle errors

@@ -664,6 +664,25 @@ static void test_max_set_frame_fits_the_bridge_limit(void) {
     free(vals);
 }
 
+static void test_get_request_respects_the_frame_limit(void) {
+    /* do_set has always refused a request frame over FRAME_MAX; do_get had
+     * no check at all, so a get of a few million value references built a
+     * request the bridge refuses to read -- the connection is dropped and
+     * the instance dies, instead of the importer being told the request is
+     * too large.  (Audit params-io 2026-09-19, repro/c_probe.c: nvr =
+     * 7,000,000 produced a 77,000,019-byte frame against a 67,108,864-byte
+     * limit.)  The cheap bound is checked here; the exact post-build one
+     * needs a 150 MB buffer, so it is left to the reproducer. */
+    fmi3ValueReference vr[1] = { 4294967295u };
+    double out[1];
+    Instance *fresh = fake_instance(SOCK_INVALID);
+    g_log_calls = 0;
+    CHECK(do_get(fresh, vr, (size_t)FRAME_MAX / 2 + 1, out, 1) == fmi3Error);
+    CHECK(fresh->req_cap == 0);                    /* refused before any buffer grew */
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
+    free_instance(fresh);
+}
+
 /* ----------------------------------------------------------- FMU state */
 
 static void test_fmu_state(void) {
@@ -852,6 +871,7 @@ int main(int argc, char **argv) {
     test_binary_fmu_state();
     test_oversize_reply_kills_the_connection();
     test_max_set_frame_fits_the_bridge_limit();
+    test_get_request_respects_the_frame_limit();
     test_fmu_state();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();

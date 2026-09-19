@@ -84,6 +84,26 @@ class _NodeSpec:
     flux_accepts_params: bool = False
 
 
+@dataclass(frozen=True)
+class _StepPlan:
+    """The derived values ``_build_step_fn`` closes over.
+
+    ``compile()`` recomputes all of them and can still raise afterwards
+    (the ``accelerated_fields`` validation, the static-data refusal,
+    ``_build_step_fn`` itself), so they travel as a plan and are written
+    onto the graph only at the commit point at the end of a successful
+    compile.  A failed ``compile()`` leaves the graph exactly as it was:
+    anything reading ``_schedule``, ``_is_multirate``, ``_rate_dividers``
+    or :attr:`~GraphManager.params` as a description of the step that is
+    actually running would otherwise read a step that was never built.
+    """
+    schedule: list[str]
+    back_edges: list[EdgeSpec]
+    is_multirate: bool
+    rate_dividers: dict[str, int]
+    params: dict
+
+
 def _correction_accepts_params(node: SimulationNode) -> bool:
     fn = getattr(node, "compute_interface_correction", None)
     if fn is None:
@@ -3434,9 +3454,15 @@ class GraphManager:
                 "edge validation failed", validation_errors
             )
 
+        # Everything from here to the commit point at the end of the
+        # method is computed into locals.  The ``accelerated_fields``
+        # validation, the static-data refusal and ``_build_step_fn`` can
+        # all still raise, and a compile that fails must leave the graph
+        # bit-identical to what it was -- not describing a step that was
+        # never built.  See ``_StepPlan``.
         node_names = list(self._nodes.keys())
-        self._schedule = topological_sort(node_names, self._edges)
-        self._back_edges = identify_back_edges(self._schedule, self._edges)
+        schedule = topological_sort(node_names, self._edges)
+        back_edges = identify_back_edges(schedule, self._edges)
 
         # ``_meta`` is *state*, not derived data: ``step_count`` decides
         # which sub-steps a node with a rate divider > 1 fires on, and the
@@ -3477,21 +3503,21 @@ class GraphManager:
 
         timesteps = sorted(set(effective_timesteps.values()))
         if len(timesteps) > 1:
-            self._is_multirate = True
+            is_multirate = True
             base_dt = _multi_gcd(timesteps)
-            self._rate_dividers = {
+            rate_dividers = {
                 name: round(effective_timesteps[name] / base_dt)
                 for name in self._nodes
             }
         else:
-            self._is_multirate = False
-            self._rate_dividers = {name: 1 for name in self._nodes}
+            is_multirate = False
+            rate_dividers = {name: 1 for name in self._nodes}
 
         # Build ``_meta`` fresh over the key set *this* graph needs, so a
         # key whose owning coupling group is gone cannot linger in the
         # scan carry, then carry the previous values back over it below.
         meta: dict = {}
-        if self._is_multirate:
+        if is_multirate:
             meta["step_count"] = jnp.array(0, dtype=jnp.int32)
 
         # Ensure _meta exists with correct structure when coupling
@@ -3586,7 +3612,7 @@ class GraphManager:
         # which is the whole point of preserving the counter.
         phase_still_means_the_same = all(
             previous_dividers[name] == divider
-            for name, divider in self._rate_dividers.items()
+            for name, divider in rate_dividers.items()
             if name in previous_dividers
         )
         for key_, seed in meta.items():
@@ -3661,10 +3687,10 @@ class GraphManager:
 
         # A weak-typed leaf in the seed state would retrace the jitted
         # step once it comes back strongly typed after the first step.
-        self._state = _strong_typed(self._state)
+        state = _strong_typed(self._state)
         # Zero external inputs are allocated once per compile, not per
         # step (``jnp.zeros`` per input per call cost ~1.5 ms/step on GPU).
-        self._default_ext_leaves = {
+        default_ext_leaves = {
             (ei.target_node, ei.target_field): jnp.zeros(ei.shape, dtype=ei.dtype)
             for ei in self._external_inputs
         }
@@ -3676,18 +3702,18 @@ class GraphManager:
         # edge or an external input must not discard a fit); anything
         # that no longer fits is dropped with a warning.  ``reset_params``
         # restores the constructor values on purpose.
-        self.params = self._merge_live_params(self._snapshot_params(), self.params)
-        self._params_dtypes = {
+        params = self._merge_live_params(self._snapshot_params(), self.params)
+        params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
-                for owner, leaves in self.params.get(section, {}).items()
+                for owner, leaves in params.get(section, {}).items()
             }
             for section in ("nodes", "mappings")
         }
-        self._params_shapes = {
+        params_shapes = {
             section: {
                 owner: {k: tuple(jnp.shape(v)) for k, v in leaves.items()}
-                for owner, leaves in self.params.get(section, {}).items()
+                for owner, leaves in params.get(section, {}).items()
             }
             for section in ("nodes", "mappings")
         }
@@ -3769,7 +3795,55 @@ class GraphManager:
             if callable(invalidate):
                 invalidate()
 
-        step_fn = self._build_step_fn()
+        # Built against the plan, not against the graph: the build is the
+        # last thing that can raise, and it must be able to fail without
+        # having moved the graph off the step it is running.
+        plan = _StepPlan(
+            schedule=schedule,
+            back_edges=back_edges,
+            is_multirate=is_multirate,
+            rate_dividers=rate_dividers,
+            params=params,
+        )
+        step_fn = self._build_step_fn(plan)
+
+        def _counted_step(full_state, external_inputs, params=None):
+            self._n_traces += 1
+            return step_fn(full_state, external_inputs, params)
+
+        compiled_step = jax.jit(_counted_step)
+
+        # Snapshot static_data hashes so we can detect drift.
+        # ``static_data_hash`` is a node-supplied method, so this is the
+        # last thing in the method that can raise -- it stays above the
+        # commit point.
+        static_data_hashes = {
+            name: spec.node.static_data_hash()
+            for name, spec in self._nodes.items()
+        }
+
+        # ------------------------------------------------------------------
+        # Commit point.  Nothing below raises, so everything computed above
+        # is written onto the graph here, together: the plan the step was
+        # built from, the state and parameter snapshots it closes over, the
+        # ``_meta`` built above (see there) and the dividers the next
+        # compile will judge its phase against.  Up to here, a raise leaves
+        # the graph running exactly the step it was running before.
+        # ------------------------------------------------------------------
+        self._schedule = plan.schedule
+        self._back_edges = plan.back_edges
+        self._is_multirate = plan.is_multirate
+        self._rate_dividers = plan.rate_dividers
+        self.params = plan.params
+        self._params_dtypes = params_dtypes
+        self._params_shapes = params_shapes
+        self._state = state
+        self._default_ext_leaves = default_ext_leaves
+        if meta:
+            self._state[_META_KEY] = meta
+        else:
+            self._state.pop(_META_KEY, None)
+        self._committed_rate_dividers = dict(plan.rate_dividers)
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -3777,27 +3851,8 @@ class GraphManager:
         # graph; a growing count means something in the call signature
         # (weak types, dtypes, params structure) keeps changing.
         self._n_traces = 0
-
-        def _counted_step(full_state, external_inputs, params=None):
-            self._n_traces += 1
-            return step_fn(full_state, external_inputs, params)
-
-        self._compiled_step = jax.jit(_counted_step)
-
-        # Snapshot static_data hashes so we can detect drift.
-        self._static_data_hashes = {
-            name: spec.node.static_data_hash()
-            for name, spec in self._nodes.items()
-        }
-
-        # Nothing below raises, so this is the commit point for the
-        # ``_meta`` built above (see there) and for the dividers the next
-        # compile will judge its phase against.
-        if meta:
-            self._state[_META_KEY] = meta
-        else:
-            self._state.pop(_META_KEY, None)
-        self._committed_rate_dividers = dict(self._rate_dividers)
+        self._compiled_step = compiled_step
+        self._static_data_hashes = static_data_hashes
 
         self._dirty = False
         # A rebuilt step invalidates every scan built against the old
@@ -3960,7 +4015,20 @@ class GraphManager:
         )
         self._dirty = True
 
-    def _build_step_fn(self) -> Callable:
+    def _committed_plan(self) -> "_StepPlan":
+        """The plan the graph is currently running, as last committed by
+        ``compile()``.  Rebuilding the step from this reproduces the step
+        that is live, which is what a caller that asks for a step function
+        outside ``compile()`` means."""
+        return _StepPlan(
+            schedule=list(self._schedule),
+            back_edges=list(self._back_edges),
+            is_multirate=self._is_multirate,
+            rate_dividers=dict(self._rate_dividers),
+            params=self.params,
+        )
+
+    def _build_step_fn(self, plan: Optional["_StepPlan"] = None) -> Callable:
         """Create a pure function ``(full_state, ext_inputs) -> full_state``.
 
         When multi-rate is active, the step function increments an
@@ -3973,12 +4041,24 @@ class GraphManager:
         When coupling groups are defined, nodes within each group are
         wrapped in a ``jax.lax.while_loop`` that iterates
         (Gauss-Seidel) until convergence or max_iterations.
+
+        Parameters
+        ----------
+        plan : _StepPlan, optional
+            The schedule, multi-rate info and parameter snapshot to build
+            against.  ``compile()`` passes the plan it has computed but
+            not yet committed, so the build -- which can raise -- happens
+            before the graph is touched.  ``None`` builds against what is
+            committed on the graph, which is what a caller rebuilding the
+            step of an already-compiled graph wants.
         """
-        schedule = list(self._schedule)
+        if plan is None:
+            plan = self._committed_plan()
+        schedule = list(plan.schedule)
         nodes = dict(self._nodes)
-        back_edge_set = set(self._back_edges)
-        is_multirate = self._is_multirate
-        rate_dividers = dict(self._rate_dividers)
+        back_edge_set = set(plan.back_edges)
+        is_multirate = plan.is_multirate
+        rate_dividers = dict(plan.rate_dividers)
         coupling_groups = list(self._coupling_groups)
 
         # Map node -> coupling group
@@ -4033,7 +4113,7 @@ class GraphManager:
         # baked in as constants, exactly the pre-params behaviour.  An
         # explicit ``params`` is a traced input, so ``jax.grad`` reaches
         # it and a new value needs no recompile.
-        params_snapshot = self.params
+        params_snapshot = plan.params
 
         def _resolve_params(params):
             if params is None:

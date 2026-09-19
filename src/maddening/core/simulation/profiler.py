@@ -97,6 +97,10 @@ class ProfileReport:
     # Optional jax.profiler trace attribution (``trace=True``)
     trace: Optional["TraceSummary"] = None
 
+    # Deterministic compilation counts (``counts=True``, the default).
+    # Unlike every timing above, these reproduce exactly on any machine.
+    counts: Optional["CompileCounts"] = None
+
     # State sizes
     node_sizes: dict[str, int] = field(default_factory=dict)
     total_state_elements: int = 0
@@ -158,6 +162,10 @@ class ProfileReport:
                 if group_key not in self.coupling_iter_stats:
                     lines.append(f"    {group_key}: {iters} iterations")
 
+        if self.counts is not None:
+            lines.append(f"")
+            lines.extend(self.counts.lines())
+
         if self.trace is not None:
             lines.append(f"")
             lines.extend(self.trace.lines())
@@ -214,6 +222,287 @@ class TraceSummary:
             for name, v in self.top_kernels[:8]:
                 out.append(f"      {name[:48]:48s} {v:>7.3f} ms/step")
         return out
+
+
+# ---------------------------------------------------------------------------
+# Deterministic compilation counts
+# ---------------------------------------------------------------------------
+
+
+@stability(StabilityLevel.EVOLVING)
+@dataclass
+class CompileCounts:
+    """Compilation counts for a graph: integers, never durations.
+
+    Compile time is what a user of MADDENING feels first, and a silent
+    regression in it would ship unnoticed -- but wall-clock cannot gate
+    it.  A per-step timing comparison in this repository failed CI at
+    3.27x against a 3.0x bound on a pull request that changed no code at
+    all, because the number it read was the runner and not the solver
+    (see ``tests/core/test_coupling_while_default.py``).
+
+    These counts are what that comparison should have been measuring.
+    They are exactly reproducible: the same graph on the same JAX
+    version yields the same integers on any machine, under any load,
+    however many other jobs share the box.
+
+    Attributes
+    ----------
+    retrace_count : int
+        Python traces of the compiled step since ``compile()``
+        (:attr:`GraphManager.trace_count`).  One is healthy.  More means
+        something in the call signature keeps changing -- a weak-typed
+        leaf, a drifting dtype, a non-static argument -- and every one of
+        them is a full XLA compile the user pays for.  This is the single
+        most valuable number here: an unexpected retrace is the classic
+        silent regression, and it is the one count that does not depend
+        on the JAX version at all, because it is counted in Python.
+    jaxpr_primitive_count : int
+        Primitives in the step's jaxpr, recursing into every sub-jaxpr
+        (``scan``/``while``/``cond`` bodies are counted once, not once
+        per iteration).  A structural measure of how much work the graph
+        builder emits.
+    hlo_op_count : int
+        Operations in the lowered StableHLO module, excluding the
+        top-level ``module`` op.  Deliberately the *pre*-optimisation
+        module: it is what MADDENING hands to XLA, so it measures
+        MADDENING's own graph construction rather than the backend's
+        fusion decisions, which differ by platform and would make the
+        number machine-dependent.
+    scan_steps : int
+        Length of the ``run_scan`` program the scan counts describe;
+        ``0`` when no scan was measured.
+    scan_retrace_count : int
+        Python traces of scan programs since ``compile()``
+        (:attr:`GraphManager.scan_trace_count`).
+    scan_jaxpr_primitive_count, scan_hlo_op_count : int
+        The same two structural counts for the scan program.
+
+    Notes
+    -----
+    Not timing.  :class:`ProfileReport` carries the wall-clock numbers;
+    they are worth trending and must not gate.
+    """
+
+    retrace_count: int = 0
+    jaxpr_primitive_count: int = 0
+    hlo_op_count: int = 0
+    scan_steps: int = 0
+    scan_retrace_count: int = 0
+    scan_jaxpr_primitive_count: int = 0
+    scan_hlo_op_count: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """The counts as a plain ``dict`` of ``int``, for serialisation.
+
+        Scan fields are omitted entirely when no scan was measured, so a
+        baseline never records a zero that could be mistaken for a
+        measured count of nothing.
+        """
+        out = {
+            "retrace_count": int(self.retrace_count),
+            "jaxpr_primitive_count": int(self.jaxpr_primitive_count),
+            "hlo_op_count": int(self.hlo_op_count),
+        }
+        if self.scan_steps:
+            out.update(
+                scan_steps=int(self.scan_steps),
+                scan_retrace_count=int(self.scan_retrace_count),
+                scan_jaxpr_primitive_count=int(self.scan_jaxpr_primitive_count),
+                scan_hlo_op_count=int(self.scan_hlo_op_count),
+            )
+        return out
+
+    def lines(self) -> list[str]:
+        """Rendered lines for :meth:`ProfileReport.__str__`."""
+        out = [
+            "  Compile counts (deterministic; no wall-clock):",
+            f"    step retraces:     {self.retrace_count:>7d}"
+            + ("" if self.retrace_count == 1 else "   <-- expected 1"),
+            f"    jaxpr primitives:  {self.jaxpr_primitive_count:>7d}",
+            f"    lowered HLO ops:   {self.hlo_op_count:>7d}",
+        ]
+        if self.scan_steps:
+            out += [
+                f"    scan ({self.scan_steps} steps) retraces: "
+                f"{self.scan_retrace_count:>3d}",
+                f"    scan jaxpr primitives: {self.scan_jaxpr_primitive_count:>7d}",
+                f"    scan lowered HLO ops:  {self.scan_hlo_op_count:>7d}",
+            ]
+        return out
+
+
+def _subjaxprs(jaxpr) -> list:
+    """Sub-jaxprs of *jaxpr*, one level down.
+
+    ``jax.extend.core.subjaxprs`` is the supported spelling; the
+    duck-typed fallback keeps this working on a JAX that moves it again
+    (``jax.core.ClosedJaxpr`` disappeared in 0.11, which is exactly the
+    breakage this fallback exists for).
+    """
+    try:
+        from jax.extend.core import subjaxprs
+    except ImportError:  # pragma: no cover - JAX layout change
+        pass
+    else:
+        return list(subjaxprs(jaxpr))
+
+    found = []  # pragma: no cover - JAX layout change
+    for eqn in jaxpr.eqns:  # pragma: no cover - JAX layout change
+        for value in eqn.params.values():
+            items = value if isinstance(value, (tuple, list)) else (value,)
+            for item in items:
+                inner = getattr(item, "jaxpr", item)
+                if hasattr(inner, "eqns"):
+                    found.append(inner)
+    return found
+
+
+@stability(StabilityLevel.EVOLVING)
+def count_jaxpr_primitives(jaxpr) -> int:
+    """Primitives in *jaxpr*, recursing into every sub-jaxpr.
+
+    Parameters
+    ----------
+    jaxpr : Jaxpr or ClosedJaxpr
+        The jaxpr to count.  A ``ClosedJaxpr`` is unwrapped.
+
+    Returns
+    -------
+    int
+        Total equation count.  A ``scan`` contributes its own primitive
+        plus the primitives of its body **once**, not once per
+        iteration, so the number describes the program's structure and
+        not the trip count -- which is what makes it comparable between
+        a 10-step and a 1000-step run of the same graph.
+    """
+    jaxpr = getattr(jaxpr, "jaxpr", jaxpr)
+    return len(jaxpr.eqns) + sum(count_jaxpr_primitives(s) for s in _subjaxprs(jaxpr))
+
+
+@stability(StabilityLevel.EVOLVING)
+def count_hlo_ops(lowered) -> int:
+    """Operations in a ``jax.stages.Lowered``'s StableHLO module.
+
+    Every MLIR operation in the module is counted, at every nesting
+    depth, excluding the top-level ``module`` op itself (``func.func``,
+    ``return`` and the bodies of ``stablehlo.while`` / ``stablehlo.case``
+    are all included).  Counting everything rather than filtering by
+    dialect keeps the number stable across JAX versions that rename or
+    re-dialect an op.
+
+    Parameters
+    ----------
+    lowered : jax.stages.Lowered
+        The result of ``jitted_fn.lower(*args)``.
+
+    Returns
+    -------
+    int
+        Operation count of the pre-optimisation module.
+    """
+    total = 0
+    stack = [lowered.compiler_ir().operation]
+    while stack:
+        op = stack.pop()
+        for region in op.regions:
+            for block in region.blocks:
+                for child in block.operations:
+                    total += 1
+                    stack.append(child)
+    return total
+
+
+@stability(StabilityLevel.EVOLVING)
+def compile_counts(
+    gm,
+    *,
+    external_inputs: Optional[dict] = None,
+    params: Optional[dict] = None,
+    scan_steps: int = 0,
+) -> CompileCounts:
+    """Measure :class:`CompileCounts` for a compiled graph.
+
+    The graph is stepped once first if it has never been stepped, since
+    ``retrace_count`` is 0 until then and a graph that has not run has
+    no compiled program to inspect.
+
+    Parameters
+    ----------
+    gm : GraphManager
+        The graph.  Compiled if dirty.
+    external_inputs : dict or None
+        External inputs for the step whose compilation is measured.
+        ``None`` uses the graph's defaults.
+    params : dict or None
+        Graph parameter pytree; ``None`` uses ``gm.params``.
+    scan_steps : int
+        When positive, also build a ``run_scan`` program of this length
+        and count it.  Costs one scan compile.
+
+    Returns
+    -------
+    CompileCounts
+        The counts.
+
+    Notes
+    -----
+    Lowering the step to read its jaxpr and its HLO re-enters
+    ``jax.jit``, which serves both from its jaxpr cache and so does not
+    retrace a warm graph.  ``_n_traces`` is nevertheless snapshotted and
+    restored around the measurement, so that measuring a graph can never
+    move the very number being measured -- on any JAX whose caching
+    differs from today's.  ``tests/core/test_compile_counts.py`` pins
+    that: it asserts ``trace_count`` is unchanged by a measurement, an
+    assertion that passes today and would be the only warning if a JAX
+    upgrade changed it.
+    """
+    if gm._dirty or gm._compiled_step is None:
+        gm.compile()
+
+    resolved_ext = gm._resolve_external_inputs(external_inputs)
+    resolved_params = gm._params_or_default(params)
+
+    if gm.trace_count == 0:
+        gm.step(external_inputs, params=params)
+        jax.block_until_ready(jax.tree.leaves(gm._state))
+
+    counts = CompileCounts(retrace_count=int(gm.trace_count))
+
+    saved_traces = gm._n_traces
+    try:
+        lowered = gm._compiled_step.lower(gm._state, resolved_ext, resolved_params)
+        counts.hlo_op_count = count_hlo_ops(lowered)
+        counts.jaxpr_primitive_count = count_jaxpr_primitives(
+            jax.make_jaxpr(gm._compiled_step)(gm._state, resolved_ext, resolved_params)
+        )
+    finally:
+        gm._n_traces = saved_traces
+
+    if scan_steps > 0:
+        counts.scan_steps = int(scan_steps)
+        saved_state = jax.tree.map(lambda x: x, gm._state)
+        try:
+            # Populates ``_scan_cache``; ``scan_trace_count`` counts the
+            # Python traces, one per XLA compile of a scan program.  It
+            # is deliberately *not* restored afterwards the way
+            # ``_n_traces`` is: this call really did build a scan
+            # program, the program stays in ``_scan_cache``, and a
+            # counter rolled back below a cache that still holds the
+            # program would report 0 traces for a program that exists.
+            gm.run_scan(scan_steps, external_inputs, params=params)
+            counts.scan_retrace_count = int(gm.scan_trace_count)
+            key = (gm._compile_generation, "run_scan", int(scan_steps))
+            scan_fn = gm._scan_cache[key]
+            scan_lowered = scan_fn.lower(saved_state, resolved_ext, resolved_params)
+            counts.scan_hlo_op_count = count_hlo_ops(scan_lowered)
+            counts.scan_jaxpr_primitive_count = count_jaxpr_primitives(
+                jax.make_jaxpr(scan_fn)(saved_state, resolved_ext, resolved_params)
+            )
+        finally:
+            gm._state = saved_state
+
+    return counts
 
 
 def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, int]]:
@@ -368,6 +657,8 @@ def profile_graph(
     *,
     measure_coupling: bool = True,
     n_stat_steps: Optional[int] = None,
+    counts: bool = True,
+    count_scan_steps: int = 0,
     trace: bool = False,
     trace_steps: int = 20,
     trace_dir: Optional[str] = None,
@@ -403,6 +694,14 @@ def profile_graph(
         counts are properties of the step.  Passing a value pins both:
         the state is reset and re-warmed first, so the statistics come
         from the same window whatever ``n_steps`` is.
+    counts : bool
+        Measure :class:`CompileCounts` -- retraces, jaxpr primitives and
+        lowered HLO ops.  Cheap (no device work) and, unlike every
+        timing in the report, exactly reproducible, which is why the
+        regression gate reads these and not the clock.
+    count_scan_steps : int
+        When positive and ``counts`` is set, also build a ``run_scan``
+        program of this length and count it.  Costs one scan compile.
     trace : bool
         Record ``trace_steps`` steps with ``jax.profiler`` and attribute
         device kernel time to the graph's named scopes
@@ -456,6 +755,15 @@ def profile_graph(
     report.n_steps = n_steps
     if report.mean_step_ms > 0:
         report.steps_per_second = 1000.0 / report.mean_step_ms
+
+    # Compilation counts, taken here rather than at the end: the coupling
+    # measurement below recompiles the step (resetting ``trace_count``),
+    # so anywhere after it the retrace count would describe the
+    # profiler's own recompile instead of the run that was just timed.
+    if counts:
+        report.counts = compile_counts(
+            gm, external_inputs=external_inputs, scan_steps=count_scan_steps,
+        )
 
     # Dispatch floor: a jitted identity on the same pytree.
     ext = external_inputs if external_inputs is not None else gm._default_external_inputs()

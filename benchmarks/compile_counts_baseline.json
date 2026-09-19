@@ -1,0 +1,40 @@
+{
+  "_comment": "Deterministic compilation counts. Regenerate with `python scripts/compile_counts.py`; see the script's docstring for what each count means and why the gate is exact on retraces and banded on op counts.",
+  "environment": {
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "platform": "cpu",
+    "device_count": 4
+  },
+  "workloads": {
+    "single_spring": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 18,
+      "hlo_op_count": 16
+    },
+    "coupled_pair": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 557,
+      "hlo_op_count": 713
+    },
+    "multirate_coupled": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 642,
+      "hlo_op_count": 784
+    },
+    "heat_chain": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 157,
+      "hlo_op_count": 177,
+      "scan_steps": 16,
+      "scan_retrace_count": 1,
+      "scan_jaxpr_primitive_count": 158,
+      "scan_hlo_op_count": 188
+    },
+    "sharded_heat": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 68,
+      "hlo_op_count": 70
+    }
+  }
+}

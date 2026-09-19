@@ -33,11 +33,35 @@ how the per-step numbers are obtained; this page is about what they say.
 > Replaying the 350-row sweep across the change: mean iterations per
 > step +10.3%, 438 of 14 733 converged step-verdicts lost against 8
 > gained, and 12 of 350 rows that used to converge now exhaust their
-> cap — eleven of them `acceleration="fixed"` at ω = 0.5 or 0.8, which
-> halves every step and so has the largest gap between its residual and
-> its error.  Iteration counts and `converged_fraction` on this page are
-> therefore lower bounds; re-recording the baselines is queued
-> (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+> cap — eleven of them `acceleration="fixed"` at ω = 0.5 or 0.8.  Those
+> rows *contract slowly on these fixtures*, so their error is a large
+> multiple of their residual.  An earlier wording here said ω = 0.5
+> "halves every step and so has the largest gap between its residual
+> and its error", which reads as a floor ρ ≥ 1 − ω.  **There is no such
+> floor, and that mechanism is retracted.**  Relaxing maps an eigenvalue
+> λ to `1 - ω + ωλ`, so a λ near −1 drives ρ towards zero — damping
+> oscillatory modes is what under-relaxation is *for* — and a search
+> over 20 000 random iteration matrices at ω = 0.5 found ρ = **0.156**
+> (`benchmarks/results/convergence_error_bound/REPORT.md`, corrected
+> 2026-09-18 in `0ee18a0`).  The measured numbers are unaffected; the
+> generality was not there.  Iteration counts and `converged_fraction`
+> on this page are therefore lower bounds; re-recording the baselines is
+> queued (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+
+> **Where each number on this page comes from.**  Unless it says
+> otherwise, a figure is from `benchmarks/results/coupling_sweep_cpu.json`
+> (the 420-row fast sweep) or `coupling_sweep_expensive_cpu.json` (the
+> two grid fixtures), both recorded **2026-09-18**, `689d7c2`.  A figure
+> tagged **(re-measured `c51cd6a`, 2026-09-19)** is *not* from those
+> files: the fast sweep was re-run at that commit with the same
+> configuration
+> (`benchmarks/results/audit_040_final/docs-compliance/coupling_sweep_cpu_HEAD_c51cd6a.json`)
+> and the recorded value no longer held, so the re-run's value is
+> quoted instead.  A figure marked **[not re-evidenced]** is one the
+> re-run contradicted with nothing on this page left to support it; it
+> is marked rather than deleted, so that it is not quoted again.  The
+> grid file was **not** re-run, so every `expensive-pair` and
+> `heterogeneous` figure is still the 2026-09-18 recording.
 
 ## Start here
 
@@ -54,16 +78,26 @@ not, and says which.
 
 | your graph | start with | why |
 |---|---|---|
-| anything, first attempt | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel needs 1.7–1.9x fewer iterations than Jacobi on every shape where both converge (1.69 on `chain-2` to 1.93 on `slow-drift`), and Aitken removes up to half of what is left (0–49% under the interface norm).  It is the sweep's own best configuration on ten of the eighteen fast fixtures (nine under the interface norm, one under L2).  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free |
+| anything, first attempt | `gauss-seidel` / `aitken` / **`l2`** | Gauss-Seidel needs **1.6–2.0x** fewer iterations than Jacobi on every shape where both converge — 1.59 on `chain-50` to 2.04 on `slow-drift` (re-measured `c51cd6a`, 2026-09-19); the 2026-09-18 recording read 1.69 to 1.93 and this row used to quote it as 1.7–1.9x, which `chain-50` now sits below.  Aitken removes up to half of what is left (0–49% under the interface norm).  It is the sweep's own best configuration on ten of the eighteen fast fixtures (nine under the interface norm, one under L2).  Its arithmetic is inside the dispatch floor on every launch-bound fixture; on a compute-bound one it is not free.  **The norm here is `l2`, not `interface`, and that is a change**: the interface norm is the iteration-cheaper of the two and this row used to recommend it, but it measures only the coupling-edge fields, so a group whose interface has gone stationary can exit while the rest of its state is still moving.  Over generated graphs that is measurable at **5.2e-01** on exactly this configuration — a Jacobi three-spring group under Aitken, both solves reporting `converged`.  Switch to `interface` once you have read the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) and checked your own graph against it |
 | cheap nodes, few interface DOFs, contraction below ~0.8 | `gauss-seidel` / `aitken` / `interface` | launch-bound: differences between configurations smaller than the dispatch floor — which is most of the step there — are not measuring the algorithm, so pick the fewest iterations and the least machinery among the rows that time the same |
-| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / `interface` | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.1 iterations where `gs/none/l2` exhausts its cap of 60 on 98% of steps and converges on 2%.  Not faster there (0.21 ms against 0.10) — right rather than fast |
+| contraction above ~0.9, or unknown and possibly divergent | `gauss-seidel` / `iqn-ils` / **`l2`** | the only family that converges *past* the limit at all, and at gain 0.95 it takes 4.0 iterations at 100% converged where `gs/none/l2` exhausts its cap of 60 on **100%** of steps and converges on **0%** (re-measured `c51cd6a`, 2026-09-19) (the 2026-09-18 recording read 4.1, 98% and 2%).  Not faster there (0.21 ms against 0.10) — right rather than fast.  **The norm here is `l2`, not `interface`, and that is a change**: `iqn-*` with the default `accelerated_fields=None` is the one pairing the accuracy caveat at the end of [Four combinations that theory says should win](#four-combinations-that-theory-says-should-win) names outright — the auto-detected set and the interface criterion are the same fields, so the quasi-Newton step lands on exactly what the criterion then measures and every other field rides out of the last raw pass unwatched.  The interface norm also stopped being the lever here: on `stiff-pair-0.95` it now cuts 2.2% of the iterations, not 15.1%, and converges 8% of steps rather than 68% |
 | one expensive node among cheap ones | `gauss-seidel` / `iqn-imvj` / `interface`, with `accelerated_fields` naming **only the cheap nodes** | the sweep's best configuration on `heterogeneous`: 3.0 iterations at 1.78 ms, against 5.4 and 2.02 for plain iteration, and 2.0 at 116 ms for the same accelerator on every field.  The quasi-Newton problem needs enough degrees of freedom to model the interface response, not the grid.  Under **Jacobi** the same restriction costs convergence — see below |
 | every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 6.0 iterations and 6.17 ms to 1.5 and 1.85 ms; IQN buys 0.05 of an iteration for 91–148x the step time and is not affordable at 2x10⁵ accelerated DOFs |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
 | wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 7.9 → 8.1 iterations from 2 to 16 leaves under the interface norm, IQN 3.0 → 3.0) but IQN's step cost is not: 1.45 ms against 0.51 ms at 16 leaves, for 5 fewer iterations that the dispatch floor hides |
 | ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
-| fixed point that barely moves between steps | `jacobi` / `fixed` ω = 0.8 / `l2` — one of only two places a constant ω wins | 6.14 → 3.46 iterations, and the sweep's best configuration on `slow-drift`; `iqn-imvj` with `jacobian_reuse` does cut iterations further (3.0 → 2.0) but costs ~20x the plain step to do it |
+| fixed point that barely moves between steps, **and nothing else** | `jacobi` / `fixed` ω = 0.8 / `l2` — one of only two places a constant ω wins | 6.80 → 3.62 iterations at 100% converged on `slow-drift` (re-measured `c51cd6a`, 2026-09-19), and the sweep's best configuration there.  **Do not carry it to another shape.**  Every table on this page records `jac/fixed0.8/l2` at 100% converged, and at `c51cd6a` it converges on **20%** of `star-16` steps, 40% of `star-8`, 82% of `star-4`, 88% of `star-2`, 92% of `stiff-pair-0.8` and 58% of `chain-20` — a wide star under this row now converges one step in five.  `iqn-imvj` with `jacobian_reuse` does cut iterations further (3.0 → 2.0) but costs ~20x the plain step to do it |
 | two subsystems with different shapes | one group each, with its own settings | groups in one graph keep independent schedules, iteration counts and convergence flags |
+
+**On the `interface` norm elsewhere in this table.**  The rows above
+that still recommend it do so on *iteration count*, which is what the
+sweep measures and what they say.  The norm's accuracy caveat applies
+to every one of them, not only to the two rows that were changed: it
+sees the coupling-edge fields and nothing else.  Where the answer
+matters more than the iteration count — training, calibration, anything
+reading state that is not on an edge — start from `"l2"` or `"mixed"`
+and move to `"interface"` only after measuring your own graph's
+`fixed_point_agreement`.
 
 Three settings that are nearly always right and are not in the table:
 
@@ -198,20 +232,29 @@ predictions rather than commentary.
 expectation was that sequential information flow would let Gauss-Seidel
 pull further ahead as the chain grew.  It does not:
 
-| fixture | Gauss-Seidel | Jacobi | ratio |
-|---|---|---|---|
-| `chain-2` | 5.6 | 9.4 | 1.69 |
-| `chain-5` | 13.4 | 23.6 | 1.77 |
-| `chain-20` | 23.7 | 40.7 | 1.72 |
-| `chain-50` | 30.8 | 53.0 | 1.72 |
+| fixture | Gauss-Seidel | Jacobi | ratio | ratio (re-measured `c51cd6a`, 2026-09-19) |
+|---|---|---|---|---|
+| `chain-2` | 5.6 | 9.4 | 1.69 | 1.83 |
+| `chain-5` | 13.4 | 23.6 | 1.77 | 1.88 |
+| `chain-20` | 23.7 | 40.7 | 1.72 | 1.79 |
+| `chain-50` | 30.8 | 53.0 | 1.72 | **1.59** |
 
-The ratio is flat because a tridiagonal coupling operator is
+The ratio was flat because a tridiagonal coupling operator is
 *consistently ordered*, for which the Gauss-Seidel spectral radius is
 exactly the square of the Jacobi one — a constant factor of two in
 iterations at any depth, not a growing one.  What grows with N is the
 radius itself (0.40 → 0.80), and so the absolute iteration count.
 
-**2. The star is where Gauss-Seidel wins by the most, not the least.**
+The last column is why row 1 of "Start here" now says 1.6–2.0x.  The
+prediction this paragraph tested — that the advantage *widens* with
+depth — is still refuted, and more firmly: at `c51cd6a` the ratio
+*falls*, from 1.88 at N = 5 to 1.59 at N = 50.  The flatness the
+explanation above accounts for is what did not survive.  Whether the
+difference is the operator or the error-bound criterion charging the two
+modes differently has not been measured.
+
+**2. The star is one of the shapes where Gauss-Seidel wins by the most,
+not the least.**
 The expectation was that leaves which cannot see each other would leave
 Gauss-Seidel's ordering nothing to exploit, making Jacobi competitive.
 Measured, the star family shows the *largest* Gauss-Seidel advantage of
@@ -222,25 +265,49 @@ dependency alone is enough to give the full squared radius; ordering
 *among* the leaves was never what produced the factor.  On one device
 there is no shape at which Jacobi is competitive on iterations.
 
+Re-measured at `c51cd6a` on 2026-09-19, the *flat in width* half holds:
+1.92–1.96 across the four stars, 23.1 iterations at 2 leaves and 24.8 at
+16.  The **"largest of any shape family" half does not** —
+`stiff-pair-0.8` measures 1.98 and `slow-drift` 2.04, both above every
+star.  What survives is the finding the paragraph was written to test:
+a star gives Gauss-Seidel the full squared radius, so leaves that cannot
+see each other were never what produced the factor.  The ranking against
+the other families was a by-product of that, and it no longer holds.
+
 **3. Aitken helps Gauss-Seidel more than Jacobi, except on a two-node
 pair.**  The expectation was the reverse: Jacobi's error history decays
 more cleanly, which is what Aitken's scalar relaxation assumes.  That
 holds where the coupling really is a single mode —
 
+All four rows re-measured at `c51cd6a` on 2026-09-19; the recorded
+2026-09-18 values are in brackets.
+
 | fixture | gs/none | gs/aitken | jac/none | jac/aitken |
 |---|---|---|---|---|
-| `stiff-pair-0.5` | 7.8 | 4.0 | 13.9 | 5.0 |
-| `stiff-pair-0.8` | 20.8 | 9.9 | 38.0 | 20.7 |
-| `star-8` | 21.7 | 10.4 | 40.2 | 37.4 |
-| `star-16` | 22.9 | 10.7 | 42.4 | 42.5 |
+| `stiff-pair-0.5` | 8.2 (7.8) | 4.0 (4.0) | 16.2 (13.9) | 5.3 (5.0) |
+| `stiff-pair-0.8` | 22.3 (20.8) | 10.0 (9.9) | 44.1 (38.0) | 23.0 (20.7) |
+| `star-8` | 24.1 (21.7) | 10.1 (10.4) | 46.8 (40.2) | 38.3 (37.4) |
+| `star-16` | 24.8 (22.9) | 10.4 (10.7) | 47.6 (42.4) | 42.1 (42.5) |
 
 — on `stiff-pair-0.5` Aitken very nearly erases the Gauss-Seidel
-advantage, taking a 1.8x gap down to 1.25x, and on `chain-2` it closes
-it outright (4.0 against 4.2).  But as soon as the error is a mixture of
+advantage, taking a 2.0x gap down to 1.3x, and on `chain-2` it closes
+it outright (4.0 against 4.3).  But as soon as the error is a mixture of
 modes with comparable magnitudes, the single Aitken ω cannot cancel them
-and Jacobi's cleaner decay stops helping: on `star-16` Aitken buys
-Jacobi **nothing at all** (42.4 → 42.5, inside the sampling spread of an
-iteration count that varies by step) and Gauss-Seidel 53%.
+and Jacobi's cleaner decay stops helping: on `star-16` Aitken removes
+**12%** of Jacobi's iterations against **58%** of Gauss-Seidel's
+(47.6 → 42.1 against 24.8 → 10.4), and on `star-8` 18% against 58%
+(re-measured `c51cd6a`, 2026-09-19).
+
+The old wording here was stronger and no longer holds: it said Aitken
+buys Jacobi "nothing at all" on `star-16`, on the recorded 42.4 → 42.5.
+That figure is gone — 42.1 from 47.6 is a real reduction, and 12% is
+not nothing.  The finding this paragraph exists to report survives on
+the *ratio*, which is what it was always about: Aitken is worth three
+to five times as much to Gauss-Seidel as to Jacobi on a wide star
+(58%/18% at 8 leaves, 58%/12% at 16), and the gap widens with width.
+One caveat on the Jacobi column: `star-16` `jac/aitken/l2` converges on
+97% of steps, not 100%, so part of its lower count is steps that
+stopped without arriving.
 
 **4. Fixed under-relaxation never helps Gauss-Seidel, and helps Jacobi
 on two fixtures out of twenty.**  The prediction was that it would lose
@@ -251,16 +318,28 @@ iterations** — it usually roughly doubles them (`chain-20`:
 23.7 → 51.3; `star-16`: 22.9 → 49.4; `slow-drift`: 3.2 → 4.3).  Every
 row where relaxation wins is a Jacobi row, and there are two of them:
 
-| fixture / norm | ω = 1 | ω = 0.5 | ω = 0.8 |
-|---|---|---|---|
-| `slow-drift`, jacobi, L2 | 6.14 | 4.30 | **3.46** |
-| `slow-drift`, jacobi, interface | 6.40 | 4.54 | **3.84** |
-| `expensive-pair`, jacobi, interface | 2.45 | 2.20 | **2.00** |
+| fixture / norm | ω = 1 | ω = 0.5 | ω = 0.8 | ω = 0.8 (re-measured `c51cd6a`, 2026-09-19) |
+|---|---|---|---|---|
+| `slow-drift`, jacobi, L2 | 6.14 | 4.30 | **3.46** | **3.62**, 100% converged |
+| `slow-drift`, jacobi, interface | 6.40 | 4.54 | **3.84** | **4.00**, 100% converged |
+| `expensive-pair`, jacobi, interface | 2.45 | 2.20 | **2.00** | **[not re-evidenced]** — the grid file was not re-run |
 
 `jacobi`/`fixed` ω = 0.8 / L2 is the sweep's own best configuration for
 `slow-drift`, and the `expensive-pair` row is the more interesting of
 the two because that fixture is compute-bound, so its 3.33 → 2.60 ms is
 a real 22% and not dispatch.
+
+**The scope of this finding is narrower than it looks, and narrower
+than it was when it was written.**  `jac/fixed0.8/l2` is recorded at
+100% converged on every fixture in the table above and on eleven more.
+At `c51cd6a` it converges on 20% of `star-16` steps, 40% of `star-8`,
+82% of `star-4`, 88% of `star-2`, 92% of `stiff-pair-0.8` and 58% of
+`chain-20`, against 100% (92% for `chain-20`) in the 2026-09-18
+recording — the largest single block of the 18 rows that stopped
+converging across the release.  The `slow-drift` recommendation itself
+stands: it still converges every step, at 6.80 → 3.62.  Read this
+finding as "on a graph whose fixed point barely moves, measure both
+ω values", never as "ω = 0.8 is a safe default under Jacobi".
 
 The split is the textbook one, and it is the same sentence as the next
 paragraph read the other way.  Under-relaxation damps an iteration that
@@ -323,11 +402,30 @@ the row that does not converge); it is the one that is right.
 
 One property of Aitken worth knowing before reaching for it: since the
 correction it needs the convergence threshold met on **two consecutive
-passes**, so it cannot exit in fewer than four.  On a group that already
-converges in three that costs a pass — `slow-drift` goes 3.3 → 4.0 and
-`stiff-pair-0.25` 3.6 → 4.0 — and every fixture where it is fast lands
-on exactly 4.0.  It is an accelerator for iterations you have, not for
-iterations you do not.
+passes**.  The mechanism is real — `_TWO_PASS_EXIT` in
+`core/graph_manager.py`, argued in `_fixed_point_while`'s docstring —
+but an earlier version of this paragraph drew the wrong floor from it
+and said Aitken "cannot exit in fewer than four".  **It can, and the
+repo's own recorded baseline says so.**  The streak's first member is
+the pass that ran *before* the group's iteration loop (`first_res`,
+which is exactly why it is seeded from a measurement rather than from
+infinity), so the guard costs at most one extra pass, not three.  Seven
+Aitken rows in `benchmarks/results/coupling_sweep_cpu.json` record an
+`iterations_min` of 2 or 3 — `star-4` and `stiff-pair-0.95` at 2 under
+both iteration modes, `ring-4` and `stiff-pair-0.25` at 3 — and all
+seven are **interface-norm** rows.  Re-measured at `c51cd6a` on
+2026-09-19, `star-4 gs/aitken/interface` still exits some steps in 3,
+while `gs/none/interface` on `stiff-pair-0.95` exits some in 1: 2 is
+the lowest Aitken count anywhere in the sweep against 1 for `none`,
+`fixed` and IQN, which is the single pass the guard is specified to
+cost.
+
+What the old sentence generalised from is the L2 rows it sampled, where
+Aitken does land on 4.0: on a group that already converges in three it
+costs a pass — `slow-drift` goes 3.3 → 4.0 and `stiff-pair-0.25`
+3.6 → 4.0.  Budget one pass over the unaccelerated exit, not a floor of
+four.  It is an accelerator for iterations you have, not for iterations
+you do not.
 
 ## What IQN costs
 
@@ -388,9 +486,12 @@ a grid node coupled on one cell is still the entire grid.
 ## Four combinations that theory says should win
 
 **Jacobi + Aitken.** Nearly closes the gap on two-node pairs
-(`stiff-pair-0.5`: 13.9 → 5.0 against Gauss-Seidel + Aitken's 4.0;
-`chain-2`: 9.4 → 4.2 against 4.0) and does nothing on anything wider
-(`star-16`: 42.4 → 42.5).  Not a general recommendation.
+(`stiff-pair-0.5`: 16.2 → 5.3 against Gauss-Seidel + Aitken's 4.0;
+`chain-2`: 11.1 → 4.3 against 4.0) and buys far less on anything wider
+(`star-16`: 47.6 → 42.1, a 12% reduction, against Gauss-Seidel's 58%)
+(re-measured `c51cd6a`, 2026-09-19).  Not a general recommendation.  An earlier version of
+this line read "does nothing on anything wider (`star-16`: 42.4 →
+42.5)"; see contradiction 3 for why that figure no longer stands.
 
 **Jacobi + IQN.** Marginally better than Gauss-Seidel + IQN on the
 chain and ring families (`chain-5` 5.3 vs 7.0, `chain-20` 13.2 vs 14.1,
@@ -407,21 +508,33 @@ worth defaulting to.
 Half right, and the half that is wrong is the more useful half.
 
 The interface norm alone generalised from AR4.  Measured on
-`gs/none` across the eighteen fast fixtures it removes **−5% to 31%** of
-the iterations: 25–31% on the deep chains, the wide stars and the larger
-rings, 13–25% on the small and the stiff pairs, nothing at all on
-`stiff-pair-1.2` (which converges nowhere), and −5% on `slow-drift`,
-where it costs a fifth of an iteration.  A blanket "25–35%" was the top
-of that range quoted as the whole of it.  On a grid fixture, where the
+`gs/none` across the eighteen fast fixtures it removes **−9% to 28%** of
+the iterations (re-measured `c51cd6a`, 2026-09-19): 18–29% on the chains, the stars and the
+rings, 20–28% on the stiff pairs up to gain 0.8, **2%** on
+`stiff-pair-0.95`, nothing at all on `stiff-pair-1.2` (which converges
+nowhere), and −9% on `slow-drift`, where it costs a third of an
+iteration.  The 2026-09-18 recording read −5% to 31% and this paragraph
+quoted that; both endpoints have moved outside it.  A blanket "25–35%"
+was the top of the range quoted as the whole of it.  On a grid fixture, where the
 L2 residual is mostly bulk change that does not iterate, the cut is far
 larger: `expensive-pair` goes 6.0 → 1.5, a 75% reduction.
 
-| fixture | l2 | interface |
-|---|---|---|
-| `chain-20` | 23.7 | 16.7 |
-| `chain-50` | 30.8 | 23.0 |
-| `star-16` | 22.9 | 15.9 |
-| `stiff-pair-0.95` | 58.4 (at cap on 98% of steps) | 49.6 (at cap on 34%) |
+| fixture | l2 (2026-09-18) | interface (2026-09-18) | l2 (re-measured `c51cd6a`, 2026-09-19) | interface (re-measured `c51cd6a`, 2026-09-19) |
+|---|---|---|---|---|
+| `chain-20` | 23.7 | 16.7 | 26.4 | 18.9 |
+| `chain-50` | 30.8 | 23.0 | 33.8 | 26.0 |
+| `star-16` | 22.9 | 15.9 | 24.8 | 18.2 |
+| `stiff-pair-0.95` | 58.4 (at cap on 98% of steps, converged 2%) | 49.6 (at cap on 34%, converged 68%) | 59.0 (at cap on **100%**, converged **0%**) | 57.7 (at cap on **94%**, converged **8%**) |
+
+**The last row reversed qualitatively and is the one to read.**  On the
+2026-09-18 recording the interface norm took `stiff-pair-0.95` from 98%
+at-cap to 34% — a 15.1% cut in iterations and a group that converged on
+two steps in three.  At `c51cd6a` it takes it from 100% at-cap to 94%,
+a **2.2%** cut, and the interface arm converges on **8%** of steps.
+Near the convergence limit the interface norm is no longer the lever
+this table was written to show; `stiff-pair-0.95` is the fixture behind
+"Start here" row 3, which is why that row now recommends IQN on its own
+merits rather than on this one.
 
 "At no measurable cost" is also not quite true, and in the direction you
 would not guess: nine of the eighteen fast fixtures record a *higher*
@@ -531,10 +644,18 @@ sharing its field name.
 
 Across all twenty fixtures the field-scaled figure runs from 1.0x10⁻⁷
 (`slow-drift`) to 4.8x10⁻³ (`mixed-modes`), and every fixture's worst
-row is an interface-norm one.  That is the expected shape: the interface
-norm is a *relative* criterion (`atol`/`rtol`), so it stops earlier than
-an absolute L2 tolerance and the trajectories drift correspondingly
-further apart.  The node-scaled figure agrees with it everywhere except
+row is an interface-norm one.  That is the expected shape, but not for
+the reason an earlier version of this page gave.  It said the interface
+norm "is a *relative* criterion (`atol`/`rtol`), so it stops earlier
+than an absolute L2 tolerance".  That sentence pre-dates 0.4.0: **all
+three norms are relative now** — each divides a field's change by that
+field's own magnitude — so relativeness is not what separates them, as
+the header of this page and `CouplingGroup`'s docstring
+(`src/maddening/core/coupling/group.py`) both say.  What separates them
+is *what they look at*.  The interface norm measures only the
+coupling-edge fields, so a group whose interface has gone stationary
+stops while the rest of its state is still moving, and the trajectories
+drift correspondingly further apart.  The node-scaled figure agrees with it everywhere except
 `chain-50`, where it reports 6.0x10⁻² for `link30.velocity` — a node
 passing near zero, measured against its own small amplitude.  That is
 what the second number is for, and it is also why the fixture-level

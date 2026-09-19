@@ -16,6 +16,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+#: Shared secret for WebRTC signaling tokens.  Unset means no client can
+#: authenticate against the signaling server (see :class:`SelkiesSession`).
+STREAM_SECRET_ENV = "MADDENING_STREAM_SECRET"
+
 
 def main() -> None:
     """Cloud entrypoint: configure and run the simulation server."""
@@ -40,11 +44,15 @@ def main() -> None:
     cloud_config = CloudConfig.from_dict(config) if config else CloudConfig()
     stream_config = cloud_config.stream_config
 
-    # Create streaming session
+    # Create streaming session.  The signaling server authenticates every
+    # client against this secret, so a deployment that wants a remote
+    # viewer must set MADDENING_STREAM_SECRET and share it with that
+    # viewer; without it the session generates a random secret nobody
+    # holds and every signaling connection is rejected.
     session: Optional[object] = None
     try:
         from maddening.cloud.selkies_session import SelkiesSession
-        session = SelkiesSession()
+        session = SelkiesSession(secret=os.environ.get(STREAM_SECRET_ENV, ""))
         logger.info("Using SelkiesSession for streaming")
     except ImportError:
         logger.warning("GStreamer not available; streaming disabled")
@@ -58,7 +66,7 @@ def main() -> None:
         # gm = load_graph(graph_usd)
 
     # Start FastAPI server
-    from maddening.api.server import SimulationServer
+    from maddening.api.server import SimulationServer, warn_if_publicly_bound
     server = SimulationServer(node_registry={})
 
     # v0.2 #8: resume from a remote checkpoint URL if requested.
@@ -82,6 +90,11 @@ def main() -> None:
     port = int(os.environ.get("MADDENING_PORT", "8000"))
 
     logger.info("Starting server on %s:%d", host, port)
+    # The default is 0.0.0.0 because a container bound to 127.0.0.1 is
+    # unreachable even with a published port.  That makes the exposure
+    # the normal case here, so say so loudly rather than leaving it to
+    # the release notes.
+    warn_if_publicly_bound(host, port)
     uvicorn.run(
         server.create_app(),
         host=host,

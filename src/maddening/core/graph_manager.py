@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     float_fields_of,
+    relaxation_step_scale,
     state_float_image,
     state_from_float_image,
 )
@@ -219,6 +220,42 @@ class ExternalInputSpec:
     shape: tuple
     dtype: Any = jnp.float32
 
+    def to_dict(self) -> dict:
+        """Serialise for :meth:`GraphManager.to_dict`.
+
+        ``dtype`` is written by name (``"int32"``, ``"float32"``).  It
+        used to be left out, so an ``int32`` input reloaded as
+        ``float32`` — a node using it as an index then failed on the
+        reloaded graph, and one doing arithmetic with it got a different
+        trace.  Every field of this dataclass has a slot here, and
+        ``tests/core/test_external_input_serialisation.py`` asserts that from
+        ``dataclasses.fields`` so the next field added cannot be dropped
+        silently.
+        """
+        return {
+            "target_node": self.target_node,
+            "target_field": self.target_field,
+            "shape": list(self.shape),
+            "dtype": jnp.dtype(self.dtype).name,
+        }
+
+    @classmethod
+    def from_dict(cls, config: dict) -> "ExternalInputSpec":
+        """Rebuild from :meth:`to_dict`.
+
+        ``dtype`` is optional: a config written before it was recorded
+        reloads at ``float32``, which is what such a graph got then.
+        """
+        return cls(
+            target_node=config["target_node"],
+            target_field=config["target_field"],
+            shape=tuple(config.get("shape", ())),
+            dtype=(
+                jnp.dtype(config["dtype"]) if config.get("dtype") is not None
+                else jnp.float32
+            ),
+        )
+
 
 # ------------------------------------------------------------------
 # Implicit-function-theorem fixed-point solver
@@ -245,8 +282,9 @@ def _bound_helpers():
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
         error_amplification,
         estimated_error,
+        relaxation_step_scale,
     )
-    return error_amplification, estimated_error
+    return error_amplification, estimated_error, relaxation_step_scale
 
 
 def _F_dispatch(step_pure, x, consts):
@@ -276,36 +314,64 @@ def _fixed_point_while(
     one-pass function; ``residual`` is the group's configured convergence
     measure of ``F(x)`` against ``x`` (L2 / mixed / interface norm).
 
-    **The criterion is an error bound, not a residual test.**  What is
-    compared against the static ``threshold`` is not ``r_k`` but an
+    **The criterion is an error estimate, not a residual test.**  What
+    is compared against the static ``threshold`` is not ``r_k`` but an
     estimate of the distance to the fixed point,
-    ``r_k / (1 - rho)``, with ``rho = r_k / r_{k-1}`` taken from the
-    two residuals the loop already has (see
-    :func:`~maddening.core.coupling.acceleration.error_amplification`).
-    ``converged=True`` therefore means "within ``threshold`` of the
-    fixed point" rather than "the last step was smaller than
+    ``omega * r_k / (1 - rho)``, with ``rho = r_k / r_{k-1}`` taken from
+    the two residuals the loop already has (see
+    :func:`~maddening.core.coupling.acceleration.error_amplification`)
+    and ``omega`` the ratio of the step the iterate takes to the
+    residual that is measured (see
+    :func:`~maddening.core.coupling.acceleration.relaxation_step_scale`).
+    ``converged=True`` therefore means "estimated within ``threshold``
+    of the fixed point" rather than "the last step was smaller than
     ``threshold``" — the gap MADD-ANO-005 recorded.  The estimate is
     never smaller than ``r_k``, so this criterion is never looser than
     the raw one it replaces: a group that stops here would have
     stopped under the old rule too, possibly later.
 
-    **Caveat on the derivation.**  ``r_k / (1 - rho)`` is the sum of a
-    geometric series of remaining step lengths, which bounds the
-    distance to the fixed point only if step lengths add --- i.e. under
-    the triangle inequality.  The 0.4.0 measures divide each field's
-    change by that field's own magnitude, and a scale that depends on
-    the pair being compared is *not* a metric: the inequality fails
-    when the iterate detours through a state orders of magnitude
-    larger than its neighbours (pinned by
-    ``test_the_triangle_inequality_does_not_hold``).  That is the price
-    of units-invariance and it was paid deliberately.
+    **Why "estimate" and not "bound".**  ``omega * r_k / (1 - rho)`` is
+    the sum of a geometric series of remaining step lengths.  Three
+    independent things break the inequality, and only the last of them
+    is detected:
 
-    The bound is therefore rigorous where the iterate's scale is stable
-    across the tail --- which is the regime it is applied in, since a
-    converging iteration does not take that detour --- and is an
-    estimate rather than a guarantee where the scale moves by orders of
-    magnitude between passes.  ``bound_valid`` does not detect this;
-    it reports an unusable *ratio*, not an unstable *scale*.
+    1. *The measure is not a metric.*  Summing step lengths bounds the
+       distance only under the triangle inequality, and the 0.4.0
+       measures divide each field's change by that field's own
+       magnitude — a scale that depends on the pair being compared.
+       The inequality fails when the iterate detours through a state
+       orders of magnitude larger than its neighbours (pinned by
+       ``test_the_triangle_inequality_does_not_hold``).  That is the
+       price of units-invariance and it was paid deliberately.  The
+       estimate is rigorous where the iterate's scale is stable across
+       the tail, which is the regime a converging iteration is in.
+    2. *``rho`` reads the mode that dominates the step, not the mode
+       that dominates the remaining error.*  On a linear two-mode
+       contraction the residual sequence is a clean geometric decay at
+       the *fast* rate for as long as the fast mode's amplitude
+       dominates, even though the distance still to travel is already
+       owned by the slow one.  Measured: modes ``(0.999, 0.2)`` at
+       ``tolerance=1e-4`` report ``9.19e-05`` against a true distance
+       of ``1.12e-02``, a 122x understatement, with ``bound_valid``
+       and ``converged`` both true.  The two-step ``sqrt`` guard in
+       ``error_amplification`` reads the same fast rate and does not
+       help, and no test on the residual sequence can: the sequence is
+       indistinguishable from a single-mode decay at 0.2 until the slow
+       mode emerges.  The same mechanism, inverted, is why IQN
+       understates — a superlinear sequence reads ``rho -> 0``.
+    3. *A dynamic step scale.*  ``omega`` above is exact for
+       ``acceleration="fixed"``, where relaxation is a constant, and
+       for ``"none"``, where it is 1.  It is *not* corrected for
+       Aitken's clipped per-pass factor (a measured 2.04x
+       understatement when it saturates at 2.0) or for the IQN
+       quasi-Newton step, which is not a multiple of ``F(x) - x``.
+    4. *A non-monotone ratio* — the one that is caught.  ``rho >= 1``,
+       a zero predecessor or a non-finite residual reject the estimate
+       and ``bound_valid`` records it.
+
+    ``bound_valid`` therefore reports a usable *ratio*, not a valid
+    *bound*; see
+    ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 
     On a non-monotone sequence the ratio is meaningless, so it is
     rejected (``rho >= 1``, a zero predecessor, a non-finite residual)
@@ -481,12 +547,17 @@ def _fixed_point_while(
     # -- is unchanged for every acceleration that is not on it.
     two_pass_exit = acceleration in _TWO_PASS_EXIT
 
-    amplification, error_of = _bound_helpers()
+    amplification, error_of, step_scale_of = _bound_helpers()
+    # Static: ``acceleration`` and ``relaxation`` are both nondiff
+    # arguments of the custom_jvp, so this is a Python float and costs
+    # nothing in the loop.
+    step_scale = step_scale_of(acceleration, relaxation)
 
     def _met(res, res_prev, res_prev2):
         """The stopping criterion: the *estimated distance to the fixed
         point* is at or below ``threshold``, not merely the last step."""
-        est = error_of(res, amplification(res, res_prev, res_prev2))
+        est = error_of(res, amplification(res, res_prev, res_prev2),
+                       step_scale)
         met = est <= threshold
         if two_pass_exit:
             # The streak the Aitken guard wants, with the current pass
@@ -632,6 +703,33 @@ def _ift_solve_impl(
 
 
 
+#: Largest flat coupling-group size at which a Krylov adjoint solve
+#: that reports failure is silently re-solved with a dense LU.  Tied to
+#: the ``restart = min(N, 50)`` clamp below: at or under this size the
+#: Krylov space GMRES builds is already the whole space, so a direct
+#: solve costs no more matvecs and is backward stable, while ``N**2``
+#: floats of scratch is negligible.  Above it, the matrix-free path is
+#: load-bearing and the failure is raised instead.
+_DENSE_ADJOINT_FALLBACK_MAX_DOF = 50
+
+#: Raised (through ``equinox.error_if``, at runtime inside jit) when a
+#: Krylov adjoint solve fails on a group too large to re-solve densely.
+#: It replaces lineax's own message, whose "increase ``restart``"
+#: remedy does not address the mechanism — see ``_ift_linear_solve``.
+_ADJOINT_SOLVE_FAILED_MSG = (
+    "MADDENING: the coupling adjoint solve did not converge "
+    "(linear_solver={solver!r}, {n} coupled DOF).  This is usually an "
+    "ill-conditioned (I - dF/dx): cond(A) ~ 1/(1 - rho) in the group's "
+    "slowest contraction rate, and float32 cannot resolve the solver's "
+    "tolerance once eps*cond(A) exceeds it.  Remedies, in order: pass "
+    "linear_solver='dense' to add_coupling_group() (exact, but O(N^2) "
+    "memory); set MADDENING_IFT_DENSE_SOLVE=1 to force that globally "
+    "for triage; or make the group less stiff (stronger relaxation, a "
+    "smaller timestep, or splitting the cycle).  Raising GMRES's "
+    "restart will NOT help: it is already min(N, 50)."
+)
+
+
 def _ift_linear_solve(matvec, rhs, linear_solver):
     """Solve ``A v = rhs`` for the matrix-free operator ``v -> matvec(v)``.
 
@@ -671,8 +769,52 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
       so a future lineax fix can re-enable it by widening the
       ``linear_solver`` Literal on CouplingGroup.
 
-    Lineax raises (``throw=True`` default) when a solve reports
-    failure, so a non-converged adjoint is loud rather than silent.
+    **Why a failed Krylov solve re-solves directly at small N.**  A
+    stiff coupling group makes ``A = I - dF/dx`` ill-conditioned:
+    ``cond(A) ~ 1 / (1 - rho)`` in the group's slowest contraction
+    rate, so ``rho = 0.999`` is already ``cond ~ 2e3``.  The relative
+    accuracy *any* solver can reach on such an operator in float32 is
+    ``~eps * cond(A)`` — ``2.4e-4`` at ``cond = 2e3`` — which is
+    looser than the ``rtol`` asked for above (100 ulp, ``1.2e-5``).
+    GMRES therefore exhausts its Krylov space without passing lineax's
+    convergence test; the next restart cycle re-orthogonalises against
+    a space that is already complete, Arnoldi returns a zero vector,
+    and lineax reports ``RESULTS.breakdown``.  Lineax forgives a
+    breakdown only when the solve *also* passes its tolerance test
+    (``breakdown & not_converged``), which this one cannot, so the
+    error escapes.  Measured on a 4-DOF two-node cycle with contraction
+    modes ``(0.999, 0.2)``: GMRES stops three restart cycles in holding
+    a solution whose relative error is ``1.0e-5`` — as accurate as
+    float32 allows — and raises anyway.
+
+    Two consequences.  This is *not* a Krylov breakdown in the textbook
+    sense (a lucky zero in Arnoldi that a longer subspace would avoid),
+    so lineax's "increase ``restart``" advice cannot help: ``restart``
+    is already ``min(N, 50)``, i.e. the whole space at small ``N``.
+    And it is a round-off lottery — whether the float32 iterate happens
+    to land inside an unreachable tolerance depends on the cotangent —
+    so the failure is non-monotone in stiffness (``rho = 0.998`` and
+    ``0.999`` fail, ``0.9995`` passes) and a user cannot predict it.
+
+    So the Krylov backends run with ``throw=False`` and this function
+    acts on ``result`` itself:
+
+    * ``N <= _DENSE_ADJOINT_FALLBACK_MAX_DOF``: re-solve densely under
+      a ``lax.cond``.  At that size the dense LU is *cheaper* than the
+      restart cycles GMRES already burned (``N`` matvecs against
+      ``3 * N`` in the measured case), needs ``N**2`` floats of
+      scratch, and is backward stable — so the fallback is a better
+      answer, not a degraded one.  Only the failing branch runs; a
+      successful GMRES solve is returned untouched, which is why
+      ``"gmres"`` still means GMRES.
+    * ``N`` above that: raise a MADDENING error naming the remedies
+      that do work.  A dense fallback is not offered there because
+      ``N**2`` is the compile-time memory the matrix-free path exists
+      to avoid, and ``lax.cond`` reserves a branch's scratch whether or
+      not the branch runs.
+
+    A non-converged adjoint therefore stays loud, but the message names
+    a remedy instead of one that cannot help.
     """
     force_dense = os.environ.get("MADDENING_IFT_DENSE_SOLVE") == "1"
     effective_solver = "dense" if force_dense else linear_solver
@@ -740,7 +882,22 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
                 restart=restart,
                 max_steps=max(4 * restart, 100),
             )
-        return lx.linear_solve(op, b, solver=solver).value
+        # ``throw=False`` so the failure is *this* module's to handle:
+        # lineax's own message recommends raising ``restart``, which is
+        # already the full space at small N and is not the mechanism
+        # (see the docstring).
+        sol = lx.linear_solve(op, b, solver=solver, throw=False)
+        failed = jnp.logical_not(sol.result == lx.RESULTS.successful)
+        if n <= _DENSE_ADJOINT_FALLBACK_MAX_DOF:
+            return jax.lax.cond(
+                failed, lambda bb: _dense(mv, bb), lambda _bb: sol.value, b,
+            )
+        import equinox as eqx  # noqa: PLC0415  (lineax transitive dep)
+
+        return eqx.error_if(
+            sol.value, failed,
+            _ADJOINT_SOLVE_FAILED_MSG.format(solver=effective_solver, n=n),
+        )
 
     solve = _dense if effective_solver == "dense" else _krylov
     # ``transpose_solve`` receives ``vecmat = v -> A^T v`` and must
@@ -813,6 +970,39 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
+
+
+def _holds_tracer(state: dict) -> bool:
+    """Whether *state* came out of a JAX transform rather than a run.
+
+    One node is enough: the state of a graph stepped under a transform
+    is the transform's output, so a node's fields are tracers together
+    or not at all, and so are the nodes.  Scanning the first node's
+    fields rather than all of them keeps this off the per-step cost of a
+    large graph, while still catching a hand-written partial state whose
+    traced field is not the first one (the shape
+    ``set_node_state`` is given by a differentiable initial condition).
+    """
+    for value in state.values():
+        if isinstance(value, dict):
+            return any(isinstance(leaf, jax.core.Tracer) for leaf in value.values())
+        return isinstance(value, jax.core.Tracer)
+    return False
+
+
+def _outside_jax_trace() -> bool:
+    """Whether no JAX transform is currently active.
+
+    Best effort, on a private JAX helper: when it is not there the
+    answer is "cannot tell", which every caller reads as "do not
+    intervene".  Being wrong in that direction costs the old behaviour
+    (JAX's own ``UnexpectedTracerError`` later), never a wrong number.
+    """
+    try:
+        from jax._src import core as _jax_core
+        return bool(_jax_core.trace_state_clean())
+    except Exception:            # pragma: no cover - JAX internals moved
+        return False
 
 
 # ------------------------------------------------------------------
@@ -930,10 +1120,16 @@ def _run_coupled_block_impl(
         fixed_relaxation,
         flatten_coupled_state,
         iqn_ils_update,
+        relaxation_step_scale,
         unflatten_coupled_state,
     )
 
     max_iters = group.max_iterations
+    # How much longer the iterate's step is than the residual that is
+    # measured -- ``relaxation`` under ``acceleration="fixed"``, 1.0
+    # otherwise.  Static, and identical on both solver paths so
+    # ``solver`` stays invisible in ``coupling_diagnostics()``.
+    step_scale = relaxation_step_scale(group.acceleration, group.relaxation)
     group_node_names = list(group_schedule)
     _node_params = node_params.nodes if node_params is not None else {}
 
@@ -1275,7 +1471,7 @@ def _run_coupled_block_impl(
         happens when the ratio is rejected.
         """
         amp = error_amplification(residual, prev_residual, prev2_residual)
-        return estimated_error(residual, amp), amp
+        return estimated_error(residual, amp, step_scale), amp
 
     # Convergence threshold depends on norm type
     conv_threshold_value = (
@@ -1364,7 +1560,7 @@ def _run_coupled_block_impl(
                     # the ift branch below.
                     sub,
                     jnp.logical_not(
-                        estimated_error(single_r, single_amp)
+                        estimated_error(single_r, single_amp, step_scale)
                         <= conv_threshold_value
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
@@ -1573,7 +1769,7 @@ def _run_coupled_block_impl(
                     # ``converged=False``; the guard has to agree.
                     x_star_full,
                     jnp.logical_not(
-                        estimated_error(final_res, final_amp)
+                        estimated_error(final_res, final_amp, step_scale)
                         <= conv_threshold_value
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
@@ -2185,6 +2381,14 @@ class GraphManager:
         self.params: dict = {"nodes": {}, "mappings": {}}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
+        # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
+        self._state_traced = False
+        self._state_before_trace: Optional[dict] = None
+        # The rate dividers of the step that is actually compiled, as
+        # opposed to ``_rate_dividers``, which ``compile`` overwrites on
+        # its way through and leaves behind if it raises.  This is what
+        # the sub-step phase in ``_meta`` is indexed by.
+        self._committed_rate_dividers: dict[str, int] = {}
 
     def _snapshot_params(self) -> dict:
         return {
@@ -2459,7 +2663,13 @@ class GraphManager:
         (e.g. freeze a node's ``mass`` when the data cannot identify it,
         or make a mapped edge's weights trainable by passing the edge
         key — ``"<src>.<field>-><tgt>.<field>"`` — as ``node``).
-        Does not dirty the graph: specs are optimiser-side metadata."""
+
+        Specs are optimiser-side metadata, so this does not dirty the
+        graph — *unless* ``key`` is one a
+        :meth:`~maddening.core.node.SimulationNode.static_data_deps`
+        entry names.  Then it decides whether ``compile()`` refuses the
+        graph (a static baked from a trainable parameter loses the
+        gradient through it), so the verdict has to be taken again."""
         if not isinstance(spec, ParamSpec):
             raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
         mapped = {e.key: e for e in self._edges if e.mapping is not None}
@@ -2484,7 +2694,17 @@ class GraphManager:
                 f"params_pytree() exposes "
                 f"{sorted(self._nodes[node].node.params_pytree())}"
             )
+        # Asked *before* the override is committed: ``static_data_deps``
+        # is a node-supplied method and may raise, and an override stored
+        # without the dirty flag that goes with it is the half-applied
+        # mutation the atomicity work is about.  It forwards from wrapped
+        # nodes, so the outer declaration is enough to know whether this
+        # key is load-bearing for the compile-time refusal.
+        declared = self._nodes[node].node.static_data_deps() or {}
+        dirties = any(key in names for names in declared.values())
         self._param_spec_overrides.setdefault(node, {})[key] = spec
+        if dirties:
+            self._dirty = True
 
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
         """``params``-shaped pytree of Python bools (``True`` = an
@@ -2915,6 +3135,14 @@ class GraphManager:
         list of CouplingGroup
             The created coupling groups.
         """
+        # Clearing is itself a change to the compiled step, and
+        # ``add_coupling_group`` below is the only thing that used to set
+        # the flag -- so an ``auto_couple`` that found no cycles left the
+        # graph describing itself as uncoupled while still running the
+        # coupled step it was compiled with.  Flagged before the clear:
+        # a graph marked dirty whose groups are unchanged costs one
+        # recompile, the reverse costs a wrong step.
+        self._dirty = True
         self._coupling_groups.clear()
         sccs = find_strongly_connected_components(
             list(self._nodes.keys()), self._edges
@@ -3139,6 +3367,10 @@ class GraphManager:
 
     def compile(self) -> None:
         """Topologically sort the graph and JIT-compile the step function."""
+        # Preserving the state across the rebuild is only safe if the
+        # state is usable; a graph still holding a transform's tracers
+        # goes back to the state it had before it first.
+        self._recover_from_escaped_tracers()
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
@@ -3181,6 +3413,26 @@ class GraphManager:
         self._schedule = topological_sort(node_names, self._edges)
         self._back_edges = identify_back_edges(self._schedule, self._edges)
 
+        # ``_meta`` is *state*, not derived data: ``step_count`` decides
+        # which sub-steps a node with a rate divider > 1 fires on, and the
+        # ``coupling_*`` entries are the predictor history and the IQN
+        # warm start.  A recompile preserves node state and ``params``; it
+        # has to preserve these for the same reason.  A mid-run structural
+        # edit (adding an edge or an external input, the profiler or the
+        # REST server recompiling behind your back) used to replace this
+        # dict, silently re-phasing a multi-rate schedule and restarting
+        # every warm start.  Snapshotted here, *before* the rate dividers
+        # are recomputed, and re-applied below over the key set the new
+        # graph expects.  ``reset_state()`` remains the explicit way to
+        # zero the counters.
+        previous_meta = dict(self._state.get(_META_KEY, {}))
+        # From the last *successful* compile, not from ``_rate_dividers``:
+        # a compile that raises after recomputing them (an
+        # ``accelerated_fields`` typo, the static-data refusal) leaves
+        # them describing a step that was never built, and comparing
+        # against those would restart the phase on the repair.
+        previous_dividers = dict(self._committed_rate_dividers)
+
         # Compute multi-rate info.
         # For nodes in subcycling coupling groups, use the group's
         # macro timestep (max of member timesteps) for rate divider
@@ -3206,15 +3458,16 @@ class GraphManager:
                 name: round(effective_timesteps[name] / base_dt)
                 for name in self._nodes
             }
-            # Initialise the step counter in the state
-            self._state[_META_KEY] = {
-                "step_count": jnp.array(0, dtype=jnp.int32),
-            }
         else:
             self._is_multirate = False
             self._rate_dividers = {name: 1 for name in self._nodes}
-            # Remove meta if it existed from a previous compile
-            self._state.pop(_META_KEY, None)
+
+        # Build ``_meta`` fresh over the key set *this* graph needs, so a
+        # key whose owning coupling group is gone cannot linger in the
+        # scan carry, then carry the previous values back over it below.
+        meta: dict = {}
+        if self._is_multirate:
+            meta["step_count"] = jnp.array(0, dtype=jnp.int32)
 
         # Ensure _meta exists with correct structure when coupling
         # diagnostics are enabled.  Pre-populate diagnostic keys so
@@ -3229,7 +3482,6 @@ class GraphManager:
             g.predictor != "none" for g in self._coupling_groups
         )
         if has_diagnostics or has_imvj or has_predictor:
-            meta = self._state.get(_META_KEY, {})
             for g in self._coupling_groups:
                 key = "+".join(sorted(g.nodes))
                 if g.diagnostics or g.solver == "ift":
@@ -3295,7 +3547,36 @@ class GraphManager:
                     meta[f"coupling_{key}_pred_count"] = jnp.array(
                         0, dtype=jnp.int32
                     )
-            self._state[_META_KEY] = meta
+
+        # Carry the live ``_meta`` back over the seeds, key by key.  Only
+        # keys the new graph expects are kept (a group that was removed
+        # takes its diagnostics and warm start with it), and only when the
+        # live value still fits the seed's shape and dtype -- a group
+        # whose interface DOF count changed gets a fresh, correctly shaped
+        # warm start rather than a crash inside ``lax.scan``.
+        # ``step_count`` restarts only when a divider moved, because the
+        # sub-step it indexes is then not the sub-step it indexed before.
+        # Judged over the nodes that survived the edit only: adding or
+        # removing a node must not re-phase the ones already running,
+        # which is the whole point of preserving the counter.
+        phase_still_means_the_same = all(
+            previous_dividers[name] == divider
+            for name, divider in self._rate_dividers.items()
+            if name in previous_dividers
+        )
+        for key_, seed in meta.items():
+            if key_ == "step_count" and not phase_still_means_the_same:
+                continue
+            live = previous_meta.get(key_)
+            if live is None:
+                continue
+            live = jnp.asarray(live)
+            if live.shape == jnp.shape(seed) and live.dtype == jnp.asarray(seed).dtype:
+                meta[key_] = live
+        # Computed here, committed at the very end of ``compile`` -- the
+        # validation below, the static-data refusal and ``_build_step_fn``
+        # can all still raise, and a compile that fails must leave the
+        # sub-step phase and the warm starts exactly as it found them.
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,
@@ -3374,10 +3655,18 @@ class GraphManager:
         # resolved against its own specs, so a wrapper cannot hide one.
         # Placed in the same region as the invalidation below: before
         # ``_build_step_fn`` and before the static-data hash snapshot.
+        # Resolved against the *merged* specs -- the node's own with this
+        # graph's ``set_param_spec`` overrides applied -- because that is
+        # the view ``trainable_mask``, ``unconstrain``, ``check_params``
+        # and ``maddening.sysid`` optimise against.  Reading the node
+        # alone made the rule disagree with the optimiser both ways: a
+        # graph-level unfreeze walked past the refusal into a silently
+        # wrong gradient, and a graph-level freeze -- the first remedy the
+        # message below names -- did not clear it.
         from maddening.core.node import static_data_dep_violations
         for name, spec in self._nodes.items():
             for owner, static_key, param_key in static_data_dep_violations(
-                spec.node
+                spec.node, self._param_spec_overrides.get(name)
             ):
                 where = (
                     f"node {name!r}" if owner == name
@@ -3444,6 +3733,15 @@ class GraphManager:
             name: spec.node.static_data_hash()
             for name, spec in self._nodes.items()
         }
+
+        # Nothing below raises, so this is the commit point for the
+        # ``_meta`` built above (see there) and for the dividers the next
+        # compile will judge its phase against.
+        if meta:
+            self._state[_META_KEY] = meta
+        else:
+            self._state.pop(_META_KEY, None)
+        self._committed_rate_dividers = dict(self._rate_dividers)
 
         self._dirty = False
         # A rebuilt step invalidates every scan built against the old
@@ -3904,15 +4202,132 @@ class GraphManager:
             ext.setdefault(ei.target_node, {})[ei.target_field] = leaf
         return ext
 
+    def _resolve_external_inputs(
+        self, external_inputs: Optional[dict[str, dict]],
+    ) -> dict[str, dict]:
+        """Complete and validate a caller's ``external_inputs``.
+
+        ``None`` means "zeros for every declared input", which was
+        already documented.  A *partial* dict now means the same for the
+        inputs it omits, rather than leaving them out of
+        ``boundary_inputs`` altogether and letting the node fall back to
+        its own default -- a 98 N difference in the case that found this,
+        with nothing said about it anywhere.
+
+        An unknown ``(node, field)`` pair is an error naming the declared
+        ones.  A typo'd node or field name used to be accepted in
+        silence, which is exactly the failure mode ``_validate_params``
+        spends a paragraph per case avoiding for the ``params`` argument
+        of the very same call.
+        """
+        if external_inputs is None:
+            return self._default_external_inputs()
+        declared = {
+            (ei.target_node, ei.target_field) for ei in self._external_inputs
+        }
+        unknown = sorted(
+            f"{node}.{field}"
+            for node, fields in external_inputs.items()
+            for field in fields
+            if (node, field) not in declared
+        )
+        if unknown:
+            known = sorted(f"{n}.{f}" for n, f in declared)
+            raise ValueError(
+                f"external_inputs names {unknown}, which this graph does not "
+                f"declare; declared external inputs: {known or ['(none)']}.  "
+                f"An undeclared name never reaches the node, so accepting it "
+                f"would mean the value silently did nothing.  Declare it with "
+                f"add_external_input(), or fix the name."
+            )
+        if not declared:
+            return external_inputs
+        # Complete from the per-compile zero cache.  Fresh outer dicts,
+        # like ``_default_external_inputs``: callers may edit them.
+        out: dict[str, dict] = {}
+        for node, fields in self._default_external_inputs().items():
+            out[node] = {**fields, **external_inputs.get(node, {})}
+        return out
+
+    # ------------------------------------------------------------------
+    # Escaped tracers
+    # ------------------------------------------------------------------
+
+    def _store_state(self, new_state: dict) -> None:
+        """Write *new_state* back, remembering whether it is traced.
+
+        ``step``, ``run``, ``run_scan`` and their siblings are stateful:
+        they assign their result into ``self._state``.  Under a JAX
+        transform that result is a pytree of tracers, so a loss that
+        calls one -- the recipe ``docs/user_guide/quickstart.md`` shows
+        -- left the graph holding tracers once the transform returned,
+        and every later ``step`` / ``run_scan`` / ``save_state`` failed
+        with an error pointing at JAX rather than at the framework.
+
+        The write still happens, because a Python loop of ``gm.step()``
+        *inside* a trace depends on it.  What is added is the state to
+        come back to: see :meth:`_recover_from_escaped_tracers`.
+        """
+        if _holds_tracer(new_state):
+            if not self._state_traced:
+                self._state_before_trace = self._state
+            self._state_traced = True
+        else:
+            self._state_traced = False
+            self._state_before_trace = None
+        self._state = new_state
+
+    def _recover_from_escaped_tracers(self) -> None:
+        """Put the graph back to the last untraced state, if it needs it.
+
+        Called from every entry point.  It costs one attribute test when
+        there is nothing to do, which is always except right after a
+        transform that stepped the graph.  Inside a transform it does
+        nothing, so a traced multi-step loop still works.
+        """
+        if not self._state_traced or not _outside_jax_trace():
+            return
+        restored = self._state_before_trace
+        if restored is None:            # pragma: no cover - defensive
+            self._state_traced = False
+            return
+        # State first, flags after, so a graph that somehow failed to be
+        # put back is still marked as holding tracers and tries again.
+        self._state = restored
+        self._state_traced = False
+        self._state_before_trace = None
+        warnings.warn(
+            "the graph held JAX tracers left behind by a transform and has "
+            "been put back to the state it had before it.  step() / run() / "
+            "run_scan() assign their result into the graph, so a loss that "
+            "calls one leaves tracers in it when jax.grad returns; the "
+            "gradient itself is unaffected.  Set the state you want "
+            "explicitly (set_node_state / reset_state / load_state) after "
+            "differentiating if the recovered state is not the one you meant.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers for _meta stripping
     # ------------------------------------------------------------------
 
     def _user_state(self, full_state: dict) -> dict:
-        """Return state dict without the internal ``_meta`` key."""
-        if _META_KEY not in full_state:
-            return full_state
-        return {k: v for k, v in full_state.items() if k != _META_KEY}
+        """The caller's view of *full_state*: no internal ``_meta`` key,
+        and a fresh dict per node.
+
+        It used to hand back ``self._state`` itself for a graph with no
+        ``_meta`` (the common uncoupled, uniform-rate case), and the
+        per-node dicts even when it did copy the outer one, so a caller
+        clamping a value in the dict it was given rewrote the running
+        simulation.  The arrays are immutable and stay shared; only the
+        dicts are new, which is one small allocation per node per step.
+        """
+        return {
+            name: dict(fields) if type(fields) is dict else fields
+            for name, fields in full_state.items()
+            if name != _META_KEY
+        }
 
     def coupling_diagnostics(self) -> dict[str, dict]:
         """Return coupling convergence info from the last step.
@@ -3933,18 +4348,33 @@ class GraphManager:
               ``1 / (1 - rho)`` of the group's slowest mode, from the
               ratio of the last two residuals.  ``nan`` when the
               estimate was rejected (see ``"bound_valid"``).
-            - ``"error_estimate"`` : float — ``residual *
+            - ``"error_estimate"`` : float — ``residual * omega *
               amplification``, an estimate of ``||x - x*||`` in the
               same norm: how far the returned state is from the fixed
-              point, rather than how far the last pass moved.  Falls
-              back to ``residual`` when the estimate was rejected.
-            - ``"bound_valid"`` : bool — whether the contraction ratio
-              was usable this step.  ``False`` on a non-monotone
-              (non-normal) sequence, on a zero or non-finite
-              predecessor, and at ``max_iterations=1``, where there is
-              no pair of residuals to take a ratio of.  The criterion
-              then falls back to the raw residual test, which is what
-              ``converged`` reports.
+              point, rather than how far the last pass moved.
+              ``omega`` is the relaxation factor under
+              ``acceleration="fixed"`` and 1 otherwise — the series is
+              over the steps the iterate takes, and over-relaxation
+              makes those longer than the residual that is measured.
+              Falls back to ``residual`` when the estimate was
+              rejected.  **It is an estimate, not a bound**: it can
+              understate, and by large factors — see ``"bound_valid"``
+              and
+              ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+            - ``"bound_valid"`` : bool — whether the contraction
+              *ratio* was usable this step.  ``False`` on a
+              non-monotone (non-normal) sequence, on a zero or
+              non-finite predecessor, and at ``max_iterations=1``,
+              where there is no pair of residuals to take a ratio of.
+              The criterion then falls back to the raw residual test,
+              which is what ``converged`` reports.  ``True`` does
+              **not** certify the estimate: three mechanisms break it
+              that this flag cannot see (a measure that is not a
+              metric, a ``rho`` read from a faster mode than the one
+              holding the remaining error, and Aitken's / IQN's
+              uncorrected step scale).  The worst measured
+              understatement with ``bound_valid=True`` is 122x.  See
+              :func:`_fixed_point_while` for all three.
             - ``"gradient_error_bound"`` : float — how far the IFT
               adjoint may be from a finite difference of this group's
               own forward, ``residual * cond(I - dF/dx)`` estimated
@@ -3952,7 +4382,9 @@ class GraphManager:
               number as ``"error_estimate"``: both are
               ``(I - dF/dx)^-1`` applied to a residual).  ``inf`` when
               ``bound_valid`` is ``False`` — no contraction was
-              observed, so nothing bounds the disagreement.
+              observed, so nothing bounds the disagreement.  Being the
+              same number, it inherits every way ``"error_estimate"``
+              can understate.
             - ``"converged"`` : bool — the *error estimate* met the
               group's threshold (``tolerance`` for the L2 norm, ``1.0``
               for the mixed / interface norms).  ``False`` means the
@@ -3965,13 +4397,15 @@ class GraphManager:
             met the criterion rather than on the update it went on to
             produce, so recomputing ``||F(x) - x||`` on the state you
             were handed reproduces ``"residual"``.  Since 0.4.0 it is
-            also a *bound on the distance to the fixed point* and not
-            only on the last step: the threshold is applied to
-            ``residual / (1 - rho)`` with ``rho`` measured from the
-            residual sequence, which is what MADD-ANO-005 recorded as
-            missing.  Where the ratio is unusable the flag degrades to
-            the old residual test and says so through
-            ``"bound_valid"``.
+            also an *estimate of the distance to the fixed point* and
+            not only of the last step: the threshold is applied to
+            ``omega * residual / (1 - rho)`` with ``rho`` measured from
+            the residual sequence, which is what MADD-ANO-005 recorded
+            as missing.  Where the ratio is unusable the flag degrades
+            to the old residual test and says so through
+            ``"bound_valid"``.  It is strictly stronger than the
+            pre-0.4.0 flag in every case and still not a guarantee —
+            do not treat ``converged=True`` as certifying a distance.
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, return the same state and derive both values
@@ -3995,7 +4429,17 @@ class GraphManager:
                 # ``rho`` in ``[0, 1)``, so it is always >= 1; the
                 # solvers write 0.0 for "rejected".
                 valid = amp >= 1.0
-                error_estimate = residual * (amp if valid else 1.0)
+                # The geometric series is over the steps the iterate
+                # takes, which are ``relaxation`` times the residual
+                # that is measured under ``acceleration="fixed"``.
+                # Both solvers apply the same factor to the same
+                # criterion, so this reproduces their ``converged``.
+                scale = relaxation_step_scale(
+                    group.acceleration, group.relaxation,
+                )
+                error_estimate = (
+                    residual * max(scale * amp, 1.0) if valid else residual
+                )
                 threshold = (
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance
@@ -4030,7 +4474,9 @@ class GraphManager:
         external_inputs : dict, optional
             Values injected from outside the graph, structured as
             ``{node_name: {field_name: value, ...}, ...}``.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
         params : dict, optional
             Graph parameter pytree (see :attr:`params`).  ``None`` uses
             :attr:`params`.  Passing a modified pytree changes node
@@ -4039,15 +4485,17 @@ class GraphManager:
         Returns the full state dict after the step (excluding internal
         metadata).
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
-        self._state = self._compiled_step(self._state, external_inputs, params)
+        self._store_state(
+            self._compiled_step(self._state, external_inputs, params)
+        )
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -4073,17 +4521,20 @@ class GraphManager:
             Static external inputs applied every step.  For dynamic
             inputs that change each step, use :meth:`step` in a loop
             or use a ``CommandReceiver`` with ``RealtimeRunner``.
+            Completed and validated as in :meth:`step`.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._state = self._compiled_step(self._state, external_inputs, params)
+            self._store_state(
+                self._compiled_step(self._state, external_inputs, params)
+            )
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
             if callback is not None:
@@ -4169,7 +4620,9 @@ class GraphManager:
             Number of base-rate simulation steps to execute.
         external_inputs : dict, optional
             Static external inputs applied identically every step.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
         params : dict, optional
             Graph parameter pytree; ``None`` uses :attr:`params`.
 
@@ -4179,12 +4632,12 @@ class GraphManager:
             The final state of the graph after *n_steps* (excluding
             internal metadata).
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         # External inputs and params are *arguments* of the jitted scan,
@@ -4207,7 +4660,7 @@ class GraphManager:
             return jax.jit(scan)
 
         fn = self._cached_scan(("run_scan", int(n_steps)), build)
-        self._state = fn(self._state, external_inputs, params)
+        self._store_state(fn(self._state, external_inputs, params))
         return self._user_state(self._state)
 
     def run_scan_with_history(
@@ -4229,7 +4682,9 @@ class GraphManager:
             Number of base-rate simulation steps to execute.
         external_inputs : dict, optional
             Static external inputs applied identically every step.
-            If ``None``, zeros are used for all declared external inputs.
+            Zeros are used for every declared input this does not
+            supply, ``None`` included; an undeclared ``node.field``
+            is a ``ValueError`` naming the declared ones.
 
         Returns
         -------
@@ -4244,12 +4699,12 @@ class GraphManager:
             ``(n_steps,)`` (or ``(n_steps, *field_shape)`` for
             non-scalar fields) holding the value **after** each step.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         def build():
@@ -4270,7 +4725,7 @@ class GraphManager:
 
         fn = self._cached_scan(("run_scan_with_history", int(n_steps)), build)
         final_state, history = fn(self._state, external_inputs, params)
-        self._state = final_state
+        self._store_state(final_state)
         return self._user_state(final_state), self._user_state(history)
 
     # ------------------------------------------------------------------
@@ -4305,10 +4760,22 @@ class GraphManager:
             runs 3 simulations with initial positions 1, 2, 3.
         external_inputs : dict, optional
             Static external inputs (not batched — same for all runs).
+            Completed and validated as in :meth:`step`.
         return_history : bool
             If True, return ``(final_states, histories)`` where
             histories has shape ``(batch, n_steps, ...)``.
             If False (default), return only ``final_states``.
+
+        Notes
+        -----
+        Multi-rate and coupled graphs are supported.  Their internal
+        ``_meta`` (the sub-step counter, the coupling diagnostics and the
+        predictor / IQN warm starts) is not part of ``initial_states``:
+        every simulation in the batch starts from the graph's current
+        ``_meta`` and evolves its own copy from there, and none of it
+        appears in the returned states.  Pass an explicit ``_meta`` entry
+        in ``initial_states`` — batched like any other leaf — to start
+        each simulation from a different phase.
 
         Returns
         -------
@@ -4318,27 +4785,42 @@ class GraphManager:
             Only if ``return_history=True``.  Batched histories with
             shape ``(batch, n_steps, ...)`` on each leaf.
         """
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
+
+        # Every other entry point carries ``self._state``, which
+        # ``compile()`` seeded with ``_meta``; the batched carry is the
+        # caller's ``initial_states``, which has none.  Without this a
+        # multi-rate graph raised ``KeyError: '_meta'`` and a coupled one
+        # with diagnostics a scan carry mismatch, though nothing
+        # documented either as unsupported.  Passed as an argument rather
+        # than closed over so a cached program cannot serve a stale
+        # counter, and unbatched inside ``vmap`` so each simulation forks
+        # its own copy of the warm start.
+        meta = self._state.get(_META_KEY)
 
         def build():
             step_fn = self._build_step_fn()
 
-            def sweep(init_states, ext, params):
+            def sweep(init_states, ext, params, meta0):
                 self._count_scan_trace()
 
                 def simulate(init_state):
+                    carry = dict(init_state)
+                    if meta0 is not None:
+                        carry.setdefault(_META_KEY, meta0)
+
                     def scan_body(state, _unused):
                         new_state = step_fn(state, ext, params)
                         return new_state, (new_state if return_history else None)
 
                     final, hist = jax.lax.scan(
-                        scan_body, init_state, None, length=int(n_steps),
+                        scan_body, carry, None, length=int(n_steps),
                     )
                     if return_history:
                         return self._user_state(final), self._user_state(hist)
@@ -4351,7 +4833,7 @@ class GraphManager:
         fn = self._cached_scan(
             ("run_sweep", int(n_steps), bool(return_history)), build,
         )
-        return fn(initial_states, external_inputs, params)
+        return fn(initial_states, external_inputs, params, meta)
 
     # ------------------------------------------------------------------
     # Adaptive timestepping
@@ -4491,6 +4973,8 @@ class GraphManager:
         dt_max: float = 0.1,
         external_inputs: Optional[dict[str, dict]] = None,
         callback: Optional[Callable] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict]:
         """Run with adaptive timestepping until *t_end*.
 
@@ -4509,10 +4993,14 @@ class GraphManager:
         dt_min, dt_max : float
             Timestep bounds.
         external_inputs : dict, optional
-            Static external inputs applied every step.
+            Static external inputs applied every step.  Completed and
+            validated as in :meth:`step`.
         callback : callable, optional
             Called after every *accepted* step with
             ``(sim_time, dt_used, state_dict)``.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.
 
         Returns
         -------
@@ -4527,12 +5015,12 @@ class GraphManager:
                 "Adaptive timestepping is incompatible with multi-rate "
                 "graphs.  All nodes must share the same timestep."
             )
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
 
         from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
 
@@ -4547,7 +5035,7 @@ class GraphManager:
         dt_step_fn = self._build_dt_step_fn()
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
-        params = self.params
+        params = self._params_or_default(params)
 
         t = 0.0
         dt = dt_initial
@@ -4620,7 +5108,7 @@ class GraphManager:
                         callback(t, dt_min, self._user_state(state))
                     self._notify(EVENT_STEP, self._user_state(state))
 
-        self._state = state
+        self._store_state(state)
         info = {
             "n_steps": n_steps,
             "n_rejected": n_rejected,
@@ -4639,6 +5127,8 @@ class GraphManager:
         dt_min: float = 1e-8,
         dt_max: float = 0.1,
         external_inputs: Optional[dict[str, dict]] = None,
+        *,
+        params: Optional[dict] = None,
     ) -> tuple[dict[str, dict], dict[str, dict], dict]:
         """Adaptive timestepping via ``jax.lax.scan`` (differentiable).
 
@@ -4656,7 +5146,13 @@ class GraphManager:
         dt_initial, atol, rtol, dt_min, dt_max : float
             Same as :meth:`run_adaptive`.
         external_inputs : dict, optional
-            Static external inputs.
+            Static external inputs.  Completed and validated as in
+            :meth:`step`.
+        params : dict, optional
+            Graph parameter pytree (see :attr:`params`).  ``None`` uses
+            :attr:`params`.  It is a traced argument of the scan, so
+            ``jax.grad`` reaches it without writing a tracer into
+            :attr:`params`.
 
         Returns
         -------
@@ -4669,12 +5165,12 @@ class GraphManager:
             raise RuntimeError(
                 "Adaptive timestepping is incompatible with multi-rate graphs."
             )
+        self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
 
-        if external_inputs is None:
-            external_inputs = self._default_external_inputs()
+        external_inputs = self._resolve_external_inputs(external_inputs)
 
         from maddening.core.simulation.adaptive import AdaptiveConfig
 
@@ -4701,10 +5197,10 @@ class GraphManager:
             jnp.array(rtol), jnp.array(dt_min), jnp.array(dt_max),
         )
         (final_state, final_t, final_dt, n_accepted), history = fn(
-            self._state, external_inputs, self.params, knobs,
+            self._state, external_inputs, self._params_or_default(params), knobs,
         )
 
-        self._state = final_state
+        self._store_state(final_state)
         info = {"n_steps": n_accepted, "final_t": final_t, "final_dt": final_dt}
         return self._user_state(final_state), history, info
 
@@ -4713,16 +5209,40 @@ class GraphManager:
     # ------------------------------------------------------------------
 
     def get_node_state(self, name: str) -> dict:
+        """The node's current state fields.
+
+        A fresh dict, not the internal one: the arrays inside are
+        immutable and shared, but writing a new value into the dict you
+        are handed does not reach the simulation.  Use
+        :meth:`set_node_state` for that.
+        """
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         if name not in self._state:
             raise KeyError(f"No node named '{name}'.")
-        return self._state[name]
+        return dict(self._state[name])
 
     def set_node_state(self, name: str, state: dict) -> None:
+        """Overwrite one node's state fields.
+
+        A traced value is accepted -- writing the argument of a loss in
+        is how a differentiable initial condition is expressed -- and
+        noted, so the graph can be put back afterwards rather than
+        keeping the tracer (see ``_recover_from_escaped_tracers``).
+        """
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
-        self._state[name] = _strong_typed(state)
+        state = _strong_typed(state)
+        if _holds_tracer({name: state}) and not self._state_traced:
+            # Snapshot before the write, per node, so the recovery has
+            # something untraced to go back to.  Only on the tracer path,
+            # so an ordinary call allocates nothing extra.
+            self._state_before_trace = {
+                k: (dict(v) if type(v) is dict else v)
+                for k, v in self._state.items()
+            }
+            self._state_traced = True
+        self._state[name] = state
 
     def reset_state(self) -> None:
         """Reset every node to its ``initial_state()`` and the internal
@@ -4736,26 +5256,43 @@ class GraphManager:
         # Every ``initial_state()`` first, then one commit: an
         # ``initial_state`` that raises (an ``AdaptiveNode`` at a Palais
         # trap) must not leave half the graph reset and half of it carrying
-        # the state from before the call.
+        # the state from before the call.  ``_meta`` is computed in the
+        # same pass and committed with them: it is state too, so a reset
+        # that leaves the node states fresh and the sub-step phase stale
+        # would re-phase a multi-rate graph exactly the way a recompile
+        # used to.
         fresh = {
             name: _strong_typed(spec.node.initial_state())
             for name, spec in self._nodes.items()
         }
-        self._state.update(fresh)
-        meta = self._state.get(_META_KEY)
-        if meta is not None:
-            for key, value in list(meta.items()):
+        live_meta = self._state.get(_META_KEY)
+        fresh_meta = None
+        if live_meta is not None:
+            fresh_meta = dict(live_meta)
+            for key, value in live_meta.items():
                 if key in ("step_count", "sub_step") or key.endswith("_iterations") \
                         or key.endswith("_pred_count"):
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
                 elif key.endswith("_residual") or key.endswith(
                     "_amplification"
                 ):
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.
                 elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
+
+        self._state.update(fresh)
+        if fresh_meta is not None:
+            # Refilled, not replaced: the compiled step and any caller
+            # holding the dict keep the object they were given.
+            live_meta.clear()
+            live_meta.update(fresh_meta)
+        # Cleared last, with the commit: a reset that raised would
+        # otherwise have taken the graph's way back from an escaped
+        # tracer with it while leaving the tracer in place.
+        self._state_traced = False
+        self._state_before_trace = None
 
     # ------------------------------------------------------------------
     # Observer pattern
@@ -4860,14 +5397,7 @@ class GraphManager:
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
-            "external_inputs": [
-                {
-                    "target_node": ei.target_node,
-                    "target_field": ei.target_field,
-                    "shape": list(ei.shape),
-                }
-                for ei in self._external_inputs
-            ],
+            "external_inputs": [ei.to_dict() for ei in self._external_inputs],
             # Every field of every group, or the key is absent: a config
             # that carried only some of a group's solver settings would
             # reload as a graph that *runs* differently -- a fixed point
@@ -4946,10 +5476,12 @@ class GraphManager:
                         f"mapped edge keys): {exc}"
                     ) from exc
         for ei in config.get("external_inputs", []):
+            spec = ExternalInputSpec.from_dict(ei)
             gm.add_external_input(
-                target_node=ei["target_node"],
-                target_field=ei["target_field"],
-                shape=tuple(ei.get("shape", ())),
+                target_node=spec.target_node,
+                target_field=spec.target_field,
+                shape=spec.shape,
+                dtype=spec.dtype,
             )
         for i, cg in enumerate(config.get("coupling_groups", [])):
             # Straight back through ``add_coupling_group``, so a loaded
@@ -5035,6 +5567,7 @@ class GraphManager:
         See :func:`maddening.core.checkpoint.save_state` for details.
         """
         from maddening.core.simulation.checkpoint import save_state
+        self._recover_from_escaped_tracers()
         return save_state(self, path)
 
     def load_state(self, path) -> None:
@@ -5043,6 +5576,7 @@ class GraphManager:
         See :func:`maddening.core.checkpoint.load_state` for details.
         """
         from maddening.core.simulation.checkpoint import load_state
+        self._recover_from_escaped_tracers()
         load_state(self, path)
 
     # ------------------------------------------------------------------

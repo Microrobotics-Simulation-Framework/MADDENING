@@ -220,3 +220,91 @@ def test_the_violations_found_are_exactly_the_forbidden_pairs(recipe):
     assert found == _forbidden(kinds, trainable, deps)
     # The declaration never invents a static, wrapped or not.
     assert set(node.static_data_deps()) <= set(node.static_data)
+
+
+@st.composite
+def _recipes_with_overrides(draw):
+    """A recipe plus the graph-level ``set_param_spec`` calls over it."""
+    recipe = draw(_recipes())
+    kinds = recipe[0]
+    # ``set_param_spec`` reaches the leaves of ``params_pytree()`` only,
+    # which is the float parameters: an ``int`` such as ``n_cells`` is
+    # structural and has no spec to override.
+    overrides = {
+        name: draw(st.booleans())
+        for name, kind in kinds.items()
+        if kind == "float" and draw(st.booleans())
+    }
+    return recipe, overrides
+
+
+def _effective_trainable(trainable, overrides) -> dict:
+    """What ``gm.trainable_mask()`` reports: the node's own specs with
+    the graph's overrides written over them."""
+    return {**trainable, **overrides}
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(case=_recipes_with_overrides())
+def test_the_rule_sees_the_same_specs_the_optimiser_does(case):
+    """``compile()`` refuses iff ``trainable_mask()`` says so.
+
+    ``GraphManager.param_specs()`` merges ``set_param_spec`` overrides
+    over the node's own specs, and ``trainable_mask``, ``unconstrain``,
+    ``check_params`` and ``maddening.sysid`` all optimise against that
+    merged view.  The rule resolved the node alone, so it disagreed in
+    both directions: a graph-level unfreeze walked past the refusal into
+    a gradient missing the term through the static, and a graph-level
+    freeze -- the remedy the error message names first -- did not clear
+    the refusal.  This property is the agreement, not either half.
+    """
+    recipe, overrides = case
+    kinds, trainable, _statics, deps = recipe
+    forbidden = _forbidden(kinds, _effective_trainable(trainable, overrides), deps)
+
+    gm = GraphManager()
+    gm.add_node(_node(recipe, name="n"))
+    for key, is_trainable in overrides.items():
+        gm.set_param_spec("n", key, ParamSpec(trainable=is_trainable))
+
+    # The mask is the optimiser's view; the rule has to agree with it.
+    mask = gm.param_specs()["nodes"]["n"]
+    for key, is_trainable in overrides.items():
+        assert mask[key].trainable is is_trainable
+
+    if not forbidden:
+        gm.compile()
+        gm.step()
+        return
+    with pytest.raises(ValueError) as excinfo:
+        gm.compile()
+    message = str(excinfo.value)
+    assert [(s, p) for (s, p) in forbidden
+            if f"'{s}'" in message and f"'{p}'" in message], message
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(case=_recipes_with_overrides())
+def test_an_override_on_a_declared_parameter_re_runs_the_rule(case):
+    """A spec change that moves the verdict has to reach the next run.
+
+    ``set_param_spec`` is documented not to dirty the graph -- specs are
+    optimiser-side metadata.  A key a ``static_data_deps()`` entry names
+    is the exception: it decides whether the graph compiles at all, so a
+    graph already compiled must not go on running the accepted step.
+    """
+    recipe, overrides = case
+    kinds, trainable, _statics, deps = recipe
+    if _forbidden(kinds, trainable, deps):
+        return                      # never compiled in the first place
+    declared = {p for keys in deps.values() for p in keys}
+
+    gm = GraphManager()
+    gm.add_node(_node(recipe, name="n"))
+    gm.compile()
+    assert not gm._dirty
+
+    for key, is_trainable in overrides.items():
+        gm.set_param_spec("n", key, ParamSpec(trainable=is_trainable))
+        assert gm._dirty == (key in declared), key
+        gm._dirty = False

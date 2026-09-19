@@ -59,6 +59,12 @@ are **not** in `gm.params`.  `gm.nodes_without_params()` lists them, and
 passing an entry for such a node (or a misspelled key) is a `ValueError`,
 not a silently ignored leaf.
 
+A value that carries a floating dtype of its own (an array, a numpy
+scalar) keeps it; a value that carries none (a Python float, a list of
+them) is placed at JAX's canonical float precision — float32, or float64
+under `jax_enable_x64`.  Nothing is narrowed below that, so a graph run
+under x64 has float64 constants as well as float64 arithmetic.
+
 A node that exposes boundary fluxes takes `params` there too and reads
 the same constants from it:
 
@@ -91,6 +97,14 @@ profiler recompiles behind your back.  Leaves that no longer fit are
 dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
 way back to the constructor snapshot.  A checkpoint loaded before the
 first compile compiles the graph so its params are not lost.
+
+The graph's *state* survives the same recompile, and so does the
+internal bookkeeping that goes with it: a multi-rate graph keeps its
+sub-step phase and a coupling group keeps its predictor history and IQN
+warm start, so a mid-run edit changes no number.  Only a change that
+moves a node's rate divider restarts the phase, because the sub-step it
+counts then means something else.  `gm.reset_state()` is the explicit
+way to zero all of it.
 
 A *partial* pytree passed to `gm.step(params=...)` / `gm.run_scan` /
 `gm.run` is completed from the **live** `gm.params` (a missing node or

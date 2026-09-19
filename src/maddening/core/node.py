@@ -79,8 +79,12 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
     :attr:`SimulationNode.static_data` and
     :meth:`SimulationNode.static_data_deps`: both must walk the same
     attributes, qualify colliding keys the same way and terminate on the
-    same cycles, or a wrapper's dependency declaration stops lining up
-    with the statics it declares for.
+    same cycles, or a wrapper's dependency declaration stops describing
+    the statics it declares for.  Note that "the same way" is not the
+    same as "to the same keys": qualification fires on a collision
+    within the dict being merged, so a wrapper whose statics collide but
+    whose declarations do not ends up with two differently shaped key
+    sets.  See :meth:`SimulationNode.static_data_deps`.
 
     Parameters
     ----------
@@ -134,7 +138,9 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
             pass
 
 
-def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
+def static_data_dep_violations(
+    node, spec_overrides: Optional[dict] = None,
+) -> list[tuple[str, str, str]]:
     """Declared static-data dependencies that name a trainable parameter.
 
     The rule
@@ -164,12 +170,33 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     and the parameter, which is where the fix goes.  The graph supplies
     the outer name it knows the node by.
 
+    ``spec_overrides`` is how the *graph* takes part.  The node's own
+    ``param_specs()`` is not the view the optimiser sees:
+    :meth:`~maddening.core.graph_manager.GraphManager.param_specs` merges
+    :meth:`~maddening.core.graph_manager.GraphManager.set_param_spec`
+    overrides over it, and ``trainable_mask``, ``unconstrain``,
+    ``check_params`` and ``maddening.sysid`` all read that merged view.
+    Resolving the rule against the node alone made it disagree with the
+    optimiser in both directions: unfreezing a parameter at graph level
+    let a baked static through (a silently wrong gradient), and the
+    remedy the error message names -- freeze it -- did not clear the
+    refusal when applied through ``set_param_spec``.
+
     Parameters
     ----------
     node : SimulationNode
         The node to check.  Duck-typed objects missing any of the three
         methods contribute nothing rather than raising, matching how
         ``compile`` probes for the other node-contract hooks.
+    spec_overrides : dict of str to ParamSpec, optional
+        The graph's overrides for *this* node, applied over each walked
+        node's own specs.  They always apply to ``node`` itself, whose
+        ``params_pytree`` is the one they were validated against.  They
+        reach a wrapped node only when it is the single wrapped holder of
+        the parameter name: two wrapped nodes exposing the same name make
+        the override ambiguous (the graph sees one of them under a
+        qualified key), and leaving their own specs alone can only
+        over-refuse, never let a baked static through.
 
     Returns
     -------
@@ -181,6 +208,29 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
     # keeps the report in first-seen (outermost) order.
     owner_of: dict[tuple[str, str], str] = {}
     order: list[tuple[str, str]] = []
+    overrides = dict(spec_overrides or {})
+    # How many *wrapped* nodes expose each overridden name, so an
+    # ambiguous override can be recognised without a second walk.
+    holders: dict[str, int] = {}
+    if overrides:
+        inner_seen: set[int] = {id(node)}
+        inner_queue = [
+            v for v in getattr(node, "__dict__", {}).values()
+            if isinstance(v, SimulationNode)
+        ]
+        while inner_queue:
+            obj = inner_queue.pop(0)
+            if id(obj) in inner_seen:
+                continue
+            inner_seen.add(id(obj))
+            pytree_of = getattr(obj, "params_pytree", None)
+            if callable(pytree_of):
+                for key in pytree_of() or {}:
+                    if key in overrides:
+                        holders[key] = holders.get(key, 0) + 1
+            for value in list(getattr(obj, "__dict__", {}).values()):
+                if isinstance(value, SimulationNode):
+                    inner_queue.append(value)
     seen: set[int] = set()
     queue = [node]
     while queue:
@@ -194,7 +244,12 @@ def static_data_dep_violations(node) -> list[tuple[str, str, str]]:
         if callable(deps) and callable(specs_of) and callable(pytree_of):
             declared = deps() or {}
             if declared:
-                specs = specs_of() or {}
+                specs = dict(specs_of() or {})
+                if overrides:
+                    specs.update({
+                        k: v for k, v in overrides.items()
+                        if obj is node or holders.get(k) == 1
+                    })
                 leaves = set(pytree_of() or {})
                 owner = getattr(obj, "name", repr(obj))
                 for static_key in sorted(declared):
@@ -325,25 +380,54 @@ class SimulationNode(ABC):
         """The node's differentiable parameters as a pytree of arrays.
 
         Default: every float-valued entry of ``self.params`` — Python
-        floats, floating-point arrays, and lists/tuples of numbers —
-        promoted to float32 arrays.  Ints, bools, strings and nested
-        dicts are structural (they change shapes or the trace) and are
-        excluded; they stay on the recompile path.
+        floats, floating-point arrays, and lists/tuples of numbers — as
+        arrays at the graph's working float precision.  Ints, bools,
+        strings and nested dicts are structural (they change shapes or
+        the trace) and are excluded; they stay on the recompile path.
+
+        Precision
+        ---------
+        A value that carries a floating dtype of its own — an array, a
+        numpy scalar — keeps it.  A value that carries none — a Python
+        float, a list of them — is placed at JAX's canonical float
+        precision, resolved the way :class:`AdaptiveNode` resolves it
+        (``jnp.zeros(()).dtype``): float32 by default, float64 under
+        ``jax_enable_x64``.  Either way nothing is narrowed *below* the
+        precision the rest of the graph is working in.
+
+        That last clause is the part that used to fail.  ``float`` was
+        pinned to ``float32`` outright, and ``numpy.float64`` is a
+        subclass of ``float``, so under ``jax_enable_x64`` a Python
+        float, an ``np.float64`` scalar and a list of floats all came
+        back float32 — a 1.7e-8 relative shift, no warning — while *the
+        same value* written as a 0-d array, a 1-d array or a ``jnp``
+        float64 array came back float64.  One value, two dtypes, two
+        answers; and an :class:`AdaptiveNode` that solved in float64
+        while its parameters, gradients and diagnostics were float32,
+        so its ``check_gradient_capture()`` evaluated at a point the
+        state had not been built at.
 
         ``GraphManager.compile`` snapshots this into
         ``GraphManager.params["nodes"][name]`` for nodes whose
         :meth:`update` accepts ``params``.
         """
+        canonical = jnp.zeros(()).dtype
         out: dict = {}
         for key, value in self.params.items():
             if isinstance(value, (bool, int, str, dict)) or value is None:
                 continue
-            if isinstance(value, float):
-                out[key] = jnp.asarray(value, dtype=jnp.float32)
+            if isinstance(value, float) and not isinstance(value, np.generic):
+                # A Python float states a value, not a precision, so it
+                # takes the working one.  ``np.float64`` is a ``float``
+                # subclass but *does* carry a dtype, so it goes the array
+                # way below and is treated exactly like the same number
+                # spelled as a 0-d array.
+                out[key] = jnp.asarray(value, dtype=canonical)
                 continue
-            # Arrays, tracers (a node built inside a traced function),
-            # and lists/tuples of numbers.  Anything jnp can't turn into
-            # a floating array is structural and skipped.
+            # Arrays, numpy scalars, tracers (a node built inside a
+            # traced function), and lists/tuples of numbers.  Anything
+            # jnp can't turn into a floating array is structural and
+            # skipped.
             try:
                 arr = jnp.asarray(value)
             except (TypeError, ValueError):
@@ -351,7 +435,7 @@ class SimulationNode(ABC):
             if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
                 continue
             if isinstance(value, (list, tuple)):
-                arr = arr.astype(jnp.float32)
+                arr = arr.astype(canonical)
             out[key] = arr
         return out
 
@@ -486,8 +570,22 @@ class SimulationNode(ABC):
 
         Default: ``{}`` for a leaf node, and -- like :attr:`static_data`
         and :meth:`invalidate_static_cache` -- the merged declaration of
-        every node this one wraps otherwise, keyed identically to the
-        forwarded ``static_data`` so the two line up.
+        every node this one wraps otherwise, keyed by the same rule.
+
+        The same *rule*, not necessarily the same *keys*.
+        ``_merge_from_wrapped`` qualifies a key with the attribute
+        holding it only when two wrapped nodes collide on it, and
+        colliding is a property of the dict being merged: a wrapper over
+        two nodes that both publish ``table``, where only the second
+        declares a dependency, publishes ``static_data`` keys
+        ``table`` and ``inner_b.table`` but a declaration under ``table``
+        alone.  Nothing consumes the pairing today --
+        :func:`static_data_dep_violations` walks every node separately
+        and resolves each declaration against that node's own pytree, so
+        a mis-keyed wrapper entry can neither hide nor invent a
+        violation -- and the D10 step-4 rebuild hook, which would key a
+        rebuild off exactly this pairing, has to make the qualification
+        unconditional before it can rely on it.
 
         Returns
         -------

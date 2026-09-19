@@ -48,12 +48,13 @@ import dataclasses
 
 import jax.numpy as jnp
 import pytest
-from hypothesis import assume, given, note, settings
+from hypothesis import assume, example, given, note, settings
 from hypothesis import strategies as st
 
 from maddening.core.coupling.acceleration import (
     coupling_residual_l2,
     coupling_residual_mixed,
+    relaxation_step_scale,
 )
 
 from tests.conftest import EXAMPLES_COSTLY
@@ -211,14 +212,18 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
 def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
     """The compatibility half of the change, as an exact statement.
 
-    ``error_estimate = residual * max(amplification, 1)`` and a valid
-    amplification is ``1/(1 - rho)`` with ``rho`` in ``[0, 1)``, so the
-    estimate is never below the residual.  Two consequences follow and
-    both are asserted here: a group that meets the new criterion also
-    meets the old one -- so D2's guarantee that ``converged=True``
-    describes the state you were handed is not weakened -- and a
-    rejected estimate degrades to exactly the old criterion rather than
-    to something unpredictable.
+    ``error_estimate = residual * max(omega * amplification, 1)``,
+    where ``omega`` is the step scale
+    (:func:`~maddening.core.coupling.acceleration.relaxation_step_scale`:
+    the relaxation factor under ``acceleration="fixed"``, 1 otherwise)
+    and a valid amplification is ``1/(1 - rho)`` with ``rho`` in
+    ``[0, 1)``.  The ``max`` is what keeps the estimate from dropping
+    below the residual under *under*-relaxation, and it is why the two
+    consequences asserted here survive ``omega``: a group that meets
+    the new criterion also meets the old one -- so D2's guarantee that
+    ``converged=True`` describes the state you were handed is not
+    weakened -- and a rejected estimate degrades to exactly the old
+    criterion rather than to something unpredictable.
     """
     gm = _diagnostics_recipe(recipe).build()
     gm.step()
@@ -231,8 +236,12 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
         note(f"{key}: {d}")
         if d["bound_valid"]:
             assert d["amplification"] >= 1.0
+            scale = relaxation_step_scale(
+                groups[key].acceleration, groups[key].relaxation,
+            )
             assert d["error_estimate"] == pytest.approx(
-                d["residual"] * d["amplification"], rel=1e-5,
+                d["residual"] * max(scale * d["amplification"], 1.0),
+                rel=1e-5,
             )
             assert d["gradient_error_bound"] == pytest.approx(
                 d["error_estimate"],
@@ -286,3 +295,184 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
         assert a["bound_valid"] == b["bound_valid"]
         assert a["residual"] == pytest.approx(b["residual"], rel=1e-4,
                                               abs=1e-9, nan_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Two further mechanisms, from the 2026-09-19 coupling audit
+#
+# The generated recipes above draw two- and three-node graphs of library
+# nodes, and neither mechanism showed up there: one needs a *chosen*
+# relaxation factor on a group slow enough to have a tail, the other
+# needs a *chosen* spectrum with a stiff mode hiding behind a fast one.
+# Both are cheap to build directly from an affine node, and the fixed
+# point is then in closed form, so these two properties measure against
+# the exact answer rather than against a tighter solve.
+#
+# See ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+# ---------------------------------------------------------------------------
+
+from maddening.core.graph_manager import GraphManager  # noqa: E402
+from maddening.core.node import (  # noqa: E402
+    BoundaryInputSpec,
+    SimulationNode,
+)
+
+
+class _Affine(SimulationNode):
+    """``x <- gain * u + bias`` on ``n`` independent modes."""
+
+    def __init__(self, name, gain, bias):
+        super().__init__(name=name, timestep=1.0)
+        self._gain = jnp.asarray(gain, jnp.float32)
+        self._bias = jnp.asarray(bias, jnp.float32)
+        self._shape = jnp.shape(self._gain)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(self._shape, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=self._shape, dtype=jnp.float32,
+                                       description="u")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._gain * boundary_inputs["u"] + self._bias}
+
+
+def _affine_cycle(gain, bias, **group_kw):
+    """``a -> b -> a`` carrying ``diag(gain)``; one sweep is ``rho = gain``.
+
+    ``b`` is the identity relay, so a Gauss-Seidel pass over the group
+    advances ``a`` by ``x -> gain * x + bias`` and the fixed point is
+    ``bias / (1 - gain)`` per mode.
+    """
+    ones = jnp.ones_like(jnp.asarray(gain, jnp.float32))
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain, bias))
+    gm.add_node(_Affine("b", ones, jnp.zeros_like(ones)))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, **group_kw)
+    gm.compile()
+    return gm
+
+
+def _exact_distance(gm, gain, bias):
+    """Distance to the analytic fixed point, in the group's own L2 norm."""
+    exact = [b / (1.0 - g) for g, b in zip(jnp.atleast_1d(jnp.asarray(gain)),
+                                           jnp.atleast_1d(jnp.asarray(bias)))]
+    exact = [float(v) for v in exact]
+    total = 0.0
+    for node in ("a", "b"):
+        got = [float(v) for v in jnp.atleast_1d(gm.get_node_state(node)["x"])]
+        ref = max(max(abs(v) for v in got), max(abs(v) for v in exact))
+        if ref == 0.0:
+            continue
+        total += sum(((g - e) / ref) ** 2 for g, e in zip(got, exact))
+    return total ** 0.5
+
+
+#: Not tighter than 1e-3: the norm is relative, the fixed points here
+#: are O(1)-O(100), and float32 resolves ~1e-7 of them, so below about
+#: 1e-4 the residual *ratio* the estimate rests on is reading round-off.
+_ANALYTIC_TOLERANCE = 1e-3
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(
+    gain=st.floats(min_value=0.4, max_value=0.95),
+    omega=st.floats(min_value=0.3, max_value=1.95),
+)
+def test_the_estimate_is_invariant_to_the_relaxation_factor(gain, omega):
+    """``relaxation`` changes how far each pass goes, not how far is left.
+
+    The exact statement, for a single mode of rate ``rho`` under
+    constant relaxation ``omega``.  The iterate contracts at
+    ``mu = 1 - omega * (1 - rho)`` and the step it takes is
+    ``omega * (F(x) - x)``, so the distance to the fixed point is
+    ``residual / (1 - rho)`` -- free of ``omega`` -- while the
+    geometric series of steps sums to
+    ``omega * residual / (1 - |mu|)``.  The two agree exactly when
+    ``mu >= 0`` and the series is *larger* when ``mu < 0``, because an
+    over-relaxed iterate that overshoots walks further than the
+    straight-line distance it covers.  So:
+
+    * the estimate never understates, which is what summing residuals
+      instead of steps used to break (``est/true`` tracked ``1/omega``:
+      0.68 at ``omega=1.5``, 0.51 at ``omega=1.95``);
+    * and it is tight, not merely safe, wherever the iteration does not
+      overshoot.
+    """
+    bias = 1.0
+    gm = _affine_cycle(
+        gain, bias, max_iterations=500, tolerance=_ANALYTIC_TOLERANCE,
+        acceleration="fixed", relaxation=omega,
+    )
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assume(d["converged"] and d["bound_valid"])
+    distance = _exact_distance(gm, gain, bias)
+    assume(distance > 0.0)
+
+    ratio = d["error_estimate"] / distance
+    mu = 1.0 - omega * (1.0 - gain)
+    note(f"gain={gain} omega={omega} mu={mu} ratio={ratio} {d}")
+    assert ratio >= 0.9, (
+        f"understated by {1 / ratio:.2f}x at relaxation={omega}: the series "
+        f"is summing residuals rather than the steps the iterate takes"
+    )
+    if mu >= 0.05:
+        assert ratio <= 1.2, (
+            f"a non-overshooting iteration should be estimated tightly; "
+            f"got {ratio:.3f} at gain={gain}, omega={omega}"
+        )
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Recorded, not accepted: `rho` is read from the residual sequence, "
+    "which reports the mode dominating the *step*.  Until the fast mode "
+    "has decayed, that sequence is indistinguishable from a single-mode "
+    "decay at the fast rate -- so no test on it, including the two-step "
+    "sqrt guard, can tell that the remaining error already belongs to a "
+    "much slower mode.  The pinned example is the audit's: (0.999, 0.2) "
+    "reports 9.19e-05 against a true distance of 1.12e-02, 122x, with "
+    "bound_valid=True.  A real fix needs the spectrum rather than the "
+    "residual sequence and is post-0.4.0 work.  Flipping this to a pass "
+    "means the estimate became a bound: update "
+    "benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md, the "
+    "caveat on _fixed_point_while, and the example-based twin in "
+    "tests/core/test_coupling_error_bound.py."
+))
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(
+    rho_slow=st.floats(min_value=0.99, max_value=0.9999),
+    rho_fast=st.floats(min_value=0.0, max_value=0.5),
+    c_slow=st.floats(min_value=1e-6, max_value=1e-3),
+)
+@example(rho_slow=0.999, rho_fast=0.2, c_slow=1e-5)
+def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
+    rho_slow, rho_fast, c_slow,
+):
+    """The property ``error_estimate`` would need for its name to hold.
+
+    A two-mode contraction, generated: a stiff mode carrying very
+    little per pass but amplified by ``1/(1 - rho_slow)``, and a fast
+    one carrying O(1) per pass.  The stiff mode owns the distance to
+    the fixed point long before it owns the residual.
+    """
+    gain = (rho_slow, rho_fast)
+    bias = (c_slow, 1.0)
+    gm = _affine_cycle(gain, bias, max_iterations=60,
+                       tolerance=_ANALYTIC_TOLERANCE)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assume(d["converged"] and d["bound_valid"])
+    distance = _exact_distance(gm, gain, bias)
+    assume(distance > 0.0)
+    note(f"rho={gain} c={bias} distance={distance} {d}")
+    assert d["error_estimate"] >= distance, (
+        f"reported {d['error_estimate']:.4e} for a true distance of "
+        f"{distance:.4e} ({distance / d['error_estimate']:.0f}x)"
+    )

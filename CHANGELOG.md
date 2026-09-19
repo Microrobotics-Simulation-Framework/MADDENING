@@ -212,6 +212,12 @@ guidance; the itemized changes follow.
 - **A coupling group no longer reports `converged=True` with a small field far
   from its fixed point** — `atol` removes a field from the norm, so it defaults to
   `0.0` and is live under every norm — and `iterations` at the cap agrees by solver
+- **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
+  `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
+  1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
+- **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
+  adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
+- **`error_estimate` accounts for `relaxation`** — and is an estimate, not a bound
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64
@@ -389,6 +395,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- Every anomaly whose defect is still reachable now records an open-ended
+  `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
+  workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had
 - MADD-ANO-005: `converged=True` is a residual test, not a bound on the
   distance to the fixed point -- calibrate it by re-solving at a 100x tighter
   tolerance (minor, open, context_dependent)

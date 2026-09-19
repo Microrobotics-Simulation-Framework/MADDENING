@@ -352,7 +352,7 @@ def _fixed_point_while(
        dominates, even though the distance still to travel is already
        owned by the slow one.  Measured: modes ``(0.999, 0.2)`` at
        ``tolerance=1e-4`` report ``9.19e-05`` against a true distance
-       of ``1.12e-02``, a 122x understatement, with ``bound_valid``
+       of ``1.12e-02``, a 122x understatement, with ``ratio_usable``
        and ``converged`` both true.  The two-step ``sqrt`` guard in
        ``error_amplification`` reads the same fast rate and does not
        help, and no test on the residual sequence can: the sequence is
@@ -367,16 +367,18 @@ def _fixed_point_while(
        quasi-Newton step, which is not a multiple of ``F(x) - x``.
     4. *A non-monotone ratio* — the one that is caught.  ``rho >= 1``,
        a zero predecessor or a non-finite residual reject the estimate
-       and ``bound_valid`` records it.
+       and ``ratio_usable`` records it.
 
-    ``bound_valid`` therefore reports a usable *ratio*, not a valid
-    *bound*; see
+    ``ratio_usable`` therefore reports exactly condition 4 and nothing
+    else: a usable *ratio*, not a valid *bound*.  That is why it is no
+    longer called ``bound_valid`` — that name asserted all four while
+    checking one.  The old key still reads through 0.4.x and warns; see
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 
     On a non-monotone sequence the ratio is meaningless, so it is
     rejected (``rho >= 1``, a zero predecessor, a non-finite residual)
     and the raw residual test stands in, with
-    ``coupling_diagnostics()['bound_valid']`` recording that it did.
+    ``coupling_diagnostics()['ratio_usable']`` recording that it did.
     When ``rho`` approaches 1 the bound diverges, which is the honest
     answer — a group that is barely contracting *is* far from its fixed
     point — and it costs iterations that the old criterion did not
@@ -986,6 +988,84 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
+
+
+# ------------------------------------------------------------------
+# Deprecated ``coupling_diagnostics()`` field names
+# ------------------------------------------------------------------
+
+#: 0.4.0 renames, old name -> new name.  Both old names asserted a
+#: *bound* the code does not establish; see
+#: :class:`_CouplingDiagnostics` and
+#: ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+#: Reading through the old name still works through 0.4.x and warns;
+#: the old names are removed in 0.5.0.
+_DIAGNOSTICS_RENAMES = {
+    "bound_valid": "ratio_usable",
+    "gradient_error_bound": "gradient_error_estimate",
+}
+
+#: Why each name moved, quoted into the warning so a caller does not
+#: have to find the memo to learn what it had been reading.
+_DIAGNOSTICS_RENAME_REASON = {
+    "bound_valid": (
+        "the flag checks one of the four conditions the estimate rests "
+        "on -- that the contraction ratio was monotone and finite -- "
+        "and not that the estimate bounds the error; the worst measured "
+        "understatement with it True is 122x"
+    ),
+    "gradient_error_bound": (
+        "it is numerically 'error_estimate' and inherits every way that "
+        "number can understate, so it is an estimate and not a bound"
+    ),
+}
+
+
+class _CouplingDiagnostics(dict):
+    """A per-group diagnostics mapping that still answers the 0.3.x names.
+
+    ``coupling_diagnostics()`` renamed two fields in 0.4.0, because each
+    called itself a *bound*:
+
+    * ``bound_valid`` -> ``ratio_usable``
+    * ``gradient_error_bound`` -> ``gradient_error_estimate``
+
+    Reading an old name returns the same value and emits a
+    :class:`DeprecationWarning`.  The old names are removed in 0.5.0.
+
+    They are deliberately **not** in :meth:`keys`, iteration or
+    :func:`len`, so ``dict(diag)``, a JSON dump and anything else that
+    enumerates the report carry only the new names: a recorded artefact
+    should not preserve a name the next release deletes.
+
+    Only reads are aliased.  Writing, popping or ``setdefault``-ing an
+    old name is not forwarded -- this mapping is a report, and a caller
+    mutating it is not a compatibility case anyone had.
+    """
+
+    __slots__ = ()
+
+    def _resolve(self, key):
+        """Map a deprecated key to its replacement, warning; else pass through."""
+        new = _DIAGNOSTICS_RENAMES.get(key)
+        if new is None or not dict.__contains__(self, new):
+            return key
+        warnings.warn(
+            f"coupling_diagnostics()[{key!r}] is deprecated: "
+            f"{_DIAGNOSTICS_RENAME_REASON[key]}.  Use {new!r}, which "
+            f"carries the same value.  The old name is removed in 0.5.0.",
+            DeprecationWarning, stacklevel=3,
+        )
+        return new
+
+    def __getitem__(self, key):
+        return dict.__getitem__(self, self._resolve(key))
+
+    def get(self, key, default=None):
+        return dict.get(self, self._resolve(key), default)
+
+    def __contains__(self, key):
+        return dict.__contains__(self, self._resolve(key))
 
 
 def _holds_tracer(state: dict) -> bool:
@@ -4409,7 +4489,7 @@ class GraphManager:
             - ``"amplification"`` : float — the estimated
               ``1 / (1 - rho)`` of the group's slowest mode, from the
               ratio of the last two residuals.  ``nan`` when the
-              estimate was rejected (see ``"bound_valid"``).
+              estimate was rejected (see ``"ratio_usable"``).
             - ``"error_estimate"`` : float — ``residual * omega *
               amplification``, an estimate of ``||x - x*||`` in the
               same norm: how far the returned state is from the fixed
@@ -4420,33 +4500,54 @@ class GraphManager:
               makes those longer than the residual that is measured.
               Falls back to ``residual`` when the estimate was
               rejected.  **It is an estimate, not a bound**: it can
-              understate, and by large factors — see ``"bound_valid"``
+              understate, and by large factors — see ``"ratio_usable"``
               and
               ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
-            - ``"bound_valid"`` : bool — whether the contraction
-              *ratio* was usable this step.  ``False`` on a
-              non-monotone (non-normal) sequence, on a zero or
-              non-finite predecessor, and at ``max_iterations=1``,
-              where there is no pair of residuals to take a ratio of.
-              The criterion then falls back to the raw residual test,
-              which is what ``converged`` reports.  ``True`` does
-              **not** certify the estimate: three mechanisms break it
-              that this flag cannot see (a measure that is not a
-              metric, a ``rho`` read from a faster mode than the one
-              holding the remaining error, and Aitken's / IQN's
-              uncorrected step scale).  The worst measured
-              understatement with ``bound_valid=True`` is 122x.  See
-              :func:`_fixed_point_while` for all three.
-            - ``"gradient_error_bound"`` : float — how far the IFT
+            - ``"ratio_usable"`` : bool — **whether the contraction
+              ratio was usable this step, and nothing more.**  The
+              estimate above rests on four conditions; this flag checks
+              exactly one of them, the fourth.
+
+              *What ``True`` means*: ``rho < 1``, the predecessor
+              residual was non-zero, and every residual in the ratio
+              was finite — so ``1/(1 - rho)`` is a number worth
+              extrapolating from, and the criterion used the estimate.
+
+              *What ``True`` does not mean*: it does **not** certify
+              that the estimate bounds the distance to the fixed point.
+              Three further conditions are unchecked — the measure
+              obeying the triangle inequality, ``rho`` being at least
+              the *asymptotic* rate rather than the rate of the mode
+              that happens to dominate the step, and the step scale
+              being the one actually applied (uncorrected under
+              ``"aitken"`` and ``"iqn-*"``).  Each is measured broken
+              in 0.4.0; the worst is a **122x** understatement with
+              ``ratio_usable=True`` and ``converged=True``.  See
+              :func:`_fixed_point_while` for all four.
+
+              ``False`` on a non-monotone (non-normal) sequence, on a
+              zero or non-finite predecessor, and at
+              ``max_iterations=1``, where there is no pair of residuals
+              to take a ratio of.  The criterion then falls back to the
+              raw residual test, which is what ``converged`` reports.
+
+              *Renamed in 0.4.0* from ``"bound_valid"``, which asserted
+              all four conditions while checking one.  The old key is
+              still readable through 0.4.x, warns, and is removed in
+              0.5.0.
+            - ``"gradient_error_estimate"`` : float — how far the IFT
               adjoint may be from a finite difference of this group's
               own forward, ``residual * cond(I - dF/dx)`` estimated
               along the observed slowest mode (numerically the same
               number as ``"error_estimate"``: both are
               ``(I - dF/dx)^-1`` applied to a residual).  ``inf`` when
-              ``bound_valid`` is ``False`` — no contraction was
-              observed, so nothing bounds the disagreement.  Being the
-              same number, it inherits every way ``"error_estimate"``
-              can understate.
+              ``ratio_usable`` is ``False`` — no contraction was
+              observed, so nothing constrains the disagreement.  Being
+              the same number, it inherits every way
+              ``"error_estimate"`` can understate, which is why it is
+              an estimate and not a bound.  *Renamed in 0.4.0* from
+              ``"gradient_error_bound"``, on the same alias terms as
+              ``"ratio_usable"``.
             - ``"converged"`` : bool — the *error estimate* met the
               group's threshold (``tolerance`` for the L2 norm, ``1.0``
               for the mixed / interface norms).  ``False`` means the
@@ -4465,7 +4566,7 @@ class GraphManager:
             the residual sequence, which is what MADD-ANO-005 recorded
             as missing.  Where the ratio is unusable the flag degrades
             to the old residual test and says so through
-            ``"bound_valid"``.  It is strictly stronger than the
+            ``"ratio_usable"``.  It is strictly stronger than the
             pre-0.4.0 flag in every case and still not a guarantee —
             do not treat ``converged=True`` as certifying a distance.
 
@@ -4534,17 +4635,17 @@ class GraphManager:
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance
                 )
-                result[key] = {
+                result[key] = _CouplingDiagnostics({
                     "iterations": int(meta[iter_key]),
                     "residual": residual,
                     "amplification": amp if valid else float("nan"),
                     "error_estimate": error_estimate,
-                    "bound_valid": valid,
-                    "gradient_error_bound": (
+                    "ratio_usable": valid,
+                    "gradient_error_estimate": (
                         error_estimate if valid else float("inf")
                     ),
                     "converged": error_estimate <= threshold,
-                }
+                })
         return result
 
     # ------------------------------------------------------------------

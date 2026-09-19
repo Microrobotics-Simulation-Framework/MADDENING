@@ -331,8 +331,11 @@ converge, did the fit find a gradient — it cannot be generated. Say so, and
 knows what that test's `max_examples` actually buys.
 
 **Never reach for `suppress_health_check=[HealthCheck.filter_too_much]`.**
-It makes the red go away and leaves the test searching a fraction of its
-stated budget behind a green tick.
+It makes the red go away and deletes the only signal anyone gets that the
+gate is getting worse — the test goes on spending most of its wall-clock on
+draws it throws away, and the next person to narrow that strategy has
+nothing to notice. Measure it and fix the generator, or measure it and
+record the residual; suppressing is neither.
 
 **Overruns are a different problem.** The audit reports them in their own
 column. An `overrun` is Hypothesis running out of entropy for a large draw,

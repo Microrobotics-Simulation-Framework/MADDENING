@@ -12,9 +12,9 @@ which aborts a run that accumulates 50 rejected draws before 10 accepted ones
 (``max_invalid_draws`` / ``max_valid_draws`` in
 ``hypothesis.internal.conjecture.engine``).  That is a *sampling* test on the
 first few dozen draws, so it is a step function with a very soft edge: a test
-at a true 60% rejection rate fails it roughly once in a thousand runs, one at
-85% roughly once in three.  Which is how a test can sit green for months and
-then go red for whoever next narrows a strategy by nine points.
+at a true 60% filter rate trips it about once in 28,000 runs, one at 70% about
+once in 140, and one at 85% three runs in five.  Which is how a test can sit
+green for months and then go red for whoever next narrows a strategy.
 
 What a high rejection rate does NOT do, on Hypothesis 6.165.x, is reduce the
 number of examples actually checked.  The engine keeps drawing until it has
@@ -33,10 +33,15 @@ Run the audit over the property suites and print the table::
         python scripts/audit_property_rejection.py \\
             tests/property tests/verification/hypothesis
 
-Fail if any test is over the gate (this is what
-``tests/property/test_draw_rejection_budget.py`` runs in CI)::
+Fail if any test is over the gate.  The ``verify-hypothesis`` job in
+``.github/workflows/ci.yml`` runs the suite this way, so the measurement
+costs nothing beyond the run it was already doing::
 
-    python scripts/audit_property_rejection.py --check tests/property
+    python scripts/audit_property_rejection.py --check \
+        --pytest-arg=-v tests/verification/hypothesis/
+
+``tests/property/test_draw_rejection_budget.py`` tests this harness rather
+than using it: the accounting, the risk model, and that the gate can fail.
 
 Options of note: ``--json PATH`` writes the raw per-test record,
 ``--markdown`` emits the table as Markdown, ``--max-rejection`` overrides the

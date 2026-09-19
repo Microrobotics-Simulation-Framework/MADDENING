@@ -212,6 +212,9 @@ guidance; the itemized changes follow.
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact
+- **A compliance gate no longer calls an optional subpackage's symbol stale**:
+  a `maddening.usd.*` reference in an environment without the `usd` extra is
+  reported as *not checked*, with the extra named, instead of failing the run
 - **A coupling group no longer reports `converged=True` with a small field far
   from its fixed point** — `atol` removes a field from the norm, so it defaults to
   `0.0` and is live under every norm — and `iterations` at the cap agrees by solver

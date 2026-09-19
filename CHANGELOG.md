@@ -209,6 +209,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
+  `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
+  1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
 - **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
   adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
 - **`error_estimate` accounts for `relaxation`** — and is an estimate, not a bound

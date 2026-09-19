@@ -43,6 +43,8 @@ to cost one pass.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -79,7 +81,11 @@ def _scripted_loop(
     seeds the two-consecutive-passes streak.  The default is above any
     threshold used here: "the run did not start out converged".
 
-    Returns ``(n_iters, final_res)``.
+    Returns ``(n_iters, final_res)``.  ``n_iters`` is what the loop
+    publishes to the diagnostics: the coupling passes that produced the
+    state returned, counting the pass before the loop -- so it is the
+    body count on a criterion exit and one more at the cap, where the
+    state returned is the successor the last body produced.
     """
     x0 = jnp.asarray([1.0, 0.0])
     schedule = jnp.asarray(residuals, dtype=x0.dtype)
@@ -195,7 +201,19 @@ def _affine_graph(x0a=0.0, x0b=0.0, **group_kw):
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
     kw = dict(diagnostics=True)
     kw.update(group_kw)
-    gm.add_coupling_group(["a", "b"], **kw)
+    with warnings.catch_warnings():
+        # ``max_iterations=1`` returns before the accelerator is built,
+        # so ``CouplingGroup`` reports the whole acceleration family
+        # inert there -- correctly, and that inertness is exactly what
+        # the cap-1 cells of the tests below assert.  Only that one
+        # message is filtered, so a knob this file sets by mistake under
+        # any other configuration still fails on the warning.
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*is ignored under max_iterations=1.*",
+            category=UserWarning,
+        )
+        gm.add_coupling_group(["a", "b"], **kw)
     gm.compile()
     return gm
 
@@ -283,7 +301,10 @@ def test_aitken_at_the_cap_does_not_report_a_lone_dip_as_convergence():
     n_iters, final_res = _scripted_loop(
         "aitken", never_paired, max_iter=9,
     )
-    assert n_iters == 8, "the loop runs at most max_iter - 1 body passes"
+    assert n_iters == 9, (
+        "the loop runs max_iter - 1 bodies and reports the passes that "
+        "produced what it returns, which at the cap is max_iter"
+    )
     assert final_res > 1e-2, (
         f"reported {final_res}: the last pass dipped to 1e-3, and the "
         "measurement of the state that dip produced springs back to 1.0"
@@ -393,9 +414,11 @@ def test_both_coupling_solvers_report_the_same_residual_and_converged_flag(
     ``strict_convergence`` exists only on the ift path, so a
     disagreement turns a clean run into a runtime error.
 
-    ``iterations`` is deliberately not compared: the two paths count
-    passes differently (one counts body iterations, the other every
-    pass) and that difference predates this file.
+    ``iterations`` is compared too, and at the cap as well as on a
+    converged exit: the two paths used to count differently there (the
+    while loop published its body count, one short of the passes it
+    had run), so the ``iterations >= max_iterations`` check the
+    diagnostics document never fired under the default solver.
     """
     if acceleration == "iqn-ils" and cap == 1:
         # A cap of one returns before any accelerator is constructed,
@@ -408,12 +431,44 @@ def test_both_coupling_solvers_report_the_same_residual_and_converged_flag(
                            max_iterations=cap, tolerance=tolerance)
         gm.step()
         d = gm.coupling_diagnostics()["a+b"]
-        seen[solver] = (d["residual"], d["converged"])
+        seen[solver] = (d["residual"], d["converged"], d["iterations"])
     assert seen["ift"][1] == seen["fori"][1], (
         f"converged differs by solver: {seen}"
     )
     assert seen["ift"][0] == pytest.approx(seen["fori"][0], abs=1e-7), (
         f"residual differs by solver: {seen}"
+    )
+    assert seen["ift"][2] == seen["fori"][2], (
+        f"iterations differ by solver: {seen}"
+    )
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+@pytest.mark.parametrize("cap", [2, 3, 8])
+def test_a_group_that_ran_out_of_passes_reports_the_cap_it_ran_out_of(
+    solver, cap,
+):
+    """The documented cap check has to be able to fire.
+
+    ``coupling_diagnostics()['iterations']`` is documented as the
+    coupling iterations used, and ``nothing here moves when a graph
+    migrates``; the obvious use of it is ``iterations >=
+    max_iterations`` to detect a group that exhausted its budget.  The
+    ift path published its ``while_loop`` body count, which is one
+    short of the passes it ran -- the first pass happens before the
+    loop -- so that check was false at every cap under the default
+    solver, and a user who moved from ``fori`` saw their cap detection
+    stop working with no other symptom.
+    """
+    gm = _affine_graph(acceleration="none", solver=solver,
+                       max_iterations=cap, tolerance=1e-12)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["converged"] is False, (
+        "fixture premise: 1e-12 is out of reach at this cap"
+    )
+    assert d["iterations"] == cap, (
+        f"a group that exhausted {cap} passes must say so: {d}"
     )
 
 

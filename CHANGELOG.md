@@ -212,6 +212,9 @@ guidance; the itemized changes follow.
 - **A compliance gate no longer calls an optional subpackage's symbol stale**:
   a `maddening.usd.*` reference in an environment without the `usd` extra is
   reported as *not checked*, with the extra named, instead of failing the run
+- **A coupling group no longer reports `converged=True` with a small field far
+  from its fixed point** — `atol` removes a field from the norm, so it defaults to
+  `0.0` and is live under every norm — and `iterations` at the cap agrees by solver
 - **A recompile no longer re-phases a multi-rate graph or restarts a coupling warm
   start** — only graphs with a rate divider > 1 or a warm start were ever affected;
   `set_param_spec` and `external_inputs` are now checked as strictly as `params`

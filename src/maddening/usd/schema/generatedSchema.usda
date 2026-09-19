@@ -43,7 +43,7 @@ class MaddeningCouplingGroup "MaddeningCouplingGroup" (
     int maddening:maxIterations = 10
     double maddening:tolerance = 1e-6
     string maddening:convergenceNorm = "l2"
-    double maddening:atol = 1e-8 (doc = "Absolute tolerance of the mixed norm")
+    double maddening:atol = 0 (doc = "Convergence dead band: a field at or below it leaves the norm.  0 asserts no noise floor")
     double maddening:rtol = 1e-6 (doc = "Relative tolerance of the mixed norm")
     string maddening:acceleration = "none"
     double maddening:relaxation = 1.0

@@ -453,8 +453,11 @@ def _fixed_point_while(
     ``_TWO_PASS_EXIT``.
 
     Returns ``(x_star, n_iters, final_res, final_amp, (V, W))``:
-    ``n_iters`` is the number of body iterations run (as a float, for
-    the diagnostics carry), ``final_amp`` the amplification
+    ``n_iters`` is the number of coupling passes that produced
+    ``x_star`` (as a float, for the diagnostics carry) -- the pre-loop
+    pass plus the bodies whose update it kept, which is the count the
+    fori path reports and is ``max_iter`` exactly at the cap, not the
+    bare body count -- ``final_amp`` the amplification
     ``1/(1 - rho)`` of the pair of residuals that ends on ``x_star``
     (``0.0`` where the estimate was rejected), and ``(V, W)`` the IQN
     secant matrices (an empty tuple for other accelerations).
@@ -637,7 +640,20 @@ def _fixed_point_while(
         x_star,
     )
     vw = (acc[0], acc[1]) if is_iqn else ()
-    return x_star, n_iters.astype(dtype), final_res, final_amp, vw
+    # ``iterations`` counts the coupling passes that produced the state
+    # being returned, which is what the fori path has always reported
+    # and what ``coupling_diagnostics`` promises does not move when a
+    # graph migrates.  ``n_iters`` counts loop bodies, and the two
+    # differ by exactly one exit: body ``k`` measures ``x_{k-1}`` (the
+    # product of ``k`` passes, counting the pre-loop one) and produces
+    # ``x_k``.  A criterion exit returns ``x_meas = x_{k-1}``, so
+    # ``n_iters`` is already the pass count; the cap returns ``x_next =
+    # x_k``, one pass further along.  Reporting ``n_iters`` at the cap
+    # published ``max_iterations - 1`` there, so the documented
+    # ``iterations >= max_iterations`` cap check never fired under the
+    # default solver.
+    n_passes = jnp.where(criterion_met, n_iters, n_iters + jnp.int32(1))
+    return x_star, n_passes.astype(dtype), final_res, final_amp, vw
 
 
 def _ift_solve_impl(
@@ -1541,6 +1557,15 @@ def _run_coupled_block_impl(
             # request about cost -- one staggered pass has to cost one
             # pass, and the profiler's one-iteration variant depends on
             # it.  So this cap reports its single measurement.
+            #
+            # ``solver="ift"`` never reaches ``_ift_solve`` here, so the
+            # gradient is straight through the one pass rather than the
+            # implicit-function derivative of a fixed point.  That is
+            # the only derivative available -- one pass defines no fixed
+            # point to differentiate -- and it is what ``"fori"`` gives
+            # too, which is why the solvers still agree.  Documented on
+            # ``CouplingGroup.max_iterations``; ``strict_convergence``
+            # is checked below so the caller still hears about it.
             single_r = _compute_residual(state_after_first, new_state_inner)
             # One pass means one residual and no ratio, so there is no
             # error bound to be had: the amplification is reported
@@ -3598,6 +3623,37 @@ class GraphManager:
                         f"of {nn!r} (state fields: {sorted(have)})"
                     )
 
+        # ``subcycling=True`` on a group whose nodes all share a
+        # timestep is demoted to ``use_subcycling = False`` in
+        # ``_run_coupled_block_impl``, which leaves
+        # ``waveform_iterations`` and ``boundary_interpolation`` dead
+        # while ``CouplingGroup``'s own ``subcycling`` predicate says
+        # they are live.  The group cannot see that -- it does not know
+        # its members' timesteps -- so the rule is enforced here, where
+        # the nodes are known and the first step has not run yet.
+        from maddening.core.coupling.group import (
+            _FIELD_DEFAULTS,
+            inert_uniform_timestep_message,
+        )
+        _SUBCYCLED_ONLY = ("waveform_iterations", "boundary_interpolation")
+        for g in self._coupling_groups:
+            if not g.subcycling:
+                continue        # the CouplingGroup rule already covers it
+            timesteps = {self._nodes[nn].timestep for nn in g.nodes
+                         if nn in self._nodes}
+            if len(timesteps) > 1:
+                continue        # genuinely subcycled: the knobs are live
+            named = tuple(
+                name for name in _SUBCYCLED_ONLY
+                if getattr(g, name) != _FIELD_DEFAULTS[name]
+            )
+            if named:
+                warnings.warn(
+                    inert_uniform_timestep_message(g, named),
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         # Persistent XLA cache, if the user asked for one via the env var
         # (see maddening.core.simulation.compile_cache).
         from maddening.core.simulation.compile_cache import enable_from_env
@@ -4338,7 +4394,11 @@ class GraphManager:
             Keyed by coupling group identifier (sorted node names
             joined by ``"+"``), each containing:
 
-            - ``"iterations"`` : int — coupling iterations used
+            - ``"iterations"`` : int — coupling passes used to produce
+              the state this step returned, counting the first
+              staggered pass.  Equal to ``max_iterations`` exactly when
+              the group exhausted its budget, whichever solver ran, so
+              ``iterations >= max_iterations`` is a usable cap check.
             - ``"residual"`` : float — ``||F(x) - x||`` in the group's
               convergence norm for the state ``x`` this step returned.
               At ``max_iterations=1`` it is the distance the single

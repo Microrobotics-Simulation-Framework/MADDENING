@@ -4,6 +4,8 @@ Verifies that nodes with different timesteps can be coupled via
 subcycling, with correct time interpolation of boundary conditions.
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -90,6 +92,47 @@ class TestSubcyclingValidation:
         gm.compile()
         state = gm.run_scan(50)
         assert jnp.isfinite(state["fast"]["position"])
+    def test_the_knobs_a_demoted_subcycling_group_never_reads_warn(self):
+        """``subcycling=True`` on uniform timesteps is a silent demotion.
+
+        ``_run_coupled_block_impl`` sets ``use_subcycling = False`` when
+        every member node shares a timestep, which leaves
+        ``waveform_iterations`` and ``boundary_interpolation`` dead --
+        while ``CouplingGroup``'s own predicate, which can only see
+        ``subcycling``, says they are live.  Three separate readers have
+        now been caught by that gap.  ``CouplingGroup`` cannot close it
+        (it does not know its members' timesteps) so ``compile()`` does,
+        which is still before the first step.
+        """
+        gm = _make_uniform_reference()
+        gm.add_coupling_group(
+            ["fast", "slow"], max_iterations=10, tolerance=1e-8,
+            subcycling=True, waveform_iterations=3,
+            boundary_interpolation="quadratic",
+        )
+        with pytest.warns(UserWarning, match="demoted") as caught:
+            gm.compile()
+        (message,) = [str(w.message) for w in caught]
+        assert "waveform_iterations=3" in message, message
+        assert "boundary_interpolation='quadratic'" in message, message
+
+    def test_a_genuinely_subcycled_group_is_not_warned_about(self):
+        """The knobs are live where the timesteps differ, so say nothing.
+
+        A warning that fires on correct usage is one people learn to
+        silence, and the next inert knob goes out with it.
+        """
+        gm = _make_mixed_rate_springs()
+        gm.add_coupling_group(
+            ["fast", "slow"], max_iterations=10, tolerance=1e-8,
+            subcycling=True, waveform_iterations=3,
+            boundary_interpolation="quadratic",
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gm.compile()
+        assert [w for w in caught if issubclass(w.category, UserWarning)
+                and not issubclass(w.category, DeprecationWarning)] == []
 
 
 # ==================================================================

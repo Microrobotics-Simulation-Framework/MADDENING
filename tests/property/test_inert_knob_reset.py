@@ -221,7 +221,17 @@ def test_a_reset_moves_nothing_the_configuration_actually_reads(recipe):
                         f"than to its default "
                         f"{_FIELD_DEFAULTS[field.name]!r}"
                     )
-                    assert not any(
+                    # ``all``, not ``any``: a field can be governed by
+                    # more than one rule -- ``linear_solver`` is dead
+                    # both under ``solver="fori"`` and at
+                    # ``max_iterations=1`` -- and it is read only where
+                    # every rule that governs it says so.  That is the
+                    # same conjunction ``without_inert_knobs`` applies
+                    # (it resets on the first rule that says inert), so
+                    # testing it with ``any`` would call a correct reset
+                    # a violation the moment a second rule landed on a
+                    # field.
+                    assert not all(
                         rule.live(reset) for rule in _INERT_RULES
                         if field.name in rule.fields
                     ), f"the helper reset {field.name}, which is live here"

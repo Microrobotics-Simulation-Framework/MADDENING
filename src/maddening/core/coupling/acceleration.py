@@ -60,10 +60,28 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     is a ratio, so it says the same thing whether a force is quoted in
     newtons or micronewtons.
 
+    **The dead band is an assertion the caller makes, so its default
+    asserts nothing (``atol=0.0``).**  Leaving the norm is not the same
+    as being held to a looser threshold: an excluded field contributes
+    exactly zero, so a group every one of whose moving fields is
+    excluded reports ``residual=0.0, converged=True`` after one pass
+    however far it is from its fixed point, and no ``tolerance`` can
+    contradict it.  Only the caller knows which of their quantities is
+    noise -- a float32 holding 1e-9 carries the same seven significant
+    digits as one holding 1.0, so nothing here can tell "small because
+    it is nothing" from "small because it is measured in metres".
+    0.4.0 changed ``atol`` from a floor under the scale, where 1e-8
+    merely *loosened* a small field's criterion, into this exclusion,
+    where 1e-8 *removes* it; the default had to move with the meaning.
+    Set it to the field's noise floor when you have one.
+
     Dividing is safe by construction — the denominator is only ever
     used where ``ref > atol``, and elsewhere the ``where`` selects a
     zero contribution — so a field that is legitimately at zero neither
-    divides by something tiny nor blocks convergence forever.
+    divides by something tiny nor blocks convergence forever.  At the
+    default that ``scale > 0`` term is the whole of the guard, and it
+    is the only exclusion that needs no units: a field with no scale
+    has no ratio to contribute.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
@@ -77,7 +95,7 @@ def coupling_residual_l2(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
     node_names: list[str],
-    atol: float = 1e-8,
+    atol: float = 0.0,
 ) -> jnp.ndarray:
     """L2 norm of the *relative* state change between iterations.
 
@@ -97,8 +115,10 @@ def coupling_residual_l2(
         Node names to include in the norm.
     atol : float
         Dead band: a field whose magnitude does not exceed ``atol`` is
-        treated as being at zero and contributes nothing.  See
-        :func:`_scaled_change`.
+        treated as being at zero and contributes nothing, so the group
+        stops being held to any criterion on it.  The default asserts
+        no noise floor and excludes only a field with no scale at all;
+        see :func:`_scaled_change` for why the caller owns this number.
 
     Returns
     -------
@@ -160,7 +180,9 @@ def coupling_residual_mixed(
         Node names to include in the norm.
     atol : float
         Dead band, in the field's own units: below this a field counts
-        as zero.
+        as zero and leaves the norm, so the group is no longer held to
+        any criterion on it.  ``CouplingGroup``'s default is ``0.0`` --
+        see :func:`_scaled_change` for why the caller owns this number.
     rtol : float
         Relative change demanded of every field above the dead band.
 
@@ -189,7 +211,7 @@ def coupling_residual_interface(
     s_new: dict[str, dict],
     s_old: dict[str, dict],
     interface_edges: list,
-    atol: float = 1e-8,
+    atol: float = 0.0,
     rtol: float = 1e-6,
 ) -> jnp.ndarray:
     """Interface consistency, on the scale of each interface quantity.
@@ -210,7 +232,10 @@ def coupling_residual_interface(
     interface_edges : list of EdgeSpec
         Edges internal to the coupling group.
     atol : float
-        Dead band, in the interface quantity's own units.
+        Dead band, in the interface quantity's own units: below this a
+        quantity leaves the norm and stops being held to any criterion.
+        ``CouplingGroup``'s default is ``0.0``; see
+        :func:`_scaled_change` for why the caller owns this number.
     rtol : float
         Relative change demanded of every interface quantity above the
         dead band.
@@ -280,6 +305,24 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     is deliberate: a trusted bad estimate is worse than an honest
     fallback, and the fallback is exactly the criterion that shipped
     before 0.4.0.
+
+    **What a non-rejected rate does not promise.**  This rate describes
+    the mode that dominates the *step*, which is not always the mode
+    that dominates the remaining error.  On a two-mode contraction the
+    residual sequence is a clean geometric decay at the fast rate until
+    the fast mode's amplitude falls below the slow one's, and over that
+    stretch it is *indistinguishable* from a single-mode decay — the
+    consecutive ratios are stationary, so the ``sqrt`` term above
+    agrees with the one-step term and a longer window would agree with
+    both.  Measured on modes ``(0.999, 0.2)``: ``rho`` reads 0.2 while
+    the distance still to travel is 122x the estimate that rate
+    produces.  Nothing computable from the residual norms alone
+    separates that from a genuine 0.2 contraction; it needs the
+    spectrum.  So a rate this function accepts is an estimate, and
+    ``bound_valid`` reports a usable *ratio*, not a valid *bound*.  The
+    full list of what the estimate rests on is in
+    ``graph_manager._fixed_point_while``; the decision it feeds is in
+    ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
     """
     if prev2_residual is None:
         prev2_residual = prev_residual
@@ -298,16 +341,69 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     return jnp.where(ok, 1.0 / den, jnp.zeros_like(residual))
 
 
-def estimated_error(residual, amplification):
-    """``residual * amplification``, with a rejected estimate read as 1.
+def relaxation_step_scale(acceleration: str, relaxation: float) -> float:
+    """How much longer the iterate's step is than the measured residual.
+
+    The residual every acceleration reports is ``||F(x) - x||``, but
+    what the iterate actually moves is ``||x_next - x||``, and the two
+    are only the same under ``acceleration="none"``.  Constant
+    relaxation moves ``omega`` times as far
+    (``x + omega * (F(x) - x)``), so a geometric series of *residuals*
+    is short of the distance the iterate still has to travel by exactly
+    ``omega``.  Over-relaxation therefore made ``estimated_error``
+    understate: measured ``est/true`` tracked ``1/omega`` to three
+    figures (0.68 at ``omega=1.5``, 0.51 at ``omega=1.95``) on an
+    affine two-node group.  Returning ``omega`` here is what puts the
+    series back on the step the iteration takes.
+
+    ``1.0`` for every other acceleration, and that is *not* the same
+    statement for each of them:
+
+    * ``"none"`` — exact, the step is the residual.
+    * ``"aitken"`` — **an underestimate**, and a known one.  Aitken's
+      relaxation factor is re-derived each pass and clipped to
+      ``[0.01, 2.0]``; on the same affine group it saturates at 2.0 and
+      the estimate understates by 2.04x.  It is not corrected here
+      because the factor is dynamic: it would have to be carried
+      through both solvers' loop state and the ``_meta`` diagnostics
+      payload, and the value that matters is the one the *next* step
+      will use, which nothing has measured.  A static ``2.0`` would be
+      a bound but would tighten the criterion for every Aitken group.
+    * ``"iqn-ils"`` / ``"iqn-imvj"`` — the quasi-Newton step is not a
+      scalar multiple of ``F(x) - x`` at all, so no scale exists.  The
+      estimate understates there too (4.5x measured), but by the
+      *rate* mechanism rather than this one: a superlinear residual
+      sequence reads ``rho -> 0``, so the amplification collapses to 1
+      while the true remaining error is still ``1/(1 - rho_spectral)``
+      of the residual.
+
+    See ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+    """
+    return float(relaxation) if acceleration == "fixed" else 1.0
+
+
+def estimated_error(residual, amplification, step_scale=1.0):
+    """``residual * step_scale * amplification``, floored at ``residual``.
 
     The quantity a convergence criterion should be testing: an estimate
     of ``||x - x*||`` in the group's own norm, rather than of how far
-    the last pass moved.  Never smaller than ``residual``, so a group
-    that meets this criterion also meets the raw residual test it
-    replaces.
+    the last pass moved.
+
+    ``step_scale`` is :func:`relaxation_step_scale` -- the ratio of the
+    step the iterate takes to the residual that is measured.  The
+    geometric series being summed is over *steps*, so leaving it out
+    understated the distance by ``omega`` under over-relaxation.
+
+    Still never smaller than ``residual``, so a group that meets this
+    criterion also meets the raw residual test it replaces.  The floor
+    binds only under *under*-relaxation of a strongly oscillatory mode
+    (``step_scale * amplification < 1`` needs ``rho < 1 - omega``,
+    reachable only for a negative eigenvalue), where it keeps the
+    compatibility guarantee at the cost of being conservative -- the
+    safe direction.
     """
-    return residual * jnp.maximum(amplification, jnp.ones_like(amplification))
+    scaled = jnp.asarray(step_scale) * amplification
+    return residual * jnp.maximum(scaled, jnp.ones_like(scaled))
 
 
 # ------------------------------------------------------------------

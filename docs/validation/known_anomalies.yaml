@@ -1,6 +1,10 @@
+# The version this registry describes.  `scripts/generate_soup_tables.py
+# --check` (run by tests/compliance/test_soup_evidence.py) fails if
+# `maddening_version` drifts from the version in pyproject.toml, so a release
+# bump has to come through here too.
 schema_version: "1.0"
-maddening_version: "0.1.0"
-generated_date: "2026-03-12"
+maddening_version: "0.4.0.dev0"
+generated_date: "2026-09-19"
 
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -11,6 +15,13 @@ anomalies:
       during compilation of the streaming step, triggered by matmul/einsum
       operations on 3D+ arrays.  The CPU backend is unaffected.  The workaround
       is to use the CPU backend (JAX_PLATFORMS=cpu).
+      Re-verification status as of 0.4.0: not re-run.  The jaxlib version named
+      here is below the supported floor (pyproject pins jaxlib >=0.10,<0.13), and
+      neither CI nor the development environment has a CUDA jaxlib installed, so
+      no run on a supported GPU stack has been made.  The entry therefore stays
+      open on the precautionary reading -- nothing has been shown to fix it --
+      and `affected_versions` is open-ended rather than closed at the version
+      where it was first seen.  Closing it needs a GPU run on a supported jaxlib.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -22,7 +33,7 @@ anomalies:
       execution and whether a fallback path exists.  CPU execution is unaffected.
     affected_components:
       - "maddening.nodes.lbm_pipe.LBMPipeNode"
-    affected_versions: "0.1.0"
+    affected_versions: ">=0.1.0"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
     resolution_status: "open"
     github_issue: null
@@ -35,6 +46,12 @@ anomalies:
       the explicit finite-difference scheme becomes unstable and produces silently
       incorrect results (temperature values that grow without bound).  There is no
       warning or error — the simulation runs but the output is wrong.
+      Re-verified at 0.4.0.dev0 and still live: on a 20-cell rod of length 1.0
+      with thermal_diffusivity=0.01 and a half-sine initial profile, a Fourier
+      number Fo = dt*alpha/dx^2 of 5.0 gives max|T| = nan after 60 steps and
+      emits no warning of any kind, while Fo = 0.4 and Fo = 0.5 decay normally
+      (0.516 and 0.437).  The constructor accepts the unstable timestep without
+      comment.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -48,8 +65,13 @@ anomalies:
       checks would catch the divergence.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
-    affected_versions: "0.1.0"
-    workaround: "Manually verify CFL condition: dt * alpha / dx^2 < 0.5"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Check the stability condition before constructing the node:
+      timestep * thermal_diffusivity / dx**2 < 0.5, with
+      dx = length / n_cells.  The constructor parameter is
+      `thermal_diffusivity` (there is no `alpha=` keyword — passing one is a
+      TypeError), and `timestep` is the value the check applies to.
     resolution_status: "open"
     github_issue: null
 
@@ -96,7 +118,7 @@ anomalies:
     affected_components:
       - "maddening.nodes.adaptive.base.AdaptiveNode"
       - "maddening.nodes.adaptive.base.AdaptiveNode.update"
-    affected_versions: "0.4.0"
+    affected_versions: ">=0.4.0"
     workaround: >
       Use the largest active-set budget the problem affords (the omitted term
       decays with it, to ~1e-8 of |J| at k=64 on the reference problem); add
@@ -191,17 +213,19 @@ anomalies:
       both solvers now stop on the iterate whose residual was measured,
       so recomputing the norm on the state you were handed reproduces
       the reported number.
-      The fourth is this anomaly's own subject, and it is now closed:
-      the threshold is applied to an estimate of the distance to the
-      fixed point, residual / (1 - rho), with rho = max(r_k / r_{k-1},
-      sqrt(r_k / r_{k-2})) read off the residual sequence the loop
-      already has, and every convergence norm divides each field's
-      change by that field's own magnitude so the criterion means the
-      same thing in any units (atol is now a dead band -- what counts as
-      zero -- rather than a floor under the scale, which made every
-      criterion absolute below atol/rtol).  coupling_diagnostics()
+      The fourth is this anomaly's own subject, and it is reduced
+      rather than closed: the threshold is applied to an estimate of the
+      distance to the fixed point, omega * residual / (1 - rho), with
+      rho = max(r_k / r_{k-1}, sqrt(r_k / r_{k-2})) read off the
+      residual sequence the loop already has and omega the step scale
+      the acceleration applies, and every convergence norm divides each
+      field's change by that field's own magnitude so the criterion
+      means the same thing in any units (atol is now a dead band -- what
+      counts as zero -- rather than a floor under the scale, which made
+      every criterion absolute below atol/rtol).  coupling_diagnostics()
       reports error_estimate, amplification, bound_valid and
-      gradient_error_bound beside the residual.
+      gradient_error_bound beside the residual.  That estimate is not a
+      bound; see the residual risk.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -220,7 +244,7 @@ anomalies:
       - "maddening.core.coupling.group.CouplingGroup.tolerance"
       - "maddening.core.coupling.group.CouplingGroup.strict_convergence"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
-    affected_versions: "<=0.3.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       On 0.3.x and earlier, calibrate the criterion once per problem
       instead of trusting it: solve the same step at tolerance t and at
@@ -262,11 +286,46 @@ anomalies:
       not.  Under convergence_norm="l2", which is over every float
       field, the same fixtures agree to 2e-05.  Evidence:
       benchmarks/results/retire_known_disagreements/REPORT.md.
+      Two further mechanisms, measured on the 0.4.0 release audit
+      (benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md),
+      break the estimate on a map that is linear and all of whose modes
+      are excited -- the case none of the conditions above reaches, and
+      the reason those conditions must not be read as an exhaustive list
+      of when to distrust the number.  First, rho is read from the
+      residual sequence, so it reports the mode that dominates the
+      *step*, which need not be the mode that dominates the remaining
+      error: on modes (0.999, 0.2) at tolerance 1e-4 the reported
+      error_estimate is 9.19e-05 against a true distance of 1.12e-02 --
+      122x -- with bound_valid=True and converged=True.  This one is a
+      characterised limitation rather than an unfinished fix.  Over the
+      passes that matter the failing sequence and a genuine single-mode
+      decay at 0.2 are the same sequence, with consecutive ratios of
+      0.2000 and 0.2024 -- stationary to three figures -- so the
+      two-step sqrt guard, a longer window, a stationarity test and a
+      multi-term fit all agree with each other and all read the fast
+      mode.  No function of the residual norms separates the two cases;
+      recovering the slow mode needs the spectrum itself (a power
+      iteration on dF/dx, available under solver="ift", for which
+      residual / (1 - rho_spectral) is a genuine bound), which is a new
+      numerical component rather than a change to the existing one.
+      Second, the step scale is corrected only where it is constant:
+      under acceleration="fixed" the series now accounts for relaxation,
+      having understated by 1/omega before that landed (0.51x at
+      omega=1.95), but Aitken's clipped per-pass factor is not carried
+      and understates by 2.04x where it saturates at 2.0.  The IQN
+      quasi-Newton step is not a multiple of F(x) - x at all; its
+      measured 4.5x shortfall is the first mechanism rather than this
+      one, because a superlinear sequence reads rho -> 0.  Neither is
+      corrected in 0.4.0.  bound_valid reports a usable *ratio*, not a
+      valid *bound*.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in"
       - "tests/property/test_coupling_error_bound.py::test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point"
+      - "tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor"
+      - "tests/core/test_coupling_error_bound.py::test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged"
+      - "tests/property/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"

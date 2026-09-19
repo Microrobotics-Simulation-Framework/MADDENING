@@ -811,6 +811,61 @@ class TestStaticDataDepsRefusedAtCompile:
         gm2.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=False))
         gm2.compile()
 
+    def test_freezing_through_set_param_spec_is_a_working_fix(self):
+        """The remedy has to work the way an optimiser reaches specs.
+
+        ``gm.set_param_spec`` is the graph-level half of the same knob --
+        it is what ``gm.trainable_mask()`` and ``maddening.sysid`` read --
+        so a freeze applied there has to clear the refusal too.
+        """
+        gm = GraphManager()
+        gm.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=True))
+        with pytest.raises(ValueError):
+            gm.compile()
+        gm.set_param_spec("d", "scale", ParamSpec(trainable=False))
+        assert gm.trainable_mask()["nodes"]["d"]["scale"] is False
+        gm.compile()
+        gm.step()
+
+    def test_unfreezing_through_set_param_spec_is_refused(self):
+        """The rule cannot be walked past by the graph-level override.
+
+        Freeze on the node, compile, then unfreeze at graph level to fit
+        the parameter: the gradient reported by the accepted step is the
+        traced term alone (1.0 where the truth is 2.0).  The override has
+        to re-arm the refusal instead.
+        """
+        gm = GraphManager()
+        gm.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=False))
+        gm.compile()
+        gm.set_param_spec("d", "scale", ParamSpec(trainable=True))
+        assert gm.trainable_mask()["nodes"]["d"]["scale"] is True
+        # It re-arms without an explicit compile(): the next run recompiles.
+        assert gm._dirty
+        with pytest.raises(ValueError, match="'scale'"):
+            gm.step()
+        with pytest.raises(ValueError, match="'scale'"):
+            gm.compile()
+
+    def test_an_override_on_an_undeclared_parameter_does_not_dirty(self):
+        """``set_param_spec`` stays free for every other parameter.
+
+        It is documented as optimiser-side metadata that costs no
+        recompile; only a key a declaration names moves the verdict.
+        """
+        gm = _compiled_graph(
+            _DerivedStaticNode("d", timestep=0.01, trainable=False)
+        )
+
+        class _NoDeps(_DerivedStaticNode):
+            def static_data_deps(self):
+                return {}
+
+        assert not gm._dirty
+        gm2 = _compiled_graph(_NoDeps("d", timestep=0.01, trainable=False))
+        gm2.set_param_spec("d", "scale", ParamSpec(trainable=True))
+        assert not gm2._dirty
+
 
 class TestHeatNodeStaticDataDeps:
     """``HeatNode`` is the only shipped node deriving a static from params.

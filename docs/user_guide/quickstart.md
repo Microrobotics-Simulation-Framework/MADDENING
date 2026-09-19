@@ -141,7 +141,18 @@ def loss(initial_velocity):
 
 grad_fn = jax.grad(loss)
 print(f"d(final_pos)/d(init_vel) = {grad_fn(jnp.array(0.0))}")
+
+# The loss stepped the graph under a transform, so its state is not one
+# you want to keep running from.  Say what it should be next:
+gm.reset_state()
 ```
+
+`run_scan` (like `step` and `run`) writes its result back into the
+graph, and under `jax.grad` that result is made of JAX tracers.  The
+gradient is correct either way, and the graph puts itself back to the
+state it had before the transform — with a `RuntimeWarning` — the next
+time you use it.  Setting the state you actually want, as above, is
+cheaper than relying on that and clearer to read.
 
 ## Deploy to Cloud
 

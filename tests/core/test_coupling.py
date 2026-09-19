@@ -169,6 +169,26 @@ class TestAutoCouple:
         assert len(groups) == 1
         assert groups[0].max_iterations == 7  # new, not the old 3
 
+    def test_auto_couple_dirties_the_graph_even_when_it_finds_nothing(self):
+        """Clearing the groups is itself a change to the compiled step.
+
+        The flag used to be a side effect of ``add_coupling_group``, so
+        an ``auto_couple`` that created no groups left the graph
+        describing itself as uncoupled while the compiled step was still
+        the coupled one -- ``coupling_diagnostics()`` reporting nothing
+        for a step that was still writing diagnostics, and a ``to_dict``
+        taken there disagreeing with the running program.
+        """
+        gm = _make_bidirectional_springs()
+        gm.add_coupling_group(["spring_a", "spring_b"])
+        gm.compile()
+        assert not gm._dirty
+
+        gm.remove_edge("spring_b", "spring_a", "position", "anchor_position")
+        gm.compile()
+        assert gm.auto_couple() == []          # acyclic now
+        assert gm._dirty
+
 
 # ==================================================================
 # TestCouplingValidation

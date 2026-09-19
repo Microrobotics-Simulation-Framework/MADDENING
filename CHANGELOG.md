@@ -212,6 +212,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
+  a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
+  can report `0.0` and `1e-05` for one state.  The state and verdict are exact
 - **A compliance gate no longer calls an optional subpackage's symbol stale**:
   a `maddening.usd.*` reference in an environment without the `usd` extra is
   reported as *not checked*, with the extra named, instead of failing the run

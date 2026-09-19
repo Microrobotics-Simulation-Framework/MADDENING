@@ -1,8 +1,13 @@
+# `version` must match `pyproject.toml`; `scripts/generate_soup_tables.py
+# --check` (run by tests/compliance/test_soup_evidence.py) fails if it does
+# not.  `date-released` is added when a version is tagged and removed again on
+# the next development bump — the same check refuses a release date on a
+# pre-release version, because a pre-release does not have one.
 cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
 title: "MADDENING: Modular Automatic Differentiation and Data-Enhanced Neural-network INteracting Graph"
 type: software
-version: 0.1.0
-date-released: "2025-03-01"
+version: 0.4.0.dev0
 license: LGPL-3.0-or-later
 repository-code: "https://github.com/Microrobotics-Simulation-Framework/MADDENING"
 abstract: >

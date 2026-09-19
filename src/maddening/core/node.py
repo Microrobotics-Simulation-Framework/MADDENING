@@ -380,25 +380,54 @@ class SimulationNode(ABC):
         """The node's differentiable parameters as a pytree of arrays.
 
         Default: every float-valued entry of ``self.params`` — Python
-        floats, floating-point arrays, and lists/tuples of numbers —
-        promoted to float32 arrays.  Ints, bools, strings and nested
-        dicts are structural (they change shapes or the trace) and are
-        excluded; they stay on the recompile path.
+        floats, floating-point arrays, and lists/tuples of numbers — as
+        arrays at the graph's working float precision.  Ints, bools,
+        strings and nested dicts are structural (they change shapes or
+        the trace) and are excluded; they stay on the recompile path.
+
+        Precision
+        ---------
+        A value that carries a floating dtype of its own — an array, a
+        numpy scalar — keeps it.  A value that carries none — a Python
+        float, a list of them — is placed at JAX's canonical float
+        precision, resolved the way :class:`AdaptiveNode` resolves it
+        (``jnp.zeros(()).dtype``): float32 by default, float64 under
+        ``jax_enable_x64``.  Either way nothing is narrowed *below* the
+        precision the rest of the graph is working in.
+
+        That last clause is the part that used to fail.  ``float`` was
+        pinned to ``float32`` outright, and ``numpy.float64`` is a
+        subclass of ``float``, so under ``jax_enable_x64`` a Python
+        float, an ``np.float64`` scalar and a list of floats all came
+        back float32 — a 1.7e-8 relative shift, no warning — while *the
+        same value* written as a 0-d array, a 1-d array or a ``jnp``
+        float64 array came back float64.  One value, two dtypes, two
+        answers; and an :class:`AdaptiveNode` that solved in float64
+        while its parameters, gradients and diagnostics were float32,
+        so its ``check_gradient_capture()`` evaluated at a point the
+        state had not been built at.
 
         ``GraphManager.compile`` snapshots this into
         ``GraphManager.params["nodes"][name]`` for nodes whose
         :meth:`update` accepts ``params``.
         """
+        canonical = jnp.zeros(()).dtype
         out: dict = {}
         for key, value in self.params.items():
             if isinstance(value, (bool, int, str, dict)) or value is None:
                 continue
-            if isinstance(value, float):
-                out[key] = jnp.asarray(value, dtype=jnp.float32)
+            if isinstance(value, float) and not isinstance(value, np.generic):
+                # A Python float states a value, not a precision, so it
+                # takes the working one.  ``np.float64`` is a ``float``
+                # subclass but *does* carry a dtype, so it goes the array
+                # way below and is treated exactly like the same number
+                # spelled as a 0-d array.
+                out[key] = jnp.asarray(value, dtype=canonical)
                 continue
-            # Arrays, tracers (a node built inside a traced function),
-            # and lists/tuples of numbers.  Anything jnp can't turn into
-            # a floating array is structural and skipped.
+            # Arrays, numpy scalars, tracers (a node built inside a
+            # traced function), and lists/tuples of numbers.  Anything
+            # jnp can't turn into a floating array is structural and
+            # skipped.
             try:
                 arr = jnp.asarray(value)
             except (TypeError, ValueError):
@@ -406,7 +435,7 @@ class SimulationNode(ABC):
             if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
                 continue
             if isinstance(value, (list, tuple)):
-                arr = arr.astype(jnp.float32)
+                arr = arr.astype(canonical)
             out[key] = arr
         return out
 

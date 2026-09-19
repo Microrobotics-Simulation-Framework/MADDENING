@@ -33,6 +33,7 @@ import pytest
 
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+from maddening.compliance import BenchmarkType, verification_benchmark
 from maddening.nodes.lbm import LBMNode
 
 _HAS_8 = len(jax.devices()) >= 8
@@ -67,6 +68,25 @@ def _run_poiseuille(node, sharded, n_steps: int, F: float):
 
 
 @pytest.mark.skipif(not _HAS_8, reason="needs >=8 virtual devices")
+@verification_benchmark(
+    benchmark_id="MADD-VER-003",
+    description=(
+        "Sharded LBMNode vs the steady-state Hagen-Poiseuille profile in a "
+        "circular pipe driven by a uniform body force, on a 2x4 pencil mesh "
+        "over (spatial_y, spatial_z)"
+    ),
+    node_type="LBMNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria=(
+        "After 500 steps: profile positive and peaked at the centre; a "
+        "least-squares fit u = c0 + c1 r^2 concave with effective R^2 within "
+        "[0.7, 1.5] of nominal; cross-section symmetric to rtol 1e-3; "
+        "centreline velocity within +/-25% of u_max = F R^2 / (4 mu)"
+    ),
+    references=(
+        "Hagen-Poiseuille steady laminar flow in a circular pipe",
+    ),
+)
 def test_poiseuille_sharded_profile_is_parabolic():
     """Sharded LBM (2x4 pencil) develops a parabolic Poiseuille-like profile.
 

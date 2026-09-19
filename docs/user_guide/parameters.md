@@ -59,6 +59,12 @@ are **not** in `gm.params`.  `gm.nodes_without_params()` lists them, and
 passing an entry for such a node (or a misspelled key) is a `ValueError`,
 not a silently ignored leaf.
 
+A value that carries a floating dtype of its own (an array, a numpy
+scalar) keeps it; a value that carries none (a Python float, a list of
+them) is placed at JAX's canonical float precision — float32, or float64
+under `jax_enable_x64`.  Nothing is narrowed below that, so a graph run
+under x64 has float64 constants as well as float64 arithmetic.
+
 A node that exposes boundary fluxes takes `params` there too and reads
 the same constants from it:
 

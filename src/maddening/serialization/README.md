@@ -47,6 +47,28 @@ gm_restored = from_dict(config, registry)
 }
 ```
 
+## Non-finite numbers
+
+`NaN` and the infinities have no JSON literal, so they are written as the
+quoted tokens `"NaN"`, `"Infinity"` and `"-Infinity"` — a diverged param, an
+infinite `ParamSpec` bound — and `from_dict` turns them back into floats:
+
+```json
+{"params": {"stiffness": "NaN"}, "bounds": ["-Infinity", "Infinity"]}
+```
+
+Before 0.4.0 these went out as the *bare* tokens `json.dumps` writes at its
+default `allow_nan=True`, which only Python reads (`MADD-ANO-006`).  Those are
+still accepted on load, so an older config needs no migration.
+
+Because a decoder cannot tell the float `NaN` from a string that reads
+`"NaN"`, `to_dict` **raises** on a string parameter equal to one of the three
+tokens, naming its path.  Spell such a value differently.
+
+The same encoding is used by the USD stage (`maddening:paramsJson` and the
+other JSON attributes) and the FMI sidecar wire; the shared implementation is
+`maddening.serialization.json_codec`.
+
 ## What is / is not serialized
 
 - **Serialized:** node descriptors (type, name, timestep, params), edges (registered transform names, interface mappings as their `MappingSpec` — kind, hyper-parameters and point references; `from_dict(..., base_dir=)` locates `{"asset": ...}` files), external input specs

@@ -77,12 +77,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # failure probability first leaves the 1e-6 range for a suite this size.
 MAX_REJECTION = 0.40
 
+#: Overruns are a separate problem with a separate health check, so they get
+#: a separate budget.  ``data_too_large`` fires at 20 overruns before 10 valid
+#: draws, which is a far tighter window than ``filter_too_much``'s -- but an
+#: overrun is Hypothesis running out of entropy for a big draw, not anything
+#: the author wrote, so it is reported beside the filter rate rather than
+#: folded into it.  Measured here: every ``hypothesis.extra.numpy.arrays``
+#: test in this tree overruns a few percent of its draws with no ``assume``
+#: anywhere in it.
+MAX_OVERRUN = 0.20
+
 #: ``hypothesis.internal.conjecture.engine`` health-check constants, mirrored
-#: so the risk estimate below does not depend on Hypothesis internals staying
+#: so the risk estimates below do not depend on Hypothesis internals staying
 #: importable.  ``test_draw_rejection_budget.py`` pins them against the
 #: installed Hypothesis.
 HEALTH_CHECK_MAX_INVALID = 50
 HEALTH_CHECK_MAX_VALID = 10
+HEALTH_CHECK_MAX_OVERRUN = 20
 
 #: Phases whose draws count towards the budget.  ``shrink`` is excluded: it
 #: only runs for a test that is already failing, and its draws are not
@@ -90,19 +101,29 @@ HEALTH_CHECK_MAX_VALID = 10
 COUNTED_PHASES = ("reuse", "generate")
 
 
-def health_check_failure_probability(rejection_rate: float) -> float:
-    """Chance that one run of a test at ``rejection_rate`` trips ``filter_too_much``.
+def health_check_failure_probability(
+    rejection_rate: float, *, budget: int = HEALTH_CHECK_MAX_INVALID
+) -> float:
+    """Chance that one run at ``rejection_rate`` trips the matching health check.
 
-    The health check fails when the run reaches ``HEALTH_CHECK_MAX_INVALID``
-    rejected draws before ``HEALTH_CHECK_MAX_VALID`` accepted ones.  Draws are
-    independent Bernoulli trials to a good approximation, so that is the
-    probability of seeing fewer than ``HEALTH_CHECK_MAX_VALID`` successes in
-    the first ``HEALTH_CHECK_MAX_INVALID + HEALTH_CHECK_MAX_VALID - 1`` trials.
+    A Hypothesis health check fails when a run reaches ``budget`` rejected
+    draws before ``HEALTH_CHECK_MAX_VALID`` accepted ones -- 50 for
+    ``filter_too_much``, 20 for ``data_too_large``.  Draws are independent
+    Bernoulli trials to a good approximation, so that is the probability of
+    seeing fewer than ``HEALTH_CHECK_MAX_VALID`` successes in the first
+    ``budget + HEALTH_CHECK_MAX_VALID - 1`` trials.
+
+    This is why the health check is no substitute for the measurement: it is
+    a step function with a very soft edge.  At a 60% filter rate it fires
+    about once in 28000 runs, at 85% about once in three.
 
     Parameters
     ----------
     rejection_rate : float
         Fraction of draws rejected, in ``[0, 1]``.
+    budget : int, default ``HEALTH_CHECK_MAX_INVALID``
+        Rejected draws the check tolerates.  Pass
+        ``HEALTH_CHECK_MAX_OVERRUN`` for ``data_too_large``.
 
     Returns
     -------
@@ -123,7 +144,7 @@ def health_check_failure_probability(rejection_rate: float) -> float:
         return 0.0
     if keep <= 0.0:
         return 1.0
-    n = HEALTH_CHECK_MAX_INVALID + HEALTH_CHECK_MAX_VALID - 1
+    n = budget + HEALTH_CHECK_MAX_VALID - 1
     return math.fsum(
         math.comb(n, k) * keep**k * (1.0 - keep) ** (n - k)
         for k in range(HEALTH_CHECK_MAX_VALID)
@@ -151,13 +172,31 @@ class RejectionRecord:
 
     @property
     def rejected(self) -> int:
-        """Draws thrown away by ``assume()``, a ``.filter()`` or an overrun."""
-        return self.invalid + self.overrun
+        """Draws thrown away by ``assume()`` or a strategy ``.filter()``.
+
+        Overruns are deliberately not in here.  They are Hypothesis running
+        out of entropy for a large draw, not the test rejecting an input, and
+        they answer to a different health check (``data_too_large``).  Folding
+        them in would blame a test for the size of its arrays: every
+        ``hypothesis.extra.numpy.arrays`` property in this tree overruns a few
+        percent of its draws with no ``assume`` written anywhere in it.
+        """
+        return self.invalid
 
     @property
     def rate(self) -> float:
-        """Fraction of draws thrown away; 0.0 for a test that drew nothing."""
-        return self.rejected / self.drawn if self.drawn else 0.0
+        """Fraction of *decided* draws filtered out; 0.0 for a test that drew none.
+
+        The denominator excludes overruns, so this is exactly the ratio
+        ``HealthCheck.filter_too_much`` watches.
+        """
+        decided = self.valid + self.invalid
+        return self.invalid / decided if decided else 0.0
+
+    @property
+    def overrun_rate(self) -> float:
+        """Fraction of all draws that ran out of entropy."""
+        return self.overrun / self.drawn if self.drawn else 0.0
 
     @property
     def effective_examples(self) -> int:
@@ -178,9 +217,12 @@ class RejectionRecord:
             "rate": self.rate,
             "invalid": self.invalid,
             "overrun": self.overrun,
+            "overrun_rate": self.overrun_rate,
             "runs": self.runs,
             "starved": self.starved,
             "health_check_risk": health_check_failure_probability(self.rate),
+            "overrun_health_check_risk": health_check_failure_probability(
+                self.overrun_rate, budget=HEALTH_CHECK_MAX_OVERRUN),
             "stopped_because": self.stopped_because,
         }
 
@@ -254,9 +296,11 @@ class RejectionAuditPlugin:
         """Records worst-first, ties broken by node id for a stable table."""
         return sorted(self.records.values(), key=lambda r: (-r.rate, r.nodeid))
 
-    def over_budget(self, max_rejection: float = MAX_REJECTION) -> list[RejectionRecord]:
-        """Records whose rejection rate exceeds ``max_rejection``."""
-        return [r for r in self.sorted_records() if r.rate > max_rejection]
+    def over_budget(self, max_rejection: float = MAX_REJECTION,
+                    max_overrun: float = MAX_OVERRUN) -> list[RejectionRecord]:
+        """Records over either budget: filtering, or entropy overruns."""
+        return [r for r in self.sorted_records()
+                if r.rate > max_rejection or r.overrun_rate > max_overrun]
 
 
 # --------------------------------------------------------------------------
@@ -279,7 +323,8 @@ def format_table(records: Sequence[RejectionRecord], *, markdown: bool = False,
     -------
     str
     """
-    header = ("test", "drawn", "rejected", "rate", "effective", "risk/run")
+    header = ("test", "drawn", "filtered", "rate", "overrun", "effective",
+              "risk/run")
     rows: list[tuple[str, ...]] = []
     for rec in records:
         rows.append((
@@ -287,6 +332,8 @@ def format_table(records: Sequence[RejectionRecord], *, markdown: bool = False,
             str(rec.drawn),
             str(rec.rejected),
             f"{rec.rate:.1%}" + ("  !" if rec.rate > max_rejection else ""),
+            f"{rec.overrun_rate:.1%}"
+            + ("  !" if rec.overrun_rate > MAX_OVERRUN else ""),
             str(rec.effective_examples) + ("  STARVED" if rec.starved else ""),
             _fmt_risk(health_check_failure_probability(rec.rate)),
         ))
@@ -325,10 +372,12 @@ def summarise(records: Sequence[RejectionRecord]) -> str:
 
     zero = sum(1 for r in rates if r == 0.0)
     return (
-        f"{n} tests with Hypothesis draws; {zero} reject nothing at all. "
-        f"median {pct(0.5):.1%}, p90 {pct(0.9):.1%}, max {rates[-1]:.1%}. "
-        f"Total draws {sum(r.drawn for r in records)}, "
-        f"of which {sum(r.rejected for r in records)} thrown away."
+        f"{n} tests with Hypothesis draws; {zero} filter nothing at all. "
+        f"filter rate: median {pct(0.5):.1%}, p90 {pct(0.9):.1%}, "
+        f"max {rates[-1]:.1%}. "
+        f"Total draws {sum(r.drawn for r in records)}, of which "
+        f"{sum(r.rejected for r in records)} filtered out and "
+        f"{sum(r.overrun for r in records)} overrun."
     )
 
 
@@ -344,7 +393,13 @@ def run_audit(paths: Sequence[str], *, extra_args: Sequence[str] = ()) -> tuple[
         The populated plugin and pytest's exit status.
     """
     plugin = RejectionAuditPlugin()
-    args = [*paths, "-q", "-p", "no:cacheprovider", *extra_args]
+    args = [*paths, "-p", "no:cacheprovider", *extra_args]
+    # Quiet only when the caller expressed no preference: the audit is meant
+    # to be droppable in front of an existing CI pytest invocation without
+    # changing what that invocation prints.
+    if not any(a.startswith("-v") or a.startswith("-q") or a == "--verbose"
+               for a in extra_args):
+        args.append("-q")
     status = pytest.main(args, plugins=[plugin])
     return plugin, int(status)
 
@@ -356,6 +411,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="test paths to audit")
     parser.add_argument("--max-rejection", type=float, default=MAX_REJECTION,
                         help=f"gate, as a fraction (default {MAX_REJECTION})")
+    parser.add_argument("--max-overrun", type=float, default=MAX_OVERRUN,
+                        help=f"entropy-overrun gate (default {MAX_OVERRUN})")
     parser.add_argument("--check", action="store_true",
                         help="exit non-zero if any test is over the gate")
     parser.add_argument("--json", dest="json_path", type=Path,
@@ -373,7 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     shown = records
     if args.only_over is not None:
-        shown = [r for r in records if r.rate > args.only_over]
+        shown = [r for r in records
+                 if r.rate > args.only_over or r.overrun_rate > args.only_over]
 
     profile = os.environ.get("MADDENING_HYPOTHESIS_PROFILE", "dev")
     print()
@@ -390,11 +448,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             indent=2) + "\n")
         print(f"\nwrote {args.json_path}")
 
-    over = plugin.over_budget(args.max_rejection)
+    over = plugin.over_budget(args.max_rejection, args.max_overrun)
     if over:
-        print(f"\n{len(over)} test(s) over the {args.max_rejection:.0%} gate:")
+        print(f"\n{len(over)} test(s) over a gate "
+              f"(filter {args.max_rejection:.0%}, overrun {args.max_overrun:.0%}):")
         for rec in over:
-            print(f"  {rec.rate:6.1%}  {rec.nodeid}")
+            why = []
+            if rec.rate > args.max_rejection:
+                why.append(f"filters {rec.rate:.1%}")
+            if rec.overrun_rate > args.max_overrun:
+                why.append(f"overruns {rec.overrun_rate:.1%}")
+            print(f"  {rec.nodeid}: {', '.join(why)}")
     if args.check:
         if status != 0:
             print("\npytest itself failed; the audit is not trustworthy",

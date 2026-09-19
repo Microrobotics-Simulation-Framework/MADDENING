@@ -78,15 +78,36 @@ def _stats(**phases):
     return out
 
 
-def test_rejected_draws_are_the_invalid_and_overrun_ones(audit):
-    """``invalid`` (assume/filter) and ``overrun`` both cost an example."""
+def test_the_filter_rate_counts_invalid_draws_only(audit):
+    """``invalid`` is what ``assume()`` and ``.filter()`` produce, and what
+    ``HealthCheck.filter_too_much`` counts."""
     rec = audit.record_from_statistics(
-        "t", _stats(generate=["valid"] * 3 + ["invalid"] * 5 + ["overrun"] * 2)
+        "t", _stats(generate=["valid"] * 3 + ["invalid"] * 5)
     )
-    assert rec.drawn == 10
-    assert rec.rejected == 7
+    assert rec.drawn == 8
+    assert rec.rejected == 5
     assert rec.effective_examples == 3
-    assert rec.rate == pytest.approx(0.7)
+    assert rec.rate == pytest.approx(5 / 8)
+
+
+def test_an_overrun_is_reported_apart_from_the_filter_rate(audit):
+    """The distinction the first cut of this harness got wrong.
+
+    An overrun is Hypothesis running out of entropy for a big draw; it has
+    its own budget and its own health check (``data_too_large``), and the
+    test did not reject anything.  Measured before this split, every
+    ``hypothesis.extra.numpy.arrays`` property in
+    ``tests/verification/hypothesis/test_hypothesis_coupling.py`` read as
+    ~10% "rejection" with no ``assume`` written anywhere in the file.  Fold
+    overruns into the filter rate and the table blames the author for the
+    size of their arrays, and the real offenders sink into the noise.
+    """
+    rec = audit.record_from_statistics(
+        "t", _stats(generate=["valid"] * 9 + ["overrun"])
+    )
+    assert rec.rate == 0.0, "an overrun is not a filtered draw"
+    assert rec.overrun_rate == pytest.approx(0.1)
+    assert rec.drawn == 10
 
 
 def test_a_failing_example_is_work_done_not_a_rejection(audit):
@@ -118,6 +139,7 @@ def test_replayed_database_examples_count(audit):
     )
     assert rec.drawn == 4
     assert rec.rejected == 1
+    assert rec.rate == pytest.approx(0.25)
 
 
 def test_several_engine_runs_under_one_node_id_accumulate(audit):
@@ -127,6 +149,7 @@ def test_several_engine_runs_under_one_node_id_accumulate(audit):
     assert rec.runs == 2
     assert rec.drawn == 5
     assert rec.rejected == 4
+    assert rec.rate == pytest.approx(0.8)
 
 
 def test_a_starved_run_is_flagged(audit):
@@ -142,7 +165,28 @@ def test_a_starved_run_is_flagged(audit):
 
 
 def test_a_test_that_drew_nothing_is_not_a_division_by_zero(audit):
-    assert audit.record_from_statistics("t", _stats()).rate == 0.0
+    rec = audit.record_from_statistics("t", _stats())
+    assert rec.rate == 0.0
+    assert rec.overrun_rate == 0.0
+
+
+def test_a_run_that_only_overran_does_not_report_a_filter_rate(audit):
+    """Every draw discarded, none of them filtered: the denominator of the
+    filter rate is empty, and 0/0 must read as "nothing filtered"."""
+    rec = audit.record_from_statistics("t", _stats(generate=["overrun"] * 5))
+    assert rec.rate == 0.0
+    assert rec.overrun_rate == 1.0
+
+
+def test_the_overrun_gate_is_separate_and_can_fire_on_its_own(audit):
+    """A test that filters nothing but overruns half its draws is still
+    a test whose search is being eaten, and ``data_too_large`` will
+    eventually say so."""
+    plugin = audit.RejectionAuditPlugin()
+    plugin.records["t"] = audit.record_from_statistics(
+        "t", _stats(generate=["valid"] * 5 + ["overrun"] * 5))
+    assert plugin.over_budget() == list(plugin.records.values())
+    assert plugin.over_budget(max_overrun=0.9) == []
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +213,14 @@ def test_the_health_check_constants_match_the_installed_hypothesis():
         "hypothesis changed HealthCheck.filter_too_much's invalid-draw budget; "
         "update HEALTH_CHECK_MAX_INVALID and re-derive MAX_REJECTION"
     )
+    assert f"max_overrun_draws = {audit_module.HEALTH_CHECK_MAX_OVERRUN}" in source, (
+        "hypothesis changed HealthCheck.data_too_large's overrun budget; "
+        "update HEALTH_CHECK_MAX_OVERRUN and re-derive MAX_OVERRUN"
+    )
+    assert "state.invalid_examples == max_invalid_draws" in source, (
+        "filter_too_much no longer counts only INVALID draws; the audit's "
+        "split between filtered and overrun draws needs re-deriving"
+    )
 
 
 def test_the_risk_model_agrees_with_a_negative_binomial(audit):
@@ -180,16 +232,17 @@ def test_the_risk_model_agrees_with_a_negative_binomial(audit):
     it, so an off-by-one in either shows up here rather than in a threshold
     nobody re-derives.
     """
-    for rejection in (0.1, 0.35, 0.5, 0.64, 0.8, 0.9):
-        keep = 1.0 - rejection
-        # P(50th failure occurs on trial 50+k, for k = 0..9 successes before it)
-        nb = math.fsum(
-            math.comb(49 + k, k) * keep**k * rejection**50
-            for k in range(audit.HEALTH_CHECK_MAX_VALID)
-        )
-        assert audit.health_check_failure_probability(rejection) == pytest.approx(
-            nb, rel=1e-9, abs=1e-18
-        ), rejection
+    for budget in (audit.HEALTH_CHECK_MAX_INVALID, audit.HEALTH_CHECK_MAX_OVERRUN):
+        for rejection in (0.1, 0.35, 0.5, 0.64, 0.8, 0.9):
+            keep = 1.0 - rejection
+            # P(the budget-th failure lands after k = 0..9 successes)
+            nb = math.fsum(
+                math.comb(budget - 1 + k, k) * keep**k * rejection**budget
+                for k in range(audit.HEALTH_CHECK_MAX_VALID)
+            )
+            assert audit.health_check_failure_probability(
+                rejection, budget=budget
+            ) == pytest.approx(nb, rel=1e-9, abs=1e-18), (budget, rejection)
 
 
 def test_the_risk_model_is_monotone_and_bounded(audit):
@@ -266,7 +319,7 @@ def test_the_gate_fails_on_a_test_that_wastes_most_of_its_draws(tmp_path):
     result = _run_audit_cli(tmp_path, "--check", "--max-rejection", "0.4")
     assert result.returncode == 1, result.stdout + result.stderr
     assert "test_wastes_four_draws_in_five" in result.stdout
-    assert "over the 40% gate" in result.stdout
+    assert "over a gate" in result.stdout
 
 
 def test_the_gate_passes_the_same_suite_under_a_looser_budget(tmp_path):
@@ -308,6 +361,6 @@ def test_the_json_report_carries_every_column_the_table_shows(tmp_path):
     }
     for record in payload["records"]:
         assert record.keys() >= {
-            "drawn", "rejected", "effective_examples", "rate",
-            "health_check_risk", "starved",
+            "drawn", "rejected", "effective_examples", "rate", "overrun",
+            "overrun_rate", "health_check_risk", "starved",
         }

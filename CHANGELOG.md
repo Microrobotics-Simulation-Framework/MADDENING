@@ -356,6 +356,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Cloud surface**: the signaling WebSocket validated its own token, not the
+  client's (CRITICAL; set `MADDENING_STREAM_SECRET`), and the unauthenticated
+  API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory

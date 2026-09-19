@@ -13,7 +13,7 @@ threshold is applied to ``r_k / (1 - rho)``.  The estimate is never
 smaller than ``r_k``, so the criterion is never looser than the one it
 replaces, and a group that used to stop on a single small step now has
 to earn it.  Where the ratio cannot be trusted the raw residual test
-stands in and ``bound_valid`` says so, which is the honest answer and
+stands in and ``ratio_usable`` says so, which is the honest answer and
 not a silent one.
 
 *The norm is scale-aware.*  A bound quoted in a field's own units is not
@@ -28,6 +28,8 @@ group forever.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -133,7 +135,7 @@ def test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point():
     gm = _contracting_graph()
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    assert d["bound_valid"] is True
+    assert d["ratio_usable"] is True
     assert d["amplification"] == pytest.approx(_AMPLIFICATION, rel=0.05), (
         f"measured 1/(1-rho) = {d['amplification']} for an iteration "
         f"whose rate is exactly {_RHO}"
@@ -246,10 +248,10 @@ def test_the_first_pass_has_no_ratio_and_reports_that_it_has_none():
     gm = _contracting_graph(max_iterations=1, tolerance=1e3)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    assert d["bound_valid"] is False
+    assert d["ratio_usable"] is False
     assert jnp.isnan(d["amplification"])
     assert d["error_estimate"] == pytest.approx(d["residual"])
-    assert d["gradient_error_bound"] == float("inf"), (
+    assert d["gradient_error_estimate"] == float("inf"), (
         "no observed contraction means nothing bounds the adjoint gap"
     )
     assert d["converged"] is True, (
@@ -496,12 +498,12 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
     gm = _contracting_graph(tolerance=1e-3)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    assert d["bound_valid"] is True, "fixture premise: a measured contraction"
-    assert d["gradient_error_bound"] == pytest.approx(d["error_estimate"])
-    assert abs(analytic - fd) <= max(d["gradient_error_bound"], 1e-5), (
+    assert d["ratio_usable"] is True, "fixture premise: a measured contraction"
+    assert d["gradient_error_estimate"] == pytest.approx(d["error_estimate"])
+    assert abs(analytic - fd) <= max(d["gradient_error_estimate"], 1e-5), (
         f"analytic {analytic} vs finite difference {fd}: the adjoint may "
         f"only be as wrong as the reported bound "
-        f"({d['gradient_error_bound']})"
+        f"({d['gradient_error_estimate']})"
     )
 
 
@@ -520,7 +522,7 @@ def test_both_solvers_report_the_same_bound(solver):
     fori.step()
     a, b = ift.coupling_diagnostics()["a+b"], fori.coupling_diagnostics()["a+b"]
     assert a["converged"] == b["converged"]
-    assert a["bound_valid"] == b["bound_valid"]
+    assert a["ratio_usable"] == b["ratio_usable"]
     assert a["iterations"] == b["iterations"]
     assert a["residual"] == pytest.approx(b["residual"], rel=1e-5)
     assert a["error_estimate"] == pytest.approx(b["error_estimate"], rel=1e-5)
@@ -578,7 +580,7 @@ def test_the_estimate_is_invariant_to_the_relaxation_factor(relaxation):
     residuals instead of steps made the reported distance short by
     exactly ``omega``: the audit measured ``est/true`` at 0.68 for
     ``omega=1.5`` and 0.51 for ``omega=1.95``, with ``converged=True``
-    and ``bound_valid=True``.  The estimate describes a distance, and a
+    and ``ratio_usable=True``.  The estimate describes a distance, and a
     distance does not depend on the knob used to travel it.
     """
     gain = 0.95
@@ -591,7 +593,7 @@ def test_the_estimate_is_invariant_to_the_relaxation_factor(relaxation):
     d = gm.coupling_diagnostics()["a+b"]
     distance = _relative_distance(_ab(gm), fixed_point)
 
-    assert d["bound_valid"] and d["converged"], d
+    assert d["ratio_usable"] and d["converged"], d
     ratio = d["error_estimate"] / distance
     assert 0.9 <= ratio <= 1.15, (
         f"relaxation={relaxation}: reported {d['error_estimate']:.4e} for a "
@@ -662,7 +664,7 @@ def _two_mode_distance(gm):
     "dominating the *remaining error* can be a different and much "
     "slower one.  On (0.999, 0.2) at tolerance=1e-4 the estimate is "
     "9.19e-05 against a true distance of 1.12e-02 -- 122x -- with "
-    "bound_valid=True and converged=True.  No test on the residual "
+    "ratio_usable=True and converged=True.  No test on the residual "
     "sequence separates this from a genuine single-mode decay at 0.2: "
     "for the first several passes the two sequences are identical, so "
     "the two-step sqrt guard reads the same fast rate.  A real fix "
@@ -682,7 +684,7 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates():
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     distance = _two_mode_distance(gm)
-    assert d["bound_valid"] and d["converged"], d
+    assert d["ratio_usable"] and d["converged"], d
     assert d["error_estimate"] >= distance, (
         f"reported {d['error_estimate']:.4e} for a true distance of "
         f"{distance:.4e} ({distance / d['error_estimate']:.0f}x)"
@@ -702,10 +704,127 @@ def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
     d = gm.coupling_diagnostics()["a+b"]
     distance = _two_mode_distance(gm)
     understatement = distance / d["error_estimate"]
-    assert d["bound_valid"] is True
+    assert d["ratio_usable"] is True
     assert d["converged"] is True
     assert understatement > 50.0, (
         f"the two-mode understatement is now {understatement:.0f}x, not the "
         f"~122x recorded in ERROR_BOUND_DECISION.md -- if the estimate "
         f"improved, update the memo and the xfail above"
     )
+
+
+# ---------------------------------------------------------------------------
+# The 0.4.0 field names
+#
+# ``bound_valid`` named all four conditions the estimate rests on while
+# checking the fourth, and ``gradient_error_bound`` called a number a
+# bound that is numerically ``error_estimate``.  Both moved; both are
+# readable through 0.4.x and warn.  These tests are the only place in
+# the repository that may name the old keys -- ``filterwarnings =
+# ["error"]`` in pyproject.toml turns any other read into a failure, so
+# the deprecation enforces itself across the suite.
+# ---------------------------------------------------------------------------
+
+#: old key -> new key, and what each is expected to be on a contracting
+#: group, so that an alias wired to the wrong target is caught by value
+#: and not only by "it returned something".
+_RENAMES = {
+    "bound_valid": "ratio_usable",
+    "gradient_error_bound": "gradient_error_estimate",
+}
+
+
+def test_the_diagnostics_report_the_0_4_0_field_names():
+    """The report's own keys are the new names, and only those.
+
+    Pinned as an exact set rather than a membership check: the old
+    names must be absent from ``keys()`` so that ``dict(diag)``, a JSON
+    dump and any recorded artefact carry a name that still exists in
+    0.5.0.
+    """
+    gm = _contracting_graph()
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert set(d) == {
+        "iterations", "residual", "amplification", "error_estimate",
+        "ratio_usable", "gradient_error_estimate", "converged",
+    }
+    # ``dict()`` copies through the real items, not the aliases.
+    assert set(dict(d)) == set(d)
+    assert not set(_RENAMES) & set(dict(d).keys())
+
+
+@pytest.mark.parametrize("old,new", sorted(_RENAMES.items()))
+def test_the_pre_0_4_0_field_name_still_reads_and_warns(old, new):
+    """Reading the old key warns and returns the new key's value.
+
+    Every read path a caller has: subscript, ``get`` (which on a plain
+    ``dict`` subclass would bypass ``__getitem__`` entirely and silently
+    miss the key) and ``in``.
+    """
+    gm = _contracting_graph()
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    expected = d[new]                       # the new name does not warn
+
+    with pytest.warns(DeprecationWarning, match=new):
+        assert d[old] == expected
+    with pytest.warns(DeprecationWarning, match=new):
+        assert d.get(old) == expected
+    with pytest.warns(DeprecationWarning, match=new):
+        assert old in d
+
+
+def test_the_deprecated_names_are_wired_to_their_own_replacements():
+    """Each alias resolves to *its* field, not merely to some field.
+
+    ``bound_valid`` is a bool and ``gradient_error_estimate`` a float,
+    so a crossed mapping would pass a loose "returns something" check.
+    The group is chosen so the two differ in value as well as in type.
+    """
+    gm = _contracting_graph()
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    with pytest.warns(DeprecationWarning):
+        assert d["bound_valid"] is d["ratio_usable"] is True
+    with pytest.warns(DeprecationWarning):
+        assert d["gradient_error_bound"] == pytest.approx(
+            d["gradient_error_estimate"]
+        )
+    assert d["gradient_error_estimate"] != d["ratio_usable"]
+
+
+def test_an_unknown_key_is_a_keyerror_and_does_not_warn():
+    """The alias layer intercepts exactly two names.
+
+    Without this, a mapping that warned on any miss -- or that swallowed
+    one into a ``None`` -- would satisfy every test above.
+    """
+    gm = _contracting_graph()
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")      # any warning fails the test
+        with pytest.raises(KeyError):
+            d["no_such_field"]
+        assert d.get("no_such_field") is None
+        assert "no_such_field" not in d
+
+
+def test_the_deprecated_names_do_not_survive_a_group_without_the_new_one():
+    """An alias never invents a value the report does not carry.
+
+    ``_resolve`` forwards only when the replacement is present, so a
+    diagnostics mapping that is missing the field (a hand-built one, or
+    a future report that drops it) raises rather than warning about a
+    key it cannot answer.
+    """
+    from maddening.core.graph_manager import _CouplingDiagnostics
+
+    partial = _CouplingDiagnostics({"iterations": 3, "residual": 1e-6})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(KeyError):
+            partial["bound_valid"]
+        assert partial.get("gradient_error_bound") is None
+        assert "bound_valid" not in partial

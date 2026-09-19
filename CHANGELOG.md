@@ -212,6 +212,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Non-finite numbers are written as valid JSON** on all three surfaces (config,
+  USD `paramsJson`, FMI wire): `NaN` / `Infinity` / `-Infinity` are now quoted.
+  Both spellings are read, so an older config, stage or peer still loads
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact

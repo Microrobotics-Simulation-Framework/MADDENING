@@ -27,9 +27,17 @@ class SafetyRelevance(Enum):
 
 
 class ResolutionStatus(Enum):
-    """Resolution status for an anomaly."""
+    """Resolution status for an anomaly.
+
+    ``PARTIALLY_RESOLVED`` is a real IEC 62304 state rather than a hedge:
+    the defect is fixed in the released version but a bounded residual
+    risk remains, recorded in the entry's ``residual_risk`` field.
+    MADD-ANO-005 is one.  Until v0.4.0 the enum could not represent the
+    registry MADDENING itself ships.
+    """
     OPEN = "open"
     RESOLVED = "resolved"
+    PARTIALLY_RESOLVED = "partially_resolved"
     WONT_FIX = "wont_fix"
     DUPLICATE = "duplicate"
 

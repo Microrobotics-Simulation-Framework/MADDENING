@@ -61,7 +61,7 @@ def build(tol, max_iter=60, solver="ift"):
 print(f"exact fixed point y* = {YSTAR}")
 print()
 hdr = ("tol        iters  residual     amp       error_estimate "
-       "bound_valid conv | TRUE dist    est/true")
+       "ratio_usable conv | TRUE dist    est/true")
 print(hdr)
 for tol in (1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 1e-5, 1e-7):
     gm = build(tol)
@@ -72,5 +72,5 @@ for tol in (1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 1e-5, 1e-7):
     true_d = scaled_l2((x, y), (YSTAR, YSTAR))
     print(f"{tol:<10.0e} {d['iterations']:<6d} {d['residual']:<12.4e} "
           f"{d['amplification']:<9.4g} {d['error_estimate']:<14.4e} "
-          f"{str(d['bound_valid']):<11} {str(d['converged']):<4} | "
+          f"{str(d['ratio_usable']):<12} {str(d['converged']):<4} | "
           f"{true_d:<12.4e} {d['error_estimate']/true_d if true_d else float('nan'):.4g}")

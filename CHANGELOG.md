@@ -130,6 +130,9 @@ guidance; the itemized changes follow.
 - **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
   `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
   of the four conditions the estimate rests on, not that it is a bound
+- **`FitResult` is keyword-only**, the guard `FIMReport` got this release:
+  no field has been inserted into it yet, and inserting one would silently
+  swap `converged` and `n_iter` for any positional caller
 - **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
   between `unit` and `shape`, so a positional call silently bound the wrong
   fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`

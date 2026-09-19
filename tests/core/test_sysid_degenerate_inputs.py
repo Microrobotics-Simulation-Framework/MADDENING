@@ -307,3 +307,25 @@ def test_fim_report_cannot_be_built_positionally():
     assert report.rank == 2 and report.cond == 1.0
     with pytest.raises(TypeError):
         FIMReport(*kwargs.values())            # type: ignore[misc]
+
+
+def test_fit_result_cannot_be_built_positionally():
+    """The same guard on the other public dataclass in this module.
+
+    ``FitResult`` has had no field inserted into it, so this assertion
+    is expected to be redundant today -- and it is the only thing that
+    keeps it so.  Its ``converged``/``n_iter`` pair is the worse case of
+    the two: a shift there does not even change the field *types*, so a
+    positional caller of a four-field ``FitResult`` that grew a fifth
+    field would read ``n_iter`` as ``converged`` -- truthy for every
+    run that took a step -- and report an unconverged fit as converged.
+    """
+    from maddening.sysid import FitResult
+
+    kwargs = dict(
+        params={"a": 1.0}, losses=np.zeros(3), converged=False, n_iter=12,
+    )
+    result = FitResult(**kwargs)
+    assert result.converged is False and result.n_iter == 12
+    with pytest.raises(TypeError):
+        FitResult(*kwargs.values())            # type: ignore[misc]

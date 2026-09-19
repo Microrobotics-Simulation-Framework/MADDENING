@@ -300,6 +300,46 @@ def test_the_overrun_gate_is_set_from_the_risk_not_from_the_tree(audit):
         audit.MAX_REJECTION)
 
 
+def test_a_filtered_test_still_gets_every_example_it_asked_for(audit):
+    """The claim the docs rest on, pinned against the installed Hypothesis.
+
+    ``docs/developer_guide/testing_standards.md`` tells readers that a high
+    rejection rate costs wall-clock and health-check margin but *not* search
+    depth: the engine keeps drawing until it has ``max_examples`` valid
+    examples, and only gives up below ~1% valid
+    (``INVALID_THRESHOLD_BASE`` / ``INVALID_PER_VALID``).  That is a property
+    of this Hypothesis version, not a law, and it is the whole reason the
+    gate is justified on fragility rather than on lost coverage.  If it ever
+    stops being true the advice has to change, so it is asserted rather than
+    believed.
+
+    50% is used rather than something dramatic because the health check's
+    per-run failure probability there is 2.6e-8: deliberately far enough
+    from the edge that this test cannot itself flake.
+    """
+    from hypothesis import assume, given, settings
+    from hypothesis import strategies as st
+    from hypothesis.statistics import collector
+
+    seen: list[dict] = []
+
+    @settings(max_examples=60, deadline=None, database=None)
+    @given(st.integers(0, 10**9))
+    def half_of_every_draw_is_thrown_away(x):
+        assume(x % 2 == 0)
+
+    with collector.with_value(seen.append):
+        half_of_every_draw_is_thrown_away()
+
+    record = audit.record_from_statistics("synthetic", seen[0])
+    assert record.effective_examples == 60, (
+        "Hypothesis no longer tops up a filtered run to max_examples valid "
+        "examples; testing_standards.md says it does"
+    )
+    assert record.rate > 0.3, "the synthetic gate did not filter anything"
+    assert not record.starved
+
+
 # ---------------------------------------------------------------------------
 # The gate, end to end
 # ---------------------------------------------------------------------------

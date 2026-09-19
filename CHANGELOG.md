@@ -209,6 +209,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
+  adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
+- **`error_estimate` accounts for `relaxation`** — and is an estimate, not a bound
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64

@@ -212,6 +212,9 @@ guidance; the itemized changes follow.
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact
+- **A coupling group no longer reports `converged=True` with a small field far
+  from its fixed point** — `atol` removes a field from the norm, so it defaults to
+  `0.0` and is live under every norm — and `iterations` at the cap agrees by solver
 - **A recompile no longer re-phases a multi-rate graph or restarts a coupling warm
   start** — only graphs with a rate divider > 1 or a warm start were ever affected;
   `set_param_spec` and `external_inputs` are now checked as strictly as `params`

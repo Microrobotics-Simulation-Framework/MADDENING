@@ -48,7 +48,19 @@ class CouplingGroup:
         Names of the nodes that participate in the coupling group.
         All must belong to the same graph and form (part of) a cycle.
     max_iterations : int
-        Upper bound on iterations per timestep.
+        Upper bound on coupling passes per timestep.
+
+        ``1`` is a different branch, not merely the smallest cap: the
+        group takes one staggered pass and returns before the
+        accelerator is built and before the IFT solver is entered.  So
+        ``acceleration``, ``relaxation``, ``jacobian_reuse``,
+        ``accelerated_fields`` and ``linear_solver`` are all inert there
+        and warn (``UserWarning``), and ``solver="ift"`` differentiates
+        straight through that single pass rather than through a fixed
+        point -- the same derivative ``"fori"`` would give, since there
+        is no fixed point to apply the implicit function theorem at.
+        ``strict_convergence`` is still honoured, and still reports
+        that the pass did not converge.
     tolerance : float
         Convergence threshold under ``convergence_norm="l2"``.  Since
         0.4.0 the L2 norm divides each field's change by that field's
@@ -56,9 +68,9 @@ class CouplingGroup:
         order one it is the absolute threshold it used to be.
 
         Read **only** when ``convergence_norm="l2"``.  The other two
-        norms carry their tolerances in ``atol`` / ``rtol`` and test
-        against a fixed threshold of ``1.0``, so setting this away from
-        its default under those norms is inert and warns
+        norms carry their tolerance in ``rtol`` and test against a
+        fixed threshold of ``1.0``, so setting this away from its
+        default under those norms is inert and warns
         (``UserWarning``).
     convergence_norm : {"l2", "mixed", "interface"}
         Norm used to check convergence.  All three scale each field's
@@ -71,19 +83,26 @@ class CouplingGroup:
         <= 1.0).
     atol : float
         Dead band, in each field's own units: a field whose magnitude
-        does not exceed ``atol`` counts as being at zero and leaves the
-        norm.  Set it to the field's noise floor.  Before 0.4.0 it was
-        a floor under the scale, which made every criterion absolute
-        for fields smaller than ``atol / rtol``.
+        does not exceed ``atol`` counts as being at zero, **leaves the
+        norm entirely** and is no longer held to any criterion.  Set it
+        to the field's noise floor if you have one; the default of
+        ``0.0`` asserts none, and excludes only a field with no scale
+        at all.
 
-        Read **only** by the ``"mixed"`` and ``"interface"`` norms;
-        setting it away from its default under ``convergence_norm="l2"``
-        is inert and warns (``UserWarning``) — tighten ``tolerance``
-        instead.
+        Read by **all three** norms.  Before 0.4.0 it was a floor under
+        the scale, where a value above a field's magnitude merely
+        loosened that field's criterion; since 0.4.0 it removes the
+        field, so the same value silently drops an unconverged field
+        out of ``residual`` and no ``tolerance`` can contradict the
+        resulting ``converged=True``.  That is why the default asserts
+        nothing and why raising it is a claim about *your* units.
     rtol : float
         Relative change demanded of every field above the dead band,
         under the ``"mixed"`` and ``"interface"`` norms.  Read **only**
-        by those two, on the same terms as ``atol``.
+        by those two -- ``"l2"`` fixes the ratio's denominator at the
+        field's bare magnitude and carries its threshold in
+        ``tolerance`` -- so setting it away from its default under
+        ``convergence_norm="l2"`` is inert and warns (``UserWarning``).
     diagnostics : bool
         If True, store iteration count and final residual in the
         ``_meta`` key of the state dict after each step.
@@ -217,7 +236,7 @@ class CouplingGroup:
     max_iterations: int = 10
     tolerance: float = 1e-6
     convergence_norm: Literal["l2", "mixed", "interface"] = "l2"
-    atol: float = 1e-8
+    atol: float = 0.0
     rtol: float = 1e-6
     diagnostics: bool = False
     acceleration: Literal[
@@ -425,9 +444,13 @@ class _InertRule:
     ----------
     fields : tuple of str
         The :class:`CouplingGroup` field names this rule governs.
-        ``atol`` and ``rtol`` share a rule because they share a fate and
-        a message: they go live and dead together under the same norm,
-        and two warnings for one mistake is one too many.
+        Several share a rule when they share a fate and a message --
+        the five knobs a single-pass group never reads go dead
+        together, and two warnings for one mistake is one too many.
+        ``atol`` and ``rtol`` used to be paired here and are not any
+        more: the 0.4.0 dead band made ``atol`` live under every norm
+        while ``rtol`` stayed hard-coded to ``1.0`` under ``"l2"``, so
+        the pair no longer shares a fate.
     live : callable
         ``live(group)`` is True when this group's configuration actually
         reads those fields.  Each predicate mirrors a read site in
@@ -446,19 +469,26 @@ class _InertRule:
     message: Callable[[CouplingGroup, tuple[str, ...]], str]
 
 
-def _inert_atol_rtol_message(
+def _inert_rtol_message(
     group: CouplingGroup, names: tuple[str, ...]
 ) -> str:
-    """``atol`` / ``rtol`` under the one norm that is never handed them."""
-    setting = " and ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    """``rtol`` under the one norm that hard-codes its denominator.
+
+    ``atol`` is deliberately *not* here.  It was, until the 0.4.0 dead
+    band: ``coupling_residual_l2`` takes ``atol`` and drops every field
+    at or below it out of the norm, so telling the caller it is ignored
+    sent them away from the only knob that governs which fields their
+    L2 residual is even measuring.
+    """
     return (
-        f"CouplingGroup.{setting} "
-        f"{'are' if len(names) > 1 else 'is'} ignored under "
-        "convergence_norm='l2', which tests the global L2 norm "
-        "of the state change against tolerance alone.  Set "
-        "tolerance to control convergence under this norm, or "
-        "choose convergence_norm='mixed' or 'interface' to make "
-        "atol and rtol live."
+        f"CouplingGroup.rtol={group.rtol!r} is ignored under "
+        "convergence_norm='l2', which divides each field's change by "
+        "that field's bare magnitude and tests the resulting L2 norm "
+        "against tolerance.  Set tolerance to control convergence "
+        "under this norm, or choose convergence_norm='mixed' or "
+        "'interface' to make rtol live.  (atol is read under every "
+        "norm: it is the dead band that decides which fields are in "
+        "the norm at all.)"
     )
 
 
@@ -473,6 +503,55 @@ def _inert_tolerance_message(
         "against a fixed threshold of 1.0.  Set atol and rtol to "
         "control convergence under this norm, or choose "
         "convergence_norm='l2' to make tolerance live."
+    )
+
+
+def inert_uniform_timestep_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """``waveform_iterations`` / ``boundary_interpolation`` on a group
+    that asked to subcycle but has nothing to subcycle.
+
+    Not in :data:`_INERT_RULES` and not decidable in
+    ``__post_init__``: ``_run_coupled_block_impl`` sets
+    ``use_subcycling = False`` when every member node shares a
+    timestep, and a :class:`CouplingGroup` does not know its members'
+    timesteps.  ``GraphManager.compile`` does, and calls this there --
+    which is still before the first step, so the caller can act on it.
+    """
+    setting = ", ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    return (
+        f"CouplingGroup.{setting} "
+        f"{'are' if len(names) > 1 else 'is'} ignored on coupling group "
+        f"{sorted(group.nodes)}: subcycling=True was demoted because "
+        "every node in the group has the same timestep, so the group "
+        "takes one pass per coupling iteration and there is no "
+        "intermediate time to interpolate to.  Give the group nodes of "
+        "differing timesteps to make them live, or drop "
+        "subcycling=True."
+    )
+
+
+def _inert_single_pass_message(
+    group: CouplingGroup, names: tuple[str, ...]
+) -> str:
+    """The knobs a one-pass group never reaches.
+
+    ``_run_coupling_inner`` returns after ``one_pass`` when
+    ``max_iterations <= 1``, before the accelerator is constructed and
+    before ``_run_ift_forward`` is entered.  So a cap of one makes the
+    whole acceleration family and ``linear_solver`` dead at once, and
+    it does so *ahead* of the settings that normally gate them -- which
+    is why this rule speaks instead of theirs, rather than as well as.
+    """
+    setting = ", ".join(f"{n}={getattr(group, n)!r}" for n in names)
+    return (
+        f"CouplingGroup.{setting} "
+        f"{'are' if len(names) > 1 else 'is'} ignored under "
+        f"max_iterations={group.max_iterations!r}: one staggered pass "
+        "returns before any accelerator is built and before the IFT "
+        "solver is entered, so nothing reads them.  Raise "
+        "max_iterations above 1 to make them live."
     )
 
 
@@ -501,9 +580,12 @@ def _gated_on(
 #: Each ``live`` predicate mirrors the read site that decides it, so a
 #: rule is wrong only if the solver changed under it:
 #:
-#: * ``atol`` / ``rtol`` -- ``_compute_residual`` passes them to the
-#:   mixed and interface residuals only; ``coupling_residual_l2`` does
-#:   not take them.
+#: * ``rtol`` -- ``_compute_residual`` passes it to the mixed and
+#:   interface residuals only; ``coupling_residual_l2`` hard-codes the
+#:   ratio's denominator to the field's bare magnitude (``rtol=1.0``)
+#:   and carries its threshold in ``tolerance``.  ``atol`` is *not* on
+#:   this list: all three residuals take it as the dead band, so it is
+#:   live under every norm.
 #: * ``tolerance`` -- ``conv_threshold_value`` is ``1.0`` for the mixed
 #:   and interface norms and ``float(group.tolerance)`` otherwise.
 #: * ``relaxation`` -- ``_accelerate`` and the fori path both read it
@@ -521,11 +603,26 @@ def _gated_on(
 #:   computed inside the ``if use_subcycling:`` block.
 #: * ``linear_solver`` / ``strict_convergence`` -- both are read inside
 #:   ``_run_ift_forward``, which only ``solver="ift"`` calls.
+#: * ``acceleration`` / ``relaxation`` / ``jacobian_reuse`` /
+#:   ``accelerated_fields`` / ``linear_solver`` -- all five are dead at
+#:   ``max_iterations <= 1``, which returns from ``_run_coupling_inner``
+#:   after the single pass, before the accelerator exists and before
+#:   ``_run_ift_forward`` runs.  That cap is checked *first*, and the
+#:   four acceleration-gated rules stand down for it (``live`` is True
+#:   at the cap), so one mistake still gets one message.
+#:   ``strict_convergence`` is *not* in that set: the single-pass
+#:   branch checks it on the ift path.
 _INERT_RULES: tuple[_InertRule, ...] = (
     _InertRule(
-        fields=("atol", "rtol"),
+        fields=("acceleration", "relaxation", "jacobian_reuse",
+                "accelerated_fields", "linear_solver"),
+        live=lambda g: g.max_iterations > 1,
+        message=_inert_single_pass_message,
+    ),
+    _InertRule(
+        fields=("rtol",),
         live=lambda g: g.convergence_norm != "l2",
-        message=_inert_atol_rtol_message,
+        message=_inert_rtol_message,
     ),
     _InertRule(
         fields=("tolerance",),
@@ -534,7 +631,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("relaxation",),
-        live=lambda g: g.acceleration == "fixed",
+        live=lambda g: g.max_iterations <= 1 or g.acceleration == "fixed",
         message=_gated_on(
             "acceleration",
             "applies no constant relaxation factor; only "
@@ -545,7 +642,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("jacobian_reuse",),
-        live=lambda g: g.acceleration == "iqn-imvj",
+        live=lambda g: g.max_iterations <= 1 or g.acceleration == "iqn-imvj",
         message=_gated_on(
             "acceleration",
             "starts every timestep from empty secant matrices; only "
@@ -556,7 +653,8 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("accelerated_fields",),
-        live=lambda g: g.acceleration in ("iqn-ils", "iqn-imvj"),
+        live=lambda g: (g.max_iterations <= 1
+                        or g.acceleration in ("iqn-ils", "iqn-imvj")),
         message=_gated_on(
             "acceleration",
             "solves no quasi-Newton problem to select fields for; only "
@@ -588,7 +686,7 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("linear_solver",),
-        live=lambda g: g.solver == "ift",
+        live=lambda g: g.max_iterations <= 1 or g.solver == "ift",
         message=_gated_on(
             "solver",
             "differentiates straight through the iterates and solves no "

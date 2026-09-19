@@ -62,7 +62,11 @@ import time.  Levels:
 | `maddening.core.simulation.compile_cache.enable` | evolving |
 | `maddening.core.simulation.compile_cache.enable_from_env` | evolving |
 | `maddening.core.simulation.compile_cache.warm_cache` | evolving |
+| `maddening.core.simulation.profiler.CompileCounts` | evolving |
 | `maddening.core.simulation.profiler.TraceSummary` | evolving |
+| `maddening.core.simulation.profiler.compile_counts` | evolving |
+| `maddening.core.simulation.profiler.count_hlo_ops` | evolving |
+| `maddening.core.simulation.profiler.count_jaxpr_primitives` | evolving |
 | `maddening.core.simulation.profiler.profile_graph` | evolving |
 | `maddening.core.solver_utils.ift_linear_solve` | experimental |
 | `maddening.core.static_data.StaticArray` | stable |
@@ -107,4 +111,4 @@ import time.  Levels:
 | `maddening.sysid.windowed_loss` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*88 API surfaces registered.*
+*92 API surfaces registered.*

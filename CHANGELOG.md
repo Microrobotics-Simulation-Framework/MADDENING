@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
+  `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
+  written; the enum could not represent the registry this project ships
 - **`SimulationNode.static_data_deps()`** declares which parameters a
   `static_data` array was derived from; `compile()` now refuses a graph whose
   static derives from a *trainable* parameter — freeze it or stop deriving it
@@ -206,6 +209,9 @@ guidance; the itemized changes follow.
 - **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
   `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
   1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
+- **The four `scripts/check_*.py` compliance gates now fail on the defects they
+  exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
+  `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
   it registers the node, so an `initial_state()` that raises no longer wedges
   the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`
@@ -345,8 +351,11 @@ guidance; the itemized changes follow.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected via `-m "not
-  slow"`).  Slow-marked tests deferred to a longer pre-release pass
+- Full MADDENING test suite at `c51cd6a`: **3440 tests collected**, 3413 under
+  `-m "not slow"` (27 deselected).  A collection count, not a pass count — see
+  `docs/release_notes/v0.4.0.md` for the last full CI run.  This line
+  previously carried v0.2.1's "1680 passed, 3 skipped"; it is edited in place
+  rather than appended because a false count is not fixed by adding a true one
 - Sharded `StaticArray` acceptance on a 4-device virtual mesh: bit-compatible
   with the single-device baseline, 50-step convergence, construction-time
   validation, `shard_info` delivery
@@ -356,6 +365,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Cloud surface**: the signaling WebSocket validated its own token, not the
+  client's (CRITICAL; set `MADDENING_STREAM_SECRET`), and the unauthenticated
+  API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory

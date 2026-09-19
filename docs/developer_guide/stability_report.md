@@ -92,6 +92,10 @@ import time.  Levels:
 | `maddening.nodes.rigid_body_2d.RigidBody2DNode` | deprecated |
 | `maddening.nodes.spring.SpringDamperNode` | stable |
 | `maddening.nodes.table.TableNode` | stable |
+| `maddening.serialization.json_codec.decode_non_finite` | evolving |
+| `maddening.serialization.json_codec.dumps` | evolving |
+| `maddening.serialization.json_codec.encode_non_finite` | evolving |
+| `maddening.serialization.json_codec.loads` | evolving |
 | `maddening.surrogates.architecture.SurrogateArchitecture` | experimental |
 | `maddening.surrogates.dataset.DatasetGenerator` | experimental |
 | `maddening.surrogates.node.SurrogateNode` | experimental |
@@ -107,4 +111,4 @@ import time.  Levels:
 | `maddening.sysid.windowed_loss` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*88 API surfaces registered.*
+*92 API surfaces registered.*

@@ -67,7 +67,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-005 | A coupling group's converged flag was a residual test, not a bound on the distance to the fixed point | `minor` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-006 | Non-finite numbers are written as non-standard JSON tokens | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0 |
 
-*6 anomalies registered, 3 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*6 anomalies registered, 2 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

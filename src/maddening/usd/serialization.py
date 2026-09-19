@@ -18,6 +18,35 @@ names may legally contain characters (``-``, ``.``, spaces, parentheses)
 that a prim name may not, and may legally start with a digit.  The node's
 own name is therefore written to ``maddening:nodeName`` and restored from
 there; the prim name is only a path element.
+
+Backward compatibility
+----------------------
+
+Two attributes were added in 0.4.0 -- ``maddening:dtype`` on an external
+input (its declared dtype, which no stage carried before, so an ``int32``
+or ``bool`` input reloaded as ``float32``) and
+``maddening:paramArrayShapesJson`` on a node (the shapes of zero-size
+array params, which ``tolist()`` flattens away).  A stage written without
+either loads exactly as it did before: the dtype falls back to the
+declaration default and the param keeps the shape its nested lists imply.
+
+Trust boundary
+--------------
+
+**A ``.usda`` / ``.usdc`` stage is untrusted input**, exactly like an FMI
+frame or a mapping asset: it names the Python class of every node it
+carries, and a stage can name any class at all.  :func:`load_graph_from_usd`
+therefore instantiates only classes the *caller* has allowed -- the
+built-ins, whatever :func:`register_node_class` registered, and whatever
+the ``node_registry`` argument passes in -- the same rule
+:meth:`GraphManager.from_dict` has always applied to a config.
+
+Until 0.4.0 the reader fell back to ``importlib.import_module`` on the
+stage's own string, so merely *opening* an untrusted stage ran the named
+module's import-time code (the ``TypeError`` that followed arrived far too
+late).  That fallback is now off unless the caller passes
+``allow_import=True``, which is only ever appropriate for a stage from a
+source you would run a script from.
 """
 
 from __future__ import annotations
@@ -59,10 +88,22 @@ def register_node_class(cls: type) -> type:
     return cls
 
 
+_BUILTINS_REGISTERED = False
+
+
 def _ensure_builtins_registered():
-    """Lazily register all built-in MADDENING nodes."""
-    if _NODE_CLASS_REGISTRY:
+    """Lazily register all built-in MADDENING nodes.
+
+    Guarded by its own flag rather than by the registry being empty: a
+    caller that runs ``register_node_class`` for one of its own classes
+    before the first load would otherwise keep the built-ins out of the
+    registry for ever.  That went unnoticed while an unregistered class
+    was resolved by importing it.
+    """
+    global _BUILTINS_REGISTERED
+    if _BUILTINS_REGISTERED:
         return
+    _BUILTINS_REGISTERED = True
     from maddening.nodes.ball import BallNode
     from maddening.nodes.heat import HeatNode
     from maddening.nodes.spring import SpringDamperNode
@@ -77,26 +118,57 @@ def _ensure_builtins_registered():
         register_node_class(cls)
 
 
-def _resolve_node_class(qualified_name: str) -> type:
-    """Resolve a qualified name to a node class."""
+def _resolve_node_class(
+    qualified_name: str,
+    node_registry: Optional[dict[str, type]] = None,
+    *,
+    allow_import: bool = False,
+) -> type:
+    """Resolve a stage's ``maddening:nodeType`` string to a node class.
+
+    The string comes off the stage, so it is untrusted: only classes the
+    caller has allowed are instantiated.  In order, that is
+    ``node_registry`` (by qualified name, then by bare class name, so a
+    registry written for :meth:`GraphManager.from_dict` works here too),
+    then the process-wide registry of built-ins and anything
+    :func:`register_node_class` was called with.
+
+    ``allow_import`` restores the pre-0.4.0 behaviour of importing the
+    module the stage names.  **Importing runs that module's top-level
+    code**, so it is opt-in and belongs only to a caller who trusts the
+    stage as much as a script.
+    """
     _ensure_builtins_registered()
+    if node_registry:
+        cls = node_registry.get(qualified_name)
+        if cls is None:
+            cls = node_registry.get(qualified_name.rsplit(".", 1)[-1])
+        if cls is not None:
+            return cls
     if qualified_name in _NODE_CLASS_REGISTRY:
         return _NODE_CLASS_REGISTRY[qualified_name]
-    # Try importing the module and getting the class
     parts = qualified_name.rsplit(".", 1)
-    if len(parts) == 2:
+    if allow_import and len(parts) == 2:
         module_path, class_name = parts
         import importlib
         try:
             mod = importlib.import_module(module_path)
-            cls = getattr(mod, class_name)
-            register_node_class(cls)
-            return cls
+            # Deliberately NOT register_node_class'd: opting in applies to
+            # the call that opted in.  Caching it would let a later load of
+            # an untrusted stage instantiate a class it never allowed.
+            return getattr(mod, class_name)
         except (ImportError, AttributeError):
             pass
     raise KeyError(
-        f"Node class '{qualified_name}' not found. "
-        f"Register it with register_node_class() or ensure it is importable."
+        f"Node class '{qualified_name}' is not allowed by this load. "
+        f"A USD stage is untrusted input and names its own Python classes, "
+        f"so only classes the caller allows are instantiated.  Pass it in: "
+        f"load_graph_from_usd(stage, node_registry={{'{qualified_name}': "
+        f"{parts[-1]}}}), or call register_node_class({parts[-1]}) first.  "
+        f"To go back to importing whatever the stage names -- which runs "
+        f"'{parts[0] if len(parts) == 2 else qualified_name}' at import time "
+        f"and is safe only for a stage you trust as much as a script -- pass "
+        f"allow_import=True."
     )
 
 
@@ -254,10 +326,20 @@ def save_graph_to_usd(
                 if spec.accepts_params else node_obj.params
             )
             prim.GetAttribute("maddening:paramsJson").Set(
-                json.dumps(
-                    _params_to_serializable(node_params), default=str
-                )
+                _params_json(node_params, node_name)
             )
+            lost = _degenerate_shapes(node_params)
+            if lost:
+                # ``np.zeros((0, 3)).tolist()`` is ``[]``: every axis after a
+                # zero-length one vanishes, and the param reloads as shape
+                # ``(0,)``.  Record those shapes beside the JSON (only when
+                # there are any, so no existing stage changes) and reshape on
+                # load.  An older reader ignores the attribute and behaves as
+                # it did before.
+                attr = prim.CreateAttribute(
+                    _PARAM_SHAPES_ATTR, Sdf.ValueTypeNames.String, custom=True,
+                )
+                attr.Set(json.dumps(lost, sort_keys=True))
             overrides = gm.param_spec_overrides().get(node_name)
             if overrides:
                 attr = prim.CreateAttribute(
@@ -335,6 +417,13 @@ def save_graph_to_usd(
             prim.GetAttribute("maddening:shape").Set(
                 Vt.IntArray(list(ext.shape))
             )
+            # The declared dtype, which the stage did not carry at all: an
+            # int32 or bool external input reloaded as float32.  Written as
+            # the dtype's name beside the shape, since the two are the same
+            # piece of information about the same array.
+            prim.CreateAttribute(
+                _EXT_DTYPE_ATTR, Sdf.ValueTypeNames.String, custom=True,
+            ).Set(_dtype_name(ext.dtype))
 
 
 # ------------------------------------------------------------------
@@ -345,8 +434,16 @@ def load_graph_from_usd(
     stage: Usd.Stage,
     root_path: str = "/Simulation",
     base_dir=None,
+    *,
+    node_registry: Optional[dict[str, type]] = None,
+    allow_import: bool = False,
 ) -> "GraphManager":
     """Reconstruct a GraphManager from a USD stage.
+
+    A stage is untrusted input: it names the Python class of every node
+    it carries.  Only classes the caller allows are instantiated -- see
+    ``node_registry`` and ``allow_import``, and the *Trust boundary*
+    section of this module.
 
     Parameters
     ----------
@@ -359,12 +456,31 @@ def load_graph_from_usd(
         mappings are relative to.  Defaults to the directory of the
         stage's root layer when it is a file, else the working
         directory.
+    node_registry : dict, optional
+        Node classes this load may instantiate, keyed by qualified name
+        (``"maddening.nodes.ball.BallNode"``) or by bare class name
+        (``"BallNode"``), so a registry written for
+        :meth:`GraphManager.from_dict` works unchanged.  Searched before
+        the built-ins and the :func:`register_node_class` registry, which
+        remain available whether or not this is given.
+    allow_import : bool, default False
+        Import the module a stage names when no registered class matches.
+        **Importing executes that module**, so this is only for a stage
+        you trust as much as a script; before 0.4.0 it was the
+        unconditional behaviour.
 
     Returns
     -------
     GraphManager
         A new graph manager with nodes, edges, coupling groups,
         and external inputs restored from the USD stage.
+
+    Raises
+    ------
+    KeyError
+        If the stage names a node class that is neither registered nor in
+        ``node_registry``.  The message names the class and says what to
+        pass.
     """
     from maddening.core.graph_manager import GraphManager
 
@@ -392,7 +508,9 @@ def load_graph_from_usd(
                 continue
 
             params = json.loads(params_json) if params_json else {}
-            cls = _resolve_node_class(node_type)
+            params = _restore_param_shapes(child, params)
+            cls = _resolve_node_class(node_type, node_registry,
+                                      allow_import=allow_import)
 
             # The node's own name, which need not be a legal prim name
             # (``"a-b"``, ``"1st"``).  Stages written before
@@ -542,7 +660,15 @@ def load_graph_from_usd(
             target_field = child.GetAttribute("maddening:targetField").Get()
             shape_arr = child.GetAttribute("maddening:shape").Get()
             shape = tuple(shape_arr) if shape_arr else ()
-            gm.add_external_input(target_node, target_field, shape=shape)
+            dtype = _ext_dtype(child)
+            if dtype is None:
+                # A stage written before the attribute existed says nothing
+                # about the dtype, so it gets the declaration default, which
+                # is what such a stage has always loaded as.
+                gm.add_external_input(target_node, target_field, shape=shape)
+            else:
+                gm.add_external_input(target_node, target_field, shape=shape,
+                                      dtype=dtype)
 
     return gm
 
@@ -606,3 +732,107 @@ def _params_to_serializable(params: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+#: Shapes of zero-size array params, which ``tolist()`` cannot carry.
+_PARAM_SHAPES_ATTR = "maddening:paramArrayShapesJson"
+
+#: The declared dtype of an external input.
+_EXT_DTYPE_ATTR = "maddening:dtype"
+
+
+def _allowed_dtypes() -> dict[str, np.dtype]:
+    """The dtypes an external input may declare, by name.
+
+    An allowlist rather than ``np.dtype(name)`` on the stage's own string:
+    a stage is untrusted input, and ``np.dtype`` accepts far more than a
+    boundary array can sensibly be (object arrays, structured records).
+    """
+    import jax.numpy as jnp  # noqa: PLC0415 - keeps module import light
+    names: dict[str, np.dtype] = {}
+    for dt in (np.bool_, np.int8, np.int16, np.int32, np.int64,
+               np.uint8, np.uint16, np.uint32, np.uint64,
+               np.float16, np.float32, np.float64, jnp.bfloat16):
+        names[np.dtype(dt).name] = np.dtype(dt)
+    return names
+
+
+def _dtype_name(dtype) -> str:
+    """``dtype`` as the name the stage stores (``"int32"``, ``"bool"``)."""
+    return np.dtype(dtype).name
+
+
+def _ext_dtype(prim):
+    """The external input's declared dtype, or ``None`` for a stage that
+    does not carry one (every stage written before 0.4.0)."""
+    attr = prim.GetAttribute(_EXT_DTYPE_ATTR)
+    name = attr.Get() if attr else None
+    if not name:
+        return None
+    dtype = _allowed_dtypes().get(str(name))
+    if dtype is None:
+        import warnings  # noqa: PLC0415
+        warnings.warn(
+            f"ignoring external-input dtype {name!r} from the USD stage: not "
+            f"a dtype a boundary array may declare; using the default",
+            RuntimeWarning, stacklevel=2,
+        )
+    return dtype
+
+
+def _degenerate_shapes(params: dict) -> dict[str, list[int]]:
+    """``{key: shape}`` for every array param whose shape ``tolist()``
+    loses -- an array with a zero-length axis and more than one axis."""
+    out: dict[str, list[int]] = {}
+    for k, v in params.items():
+        shape = getattr(v, "shape", None)
+        if shape is not None and len(shape) > 1 and 0 in tuple(shape):
+            out[k] = [int(d) for d in shape]
+    return out
+
+
+def _restore_param_shapes(prim, params: dict) -> dict:
+    """Undo :func:`_degenerate_shapes` for a stage that recorded them."""
+    attr = prim.GetAttribute(_PARAM_SHAPES_ATTR)
+    raw = attr.Get() if attr else None
+    if not raw:
+        return params
+    for key, shape in json.loads(raw).items():
+        if key in params:
+            params[key] = np.asarray(params[key]).reshape(tuple(shape))
+    return params
+
+
+def _params_json(params: dict, node_name: str) -> str:
+    """The ``maddening:paramsJson`` text for one node's params.
+
+    No ``default=str``: a param the JSON encoder cannot represent used to
+    be written as its ``repr`` and reload as that string -- a
+    ``static_data_provider`` object came back as
+    ``"<Provider /data/mesh.vtu>"`` -- while ``GraphManager.to_dict`` +
+    ``json.dumps`` raised a ``TypeError`` for the same graph.  The two
+    serialisers now agree, and they agree on the answer that fails at save
+    time rather than on the one that fails much later somewhere else.
+    """
+    try:
+        return json.dumps(_params_to_serializable(params))
+    except TypeError as exc:
+        bad = sorted(
+            k for k, v in _params_to_serializable(params).items()
+            if not _json_representable(v)
+        )
+        raise TypeError(
+            f"node {node_name!r}: parameter(s) {bad} cannot be written to a "
+            f"USD stage ({exc}).  A param that is not JSON-representable has "
+            f"to be rebuilt by the node's constructor from something that "
+            f"is, or kept out of ``params``; writing its repr() would reload "
+            f"it as a string."
+        ) from exc
+
+
+def _json_representable(value) -> bool:
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True

@@ -127,6 +127,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
+  between `unit` and `shape`, so a positional call silently bound the wrong
+  fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`
 - **`FIMReport` is keyword-only**: `rank` was inserted mid-dataclass this
   release, so positional construction silently reassigned every field after it;
   build it with keywords (every in-tree caller already did)
@@ -386,6 +389,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
+  bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
+  stage no longer imports the class it names — pass `node_registry=` to allow one
 - **Cloud surface**: the signaling WebSocket validated its own token, not the
   client's (CRITICAL; set `MADDENING_STREAM_SECRET`), and the unauthenticated
   API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0

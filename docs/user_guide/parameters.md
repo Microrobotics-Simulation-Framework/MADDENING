@@ -223,7 +223,14 @@ linearises, it never steps a parameter.)
   them — plus any `set_param_spec` overrides (`param_specs` in the dict,
   `maddening:paramSpecOverridesJson` on the USD node prim).  Reloading
   gives a node constructed with the calibrated constants and the same
-  trainable mask.
+  trainable mask.  A config and a stage are both **untrusted input**:
+  each names the Python class of every node, so each is read against an
+  explicit registry — `from_dict(config, node_registry)` and
+  `load_graph_from_usd(stage, node_registry=...)`, which also accepts
+  whatever `register_node_class` registered and the built-ins.  Before
+  0.4.0 the USD reader imported the module a stage named, which ran that
+  module; pass `allow_import=True` to get that back, and only for a
+  stage you trust as much as a script.
 * **FMI**: `build_model_description` exposes every leaf of `gm.params`
   as a `causality="parameter"`, `variability="tunable"` variable named
   `<node>.params.<key>` (its own namespace, mirroring the pytree path, so

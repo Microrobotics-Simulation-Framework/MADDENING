@@ -406,11 +406,24 @@ static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr
 
 static fmi3Status do_get(Instance *in, const fmi3ValueReference vr[], size_t nvr,
                          double *out, size_t nvalues) {
+    /* The same frame check do_set has.  Without it a get of a few million
+     * value references built a request frame over FRAME_MAX, which the
+     * bridge refuses to read: the connection is dropped and the instance
+     * dies, instead of the importer being told its request is too large. */
+    static const char *const too_big = "maddening_fmu: get exceeds the frame limit";
+    if (nvr > FRAME_MAX / 2) {
+        inst_log(in, fmi3Error, "logStatusError", too_big);
+        return fmi3Error;
+    }
     if (req_reserve(in, 64 + 24 * nvr)) return fmi3Fatal;
     char *w = in->req;
     w += sprintf(w, "{\"op\":\"get\",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
-    sprintf(w, "]}");
+    w += sprintf(w, "]}");
+    if ((size_t)(w - in->req) > FRAME_MAX) {
+        inst_log(in, fmi3Error, "logStatusError", too_big);
+        return fmi3Error;
+    }
     fmi3Status st = bridge_call(in, in->req);
     if (st != fmi3OK) return st;
     if (in->resp_binary) return parse_binary_values(in, out, nvalues);

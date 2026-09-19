@@ -82,6 +82,27 @@ initial_state_st = st.fixed_dictionaries({
     "position": _finite(-5.0, 5.0),
     "velocity": _finite(-2.0, 2.0),
 })
+# The spring's equilibrium is ``anchor_position + rest_length``, and with no
+# anchor edge that is ``REST``.  A state started *at* equilibrium and at rest
+# never moves, so a rollout from it carries no information about ``(k, c)``
+# and the FIM properties below cannot say anything -- which is what
+# ``assume(_position_variance(obs) > 1e-2)`` was throwing away.  Hypothesis
+# samples exactly 0.0 far more often than a uniform draw would, so that gate
+# fired on 13-31% of draws depending on the test, measured, against ~7% for
+# uniform sampling of the same ranges.
+#
+# Displacing the start by at least half a unit removes the at-rest draws
+# without narrowing the dynamics: the envelope on ``(k, c, m)`` is untouched,
+# so the lightly-damped stiff spring at ``k=49, c=0.125, m=3`` that
+# ``test_crb_is_finite_exactly_where_the_pair_is_identifiable`` documents as
+# its counter-example is still drawn. It does not reach zero rejection --
+# a soft, heavily damped spring still barely moves inside a 20-step window,
+# and constraining *that* away would delete the counter-example. Each test
+# records what it still rejects.
+displaced_state_st = st.fixed_dictionaries({
+    "position": st.one_of(_finite(-5.0, REST - 0.5), _finite(REST + 0.5, 5.0)),
+    "velocity": _finite(-2.0, 2.0),
+})
 # Multiplicative perturbation of the fitted constants (stiffness, damping).
 perturb_st = st.fixed_dictionaries({
     "stiffness": _finite(0.5, 2.0),
@@ -379,7 +400,7 @@ class TestFIM:
         assert name in rep.param_names
         assert 0.0 < weight <= 1.0 + 1e-6
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_crb_is_finite_exactly_where_the_pair_is_identifiable(
         self, single, truth, init, n,
@@ -403,6 +424,18 @@ class TestFIM:
         stronger than what it replaced: it holds for every draw, identifiable
         or not, and it would catch a ``rank`` that disagreed with its own
         ``crb`` in either direction.
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 16% of
+        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
+        buys that much less search here than the number says.  It is not
+        removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
         """
         gm = single
         note(f"truth={truth} init={init} n={n}")
@@ -432,14 +465,28 @@ class TestFIM:
             assert bool((crb[finite] > 0.0).all()), rep.crb
             assert bool(np.isinf(crb[~finite]).all()), rep.crb
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
         self, single, truth, init, n,
     ):
         """Position-only data sees k/m and c/m: scaling (k, c, m) together
         is invisible, so in relative coordinates (1, 1, 1)/sqrt(3) is the
-        weakest eigenvector with a ~0 eigenvalue."""
+        weakest eigenvector with a ~0 eigenvalue.
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 22% of
+        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
+        buys that much less search here than the number says.  It is not
+        removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n}")
         p_truth = _with_params(gm, "s", truth)
@@ -463,14 +510,28 @@ class TestFIM:
         proj = np.linalg.norm(null.T @ d)
         assert proj > 0.98, (proj, ev / ev[-1], V[:, 0])
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_valued_parameter_is_exact_null_direction_under_relative_scaling(
         self, single, truth, init, n,
     ):
         """At ``damping == 0`` the relative FIM has a zero damping row and
         column, so the weakest direction is exactly the damping axis with
-        eigenvalue 0 (a relative change of zero is no change)."""
+        eigenvalue 0 (a relative change of zero is no change).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 8% of
+        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
+        buys that much less search here than the number says.  It is not
+        removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         truth = {**truth, "damping": 0.0}
         note(f"truth={truth} init={init} n={n}")
@@ -487,7 +548,7 @@ class TestFIM:
         assert abs(v[0]) > 0.999, v  # param_names[0] == "['damping']"
         assert rep.least_identifiable()[0] == "['damping']"
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st,
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st,
            split=_finite(0.1, 0.9))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_duplicated_parameter_null_direction_is_difference(
@@ -496,7 +557,21 @@ class TestFIM:
         """Inject an exact null direction: stiffness = a + b.  With raw
         sensitivities the two columns of J are identical, so the FIM's
         weakest eigenvector is (1, -1)/sqrt(2) with eigenvalue 0 and the
-        strongest is (1, 1)/sqrt(2)."""
+        strongest is (1, 1)/sqrt(2).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 18% of
+        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
+        buys that much less search here than the number says.  It is not
+        removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n} split={split}")
         p_truth = _with_params(gm, "s", truth)

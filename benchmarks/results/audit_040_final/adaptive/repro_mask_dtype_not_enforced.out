@@ -1,0 +1,6 @@
+PoissonSineTopKNode    n_active=  8/64  ratio=0.5647  trapped=False  J= 0.0127174247
+ReturnsScores          n_active= 64/64  ratio=1.0000  trapped=False  J= 0.0125625291
+ReturnsPermutation     n_active= 63/64  ratio=1.0000  trapped=False  J= 0.0125625291
+
+no error, no warning: the shape check at base.py:794 and base.py:1034 passes,
+and jnp.asarray(x, dtype=bool) turns every nonzero entry into an active mode.

@@ -1,0 +1,27 @@
+jax devices: 4
+devices=1 n_cells=12 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=1 n_cells=16 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=1 n_cells=17 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=1 n_cells=18 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=1 n_cells=20 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=2 n_cells=12 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=2 n_cells=16 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=2 n_cells=17 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 2, axis_types=(Auto,)), spec=P('x',
+devices=2 n_cells=18 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=2 n_cells=20 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=3 n_cells=12 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=3 n_cells=16 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 3, axis_types=(Auto,)), spec=P('x',
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=3 n_cells=17 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 3, axis_types=(Auto,)), spec=P('x',
+devices=3 n_cells=18 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=3 n_cells=20 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 3, axis_types=(Auto,)), spec=P('x',
+devices=4 n_cells=12 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+devices=4 n_cells=16 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=4 n_cells=17 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 4, axis_types=(Auto,)), spec=P('x',
+/home/nick/MSF/msf/MADDENING-wt/audit/cloud-sharding/src/maddening/cloud/multigpu/sharded_node.py:705:25 (ShardedStencilNode._materialise_sharded_statics)
+devices=4 n_cells=18 (divides=False)             RAISED IndivisibleError: One of device_put args was given the sharding NamedSharding(mesh=Mesh('x': 4, axis_types=(Auto,)), spec=P('x',
+devices=4 n_cells=20 (divides=True)              max|sharded-unsharded| = 0.000e+00  OK 

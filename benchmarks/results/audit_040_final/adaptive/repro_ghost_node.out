@@ -1,0 +1,26 @@
+/home/nick/MSF/msf/MADDENING/benchmarks/results/audit_040_final/adaptive/repro_ghost_node.py:16: UserWarning: WARNING: node 'good' is disconnected (no edges or external inputs)
+  gm.compile()
+/home/nick/MSF/msf/MADDENING/benchmarks/results/audit_040_final/adaptive/repro_ghost_node.py:16: UserWarning: WARNING: node 'trap' is disconnected (no edges or external inputs)
+  gm.compile()
+node_names           : ['trap', 'good']
+state keys           : ['good']
+params['nodes'] keys : ['trap', 'good']
+Traceback (most recent call last):
+  File "/home/nick/MSF/msf/MADDENING/benchmarks/results/audit_040_final/adaptive/repro_ghost_node.py", line 20, in <module>
+    out = gm.step()
+          ^^^^^^^^^
+  File "/home/nick/MSF/msf/MADDENING-wt/audit/adaptive/src/maddening/core/graph_manager.py", line 4034, in step
+    self._state = self._compiled_step(self._state, external_inputs, params)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nick/MSF/msf/MADDENING-wt/audit/adaptive/src/maddening/core/graph_manager.py", line 3422, in _counted_step
+    return step_fn(full_state, external_inputs, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nick/MSF/msf/MADDENING-wt/audit/adaptive/src/maddening/core/graph_manager.py", line 3785, in graph_step
+    new_state[node_name] = _resolve_and_update_node(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nick/MSF/msf/MADDENING-wt/audit/adaptive/src/maddening/core/graph_manager.py", line 3724, in _resolve_and_update_node
+    spec, new_state[node_name], boundary_inputs, spec.timestep,
+          ~~~~~~~~~^^^^^^^^^^^
+KeyError: 'trap'
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

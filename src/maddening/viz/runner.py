@@ -6,9 +6,12 @@ Optionally reads external inputs from a ``CommandReceiver`` and
 injects them into the simulation each step.
 """
 
+import logging
 import time
 import threading
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class RealtimeRunner:
@@ -52,6 +55,10 @@ class RealtimeRunner:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._sim_time: float = 0.0
+        #: How many command dicts this runner has rejected (see
+        #: :meth:`_accepted_commands`).  Readable from the control thread.
+        self.rejected_commands: int = 0
+        self._last_command_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -108,6 +115,47 @@ class RealtimeRunner:
     # Internal
     # ------------------------------------------------------------------
 
+    def _accepted_commands(self, commands):
+        """*commands* if the graph will take them, else ``None``, logged.
+
+        A command dict comes off the wire from a remote controller, so
+        its node and field names are whatever the other end sent.  Since
+        v0.4.0 ``GraphManager.step`` rejects a name the graph does not
+        declare instead of dropping it in silence -- which is right, a
+        control input that quietly does nothing is the worse failure --
+        but a rejected input must not take the session with it.  A dead
+        runner thread costs the operator every subsequent frame and says
+        only that a thread died, whereas this says exactly which name was
+        wrong and keeps stepping.
+
+        Rejection falls back to ``None``, which is the documented
+        "zeros for every declared input": the same thing the runner does
+        when no receiver is attached, rather than a half-applied command.
+        Repeats of the same complaint are logged once, so a controller
+        stuck on a bad name cannot flood the log at frame rate.
+
+        Only the validation is caught.  An exception from the physics is
+        not an input problem and still stops the thread, because a step
+        that cannot run is not something the next frame recovers from.
+        """
+        if commands is None:
+            return None
+        try:
+            self._gm._resolve_external_inputs(commands)  # noqa: SLF001
+        except (ValueError, TypeError, KeyError) as exc:
+            self.rejected_commands += 1
+            message = f"{type(exc).__name__}: {exc}"
+            if message != self._last_command_error:
+                self._last_command_error = message
+                logger.error(
+                    "rejected external command %r from the command receiver; "
+                    "stepping with zeros for this frame instead.  %s",
+                    commands, message,
+                )
+            return None
+        self._last_command_error = None
+        return commands
+
     def _loop(self) -> None:
         """Main loop executed on the daemon thread."""
         dt = self._gm.timestep
@@ -122,7 +170,9 @@ class RealtimeRunner:
             # Read external inputs from command receiver (if any)
             ext_inputs = None
             if self._cmd_recv is not None:
-                ext_inputs = self._cmd_recv.latest_commands()
+                ext_inputs = self._accepted_commands(
+                    self._cmd_recv.latest_commands()
+                )
 
             # Batch-step: execute multiple physics steps before sleeping.
             # The relay (observer) still captures every step, but sleep

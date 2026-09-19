@@ -232,3 +232,87 @@ def test_a_node_whose_state_entry_is_missing_can_still_be_removed():
     gm.remove_node("ball")
     assert "ball" not in gm.node_names
     assert not [e for e in gm._edges if "ball" in (e.source_node, e.target_node)]
+
+
+# ---------------------------------------------------------------- ``_meta``
+#
+# ``_meta`` is state too: it holds the multi-rate sub-step counter and the
+# coupling predictor / IQN warm starts.  A mutator that rolls back ``_nodes``
+# and ``_state`` but leaves ``_meta`` half-applied re-phases the schedule on
+# the *rollback* path -- the same silent trajectory change that preserving
+# ``_meta`` across a recompile was fixed to stop.  ``_snapshot`` above already
+# reads ``_meta`` (it is a key of ``_state``); these are the cases that put
+# something in it.
+
+
+def _multirate_mid_run():
+    """A multi-rate graph four base steps in, so it has a phase to lose."""
+    gm = GraphManager()
+    gm.add_node(TableNode(name="table", timestep=0.01))
+    gm.add_node(BallNode(name="ball", timestep=0.03))
+    gm.add_edge("table", "ball", "position", "table_position")
+    gm.compile()
+    gm.run(4)
+    assert int(gm._state["_meta"]["step_count"]) == 4
+    return gm
+
+
+def test_a_failed_reset_state_leaves_the_sub_step_phase_alone():
+    gm = GraphManager()
+    gm.add_node(BallNode(name="ball", timestep=0.01))
+    flaky = _FlakyInitialStateNode(name="flaky", timestep=0.03)
+    gm.add_node(flaky)
+    gm.compile()
+    gm.run(4)
+    assert int(gm._state["_meta"]["step_count"]) == 4
+    before = _snapshot(gm)
+
+    flaky.armed = True
+    with pytest.raises(_FlakyInitialStateNode.Refused):
+        gm.reset_state()
+
+    assert _snapshot(gm) == before
+    assert int(gm._state["_meta"]["step_count"]) == 4
+
+
+def test_a_failed_compile_leaves_the_sub_step_phase_alone():
+    """``compile`` rebuilds ``_meta``; it must commit it only once it is done.
+
+    The refusals after that point are real (``accelerated_fields`` naming a
+    field that is not a state field, the static-data/trainable-parameter
+    rule), and a graph that has to be fixed and recompiled must not have
+    lost four steps of phase on the way.
+    """
+    gm = _multirate_mid_run()
+    gm.add_coupling_group(
+        ["table", "ball"],
+        subcycling=True,                 # the two differ in timestep
+        acceleration="iqn-ils",          # ... which accelerated_fields needs
+        accelerated_fields={"ball": ["no_such_field"]},
+    )
+    before = _snapshot(gm)
+
+    with pytest.raises(ValueError, match="not a state field"):
+        gm.compile()
+
+    assert _snapshot(gm) == before
+    assert int(gm._state["_meta"]["step_count"]) == 4
+
+
+def test_the_phase_survives_the_repair_and_the_run_continues():
+    """The point of the rollback: fix the cause, recompile, carry on."""
+    reference = _multirate_mid_run()
+    reference.run(4)
+
+    gm = _multirate_mid_run()
+    gm.add_coupling_group(
+        ["table", "ball"], subcycling=True, acceleration="iqn-ils",
+        accelerated_fields={"ball": ["no_such_field"]},
+    )
+    with pytest.raises(ValueError):
+        gm.compile()
+    gm.remove_coupling_group(["table", "ball"])
+    gm.run(4)
+
+    for field, expected in reference.get_node_state("ball").items():
+        assert jnp.array_equal(gm.get_node_state("ball")[field], expected), field

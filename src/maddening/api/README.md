@@ -22,25 +22,63 @@ uvicorn module:app --host 127.0.0.1 --port 8000
 # Interactive docs at http://localhost:8000/docs
 ```
 
-## Security: this API has no authentication
+## Security: a loopback bind is open, anything else needs a token
 
-There is no login, no API key and no TLS.  Every route below is open to
-anyone who can reach the port, including `DELETE /graph/nodes/{name}`,
-`POST /checkpoint/save` and `POST /cloud/launch` — which provisions paid
-GPU instances with the credentials stored on the host — while `/docs`
-publishes the full route list.  So:
+**Binding `127.0.0.1` changes nothing** — no login, no header, exactly as
+before.  **Binding anything else requires a bearer token on every route**
+except `/healthz` and the static `/viz/*` pages, because those routes
+include `DELETE /graph/nodes/{name}`, `POST /checkpoint/save` and
+`POST /cloud/launch`, which provisions paid GPU instances with the
+credentials stored on the host.
 
-* **Bind it to `127.0.0.1`** (`--host 127.0.0.1`, or `MADDENING_HOST` for
-  the cloud entry point) and reach it from elsewhere through an SSH
-  tunnel: `ssh -L 8000:127.0.0.1:8000 user@host`.
-* **If it must listen on a network**, put an authenticating,
-  TLS-terminating reverse proxy in front of it and keep port 8000 closed
-  in the firewall / cloud security group.
-* Containers are the exception that proves the rule: a container bound to
-  `127.0.0.1` is unreachable even with `-p`, so the image binds `0.0.0.0`
-  and the *published port* is what you must keep private.  The server
-  logs a warning at startup whenever it binds a non-loopback address
-  (`maddening.api.server.warn_if_publicly_bound`).
+The server has to be *told* the bind address — it cannot see the socket
+uvicorn opens:
+
+```python
+server = SimulationServer(registry, bind_host=host)   # or $MADDENING_HOST
+server.auth.announce(port)                            # logs a generated token once
+uvicorn.run(server.create_app(), host=host, port=port)
+```
+
+A request that arrives from a routable IP is challenged even when the
+server was told the bind is loopback.  That backstop is why forgetting
+`bind_host` costs you a 401, not an open API.
+
+### The token
+
+* `MADDENING_API_TOKEN` if set.  **Set but blank raises** — that is what
+  `MADDENING_API_TOKEN=$UNSET_VARIABLE` produces, and reading it as
+  "authentication off" is the failure this exists to prevent.
+* Otherwise a `secrets.token_urlsafe(32)` value generated at startup and
+  logged once.  If nothing reads your log — a detached container, a
+  batch job — set `MADDENING_API_TOKEN` yourself, or point
+  `MADDENING_API_TOKEN_FILE` at a path on a mounted volume and the
+  generated token is written there with mode `0600`.
+
+### Presenting it
+
+| Client | Carrier |
+| --- | --- |
+| HTTP | `Authorization: Bearer <token>`. No authenticated route accepts `?token=`, so a credential never reaches an access log through this API. |
+| WebSocket, non-browser | `Authorization: Bearer <token>` on the handshake. |
+| WebSocket, browser | Subprotocols `["maddening.bearer.<base64url(token)>", "maddening.v1"]`; the server selects `maddening.v1`. Browsers cannot set a header on a handshake. |
+| Bundled UI | Open `/viz/app?token=<token>`. The page removes the token from the URL immediately and keeps it in `sessionStorage`; without one it prompts on the first 401. |
+
+`/docs`, `/redoc` and `/openapi.json` are **not served** when the token is
+enforced: Swagger UI fetches its own schema with no `Authorization`
+header, so it cannot work behind a bearer token.  Read them from a
+loopback-bound instance over an SSH tunnel.
+
+### What the token does not do
+
+There is still **no TLS**.  The token and every state snapshot cross the
+network in cleartext, so a non-loopback bind belongs on a private network
+or behind a TLS-terminating proxy.  Containers are the awkward case: a
+container bound to `127.0.0.1` is unreachable even with `-p`, so the image
+binds `0.0.0.0` — publish the port to loopback
+(`docker run -p 127.0.0.1:8000:8000`) and tunnel to it.  The server logs
+what is exposed at startup
+(`maddening.api.server.warn_if_publicly_bound`).
 
 Request sizes are bounded (`n_steps` ≤ 100000, node integer parameters ≤
 10000000 and ≤ 20000000 state elements per node, bounded

@@ -181,3 +181,52 @@ def test_an_unknown_dtype_on_a_stage_warns_and_falls_back():
         reloaded = load_graph_from_usd(stage)
     assert any("object" in str(w.message) for w in caught)
     assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("float32")
+
+
+def test_a_non_finite_param_makes_the_params_attribute_non_standard_json():
+    """The USD third of ``MADD-ANO-006``, pinned.
+
+    ``maddening:paramsJson`` is written with ``json.dumps``, whose default
+    ``allow_nan=True`` emits the bare tokens ``NaN`` / ``Infinity``.
+    Python reads them back, so the stage round-trips exactly; they are not
+    JSON, so any other reader of the ``.usda`` rejects the attribute.
+
+    The anomaly is **open**: closing it means choosing an encoding for a
+    format that has shipped, and no existing reader of a MADDENING stage
+    would understand a tagged one.  This test states the behaviour the
+    registry documents, so that changing it fails here and the registry
+    entry is updated with it.
+    """
+    def _refuse(token):
+        raise ValueError(f"non-standard JSON token {token!r}")
+
+    gm = GraphManager()
+    node = SpringDamperNode("s", 0.01, stiffness=30.0)
+    node.params["cap"] = float("inf")
+    gm.add_node(node)
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
+        "maddening:paramsJson").Get()
+
+    assert "Infinity" in stored, (
+        "MADD-ANO-006 says the stage carries the bare token; if that "
+        "changed, update the registry entry"
+    )
+    assert json.loads(stored)["cap"] == float("inf")     # Python reads it back
+    with pytest.raises(ValueError):
+        json.loads(stored, parse_constant=_refuse)       # a strict reader does not
+
+
+def test_a_finite_graph_writes_strict_json_to_the_stage():
+    """The anomaly is confined to non-finite numbers, not to the attribute."""
+    def _refuse(token):
+        raise ValueError(f"non-standard JSON token {token!r}")
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(_gm(), stage)
+    stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
+        "maddening:paramsJson").Get()
+
+    assert json.loads(stored, parse_constant=_refuse)["stiffness"] == 30.0

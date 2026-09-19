@@ -315,7 +315,8 @@ anomalies:
       maintainer's call about a shipped format, not a bug fix, so it is
       recorded here instead of being made unilaterally.
     verification:
-      - "benchmarks/results/audit_040_final/params-io/repro/r16_spec_roundtrip_gaps.py"
-      - "benchmarks/results/audit_040_final/params-io/repro/r2_usd_params.py"
-      - "benchmarks/results/audit_040_final/params-io/repro/r20_misc.py"
+      - "tests/core/test_non_finite_json_tokens.py::test_an_infinite_param_spec_bound_makes_to_dict_non_standard_json"
+      - "tests/usd/test_usd_params.py::test_a_non_finite_param_makes_the_params_attribute_non_standard_json"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_not_standard_json"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_the_binary_frames_carry_the_same_values_exactly"
     github_issue: null

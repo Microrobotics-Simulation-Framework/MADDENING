@@ -208,11 +208,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The `usd` extra is here so the gates can actually see what they
+      # verify: an anomaly or an algorithm guide may name a
+      # `maddening.usd.*` symbol, and without usd-core the resolver can only
+      # report it as unchecked.  `test-usd` installs the same extra in this
+      # workflow, so the wheel is proven here.  The gates still degrade
+      # gracefully without it -- see the NOTE path in
+      # maddening.compliance._validate -- which is what a contributor
+      # running them locally relies on.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"
-          pip install -e ".[ci]"
+          pip install -e ".[ci,usd]"
 
       - name: Validate anomaly registry
         run: python scripts/check_anomalies.py --prefix MADD-ANO-

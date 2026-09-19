@@ -386,3 +386,187 @@ def test_both_solvers_report_the_same_bound(solver):
     assert a["residual"] == pytest.approx(b["residual"], rel=1e-5)
     assert a["error_estimate"] == pytest.approx(b["error_estimate"], rel=1e-5)
     assert _ab(ift) == pytest.approx(_ab(fori), rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# What the estimate is short of, from the 2026-09-19 coupling audit
+#
+# Two mechanisms, both independent of the already-recorded one (the
+# measure is not a metric, ``test_the_triangle_inequality_does_not_hold``).
+# One is fixed here; one is not, and is pinned as a strict xfail so that
+# fixing it is noticed.  See
+# ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+# ---------------------------------------------------------------------------
+
+
+def _slow_cycle(gain, **group_kw):
+    """The ``rho = gain**2`` cycle -- slow enough for relaxation to matter.
+
+    ``_contracting_graph``'s ``rho = 0.25`` converges in a handful of
+    passes, which leaves no tail for a geometric series to be wrong
+    about.  ``gain = 0.95`` gives ``rho = 0.9025`` and a fixed point of
+    ``(1, gain) / (1 - rho)``.
+    """
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain=gain, bias=1.0))
+    gm.add_node(_Affine("b", gain=gain, bias=0.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, **group_kw)
+    gm.compile()
+    return gm
+
+
+#: Relaxation factors either side of 1.  0.5 was 2.0x *conservative*
+#: before the fix and 1.95 was 1.97x optimistic, so a test that only
+#: looked at over-relaxation would have read the safe direction as
+#: correct.
+_RELAXATIONS = (0.5, 0.8, 1.0, 1.3, 1.6, 1.9)
+
+#: ``tolerance`` for the relaxation sweep.  Not tighter: the norm is
+#: relative, the fixed point is ~10, and float32 resolves ~1e-7 of it,
+#: so below ~1e-4 the residual *ratio* the estimate rests on is reading
+#: round-off and the comparison stops measuring the criterion.
+_RELAXATION_TOLERANCE = 1e-3
+
+
+@pytest.mark.parametrize("relaxation", _RELAXATIONS)
+def test_the_estimate_is_invariant_to_the_relaxation_factor(relaxation):
+    """Over-relaxation moves the iterate further, not the estimate less.
+
+    ``x_{k+1} = x_k + omega * (F(x_k) - x_k)``, so the step the iterate
+    takes is ``omega`` times the residual that is measured.  Summing
+    residuals instead of steps made the reported distance short by
+    exactly ``omega``: the audit measured ``est/true`` at 0.68 for
+    ``omega=1.5`` and 0.51 for ``omega=1.95``, with ``converged=True``
+    and ``bound_valid=True``.  The estimate describes a distance, and a
+    distance does not depend on the knob used to travel it.
+    """
+    gain = 0.95
+    fixed_point = (1.0 / (1.0 - gain * gain), gain / (1.0 - gain * gain))
+    gm = _slow_cycle(
+        gain, max_iterations=400, tolerance=_RELAXATION_TOLERANCE,
+        acceleration="fixed", relaxation=relaxation,
+    )
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _relative_distance(_ab(gm), fixed_point)
+
+    assert d["bound_valid"] and d["converged"], d
+    ratio = d["error_estimate"] / distance
+    assert 0.9 <= ratio <= 1.15, (
+        f"relaxation={relaxation}: reported {d['error_estimate']:.4e} for a "
+        f"true distance of {distance:.4e} (ratio {ratio:.4f}).  A ratio "
+        f"near 1/omega means the geometric series is summing residuals "
+        f"rather than the steps the iterate takes."
+    )
+
+
+class _TwoMode(SimulationNode):
+    """``x <- rho * u + c`` on two independent modes at once."""
+
+    def __init__(self, name, rho, c):
+        super().__init__(name=name, timestep=1.0)
+        self._rho = jnp.asarray(rho, jnp.float32)
+        self._c = jnp.asarray(c, jnp.float32)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(2, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(2,), dtype=jnp.float32,
+                                       description="u")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._rho * boundary_inputs["u"] + self._c}
+
+
+#: The audit's case.  The slow mode carries 1e-5 per pass but is
+#: amplified 1000x, so it owns 1.25e-2 of the answer; the fast mode
+#: carries 1.0 per pass and is amplified 1.25x.  The *step* is the fast
+#: mode's until 0.2**k drops below 1e-5, which is about seven passes
+#: after the criterion is met.
+_TWO_MODE_RHO = (0.999, 0.2)
+_TWO_MODE_C = (1e-5, 1.0)
+
+
+def _two_mode_group(**group_kw):
+    gm = GraphManager()
+    gm.add_node(_TwoMode("a", _TWO_MODE_RHO, _TWO_MODE_C))
+    gm.add_node(_TwoMode("b", (1.0, 1.0), (0.0, 0.0)))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, **group_kw)
+    gm.compile()
+    return gm
+
+
+def _two_mode_distance(gm):
+    """Distance to the analytic fixed point, in the group's own norm."""
+    exact = [c / (1.0 - r) for r, c in zip(_TWO_MODE_RHO, _TWO_MODE_C)]
+    total = 0.0
+    for node in ("a", "b"):
+        got = [float(v) for v in gm.get_node_state(node)["x"]]
+        ref = max(max(abs(g) for g in got), max(abs(e) for e in exact))
+        if ref == 0.0:
+            continue
+        total += sum(((g - e) / ref) ** 2 for g, e in zip(got, exact))
+    return total ** 0.5
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Recorded, not accepted: `rho` is read from the residual sequence, "
+    "which reports the mode dominating the *step*, and the mode "
+    "dominating the *remaining error* can be a different and much "
+    "slower one.  On (0.999, 0.2) at tolerance=1e-4 the estimate is "
+    "9.19e-05 against a true distance of 1.12e-02 -- 122x -- with "
+    "bound_valid=True and converged=True.  No test on the residual "
+    "sequence separates this from a genuine single-mode decay at 0.2: "
+    "for the first several passes the two sequences are identical, so "
+    "the two-step sqrt guard reads the same fast rate.  A real fix "
+    "needs the spectrum (e.g. a power iteration on dF/dx, available "
+    "only under solver='ift') and is post-0.4.0 work.  Flipping this "
+    "to a pass means the estimate became a bound: update "
+    "benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md and "
+    "the caveat on _fixed_point_while."
+))
+def test_the_estimate_is_never_smaller_than_the_distance_it_estimates():
+    """The property the field's name claims, on a two-mode contraction.
+
+    This is the statement ``error_estimate`` would have to satisfy to
+    be a bound.  It does not, and the gap is not small.
+    """
+    gm = _two_mode_group(max_iterations=60, tolerance=1e-4)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm)
+    assert d["bound_valid"] and d["converged"], d
+    assert d["error_estimate"] >= distance, (
+        f"reported {d['error_estimate']:.4e} for a true distance of "
+        f"{distance:.4e} ({distance / d['error_estimate']:.0f}x)"
+    )
+
+
+def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
+    """The same case as a measurement, so the memo's number is pinned.
+
+    The strict xfail above says the bound fails; this says *by how
+    much* and that nothing in the report warns.  Kept separate so a
+    partial improvement that shrinks 122x to 3x is visible here rather
+    than silently still failing there.
+    """
+    gm = _two_mode_group(max_iterations=60, tolerance=1e-4)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm)
+    understatement = distance / d["error_estimate"]
+    assert d["bound_valid"] is True
+    assert d["converged"] is True
+    assert understatement > 50.0, (
+        f"the two-mode understatement is now {understatement:.0f}x, not the "
+        f"~122x recorded in ERROR_BOUND_DECISION.md -- if the estimate "
+        f"improved, update the memo and the xfail above"
+    )

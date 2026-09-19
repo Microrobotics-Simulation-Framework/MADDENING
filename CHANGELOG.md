@@ -198,15 +198,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **A recompile no longer re-phases a multi-rate graph or restarts a coupling
-  warm start**: `_meta` is preserved like node state and `params`, so a mid-run
-  edit changes no trajectory; `reset_state()` is still the way to zero it
-- **The static-data/trainable-parameter refusal now reads `set_param_spec`
-  overrides**, in both directions: unfreezing a declared parameter re-arms the
-  refusal instead of yielding a wrong gradient, and freezing one clears it
-- **`external_inputs` is now as strict as `params`**: an undeclared `node.field`
-  raises instead of being dropped in silence, an omitted one is zero-filled, and
-  a declared `dtype` survives `to_dict`/`from_dict` instead of reloading float32
+- **A recompile no longer re-phases a multi-rate graph or restarts a coupling warm
+  start** — only graphs with a rate divider > 1 or a warm start were ever affected;
+  `set_param_spec` and `external_inputs` are now checked as strictly as `params`
 - **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
   "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
   `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid

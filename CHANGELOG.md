@@ -389,6 +389,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **The API requires a bearer token unless it is bound to loopback** (CRITICAL):
+  set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
+  no longer defaults to `[8000]`, so a cloud launch stops opening the API port
 - **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
   bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
   stage no longer imports the class it names — pass `node_registry=` to allow one

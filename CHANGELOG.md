@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **`fim` says when `rank` was decided at the float32 noise floor**: a
   `PrecisionLimitWarning` naming the eigenvalue ratio, the cutoff and the
   `jax_enable_x64` re-run that settles it.  Quiet on well-conditioned problems
+- **A performance regression gate on compile counts, not the clock**:
+  `profile_graph` reports retraces, jaxpr primitives and lowered HLO ops;
+  `python scripts/compile_counts.py --check` gates them and CI runs it
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships

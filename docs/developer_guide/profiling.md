@@ -114,3 +114,74 @@ does the same from code, and `compile_cache.warm_cache(gm_factory,
 n_steps=2, scan_steps=N)` compiles a graph's `step` and `run_scan`
 ahead of a run.  The cache key covers the JAX/XLA version, backend and
 traced program, so a stale entry is a miss, never a wrong executable.
+
+## Compilation counts, and the regression gate
+
+Compile time is what a user of MADDENING feels first — the pitch is that
+the whole graph compiles to one jitted step — and until v0.4.0 nothing
+stopped a silent 3× compile-time regression from shipping.
+
+The gate that guards it does not read the clock.  This repository has
+already paid for a wall-clock gate: a test comparing per-step cost at
+two coupling iteration caps with a 3× bound, on quantities around
+1e-4 s, failed CI at 3.27× on a pull request that changed 122
+documentation files and no code at all.  On an idle box the real ratio
+is 0.97–1.31.  The number it read was the runner.
+
+So the gate reads integers.  `profile_graph` reports a `CompileCounts`
+alongside the timings (`compile_counts(gm)` gets them on their own):
+
+| count | what it is | why it matters |
+| --- | --- | --- |
+| `retrace_count` | Python traces of the compiled step since `compile()`, i.e. XLA compilations | One is healthy.  An unexpected retrace is the classic silent regression — a weak-typed leaf, a dtype that drifts, an argument that stopped being static — and costs a full compile on every run |
+| `jaxpr_primitive_count` | primitives in the step's jaxpr, recursing into `scan`/`while`/`cond` bodies | how much work the graph builder emits.  A body counts once, not once per iteration, so the number describes the program and not the trip count |
+| `hlo_op_count` | operations in the lowered StableHLO module | what MADDENING hands to XLA.  Deliberately *pre*-optimisation: the post-fusion count is the backend's decision and differs by platform |
+
+`scan_*` variants cover a `run_scan` program when `scan_steps` is passed.
+
+All of these reproduce exactly: the same graph on the same JAX version
+gives the same integers on any machine, under any load.  Wall-clock
+stays in the report, worth trending, and never gates.
+
+### Running the gate
+
+```bash
+python scripts/compile_counts.py --check    # what CI runs
+python scripts/compile_counts.py --show     # print, write nothing
+python scripts/compile_counts.py            # regenerate the baseline
+```
+
+Five workloads are measured — a single node, a coupled pair, a
+multi-rate graph, a heat chain with a `run_scan` program, and a
+`ShardedStencilNode` over a four-device mesh — and compared to
+`benchmarks/compile_counts_baseline.json`.  The script pins
+`JAX_PLATFORMS=cpu` and the device count before importing JAX, because
+both change the counts; `tests/core/test_compile_counts.py` therefore
+runs it as a subprocess.
+
+### If the gate fails on your branch
+
+It prints every count that moved, both tables, and the regenerate
+command.  Two cases:
+
+- **A retrace count moved.**  Compared exactly, always, because it is
+  counted in Python and does not depend on the JAX version at all.  An
+  increase is an extra XLA compile on every run; find the leaf whose
+  dtype or weak type changes after the first step, or the argument that
+  stopped being static, before touching the baseline.
+- **An op count moved.**  Compared against a band: ±max(2 ops, 2%) when
+  the running JAX matches the baseline's, ±max(10 ops, 25%) otherwise.
+  If the change is intended, regenerate and commit the new baseline,
+  saying in the commit message why the counts moved.
+
+Regenerate under the JAX version CI pins where you can — the baseline
+records the version it was taken on, and one matching CI's gets the
+tighter band.  The counts were measured identical on JAX 0.10.2 and
+0.11.0, so this costs strictness and nothing else.
+
+`CompileCounts` reads the counts after four warmup steps, not one.  The
+retrace bugs this project has actually had did not appear on the first
+step: the weak-typed-seed bug traced again on step 2 when a weak leaf
+came back strongly typed, and a third time on step 3.  Measured after a
+single step it looked healthy — which is how the gate's own mutation
+test found the flaw.

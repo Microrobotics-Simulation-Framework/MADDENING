@@ -184,7 +184,7 @@ def test_the_overrun_gate_is_separate_and_can_fire_on_its_own(audit):
     eventually say so."""
     plugin = audit.RejectionAuditPlugin()
     plugin.records["t"] = audit.record_from_statistics(
-        "t", _stats(generate=["valid"] * 5 + ["overrun"] * 5))
+        "t", _stats(generate=["valid"] * 4 + ["overrun"] * 6))
     assert plugin.over_budget() == list(plugin.records.values())
     assert plugin.over_budget(max_overrun=0.9) == []
 
@@ -272,6 +272,32 @@ def test_the_gate_sits_where_the_risk_turns_over(audit):
     assert audit.health_check_failure_probability(audit.MAX_REJECTION) < 1e-11
     assert audit.health_check_failure_probability(0.70) > 1e-3
     assert 0.25 < audit.MAX_REJECTION < 0.70
+
+
+def test_the_overrun_gate_is_set_from_the_risk_not_from_the_tree(audit):
+    """``MAX_OVERRUN`` cannot be set the way ``MAX_REJECTION`` was.
+
+    ``data_too_large`` tolerates 20 overruns before 10 valid draws rather
+    than 50, so its curve turns over far earlier -- and the measured tree
+    runs right up to it, at 37.6% for
+    ``test_a_mask_whose_keys_differ_from_params_is_refused``.  A gate set
+    from that distribution would sit in the part of the curve where the
+    health check genuinely fires.  It is set from the curve instead: at
+    ``MAX_OVERRUN`` one run trips the check with probability of order a few
+    percent, which is where the problem stops being theoretical, and the
+    worst measured today is comfortably below it.
+    """
+    at_gate = audit.health_check_failure_probability(
+        audit.MAX_OVERRUN, budget=audit.HEALTH_CHECK_MAX_OVERRUN)
+    assert 5e-3 < at_gate < 1e-1, at_gate
+    # Today's worst measured overrun rate must sit under the gate, or CI is
+    # red on merge rather than on a regression.
+    assert audit.MAX_OVERRUN > 0.376
+    # And the overrun budget must stay looser than the filter budget in
+    # rate terms while being tighter in risk terms -- if that ever inverts,
+    # the two gates have been conflated.
+    assert at_gate > audit.health_check_failure_probability(
+        audit.MAX_REJECTION)
 
 
 # ---------------------------------------------------------------------------

@@ -51,9 +51,18 @@ NODES = frozenset({"a", "b"})
 #: actually reads the field.  Sources, all in
 #: ``maddening.core.graph_manager``:
 #:
-#: * ``_compute_residual`` hands ``atol`` / ``rtol`` to the mixed and
-#:   interface residuals only, and ``conv_threshold_value`` is a literal
-#:   ``1.0`` for those two and ``float(group.tolerance)`` otherwise;
+#: * ``max_iterations <= 1`` returns from ``_run_coupling_inner`` after
+#:   the single pass, before the accelerator is built and before
+#:   ``_run_ift_forward`` runs -- which kills ``acceleration``,
+#:   ``relaxation``, ``jacobian_reuse``, ``accelerated_fields`` and
+#:   ``linear_solver`` whatever else is set.  ``strict_convergence``
+#:   survives it: that branch checks it on the ift path;
+#: * ``_compute_residual`` hands ``rtol`` to the mixed and interface
+#:   residuals only, and ``conv_threshold_value`` is a literal ``1.0``
+#:   for those two and ``float(group.tolerance)`` otherwise.  ``atol``
+#:   is *not* in that set: all three residuals take it as the dead band
+#:   that decides which fields enter the norm at all, and the cap-one
+#:   branch measures a residual too, so it is read on every path;
 #: * ``_accelerate`` (ift) and the ``elif group.acceleration == "fixed"``
 #:   branch (fori) are the only readers of ``relaxation``;
 #: * ``_iqn_warm_start`` returns before reaching ``jacobian_reuse``
@@ -66,41 +75,55 @@ NODES = frozenset({"a", "b"})
 #:
 #: Everything else is read on every path, so it can never be inert.
 _ALWAYS = (lambda g: True)
+_MULTIPASS = (lambda g: g.max_iterations > 1)
 _READ_WHEN = {
     "max_iterations": _ALWAYS,
     "tolerance": lambda g: g.convergence_norm == "l2",
     "convergence_norm": _ALWAYS,
-    "atol": lambda g: g.convergence_norm != "l2",
+    "atol": _ALWAYS,
     "rtol": lambda g: g.convergence_norm != "l2",
     "diagnostics": _ALWAYS,
-    "acceleration": _ALWAYS,
-    "relaxation": lambda g: g.acceleration == "fixed",
+    "acceleration": _MULTIPASS,
+    "relaxation": lambda g: _MULTIPASS(g) and g.acceleration == "fixed",
     "iteration_mode": _ALWAYS,
-    "accelerated_fields": lambda g: g.acceleration in ("iqn-ils", "iqn-imvj"),
+    "accelerated_fields": lambda g: (
+        _MULTIPASS(g) and g.acceleration in ("iqn-ils", "iqn-imvj")
+    ),
     "subcycling": _ALWAYS,
     "boundary_interpolation": lambda g: g.subcycling,
-    "jacobian_reuse": lambda g: g.acceleration == "iqn-imvj",
+    "jacobian_reuse": lambda g: _MULTIPASS(g) and g.acceleration == "iqn-imvj",
     "waveform_iterations": lambda g: g.subcycling,
     "predictor": _ALWAYS,
     "solver": _ALWAYS,
     "strict_convergence": lambda g: g.solver == "ift",
-    "linear_solver": lambda g: g.solver == "ift",
+    "linear_solver": lambda g: _MULTIPASS(g) and g.solver == "ift",
 }
 
-#: Settings reported in one message instead of one each.  ``atol`` and
-#: ``rtol`` are the only pair: they go live and dead together under the
-#: same norm, and two warnings for one mistake is one too many.
-_ONE_MESSAGE = (("atol", "rtol"),)
+#: ``(applies, fields)``: settings reported in one message instead of
+#: one each, and the configurations where that happens.  ``atol`` and
+#: ``rtol`` used to be the only pair and are not one any more -- the
+#: 0.4.0 dead band made ``atol`` live under every norm.  A cap of one
+#: kills the whole acceleration family and ``linear_solver`` at once,
+#: and does it *ahead* of the settings that normally gate them, so
+#: there they share a message and two warnings for one mistake is still
+#: one too many.
+_ONE_MESSAGE = (
+    (lambda g: g.max_iterations <= 1,
+     ("acceleration", "relaxation", "jacobian_reuse", "accelerated_fields",
+      "linear_solver")),
+)
 
 #: Values drawn per field, the declared default first.  Each pool holds
 #: the default and at least one deliberate alternative, so both halves
 #: of the property are reachable for every field;
 #: :func:`test_pools_start_at_the_declared_default` keeps that true.
 _VALUES = {
-    "max_iterations": [10, 3],
+    # ``1`` is not a smaller cap but a different branch: it returns
+    # before the accelerator exists.  See ``_READ_WHEN``.
+    "max_iterations": [10, 3, 1],
     "tolerance": [1e-6, 1e-9],
     "convergence_norm": ["l2", "mixed", "interface"],
-    "atol": [1e-8, 1e-10],
+    "atol": [0.0, 1e-10],
     "rtol": [1e-6, 1e-9],
     "diagnostics": [False, True],
     "acceleration": ["none", "aitken", "fixed", "iqn-ils", "iqn-imvj"],
@@ -135,11 +158,13 @@ def _expected_message_heads(group: CouplingGroup) -> set[str]:
         and not _READ_WHEN[name](group)
     ]
     heads, paired = [], set()
-    for pair in _ONE_MESSAGE:
-        named = [name for name in pair if name in inert]
+    for applies, shared in _ONE_MESSAGE:
+        if not applies(group):
+            continue
+        named = [name for name in shared if name in inert]
         if named:
             heads.append(named[0])
-        paired.update(pair)
+        paired.update(shared)
     heads += [name for name in inert if name not in paired]
     return {f"CouplingGroup.{name}" for name in heads}
 
@@ -245,19 +270,25 @@ def test_the_validator_and_this_module_agree_on_when_a_field_is_read(name):
     """
     from maddening.core.coupling.group import _INERT_RULES
 
-    ruled = {f: r for r in _INERT_RULES for f in r.fields}
-    if name not in ruled:
+    ruled = [r for r in _INERT_RULES if name in r.fields]
+    if not ruled:
         # Unruled means "read on every path"; assert that, rather than
         # trusting that nobody forgot a rule.
         assert _READ_WHEN[name] is _ALWAYS, name
         return
-    live = ruled[name].live
     for config in (
         {}, {"convergence_norm": "mixed"}, {"acceleration": "fixed"},
         {"acceleration": "iqn-ils"}, {"acceleration": "iqn-imvj"},
         {"subcycling": True}, {"solver": "fori"},
+        {"max_iterations": 1}, {"max_iterations": 1, "acceleration": "fixed"},
+        {"max_iterations": 1, "solver": "fori"},
     ):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             g = CouplingGroup(nodes=NODES, **config)
-        assert live(g) == _READ_WHEN[name](g), (name, config)
+        # Two rules can govern one field -- the cap and the setting
+        # that normally gates it -- and it is read only where both say
+        # so.  The cap rule stands the other one down so the *message*
+        # is single; the *fact* is still the conjunction.
+        live = all(r.live(g) for r in ruled)
+        assert live == _READ_WHEN[name](g), (name, config)

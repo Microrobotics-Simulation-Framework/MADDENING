@@ -66,7 +66,26 @@ _AVAILABLE_DEVICES = len(jax.devices())
 #: example compiles a fresh ``shard_map`` per device count and the shared
 #: CPU box runs several agents at once, so a wider mesh buys coverage of
 #: the same code path at several times the wall clock.
-DEVICE_COUNTS = tuple(n for n in (1, 2, 4) if n <= _AVAILABLE_DEVICES)
+#:
+#: 3 is in the list because 1, 2 and 4 divide every power-of-two grid a
+#: test would reach for, so no property ever generated a grid the mesh
+#: cannot split evenly -- the case ``ShardedStencilNode`` refuses and
+#: ``ShardedUnstructuredNode`` handles.  :func:`cells_for` keeps the
+#: builders below on a divisible grid; the divisibility rule itself is a
+#: property of its own (``test_property_shard_construction.py``).
+DEVICE_COUNTS = tuple(n for n in (1, 2, 3, 4) if n <= _AVAILABLE_DEVICES)
+
+
+def cells_for(n_devices: int, *, at_least: int) -> int:
+    """Smallest multiple of *n_devices* that is at least *at_least*.
+
+    A pencil decomposition gives every device the same slab, so a
+    builder with a hard-coded cell count would be constructible only on
+    the device counts that happen to divide it.  Properties about
+    anything other than that rule take their grid from here.
+    """
+    n_devices = int(n_devices)
+    return n_devices * -(-int(at_least) // n_devices)
 
 def device_counts() -> st.SearchStrategy[int]:
     """A device count the local mesh can actually supply."""
@@ -418,7 +437,8 @@ def _source_for(n_cells: int) -> jnp.ndarray:
 
 
 def build_pointwise(*, n_devices: int, rate: float = 0.5,
-                    n_cells: int = 8) -> WrapperCase:
+                    n_cells: Optional[int] = None) -> WrapperCase:
+    n_cells = cells_for(n_devices, at_least=8) if n_cells is None else n_cells
     inner = PointwiseRelaxNode(name="relax", n_cells=n_cells, rate=rate)
     mesh = create_device_mesh(shape=(n_devices,))
     return WrapperCase(
@@ -428,8 +448,10 @@ def build_pointwise(*, n_devices: int, rate: float = 0.5,
     )
 
 
-def build_stencil(*, n_devices: int, rate: float = 0.5, n_cells: int = 16,
+def build_stencil(*, n_devices: int, rate: float = 0.5,
+                  n_cells: Optional[int] = None,
                   mask: Optional[np.ndarray] = None) -> WrapperCase:
+    n_cells = cells_for(n_devices, at_least=16) if n_cells is None else n_cells
     inner = StencilDiffusion1D(
         name="diff", n_cells=n_cells, rate=rate,
         mask=_mask_for(n_cells) if mask is None else mask)

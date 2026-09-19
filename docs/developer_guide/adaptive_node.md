@@ -11,10 +11,11 @@ bulk-chasing, hierarchical refinement. It gives a subclass three things:
   derivative of the objective with the active set held fixed, routed through
   `maddening.core.solver_utils.ift_linear_solve`;
 - the **cold-start diagnostics**: how much of the full-basis gradient your
-  active set reproduces (`gradient_capture_ratio`), and whether the parameters
-  sit at a Palais fixed point of the problem's symmetry, where the frozen
-  gradient is exactly zero in the direction an optimiser needs
-  (`is_trapped_at`).
+  active set reproduces (`gradient_capture_ratio`), and whether the frozen
+  gradient has collapsed relative to its own rate of change
+  (`frozen_gradient_vanishes_at`) — the signature of a Palais fixed point of
+  the problem's symmetry, where the frozen gradient is exactly zero in the
+  direction an optimiser needs.
 
 > **Stability.** `AdaptiveNode`, `AdaptiveNodeBlindnessError` and
 > `ift_linear_solve` are **not** `STABLE`. The node surfaces are
@@ -97,7 +98,9 @@ from maddening.nodes.adaptive import AdaptiveNode
 class MyAdaptiveNode(AdaptiveNode):
     def __init__(self, name, timestep, *, theta, k, **kw):
         super().__init__(name, timestep, n_max=256, theta=theta, k=int(k), **kw)
-        # build basis arrays once; keep them on self (static data), not in state
+        # Precompute basis arrays once and keep them on self -- but only from
+        # values that are NOT trainable parameters.  See "Precomputed basis
+        # arrays" below: baking a trainable parameter zeroes its gradient.
 
     def param_specs(self):
         return {**super().param_specs(),
@@ -121,13 +124,34 @@ class MyAdaptiveNode(AdaptiveNode):
 ```
 
 - **`compute_active_set(state, params, *, prev, is_cold_start)`** returns a
-  boolean `(n_max,)` mask. It must be traceable with a fixed output shape.
-  The base class wraps the result in `jax.lax.stop_gradient`; keep
-  differentiable surrogates (soft thresholds, softmax scores) off this path
-  anyway — a tangent leaking through the selection is the one silent failure
-  the framework cannot detect. `prev` is the previous mask (`None` at cold
-  start) for rolling or hysteresis rules; `is_cold_start` is true on the call
-  from `initial_state`.
+  boolean `(n_max,)` mask with **at least one entry true**. It must be
+  traceable with a fixed output shape. The base class wraps the result in
+  `jax.lax.stop_gradient`; keep differentiable surrogates (soft thresholds,
+  softmax scores) off this path anyway — a tangent leaking through the
+  selection is the one silent failure the framework cannot detect. `prev` is
+  the previous mask (`None` at cold start) for rolling or hysteresis rules;
+  `is_cold_start` is true on the call from `initial_state`.
+
+  All three parts of that contract are enforced, and the two value-level ones
+  are enforced because a violation is otherwise invisible:
+
+  - **The dtype must be `bool`.** Returning the scores, or an `argsort` you
+    forgot to scatter, is truthy almost everywhere: the node quietly becomes
+    an `O(n_max)` full-basis solver and `gradient_capture_ratio` then reports
+    `1.00`, because the frozen set *is* the full set. Return
+    `scores >= threshold`, or `jnp.zeros(n_max, bool).at[idx].set(True)`.
+  - **The set must not be empty.** An empty mask solves to `c = 0` with an
+    exactly zero gradient, which the diagnostics read as a symmetry trap on a
+    problem that may have no symmetry at all. This is the easy one to hit:
+    thresholding `|c|` selects nothing at a cold start, where `c` is all
+    zeros. Branch on `is_cold_start` and seed a set there (the coarsest
+    scale, or the top-k by score); afterwards, start from `prev` and add
+    above `eps_add` / remove below `eps_remove < eps_add`, which never
+    empties a set that started non-empty.
+  - Shape and dtype are static and checked on every call. Emptiness is a
+    value, so it is checked whenever the mask is concrete — every
+    `initial_state()`, and every eager `update` — but not inside a `jit`
+    trace, where there is nothing to read.
 - **`solve_frozen(state, mask, params)`** is the differentiable half. Build
   the masked operator as a full-size operator that is the identity on
   inactive rows (so the buffer keeps its shape and the inactive block is
@@ -149,6 +173,61 @@ class MyAdaptiveNode(AdaptiveNode):
 read the physical constants from it, never from `self.params`, or the graph's
 injected (traced, differentiable) values are ignored.
 
+#### Precomputed basis arrays
+
+Building the basis once in `__init__` and keeping it on `self` is the right
+pattern — **as long as nothing in it derives from a trainable parameter**. An
+array computed in `__init__` is a Python constant: it was built from the
+constructor's float, not from the traced value the graph injects, so nothing
+downstream of it is a function of that parameter. `jax.grad` with respect to it
+returns exactly `0.0`, and so does a central finite difference, because both
+read the same baked numbers. `compile()` accepts the graph and no diagnostic
+fires; the gradient is simply wrong, silently, and the usual oracle agrees with
+it.
+
+Both shipped toys are safe, and it is worth seeing why: `PoissonSineTopKNode`
+bakes `_phi_sensor` from `sensor_x`, which is `ParamSpec(trainable=False)`, and
+`_x` / `_phi` / `_lambdas` from `n`, a structural `int` that never reaches
+`params_pytree()`; `MaskedDenseNode` bakes from `seed`, also structural.
+
+So, for every array you precompute, one of these must hold:
+
+1. it derives only from **structural** values (ints, strings, shapes) that are
+   not leaves of `params_pytree()`; or
+2. it derives only from parameters declared `ParamSpec(trainable=False)`; or
+3. you publish it through `static_data` and declare where it came from with
+   `static_data_deps`, which makes `compile()` refuse the graph if the
+   dependency is trainable:
+
+   ```python
+   def static_data(self):
+       return {"phi_sensor": self._phi_sensor}
+
+   def static_data_deps(self):
+       return {"phi_sensor": ("sensor_x",)}
+   ```
+
+   The guard only sees arrays published that way. `AdaptiveNode` publishes
+   none of its own, so a bare instance attribute is invisible to it — which is
+   exactly why rules 1 and 2 are on you.
+
+If the array genuinely depends on a **trainable** parameter, do not bake it:
+recompute it inside `solve_frozen` / `objective` from the `params` argument, so
+the tangent flows.
+
+#### Masked operands and rank
+
+`mask_safe(mask, x, fill)` is a plain `jnp.where`, so the mask broadcasts
+against the **last** axis of `x`. That is right for a `(n_max,)` operand and
+for a batch `(..., n_max)`. On a square operator `(n_max, n_max)` it fills
+whole *columns* and leaves the rows untouched — silently. Mask rows with
+`mask[:, None]`:
+
+```python
+A = self.mask_safe(mask[:, None], A, fill=0.0)   # rows
+A = self.mask_safe(mask, A, fill=0.0)            # columns
+```
+
 ### What the base class does
 
 - `update(state, boundary_inputs, dt, *, params=None)`: select on the
@@ -159,11 +238,12 @@ injected (traced, differentiable) values are ignored.
   `check_gradient_capture()` at those parameters.
 - `check_gradient_capture(params=None, *, state=None, on_blind=None)`: measure
   the ratio and apply the policy. A low ratio **warns** (naming the measured
-  value, the threshold and the remedies) and raises only when `is_trapped_at`
-  confirms a Palais fixed point — the one cause the diagnostics can establish
-  — or when the node was built with `on_blind="raise"`. `gm.add_node`
-  therefore still fails loudly at a trap, and no longer rejects a small
-  active-set budget, which is the point of an adaptive solver.
+  value, the threshold, which of the two causes the evidence points at, and
+  the remedies). Under the default `on_blind="warn"` it **never raises** —
+  including at a trap. `on_blind="raise"` is the strict setting and refuses a
+  low ratio of any cause. So `gm.add_node` warns rather than failing at a
+  trap, and does not reject a small active-set budget either, which is the
+  point of an adaptive solver.
   **It evaluates the parameters you hand it**: `initial_state` sees the
   constructor's, so after seeding a graph call
   `node.check_gradient_capture(gm.params["nodes"][name])` — that is the point
@@ -177,13 +257,24 @@ injected (traced, differentiable) values are ignored.
 
 | Method | Cost | Use |
 |---|---|---|
-| `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`) |
-| `is_trapped_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | The only check that can *establish* a symmetry trap; reliable for exact traps, not for partial blindness |
+| `gradient_capture_ratio(state, params=None) -> float` | 2 gradients, one full-basis | How much of the full-basis gradient the frozen set reproduces. ~1 trustworthy, ~0 either a trap **or** too small a budget, `1.0` sentinel when the full gradient itself vanishes. The active set is re-selected at `params` (never read from a stale `state["mask"]`). Also warns when the full-basis gradient for a **trainable** leaf is *bitwise* zero — see *Precomputed basis arrays* |
+| `frozen_gradient_vanishes_at(state, params=None, *, eps=1e-3) -> bool` | 2 frozen gradients + 1 full | Is the frozen gradient negligible against its own rate of change? A Palais trap implies this, so **`False` rules a trap out**; `True` does not establish one — an ordinary stationary point, including the optimum a successful fit ends at, gives the same answer. Reliable for exact traps, not for partial blindness. `is_trapped_at` is a deprecated alias |
 | `symmetry_break(state, params=None, *, delta=None) -> params` | 1 full gradient | Step `delta` (default `blindness_break_delta`) along the unit full-basis gradient; trainable leaves only |
 | `check_gradient_capture(params=None, ...) -> float or None` | as above, memoised | The policy wrapper the cold start uses; call it yourself at `gm.params["nodes"][name]` |
 
-`blindness_ratio()` is a deprecated alias of `gradient_capture_ratio()` and
-warns. All of them are host-side (they return Python scalars or concrete
+`blindness_ratio()` is a deprecated alias of `gradient_capture_ratio()`, and
+`is_trapped_at()` of `frozen_gradient_vanishes_at()`; both warn.
+
+**What a positive `frozen_gradient_vanishes_at` does not tell you.** Nothing in
+it looks at the mask, at a group action or at a fixed-point set: it is a
+necessary condition for a Palais trap, never a sufficient one. On the 1-D sine
+toy it returns `True` at the interior stationary point `theta = 0.343973`,
+whose only reflection fixed point is `theta = 0.5` — i.e. it fires exactly
+where a successful optimisation stops. Before concluding "trap", rule out the
+ordinary explanations: you have converged (`gradient_capture_ratio` returns its
+`1.0` sentinel when the full gradient is negligible too), or the active set is
+degenerate. The symmetry itself is a property of the operator, source and
+objective, and you establish it from the problem, not from this number. All of them are host-side (they return Python scalars or concrete
 pytrees) and are never called inside the traced step.
 
 **A low ratio is usually a budget, not a trap.** At a fixed, entirely
@@ -200,8 +291,9 @@ The constants — `gradient_capture_threshold = 0.7` (deprecated alias
 are class attributes with constructor overrides. They are not parameter
 leaves: they steer diagnostics, they are not physics a fit could identify.
 `D_threshold` is advisory: above that many trainable parameters, run
-`is_trapped_at` between optimiser steps rather than relying on the cold start
-alone.
+`frozen_gradient_vanishes_at` between optimiser steps rather than relying on
+the cold start alone — reading a `False` as "not a trap", not a `True` as
+"trap".
 
 **Cost.** The diagnostic costs two gradient evaluations, one of them
 full-basis — measured 8–10x the cost of an unguarded `initial_state()` — and
@@ -232,11 +324,26 @@ check still refuses to construct through.
 
 ## Failure modes
 
-- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.**
-  `is_trapped_at` confirmed a Palais fixed point at the constructor
-  parameters (or you asked for `on_blind="raise"`). Use `cold_start()` and
-  seed `gm.params` with the returned pytree, or perturb the parameters
-  yourself.
+- **A `UserWarning` naming a Palais fixed point, from `add_node` /
+  `initial_state`.** The ratio was low *and* `frozen_gradient_vanishes_at` was
+  true. That is a necessary condition for a symmetry trap, not a sufficient
+  one, so the default policy warns rather than refusing — read it, then decide
+  which case you are in. If the operator, source and objective really do share
+  a symmetry fixing these parameters, use `cold_start()` and seed `gm.params`
+  with the returned pytree, or perturb them yourself. If they do not, you are
+  at an ordinary stationary point (have you just converged?) or at a
+  degenerate active set, and no perturbation helps.
+- **`AdaptiveNodeBlindnessError` from `add_node` / `initial_state`.** You
+  built the node with `on_blind="raise"`, the strict setting, and the ratio is
+  below `gradient_capture_threshold`. Same two causes; the error names which
+  one the evidence points at. A failed `add_node` is a no-op, so the name is
+  free for the retry. (`cold_start()` also raises this when one
+  `symmetry_break` does not lift the ratio.)
+- **A `UserWarning` that the full-basis gradient for a parameter is *exactly*
+  `0.0`.** Not "small" — bitwise zero, which means the parameter is not in the
+  computation at all. Almost always an array built in `__init__` from it; see
+  *Precomputed basis arrays* above. `jax.grad` and a finite difference both
+  return `0.0`, so this warning is the only cheap oracle for it.
 - **A `UserWarning` about the gradient-capture ratio.** Not a trap: your
   active-set budget does not reproduce the full-basis gradient at these
   parameters. See *Diagnostics* above for the remedies, in order.
@@ -272,6 +379,15 @@ check still refuses to construct through.
   active set, the mask is empty, or `solver="cg"` was used on a non-SPD
   operator. The identity-off-mask construction keeps the inactive block
   harmless; the active block is the subclass's responsibility.
+- **`jax.grad` returns exactly `0.0` for one parameter, and so does a finite
+  difference.** An array used by `solve_frozen` or `objective` was built in
+  `__init__` from that parameter, so it is a constant and the parameter is not
+  in the computation at all. Both oracles agree because both read the same
+  baked numbers, and `compile()` has nothing to object to. See *Precomputed
+  basis arrays* above.
+- **A masked square operator comes out wrong along one axis.** `mask_safe`
+  broadcasts against the last axis: on an `(n_max, n_max)` operand it masks
+  columns. Use `mask[:, None]` for rows.
 - **`verify_node` reports `params_effective` failing.** `update` did not read
   the parameter from the injected `params` dict.
 

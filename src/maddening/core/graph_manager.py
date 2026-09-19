@@ -2606,8 +2606,21 @@ class GraphManager:
             accepts_params=_update_accepts_params(node),
             flux_accepts_params=_flux_accepts_params(node),
         )
+        # Atomic on purpose: build the state *before* committing to either
+        # dict.  ``initial_state()`` is a documented, recoverable failure
+        # point -- an ``AdaptiveNode`` raises ``AdaptiveNodeBlindnessError``
+        # at a Palais trap and the developer guide's recovery is to perturb
+        # the parameters and re-add under the same name.  Registering the
+        # spec first left ``_nodes[name]`` populated and ``_state[name]``
+        # missing: the name was taken for good (``add_node`` raised
+        # "already exists", ``remove_node`` raised ``KeyError``),
+        # ``compile()`` accepted the graph, ``params["nodes"]`` carried a
+        # node that can never run, and ``step()`` died much later with a
+        # bare ``KeyError`` inside the compiled step.  A failed ``add_node``
+        # must leave the graph exactly as it was.
+        state = node.initial_state()
         self._nodes[node.name] = spec
-        self._state[node.name] = node.initial_state()
+        self._state[node.name] = state
         self._dirty = True
         self._notify(EVENT_NODE_ADDED, node.name)
 
@@ -2775,7 +2788,10 @@ class GraphManager:
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         del self._nodes[name]
-        del self._state[name]
+        # ``pop`` rather than ``del``: a graph whose state entry is missing
+        # must still be removable, so the removal cannot itself fail
+        # half-way and leave ``_nodes`` and ``_state`` disagreeing.
+        self._state.pop(name, None)
         self._edges = [
             e for e in self._edges
             if e.source_node != name and e.target_node != name
@@ -4777,8 +4793,15 @@ class GraphManager:
         normalises them (weak types stripped), so the jitted step does not
         retrace after a reset, and ``_meta``'s structure is preserved.
         """
-        for name, spec in self._nodes.items():
-            self._state[name] = _strong_typed(spec.node.initial_state())
+        # Every ``initial_state()`` first, then one commit: an
+        # ``initial_state`` that raises (an ``AdaptiveNode`` at a Palais
+        # trap) must not leave half the graph reset and half of it carrying
+        # the state from before the call.
+        fresh = {
+            name: _strong_typed(spec.node.initial_state())
+            for name, spec in self._nodes.items()
+        }
+        self._state.update(fresh)
         meta = self._state.get(_META_KEY)
         if meta is not None:
             for key, value in list(meta.items()):

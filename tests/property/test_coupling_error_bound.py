@@ -47,6 +47,7 @@ from __future__ import annotations
 import dataclasses
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hypothesis import assume, given, note, settings
 from hypothesis import strategies as st
@@ -57,6 +58,9 @@ from maddening.core.coupling.acceleration import (
 )
 
 from tests.conftest import EXAMPLES_COSTLY
+from tests.core.test_coupling_solver_equivalence import (
+    residual_noise_floor,
+)
 from tests.property.strategies import graph_recipes, without_inert_knobs
 
 #: How much the linear extrapolation, the reference's own residual and
@@ -122,6 +126,27 @@ def _tightened(recipe):
     return dataclasses.replace(
         recipe,
         coupling_groups=tuple(_tighter(g) for g in recipe.coupling_groups),
+    )
+
+
+def _state_gap(a: dict, b: dict, nodes: list[str]) -> float:
+    """Largest relative difference between two returned states."""
+    worst = 0.0
+    for node in nodes:
+        for field in a[node]:
+            x = np.asarray(a[node][field], np.float64)
+            y = np.asarray(b[node][field], np.float64)
+            scale = max(np.max(np.abs(x)), np.max(np.abs(y)), 1e-30)
+            worst = max(worst, float(np.max(np.abs(x - y)) / scale))
+    return worst
+
+
+def _n_float_entries(state: dict, nodes: list[str]) -> int:
+    """Float scalars in the group's state -- the L2 norm's sum length."""
+    return sum(
+        int(np.asarray(v).size)
+        for node in nodes for v in state[node].values()
+        if np.issubdtype(np.asarray(v).dtype, np.floating)
     )
 
 
@@ -256,10 +281,28 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
     same verdict.  The error bound is derived from the same residual
     sequence on both, so a divergence here would mean one of them is
     measuring a different sequence.
+
+    *The state and the verdict are exact claims; the residual is not.*
+    This asserted ``residual`` equality at ``abs=1e-9``, and a
+    generated multi-rate group falsified it: ``ift`` read ``0.0`` where
+    ``fori`` read ``1.04e-05`` on a graph both returned the same state
+    for.  Neither was measuring a different sequence.  Every norm here
+    divides ``F(x) - x`` by a scale, so a converged group's residual is
+    a *cancellation*, and the two solvers run their passes in different
+    loop constructs -- ``lax.while_loop`` for the early-exiting
+    ``ift``, ``lax.fori_loop`` for ``fori`` -- which XLA compiles to
+    differently rounded arithmetic.  One ulp on the map's output is a
+    full-size change to a residual that small.  ``1e-9`` was three
+    thousand times below the measurement's own resolution; the honest
+    comparison is against that resolution, which
+    :func:`residual_noise_floor` derives from the norm.  The worked
+    reproducer is in ``tests/core/test_coupling_solver_equivalence.py``.
     """
     base = _diagnostics_recipe(recipe)
     other = "fori" if solver == "ift" else "ift"
     built = {}
+    states = {}
+    groups = {}
     for name in (solver, other):
         # ``linear_solver`` and ``strict_convergence`` are read inside
         # the IFT path alone, so flipping to ``"fori"`` strands whatever
@@ -277,12 +320,39 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
         gm = r.build()
         gm.step()
         built[name] = gm.coupling_diagnostics()
+        groups[name] = {"+".join(sorted(g.nodes)): g
+                        for g in gm._coupling_groups}       # noqa: SLF001
+        states[name] = {n: dict(gm.get_node_state(n))
+                        for n in gm.node_names}
     assume(built[solver])
     assert set(built[solver]) == set(built[other])
     for key in built[solver]:
         a, b = built[solver][key], built[other][key]
+        group = groups[solver][key]
+        nodes = sorted(group.nodes)
         note(f"{key}: {solver}={a} {other}={b}")
+
+        # The claim that matters, and the one this test did not make:
+        # whatever the two reports say, the states they describe are the
+        # same one.  Float32 round-off only -- the acceleration carries
+        # the last-bit difference of the map into the iterate.
+        gap = _state_gap(states[solver], states[other], nodes)
+        assert gap <= 1e-5, (
+            f"{key}: the two solvers returned states {gap} apart "
+            "relatively, which is a solver defect and not round-off"
+        )
         assert a["converged"] == b["converged"]
-        assert a["bound_valid"] == b["bound_valid"]
+
+        floor = residual_noise_floor(
+            group.convergence_norm, group.rtol,
+            _n_float_entries(states[solver], nodes),
+        )
         assert a["residual"] == pytest.approx(b["residual"], rel=1e-4,
-                                              abs=1e-9, nan_ok=True)
+                                              abs=floor, nan_ok=True)
+        # ``bound_valid`` is a statement about the *ratio* of the last
+        # two residuals.  Where both are at the noise floor that ratio
+        # is a ratio of rounding, and one solver rejecting it while the
+        # other accepts it says nothing about either.  Above the floor
+        # the two must agree.
+        if min(a["residual"], b["residual"]) > floor:
+            assert a["bound_valid"] == b["bound_valid"]

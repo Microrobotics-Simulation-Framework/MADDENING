@@ -3928,7 +3928,9 @@ class GraphManager:
               convergence norm for the state ``x`` this step returned.
               At ``max_iterations=1`` it is the distance the single
               pass moved, which is the same thing measured one pass
-              earlier.
+              earlier.  **It carries a floating-point noise floor**,
+              and near the fixed point that floor is the whole value:
+              see the note on ``solver`` below.
             - ``"amplification"`` : float — the estimated
               ``1 / (1 - rho)`` of the group's slowest mode, from the
               ratio of the last two residuals.  ``nan`` when the
@@ -3974,12 +3976,37 @@ class GraphManager:
             ``"bound_valid"``.
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
-            same passes, return the same state and derive both values
-            the same way, so nothing here moves when a graph migrates
-            between them.  Reported for every group under
-            ``solver="ift"``; ``"fori"`` groups only with
-            ``diagnostics=True``.  Empty dict if no step has been taken
-            yet.
+            same passes, stop on the same pass, return the same state
+            and derive every value here by the same rule, so migrating
+            a graph between them does not move the answer or the
+            verdict.
+
+            **The reported ``"residual"`` is the one number that can
+            still move, and only by float32 round-off.**  Every norm
+            here divides ``F(x) - x`` by a scale, so it is a
+            *cancellation*: near the fixed point the numerator is the
+            difference of two nearly equal float32 states, and one unit
+            in the last place of either is a full-size contribution to
+            it.  The two solvers run their passes in different loop
+            constructs -- ``"ift"`` in a ``lax.while_loop`` so it can
+            exit early, ``"fori"`` in a ``lax.fori_loop`` -- which XLA
+            is free to compile to differently rounded arithmetic, and
+            it does: one ulp on a couple of components of the map's
+            output is enough to move a residual of 1e-05 to ``0.0``.
+            So ``"residual"`` agrees between the solvers to about
+            ``eps_float32 / rtol`` under the mixed norm and
+            ``eps_float32 * sqrt(n)`` under the L2 norm, which is the
+            measurement's own resolution and not a bound on anything
+            physical.  A residual at that floor means "converged to
+            float32", and comparing two of them -- across solvers,
+            across JAX versions or across backends -- compares rounding.
+            ``converged``, ``iterations`` and the returned state carry
+            no such caveat.  Pinned by
+            ``tests/core/test_coupling_solver_equivalence.py``.
+
+            Reported for every group under ``solver="ift"``; ``"fori"``
+            groups only with ``diagnostics=True``.  Empty dict if no
+            step has been taken yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}

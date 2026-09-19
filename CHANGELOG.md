@@ -203,6 +203,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
+  a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
+  can report `0.0` and `1e-05` for one state.  The state and verdict are exact
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
   it registers the node, so an `initial_state()` that raises no longer wedges
   the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`

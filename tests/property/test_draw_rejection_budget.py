@@ -1,0 +1,313 @@
+"""The draw-rejection audit has to be able to fail, and its model has to hold.
+
+``scripts/audit_property_rejection.py`` measures what fraction of each
+property test's Hypothesis draws is thrown away by ``assume()`` or by a
+strategy ``.filter()``.  It exists because that fraction is otherwise
+invisible: a test rejecting 5% of its draws and one rejecting 85% print the
+same green tick and the same ``max_examples``, and the only thing that ever
+says otherwise is ``HealthCheck.filter_too_much`` -- which is a sampling test
+on the first few dozen draws, so it stays quiet for months and then fires for
+whoever next narrows a strategy.
+
+That happened on this tree.
+``test_coupling_acceleration_agreement.py::test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration``
+went red in CI with "9 inputs generated successfully, 50 filtered out" after a
+change to an unrelated strategy, and the audit that followed found it had
+been discarding most of its draws all along.
+
+So this file tests the auditor, not the audited:
+
+* the gate can fail (a synthetic over-budget test is caught, end to end,
+  through the real CLI);
+* the accounting is right, including the statuses that are *not* rejections;
+* the health-check risk model matches both an independent computation and the
+  constants in the installed Hypothesis, so it cannot go stale silently.
+
+Where the gate itself runs is ``.github/workflows/ci.yml``
+(``verify-hypothesis``), which audits while it runs the suite it already ran.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import math
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+AUDIT_SCRIPT = REPO_ROOT / "scripts" / "audit_property_rejection.py"
+
+
+def _load_audit():
+    """Import the audit script as a module (``scripts/`` is not a package)."""
+    spec = importlib.util.spec_from_file_location(
+        "_audit_property_rejection", AUDIT_SCRIPT
+    )
+    module = importlib.util.module_from_spec(spec)
+    # Registered before execution: ``@dataclass`` resolves annotations through
+    # ``sys.modules[cls.__module__]`` and raises without it.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def audit():
+    return _load_audit()
+
+
+# ---------------------------------------------------------------------------
+# The accounting
+# ---------------------------------------------------------------------------
+def _stats(**phases):
+    """A minimal stand-in for ``ConjectureRunner.statistics``."""
+    out = {"stopped-because": "settings.max_examples=200"}
+    for phase, statuses in phases.items():
+        out[f"{phase}-phase"] = {
+            "duration-seconds": 0.0,
+            "distinct-failures": 0,
+            "shrinks-successful": 0,
+            "test-cases": [{"status": s, "runtime": 0.0, "drawtime": 0.0,
+                            "events": []} for s in statuses],
+        }
+    return out
+
+
+def test_rejected_draws_are_the_invalid_and_overrun_ones(audit):
+    """``invalid`` (assume/filter) and ``overrun`` both cost an example."""
+    rec = audit.record_from_statistics(
+        "t", _stats(generate=["valid"] * 3 + ["invalid"] * 5 + ["overrun"] * 2)
+    )
+    assert rec.drawn == 10
+    assert rec.rejected == 7
+    assert rec.effective_examples == 3
+    assert rec.rate == pytest.approx(0.7)
+
+
+def test_a_failing_example_is_work_done_not_a_rejection(audit):
+    """``interesting`` reached the body and falsified it.
+
+    Counting it as a rejection would make every genuinely failing test read
+    as 100% rejection and bury the real offenders in the table.
+    """
+    rec = audit.record_from_statistics("t", _stats(generate=["valid", "interesting"]))
+    assert rec.rejected == 0
+    assert rec.rate == 0.0
+
+
+def test_shrink_draws_do_not_count_against_the_budget(audit):
+    """Shrinking only happens for an already-failing test, and its draws are
+    not examples -- most of them are *meant* to be invalid."""
+    rec = audit.record_from_statistics(
+        "t", _stats(generate=["valid"] * 4, shrink=["invalid"] * 100)
+    )
+    assert rec.drawn == 4
+    assert rec.rate == 0.0
+
+
+def test_replayed_database_examples_count(audit):
+    """The ``reuse`` phase replays saved failures; they are draws like any
+    other and a test that rejects them is rejecting real work."""
+    rec = audit.record_from_statistics(
+        "t", _stats(reuse=["valid", "invalid"], generate=["valid"] * 2)
+    )
+    assert rec.drawn == 4
+    assert rec.rejected == 1
+
+
+def test_several_engine_runs_under_one_node_id_accumulate(audit):
+    """A test body that calls more than one ``@given`` function reports twice."""
+    rec = audit.record_from_statistics("t", _stats(generate=["valid", "invalid"]))
+    rec = audit.record_from_statistics("t", _stats(generate=["invalid"] * 3), into=rec)
+    assert rec.runs == 2
+    assert rec.drawn == 5
+    assert rec.rejected == 4
+
+
+def test_a_starved_run_is_flagged(audit):
+    """Below ~1% valid the engine stops early, and the test really did run
+    fewer examples than it asked for.  That must not read as a clean pass."""
+    stats = _stats(generate=["valid"] * 2 + ["invalid"] * 500)
+    stats["stopped-because"] = (
+        "settings.max_examples=200, but < 1% of test cases satisfied assumptions"
+    )
+    rec = audit.record_from_statistics("t", stats)
+    assert rec.starved
+    assert rec.as_dict()["starved"]
+
+
+def test_a_test_that_drew_nothing_is_not_a_division_by_zero(audit):
+    assert audit.record_from_statistics("t", _stats()).rate == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The risk model
+# ---------------------------------------------------------------------------
+def test_the_health_check_constants_match_the_installed_hypothesis():
+    """The risk model is only meaningful against the real thresholds.
+
+    ``scripts/audit_property_rejection.py`` mirrors them rather than importing
+    them, so that the gate does not break on a Hypothesis refactor -- which
+    means something has to notice when the mirror goes stale.  That is this.
+    """
+    audit_module = _load_audit()
+    source = Path(
+        importlib.util.find_spec(
+            "hypothesis.internal.conjecture.engine"
+        ).origin
+    ).read_text()
+    assert f"max_valid_draws = {audit_module.HEALTH_CHECK_MAX_VALID}" in source, (
+        "hypothesis changed HealthCheck.filter_too_much's valid-draw budget; "
+        "update HEALTH_CHECK_MAX_VALID and re-derive MAX_REJECTION"
+    )
+    assert f"max_invalid_draws = {audit_module.HEALTH_CHECK_MAX_INVALID}" in source, (
+        "hypothesis changed HealthCheck.filter_too_much's invalid-draw budget; "
+        "update HEALTH_CHECK_MAX_INVALID and re-derive MAX_REJECTION"
+    )
+
+
+def test_the_risk_model_agrees_with_a_negative_binomial(audit):
+    """Independent derivation of the same number.
+
+    The model counts "fewer than 10 successes in the first 59 trials".  The
+    equivalent statement is "the 50th failure arrives before the 10th
+    success", i.e. a sum over negative-binomial terms.  Two ways of writing
+    it, so an off-by-one in either shows up here rather than in a threshold
+    nobody re-derives.
+    """
+    for rejection in (0.1, 0.35, 0.5, 0.64, 0.8, 0.9):
+        keep = 1.0 - rejection
+        # P(50th failure occurs on trial 50+k, for k = 0..9 successes before it)
+        nb = math.fsum(
+            math.comb(49 + k, k) * keep**k * rejection**50
+            for k in range(audit.HEALTH_CHECK_MAX_VALID)
+        )
+        assert audit.health_check_failure_probability(rejection) == pytest.approx(
+            nb, rel=1e-9, abs=1e-18
+        ), rejection
+
+
+def test_the_risk_model_is_monotone_and_bounded(audit):
+    assert audit.health_check_failure_probability(0.0) == 0.0
+    assert audit.health_check_failure_probability(1.0) == 1.0
+    previous = -1.0
+    for i in range(21):
+        p = audit.health_check_failure_probability(i / 20)
+        assert p >= previous
+        previous = p
+    with pytest.raises(ValueError):
+        audit.health_check_failure_probability(1.5)
+
+
+def test_the_gate_sits_where_the_risk_turns_over(audit):
+    """``MAX_REJECTION`` is not a round number someone liked.
+
+    Two constraints fix it.  Below it, one run of one test trips
+    ``filter_too_much`` with probability under 1e-11 -- so a suite of a few
+    hundred property tests run on every push will not see it this decade.
+    Above 70% the same probability is 7e-3, which for a suite this size is a
+    red CI every few weeks.  The measured distribution of this repository's
+    two property suites puts every test at or under 25% after the fixes in
+    this branch, so the gate also leaves real headroom for an honest test
+    that drifts a little.
+    """
+    assert audit.health_check_failure_probability(audit.MAX_REJECTION) < 1e-11
+    assert audit.health_check_failure_probability(0.70) > 1e-3
+    assert 0.25 < audit.MAX_REJECTION < 0.70
+
+
+# ---------------------------------------------------------------------------
+# The gate, end to end
+# ---------------------------------------------------------------------------
+_SYNTHETIC_SUITE = '''
+from hypothesis import assume, given, settings, HealthCheck
+from hypothesis import strategies as st
+
+_S = settings(max_examples=60, deadline=None, database=None,
+              suppress_health_check=[HealthCheck.filter_too_much])
+
+@_S
+@given(st.integers(0, 10**9))
+def test_wastes_four_draws_in_five(x):
+    # keeps 20%: a rejection rate of ~80%
+    assume(x % 10 < 2)
+
+@_S
+@given(st.integers(0, 10**9))
+def test_wastes_nothing(x):
+    assert x >= 0
+'''
+
+
+def _run_audit_cli(tmp_path, *args):
+    suite = tmp_path / "test_synthetic_rejection.py"
+    suite.write_text(textwrap.dedent(_SYNTHETIC_SUITE))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["JAX_PLATFORMS"] = "cpu"
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    return subprocess.run(
+        [sys.executable, str(AUDIT_SCRIPT), str(suite), *args],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path),
+    )
+
+
+def test_the_gate_fails_on_a_test_that_wastes_most_of_its_draws(tmp_path):
+    """The mutation this gate exists to catch, planted and caught.
+
+    A gate that has never been shown to fail is not a gate; MADDENING's four
+    compliance gates scored 6 caught against 22 missed before anyone checked.
+    """
+    result = _run_audit_cli(tmp_path, "--check", "--max-rejection", "0.4")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "test_wastes_four_draws_in_five" in result.stdout
+    assert "over the 40% gate" in result.stdout
+
+
+def test_the_gate_passes_the_same_suite_under_a_looser_budget(tmp_path):
+    """The other direction: the failure above is the rate, not the harness."""
+    result = _run_audit_cli(tmp_path, "--check", "--max-rejection", "0.95")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_measured_rate_is_the_rate_the_test_was_built_to_have(tmp_path):
+    """End to end, the number in the table is the number in the source.
+
+    ``assume(x % 10 < 2)`` keeps a fifth of its draws; the audit has to say
+    so, or the whole table is decoration.
+    """
+    result = _run_audit_cli(tmp_path, "--max-rejection", "0.95")
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = {
+        line.split()[0].rsplit("::", 1)[-1]: line
+        for line in result.stdout.splitlines()
+        if "::test_wastes" in line
+    }
+    assert set(rows) == {"test_wastes_four_draws_in_five", "test_wastes_nothing"}
+    wasteful = rows["test_wastes_four_draws_in_five"].split()
+    measured = float(wasteful[3].rstrip("%!").strip()) / 100.0
+    assert 0.70 <= measured <= 0.88, result.stdout
+    assert rows["test_wastes_nothing"].split()[3].startswith("0.0%")
+
+
+def test_the_json_report_carries_every_column_the_table_shows(tmp_path):
+    """The JSON is what a trend over releases would be built from."""
+    import json
+
+    out = tmp_path / "report.json"
+    result = _run_audit_cli(tmp_path, "--max-rejection", "0.95", "--json", str(out))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(out.read_text())
+    assert {r["nodeid"].rsplit("::", 1)[-1] for r in payload["records"]} == {
+        "test_wastes_four_draws_in_five", "test_wastes_nothing",
+    }
+    for record in payload["records"]:
+        assert record.keys() >= {
+            "drawn", "rejected", "effective_examples", "rate",
+            "health_check_risk", "starved",
+        }

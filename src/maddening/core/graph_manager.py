@@ -5207,15 +5207,21 @@ class GraphManager:
             ``dt_history`` (list of used timesteps), and
             ``t_history`` (list of simulation times).
         """
+        self._recover_from_escaped_tracers()
+        self._check_static_data_dirty()
+        if self._dirty or self._compiled_step is None:
+            self.compile()
+        # Judged after the recompile, not before it.  ``_is_multirate`` is
+        # derived by ``compile()``, so on a graph that has been edited --
+        # or never compiled -- it describes the step last built rather
+        # than the one about to run.  Asked first, the refusal let a graph
+        # that had just become multi-rate through, and refused one that
+        # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(
                 "Adaptive timestepping is incompatible with multi-rate "
                 "graphs.  All nodes must share the same timestep."
             )
-        self._recover_from_escaped_tracers()
-        self._check_static_data_dirty()
-        if self._dirty or self._compiled_step is None:
-            self.compile()
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
@@ -5358,14 +5364,15 @@ class GraphManager:
             *history*: stacked state at each step (shape ``(max_steps, ...)``).
             *info*: dict with ``n_steps`` (actual steps taken, as JAX array).
         """
-        if self._is_multirate:
-            raise RuntimeError(
-                "Adaptive timestepping is incompatible with multi-rate graphs."
-            )
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        # After the recompile, for the reason given in ``run_adaptive``.
+        if self._is_multirate:
+            raise RuntimeError(
+                "Adaptive timestepping is incompatible with multi-rate graphs."
+            )
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 

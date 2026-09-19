@@ -519,24 +519,31 @@ def test_a_failed_compile_leaves_the_graph_exactly_as_it_was(
     assert _snapshot(gm) == before
 
 
-def test_a_failed_compile_leaves_a_calibrated_parameter_alone():
-    """``compile()`` rewrites ``params`` from the nodes' constructor values
-    with the live leaves merged back over them, and *drops* a leaf that no
-    longer fits.  A failed compile that committed that rewrite would throw
-    away a fit -- and the warning that says so has already been issued, so
-    the repair recompile is silent about it."""
-    gm = _compiled_graph(multirate=False)
-    node_params = gm.params["nodes"]
-    owner = next(n for n, leaves in node_params.items() if leaves)
-    key = sorted(node_params[owner])[0]
-    fitted = jnp.asarray(node_params[owner][key]) + 1.0
-    gm.params["nodes"][owner][key] = fitted
+def test_a_failed_compile_leaves_gm_params_alone():
+    """``compile()`` rebuilds ``params`` from the nodes' constructor values
+    with the live leaves merged back over them, and *drops* any leaf that no
+    longer fits the graph.  Committing that rebuild from a compile that then
+    failed edits the caller's parameters on the error path -- and the
+    warning naming the dropped leaves has already been issued, so the
+    repair recompile is silent about them.
 
-    _arm_accelerated_fields(gm, subcycling=False)
-    with pytest.raises(ValueError, match="not a state field"):
-        gm.compile()
+    Driven through the build failure rather than the ``accelerated_fields``
+    route, because that one raises *before* ``params`` is touched.
+    """
+    gm = _compiled_graph(multirate=False)
+    owner = next(n for n, leaves in gm.params["nodes"].items() if leaves)
+    key = sorted(gm.params["nodes"][owner])[0]
+    fitted = jnp.asarray(gm.params["nodes"][owner][key]) + 1.0
+    gm.params["nodes"][owner][key] = fitted
+    gm.params["nodes"][owner]["not_a_leaf_of_this_graph"] = jnp.ones(3)
+
+    expected, match = _arm_build_failure(gm, subcycling=False)
+    with pytest.warns(RuntimeWarning, match="no longer fit"):
+        with pytest.raises(expected, match=match):
+            gm.compile()
 
     assert jnp.array_equal(gm.params["nodes"][owner][key], fitted)
+    assert "not_a_leaf_of_this_graph" in gm.params["nodes"][owner]
 
 
 def test_a_failed_compile_does_not_defeat_the_multi_rate_refusal():
@@ -562,6 +569,31 @@ def test_a_failed_compile_does_not_defeat_the_multi_rate_refusal():
     gm.remove_coupling_group(["table", "ball"])          # the repair
     with pytest.raises(RuntimeError, match="multi-rate"):
         gm.run_adaptive(t_end=0.05)
+
+
+@pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan"])
+def test_the_multi_rate_refusal_reads_the_graph_about_to_run(entry):
+    """The other half of the same defect: the refusal was asked *before*
+    the recompile, so ``_is_multirate`` still described the last step
+    built.  A graph that had never been compiled, or that had just been
+    given a node at a different timestep, was integrated adaptively --
+    silently, with the rate dividers deciding when nodes fire.
+    """
+    call = {"run_adaptive": lambda g: g.run_adaptive(t_end=0.05),
+            "run_adaptive_scan": lambda g: g.run_adaptive_scan(
+                t_end=0.05, max_steps=4)}[entry]
+
+    never_compiled = GraphManager()
+    never_compiled.add_node(TableNode(name="table", timestep=0.01))
+    never_compiled.add_node(BallNode(name="ball", timestep=0.03))
+    never_compiled.add_edge("table", "ball", "position", "table_position")
+    with pytest.raises(RuntimeError, match="multi-rate"):
+        call(never_compiled)
+
+    made_multirate = _compiled_graph(multirate=False)
+    made_multirate.add_node(BallNode(name="slow", timestep=0.03))
+    with pytest.raises(RuntimeError, match="multi-rate"):
+        call(made_multirate)
 
 
 @pytest.mark.parametrize("arm", [fn for _, fn in _COMPILE_FAILURES],

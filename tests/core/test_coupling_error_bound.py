@@ -7,7 +7,7 @@ distance to the fixed point, which is larger by the amplification
 close that, and they are tested here together because neither is worth
 much without the other:
 
-*The criterion is an error bound.*  ``rho`` costs nothing -- it is
+*The criterion is an error estimate.*  ``rho`` costs nothing -- it is
 ``r_k / r_{k-1}``, two numbers both solvers already carry -- so the
 threshold is applied to ``r_k / (1 - rho)``.  The estimate is never
 smaller than ``r_k``, so the criterion is never looser than the one it
@@ -466,7 +466,7 @@ def test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it():
 
 
 # ---------------------------------------------------------------------------
-# The gradient-trust bound
+# The gradient-trust estimate
 # ---------------------------------------------------------------------------
 
 def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
@@ -479,6 +479,18 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
     residual sequence reveals, which is the mode that dominates the
     conditioning.  Before this it was a documented sentence with no
     value attached.
+
+    **The inequality asserted below is a property of this fixture, not
+    of the field.**  ``gradient_error_estimate`` is numerically
+    ``error_estimate`` and inherits every way that number understates:
+    the same assertion fails by 122x on the two-mode contraction, which
+    ``benchmarks/results/audit_040_final/coupling/repro_gradient_error_bound.py``
+    reproduces.  This fixture is a single-mode contraction with a known
+    rate, where the estimate is tight -- so what this pins is that the
+    reported number is the right order for a well-conditioned group, not
+    that it bounds anything in general.  The function's name predates
+    the 0.4.0 rename and is referenced from the recorded audit report;
+    read "bound" in it as "estimate".
     """
     def loss(p, gm=None):
         gm = gm if gm is not None else _contracting_graph(tolerance=1e-3)
@@ -502,7 +514,7 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
     assert d["gradient_error_estimate"] == pytest.approx(d["error_estimate"])
     assert abs(analytic - fd) <= max(d["gradient_error_estimate"], 1e-5), (
         f"analytic {analytic} vs finite difference {fd}: the adjoint may "
-        f"only be as wrong as the reported bound "
+        f"only be as wrong as the reported estimate "
         f"({d['gradient_error_estimate']})"
     )
 

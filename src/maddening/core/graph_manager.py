@@ -331,9 +331,9 @@ def _fixed_point_while(
     stopped under the old rule too, possibly later.
 
     **Why "estimate" and not "bound".**  ``omega * r_k / (1 - rho)`` is
-    the sum of a geometric series of remaining step lengths.  Three
-    independent things break the inequality, and only the last of them
-    is detected:
+    the sum of a geometric series of remaining step lengths.  That sum
+    bounds the distance only if **four** conditions hold.  Three of them
+    can fail undetected; only the fourth is checked:
 
     1. *The measure is not a metric.*  Summing step lengths bounds the
        distance only under the triangle inequality, and the 0.4.0

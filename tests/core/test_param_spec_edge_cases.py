@@ -144,6 +144,30 @@ def test_identity_bounded_int_leaf_keeps_dtype():
     assert spec.to_constrained(f).dtype == jnp.float32
 
 
+def test_a_log_or_logit_transform_refuses_a_leaf_it_cannot_return():
+    """The identity branch preserves an integer leaf's dtype; the
+    transform branches cannot -- ``exp(log(3))`` is float, and for
+    ``logit`` it is also 2.4e-7 off -- so ``constrain(unconstrain(p))``
+    came back as a different dtype and a different value than the one
+    this module's docstring promises for the whole tree.  Refusing the
+    combination is what keeps that promise true.
+
+    Reproducer: ``benchmarks/results/audit_040_final/params-io/repro/
+    r1_paramspec_roundtrip.py``.
+    """
+    p = jnp.asarray(3, jnp.int32)
+    for spec in (ParamSpec(bounds=(0.0, None), transform="log"),
+                 ParamSpec(bounds=(0.0, 100.0), transform="logit")):
+        with pytest.raises(ValueError, match="needs a floating-point leaf"):
+            spec.to_unconstrained(p)
+    # The same parameter as a float still round-trips, and the identity
+    # transform still accepts the integer leaf.
+    q = jnp.asarray(3.0, jnp.float32)
+    log_spec = ParamSpec(bounds=(0.0, None), transform="log")
+    assert log_spec.to_constrained(log_spec.to_unconstrained(q)).dtype == jnp.float32
+    assert int(ParamSpec(bounds=(0.0, 10.0)).to_unconstrained(p)) == 3
+
+
 # ---------------------------------------------------------------------------
 # #9: sysid noise_std as a pytree
 # ---------------------------------------------------------------------------

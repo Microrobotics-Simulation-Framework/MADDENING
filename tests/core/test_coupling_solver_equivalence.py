@@ -556,7 +556,13 @@ def _multirate_graph(solver, **overrides):
     two -- which together put the group inside its threshold of 1.0 at
     a residual of ~1e-05, i.e. at the norm's float32 resolution.
     """
-    _register_scale(0.5)          # registers the "scale_0.5" transform
+    # ``scale(0.5)`` registers ``"scale_0.5"`` and returns the callable.
+    # The recipe named it by string; the callable it resolves to is passed
+    # instead, because a factory-registered name exists only once something
+    # has called the factory and ``scripts/check_transforms.py`` -- which
+    # reads the live registry -- correctly cannot see it statically.  The
+    # edge is the same edge either way.
+    half = _register_scale(0.5)
     gm = GraphManager()
     gm.add_node(RigidBody2DNode(
         name="rod", timestep=0.04, mass=1.5548670291900635,
@@ -577,7 +583,7 @@ def _multirate_graph(solver, **overrides):
                 target_field="torque", transform="identity", additive=True,
                 source_units="N*m", target_units="N*m")
     gm.add_edge(source="rod", target="node_1", source_field="x",
-                target_field="force", transform="scale_0.5", additive=False)
+                target_field="force", transform=half, additive=False)
     gm.add_edge(source="node_1", target="rod", source_field="x",
                 target_field="force", transform="identity", additive=True)
     gm.add_external_input("rod", "torque", shape=())

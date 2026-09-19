@@ -324,6 +324,20 @@ class TestTrainableContract:
            n_iter=st.integers(min_value=1, max_value=4))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fit_moves_only_the_masked_trainable_leaves(self, recipe, data, n_iter):
+        """A fit moves the masked trainable leaves and nothing else.
+
+        Rejected draws
+        --------------
+        17.5% under the ``ci`` profile, measured, down from 39.4%.  The
+        mask is now generated rather than filtered (see
+        :func:`_flags_with_at_least_one_set`); what is left is a drawn graph
+        whose every leaf is frozen (two ``TableNode`` graphs: their ``position``
+        is an initial condition), and a start that ``reset_params`` could
+        not bring inside its declared bounds.  Both are properties of the
+        drawn graph, and ``graph_recipes`` has no knob for either -- adding
+        one is the follow-up, and it belongs in the shared strategy module
+        rather than in this file.
+        """
         gm = recipe.build()
         if not _in_bounds(gm):
             # ``graph_recipes`` multiplies a "calibrated" leaf by up to
@@ -455,7 +469,16 @@ class TestTrainableContract:
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fit_defaults_its_mask_to_the_trainable_set(self, recipe):
-        """With no ``mask``, a ``trainable=False`` leaf is bit-identical."""
+        """With no ``mask``, a ``trainable=False`` leaf is bit-identical.
+
+        Rejected draws
+        --------------
+        14.0% under the ``ci`` profile, measured.  Same cause as
+        ``test_fit_moves_only_the_masked_trainable_leaves``: the property
+        needs a graph with both a frozen leaf and a trainable one, and
+        which leaves a drawn graph has is not something this test can
+        ask for without a knob on ``graph_recipes``.
+        """
         gm = recipe.build()
         if not _in_bounds(gm):
             gm.reset_params()
@@ -837,7 +860,21 @@ class TestFIMAgainstFiniteDifference:
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fim_matches_a_finite_difference_of_a_rollout(self, truth, init, n):
         """The same check against a real graph rollout, at the tolerance
-        float32 actually supports (module docstring)."""
+        float32 actually supports (module docstring).
+
+        Rejected draws
+        --------------
+        25.2% under the ``ci`` profile, measured -- the highest left in
+        ``tests/property/`` -- so ``EXAMPLES_COSTLY`` buys about a quarter
+        less search here than the number says.  Three gates, none of them
+        a shape: the rollout has to have moved (``jnp.var(position) >
+        1e-2``), the float32 round trip of the finite-difference endpoints
+        has to leave a non-zero step, and the matrix has to have a
+        non-zero scale to compare against.  All three are outcomes of the
+        numbers, and an envelope narrow enough to guarantee them would
+        also delete the high-stiffness tail this test's 2e-2 bound was
+        measured on (module docstring).
+        """
         gm = _spring_gm()
         gm.set_node_state("s", {"position": jnp.float32(init["position"]),
                                 "velocity": jnp.float32(init["velocity"])})
@@ -873,7 +910,18 @@ class TestFIMAgainstFiniteDifference:
     def test_crb_is_consistent_with_the_matrix_it_came_from(self, problem):
         """For a non-singular FIM the reported bound is the diagonal of the
         inverse, and the Cramér--Rao inequality ``crb_i >= 1 / F_ii`` holds
-        (a parameter is never easier to estimate jointly than alone)."""
+        (a parameter is never easier to estimate jointly than alone).
+
+        Rejected draws
+        --------------
+        10.7% under the ``ci`` profile, measured.  The property is about
+        a *non-singular* FIM, and whether a drawn residual produces one
+        is a fact about the matrix, not about the draw.  Generating only
+        well-conditioned problems would make the property vacuous: the
+        rank-deficient case is what
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        exists to cover.
+        """
         residual, keys, theta = problem
         with x64_enabled():
             params = {k: jnp.asarray(v, jnp.float64)

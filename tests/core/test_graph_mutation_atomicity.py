@@ -612,7 +612,7 @@ def test_the_run_continues_unchanged_after_a_failed_compile_is_repaired(arm):
     gm.remove_coupling_group(["table", "ball"])
     if "baked" in gm.node_names:
         gm.remove_node("baked")
-    if hasattr(gm, "_build_step_fn") and "_build_step_fn" in vars(gm):
+    if "_build_step_fn" in vars(gm):                     # the injected failure
         del gm._build_step_fn                            # noqa: SLF001
     gm.run(4)
 

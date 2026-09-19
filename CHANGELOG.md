@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
+  `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
+  written; the enum could not represent the registry this project ships
 - **`SimulationNode.static_data_deps()`** declares which parameters a
   `static_data` array was derived from; `compile()` now refuses a graph whose
   static derives from a *trainable* parameter — freeze it or stop deriving it
@@ -124,6 +127,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`FIMReport` is keyword-only**: `rank` was inserted mid-dataclass this
+  release, so positional construction silently reassigned every field after it;
+  build it with keywords (every in-tree caller already did)
 - **`AdaptiveNode` tightens its subclass contract and loosens its gate**:
   `compute_active_set` must return a non-empty **boolean** mask; `is_trapped_at`
   is now `frozen_gradient_vanishes_at`; `on_blind="warn"` no longer ever raises
@@ -203,6 +209,15 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
+  adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
+- **`error_estimate` accounts for `relaxation`** — and is an estimate, not a bound
+- **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
+  a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
+  values that invert their meaning now raise; `params_pytree` keeps float64 under x64
+- **The four `scripts/check_*.py` compliance gates now fail on the defects they
+  exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
+  `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
   it registers the node, so an `initial_state()` that raises no longer wedges
   the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`

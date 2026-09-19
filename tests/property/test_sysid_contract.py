@@ -36,9 +36,10 @@ residual is accurate to ~1e-10 relative, which leaves a tolerance of
 chain-rule factor, or a forward-difference mix-up (all O(1) or O(h)).
 
 A graph rollout cannot be made precise that way: the nodes pin their
-state and constants to float32 whatever ``jax_enable_x64`` says, so the
-finite difference measures float32 cancellation as much as the
-derivative.  ``test_fim_matches_a_finite_difference_of_a_rollout``
+*state* to float32 whatever ``jax_enable_x64`` says (since 0.4.0 the
+constants do follow the canonical precision, but the state they are
+multiplied into does not), so the finite difference measures float32
+cancellation as much as the derivative.  ``test_fim_matches_a_finite_difference_of_a_rollout``
 therefore states the weaker, measured claim -- 2e-2 relative to the
 matrix's own scale, at a relative step of 3e-3 -- and says so here rather
 than pretending float32 buys more.
@@ -86,6 +87,7 @@ from maddening.core.simulation.calibration import (
 )
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import (
+    _rank_and_crb,
     fim,
     fit,
     fit_lm,
@@ -156,6 +158,35 @@ def _leaf_paths(tree):
 
 def _leaf_values(tree):
     return [np.asarray(leaf) for leaf in jax.tree.leaves(tree)]
+
+
+def _bound_at_leaf_precision(bound, leaf):
+    """``bound`` rounded to the precision ``leaf`` actually carries.
+
+    A ``ParamSpec`` bound is a Python float, i.e. a float64; the
+    parameter it bounds lives at the graph's working precision.
+    ``to_constrained`` clips with ``jnp.clip(u, lo, hi).astype(u.dtype)``,
+    so a fit pushed onto its bound comes back as *the bound in the leaf's
+    dtype* -- and for a bound no float32 can hold, that is up to half an
+    ulp on the wrong side of the float64 number it was clipped to.  The
+    draw ``lo = 1.6977594293117515`` returns ``1.6977593898773193``:
+    8 significant figures of agreement, 2.3e-8 relative, and
+    ``value >= lo`` is False.
+
+    Comparing a float32 leaf against a float64 bound asks the leaf for
+    precision it does not carry, and it is stricter than the contract
+    being tested: :meth:`ParamSpec.check` compares a weakly-typed Python
+    bound against the leaf, i.e. *in the leaf's dtype*, and accepts this
+    value -- ``gm.check_params`` passes on the very pytree the assertion
+    then rejected.  Rounding the bound the same way forgives the sub-ulp
+    landing and nothing else: an escape of one whole ulp still fails, so
+    the property keeps its teeth.
+
+    The dtype comes from the leaf rather than being pinned to float32 so
+    that the claim stays true under ``jax_enable_x64``, where the
+    parameters are float64 and the bound is then exact.
+    """
+    return float(np.asarray(bound, dtype=jnp.asarray(leaf).dtype))
 
 
 def _moved(before, after):
@@ -624,11 +655,54 @@ class TestBoundsAndTransforms:
             res = fit(gm, lambda p: direction * 50.0 * p["nodes"]["s"]["stiffness"],
                       n_iter=n_iter, lr=0.5)
             gm.check_params(res.params)
-            value = float(res.params["nodes"]["s"]["stiffness"])
+            leaf = res.params["nodes"]["s"]["stiffness"]
+            value = float(leaf)
             assert np.isfinite(value)
+            # At the leaf's own precision: a fit driven onto its bound
+            # returns the bound *cast to the parameter's dtype*, which for
+            # a bound no float32 can hold sits a fraction of an ulp the
+            # wrong side of the float64 the spec declares.  See
+            # ``_bound_at_leaf_precision``.
             if spec.bounds[1] is not None:
-                assert value <= spec.bounds[1]
-            assert value >= spec.bounds[0]
+                assert value <= _bound_at_leaf_precision(spec.bounds[1], leaf), (
+                    value, spec.bounds[1])
+            assert value >= _bound_at_leaf_precision(spec.bounds[0], leaf), (
+                value, spec.bounds[0])
+
+
+    def test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision(self):
+        """The draw that made the property above flake, pinned.
+
+        ``lo = 1.6977594293117515`` has no float32 representation, so a
+        fit clipped onto it returns ``1.6977593898773193`` -- 0.33 ulp
+        below the declared bound.  Hypothesis searches fresh every run,
+        so without this case the fix is only re-checked when a draw
+        happens to land on an unrepresentable bound again; in CI that is
+        an intermittent failure, which is the shape that gets re-run
+        until green instead of read.
+        """
+        lo, hi = 1.6977594293117515, 6.0
+        assert float(np.float32(lo)) < lo, "draw no longer exercises the case"
+        spec = ParamSpec(bounds=(lo, hi))
+        gm = _spring_gm(stiffness=0.5 * (lo + hi))
+        gm.set_param_spec("s", "stiffness", spec)
+        for key in ("damping", "mass", "rest_length"):
+            gm.set_param_spec("s", key, ParamSpec(trainable=False))
+
+        res = fit(gm, lambda p: 50.0 * p["nodes"]["s"]["stiffness"],
+                  n_iter=6, lr=0.5)
+        # The library's own contract accepts it...
+        gm.check_params(res.params)
+        leaf = res.params["nodes"]["s"]["stiffness"]
+        value = float(leaf)
+        # ...the fit really did land on the bound, in float32...
+        assert value == float(np.float32(lo)), value
+        # ...so the assertion has to be made at that precision.
+        assert value >= _bound_at_leaf_precision(lo, leaf)
+        # Non-vacuity: the rounding forgives a sub-ulp landing, not a
+        # parameter that actually left its bounds.
+        ulp = float(np.spacing(np.float32(lo)))
+        assert not (value - ulp >= _bound_at_leaf_precision(lo, leaf))
 
 
 # ---------------------------------------------------------------------------
@@ -994,6 +1068,129 @@ class TestFIMMaskingAndScaling:
             scaled.cond, base.cond)
         assert np.allclose(crb_s, crb_b * sigma**2, rtol=1e-3,
                            atol=1e-9 * (1 + np.abs(crb_s).max()))
+
+
+class TestFIMFailsSafe:
+    """``crb`` must never be more trustworthy than the decomposition.
+
+    ``FIMReport`` justifies ``+inf`` by what it does to a caller's test:
+    ``crb < threshold`` is False for a parameter the data cannot
+    determine.  The property that makes that justification true is not
+    "``crb`` is ``+inf`` in the null space" but the stronger "``crb`` is
+    finite only where it was established", which is what a NaN
+    decomposition used to break -- the null-space sum over an empty
+    resolved subspace is ``0.0``, and ``NaN > n * eps`` is False, so the
+    ``+inf`` rescue never fired and every parameter read as perfectly
+    determined.
+
+    Reproducers: ``benchmarks/results/audit_040_final/params-io/repro/``
+    ``r6_fim.py``, ``r7_fim_crb.py``.
+    """
+
+    @staticmethod
+    def _decomposition(entries, n, corrupt):
+        f = np.asarray(entries[:n * n], dtype=np.float32).reshape(n, n)
+        f = f + f.T
+        for i, j, bad in corrupt:
+            f[i % n, j % n] = f[j % n, i % n] = bad
+        return jnp.linalg.eigh(jnp.asarray(f, jnp.float32))
+
+    @given(
+        n=st.integers(min_value=1, max_value=4),
+        entries=st.lists(_finite(-10.0, 10.0), min_size=16, max_size=16),
+        corrupt=st.lists(
+            st.tuples(st.integers(0, 3), st.integers(0, 3),
+                      st.sampled_from([np.float32(np.nan), np.float32(np.inf),
+                                       np.float32(-np.inf)])),
+            max_size=3),
+    )
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+    def test_no_parameter_is_reported_identifiable_on_a_non_finite_quantity(
+        self, n, entries, corrupt,
+    ):
+        rank, crb = _rank_and_crb(*self._decomposition(entries, n, corrupt), None)
+        crb = np.asarray(crb, dtype=np.float64)
+        note(f"n={n} corrupt={corrupt} rank={rank} crb={crb}")
+        # A NaN bound would propagate into the caller's comparison as
+        # False in *both* directions, which is the failure mode ``+inf``
+        # exists to avoid.
+        assert not np.any(np.isnan(crb))
+        # Nothing resolved means nothing determined.
+        if rank == 0:
+            assert np.all(np.isinf(crb)), crb
+        # Whatever was resolved, a finite bound is a positive claim.
+        assert np.all(np.isfinite(crb) | np.isinf(crb))
+
+    @given(bad=st.sampled_from([np.float32(np.nan), np.float32(np.inf)]))
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+    def test_fim_raises_rather_than_reporting_on_a_non_finite_matrix(self, bad):
+        def residual(p):
+            return jnp.stack([p["a"] * bad, p["b"]])
+
+        params = {"a": jnp.float32(1.0), "b": jnp.float32(1.0)}
+        with pytest.raises(FloatingPointError, match="non-finite Fisher matrix"):
+            fim(residual, params, scale=None)
+
+    @given(sigma=st.sampled_from([0.0, -1.0, -1e-3, float("nan"),
+                                  float("inf"), 1e-320]))
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+    def test_a_sigma_that_is_not_a_noise_level_is_refused(self, sigma):
+        def residual(p):
+            return jnp.stack([p["a"], p["b"]])
+
+        params = {"a": jnp.float32(1.0), "b": jnp.float32(1.0)}
+        with pytest.raises(ValueError, match="noise_std must be finite"):
+            fim(residual, params, scale=None, noise_std=sigma)
+
+
+class TestMaskStructure:
+    """A mask is read leaf by leaf in flatten order, so its *keys* are
+    part of its contract.
+
+    Reproducer:
+    ``benchmarks/results/audit_040_final/params-io/repro/r14_mask_structure.py``
+    -- a mask keyed by the caller's own symbol names marked ``damping``
+    and the fit moved ``stiffness``.
+    """
+
+    @staticmethod
+    def _params(keys):
+        return {k: jnp.asarray(float(i + 1), jnp.float32)
+                for i, k in enumerate(keys)}
+
+    @staticmethod
+    def _residual(p):
+        return jnp.stack([v for _, v in sorted(p.items())])
+
+    @given(keys=st.lists(st.text("abcdefg", min_size=1, max_size=3),
+                         min_size=2, max_size=5, unique=True),
+           data=st.data())
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+    def test_a_mask_whose_keys_differ_from_params_is_refused(self, keys, data):
+        params = self._params(keys)
+        renamed = data.draw(st.sampled_from(sorted(keys)))
+        other = data.draw(st.text("hijk", min_size=1, max_size=3))
+        assume(other not in keys)
+        mask = {(other if k == renamed else k): True for k in keys}
+        note(f"params={sorted(params)} mask={sorted(mask)}")
+        assert len(jax.tree.leaves(mask)) == len(jax.tree.leaves(params))
+        with pytest.raises(ValueError, match="same tree structure as params"):
+            fim(self._residual, params, scale=None, mask=mask)
+
+    @given(keys=st.lists(st.text("abcdefg", min_size=1, max_size=3),
+                         min_size=2, max_size=5, unique=True),
+           data=st.data())
+    @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+    def test_a_mask_built_from_the_params_tree_is_accepted(self, keys, data):
+        """Non-vacuity: the refusal above is about the keys, not about
+        masks."""
+        params = self._params(keys)
+        flags = data.draw(st.lists(st.booleans(), min_size=len(keys),
+                                   max_size=len(keys)))
+        assume(any(flags))
+        mask = dict(zip(sorted(params), flags))
+        report = fim(self._residual, params, scale=None, mask=mask)
+        assert len(report.param_names) == sum(flags)
 
 
 # ---------------------------------------------------------------------------

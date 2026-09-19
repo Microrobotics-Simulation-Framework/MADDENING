@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
+  `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
+  written; the enum could not represent the registry this project ships
 - **`SimulationNode.static_data_deps()`** declares which parameters a
   `static_data` array was derived from; `compile()` now refuses a graph whose
   static derives from a *trainable* parameter — freeze it or stop deriving it
@@ -203,6 +206,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The four `scripts/check_*.py` compliance gates now fail on the defects they
+  exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
+  `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
   it registers the node, so an `initial_state()` that raises no longer wedges
   the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`

@@ -1,11 +1,14 @@
 """Tests for the @stability decorator and generate_stability_report()."""
 
 import ast
+import difflib
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -264,6 +267,60 @@ class TestStabilityReportGeneratorCoverage:
                 f"{module} is missing from STABILITY_MODULES, so its "
                 "@stability-decorated surfaces never reach the report"
             )
+
+    def test_the_committed_report_is_what_the_script_emits(self, tmp_path):
+        """``docs/developer_guide/stability_report.md`` must equal a fresh run.
+
+        The report is a generated artifact that the file's own header
+        promises is "refreshed at release time".  Nothing checked that, so
+        it silently rotted for two releases: at the 0.4.0 audit the
+        committed file listed 42 surfaces against a registry of 85 -- half
+        the public API missing, including both ``deprecated`` entries, so a
+        release that deprecated four things published a stability contract
+        showing none.  The coverage test above only checks that the
+        generator *reaches* every tagged module; a generated artifact with
+        no equality check is a green check that cannot fail.
+
+        The generator runs in a fresh interpreter (in-process imports from
+        other tests would otherwise seed the registry) and writes into a
+        temporary tree, so the test never touches the working copy.
+        """
+        code = (
+            "import importlib.util, sys, pathlib\n"
+            f"spec = importlib.util.spec_from_file_location('gen', {str(self.SCRIPT)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            f"mod.REPO_ROOT = pathlib.Path({str(tmp_path)!r})\n"
+            "rc = mod.main([])\n"
+            "print(repr((rc, dict(mod.SKIPPED_MODULES))))\n"
+        )
+        env = dict(os.environ, JAX_PLATFORMS="cpu")
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, env=env)
+        assert out.returncode == 0, out.stderr[-3000:]
+        rc, skipped = ast.literal_eval(out.stdout.strip().splitlines()[-1])
+        if skipped:
+            # ``main`` refuses to write an incomplete report, and comparing
+            # against one would be meaningless.  The release gate and CI
+            # install every extra; this only fires on a partial install.
+            pytest.skip(
+                "stability report cannot be regenerated here: optional "
+                f"dependencies missing for {sorted(skipped)}"
+            )
+        assert rc == 0, out.stderr[-3000:]
+
+        fresh = (tmp_path / "docs" / "developer_guide" / "stability_report.md")
+        committed = self.REPO_ROOT / "docs" / "developer_guide" / "stability_report.md"
+        diff = list(difflib.unified_diff(
+            committed.read_text(encoding="utf-8").splitlines(),
+            fresh.read_text(encoding="utf-8").splitlines(),
+            fromfile="committed", tofile="generated", lineterm="", n=1,
+        ))
+        assert not diff, (
+            "docs/developer_guide/stability_report.md is stale; regenerate it "
+            "with `python scripts/generate_stability_report.py` and commit the "
+            "result.\n" + "\n".join(diff[:60])
+        )
 
     def test_the_adaptive_surfaces_reach_the_generated_report(self):
         import importlib

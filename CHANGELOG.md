@@ -127,6 +127,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`FitResult` is keyword-only**, the guard `FIMReport` got this release:
+  no field has been inserted into it yet, and inserting one would silently
+  swap `converged` and `n_iter` for any positional caller
 - **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
   between `unit` and `shape`, so a positional call silently bound the wrong
   fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`

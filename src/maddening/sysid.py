@@ -936,10 +936,20 @@ def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
 
 
 @stability(StabilityLevel.EVOLVING)
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class FitResult:
     """Outcome of :func:`fit`, :func:`fit_lm` and
     :func:`fit_multiple_shooting`.
+
+    Keyword-only by construction, for the reason :class:`FIMReport`
+    became so during 0.4.0: inserting a field anywhere but the end
+    reassigns every positional argument after it, with no ``TypeError``
+    and no warning.  Here the two adjacent ``bool``/``int`` fields make
+    it worse than a shift -- ``converged`` and ``n_iter`` each accept
+    the other's value silently, so a run that stopped at iteration 12
+    would read as converged.  No field has been inserted yet and no
+    caller built one positionally; ``kw_only`` is what keeps that true
+    for the next field.
 
     ``params`` is a physical pytree (already mapped back through
     ``GraphManager.constrain``); ``losses[i]`` is the loss *before*

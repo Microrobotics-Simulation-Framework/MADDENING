@@ -38,9 +38,11 @@ value for every other field but one.
 A setting is drawn away from its default only under the configuration
 that *reads* it: ``relaxation`` under ``acceleration="fixed"``,
 ``jacobian_reuse`` and ``accelerated_fields`` under the quasi-Newton
-methods, ``waveform_iterations`` and ``boundary_interpolation`` under
-``subcycling=True``, ``linear_solver`` under ``solver="ift"``, and the
-tolerance knobs under the norm that reads them.  Combinations that are
+methods, ``waveform_iterations`` and ``boundary_interpolation`` under a
+group that *actually* subcycles -- ``subcycling=True`` is demoted to a
+no-op when every member node shares a timestep, and ``compile()``
+reports the demotion -- ``linear_solver`` under ``solver="ift"``, and
+the tolerance knobs under the norm that reads them.  Combinations that are
 merely pointless used to be drawn anyway -- the group accepted them,
 and a serialiser that drops a field because it is inert in one
 configuration drops it in the configuration where it is not -- but
@@ -412,7 +414,7 @@ class CouplingGroupRecipe:
     max_iterations: int = 10
     tolerance: float = 1e-6
     convergence_norm: str = "l2"
-    atol: float = 1e-8
+    atol: float = 0.0
     rtol: float = 1e-6
     diagnostics: bool = False
     acceleration: str = "none"
@@ -696,6 +698,15 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
     # Mixed timesteps inside one group are legal only with subcycling --
     # ``validate()`` says so by name -- so this is a constraint, not a
     # preference.  With one timestep, both values are drawn.
+    #
+    # ``mixed_dt`` is also what gates ``waveform_iterations`` and
+    # ``boundary_interpolation`` below, rather than ``subcycling``:
+    # ``_run_coupled_block_impl`` demotes ``use_subcycling`` to False on
+    # a uniform-timestep group, which leaves those two dead, and
+    # ``compile()`` reports that -- fatally, under
+    # ``filterwarnings = ["error"]``.  Drawing them off ``subcycling``
+    # alone produced recipes no user would write and failed the graph
+    # over the recipe rather than over the property.
     mixed_dt = len({m.timestep for m in members}) > 1
     subcycling = True if mixed_dt else draw(st.booleans())
 
@@ -718,15 +729,17 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
         )
 
     # Only the tolerance knob the drawn norm actually reads is varied.
-    # ``"l2"`` tests against ``tolerance`` and never sees ``atol`` /
-    # ``rtol``; ``"mixed"`` and ``"interface"`` scale the residual by
-    # ``atol`` / ``rtol`` and never see ``tolerance``.  ``CouplingGroup``
-    # warns about a knob its norm ignores, so drawing all three would
-    # generate recipes no user would write -- and, under
-    # ``filterwarnings = ["error"]``, would fail two thirds of the graphs
-    # built here on a warning about the graph rather than about the
-    # property.  Both branches occur across examples, so every field
-    # still takes a non-default value somewhere in the search.
+    # ``"l2"`` tests against ``tolerance`` and never sees ``rtol``;
+    # ``"mixed"`` and ``"interface"`` scale the residual by ``rtol`` and
+    # never see ``tolerance``.  ``CouplingGroup`` warns about a knob its
+    # norm ignores, so drawing both would generate recipes no user would
+    # write -- and, under ``filterwarnings = ["error"]``, would fail two
+    # thirds of the graphs built here on a warning about the graph rather
+    # than about the property.  Both branches occur across examples, so
+    # every field still takes a non-default value somewhere in the
+    # search.  ``atol`` is drawn for every norm: all three residuals read
+    # it as the dead band that decides which fields enter the norm, so
+    # none of them warns about it.
     norm = draw(st.sampled_from(COUPLING_NORMS))
     live_l2 = norm == "l2"
     # Same rule for the other five gated knobs, and the same reason.
@@ -740,7 +753,10 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
             draw(st.sampled_from([1e-8, 1e-6, 1e-3])) if live_l2 else 1e-6
         ),
         convergence_norm=norm,
-        atol=1e-8 if live_l2 else draw(st.sampled_from([1e-8, 1e-5])),
+        # The dead band, in the fields' own units.  These fixtures are
+        # O(1), so a band at or below 1e-5 excludes nothing and the
+        # draw varies a live knob without changing any verdict.
+        atol=draw(st.sampled_from([0.0, 1e-8, 1e-5])),
         rtol=1e-6 if live_l2 else draw(st.sampled_from([1e-6, 1e-3])),
         diagnostics=draw(st.booleans()),
         acceleration=acceleration,
@@ -753,14 +769,14 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
         subcycling=subcycling,
         boundary_interpolation=(
             draw(st.sampled_from(COUPLING_INTERPOLATIONS))
-            if subcycling else "linear"
+            if mixed_dt else "linear"
         ),
         jacobian_reuse=(
             draw(st.integers(min_value=0, max_value=3))
             if acceleration == "iqn-imvj" else 0
         ),
         waveform_iterations=(
-            draw(st.sampled_from([1, 2])) if subcycling else 1
+            draw(st.sampled_from([1, 2])) if mixed_dt else 1
         ),
         predictor=draw(st.sampled_from(COUPLING_PREDICTORS)),
         # 'fori' is deprecated, not removed: it is still a configuration a

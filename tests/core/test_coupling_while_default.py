@@ -184,7 +184,12 @@ def test_unconverged_is_reported_not_raised_by_default():
     d = gm.coupling_diagnostics()["spring_a+spring_b"]
     assert d["converged"] is False
     assert d["residual"] > 1e-12
-    assert d["iterations"] == 1
+    # A group that exhausted its budget reports the budget: two passes
+    # ran and two are reported, so ``iterations >= max_iterations``
+    # detects the cap.  This used to read ``1`` -- the while loop's body
+    # count, one short of the passes -- which is the defect, not the
+    # contract; ``fori`` always reported ``2`` here.
+    assert d["iterations"] == 2
 
 
 def test_strict_convergence_raises_at_cap():

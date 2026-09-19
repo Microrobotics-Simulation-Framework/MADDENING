@@ -653,7 +653,8 @@ _INERT_RULES: tuple[_InertRule, ...] = (
     ),
     _InertRule(
         fields=("accelerated_fields",),
-        live=lambda g: g.max_iterations <= 1 or g.acceleration in ("iqn-ils", "iqn-imvj"),
+        live=lambda g: (g.max_iterations <= 1
+                        or g.acceleration in ("iqn-ils", "iqn-imvj")),
         message=_gated_on(
             "acceleration",
             "solves no quasi-Newton problem to select fields for; only "

@@ -2257,6 +2257,11 @@ class GraphManager:
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
+        # The rate dividers of the step that is actually compiled, as
+        # opposed to ``_rate_dividers``, which ``compile`` overwrites on
+        # its way through and leaves behind if it raises.  This is what
+        # the sub-step phase in ``_meta`` is indexed by.
+        self._committed_rate_dividers: dict[str, int] = {}
 
     def _snapshot_params(self) -> dict:
         return {
@@ -2562,12 +2567,16 @@ class GraphManager:
                 f"params_pytree() exposes "
                 f"{sorted(self._nodes[node].node.params_pytree())}"
             )
-        self._param_spec_overrides.setdefault(node, {})[key] = spec
-        # ``static_data_deps()`` forwards from wrapped nodes, so the outer
-        # declaration is enough to know whether this key is load-bearing
-        # for the compile-time refusal.
+        # Asked *before* the override is committed: ``static_data_deps``
+        # is a node-supplied method and may raise, and an override stored
+        # without the dirty flag that goes with it is the half-applied
+        # mutation the atomicity work is about.  It forwards from wrapped
+        # nodes, so the outer declaration is enough to know whether this
+        # key is load-bearing for the compile-time refusal.
         declared = self._nodes[node].node.static_data_deps() or {}
-        if any(key in names for names in declared.values()):
+        dirties = any(key in names for names in declared.values())
+        self._param_spec_overrides.setdefault(node, {})[key] = spec
+        if dirties:
             self._dirty = True
 
     def trainable_mask(self, params: Optional[dict] = None) -> dict:
@@ -2665,8 +2674,21 @@ class GraphManager:
             accepts_params=_update_accepts_params(node),
             flux_accepts_params=_flux_accepts_params(node),
         )
+        # Atomic on purpose: build the state *before* committing to either
+        # dict.  ``initial_state()`` is a documented, recoverable failure
+        # point -- an ``AdaptiveNode`` raises ``AdaptiveNodeBlindnessError``
+        # at a Palais trap and the developer guide's recovery is to perturb
+        # the parameters and re-add under the same name.  Registering the
+        # spec first left ``_nodes[name]`` populated and ``_state[name]``
+        # missing: the name was taken for good (``add_node`` raised
+        # "already exists", ``remove_node`` raised ``KeyError``),
+        # ``compile()`` accepted the graph, ``params["nodes"]`` carried a
+        # node that can never run, and ``step()`` died much later with a
+        # bare ``KeyError`` inside the compiled step.  A failed ``add_node``
+        # must leave the graph exactly as it was.
+        state = node.initial_state()
         self._nodes[node.name] = spec
-        self._state[node.name] = node.initial_state()
+        self._state[node.name] = state
         self._dirty = True
         self._notify(EVENT_NODE_ADDED, node.name)
 
@@ -2834,7 +2856,10 @@ class GraphManager:
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         del self._nodes[name]
-        del self._state[name]
+        # ``pop`` rather than ``del``: a graph whose state entry is missing
+        # must still be removable, so the removal cannot itself fail
+        # half-way and leave ``_nodes`` and ``_state`` disagreeing.
+        self._state.pop(name, None)
         self._edges = [
             e for e in self._edges
             if e.source_node != name and e.target_node != name
@@ -2987,9 +3012,11 @@ class GraphManager:
         # ``add_coupling_group`` below is the only thing that used to set
         # the flag -- so an ``auto_couple`` that found no cycles left the
         # graph describing itself as uncoupled while still running the
-        # coupled step it was compiled with.
-        self._coupling_groups.clear()
+        # coupled step it was compiled with.  Flagged before the clear:
+        # a graph marked dirty whose groups are unchanged costs one
+        # recompile, the reverse costs a wrong step.
         self._dirty = True
+        self._coupling_groups.clear()
         sccs = find_strongly_connected_components(
             list(self._nodes.keys()), self._edges
         )
@@ -3272,7 +3299,12 @@ class GraphManager:
         # graph expects.  ``reset_state()`` remains the explicit way to
         # zero the counters.
         previous_meta = dict(self._state.get(_META_KEY, {}))
-        previous_dividers = dict(getattr(self, "_rate_dividers", None) or {})
+        # From the last *successful* compile, not from ``_rate_dividers``:
+        # a compile that raises after recomputing them (an
+        # ``accelerated_fields`` typo, the static-data refusal) leaves
+        # them describing a step that was never built, and comparing
+        # against those would restart the phase on the repair.
+        previous_dividers = dict(self._committed_rate_dividers)
 
         # Compute multi-rate info.
         # For nodes in subcycling coupling groups, use the group's
@@ -3414,10 +3446,10 @@ class GraphManager:
             live = jnp.asarray(live)
             if live.shape == jnp.shape(seed) and live.dtype == jnp.asarray(seed).dtype:
                 meta[key_] = live
-        if meta:
-            self._state[_META_KEY] = meta
-        else:
-            self._state.pop(_META_KEY, None)
+        # Computed here, committed at the very end of ``compile`` -- the
+        # validation below, the static-data refusal and ``_build_step_fn``
+        # can all still raise, and a compile that fails must leave the
+        # sub-step phase and the warm starts exactly as it found them.
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,
@@ -3574,6 +3606,15 @@ class GraphManager:
             name: spec.node.static_data_hash()
             for name, spec in self._nodes.items()
         }
+
+        # Nothing below raises, so this is the commit point for the
+        # ``_meta`` built above (see there) and for the dividers the next
+        # compile will judge its phase against.
+        if meta:
+            self._state[_META_KEY] = meta
+        else:
+            self._state.pop(_META_KEY, None)
+        self._committed_rate_dividers = dict(self._rate_dividers)
 
         self._dirty = False
         # A rebuilt step invalidates every scan built against the old
@@ -5053,24 +5094,46 @@ class GraphManager:
         normalises them (weak types stripped), so the jitted step does not
         retrace after a reset, and ``_meta``'s structure is preserved.
         """
-        self._state_traced = False
-        self._state_before_trace = None
-        for name, spec in self._nodes.items():
-            self._state[name] = _strong_typed(spec.node.initial_state())
-        meta = self._state.get(_META_KEY)
-        if meta is not None:
-            for key, value in list(meta.items()):
+        # Every ``initial_state()`` first, then one commit: an
+        # ``initial_state`` that raises (an ``AdaptiveNode`` at a Palais
+        # trap) must not leave half the graph reset and half of it carrying
+        # the state from before the call.  ``_meta`` is computed in the
+        # same pass and committed with them: it is state too, so a reset
+        # that leaves the node states fresh and the sub-step phase stale
+        # would re-phase a multi-rate graph exactly the way a recompile
+        # used to.
+        fresh = {
+            name: _strong_typed(spec.node.initial_state())
+            for name, spec in self._nodes.items()
+        }
+        live_meta = self._state.get(_META_KEY)
+        fresh_meta = None
+        if live_meta is not None:
+            fresh_meta = dict(live_meta)
+            for key, value in live_meta.items():
                 if key in ("step_count", "sub_step") or key.endswith("_iterations") \
                         or key.endswith("_pred_count"):
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
                 elif key.endswith("_residual") or key.endswith(
                     "_amplification"
                 ):
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.
                 elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:
-                    meta[key] = jnp.zeros_like(value)
+                    fresh_meta[key] = jnp.zeros_like(value)
+
+        self._state.update(fresh)
+        if fresh_meta is not None:
+            # Refilled, not replaced: the compiled step and any caller
+            # holding the dict keep the object they were given.
+            live_meta.clear()
+            live_meta.update(fresh_meta)
+        # Cleared last, with the commit: a reset that raised would
+        # otherwise have taken the graph's way back from an escaped
+        # tracer with it while leaving the tracer in place.
+        self._state_traced = False
+        self._state_before_trace = None
 
     # ------------------------------------------------------------------
     # Observer pattern

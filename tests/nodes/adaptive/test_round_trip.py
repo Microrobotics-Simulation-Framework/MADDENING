@@ -65,7 +65,8 @@ def test_a_gate_disabled_node_does_not_reload_with_the_gate_on():
     assert clone.blindness_gate is False
     clone.initial_state()   # would raise if the gate came back on
 
-    gated = PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16)
+    gated = PoissonSineTopKNode("adaptive", 1.0, theta=0.5, n=64, k=16,
+                                on_blind="raise")
     with pytest.raises(AdaptiveNodeBlindnessError):
         _rebuild(gated).initial_state()
 

@@ -426,10 +426,11 @@ class TestFIM:
         ``crb`` in either direction.
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 16% of
-        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
-        buys that much less search here than the number says.  It is not
-        removable by generation: what is left is a soft, heavily damped
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 16-26% of
+        draws under the ``ci`` profile -- the two ends are two ci runs of
+        the same test, which is how much sampling noise 80 examples carry --
+        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
         spring at ``k=49, c=0.125, m=3`` that
@@ -476,10 +477,11 @@ class TestFIM:
 
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 22% of
-        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
-        buys that much less search here than the number says.  It is not
-        removable by generation: what is left is a soft, heavily damped
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 22-24% of
+        draws under the ``ci`` profile -- the two ends are two ci runs of
+        the same test, which is how much sampling noise 80 examples carry --
+        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
         spring at ``k=49, c=0.125, m=3`` that
@@ -521,10 +523,11 @@ class TestFIM:
 
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 8% of
-        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
-        buys that much less search here than the number says.  It is not
-        removable by generation: what is left is a soft, heavily damped
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 8-16% of
+        draws under the ``ci`` profile -- the two ends are two ci runs of
+        the same test, which is how much sampling noise 80 examples carry --
+        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
         spring at ``k=49, c=0.125, m=3`` that
@@ -561,10 +564,11 @@ class TestFIM:
 
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 18% of
-        draws under the ``ci`` profile, measured, so ``EXAMPLES_COSTLY``
-        buys that much less search here than the number says.  It is not
-        removable by generation: what is left is a soft, heavily damped
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 18-27% of
+        draws under the ``ci`` profile -- the two ends are two ci runs of
+        the same test, which is how much sampling noise 80 examples carry --
+        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
         spring at ``k=49, c=0.125, m=3`` that

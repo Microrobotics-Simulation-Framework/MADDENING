@@ -127,6 +127,9 @@ guidance; the itemized changes follow.
 - **`FIMReport` is keyword-only**: `rank` was inserted mid-dataclass this
   release, so positional construction silently reassigned every field after it;
   build it with keywords (every in-tree caller already did)
+- **`AdaptiveNode` tightens its subclass contract and loosens its gate**:
+  `compute_active_set` must return a non-empty **boolean** mask; `is_trapped_at`
+  is now `frozen_gradient_vanishes_at`; `on_blind="warn"` no longer ever raises
 - **`converged=True` means "within `tolerance` of the fixed point"**, not "the
   last step was small": the threshold is tested against `residual / (1 - rho)`
   and every norm is now relative, so expect more iterations and retune `atol`
@@ -186,6 +189,8 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
+  read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and
   `tune_coupling_params` warn and are removed in 0.5.0; use
   `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
@@ -204,6 +209,9 @@ guidance; the itemized changes follow.
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64
+- **A failed graph mutation is now a no-op**: `add_node` builds the state before
+  it registers the node, so an `initial_state()` that raises no longer wedges
+  the graph with a ghost `step()` dies on; same for `reset_state`/`remove_node`
 - **A failed resume now leaves the graph untouched** and logs `RESUME FAILED`, not
   "starting fresh"; sharded wrappers honour `shard_axes`, pass `params` to a
   `**kwargs` node (whose gradient was silently zero) and refuse an indivisible grid
@@ -325,6 +333,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **The committed stability report is compared with a fresh generation** in
+  CI: it had rotted to 42 of 85 surfaces, hiding every deprecation.  Four
+  surfaces that warn deprecated now carry the `DEPRECATED` tag
 - **The coupled adjoint-identity property stops scaling by a cancelling
   inner product**: it divides by the norm of the terms contracted, not by
   the value they produce, which removes a latent float32 flake

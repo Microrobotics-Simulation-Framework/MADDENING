@@ -352,7 +352,31 @@ def _residual_fn(gm, obs, base_params, names, node="s", n_steps=None,
     return residual
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIM:
+    """``fim`` over generated spring-damper parameters.
+
+    The whole class filters ``PrecisionLimitWarning``, and not as a
+    workaround: position-only data cannot separate a common scaling of
+    ``(k, c, m)``, so for a good share of the generated parameter draws
+    the weakest eigenvalue genuinely sits at the float32 noise floor and
+    ``fim`` correctly says so.  Observed here at 1.14x, 1.18x, 1.4x,
+    1.67x and 1.97x the cutoff on different draws -- which is also the
+    honest headline about doing identifiability analysis in float32:
+    for this project's canonical problem the rank verdict routinely sits
+    within a small multiple of the floor.
+
+    What these tests assert -- symmetry, PSD-ness, eigenvector
+    directions, the congruence identity, where ``crb`` is finite -- are
+    statements about the *matrix*, and the warning is about the rank
+    verdict read off it.  Marking the class rather than the methods
+    because the generators are shared and which draw crosses the band is
+    not stable between runs; a per-method mark left one test to fail on
+    a later seed.  Every assertion *about* the warning lives in
+    :class:`TestPrecisionLimitedRank`, which does not filter it.
+    """
+
 
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -440,8 +464,6 @@ class TestFIM:
             assert bool((crb[finite] > 0.0).all()), rep.crb
             assert bool(np.isinf(crb[~finite]).all()), rep.crb
 
-    @pytest.mark.filterwarnings(
-        "ignore::maddening.warnings.PrecisionLimitWarning")
     @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
@@ -536,8 +558,6 @@ class TestFIM:
         # The CRB is NaN along a singular FIM (pinv), not a bogus number.
         assert rep.cond == float("inf") or rep.cond > 1e5
 
-    @pytest.mark.filterwarnings(
-        "ignore::maddening.warnings.PrecisionLimitWarning")
     @given(truth=truth_params_st, init=initial_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_relative_scaling_is_congruence_by_params(self, single, truth, init, n):

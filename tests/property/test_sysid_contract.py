@@ -737,10 +737,12 @@ def analytic_residual(draw):
     return residual, keys, tuple(theta)
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIMAgainstFiniteDifference:
     """``fim``'s matrix against a finite difference of the same residual.
 
-    Both tests carry a ``PrecisionLimitWarning`` filter.  They sweep
+    The class carries a ``PrecisionLimitWarning`` filter.  These sweep
     spring parameters across regimes that include genuinely floor-level
     conditioning -- position-only data cannot separate a common scaling
     of ``(k, c, m)``, so the weakest eigenvalue sits at the noise floor
@@ -748,11 +750,11 @@ class TestFIMAgainstFiniteDifference:
     warning is a true statement about those matrices and is beside the
     point of what is asserted here, which is the *matrix*, not the rank
     verdict read off it.  Filtered rather than asserted because it fires
-    on some generated draws and not others.
+    on some generated draws and not others, and marked on the class
+    rather than the methods for the same reason: which draw crosses the
+    band is not stable between runs.
     """
 
-    @pytest.mark.filterwarnings(
-        "ignore::maddening.warnings.PrecisionLimitWarning")
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_fim_matches_a_central_finite_difference(self, problem):
@@ -785,8 +787,6 @@ class TestFIMAgainstFiniteDifference:
         "position": _finite(-5.0, 5.0),
         "velocity": _finite(-2.0, 2.0),
     }), n=st.sampled_from((20, 40)))
-    @pytest.mark.filterwarnings(
-        "ignore::maddening.warnings.PrecisionLimitWarning")
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fim_matches_a_finite_difference_of_a_rollout(self, truth, init, n):
         """The same check against a real graph rollout, at the tolerance

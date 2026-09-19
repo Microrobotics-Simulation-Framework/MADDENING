@@ -219,11 +219,30 @@ def _retune(recipe, *, acceleration, accelerated_fields=None,
     )
 
 
+#: ``allow_subcycling=False`` is a *generation* constraint, not a
+#: filter.  A subcycled group is not one fixed-point iteration over one
+#: state: a pass runs several sub-steps and reapplies the interface
+#: override inside each, so its residual measures the last sub-step
+#: rather than the pass, and the two solves interpolate two different
+#: interface histories.  Measured at 3.4e+00 on a three-node graph with
+#: timesteps 0.04 / 0.02 / 0.01, the accelerated exit reporting
+#: ``amplification=nan`` and ``bound_valid=False``.  That is a statement
+#: about waveform relaxation, and this property does not make it.
+#:
+#: It used to be said with ``assume``, which is the expensive way to say
+#: it: better than half the drawn recipes carried a subcycled group
+#: (55% measured on the base strategy, 64% after the inert-knob rules
+#: narrowed what a demoted group may draw), every one of them paid for a
+#: graph that was then thrown away, and together with the five
+#: ``assume`` calls further down it put this test over Hypothesis's
+#: ``filter_too_much`` threshold -- 9 examples kept out of 59.  Asking
+#: for uniform timesteps costs nothing and rejects nothing.
 _RECIPES = graph_recipes(
     min_nodes=2, max_nodes=3,
     kinds=_SMOOTH_KINDS,
     require_coupling_group=True,
     allow_mappings=False,
+    allow_subcycling=False,
 )
 
 
@@ -253,17 +272,13 @@ def test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration(
     configuration seven of the ten rows are in, and reuse is what makes
     an IMVJ answer depend on steps before this one.
     """
-    # A subcycled group is not one fixed-point iteration over one
-    # state: a pass runs several sub-steps and reapplies the interface
-    # override inside each, so its residual measures the last sub-step
-    # rather than the pass, and the two solves interpolate two different
-    # interface histories.  Measured at 3.4e+00 on a three-node graph
-    # with timesteps 0.04 / 0.02 / 0.01, the accelerated exit reporting
-    # ``amplification=nan`` and ``bound_valid=False``.  That is a
-    # statement about waveform relaxation.  Skipped rather than switched
-    # off, because a group whose nodes carry different timesteps
-    # *requires* ``subcycling=True`` and will not compile without it.
-    assume(not any(g.subcycling for g in recipe.coupling_groups))
+    # The strategy is asked for uniform timesteps (see ``_RECIPES``), so
+    # no group here subcycles.  Asserted rather than assumed: if the
+    # generator ever stops holding up its end this must fail loudly, not
+    # quietly go back to throwing half its examples away.
+    assert not any(g.subcycling for g in recipe.coupling_groups), (
+        "allow_subcycling=False must not produce a subcycled group"
+    )
 
     plain = _retune(recipe, acceleration="none")
     gm_plain = plain.build()

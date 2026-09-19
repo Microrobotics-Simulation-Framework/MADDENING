@@ -581,9 +581,18 @@ class GraphRecipe:
 # The strategy
 # ---------------------------------------------------------------------------
 
-def _timesteps(draw, count: int) -> list[float]:
-    """Commensurate timesteps, so a multi-rate graph has an exact GCD."""
+def _timesteps(draw, count: int, *, uniform: bool = False) -> list[float]:
+    """Commensurate timesteps, so a multi-rate graph has an exact GCD.
+
+    ``uniform`` gives every node the same one.  A group over nodes of
+    differing timesteps *must* set ``subcycling=True`` -- ``validate()``
+    refuses it otherwise -- so that is how a caller asks for graphs no
+    group has to subcycle, rather than drawing multi-rate graphs and
+    rejecting them afterwards.
+    """
     base = draw(st.sampled_from([0.01, 0.005, 0.02]))
+    if uniform:
+        return [base] * count
     return [base * draw(st.sampled_from([1, 1, 1, 2, 4])) for _ in range(count)]
 
 
@@ -689,11 +698,19 @@ def _edges(draw, nodes: tuple[NodeRecipe, ...], *, allow_mappings: bool,
 
 
 @st.composite
-def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecipe:
+def _coupling_group(draw, members: tuple[NodeRecipe, ...], *,
+                    allow_subcycling: bool = True) -> CouplingGroupRecipe:
     """One valid group over *members*.
 
     Every field is drawn independently; see the module docstring for the
     two combinations that are not drawn and why.
+
+    ``allow_subcycling=False`` pins ``subcycling`` at its default.  The
+    caller has already made every timestep equal (see
+    :func:`_timesteps`), so no group *needs* to subcycle, and a group
+    that asks to anyway is demoted at build time -- which is a shape
+    some properties have to reject, and rejecting is what a generator
+    is for avoiding.
     """
     # Mixed timesteps inside one group are legal only with subcycling --
     # ``validate()`` says so by name -- so this is a constraint, not a
@@ -708,7 +725,14 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
     # alone produced recipes no user would write and failed the graph
     # over the recipe rather than over the property.
     mixed_dt = len({m.timestep for m in members}) > 1
-    subcycling = True if mixed_dt else draw(st.booleans())
+    if not allow_subcycling:
+        assert not mixed_dt, (
+            "allow_subcycling=False must come with uniform timesteps: a "
+            "group over differing ones does not compile without it"
+        )
+        subcycling = False
+    else:
+        subcycling = True if mixed_dt else draw(st.booleans())
 
     # Drawn before the knobs it gates.  Only the two quasi-Newton
     # methods read ``accelerated_fields``, ``jacobian_reuse`` is
@@ -798,7 +822,9 @@ def _coupling_group(draw, members: tuple[NodeRecipe, ...]) -> CouplingGroupRecip
 @st.composite
 def _coupling_groups(draw, nodes: tuple[NodeRecipe, ...],
                      edges: tuple[EdgeRecipe, ...], *,
-                     required: bool = False) -> tuple[CouplingGroupRecipe, ...]:
+                     required: bool = False,
+                     allow_subcycling: bool = True,
+                     ) -> tuple[CouplingGroupRecipe, ...]:
     """Up to two disjoint groups over *nodes*.
 
     Disjoint because ``add_coupling_group`` refuses a node that is
@@ -831,7 +857,10 @@ def _coupling_groups(draw, nodes: tuple[NodeRecipe, ...],
             third = draw(st.sampled_from(spare))
             members.append(third)
             free.discard(third)
-        groups.append(draw(_coupling_group(tuple(by_name[m] for m in members))))
+        groups.append(draw(_coupling_group(
+            tuple(by_name[m] for m in members),
+            allow_subcycling=allow_subcycling,
+        )))
     return tuple(groups)
 
 
@@ -904,6 +933,7 @@ def graph_recipes(
     train_mapping_weights: bool = False,
     allow_coupling_groups: bool = True,
     require_coupling_group: bool = False,
+    allow_subcycling: bool = True,
 ) -> GraphRecipe:
     """Valid :class:`GraphRecipe`\\ s.
 
@@ -928,6 +958,14 @@ def graph_recipes(
         way) turns ``allow_coupling_groups`` off, and a property *about*
         groups requires one rather than spending its examples on graphs
         that have none.
+    allow_subcycling : bool
+        Whether a group may subcycle.  ``False`` gives every node the
+        same timestep and pins ``subcycling`` at its default, so every
+        group is one fixed-point iteration over one state.  A property
+        that does not hold across a sub-step window states it here
+        instead of drawing multi-rate graphs and calling ``assume`` on
+        them: a rejected example costs a draw and buys nothing, and
+        enough of them trip Hypothesis's ``filter_too_much``.
     """
     require_mapping = require_mapping or train_mapping_weights
     # Requiring one implies allowing one.
@@ -945,7 +983,7 @@ def graph_recipes(
         picked += [draw(st.sampled_from(kinds)) for _ in range(n - 2)]
     else:
         picked = [draw(st.sampled_from(kinds)) for _ in range(n)]
-    steps = _timesteps(draw, n)
+    steps = _timesteps(draw, n, uniform=not allow_subcycling)
     nodes = tuple(
         NodeRecipe(kind, name, dt, tuple(draw(_KWARGS[kind]).items()))
         for kind, name, dt in zip(picked, names, steps)
@@ -957,7 +995,8 @@ def graph_recipes(
         edges=edges,
         coupling_groups=(
             draw(_coupling_groups(nodes, edges,
-                                  required=require_coupling_group))
+                                  required=require_coupling_group,
+                                  allow_subcycling=allow_subcycling))
             if allow_coupling_groups else ()
         ),
         external_inputs=draw(_external_inputs(nodes, edges)),

@@ -17,8 +17,8 @@ anomalies:
       is to use the CPU backend (JAX_PLATFORMS=cpu).
       Resolved in 0.4.0, by the dependency floor moving past the affected jaxlib
       rather than by any change to MADDENING's own code.  Versions 0.1.0 to
-      0.3.1 pinned `jax>=0.4,<0.6`, which permits the affected jaxlib 0.5.1;
-      0.4.0 pins `jax>=0.10,<0.13`, which does not.  The old pin was held back
+      0.3.1 carried a jax floor below 0.10, which permitted the affected
+      jaxlib 0.5.1; 0.4.0's floor does not.  The old pin was held back
       deliberately, for compile-time reasons on a MIME experiment, and that
       constraint no longer applies.
 

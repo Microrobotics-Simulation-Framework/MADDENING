@@ -43,6 +43,8 @@ to cost one pass.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -199,7 +201,19 @@ def _affine_graph(x0a=0.0, x0b=0.0, **group_kw):
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
     kw = dict(diagnostics=True)
     kw.update(group_kw)
-    gm.add_coupling_group(["a", "b"], **kw)
+    with warnings.catch_warnings():
+        # ``max_iterations=1`` returns before the accelerator is built,
+        # so ``CouplingGroup`` reports the whole acceleration family
+        # inert there -- correctly, and that inertness is exactly what
+        # the cap-1 cells of the tests below assert.  Only that one
+        # message is filtered, so a knob this file sets by mistake under
+        # any other configuration still fails on the warning.
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*is ignored under max_iterations=1.*",
+            category=UserWarning,
+        )
+        gm.add_coupling_group(["a", "b"], **kw)
     gm.compile()
     return gm
 

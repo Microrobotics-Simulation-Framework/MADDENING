@@ -229,6 +229,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
+  every stage holds the one value you pass. The arithmetic is unchanged; carry time
+  as a state field with derivative 1 to get 4.00 back — see the new solvers guide
 - **Non-finite numbers are written as valid JSON** (config, USD `paramsJson`, FMI
   wire): `NaN` / `Infinity` / `-Infinity` are quoted, and both spellings load
 - **An FMU instance may reconnect at once**: the bridge no longer refuses the slot

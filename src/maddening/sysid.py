@@ -65,69 +65,79 @@ _META_KEY = "_meta"
 #: own arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
 #: float64 reference applying the *same* rank rule, over 171,000
 #: synthetic Fisher matrices of known spectrum (n = 2..25 parameters,
-#: m = 20..2000 residual rows, spread / clustered / twin-null spectra).
+#: m = 20..2000 residual rows, spread / clustered / twin-null spectra),
+#: in two independently seeded sweeps that agree.
 #:
-#: **Re-derived when the cutoff gained its ``sqrt(m)`` term.**  The
-#: factor and the cutoff are not independent: the band is the width of
-#: the arithmetic's error *in units of the cutoff*, so moving the cutoff
-#: moves the band.  The first measurement of this constant was taken
-#: against ``rank_rtol = n * eps`` and gave 2.0; against
-#: ``max(n, sqrt(m)) * eps`` the same sweep gives the table below.  Both
-#: runs are in the same units, so they can be read side by side.
+#: **Re-measured when the cutoff gained its ``sqrt(m)`` term, because the
+#: two are not independent.**  The band is the width of the arithmetic's
+#: error *expressed in units of the cutoff*, so moving the cutoff moves
+#: the band and the factor fitted to it.  The same sweep, scored against
+#: both cutoffs -- disagreement rate binned by the matrix's *true*
+#: eigenvalue ratio:
 #:
-#: =====================  ==============  ==============
-#: true ratio / cutoff    disagreement    disagreement
-#:                        at ``n*eps``    at the new cutoff
-#: =====================  ==============  ==============
-#: 0.10 -- 0.32           0.009           0.0000
-#: 0.32 -- 0.46           0.023           0.0000
-#: 0.46 -- 0.68           0.039           0.010
-#: 0.68 -- 1.0            0.099           0.049
-#: 1.0  -- 1.47           0.110           0.045
-#: 1.47 -- 2.15           0.010           0.0000
-#: 2.15 and above         0.001           0.0000
-#: =====================  ==============  ==============
+#: =====================  ==============  ==================
+#: true ratio / cutoff    at ``n * eps``  at ``max(n,√m)*eps``
+#: =====================  ==============  ==================
+#: 0.10 -- 0.22           0.0067          0.0000
+#: 0.22 -- 0.32           0.0124          0.0000
+#: 0.32 -- 0.46           0.0205          0.0000
+#: 0.46 -- 0.68           0.0450          0.0128
+#: 0.68 -- 1.0            0.1045          0.0477
+#: 1.0  -- 1.47           0.1089          0.0442
+#: 1.47 -- 2.15           0.0102          0.0000
+#: 2.15 -- 3.16           0.0022          0.0000
+#: 3.16 and above         0.0000          0.0000
+#: =====================  ==============  ==================
 #:
-#: The band was ``[0.46x, 2.15x]`` and is now ``[0.46x, 1.47x]``: the
-#: cutoff no longer sits below the arithmetic's own floor at long
-#: residuals, so the verdicts that used to be decided by rounding *above*
-#: the cutoff are not decided by rounding any more.  The whole population
-#: of precision-limited verdicts shrank with it, from 1.14% of draws to
-#: 0.35%.
+#: The population itself shrank, from 1.17% of draws to 0.35%: two
+#: thirds of the verdicts that used to rest on rounding do not any more,
+#: because the cutoff no longer sits *below* the arithmetic's own floor
+#: at long residuals.  What is left is gathered tightly on the cutoff
+#: instead of smeared over decades below it.
 #:
-#: The threshold sits **at** the band's edge rather than beyond it,
-#: because a margin is not free here.  Recall over the disagreements, and
-#: fire rate on verdicts the two precisions *agree* about, by true ratio,
-#: against the new cutoff:
+#: **The factor stays at 2.0, and it now buys something different.**
+#: What the band actually tests is the *float32* deciding ratio, and at
+#: a disagreement that lies in ``[0.566x, 1.326x]`` of the cutoff --
+#: asymmetric, with the lower edge binding, so symmetric coverage needs
+#: at least 1.77.  Recall over the disagreements, and fire rate on
+#: verdicts the two precisions *agree* about, by true ratio:
 #:
-#: =========  ========  ========  =========  ======
-#: factor     recall    2x..5x    5x..10x    10x+
-#: =========  ========  ========  =========  ======
-#: 1.25       0.975     0.000     0.000      0.000
-#: 1.5        1.000     0.000     0.000      0.000
-#: 2.0        1.000     0.009     0.000      0.000
-#: 2.5        1.000     0.247     0.000      0.000
-#: 3.0        1.000     0.458     0.000      0.000
-#: 8.0        1.000     1.000     0.679      0.000
-#: =========  ========  ========  =========  ======
+#: =========  ========  ==========  =========  ======
+#: factor     recall    2x .. 5x    5x .. 10x  10x+
+#: =========  ========  ==========  =========  ======
+#: 1.5        0.9967    0.0000      0.000      0.000
+#: 1.8        1.0000    0.0005      0.000      0.000
+#: 2.0        1.0000    0.0094      0.000      0.000
+#: 2.5        1.0000    0.2451      0.000      0.000
+#: 3.0        1.0000    0.4470      0.000      0.000
+#: 8.0        1.0000    1.0000      0.682      0.000
+#: =========  ========  ==========  =========  ======
 #:
-#: 1.5 is the smallest factor in the sweep with full recall, and the
-#: largest that fires on nothing the two precisions agree about.  Every
-#: step past it buys no recall at all and costs an order of magnitude of
-#: false firing -- at 2.5 it fires on a quarter of ordinary ``2x..5x``
-#: verdicts, at 8 on two thirds of ``5x..10x`` ones, which this project's
-#: own spring-damper identification tests produce routinely.  A warning
-#: that fires routinely gets suppressed, which is worse than silence.
+#: Against the old cutoff the same sweep put 2.0's recall at **0.916**;
+#: against this one it is 1.000.  The ~8% that were unreachable were the
+#: long-residual verdicts -- not because no factor was wide enough, but
+#: because the cutoff was below the floor there, so the disagreements
+#: were not near the cutoff at all.  Making the cutoff see ``m`` is what
+#: brought them into reach; no change to this constant could have.
 #:
-#: Recall is 1.000 and not merely high, which the previous cutoff could
-#: not reach at any factor: ~14% of its precision-limited verdicts were
-#: unreachable by any symmetric band, because they were long-residual
-#: cases where the cutoff sat *below* the noise floor and so the
-#: disagreements were spread over decades rather than gathered around
-#: the cutoff.  Making the cutoff see ``m`` is what collapsed them back
-#: onto it.  The residual coverage risk is now sampling error on the 199
-#: disagreements the sweep produced, not a structural blind spot.
-_PRECISION_WARN_FACTOR = 1.5
+#: 2.0 rather than the 1.8 that first attains full recall, because 1.8
+#: is fitted to the single most extreme of 605 disagreements (1/1.8 =
+#: 0.556 against an observed edge of 0.566, i.e. no margin at all on an
+#: extreme order statistic), while 2.0 keeps 13% of margin for a false
+#: fire rate of 0.94% on ordinary ``2x..5x`` verdicts -- less than the
+#: 2.5% it cost under the old cutoff.  Past 2.0 the curve turns: 2.5
+#: fires on a quarter of ordinary ``2x..5x`` reports and 8 on two thirds
+#: of ``5x..10x`` ones, which this project's own spring-damper
+#: identification tests produce routinely, for no recall at all.  A
+#: warning that fires routinely gets suppressed, which is worse than
+#: silence.
+#:
+#: Full recall here is a statement about 605 measured disagreements, not
+#: a proof.  The residual risk is sampling error on that population,
+#: which is a far better place to be than the previous structural blind
+#: spot; ``TestPrecisionLimitedRank`` holds the separation from both
+#: sides so that a later edit cannot quietly give it up.
+_PRECISION_WARN_FACTOR = 2.0
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -397,9 +407,14 @@ class FIMReport:
 
     ``rank`` counts the directions the data actually resolves: the
     eigenvalues strictly above ``rank_rtol * eigvals[-1]``, where
-    ``rank_rtol`` defaults to ``n * eps`` for ``n`` parameters at the
-    matrix's own precision -- the relative form
-    ``numpy.linalg.matrix_rank`` uses.  ``rank < len(param_names)`` says
+    ``rank_rtol`` defaults to ``max(n, sqrt(m)) * eps`` for ``n``
+    parameters and ``m`` residual rows at the matrix's own precision.
+    The ``n`` term is the relative form ``numpy.linalg.matrix_rank``
+    uses and bounds ``eigh``; the ``sqrt(m)`` term is the error in
+    forming ``F = J.T @ J`` over ``m`` rows, which ``F`` itself cannot
+    show and which the cutoff ignored before 0.4.0 --
+    :func:`~maddening.sysid._resolve_rank_rtol` has the measurement.
+    ``rank < len(param_names)`` says
     the data leaves that many independent parameter combinations
     undetermined.  Unlike ``cond`` the verdict does not move when the
     residual is rescaled (by ``noise_std``, say), because the threshold
@@ -1008,14 +1023,25 @@ def fim(
         Relative tolerance deciding which directions the data resolves:
         an eigenvalue at or below ``rank_rtol * max(eigvals)`` counts as
         zero, and the parameters with support in the directions it
-        rejects get an infinite ``crb``.  The default, ``n * eps`` for
-        ``n`` parameters at the matrix's precision, is the relative form
-        ``numpy.linalg.matrix_rank`` uses and the point below which
-        ``eigh`` is reporting its own rounding error; raise it to
-        declare a merely ill-conditioned direction unidentifiable too.
+        rejects get an infinite ``crb``.  The default is
+        ``max(n, sqrt(m)) * eps`` for ``n`` parameters and ``m`` residual
+        rows at the matrix's precision: the point below which this
+        function is reporting its own rounding error, counting both
+        stages that produce it -- ``eigh``'s ``n * eps`` (the relative
+        form ``numpy.linalg.matrix_rank`` uses) and the ``sqrt(m) * eps``
+        of forming ``F = J.T @ J`` over ``m`` rows.  Raise it to declare
+        a merely ill-conditioned direction unidentifiable too.
         ``0.0`` resolves every positive eigenvalue and suppresses the
         precision warning with it: there is no threshold left to sit
         near.
+
+        **Changed in 0.4.0**: the ``sqrt(m)`` term is new.  A cutoff of
+        ``n * eps`` alone sits below the float32 noise floor whenever
+        ``sqrt(m) > n``, and there ``rank`` could count a direction the
+        data does not contain and ``crb`` report a finite bound for it.
+        Verdicts move only for ``m > n**2``, and only ever toward
+        "unresolved"; pass ``rank_rtol=n * eps`` explicitly to keep the
+        old cutoff.
 
     Returns
     -------
@@ -1037,9 +1063,10 @@ def fim(
         (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
         cores).  The design goal is that the cases which need it say so.
 
-        Measured, not assumed: the factor is the edge of the band where
-        float32 and float64 verdicts were observed to diverge over
-        ~500k synthetic Fisher matrices of known rank; see
+        Measured, not assumed: the factor covers the band where float32
+        and float64 verdicts were observed to diverge over 171,000
+        synthetic Fisher matrices of known rank, re-measured against the
+        ``max(n, sqrt(m)) * eps`` cutoff this release introduced; see
         ``_PRECISION_WARN_FACTOR`` for the distribution and for the
         false-firing cost of every wider choice.  It is quiet on
         ordinary problems -- no fire at all above five times the cutoff
@@ -1051,10 +1078,15 @@ def fim(
         caller raised, which is a modelling threshold and not a
         statement about arithmetic.
 
-        It is not exhaustive: about 14% of precision-limited verdicts
-        stay silent, nearly all of them long-residual cases where the
-        error in forming ``J.T @ J`` scales with the number of residual
-        rows and the ``n * eps`` cutoff cannot see it.
+        Over that population it caught every precision-limited verdict,
+        which it did not before 0.4.0: against the old ``n * eps``
+        cutoff the same measurement put its recall at 0.916, and the
+        misses were the long-residual cases where the cutoff sat below
+        the arithmetic's own noise floor.  Those are now inside the
+        cutoff rather than outside the band.  "Every" is still 605
+        measured disagreements and not a proof; the one class it
+        deliberately does not cover is an eigenvalue that came back zero
+        or negative.
 
     Raises
     ------
@@ -1144,7 +1176,8 @@ def fim(
             "Settle it by re-running under x64 -- "
             "jax.config.update('jax_enable_x64', True) before the first "
             "array is made, or JAX_ENABLE_X64=1 -- which moves the "
-            "cutoff to n * 2.22e-16 and computes the ratio to match."
+            "cutoff to max(n, sqrt(m)) * 2.22e-16 and computes the "
+            "ratio to match."
             if dtype == np.float32 else
             "This is already the widest precision JAX offers, so no "
             "re-run settles it: the two numbers being compared are "
@@ -1160,8 +1193,10 @@ def fim(
             f"within the {_PRECISION_WARN_FACTOR:g}x band where the "
             f"float32 and float64 verdicts were measured to disagree. "
             f"eigh returns each eigenvalue with an absolute error of "
-            f"order eps * max(eigvals), and forming F = J^T J in "
-            f"{dtype} costs up to as much again, so a difference this "
+            f"order n * eps * max(eigvals), and forming F = J^T J over "
+            f"{n_residual} residual rows in {dtype} costs about "
+            f"sqrt(m) * eps * max(eigvals) again -- the cutoff is the "
+            f"larger of the two -- so a difference this "
             f"size is rounding and not information: rank, crb and cond "
             f"all follow this one comparison and are provisional "
             f"together. {remedy} This is advisory: nothing about the "

@@ -1,0 +1,46 @@
+{
+  "_readme": [
+    "Tier definitions and the committed error ceilings for the pyright",
+    "gate (docs/developer_guide/typing.md, phase 2).  scripts/",
+    "typing_baseline.py reads this file; CI runs it once per tier.",
+    "",
+    "A measurement is only meaningful in the environment it was taken in:",
+    "'pyright_version' and 'environment' below say which, and the script",
+    "refuses to compare against a ceiling measured with a different",
+    "pyright.  Bump the pin in pyproject.toml's [ci] extra and these",
+    "numbers together, never one alone.",
+    "",
+    "Ceilings are per top-level package so that a regression in one",
+    "cannot be masked by an improvement in another.  Lower one whenever",
+    "the measured count drops; the script prints the slack it sees."
+  ],
+  "pyright_version": "1.1.414",
+  "environment": "pip install -e '.[ci]' on Python 3.11 with jax==0.10.2; no usd-core, pyvista, pygfx, rendercanvas, scikit-image, PyGObject or cupy",
+  "measured": "2026-09-20, branch feat/pep561-phase2",
+  "tiers": {
+    "tier1": {
+      "description": "Annotated to zero: the packages refactors move through.",
+      "max_errors": {
+        "cloud": 0,
+        "compliance": 0,
+        "core": 0,
+        "fmi": 0,
+        "nodes": 0,
+        "serialization": 0,
+        "sysid.py": 0,
+        "testing": 0,
+        "transport_auth.py": 0,
+        "warnings.py": 0
+      }
+    },
+    "tier2": {
+      "description": "Public signatures annotated; bodies ratcheted only. These sit on untyped or optional third-party libraries (matplotlib, pxr, pygfx, pyvista, equinox), so the errors are overwhelmingly attribute access against something with no stubs.",
+      "max_errors": {
+        "api": 61,
+        "surrogates": 58,
+        "usd": 1,
+        "viz": 45
+      }
+    }
+  }
+}

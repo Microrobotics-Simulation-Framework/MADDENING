@@ -323,3 +323,186 @@ def test_ci_invocation_markdown_top_fail_on_errors_reports_the_count(tb, report,
     # The count line is what the CI report step parses.
     import re
     assert re.search(r"^files analysed:.*; errors: (\d+);", out, re.M).group(1) == "4"
+
+
+# ---------------------------------------------------------------------
+# Tier gate (phase 2): typing_tiers.json, per-package ceilings, and the
+# refusal to compare counts measured with a different pyright.
+#
+# Each of these asserts on the *message*, not only on the exit status:
+# exit 1 is returned for "a package is over its ceiling" and exit 2 for
+# four different infrastructure faults, so a test that checked `rc`
+# alone could not tell them apart and would pass for the wrong reason.
+# ---------------------------------------------------------------------
+
+TIERS_DOC = {
+    "pyright_version": "1.1.414",
+    "environment": "a fixture",
+    "tiers": {
+        "clean": {"description": "zero", "max_errors": {"alpha": 0}},
+        "ratchet": {"description": "capped", "max_errors": {"beta": 2}},
+    },
+}
+
+
+@pytest.fixture
+def tiers_file(tmp_path):
+    def write(doc):
+        p = tmp_path / "typing_tiers.json"
+        p.write_text(json.dumps(doc))
+        return p
+    return write
+
+
+def _pkg_report(tb, counts, version="1.1.414"):
+    """A report with *counts* errors in each named top-level package."""
+    root = tb.REPO_ROOT / "src" / "maddening"
+    diags = []
+    for pkg, n in counts.items():
+        f = str(root / pkg / "mod.py") if "." not in pkg else str(root / pkg)
+        diags += [_diag(f, "error", "reportArgumentType") for _ in range(n)]
+    return {"version": version, "generalDiagnostics": diags,
+            "summary": _summary(files=9, errors=sum(counts.values()))}
+
+
+def test_errors_are_counted_per_top_level_package(tb):
+    s = tb.summarise(_pkg_report(tb, {"alpha": 3, "beta": 1}))
+    assert s.errors_by_package == {"alpha": 3, "beta": 1}
+
+
+def test_a_module_directly_in_the_package_is_its_own_entry(tb):
+    s = tb.summarise(_pkg_report(tb, {"sysid.py": 2}))
+    assert s.errors_by_package == {"sysid.py": 2}
+
+
+def test_summarise_can_restrict_to_one_tiers_packages(tb):
+    report = _pkg_report(tb, {"alpha": 3, "beta": 1})
+    assert tb.summarise(report, packages=("beta",)).error_count == 1
+    # files_analyzed still describes the whole run, so the environment
+    # checks keep seeing the truth.
+    assert tb.summarise(report, packages=("beta",)).files_analyzed == 9
+
+
+def test_gate_passes_at_the_ceiling(tb, tiers_file):
+    tier = tb.load_tier("ratchet", tiers_file(TIERS_DOC))
+    ok, verdict = tb.gate(tb.summarise(_pkg_report(tb, {"beta": 2})), tier)
+    assert ok
+    assert any("at the ceiling" in line for line in verdict)
+
+
+def test_gate_fails_and_names_the_package_that_grew(tb, tiers_file):
+    tier = tb.load_tier("ratchet", tiers_file(TIERS_DOC))
+    ok, verdict = tb.gate(tb.summarise(_pkg_report(tb, {"beta": 5})), tier)
+    assert not ok
+    assert any(line.startswith("FAIL  beta:") and "+3" in line
+               for line in verdict), verdict
+
+
+def test_gate_reports_slack_so_a_ratchet_can_be_tightened(tb, tiers_file):
+    tier = tb.load_tier("ratchet", tiers_file(TIERS_DOC))
+    ok, verdict = tb.gate(tb.summarise(_pkg_report(tb, {"beta": 0})), tier)
+    assert ok
+    assert any("lower the ceiling to 0" in line for line in verdict), verdict
+
+
+def test_a_single_new_error_fails_the_zero_tier(tb, tiers_file):
+    tier = tb.load_tier("clean", tiers_file(TIERS_DOC))
+    assert tb.gate(tb.summarise(_pkg_report(tb, {"alpha": 0})), tier)[0]
+    ok, verdict = tb.gate(tb.summarise(_pkg_report(tb, {"alpha": 1})), tier)
+    assert not ok
+    assert any("FAIL  alpha: 1 errors, ceiling 0" in line for line in verdict)
+
+
+def test_a_missing_tier_file_is_an_infrastructure_failure(tb, tmp_path):
+    with pytest.raises(tb.InfrastructureFailure, match="cannot read"):
+        tb.load_tier("clean", tmp_path / "nope.json")
+
+
+def test_an_unknown_tier_name_is_an_infrastructure_failure(tb, tiers_file):
+    with pytest.raises(tb.InfrastructureFailure, match="defines no tier"):
+        tb.load_tier("nosuch", tiers_file(TIERS_DOC))
+
+
+def test_an_empty_ceiling_map_is_refused_rather_than_passing(tb, tiers_file):
+    """A gate over nothing would pass on anything -- fail closed."""
+    doc = {"pyright_version": "1.1.414",
+           "tiers": {"clean": {"max_errors": {}}}}
+    with pytest.raises(tb.InfrastructureFailure, match="no `max_errors`"):
+        tb.load_tier("clean", tiers_file(doc))
+
+
+def test_a_non_count_ceiling_is_refused(tb, tiers_file):
+    doc = {"pyright_version": "1.1.414",
+           "tiers": {"clean": {"max_errors": {"alpha": True}}}}
+    with pytest.raises(tb.InfrastructureFailure, match="not a count"):
+        tb.load_tier("clean", tiers_file(doc))
+
+
+def test_ceilings_from_another_pyright_release_are_refused(tb, tiers_file):
+    """Every release changes diagnostics, so the comparison is void."""
+    tier = tb.load_tier("clean", tiers_file(TIERS_DOC))
+    tb.check_tier_environment(tier, "1.1.414")          # the recorded one
+    with pytest.raises(tb.InfrastructureFailure, match="1.1.999"):
+        tb.check_tier_environment(tier, "1.1.999")
+
+
+def test_a_tier_file_without_a_recorded_version_is_refused(tb, tiers_file):
+    doc = {"tiers": {"clean": {"max_errors": {"alpha": 0}}}}
+    tier = tb.load_tier("clean", tiers_file(doc))
+    with pytest.raises(tb.InfrastructureFailure, match="no `pyright_version`"):
+        tb.check_tier_environment(tier, "1.1.414")
+
+
+def test_main_exits_1_and_says_which_tier_when_a_ceiling_is_exceeded(
+        tb, tmp_path, tiers_file, capsys):
+    run = tmp_path / "run.json"
+    run.write_text(json.dumps(_pkg_report(tb, {"alpha": 4})))
+    rc = tb.main(["--json", str(run), "--tier", "clean",
+                  "--tiers-file", str(tiers_file(TIERS_DOC))])
+    err = capsys.readouterr().err
+    assert rc == tb.EXIT_ERRORS
+    assert "tier clean is over its committed ceiling" in err
+    assert "FAIL  alpha: 4 errors, ceiling 0" in err
+
+
+def test_main_exits_2_not_1_when_the_pyright_release_does_not_match(
+        tb, tmp_path, tiers_file, capsys):
+    """The distinction matters: exit 1 means 'you broke it', exit 2 means
+    'nobody can tell'.  Both would be non-zero to a shell."""
+    run = tmp_path / "run.json"
+    run.write_text(json.dumps(_pkg_report(tb, {"alpha": 0},
+                                          version="1.1.999")))
+    rc = tb.main(["--json", str(run), "--tier", "clean",
+                  "--tiers-file", str(tiers_file(TIERS_DOC))])
+    err = capsys.readouterr().err
+    assert rc == tb.EXIT_INFRASTRUCTURE
+    assert "infrastructure failure" in err
+    assert "1.1.999" in err
+
+
+def test_the_committed_tier_file_is_loadable_and_covers_every_package(tb):
+    """The real typing_tiers.json must name every package under
+    ``src/maddening``, or a package could drift with no ceiling at all."""
+    tier1 = tb.load_tier("tier1")
+    tier2 = tb.load_tier("tier2")
+    covered = set(tier1.packages) | set(tier2.packages)
+    root = tb.REPO_ROOT / "src" / "maddening"
+    on_disk = {
+        p.name for p in root.iterdir()
+        if (p.is_dir() and (p / "__init__.py").exists()
+            and p.name not in ("examples", "__pycache__"))
+        or (p.is_file() and p.suffix == ".py" and p.name != "__init__.py")
+    }
+    assert not on_disk - covered, (
+        f"{sorted(on_disk - covered)} are under src/maddening but in no "
+        "tier, so nothing gates them; add them to typing_tiers.json"
+    )
+    assert not covered - on_disk, (
+        f"{sorted(covered - on_disk)} are in typing_tiers.json but not on "
+        "disk; a ceiling on a package that no longer exists can never fail"
+    )
+
+
+def test_tier1_is_committed_at_zero(tb):
+    """The policy's own claim, as a test: tier 1 is not merely small."""
+    assert set(tb.load_tier("tier1").max_errors.values()) == {0}

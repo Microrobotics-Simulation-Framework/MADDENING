@@ -403,6 +403,25 @@ class TestFlatteningKeepsEveryRecord:
         assert member["parameters"] == []
         assert flat[name] == {k: v for k, v in surface.items() if k != "members"}
 
+    def test_a_member_record_never_overwrites_the_surface_it_shadows(self, guard):
+        """A synthetic snapshot whose class is visited *after* the shadowed
+        surface.  The committed snapshot happens to sort the class first, so
+        on real data the surface survived by luck; this pins the rule."""
+        snapshot = {"format": 1, "surfaces": {
+            "pkg.mod.Thing.hook": {
+                "kind": "function", "module": "pkg.mod",
+                "parameters": [{"name": "self", "kind": "POSITIONAL_OR_KEYWORD"}],
+            },
+            "pkg.mod.Thing": {
+                "kind": "class", "module": "pkg.mod", "parameters": [],
+                "members": {"hook": {"kind": "method", "parameters": []}},
+            },
+        }}
+        flat = guard._flatten(snapshot)
+        assert flat["pkg.mod.Thing.hook"]["kind"] == "function"
+        assert [p["name"] for p in flat["pkg.mod.Thing.hook"]["parameters"]] == ["self"]
+        assert set(flat) == {"pkg.mod.Thing", "pkg.mod.Thing.hook"}
+
     def test_flattening_does_not_depend_on_the_order_of_the_surfaces(self, guard):
         snapshot = json.loads(SNAPSHOT.read_text())
         reversed_snapshot = {

@@ -428,3 +428,54 @@ def test_madd_ano_001_is_recorded_resolved_by_that_floor():
         "MADD-ANO-001 no longer names the affected jaxlib; "
         "_ANO_001_AFFECTED_JAXLIB above is stale"
     )
+
+
+# ---------------------------------------------------------------------------
+# The §3 headline counts reachable defects, not unclosed tickets
+# ---------------------------------------------------------------------------
+def test_the_anomaly_headline_counts_every_reachable_defect():
+    """`partially_resolved` with a live residual risk is still reachable.
+
+    The headline used to read "15 anomalies registered, 6 open", counting
+    only `resolution_status == "open"` — while MADD-ANO-005 falls back to
+    the pre-0.4.0 residual test on a reachable path and MADD-ANO-014's own
+    residual risk says the degraded path "is still the default and still
+    silent".  Eight defects were reachable and the document said six, in
+    the direction that understates.
+
+    The predicate is shared with `_check_unresolved_anomalies_are_open_ended`
+    so the headline and the version-range gate cannot drift apart.
+    """
+    registry = gen.read_registry()
+    reachable = [
+        a["anomaly_id"] for a in registry["anomalies"]
+        if a.get("resolution_status")
+        not in gen._STATUSES_THAT_MAY_CLOSE_A_RANGE
+    ]
+    assert reachable, "no reachable anomalies — the predicate matched nothing"
+
+    rendered = gen.render_known_anomalies(registry)
+    assert f"{len(reachable)} have a defect reachable in this version" in rendered, (
+        f"the §3 headline does not report the {len(reachable)} reachable "
+        f"defects {sorted(reachable)}:\n{rendered.splitlines()[-1]}"
+    )
+
+
+def test_a_partially_resolved_anomaly_is_counted_as_reachable():
+    """The distinction the headline exists to make, pinned directly.
+
+    Without this, flipping the headline back to `== "open"` still passes
+    the test above on any registry that happens to hold no
+    `partially_resolved` entry.
+    """
+    registry = {"anomalies": [
+        {"anomaly_id": "MADD-ANO-001", "resolution_status": "open"},
+        {"anomaly_id": "MADD-ANO-002",
+         "resolution_status": "partially_resolved"},
+        {"anomaly_id": "MADD-ANO-003", "resolution_status": "resolved"},
+        {"anomaly_id": "MADD-ANO-004", "resolution_status": "wont_fix"},
+        {"anomaly_id": "MADD-ANO-005", "resolution_status": "duplicate"},
+    ]}
+    rendered = gen.render_known_anomalies(registry)
+    assert "3 have a defect reachable in this version" in rendered, rendered
+    assert "1 `open`" in rendered and "2 `partially_resolved`" in rendered, rendered

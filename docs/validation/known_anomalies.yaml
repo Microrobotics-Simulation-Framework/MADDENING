@@ -550,20 +550,35 @@ anomalies:
       the end cells being frozen when no boundary data was supplied will find
       them evolving under a zero-flux closure instead.  Four assertions in the
       suite encoded the old behaviour and were updated.
-      Two knock-on effects are recorded rather than fixed here.  The
-      `compute_interface_correction` hook now returns exactly what `update`
-      already produced, so applying it is an identity; it is kept because the
-      coupling system asks every node with interface DOFs for one.  And
-      `compute_boundary_fluxes` still reports the flux across the face between
-      the first two cells rather than the flux at the rod end, which is a
-      separate (smaller) inconsistency of the same kind and is not touched by
-      this change.
+      Two knock-on effects were recorded rather than fixed when the datum was
+      moved.  The `compute_interface_correction` hook now returns exactly what
+      `update` already produced, so applying it is an identity; it is kept
+      because the coupling system asks every node with interface DOFs for one.
+      The second was `compute_boundary_fluxes`, which still reported the flux
+      across the face between the first two cells rather than the flux at the
+      rod end: a separate, smaller inconsistency of the same kind.  **That one
+      is now also fixed, later in the same release.**  The reported flux is
+      reconstructed at the rod end from the Dirichlet datum and the nearest
+      `stencil_order` cell centres, and on `T = exp(x)`, alpha = 1, the
+      reported left flux at n = 10 moves from -1.10563 (10.6% against the true
+      -1.0) to -0.99869 (0.13%), and its refinement order from 1.005 to 2.005
+      over 80 -> 160 and 2.002 over 160 -> 320.  In-tree ladders on the
+      module's steady profile measure 1.999 at both ends for `stencil_order=2`
+      and 3.993 for `stencil_order=4`, so the interface no longer caps a
+      flux-coupled solve below the node's own order.
+      What remains is the *different* statement, and it is not a defect: the
+      reported flux is the physical rod-end flux, not bit-for-bit the
+      conservative scheme's own first-cell face flux (the 1st-order
+      `-alpha (T[0] - T_b) / (dx/2)`).  The two differ by
+      `O(dx**stencil_order)`.  A coupled neighbour needs the physical one.
     verification:
       - "tests/verification/test_mms_order.py::test_heat_second_order_stencil_converges_at_its_declared_spatial_order"
       - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_a_linear_profile_between_the_rod_ends_is_reproduced_exactly"
       - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_the_boundary_cell_is_not_pinned_to_the_supplied_value"
       - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_the_cell_centre_reading_of_the_boundary_data_still_costs_an_order"
       - "tests/verification/test_heat_analytical.py::test_heat_spatial_convergence"
+      - "tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd::test_the_reported_value_is_the_rod_end_flux_and_not_the_first_face"
+      - "tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd::test_the_flux_converges_at_the_default_stencils_order"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-008"
@@ -750,12 +765,21 @@ anomalies:
       The refusal is on every surface that shares the codec:
       GraphManager.to_dict, the USD JSON attributes written by
       save_graph_to_usd, and the FMI JSON wire helpers send_message and
-      encode_binary.  On the wire the protocol has no free-text field --
-      op, dtype, vr, values, t, dt and the base64 state are all
-      constrained -- so no request or reply FmuTcpBridge itself builds
-      can reach it; a third-party client that puts its own strings in a
-      binary header can, and a property test drawing arbitrary headers
-      does.
+      encode_binary.  Since 0.4.0 it is also on GraphManager.add_node, so
+      for node names the check is on the constructor rather than on each
+      writer: the three surfaces used to disagree, and a .usda naming a
+      node "NaN" round-tripped into a graph that to_dict would not write.
+      On the wire one reply the bridge itself builds does carry free text:
+      the hello reply echoes the FMU's model_name.  Until 0.4.0 an FMU
+      named exactly "NaN", "Infinity" or "-Infinity" therefore made every
+      connection's first reply unencodable, and the ValueError ended the
+      connection's worker thread.  build_model_description now refuses
+      such a model_name, and _serve_conn_inner answers *any* unencodable
+      reply with a plain-ASCII error reply rather than losing the
+      connection, so the protocol keeps its promise to answer every
+      request.  A third-party client that puts its own strings in a binary
+      header can still reach the refusal on the request side, and a
+      property test drawing arbitrary headers does.
 
       The alternative encoding, a tagged object such as
       {"__nonfinite__": "Infinity"}, does not remove the ambiguity.  A
@@ -770,8 +794,13 @@ anomalies:
     safety_relevance_rationale: >
       The refusal is a fail-stop at write time that names the path to
       the offending value, so no wrong number reaches a document and
-      nothing is lost silently; what it carries is an availability risk,
-      not a correctness one.  It is context-dependent because the write
+      nothing is lost silently.  On the FMI wire that holds only because
+      the bridge turns an unencodable reply into an error reply naming
+      the path (0.4.0): the refusal itself unwinds inside a daemon thread
+      whose caller is a C wrapper on the far end of a socket, so a bare
+      fail-stop there would be an EOF and a traceback on the bridge's
+      stderr, not a message to anyone who can act.  What the refusal
+      carries is an availability risk, not a correctness one.  It is context-dependent because the write
       it can stop is the one a diverged run most wants to make: a
       product that serialises a graph on a fault path, and whose node
       names or string parameters come from field or operator data rather
@@ -783,16 +812,22 @@ anomalies:
     affected_components:
       - "maddening.serialization.json_codec.encode_non_finite"
       - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.core.graph_manager.GraphManager.add_node"
       - "maddening.usd.serialization.save_graph_to_usd"
       - "maddening.fmi.tcp_bridge.encode_binary"
+      - "maddening.fmi.model_description.build_model_description"
     affected_versions: ">=0.4.0"
     workaround: >
       Spell the value differently.  The refusal names the path, and
       every other spelling -- "nan", "inf", "+Infinity", "NaN " -- is
       stored and read back as the string it is, because both the
       refusal and the decode are exact matches.  A node name is under
-      the same rule.  A client that needs to put arbitrary text on the
-      FMI wire should send it base64-encoded, as set_state already does.
+      the same rule, but from 0.4.0 it no longer needs this advice: the
+      name is refused by add_node, where it is set, so the failure lands
+      on data entry rather than on the save.  The same is true of an FMU
+      model_name, which build_model_description refuses.  A client that
+      needs to put arbitrary text on the FMI wire should send it
+      base64-encoded, as set_state already does.
     resolution_status: "open"
     residual_risk: >
       Reading carries the mirror of the same ambiguity with no refusal
@@ -807,6 +842,12 @@ anomalies:
       - "tests/core/test_non_finite_json_tokens.py::test_a_string_that_collides_with_a_token_is_refused_at_write_time"
       - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused"
       - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_that_only_looks_like_a_token_stays_a_string"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_a_model_name_spelling_a_non_finite_token_is_refused_at_build_time"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_a_reply_that_cannot_be_encoded_is_an_error_reply_not_a_dead_worker"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_the_importer_is_told_which_string_broke_the_hello"
+      - "tests/core/test_non_finite_json_tokens.py::test_a_node_name_spelling_a_token_is_refused_where_names_are_accepted"
+      - "tests/usd/test_usd_params.py::test_a_stage_carrying_a_token_spelled_node_name_is_refused_on_load"
+      - "tests/core/test_non_finite_json_tokens.py::test_encoding_twice_is_refused_rather_than_being_idempotent"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-015"
@@ -1034,7 +1075,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-013"
-    title: "HeartPumpNode downcasts its backpressure boundary input to float32"
+    title: "Several nodes pin a float64 quantity to float32: HeartPumpNode's backpressure, and the rigid-body and HeatNode parameter and initial_state casts"
     description: >
       `HeartPumpNode.update` and `HeartPumpNode.derivatives` both run
       `P_downstream = jnp.asarray(P_downstream, dtype=jnp.float32)` on the
@@ -1061,6 +1102,36 @@ anomalies:
       returns, becomes float32.  The returned state is then a different type
       from the one passed in, and `jax.lax.scan`/`fori_loop` rejects the carry
       with a type-mismatch error that names neither this node nor the cast.
+      Widened at 0.4.0 from the HeartPump backpressure to the same cast on
+      *parameters* and on `initial_state`, which the 0.4.0 numerics audit
+      found in three more nodes.  `RigidBodyNode.update` and `.derivatives`
+      run `jnp.asarray(p["inertia"], dtype=jnp.float32)` and the same on
+      `p["gravity"]`; `RigidBody2DNode.update` does it to `p["gravity"]`;
+      `HeatNode.__init__` builds `grid_x` as float32 and `HeatNode.initial_state`
+      casts `T0`.  Both rigid-body nodes also build every `initial_state`
+      field as float32.
+      Measured at the merged tree under `jax_enable_x64`, driving each node
+      from a float64 state.  `RigidBodyNode` at `inertia=1.0` and at
+      `inertia=1.0 + 1e-8` returns a **bit-identical** angular velocity, so a
+      parameter perturbation five orders below a float32 ulp is discarded
+      exactly as the backpressure one is.  The resulting relative error is the
+      float32 representation error of the parameter and nothing more: 2.98e-08
+      for a 1/3 inertia, 3.67e-08 for 1.3, and 6.71e-08 on the gravity path
+      measured through the node's own velocity.  It is **independent of the
+      step count** -- the same 2.98e-08 at N = 1, 10, 100 and 1000 -- so it is
+      a floor under the achievable accuracy rather than an accumulating drift,
+      and reverse-mode gradients still flow through it (d(loss)/d(inertia) is
+      finite and non-zero), so it is a precision floor and not a dead gradient.
+      At the framework's float32 default every one of these casts is a no-op.
+      One instance of the same pattern is **resolved**: `BallNode.derivatives`
+      pinned `g` to float32 while `update` read `p["gravity"]` raw, so the node
+      disagreed with itself by 4.196e-07 in the acceleration under
+      `jax_enable_x64`.  `g` now follows the dtype of the velocity it is added
+      to.  A knock-on of the HeatNode `grid_x` cast, recorded because it shaped
+      another fix: a coordinate rounded to float32 puts ~2e-5 relative error on
+      `dx`, which would have floored the new rod-end flux reconstruction from
+      n = 40 up, so `compute_boundary_fluxes` reads `params["grid_points"]`
+      instead.  That is a workaround at one call site and does not fix the cast.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -1079,17 +1150,30 @@ anomalies:
     affected_components:
       - "maddening.nodes.heart_pump.HeartPumpNode.update"
       - "maddening.nodes.heart_pump.HeartPumpNode.derivatives"
+      - "maddening.nodes.rigid_body.RigidBodyNode.update"
+      - "maddening.nodes.rigid_body.RigidBodyNode.derivatives"
+      - "maddening.nodes.rigid_body.RigidBodyNode.initial_state"
+      - "maddening.nodes.rigid_body_2d.RigidBody2DNode.update"
+      - "maddening.nodes.rigid_body_2d.RigidBody2DNode.initial_state"
+      - "maddening.nodes.heat.HeatNode.initial_state"
     affected_versions: ">=0.1.0"
     workaround: >
-      Run this node at the framework default of float32, where the cast is a
-      no-op, or keep any float64 study above about 1e-5 relative error.  Pass
-      the pressure state as a *strongly* typed array
+      Run these nodes at the framework default of float32, where every one of
+      the casts is a no-op, or keep any float64 study above about 1e-5
+      relative error -- and, for the parameter casts, above the ~3e-8 to
+      ~7e-8 floor the float32 representation of the parameter itself puts
+      there.  Pass the pressure state as a *strongly* typed array
       (`jnp.asarray(p, dtype=jnp.float64)`) to avoid the dtype demotion inside
-      a scanned loop.
+      a scanned loop.  For a calibration or sysid run against `inertia` or
+      `gravity`, do not expect a step below the float32 resolution of the
+      parameter to move the answer: the gradient is finite but the forward
+      difference is exactly zero there.
     resolution_status: "open"
     verification:
       - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_resolves_a_backpressure_difference_below_float32"
       - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given"
+      - "tests/verification/test_mms_order_ode_nodes.py::TestBallNodeAgreesWithItselfAboutGravity::test_the_two_entry_points_return_the_same_acceleration"
+      - "tests/verification/test_mms_order_ode_nodes.py::TestBallNodeAgreesWithItselfAboutGravity::test_the_acceleration_follows_the_dtype_of_the_velocity"
     github_issue: null
   - anomaly_id: "MADD-ANO-014"
     title: "Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order"

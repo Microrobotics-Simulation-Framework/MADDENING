@@ -328,15 +328,41 @@ def render_known_anomalies(registry: dict) -> str:
         rows,
     )
     n = len(rows)
+    # Two counts, because they answer different questions and the
+    # headline used to give only the first.  ``open`` is a lifecycle
+    # state: how many entries nobody has closed.  What a reader of a
+    # SOUP document needs is how many known defects can reach them in
+    # the version they are running, and ``partially_resolved`` entries
+    # are in that set -- MADD-ANO-005's estimate still falls back to the
+    # pre-0.4.0 residual test on a reachable path, and MADD-ANO-014's
+    # own residual risk says "the degraded path is still the default and
+    # still silent".  Counting only ``open`` reported 6 where 8 defects
+    # were reachable, and it under-reported, which is the dangerous
+    # direction.
+    #
+    # "Reachable" is deliberately the *same* predicate as
+    # ``_check_unresolved_anomalies_are_open_ended``'s: an entry may
+    # close its ``affected_versions`` range exactly when the defect is
+    # gone.  Deriving both from ``_STATUSES_THAT_MAY_CLOSE_A_RANGE``
+    # means the headline and the range gate cannot come to disagree, and
+    # an unrecognised status counts as reachable rather than being
+    # quietly dropped from the total.
     n_open = sum(
         1 for a in registry.get("anomalies", [])
         if a.get("resolution_status") == "open"
     )
+    n_reachable = sum(
+        1 for a in registry.get("anomalies", [])
+        if a.get("resolution_status") not in _STATUSES_THAT_MAY_CLOSE_A_RANGE
+    )
     return (
         f"{table}\n\n"
-        f"*{n} anomalies registered, {n_open} open.  Rationale, workaround, "
-        f"affected components and verification evidence for each: "
-        f"`known_anomalies.yaml`.*"
+        f"*{n} anomalies registered.  {n_reachable} have a defect reachable "
+        f"in this version — every entry whose `resolution_status` is not "
+        f"`resolved` or `duplicate`, which is {n_open} `open` plus "
+        f"{n_reachable - n_open} `partially_resolved` whose residual risk is "
+        f"still live.  Rationale, workaround, affected components and "
+        f"verification evidence for each: `known_anomalies.yaml`.*"
     )
 
 

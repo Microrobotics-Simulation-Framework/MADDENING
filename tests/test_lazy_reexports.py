@@ -189,6 +189,29 @@ def test_every_exported_name_also_resolves_at_runtime(rel: str) -> None:
     )
 
 
+def test_the_lazy_table_reader_reads_the_table_and_not_dunder_all() -> None:
+    """The check above is only as good as this helper.
+
+    A helper that quietly returned ``__all__`` would make every package
+    look consistent -- the failure mode mutation testing cannot reach
+    from outside, because it is in the test's own machinery.
+    ``maddening.viz`` is the one package where the two sets differ in
+    both directions: four names are imported eagerly and are in
+    ``__all__`` but not in the table, and three USD helpers are in the
+    table but not in ``__all__``.  Asserting the exact set therefore
+    pins that the reader read the dict.
+    """
+    tree = _module("viz/__init__.py")
+    assert _lazy_table_keys(tree) == {
+        "HistoryViewer3D", "GPUHistoryViewer", "PyVistaLiveRenderer",
+        "viewer_from_usd", "viewer_from_usd_with_geometry",
+        "render_usd_frame",
+    }
+    assert "Renderer" in _dunder_all(tree)          # eager, not in the table
+    assert "Renderer" not in _lazy_table_keys(tree)
+    assert "render_usd_frame" not in _dunder_all(tree)  # table, not exported
+
+
 @pytest.mark.parametrize("rel", LAZY_PACKAGES)
 def test_the_lazy_table_is_found_where_each_package_spells_it(rel: str) -> None:
     """The check above passes vacuously if the table cannot be located.

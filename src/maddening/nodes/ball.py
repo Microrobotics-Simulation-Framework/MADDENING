@@ -8,7 +8,12 @@ JAX-traceable and JIT-compilable.
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -42,6 +47,24 @@ class BallNode(SimulationNode):
         description="Point-mass ball under gravity with optional surface collision",
         governing_equations="dv/dt = g; dx/dt = v; collision: v -> -e*v at x = table_pos",
         discretization="Forward Euler (explicit, 1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "1st order globally in position and velocity, measured by "
+                "MADD-VER-010.  No spatial order -- the node integrates an "
+                "ODE.  The order holds, but the scheme ``update()`` "
+                "implements is semi-implicit (symplectic) Euler, not the "
+                "forward Euler ``discretization`` above names: the position "
+                "update uses the already-updated velocity, so it disagrees "
+                "with a forward-Euler step built from this node's own "
+                "``derivatives()`` at O(dt).  See MADD-ANO-010.  Both "
+                "schemes are 1st order, which is why the declared order is "
+                "unaffected.  The order claim also covers the smooth "
+                "(collision-free) regime only: a ``table_position`` contact "
+                "is a non-smooth event and no order is claimed across it."
+            ),
+        ),
         assumptions=(
             "Point mass (no rotational dynamics)",
             "Perfectly rigid collision surface",

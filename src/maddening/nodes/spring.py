@@ -12,7 +12,12 @@ JAX-traceable and JIT-compilable.
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -59,6 +64,20 @@ class SpringDamperNode(SimulationNode):
         description="Linear spring-damper connecting two attachment points",
         governing_equations="F = -k*(x - anchor - rest) - c*v; a = F/m",
         discretization="Semi-implicit Euler (1st-order, better energy conservation than forward Euler)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "Semi-implicit (symplectic) Euler -- the velocity is "
+                "advanced first and the position uses the already-updated "
+                "velocity -- so the scheme is 1st order globally in both "
+                "state fields.  Unlike a body under a state-independent "
+                "force, the position does not gain an order here: the "
+                "spring force depends on the position itself, so the "
+                "leading error term does not cancel.  No spatial order -- "
+                "the node integrates an ODE.  Measured by MADD-VER-009."
+            ),
+        ),
         assumptions=(
             "Linear spring (Hooke's law)",
             "Viscous damping (linear in velocity)",

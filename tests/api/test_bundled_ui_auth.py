@@ -80,7 +80,8 @@ def test_the_helper_scrubs_the_token_out_of_the_url():
     """A token left in the address bar reaches history and Referer."""
     js = (STATIC / "auth.js").read_text()
     assert "history.replaceState" in js
-    assert 'params.delete("token")' in js
+    assert 'hash.delete("token")' in js
+    assert 'query.delete("token")' in js
     # sessionStorage only: localStorage would leave the credential behind
     # for the next person to open this browser profile.
     assert "localStorage.setItem" not in js
@@ -146,10 +147,8 @@ def test_the_helper_builds_the_subprotocols_the_server_decodes(tmp_path):
         assert offered[0] == encode_ws_bearer(token)
 
 
-@needs_node
-def test_the_helper_takes_the_token_from_the_query_string(tmp_path):
-    """The delivery channel: open ``/viz/app?token=<token>`` once."""
-    harness = tmp_path / "query.mjs"
+def _url_harness(tmp_path, name, search, hash_):
+    harness = tmp_path / name
     harness.write_text(
         "import fs from 'node:fs';\n"
         "const store = {};\n"
@@ -157,7 +156,8 @@ def test_the_helper_takes_the_token_from_the_query_string(tmp_path):
         "globalThis.window = globalThis;\n"
         "globalThis.location = {\n"
         "  origin: 'http://h', pathname: '/viz/app',\n"
-        "  search: '?token=sekret&fps=30', hash: '', href: 'http://h/viz/app',\n"
+        f"  search: {json.dumps(search)}, hash: {json.dumps(hash_)},\n"
+        "  href: 'http://h/viz/app',\n"
         "};\n"
         "globalThis.history = { replaceState: (a, b, url) => { replaced = url; } };\n"
         "globalThis.sessionStorage = {\n"
@@ -170,18 +170,47 @@ def test_the_helper_takes_the_token_from_the_query_string(tmp_path):
         "process.stdout.write(JSON.stringify({\n"
         "  token: window.maddeningAuth.token(),\n"
         "  replaced, stored: store['maddening.api.token'],\n"
+        "  shareable: window.maddeningAuth.shareableUrl(),\n"
         "}));\n"
     )
     result = subprocess.run(
         [NODE, str(harness)], capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    got = json.loads(result.stdout)
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_the_helper_takes_the_token_from_a_url_fragment(tmp_path):
+    """The preferred channel: a fragment is never sent to the server.
+
+    ``/viz/app#token=<token>`` therefore reaches no access log, unlike
+    the query-string form below.  It is what the server prints.
+    """
+    got = _url_harness(tmp_path, "hash.mjs", "?fps=30", "#token=sekret&t=2")
     assert got["token"] == "sekret"
     assert got["stored"] == "sekret"
-    # Scrubbed from the URL, and the page's other parameters survive.
+    assert "token" not in got["replaced"]
+    # The page's own parameters, in both parts, survive the scrub.
+    assert "fps=30" in got["replaced"] and "t=2" in got["replaced"]
+    # A URL handed to someone else uses the fragment form too.
+    assert got["shareable"].endswith("#token=sekret")
+
+
+@needs_node
+def test_the_helper_still_takes_a_query_string_token(tmp_path):
+    """Accepted because a query string survives tools that drop fragments."""
+    got = _url_harness(tmp_path, "query.mjs", "?token=sekret&fps=30", "")
+    assert got["token"] == "sekret"
+    assert got["stored"] == "sekret"
     assert "token" not in got["replaced"]
     assert "fps=30" in got["replaced"]
+
+
+@needs_node
+def test_a_fragment_token_wins_over_a_query_token(tmp_path):
+    got = _url_harness(tmp_path, "both.mjs", "?token=fromquery", "#token=fromhash")
+    assert got["token"] == "fromhash"
 
 
 @needs_node

@@ -6,13 +6,21 @@
  * server needs no token at all and this file then does nothing visible.
  *
  * Where the token comes from, in order:
- *   1. ?token=... on this page's URL, which is immediately removed from
- *      the address bar with history.replaceState so it does not sit in
- *      the browser history, get copied out of the URL bar, or leak
- *      through a Referer header to anything the page later loads.
- *   2. sessionStorage, so a reload keeps working.  Per-tab and cleared
+ *   1. #token=... on this page's URL.  A fragment is never sent to the
+ *      server, so this delivery channel reaches no access log at all.
+ *      It is the form the server prints at start-up.
+ *   2. ?token=... on this page's URL, accepted because a query string
+ *      survives being pasted through tools that drop fragments -- but a
+ *      query string DOES reach the server's access log, so prefer (1).
+ *      (No authenticated route accepts ?token=; this is the page URL,
+ *      which is served without a credential in the first place.)
+ *      Either form is removed from the address bar immediately with
+ *      history.replaceState, so it does not sit in the browser history,
+ *      get copied out of the URL bar, or leak through a Referer header
+ *      to anything the page later loads.
+ *   3. sessionStorage, so a reload keeps working.  Per-tab and cleared
  *      when the tab closes; localStorage would outlive the session.
- *   3. a prompt, shown the first time a request comes back 401.
+ *   4. a prompt, shown the first time a request comes back 401.
  *
  * How it is presented:
  *   - fetch(): window.fetch is wrapped so every same-origin request
@@ -51,25 +59,28 @@
     }
   }
 
-  /* 1. ?token=... , then scrub it out of the URL. */
+  /* 1 and 2. #token=... or ?token=... , then scrub both out of the URL. */
   try {
-    var params = new URLSearchParams(window.location.search);
-    var fromUrl = params.get("token");
+    var hash = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+    var query = new URLSearchParams(window.location.search || "");
+    var fromUrl = hash.get("token") || query.get("token");
     if (fromUrl) {
       token = fromUrl;
       store(token);
-      params.delete("token");
-      var query = params.toString();
+      hash.delete("token");
+      query.delete("token");
+      var q = query.toString();
+      var h = hash.toString();
       window.history.replaceState(
         null, "",
-        window.location.pathname + (query ? "?" + query : "") + window.location.hash
+        window.location.pathname + (q ? "?" + q : "") + (h ? "#" + h : "")
       );
     }
   } catch (err) {
     /* no URLSearchParams / no history: fall through to storage */
   }
 
-  /* 2. whatever a previous load put in sessionStorage. */
+  /* 3. whatever a previous load put in sessionStorage. */
   if (!token) {
     token = readStored();
   }
@@ -95,7 +106,7 @@
     }
   }
 
-  /* 3. ask, once, and only once even if twenty requests 401 at once. */
+  /* 4. ask, once, and only once even if twenty requests 401 at once. */
   function askForToken() {
     if (prompting) {
       return prompting;
@@ -106,7 +117,8 @@
         "It was printed in the server log at start-up, or is the value " +
         "of MADDENING_API_TOKEN.\n\n" +
         "You can also open this page as  " + window.location.pathname +
-        "?token=<token>  to skip this prompt.",
+        "#token=<token>  to skip this prompt. A fragment is never sent " +
+        "to the server, so it reaches no access log.",
         ""
       );
       if (answer && answer.trim()) {
@@ -173,10 +185,11 @@
     token: function () { return token; },
     protocols: protocols,
     prompt: askForToken,
-    /* Append ?token= to a URL a user is meant to copy elsewhere. */
+    /* Append #token= to a URL a user is meant to copy elsewhere.  The
+       fragment form, so the credential never reaches the server's log. */
     shareableUrl: function (path) {
       var base = window.location.origin + (path || window.location.pathname);
-      return token ? base + "?token=" + encodeURIComponent(token) : base;
+      return token ? base + "#token=" + encodeURIComponent(token) : base;
     }
   };
 })();

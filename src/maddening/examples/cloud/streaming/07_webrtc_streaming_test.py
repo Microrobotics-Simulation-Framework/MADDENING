@@ -465,7 +465,7 @@ def main():
     print(f"  and enter the signaling URL:")
     print(f"\n    Signaling: {signaling_url or 'unknown'}")
     print(f"\n  Or use the server-rendered viewer (JPEG over WS):")
-    print(f"    {base_url}/viz/render?token={API_TOKEN}")
+    print(f"    {base_url}/viz/render#token={API_TOKEN}")
     print(f"\n  REST API:")
     print(f"    {base_url}/graph")
     print(f"    {base_url}/graph/state")

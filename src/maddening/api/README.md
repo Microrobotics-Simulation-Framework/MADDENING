@@ -57,12 +57,17 @@ server was told the bind is loopback.  That backstop is why forgetting
 
 ### Presenting it
 
+The token is a bearer credential with no binding to a request, a time or a
+client, and there is no TLS, so every carrier below is only as private as
+the path between the client and the port.  What each one buys is where the
+token does *not* end up.
+
 | Client | Carrier |
 | --- | --- |
 | HTTP | `Authorization: Bearer <token>`. No authenticated route accepts `?token=`, so a credential never reaches an access log through this API. |
 | WebSocket, non-browser | `Authorization: Bearer <token>` on the handshake. |
 | WebSocket, browser | Subprotocols `["maddening.bearer.<base64url(token)>", "maddening.v1"]`; the server selects `maddening.v1`. Browsers cannot set a header on a handshake. |
-| Bundled UI | Open `/viz/app?token=<token>`. The page removes the token from the URL immediately and keeps it in `sessionStorage`; without one it prompts on the first 401. |
+| Bundled UI | Open `/viz/app#token=<token>` — a **fragment**, which the browser never sends, so the token reaches no access log. The page removes it from the address bar immediately and keeps it in `sessionStorage`. `?token=` also works and is sometimes easier to paste, but a query string *does* reach the log. Without either, the page prompts on the first 401. |
 
 `/docs`, `/redoc` and `/openapi.json` are **not served** when the token is
 enforced: Swagger UI fetches its own schema with no `Authorization`
@@ -97,7 +102,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/healthz` | Liveness probe: `{status, version}`. Never authenticated — a container probe holds no credential, and the answer says nothing about the graph |
-| GET | `/viz/app`, `/viz/graph`, `/viz/render` | The bundled UIs. Never authenticated: they hold no secret, and a page that could not load could not ask for the token. Open `?token=<token>` to hand one to the page |
+| GET | `/viz/app`, `/viz/graph`, `/viz/render` | The bundled UIs. Never authenticated: they hold no secret, and a page that could not load could not ask for the token. Open `#token=<token>` to hand one to the page |
 | GET | `/viz/auth.js` | The pages' token helper |
 
 ### Graph Structure

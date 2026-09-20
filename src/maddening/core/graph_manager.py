@@ -2925,6 +2925,29 @@ class GraphManager:
                 f"Node name {node.name!r} is invalid: must be non-empty and must "
                 f"not contain {bad or ['/', '#', '->']}"
             )
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            NON_FINITE_TOKENS,
+        )
+        if node.name in NON_FINITE_TOKENS:
+            # MADD-ANO-010: the JSON surfaces refuse a string that spells a
+            # non-finite token, and a node name is a JSON *value* in
+            # ``to_dict`` (``nodes[i]["name"]``) and in any mapping point
+            # reference.  It reached the stage untouched, though, because
+            # ``save_graph_to_usd`` writes it to a typed USD String
+            # attribute that never sees the codec -- so a ``.usda`` could
+            # round-trip to a graph that could not be written as a config,
+            # and the same graph was refused or accepted depending on which
+            # surface it met.  Refused here instead, at the point of entry,
+            # which is what the anomaly's own workaround recommends
+            # ("validate names ... where they are accepted, not where they
+            # are saved") and what makes the three surfaces agree.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: it spells a non-finite "
+                f"JSON token, which the serialisers reserve (MADD-ANO-010), so "
+                f"a graph holding it could not be written as a config or "
+                f"referenced from an interface mapping.  A different spelling "
+                f"({node.name.lower()!r}, say) is fine."
+            )
 
         spec = _NodeSpec(
             node=node,
@@ -5710,6 +5733,18 @@ class GraphManager:
         numbers (the USD writer sets typed stage attributes from
         :meth:`CouplingGroup.to_dict`).  See
         :mod:`maddening.serialization.json_codec`.
+
+        Because the result is *already encoded*, write it with
+        ``json.dumps`` or
+        :func:`~maddening.serialization.json_codec.dumps_encoded`, and
+        **not** with :func:`~maddening.serialization.json_codec.dumps`:
+        that one encodes what it is given, the encoding is not
+        idempotent, and the second walk refuses the tokens the first one
+        wrote (``$.param_specs.<node>.<key>.bounds[0]: the string
+        '-Infinity' cannot be written to JSON``, from any graph with an
+        unbounded :class:`~maddening.core.params.ParamSpec`).  Read it
+        back with :func:`~maddening.serialization.json_codec.loads`,
+        which *is* composable.
         """
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             encode_non_finite,

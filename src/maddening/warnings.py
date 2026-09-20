@@ -70,6 +70,32 @@ class DtypeMismatchError(EdgeValidationError):
 # ShapeMismatchError / DtypeMismatchError above.
 
 
+class PrecisionLimitWarning(UserWarning):
+    """A result was decided by a difference smaller than its dtype can
+    resolve, so re-running it at a different precision may answer
+    differently.
+
+    Not an error and not a sign of a bug: it says the *verdict* rests on
+    rounding, not that the computation went wrong.  Raised by
+    :func:`maddening.sysid.fim` when the eigenvalue ratio deciding
+    ``rank`` lands within a measured factor of the epsilon-scaled
+    cutoff.  The remedy is named in the message and is mechanical --
+    re-run under ``jax_enable_x64`` -- so the warning is filterable by
+    category once a user has decided the answer does not matter to
+    them::
+
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+
+    Advisory forever.  MADDENING does not silently promote a
+    computation to float64: ``jax_enable_x64`` is process-global and set
+    before the first JAX import, so it changes every library in the
+    process, and fp64 measures 91x slower than fp32 on the reference
+    RTX A2000 (155 vs 14,135 GFLOP/s).  Making the precision-limited
+    cases self-identifying costs nothing; making everything float64
+    costs that.
+    """
+
+
 class UnitMismatchWarning(UserWarning):
     """Edge declares units that don't match the target node's
     :attr:`BoundaryInputSpec.expected_units`.

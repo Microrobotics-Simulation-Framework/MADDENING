@@ -15,6 +15,8 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
+import shlex
 import struct
 import sys
 import time
@@ -36,6 +38,14 @@ INSTALL_CMD = (
     " && [ -d ~/sky_workdir/src ] && pip install -q --root-user-action=ignore -e ~/sky_workdir"
     " ; echo INSTALL_DONE"
 )
+
+
+# The VM's API binds 0.0.0.0, which is not loopback, so it requires a
+# bearer token on every route.  This script chooses the token, passes it
+# to the remote process in MADDENING_API_TOKEN, and presents it on every
+# request -- there is no TLS, so treat the endpoint as a demo on a
+# throwaway VM rather than a deployment pattern.
+API_TOKEN = secrets.token_urlsafe(32)
 
 SERVER_SCRIPT = r"""
 import jax, warnings
@@ -60,6 +70,9 @@ with warnings.catch_warnings():
 server = SimulationServer(
     node_registry={"BallNode": BallNode, "TableNode": TableNode, "SpringDamperNode": SpringDamperNode},
     graph_manager=gm,
+    # The bind address has to be handed to the server: it turns on the
+    # bearer token, and the app cannot see the socket uvicorn opens.
+    bind_host="0.0.0.0",
 )
 
 # Start the runner so the simulation ticks continuously
@@ -73,6 +86,17 @@ runner.start()
 print("Server + runner started on :8000")
 uvicorn.run(server.create_app(), host="0.0.0.0", port=8000, log_level="warning")
 """
+
+
+def _ws_auth() -> dict:
+    """Handshake kwargs carrying the bearer token.
+
+    A non-browser client can set the header, which is the carrier to
+    prefer: unlike a query parameter it does not reach an access log.
+    Browsers, which cannot set one, use the ``maddening.bearer.*``
+    subprotocol instead -- see ``maddening.api.auth``.
+    """
+    return {"additional_headers": {"Authorization": f"Bearer {API_TOKEN}"}}
 
 
 async def test_websocket_binary(ws_url: str, n_frames: int = 10) -> dict:
@@ -94,7 +118,7 @@ async def test_websocket_binary(ws_url: str, n_frames: int = 10) -> dict:
         "sim_times": [],
     }
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, **_ws_auth()) as ws:
         # First message should be JSON schema
         schema_msg = await asyncio.wait_for(ws.recv(), timeout=10)
         if isinstance(schema_msg, str):
@@ -129,7 +153,7 @@ async def test_websocket_json(ws_url: str, n_frames: int = 5) -> dict:
 
     results = {"frames_received": 0, "last_state": None}
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, **_ws_auth()) as ws:
         for i in range(n_frames):
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -169,6 +193,10 @@ def main():
         ),
         run="echo 'VM ready'; sleep 7200",
         workdir=project_root,
+        # JobConfig.ports is empty by default so a launch does not open
+        # the API in the provider's firewall.  This demo needs the public
+        # NAT mapping, so it asks for it explicitly.
+        ports=[8000],
     )
 
     launcher = CloudLauncher()
@@ -199,9 +227,10 @@ def main():
     print(f"  {(result.stdout or '').strip()}")
 
     print("Starting server with continuous runner...")
-    import shlex
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/maddening_server.py", check=True)
-    job.ssh_run_background("python3.12 /tmp/maddening_server.py")
+    job.ssh_run_background(
+        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} python3.12 /tmp/maddening_server.py"
+    )
 
     # --- Wait for server ---
     print("\nDiscovering endpoint...")
@@ -229,7 +258,10 @@ def main():
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:
-            req = urllib.request.Request(f"{base_url}/graph", method="GET")
+            req = urllib.request.Request(
+                f"{base_url}/graph", method="GET",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+            )
             with urllib.request.urlopen(req, timeout=5):
                 break
         except Exception:
@@ -244,7 +276,10 @@ def main():
     # Start the simulation running
     print("\nStarting continuous simulation...")
     urllib.request.urlopen(
-        urllib.request.Request(f"{base_url}/sim/start", method="POST"), timeout=10,
+        urllib.request.Request(
+            f"{base_url}/sim/start", method="POST",
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+        ), timeout=10,
     )
     time.sleep(1)  # Let a few steps accumulate
 
@@ -288,7 +323,10 @@ def main():
     print("\nStopping simulation...")
     try:
         urllib.request.urlopen(
-            urllib.request.Request(f"{base_url}/sim/stop", method="POST"), timeout=10,
+            urllib.request.Request(
+                f"{base_url}/sim/stop", method="POST",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+            ), timeout=10,
         )
     except Exception:
         pass

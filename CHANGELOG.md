@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **GCI / Richardson mode in `maddening.testing.mms`** for nodes MMS cannot
   reach: `assert_node_gci_verified(node, solution_at=..., levels=...)` needs
   no source term and no reference — three refinements give an error band
+- **`fim` says when `rank` was decided at the float32 noise floor**: a
+  `PrecisionLimitWarning` naming the eigenvalue ratio, the cutoff and the
+  `jax_enable_x64` re-run that settles it.  Quiet on well-conditioned problems
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships
@@ -133,6 +136,9 @@ guidance; the itemized changes follow.
 - **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
   `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
   of the four conditions the estimate rests on, not that it is a bound
+- **`FitResult` is keyword-only**, the guard `FIMReport` got this release:
+  no field has been inserted into it yet, and inserting one would silently
+  swap `converged` and `n_iter` for any positional caller
 - **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
   between `unit` and `shape`, so a positional call silently bound the wrong
   fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`
@@ -406,6 +412,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **The API requires a bearer token unless it is bound to loopback** (CRITICAL):
+  set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
+  no longer defaults to `[8000]`, so a cloud launch stops opening the API port
 - **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
   bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
   stage no longer imports the class it names — pass `node_registry=` to allow one

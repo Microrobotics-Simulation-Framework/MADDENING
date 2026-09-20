@@ -1,0 +1,28 @@
+{
+  "_why": [
+    "The committed floor for scripts/check_impl_mapping.py's MIN_MAPPINGS.",
+    "MIN_MAPPINGS is the only protection the Implementation Mapping tables",
+    "have, and it lives in the same file an author editing a guide is",
+    "already editing: lowering a pin and deleting the rows left the gate",
+    "green and all of TestImplementationMappingGate green with it. The",
+    "comment above MIN_MAPPINGS says 'never lower one to make CI pass',",
+    "which is a convention and not a check (audit_040_r2/gates, finding G6).",
+    "",
+    "tests/compliance/test_gate_scripts.py::TestMinMappingsRatchet asserts",
+    "MIN_MAPPINGS[path] >= floor[path], so lowering a pin now takes an edit",
+    "to two files in opposite directions instead of one number in one file.",
+    "",
+    "Raising a pin needs no change here. Lowering one -- which should be",
+    "rare and deliberate -- means a guide legitimately shrank, and the",
+    "reason belongs in the commit message that lowers both."
+  ],
+  "floor": {
+    "docs/algorithm_guide/nodes/heat_node.md": 9,
+    "docs/algorithm_guide/nodes/adaptive_node.md": 12,
+    "docs/algorithm_guide/solvers/explicit_integrators.md": 5,
+    "docs/algorithm_guide/nodes/spring_node.md": 9,
+    "docs/algorithm_guide/nodes/ball_node.md": 7,
+    "docs/algorithm_guide/nodes/rigid_body_2d_node.md": 7,
+    "docs/algorithm_guide/nodes/heart_pump_node.md": 9
+  }
+}

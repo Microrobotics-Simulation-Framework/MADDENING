@@ -447,9 +447,14 @@ def summarise(records: Sequence[RejectionRecord]) -> str:
     def pct(q: float) -> float:
         return rates[min(n - 1, int(q * n))]
 
-    zero = sum(1 for r in rates if r == 0.0)
+    # "Filtered nothing" and "drew nothing" are both rate 0.0, and folding
+    # them together would let a test that measured nothing count towards the
+    # population the gate's threshold was derived from.
+    drew_nothing = sum(1 for r in records if r.drawn == 0)
+    zero = sum(1 for r in records if r.drawn and r.rate == 0.0)
+    nothing = f", {drew_nothing} drew nothing at all" if drew_nothing else ""
     return (
-        f"{n} tests with Hypothesis draws; {zero} filter nothing at all. "
+        f"{n} tests observed; {zero} drew and filtered nothing{nothing}. "
         f"filter rate: median {pct(0.5):.1%}, p90 {pct(0.9):.1%}, "
         f"max {rates[-1]:.1%}. "
         f"Total draws {sum(r.drawn for r in records)}, of which "
@@ -542,6 +547,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("\npytest itself failed; the audit is not trustworthy",
                   file=sys.stderr)
             return status
+        # Zero records means zero `over`, so the gate used to pass having
+        # measured nothing -- printing "no Hypothesis runs were observed" and
+        # exiting 0.  An empty *collection* is caught by pytest's exit 5, but
+        # an all-skipped or all-deselected run is not, and neither is a
+        # Hypothesis refactor that stops calling ``hypothesis.statistics``.
+        # A gate that verifies nothing cannot fail
+        # (audit_040_r2/gates, finding G7).
+        if not records:
+            print(
+                f"\nFAIL: no Hypothesis runs were observed in "
+                f"{list(args.paths)}.\n"
+                "A gate that measures nothing cannot fail.  Either every test "
+                "in scope skipped or was deselected, or the statistics hook "
+                "is no longer being called; fix the scope rather than "
+                "trusting the exit code.",
+                file=sys.stderr,
+            )
+            return 1
         return 1 if over else 0
     return status
 

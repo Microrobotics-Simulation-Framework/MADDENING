@@ -38,12 +38,30 @@ DEFAULT_BIB = os.path.join("docs", "bibliography.bib")
 # Citations that are deliberately dangling because the surrounding text is
 # teaching the syntax rather than citing anything.  Keyed by (path relative
 # to the repository root, key) so a genuinely broken citation in the same
-# file is still caught.
+# file is still caught, with a one-line reason each so a deliberate
+# exemption stays distinguishable from an accumulated one.
+#
+# This was the one allowlist in the tree with no reason, no cap and no
+# staleness check -- compare ``_ALLOWED_UNRESOLVABLE`` in
+# check_transforms.py and ``_ALLOWED_UNSTABLE`` in check_heat_stability.py,
+# both of which have all three.  ``tests/compliance/test_gate_scripts.py::
+# TestCitationTemplateAllowlist`` now supplies them.
+#
+# Add an entry only where the prose is *demonstrating* citation syntax --
+# never to quiet a citation whose key should have been added to the
+# bibliography.
 _TEMPLATE_CITATIONS = {
-    # "Cite as [@Key]" examples in the authoring documentation.
-    (os.path.join("docs", "developer_guide", "documentation_standards.md"), "Key"),
-    (os.path.join("docs", "developer_guide", "node_authoring.md"), "Key"),
+    (os.path.join("docs", "developer_guide", "documentation_standards.md"),
+     "Key"):
+        "the \"Cite as [@Key]\" example in the documentation standards",
+    (os.path.join("docs", "developer_guide", "node_authoring.md"), "Key"):
+        "the \"Cite as [@Key]\" example in the node authoring guide",
 }
+
+# A ceiling, not a target.  Two authoring guides teach the syntax; a third
+# is plausible, a tenth means dangling citations are being allowlisted
+# rather than fixed.
+_MAX_TEMPLATE_CITATIONS = 5
 
 # BibTeX entry types that declare no citable key.
 _NON_ENTRY_TYPES = {"comment", "string", "preamble"}
@@ -157,14 +175,23 @@ def main(argv=None) -> int:
 
     # Check for dangling citations (cited but not in bib)
     cited_keys = set()
+    verified = 0
+    declined: list[str] = []
     for fpath, lineno, key in citations:
         try:
             relpath = os.path.relpath(fpath, _REPO_ROOT)
         except ValueError:  # pragma: no cover - different drive
             relpath = fpath
         if (relpath, key) in _TEMPLATE_CITATIONS:
+            # Skipped before the existence check -- so it must not be
+            # counted as verified afterwards.  It was: the gate reported
+            # "50 citation(s) verified" having checked 45
+            # (audit_040_r2/gates, finding G1).
+            declined.append(f"{relpath}:{lineno}: [@{key}] is a syntax "
+                            f"example and was NOT checked")
             continue
         cited_keys.add(key)
+        verified += 1
         if key not in bib_keys:
             errors.append(f"{relpath}:{lineno}: [@{key}] not found in {bib_path}")
 
@@ -183,8 +210,24 @@ def main(argv=None) -> int:
         )
         return 1
 
+    for note in declined:
+        print(f"NOTE: {note}")
+
+    if verified == 0:
+        print(
+            f"FAIL: all {len(citations)} citation(s) under {scan_dir} are "
+            f"allowlisted syntax examples; none was checked.\n"
+            "A gate that verifies nothing cannot fail; fix the scope or the "
+            "allowlist rather than trusting the OK.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Verified and declined, separately.  One headline number that folds in
+    # the references the gate declined to check is the whole defect.
+    note = f", {len(declined)} not checked" if declined else ""
     print(
-        f"OK: {len(citations)} citation(s) verified "
+        f"OK: {verified} citation(s) verified{note} "
         f"({len(cited_keys)} unique keys, {len(bib_keys)} bib entries)"
     )
     return 0

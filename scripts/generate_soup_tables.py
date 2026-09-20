@@ -556,6 +556,84 @@ def build() -> tuple[dict[Path, str], list[str]]:
     return {SOUP_PACKAGE: soup, FRAMEWORK_VERIFICATION: fv}, errors
 
 
+#: Any MADD-* evidence identifier, for naming what a drift would remove.
+_EVIDENCE_ID = re.compile(r"MADD-[A-Z]+-\d+")
+
+
+def describe_drift(rel, current: str, generated: str) -> str:
+    """Say what *kind* of difference this is, not just that there is one.
+
+    The remedy is opposite for the two kinds, and this message used to
+    prescribe one of them for both: *"run
+    ``python scripts/generate_soup_tables.py`` and commit the result"*.  That
+    is right when the committed document is behind its source.  It is exactly
+    wrong when the committed document has a row the source no longer
+    produces, because then regenerating rewrites the document from a source
+    that has lost an entry -- the two agree again, every gate goes green, and
+    the entry is gone from the IEC 62304 evidence set.  That is how deleting
+    an open anomaly from ``known_anomalies.yaml`` passed the whole compliance
+    suite (audit_040_r2/gates, finding G5): the instruction in this very
+    message was the last step of the defect.
+
+    So: count lines only in the committed file (the source dropped them),
+    lines only in the generated file (the document is behind), and lines
+    changed in place, and lead with the dangerous one when it is present.
+    """
+    old_lines = current.splitlines(keepends=True)
+    new_lines = generated.splitlines(keepends=True)
+
+    removed: list[str] = []
+    added: list[str] = []
+    changed: list[str] = []
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            removed.extend(old_lines[i1:i2])
+        elif tag == "insert":
+            added.extend(new_lines[j1:j2])
+        elif tag == "replace":
+            changed.extend(old_lines[i1:i2])
+
+    lines = [
+        f"{rel} does not match a fresh generation from its sources:",
+        f"  {len(removed)} line(s) only in the COMMITTED file "
+        f"(the source no longer produces them)",
+        f"  {len(added)} line(s) only in the GENERATED file "
+        f"(the source has them, the document does not)",
+        f"  {len(changed)} line(s) changed in place",
+        "",
+    ]
+
+    if removed:
+        lost = sorted({m.group(0) for line in removed
+                       for m in _EVIDENCE_ID.finditer(line)})
+        named = f" ({', '.join(lost)})" if lost else ""
+        lines += [
+            f"DO NOT regenerate yet.  Regenerating would DELETE those "
+            f"committed rows{named} from the evidence set, and the gate "
+            f"would then pass.",
+            "Establish why the source lost them first: an entry removed from "
+            "docs/validation/known_anomalies.yaml, a @verification_benchmark "
+            "decorator deleted, or two decorators sharing a benchmark_id.  "
+            "Restore it; if it was genuinely retired, record the retirement "
+            "explicitly (see tests/compliance/test_soup_evidence.py) rather "
+            "than by deletion.",
+        ]
+    else:
+        lines += [
+            "The committed document is behind its source; no committed row "
+            "would be lost.  Run `python scripts/generate_soup_tables.py` and "
+            "commit the result.",
+        ]
+
+    diff = difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"{rel} (committed)",
+        tofile=f"{rel} (generated)",
+    )
+    return "\n".join(lines) + "\n\n" + "".join(diff)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -574,16 +652,7 @@ def main() -> int:
             continue
         rel = path.relative_to(REPO_ROOT)
         if args.check:
-            diff = difflib.unified_diff(
-                current.splitlines(keepends=True),
-                content.splitlines(keepends=True),
-                fromfile=f"{rel} (committed)",
-                tofile=f"{rel} (generated)",
-            )
-            failures.append(
-                f"{rel} is stale — regenerate with "
-                f"`python scripts/generate_soup_tables.py`:\n" + "".join(diff)
-            )
+            failures.append(describe_drift(rel, current, content))
         else:
             path.write_text(content)
             print(f"wrote {rel}")

@@ -51,6 +51,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import contextlib  # noqa: E402
+import pathlib  # noqa: E402
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -112,6 +113,9 @@ def float64():
 # --------------------------------------------------------------------------
 # HeatNode — spatial order
 # --------------------------------------------------------------------------
+
+#: Repository root: tests/verification/<this file> -> two levels up.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _L = 1.0
 _ALPHA = 1.0
@@ -501,6 +505,239 @@ class TestHeatStencilGhosts:
             state = node.update(state, {}, 0.1)
         after = float(jnp.sum(state["temperature"]))
         assert after == pytest.approx(before, rel=1e-5)
+
+
+#: Exact gradient of :data:`_STEADY` at ``t = 0``, by AD rather than by
+#: hand, for the same reason the source term is: a hand-differentiated
+#: reference is a second place for the profile to be wrong.
+_STEADY_GRADIENT = jax.grad(lambda x: _STEADY.exact(x, jnp.float64(0.0)))
+
+
+def _heat_boundary_flux_error(
+    n_cells, *, end="left", stencil_order=2, datum=True,
+):
+    """Relative error of a reported rod-end flux on the steady profile.
+
+    The field is handed to the node exactly -- no relaxation -- because
+    what is being measured is the boundary *reconstruction*, not the
+    scheme that produced the field.  Mixing the two would let a
+    2nd-order state error mask a 1st-order flux.
+
+    ``datum=False`` withholds ``left_temperature`` /
+    ``right_temperature``, which is the path
+    ``compute_boundary_fluxes`` takes when a caller asks for a flux
+    without a Dirichlet boundary condition.
+    """
+    dx = _L / n_cells
+    x = _cell_centres(n_cells)
+    T = np.asarray(_STEADY.field(x, 0.0), dtype=np.float64)
+    node = HeatNode(
+        "flux_heat", timestep=0.3 * dx * dx / _ALPHA, n_cells=n_cells,
+        length=_L, thermal_diffusivity=_ALPHA, stencil_order=stencil_order,
+    )
+    boundary = {}
+    if datum:
+        boundary = {
+            "left_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(0.0), jnp.float64(0.0)))
+            ),
+            "right_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(_L), jnp.float64(0.0)))
+            ),
+        }
+    fluxes = node.compute_boundary_fluxes(
+        {"temperature": jnp.asarray(T)}, boundary, dx * dx,
+    )
+    at = jnp.float64(0.0 if end == "left" else _L)
+    true_flux = -_ALPHA * float(_STEADY_GRADIENT(at))
+    reported = float(fluxes[f"{end}_heat_flux"])
+    return abs(reported - true_flux) / abs(true_flux)
+
+
+class TestTheReportedBoundaryFluxIsAtTheRodEnd:
+    """``compute_boundary_fluxes`` returns the flux the spec names.
+
+    Until 0.4.0 it returned ``-alpha (T[1] - T[0]) / dx``, the gradient
+    of the line through the first two cell *centres*, which for a
+    cell-centred grid sits at ``x = dx`` -- a full cell inside the end
+    ``boundary_flux_spec`` calls "the left boundary".  On ``T = exp(x)``
+    with ``alpha = 1`` and ``n = 10`` that is -1.10563 where the
+    rod-end flux is -1.0, a 10.6% error, and it matched the flux at
+    ``x = dx`` (-1.10517) to four figures.  It refined at order 1.005
+    against the node's own 2.000, so a flux-coupled solve was capped at
+    1st order by the flux alone.
+
+    Nothing asserted the value.  The three tests that touched it
+    checked ``isfinite`` and ``> 0.0``, and a *linear* profile cannot
+    see the defect at all -- the scheme is exact there and both
+    readings give exactly -1.0 -- so the profile these studies refine
+    has to be curved at the ends, exactly as
+    :class:`TestTheSteadyProfileCanSeeABrokenScheme` requires of the
+    state ladder one layer down.
+    """
+
+    @pytest.mark.parametrize("end", ["left", "right"])
+    def test_the_flux_converges_at_the_default_stencils_order(
+        self, float64, end,
+    ):
+        """2nd order, matching the state: measured 1.999 (was 1.005)."""
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(n, end=end),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(2.0, abs=0.2), (
+            measurement.table()
+        )
+
+    @pytest.mark.parametrize("end", ["left", "right"])
+    def test_the_flux_converges_at_the_fourth_order_stencils_order(
+        self, float64, end,
+    ):
+        """4th order for ``stencil_order=4``: measured 3.993.
+
+        The interface is not capped below the state it belongs to.  The
+        reconstruction reads the rod-end datum plus ``stencil_order``
+        cells, so it is accurate to ``stencil_order`` at either end.
+        """
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(n, end=end, stencil_order=4),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(4.0, abs=0.2), (
+            measurement.table()
+        )
+
+    @pytest.mark.parametrize("end", ["left", "right"])
+    @pytest.mark.parametrize("stencil_order", [2, 4])
+    def test_the_flux_without_a_dirichlet_datum_is_still_at_the_rod_end(
+        self, float64, stencil_order, end,
+    ):
+        """No boundary input: extrapolate to the end, do not move it.
+
+        With no datum the reconstruction is a pure extrapolation from
+        three cells and 2nd order for either stencil -- a higher-degree
+        extrapolant costs conditioning (coefficient L1 norm per ``dx``
+        of 6 for three cells against 28.3 for five) to buy accuracy
+        against a boundary condition that was never supplied.  What
+        matters is that it still reports the flux *at the rod end*:
+        measured 1.996, where the old expression measured 1.007 here
+        too.
+        """
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(
+                n, end=end, stencil_order=stencil_order, datum=False,
+            ),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(2.0, abs=0.2), (
+            measurement.table()
+        )
+
+    def test_the_reported_value_is_the_rod_end_flux_and_not_the_first_face(
+        self, float64,
+    ):
+        """The cheap direct test: one number, on ``T = exp(x)``.
+
+        An order ladder says a regression happened; this says what the
+        number is.  Both readings are pinned, so a fix that moved the
+        flux to some third location would fail this too.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_exp", timestep=0.3 * dx * dx, n_cells=n_cells, length=_L,
+            thermal_diffusivity=1.0,
+        )
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": jnp.asarray(np.exp(x))},
+            {"left_temperature": jnp.asarray(1.0),
+             "right_temperature": jnp.asarray(float(np.exp(_L)))},
+            dx * dx,
+        )
+        left = float(fluxes["left_heat_flux"])
+        # -alpha exp'(0) = -1; the flux one cell in is -exp(dx).
+        assert left == pytest.approx(-1.0, abs=5e-3), (
+            f"left flux {left} is not the rod-end flux -1.0"
+        )
+        assert abs(left - -float(np.exp(dx))) > 1e-2, (
+            f"left flux {left} is still the flux at x = dx "
+            f"({-float(np.exp(dx))})"
+        )
+        right = float(fluxes["right_heat_flux"])
+        assert right == pytest.approx(-float(np.exp(_L)), rel=5e-3), (
+            f"right flux {right} is not the rod-end flux {-np.exp(_L)}"
+        )
+        assert abs(right - -float(np.exp(_L - dx))) > 1e-2
+
+    def test_a_linear_profile_cannot_tell_the_two_readings_apart(
+        self, float64,
+    ):
+        """Why the studies above may not use a straight line.
+
+        On ``T = x`` the scheme is exact and *both* readings give
+        exactly -1.0 at both ends, so a linear-profile test -- the
+        obvious one to reach for, and the shape
+        ``tests/core/test_flux_coupling.py`` happened to use -- is
+        blind to the whole defect.  Recorded as an assertion so the
+        next person to simplify these studies finds out here.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_linear", timestep=0.3 * dx * dx, n_cells=n_cells,
+            length=_L, thermal_diffusivity=1.0,
+        )
+        T = jnp.asarray(x)
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": T},
+            {"left_temperature": jnp.asarray(0.0),
+             "right_temperature": jnp.asarray(_L)},
+            dx * dx,
+        )
+        old_reading_left = -float(T[1] - T[0]) / dx
+        assert float(fluxes["left_heat_flux"]) == pytest.approx(-1.0, abs=1e-12)
+        assert old_reading_left == pytest.approx(-1.0, abs=1e-12)
+        assert float(fluxes["right_heat_flux"]) == pytest.approx(
+            -1.0, abs=1e-12,
+        )
+
+    def test_the_two_ends_of_one_rod_report_a_balanced_pair(self, float64):
+        """A curved profile: the two ends must not err with one sign.
+
+        The old reading was the flux one cell *inside* each end, so on
+        any curved profile the two ends were wrong in opposite
+        directions and their sum -- the net flux into the rod, which is
+        what a conservation check reads -- carried the whole error.  On
+        ``T = exp(x)`` at n = 10 the old pair gave a net 1.35500
+        against the true 1.71828 -- 21.1% out -- while each end alone
+        was only 10.6% and 9.5% out; it is now within 0.25%.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_balance", timestep=0.3 * dx * dx, n_cells=n_cells,
+            length=_L, thermal_diffusivity=1.0,
+        )
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": jnp.asarray(np.exp(x))},
+            {"left_temperature": jnp.asarray(1.0),
+             "right_temperature": jnp.asarray(float(np.exp(_L)))},
+            dx * dx,
+        )
+        net = float(fluxes["left_heat_flux"]) - float(fluxes["right_heat_flux"])
+        true_net = -1.0 + float(np.exp(_L))
+        assert net == pytest.approx(true_net, rel=5e-3), (
+            f"net flux {net} against the true {true_net}"
+        )
 
 
 class TestHeatStabilityBound:
@@ -976,6 +1213,174 @@ class TestTheOrderGateCanFail:
 
     def test_the_default_band_is_the_one_the_docstring_claims(self):
         assert (DEFAULT_ORDER_SHORTFALL, DEFAULT_ORDER_EXCESS) == (0.25, 1.0)
+
+
+class TestTheOrderBandIsJustifiedByTheseNumbers:
+    """Every figure the two band constants cite, checked two ways.
+
+    ``DEFAULT_ORDER_SHORTFALL`` and ``DEFAULT_ORDER_EXCESS`` are
+    justified in ``mms.py`` by measured figures.  An earlier revision
+    justified them with figures no ladder in the tree produces -- "the
+    corrected fourth-order stencil measures 5.02", where the largest
+    pairwise order over four manufactured solutions is 4.126, and
+    "as much as 0.16 low (1.847)", where the coarsest pairs measure
+    2.007-2.023, *above* theory.  Worse, 5.02 was cited as the
+    superconvergence the band accommodates while lying outside the
+    band's own upper edge of ``4 + 1.0 = 5.00``, so the figure quoted
+    in its defence would have failed it.
+
+    So each figure is pinned twice: it has to appear in the recorded
+    fixture it is attributed to, and ``check_order`` has to make the
+    decision on it that the docstring claims.  A figure that drifts out
+    of the band it is cited as being inside fails here rather than
+    sitting on the page.
+    """
+
+    _FIXTURES = _REPO_ROOT / "benchmarks" / "results" / "audit_040_r2" / "numerics"
+
+    #: ``(figure, fixture file, what check_order does with it against 4)``.
+    _FOURTH_ORDER_EVIDENCE = (
+        # Correct cubic ghost closure -- the band must admit all of these.
+        ("4.126", "r8_order_band.log", True),   # largest pairwise, tanh_bump
+        ("4.001", "r8_order_band.log", True),   # largest finest-pair
+        ("3.957", "r8_order_band.log", True),   # release profile
+        ("3.760", "r8_order_band.log", True),   # coarsest pair, same study
+        # The disarmed-profile defect.  The band does NOT catch it.
+        ("4.080", "r8_order_band.log", True),
+    )
+
+    _SECOND_ORDER_EVIDENCE = (
+        ("2.0004", "r1_heat_order_independent.log", True),
+        ("2.023", "r1_heat_order_independent.log", True),
+        ("1.998", "r10_lbm_order.log", True),
+    )
+
+    _FIRST_ORDER_EVIDENCE = (
+        ("1.0009", "r6_declared_orders.log", True),
+        ("1.0003", "r6_declared_orders.log", True),
+        ("1.0002", "r6_declared_orders.log", True),
+    )
+
+    @pytest.mark.parametrize(
+        ("figure", "fixture"),
+        [(f, x) for f, x, _ in
+         _FOURTH_ORDER_EVIDENCE + _SECOND_ORDER_EVIDENCE + _FIRST_ORDER_EVIDENCE],
+    )
+    def test_the_figure_is_in_the_fixture_it_is_attributed_to(
+        self, figure, fixture,
+    ):
+        """A cited measurement has to exist where it says it does."""
+        path = self._FIXTURES / fixture
+        assert path.is_file(), f"cited fixture {path} is missing"
+        assert figure in path.read_text(), (
+            f"{figure} is cited against {fixture} but does not appear in it; "
+            f"re-run benchmarks/results/audit_040_r2/numerics/repro/ and "
+            f"quote what it now says"
+        )
+
+    @pytest.mark.parametrize("fixture", [
+        "r8_order_band.log", "r1_heat_order_independent.log",
+        "r6_declared_orders.log", "r10_lbm_order.log",
+    ])
+    def test_every_fixture_mms_names_is_present(self, fixture):
+        """``_ORDER_BAND_FIXTURES`` must not be a list of dead paths."""
+        from maddening.testing.mms import _ORDER_BAND_FIXTURES
+        relative = f"benchmarks/results/audit_040_r2/numerics/{fixture}"
+        assert relative in _ORDER_BAND_FIXTURES
+        assert (_REPO_ROOT / relative).is_file()
+
+    @pytest.mark.parametrize(
+        ("figure", "expected"),
+        [(f, 4.0) for f, _, _ in _FOURTH_ORDER_EVIDENCE]
+        + [(f, 2.0) for f, _, _ in _SECOND_ORDER_EVIDENCE]
+        + [(f, 1.0) for f, _, _ in _FIRST_ORDER_EVIDENCE],
+    )
+    def test_the_band_admits_every_recorded_measurement(self, figure, expected):
+        """Nothing the fixtures recorded as correct may fail the band."""
+        result = check_order(_ladder(float(figure)), expected)
+        assert result.passed, result.detail
+
+    @pytest.mark.parametrize(
+        ("observed", "expected"),
+        [(1.001, 2.0),   # MADD-ANO-007, boundary datum half a cell in
+         (0.954, 4.0)],  # MADD-ANO-008, ghosts at the wrong positions
+    )
+    def test_the_band_rejects_the_defects_it_is_credited_with(
+        self, observed, expected,
+    ):
+        result = check_order(_ladder(observed), expected)
+        assert result.failed
+        assert "below the declared" in result.detail
+
+    def test_the_band_does_not_catch_the_disarmed_profile_defect(self):
+        """Recorded as a pass, because it is one, and that is the point.
+
+        A linear ghost closure -- genuinely 2nd order -- measured 4.080
+        on the pre-0.4.0 flat-ended profile and sailed through.  What
+        catches it is
+        :class:`TestTheSteadyProfileCanSeeABrokenScheme`, which forbids
+        a manufactured solution flat at the rod ends; on a curved one
+        the same closure measures 2.000 and the *shortfall* rejects it.
+        """
+        assert check_order(_ladder(4.080), 4.0).passed
+        assert check_order(_ladder(2.000), 4.0).failed
+
+    @pytest.mark.parametrize(
+        "excess", [0.02, 0.05, 0.08, 0.1, 0.126, 0.15, 0.25, 0.5, 1.0, 1.5],
+    )
+    def test_no_excess_separates_the_defect_from_a_correct_study(self, excess):
+        """The trap, made executable: do not tighten this band.
+
+        ``check_order`` gates on the finest pair of whatever ladder it
+        is handed, and this constant is global.  The defect's gated
+        value is 4.080; a correct ``tanh_bump`` study read over its
+        coarsest pair -- which is the gated value of any two- or
+        three-level ladder of it -- is 4.126.  4.080 < 4.126, so every
+        upper edge that rejects the defect also rejects that study.
+        Tightening ``DEFAULT_ORDER_EXCESS`` cannot be the fix for the
+        disarmed-profile case at any value whatsoever.
+        """
+        defect = check_order(_ladder(4.080), 4.0, excess=excess).passed
+        correct = check_order(_ladder(4.126), 4.0, excess=excess).passed
+        assert defect or not correct, (
+            f"excess={excess} rejects the 4.080 defect while still admitting "
+            f"the legitimate 4.126 study -- which the recorded fixtures say "
+            f"is impossible, so one of them has moved"
+        )
+
+    def test_every_admissible_figure_is_below_the_edge_it_is_cited_against(
+        self,
+    ):
+        """The arithmetic guard the old docstring failed.
+
+        "1.0 is wide enough for X" is false whenever ``X > 4 + 1.0``.
+        The figure that sentence used to name, 5.02, is exactly that
+        case.
+        """
+        edge = 4.0 + DEFAULT_ORDER_EXCESS
+        assert edge == 5.0
+        for figure, _, admissible in self._FOURTH_ORDER_EVIDENCE:
+            assert admissible and float(figure) < edge, (
+                f"{figure} is cited as admissible but the band's upper edge "
+                f"for a declared 4 is {edge}"
+            )
+        # The figure the docstring used to cite, kept as the negative
+        # control for this check.
+        assert 5.02 > edge
+
+    def test_the_shortfall_sits_between_the_wobble_and_the_defects(self):
+        """0.25 is a ratio to two measured quantities, not a round number.
+
+        Largest honest finest-pair shortfall recorded: 0.043 (the
+        4th-order heat stencil's 3.957 against 4).  Smallest defect it
+        must reject: 1.0 (MADD-ANO-007's 1.001 against 2).
+        """
+        largest_honest_shortfall = 4.0 - 3.957
+        smallest_defect_shortfall = 2.0 - 1.001
+        assert largest_honest_shortfall < DEFAULT_ORDER_SHORTFALL
+        assert DEFAULT_ORDER_SHORTFALL < smallest_defect_shortfall
+        assert DEFAULT_ORDER_SHORTFALL / largest_honest_shortfall > 5.0
+        assert smallest_defect_shortfall / DEFAULT_ORDER_SHORTFALL > 3.5
 
 
 class TestMeasureOrder:

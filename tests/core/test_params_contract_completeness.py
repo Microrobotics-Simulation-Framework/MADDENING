@@ -120,7 +120,27 @@ def test_heat_flux_uses_injected_diffusivity():
     s2 = step(gm._state, ext, p2)
     T = s2["h"]["temperature"]
     delivered = float(s2["sink"]["x"]) / 1e-4
-    assert delivered == pytest.approx(float(-1.0 * (T[1] - T[0]) / (1.0 / 6)), rel=1e-5)
+    # Against the node's own reconstruction rather than a transcription
+    # of it: what this test is about is which alpha the flux used, and
+    # hard-coding the stencil made it fail when the rod-end
+    # reconstruction landed in 0.4.0 without anything being wrong with
+    # the params contract.
+    node = gm.get_node("h")
+    injected = float(node.compute_boundary_fluxes(
+        {"temperature": T}, {}, 1e-4,
+        params={"thermal_diffusivity": jnp.asarray(1.0, jnp.float32)},
+    )["left_heat_flux"])
+    assert delivered == pytest.approx(injected, rel=1e-5)
+    # The flux is linear in alpha, so the constructor's 0.1 would have
+    # delivered a tenth of this.  Without that the assertion above could
+    # be satisfied by a flux that ignored `params` entirely.
+    constructed = float(
+        node.compute_boundary_fluxes({"temperature": T}, {}, 1e-4)[
+            "left_heat_flux"
+        ]
+    )
+    assert delivered == pytest.approx(10.0 * constructed, rel=1e-5)
+    assert delivered != pytest.approx(constructed, rel=1e-3)
 
 
 def test_flux_edge_inside_a_coupling_group_uses_injected_stiffness():

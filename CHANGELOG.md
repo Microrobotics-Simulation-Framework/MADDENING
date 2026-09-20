@@ -238,6 +238,9 @@ guidance; the itemized changes follow.
 - **Audit fixes on the serialisation surfaces** (`MADD-ANO-010`): an FMU or node named
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
+- **`HeatNode` reports its boundary flux at the rod end**, not a cell inside:
+  measured order 1.005 -> 1.999 (and 3.993 for `stencil_order=4`), and the units
+  are `K*m/s`, not `W/m^2`. Flux-coupled results move by up to 10%
 - **The compliance gates can now fail on the defects they exist to catch**: the
   anomaly and benchmark ID sets are pinned, four gates that reported success
   having verified nothing now fail closed, and two stopped inflating their counts

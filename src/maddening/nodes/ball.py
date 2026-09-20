@@ -145,11 +145,29 @@ class BallNode(SimulationNode):
         return {"position": position, "velocity": velocity}
 
     def derivatives(self, state, boundary_inputs):
-        """dx/dt = v, dv/dt = g (no collision)."""
+        """dx/dt = v, dv/dt = g (no collision).
+
+        ``g`` follows the dtype of the velocity it will be added to,
+        rather than being pinned to float32.  Pinning it made this node
+        disagree with *itself*: ``update`` reads ``p["gravity"]`` raw,
+        so under ``jax_enable_x64`` with a float64 state the explicit
+        path integrated -9.81 while ``derivatives`` -- and therefore
+        ``integrate_node``, ``euler_step`` and every higher-order
+        integrator built on it -- integrated -9.810000419616699, an
+        absolute difference of 4.196e-07 in the acceleration.  That is
+        the MADD-ANO-011/012 pattern (one node, two answers) arriving
+        by a different mechanism.
+
+        Following the state cannot promote anything: at the framework
+        default the state is float32 and so is ``g``, exactly as
+        before.  It only stops the node from *demoting* a float64 carry
+        halfway through a step.
+        """
         gravity = self.params["gravity"]
+        velocity = jnp.asarray(state["velocity"])
         return {
-            "position": state["velocity"],
-            "velocity": jnp.array(gravity, dtype=jnp.float32),
+            "position": velocity,
+            "velocity": jnp.asarray(gravity, dtype=velocity.dtype),
         }
 
     def boundary_input_spec(self):

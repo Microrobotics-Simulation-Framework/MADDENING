@@ -38,6 +38,7 @@ precision.
 
 import contextlib
 import math
+from fractions import Fraction
 
 import jax
 import jax.numpy as jnp
@@ -296,10 +297,20 @@ def test_carrying_time_in_the_state_restores_each_methods_classical_order(
 # ---------------------------------------------------------------------------
 
 #: R(z) for each method: one step of x' = a*x from x0 multiplies x0 by
-#: this, with z = a*dt.  Truncations of exp(z) to the method's order,
-#: which for these three methods is also a complete statement of their
-#: Butcher coefficients up to the compensations the polynomial cannot
-#: see (there are none for a 4-stage explicit method of this shape).
+#: this, with z = a*dt.  Truncations of exp(z) to the method's order.
+#:
+#: This pins every stage offset and output weight *as they enter the
+#: linear problem*, which is what makes a scheme swap or a mistyped
+#: weight fail here at a few ulp rather than inside a convergence band.
+#: It is **not** a complete statement of the Butcher coefficients: an
+#: earlier revision of this comment claimed there were no compensations
+#: the polynomial cannot see "for a 4-stage explicit method of this
+#: shape", and there are.  See
+#: :class:`TestWhatTheStabilityPolynomialDoesNotPin` for one written out
+#: -- a tableau with RK4's exact R(z) that is 2nd order on a nonlinear
+#: problem.  The nonlinear order conditions are what
+#: ``test_carrying_time_in_the_state_restores_each_methods_classical_order``
+#: measures, and between them the two checks do pin the scheme.
 _STABILITY_POLYNOMIAL = {
     "euler": lambda z: 1.0 + z,
     "heun": lambda z: 1.0 + z + z**2 / 2.0,
@@ -340,6 +351,79 @@ def test_each_stepper_reproduces_its_own_stability_polynomial(
     )
     expected = x0 * _STABILITY_POLYNOMIAL[method](z)
     assert float(out["x"]) == pytest.approx(expected, rel=1e-13, abs=1e-15)
+
+
+class TestWhatTheStabilityPolynomialDoesNotPin:
+    """``R(z)`` fixes the linear-problem behaviour and not the order.
+
+    The audit of 2026-09-20 asked for a counterexample to the claim that
+    an ``R(z)`` match leaves nothing free for a 4-stage explicit method,
+    and constructed one.  It is recorded here as arithmetic rather than
+    as a stepper, because the point is a property of the tableau: an
+    ``R(z)`` check and a nonlinear order study are not redundant, and
+    dropping either one leaves a real mutation uncaught.
+
+    The composition in this module is sound -- the mutant below fails
+    ``test_carrying_time_in_the_state_restores_each_methods_classical
+    _order`` at 2.013 against a declared 4 -- so nothing is broken. What
+    was wrong was the parenthetical saying no such tableau exists.
+    """
+
+    #: ``c = (0, 1/2, 1/2, 2)`` with ``b = (1/4, 1/3, 1/3, 1/12)``, i.e.
+    #: RK4's shape with the last stage evaluated at ``2*dt`` and the
+    #: weights rebalanced.  ``A`` is RK4's with the last row scaled to
+    #: match ``c``.
+    _B = (Fraction(1, 4), Fraction(1, 3), Fraction(1, 3), Fraction(1, 12))
+    _C = (Fraction(0), Fraction(1, 2), Fraction(1, 2), Fraction(2))
+    _A = (
+        (Fraction(0), Fraction(0), Fraction(0), Fraction(0)),
+        (Fraction(1, 2), Fraction(0), Fraction(0), Fraction(0)),
+        (Fraction(0), Fraction(1, 2), Fraction(0), Fraction(0)),
+        (Fraction(0), Fraction(0), Fraction(2), Fraction(0)),
+    )
+
+    @staticmethod
+    def _matvec(matrix, vector):
+        return tuple(
+            sum(row[j] * vector[j] for j in range(len(vector)))
+            for row in matrix
+        )
+
+    @classmethod
+    def _dot(cls, u, v):
+        return sum(a * b for a, b in zip(u, v))
+
+    def test_the_tableau_is_consistent_with_its_own_abscissae(self):
+        """``c_i = sum_j A_ij`` -- otherwise it is not a tableau at all."""
+        ones = (Fraction(1),) * 4
+        assert self._matvec(self._A, ones) == self._C
+
+    def test_it_reproduces_rk4s_stability_polynomial_exactly(self):
+        """``R(z) = 1 + z b.1 + z^2 b.A1 + z^3 b.A^2 1 + z^4 b.A^3 1``.
+
+        All four coefficients are RK4's, so
+        ``test_each_stepper_reproduces_its_own_stability_polynomial``
+        would pass this tableau at every ``z``, to the last bit.
+        """
+        ones = (Fraction(1),) * 4
+        powers = [ones]
+        for _ in range(3):
+            powers.append(self._matvec(self._A, powers[-1]))
+        coefficients = [self._dot(self._B, p) for p in powers]
+        assert coefficients == [
+            Fraction(1), Fraction(1, 2), Fraction(1, 6), Fraction(1, 24),
+        ]
+
+    def test_it_nonetheless_fails_a_third_order_condition(self):
+        """``b.c^2 = 1/3`` is required for 3rd order and is not linear in
+        the tableau's action on ``x' = a x``, so ``R(z)`` cannot see it."""
+        b_c_squared = self._dot(self._B, tuple(c * c for c in self._C))
+        assert b_c_squared == Fraction(1, 2)
+        assert b_c_squared != Fraction(1, 3)
+        # For contrast, classical RK4 satisfies it.
+        rk4_b = (Fraction(1, 6), Fraction(1, 3), Fraction(1, 3), Fraction(1, 6))
+        rk4_c = (Fraction(0), Fraction(1, 2), Fraction(1, 2), Fraction(1))
+        assert self._dot(rk4_b, tuple(c * c for c in rk4_c)) == Fraction(1, 3)
 
 
 class _LinearNode(SimulationNode):

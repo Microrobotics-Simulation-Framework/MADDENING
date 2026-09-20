@@ -98,8 +98,18 @@ def demo_conservation():
     """Verify that heat flux is continuous at the coupling interface.
 
     With interior-cell DD coupling and matched grid/material, the
-    one-sided finite-difference fluxes on each side of the interface
-    should be identical.
+    two rods are mirror images across the interface, so the rod-end
+    fluxes they report should agree.
+
+    Since 0.4.0 ``compute_boundary_fluxes`` reconstructs the flux **at
+    the rod end** (``x = 0`` / ``x = L``) rather than between the first
+    two cell centres, so what is compared here is the flux at two
+    points that are genuinely one cell apart in this overlapping
+    decomposition.  The old reading made the imbalance identically
+    zero by symmetry -- the two rods' interior differences were the
+    same subtraction -- which flattered the check; the residual now
+    printed is float32 round-off, and the units are K*m/s, not W/m^2
+    (see :meth:`HeatNode.boundary_flux_spec`).
     """
     print()
     print("=" * 60)

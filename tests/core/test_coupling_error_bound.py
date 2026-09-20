@@ -710,6 +710,15 @@ def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
     much* and that nothing in the report warns.  Kept separate so a
     partial improvement that shrinks 122x to 3x is visible here rather
     than silently still failing there.
+
+    Two-sided, like ``test_the_estimate_is_invariant_to_the_relaxation
+    _factor``.  It asserted only ``> 50.0`` until 0.4.0, which caught an
+    improvement -- its stated purpose -- but was blind to the thing a
+    reader would care about far more: a regression that turned 122x into
+    10,000x would have passed it silently.  A recorded figure is a
+    figure, not a floor.  Measured 122.39; the band is a factor of ~2.5
+    each way, wide enough for a float32 reshuffle and far too narrow for
+    an order of magnitude.
     """
     gm = _two_mode_group(max_iterations=60, tolerance=1e-4)
     gm.step()
@@ -718,10 +727,13 @@ def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
     understatement = distance / d["error_estimate"]
     assert d["ratio_usable"] is True
     assert d["converged"] is True
-    assert understatement > 50.0, (
-        f"the two-mode understatement is now {understatement:.0f}x, not the "
-        f"~122x recorded in ERROR_BOUND_DECISION.md -- if the estimate "
-        f"improved, update the memo and the xfail above"
+    assert 50.0 < understatement < 300.0, (
+        f"the two-mode understatement is now {understatement:.1f}x, not the "
+        f"~122x recorded in ERROR_BOUND_DECISION.md.  Below the band the "
+        f"estimate improved: update the memo and the xfail above.  Above it "
+        f"the estimate got *worse*, which is a regression in "
+        f"error_amplification or in the residual the rate is read from, and "
+        f"is not a documentation change."
     )
 
 

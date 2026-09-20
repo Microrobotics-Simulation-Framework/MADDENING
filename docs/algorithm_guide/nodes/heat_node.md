@@ -56,6 +56,8 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | $\nabla^2 T$, non-uniform grid | `maddening.nodes.heat._laplacian_nonuniform` | Variable-$\Delta x$ 2nd-order form; `stencil_order=4` is not offered here |
 | Left/right Dirichlet BC, 2nd order | `maddening.nodes.heat._dirichlet_ghosts_2nd_order` | $T_{-1} = 2T_b - T_0$, imposing $T_b$ at the rod end |
 | Left/right Dirichlet BC, 4th order | `maddening.nodes.heat._dirichlet_ghosts_4th_order` | Cubic through the rod end and the three nearest cell centres |
+| Rod-end flux $-\alpha\,\partial T/\partial x$ at $x = 0, L$ | `maddening.nodes.heat._rod_end_gradient` | One-sided reconstruction anchored at the rod end; with the Dirichlet datum it reads `stencil_order` cells and is accurate to `stencil_order`, without one it extrapolates from three cells at 2nd order |
+| Lagrange derivative at the end face | `maddening.nodes.heat._lagrange_gradient_weights` | Pure-Python weights, folded before tracing: one formula for both grids, both ends and both datum cases, and one dot product in the graph |
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added as `source * dt` after diffusion step |
 | Time integration ($\partial T / \partial t$) | `maddening.nodes.heat.HeatNode.update` | Forward Euler: `T + alpha * dt * laplacian + source * dt` |
 | Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER` |
@@ -84,7 +86,8 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 3. **No convection**: pure diffusion only
 4. **No radiation**: no radiative heat transfer
 5. **Non-uniform grids are 2nd-order only**: `stencil_order=4` requires a uniform grid
-6. **`compute_boundary_fluxes` reports an interior face**: it returns $-\alpha (T_1 - T_0)/\Delta x$, the flux across the face between the first two cells, not the flux at the rod end
+6. **The reported flux is not the scheme's own face flux**: `compute_boundary_fluxes` returns the physical rod-end flux, reconstructed to $O(\Delta x^{\texttt{stencil\_order}})$, while the conservative update's first row uses the 1st-order face flux $-\alpha (T_0 - T_b)/(\Delta x/2)$. The two agree in the limit but not bit-for-bit, so a discrete energy balance closed against the reported flux carries that difference. Until 0.4.0 the method instead returned $-\alpha (T_1 - T_0)/\Delta x$, the flux at $x = \Delta x$ rather than at the rod end: a 10.6% error at $N = 10$ on $T = e^x$, converging at order 1.005 against the node's own 2.000
+7. **Units**: `boundary_flux_spec` declares `K*m/s`, not `W/m^2`. $-\alpha\,\partial T/\partial x$ is the conductive flux divided by $\rho c_p$, and neither is a parameter of this node
 
 ## Stability Conditions
 

@@ -78,6 +78,7 @@ from maddening.core.compliance.validation import (  # noqa: E402
 from maddening.core.simulation.integrators import euler_step  # noqa: E402
 from maddening.nodes.ball import BallNode  # noqa: E402
 from maddening.nodes.heart_pump import HeartPumpNode  # noqa: E402
+from maddening.nodes.rigid_body import RigidBodyNode  # noqa: E402
 from maddening.nodes.rigid_body_2d import RigidBody2DNode  # noqa: E402
 from maddening.nodes.spring import SpringDamperNode  # noqa: E402
 from maddening.testing.mms import (  # noqa: E402
@@ -821,6 +822,224 @@ def test_spring_implements_the_semi_implicit_scheme_its_metadata_names():
 
 
 # --------------------------------------------------------------------------
+# The rotational half of the "semi-implicit in both DOFs" claim
+# --------------------------------------------------------------------------
+#
+# Both rigid-body nodes document semi-implicit Euler in the *rotational*
+# degrees of freedom as well as the translational.  Until these tests,
+# only the translational half was pinned: mutating
+# ``omega_to_quat(ang_vel_new) -> omega_to_quat(ang_vel)`` in
+# ``rigid_body.py`` and ``angle + omega_new*dt -> angle + omega*dt`` in
+# ``rigid_body_2d.py`` left 112 and 97 tests passing, while the matching
+# translational mutations were caught by the free-fall tests immediately.
+# The code was correct; the invariant was unguarded.
+#
+# The free-fall tests cannot see it because nothing drives a torque, and
+# an order ladder cannot see it because forward and semi-implicit Euler
+# are both 1st order -- which
+# ``test_an_order_study_cannot_tell_forward_from_semi_implicit_euler``
+# already asserts for the spring.
+
+_RB_TORQUE_Z = 2.0
+_RB_INERTIA_Z = 0.5
+
+
+def _rigid_body_z_only(**kwargs):
+    """A body that can only rotate about +z, with no gravity.
+
+    Gravity off and the torque on one axis keeps the quaternion in the
+    ``(w, z)`` plane, where its rotation angle is ``2 atan2(q_z, q_w)``
+    and can be compared against a closed form.
+    """
+    return RigidBodyNode(
+        "rb_rot", timestep=0.01, mass=1.0,
+        inertia=(1.0, 1.0, _RB_INERTIA_Z), gravity=(0.0, 0.0, 0.0),
+        **kwargs,
+    )
+
+
+def _rb_state(omega_z=0.0, angle=0.0):
+    half = angle / 2.0
+    return {
+        "position": jnp.zeros(3, dtype=jnp.float32),
+        "orientation": jnp.asarray(
+            [math.cos(half), 0.0, 0.0, math.sin(half)], dtype=jnp.float32,
+        ),
+        "velocity": jnp.zeros(3, dtype=jnp.float32),
+        "angular_velocity": jnp.asarray(
+            [0.0, 0.0, omega_z], dtype=jnp.float32,
+        ),
+    }
+
+
+def _z_rotation_angle(quaternion):
+    """The rotation angle of a quaternion known to lie in the (w, z) plane."""
+    q = np.asarray(quaternion, dtype=np.float64)
+    assert abs(q[1]) < 1e-9 and abs(q[2]) < 1e-9, (
+        f"quaternion left the (w, z) plane: {q}"
+    )
+    return 2.0 * math.atan2(q[3], q[0])
+
+
+class TestTheRotationalHalfOfTheSemiImplicitClaim:
+    """Both rigid bodies advance orientation with the *new* angular velocity.
+
+    ``RigidBodyNode`` implements ``derivatives()``, so
+    :func:`_forward_euler_agrees` -- the probe already applied to
+    ``BallNode``, ``HeartPumpNode`` and ``SpringDamperNode`` -- reaches
+    it directly.  ``RigidBody2DNode`` does not implement
+    ``derivatives()`` at all, so the probe cannot reach it and its half
+    is pinned against a closed form instead.
+    """
+
+    def test_a_torque_from_rest_rotates_the_body_within_one_step(self):
+        """The sharpest form of the distinction, and it needs no ladder.
+
+        From ``omega = 0`` under a torque, semi-implicit Euler turns the
+        body in the very first step -- it uses ``omega_new = alpha*dt``
+        -- while forward Euler uses ``omega = 0`` and leaves the
+        orientation exactly where it was.  No O(dt^2) quaternion
+        renormalisation term can confuse the two: the forward-Euler
+        increment is identically zero.
+        """
+        node = _rigid_body_z_only()
+        state = _rb_state()
+        inputs = {"torque": jnp.asarray([0.0, 0.0, _RB_TORQUE_Z])}
+        assert not _forward_euler_agrees(
+            node, state, inputs, 0.1, "orientation",
+        ), (
+            "RigidBodyNode.update matched a forward-Euler step of its own "
+            "derivatives() in the rotational DOFs, but its metadata claims "
+            "semi-implicit Euler in the angular velocity too"
+        )
+        # The translational control, which was already pinned, run the
+        # same way so the two halves are visibly the same test.
+        assert not _forward_euler_agrees(
+            node, state, {"force": jnp.asarray([1.0, 0.0, 0.0])},
+            0.1, "position",
+        )
+        assert "semi-implicit" in RigidBodyNode.meta.discretization.lower()
+        assert "angular velocity" in (
+            RigidBodyNode.meta.discretization_order.notes.lower()
+        )
+
+    def test_without_a_torque_the_probe_cannot_tell_the_two_apart(self):
+        """Why the hole existed, recorded as an assertion.
+
+        Every rigid-body test in the tree drove translation only.  With
+        no torque and no initial spin the two schemes agree exactly, so
+        a probe run that way passes whichever one is implemented and
+        proves nothing.  If this ever starts failing, the probe has
+        grown a second sensitivity and the test above is no longer
+        measuring only the scheme.
+        """
+        node = _rigid_body_z_only()
+        assert _forward_euler_agrees(
+            node, _rb_state(), {}, 0.1, "orientation",
+        )
+
+    def test_the_orientation_follows_the_closed_form_semi_implicit_angle(
+        self, float64,
+    ):
+        """A positive statement, not just "it is not forward Euler".
+
+        For a rotation about a single axis the quaternion stays in the
+        ``(w, z)`` plane, and ``q + (dt/2) omega_q q`` renormalised is
+        exactly a rotation by ``2 arctan(dt*omega/2)`` -- the norm
+        divides out.  So the discrete angle obeys
+
+            theta_{k+1} = theta_k + 2 arctan(dt * omega_{k+1} / 2)
+
+        with ``omega_{k+1} = omega_k + (torque/I) dt`` for the
+        semi-implicit scheme, and ``omega_k`` for forward Euler.  That
+        recursion is derived from the quaternion algebra, not read off
+        the implementation, so agreeing with it says something.
+        """
+        n_steps, dt = 20, 0.05
+        alpha = _RB_TORQUE_Z / _RB_INERTIA_Z
+        node = _rigid_body_z_only()
+        state = _rb_state(omega_z=0.3)
+        inputs = {"torque": jnp.asarray([0.0, 0.0, _RB_TORQUE_Z])}
+        for _ in range(n_steps):
+            state = node.update(state, inputs, dt)
+
+        semi = forward = 0.0
+        omega = 0.3
+        for _ in range(n_steps):
+            forward += 2.0 * math.atan(dt * omega / 2.0)
+            omega += alpha * dt
+            semi += 2.0 * math.atan(dt * omega / 2.0)
+
+        observed = _z_rotation_angle(state["orientation"])
+        assert observed == pytest.approx(semi, rel=1e-6), (
+            f"angle {observed} is not the semi-implicit {semi} "
+            f"(forward Euler would give {forward})"
+        )
+        # The two references have to be far enough apart for the
+        # agreement above to mean anything.
+        assert abs(semi - forward) > 1e-3 * abs(semi)
+        assert observed != pytest.approx(forward, rel=1e-4)
+
+    def test_the_2d_angle_follows_the_closed_form_semi_implicit_recursion(
+        self, float64,
+    ):
+        """``RigidBody2DNode``'s half, which no probe can reach.
+
+        The node implements no ``derivatives()``, so
+        :func:`_forward_euler_agrees` raises rather than answering.
+        Under a constant torque the angle has a closed form either way:
+        semi-implicit accumulates ``omega_{k+1}``, giving
+        ``a dt^2 N(N+1)/2``, and forward Euler accumulates ``omega_k``,
+        giving ``a dt^2 N(N-1)/2``.  They differ by exactly
+        ``a dt^2 N`` -- one whole step of angular velocity.
+        """
+        n_steps, dt = 20, 0.05
+        inertia, torque, omega_0 = 0.5, 2.0, 0.3
+        accel = torque / inertia
+        node = RigidBody2DNode(
+            "rb2_rot", timestep=dt, mass=1.0, inertia=inertia,
+            gravity=(0.0, 0.0), initial_omega=omega_0,
+        )
+        state = node.initial_state()
+        inputs = {"torque": jnp.asarray(torque)}
+        for _ in range(n_steps):
+            state = node.update(state, inputs, dt)
+
+        semi = (
+            n_steps * dt * omega_0
+            + accel * dt * dt * n_steps * (n_steps + 1) / 2.0
+        )
+        forward = (
+            n_steps * dt * omega_0
+            + accel * dt * dt * n_steps * (n_steps - 1) / 2.0
+        )
+        observed = float(state["angle"])
+        assert observed == pytest.approx(semi, rel=1e-6), (
+            f"angle {observed} is not the semi-implicit {semi} "
+            f"(forward Euler would give {forward})"
+        )
+        assert abs(semi - forward) == pytest.approx(
+            accel * dt * dt * n_steps, rel=1e-9,
+        )
+        assert observed != pytest.approx(forward, rel=1e-4)
+        # The translational control, in the same run, so a future
+        # reader can see the two halves are the same claim.
+        assert "both the" in (
+            RigidBody2DNode.meta.discretization_order.notes.lower()
+        )
+
+    def test_the_2d_node_has_no_derivatives_for_the_probe_to_read(self):
+        """Recorded because it is why the test above is shaped differently.
+
+        If ``RigidBody2DNode`` ever grows a ``derivatives()``, this
+        fails and the cheap probe becomes available to it.
+        """
+        node = RigidBody2DNode("rb2_probe", timestep=0.01)
+        with pytest.raises(NotImplementedError):
+            node.derivatives(node.initial_state(), {})
+
+
+# --------------------------------------------------------------------------
 # MADD-ANO-013: the float32 downcast of backpressure
 # --------------------------------------------------------------------------
 
@@ -873,3 +1092,84 @@ def test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given(float6
         f"a float64 pressure came back as {out['arterial_pressure'].dtype}; "
         "see MADD-ANO-013"
     )
+
+
+# --------------------------------------------------------------------------
+# BallNode's float32 gravity: one node, two answers
+# --------------------------------------------------------------------------
+#
+# MADD-ANO-013 registers one float32 downcast (HeartPumpNode.backpressure),
+# and the audit of 2026-09-20 found at least five more.  Most of them are
+# *consistent* -- RigidBodyNode casts inertia and gravity the same way in
+# update() and derivatives(), so the node agrees with itself and the cast
+# is only a precision floor -- and are left alone here, because removing
+# them changes state dtypes and is the public-contract decision TODO
+# records under "AdaptiveNode dtype policy".
+#
+# BallNode was the exception: update() read p["gravity"] raw while
+# derivatives() pinned it to float32, so the same node integrated two
+# different accelerations depending on which entry point was used.  That
+# is a defect on its own terms, independent of any dtype policy, and it
+# is the MADD-ANO-011/012 pattern reached by a different mechanism.
+
+
+class TestBallNodeAgreesWithItselfAboutGravity:
+    """``update()`` and ``derivatives()`` must integrate the same ``g``."""
+
+    def test_the_two_entry_points_return_the_same_acceleration(self, float64):
+        """Measured disagreement before the fix: 4.196e-07 absolute."""
+        node = BallNode("ball", timestep=0.01, initial_position=10.0,
+                        initial_velocity=0.0, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=jnp.float64),
+                 "velocity": jnp.asarray(0.0, dtype=jnp.float64)}
+        dt = 1.0
+        explicit = float(node.update(state, {}, dt)["velocity"]) / dt
+        from_derivatives = float(node.derivatives(state, {})["velocity"])
+        assert explicit == from_derivatives, (
+            f"update() integrates g = {explicit!r} while derivatives() "
+            f"reports {from_derivatives!r}: the node holds two values of g, "
+            f"differing by {abs(explicit - from_derivatives):.3e}"
+        )
+        assert from_derivatives == -9.81
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_the_acceleration_follows_the_dtype_of_the_velocity(
+        self, float64, dtype,
+    ):
+        """It follows the state rather than pinning a dtype of its own."""
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=dtype),
+                 "velocity": jnp.asarray(0.0, dtype=dtype)}
+        derivatives = node.derivatives(state, {})
+        assert derivatives["velocity"].dtype == dtype
+        assert derivatives["position"].dtype == dtype
+
+    def test_a_float32_carry_is_not_promoted_by_the_derivatives(self, float64):
+        """The promotion consequence, measured rather than assumed.
+
+        Following the state cannot widen anything: a float32 state under
+        ``jax_enable_x64`` steps to float32, which is what
+        ``lax.scan``'s carry requires.  Dropping the cast entirely --
+        rather than following the state -- would have returned a
+        float64 ``g`` here and changed the carry dtype mid-scan, which
+        is the breakage the AdaptiveNode dtype policy records.
+        """
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=jnp.float32),
+                 "velocity": jnp.asarray(0.0, dtype=jnp.float32)}
+        stepped = euler_step(node.derivatives, state, {}, 0.01)
+        assert jnp.asarray(stepped["velocity"]).dtype == jnp.float32
+        assert jnp.asarray(stepped["position"]).dtype == jnp.float32
+
+    def test_the_default_precision_result_is_unchanged(self):
+        """No float32 user sees anything move.
+
+        Outside ``jax_enable_x64`` the state is float32 and so is ``g``,
+        exactly as when the cast was unconditional.
+        """
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        derivatives = node.derivatives(node.initial_state(), {})
+        assert derivatives["velocity"].dtype == jnp.float32
+        assert float(derivatives["velocity"]) == float(
+            jnp.asarray(-9.81, dtype=jnp.float32)
+        )

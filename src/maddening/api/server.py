@@ -461,9 +461,10 @@ class SimulationServer:
         self.registry = dict(node_registry)
         self.auth = APIAuth(bind_host=bind_host, token=api_token)
         self.gm = graph_manager if graph_manager is not None else GraphManager()
-        # /checkpoint/{save,load} only touch files under this directory
-        # (an unauthenticated client must not choose arbitrary server
-        # paths).  Bind the server to localhost or put it behind auth.
+        # /checkpoint/{save,load} only touch files under this directory:
+        # a client must not choose arbitrary server paths.  That holds
+        # whether or not the bearer token is enforced -- on a loopback
+        # bind the caller is anyone with a shell on this box.
         self.checkpoint_root = Path(checkpoint_root or Path.cwd() / "checkpoints").resolve()
         self.relay = StateRelay()
         self.runner: Optional[RealtimeRunner] = None
@@ -675,11 +676,11 @@ class SimulationServer:
         def viz_auth_js():
             """Serve the token helper the bundled pages load.
 
-            Static and secret-free: it *finds* a token (query string,
-            then ``sessionStorage``, then a prompt), it never contains
-            one.  That is why it, and the pages that load it, are served
-            without a credential -- otherwise the page that asks for the
-            token could not load.
+            Static and secret-free: it *finds* a token (a ``#token=``
+            fragment, then ``?token=``, then ``sessionStorage``, then a
+            prompt), it never contains one.  That is why it, and the
+            pages that load it, are served without a credential --
+            otherwise the page that asks for the token could not load.
             """
             js_path = _STATIC_DIR / "auth.js"
             return PlainTextResponse(

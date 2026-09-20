@@ -545,3 +545,177 @@ anomalies:
     verification:
       - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-010"
+    title: "BallNode's declared discretisation is forward Euler; the implementation is semi-implicit Euler"
+    description: >
+      `BallNode.meta.discretization` reads "Forward Euler (explicit,
+      1st-order)", and `meta.limitations` repeats it ("Forward Euler is only
+      1st-order").  `BallNode.update` advances the velocity first and then
+      advances the position with the *already-updated* velocity, which is
+      semi-implicit (symplectic) Euler:
+
+          velocity = state["velocity"] + gravity * dt
+          position = state["position"] + velocity * dt
+
+      Reproduced at 0.4.0.dev0 from rest at the origin with gravity -9.81 and
+      dt = 0.1.  Forward Euler leaves the position at 0.0 after the first step
+      (x1 = x0 + dt*v0); `update` returns -0.0981 = g*dt^2, and a forward-Euler
+      step built from the node's own `derivatives()`
+      (`maddening.core.simulation.integrators.euler_step`) returns 0.0.  The
+      two documented ways to advance the same node therefore disagree at
+      O(dt), with opposite signs of the leading position error (-g*T*dt/2 for
+      forward Euler, +g*T*dt/2 for the scheme implemented).
+      The declared order is unaffected and was verified independently: both
+      schemes are 1st order, and MADD-VER-010 measures 1.002 against the
+      declared 1.0.  An order study cannot see this defect, which is why it is
+      pinned by a scheme-identity test rather than by a convergence ladder.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The scheme named in `NodeMeta.discretization` is the detailed-design
+      record an IEC 62304 Clause 5.4 review reads, and it is also what a user
+      derives an error budget from.  A reviewer who budgets from forward Euler
+      gets the wrong sign for the position error and the wrong long-run energy
+      behaviour: symplectic Euler does not drift secularly in energy the way
+      `meta.limitations` says this node does, so the recorded limitation
+      describes a failure mode the code does not have while leaving the one it
+      does have unstated.  Nothing computed is incorrect -- the order claim
+      holds -- so the relevance is to the traceability record and to anyone
+      choosing between `update()` and `integrate_node(..., method="euler")`,
+      which do not agree.
+    affected_components:
+      - "maddening.nodes.ball.BallNode.update"
+      - "maddening.nodes.ball.BallNode.derivatives"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Treat `BallNode.update` as semi-implicit Euler: the position error is
+      +g*T*dt/2, not -g*T*dt/2, and the scheme is symplectic for the
+      collision-free regime.  Do not mix `update()` and
+      `integrate_node(node, ..., method="euler")` in one study; they are
+      different schemes of the same order.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_mms_order_ode_nodes.py::test_ball_implements_the_scheme_its_metadata_names"
+      - "tests/verification/test_mms_order_ode_nodes.py::test_ball_converges_at_its_declared_temporal_order"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-011"
+    title: "HeartPumpNode samples its cardiac inflow at the end of the step, disagreeing with its own derivatives()"
+    description: >
+      `HeartPumpNode.meta.discretization` reads "Forward Euler (explicit,
+      1st-order)", which places every right-hand-side term at the start of the
+      step.  `HeartPumpNode.update` advances the cardiac phase first and then
+      evaluates the inflow waveform at the *new* phase, while the outflow term
+      uses the *old* pressure:
+
+          phase_new = fmod(phase + dt * hr / 60, 1)
+          Q_heart   = _cardiac_output(phase_new, ...)      # t + dt
+          Q_out     = (P_art - P_downstream) / R           # t
+          P_new     = P_art + dt * (Q_heart - Q_out) / C
+
+      The node's own `derivatives()` -- the right-hand side used by
+      `maddening.core.simulation.integrators.integrate_node` and by
+      `implicit_residual()` -- evaluates the same waveform at the *old* phase.
+      So the node's explicit path and its derivatives()-based paths integrate
+      inflow waveforms offset by one timestep.
+      Reproduced at 0.4.0.dev0 with the default parameters, dt = 0.05 s,
+      P = 80, phase = 0: `update` reports a flow rate of 193.4 (the waveform at
+      phase = 0.06) and P1 = 85.67, while forward Euler of `derivatives()`
+      starts from Q_heart = 0 at phase 0 and gives P1 = 76.0.  The offset is
+      one step of systolic flow, which at the top of the validated heart-rate
+      range (180 bpm) and a coarse timestep is a material fraction of systole.
+      Both samplings are 1st order, so the declared order is unaffected and was
+      verified independently: MADD-VER-012 measures 1.000 against the declared
+      1.0.  An order study cannot see this defect.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The pressure waveform this node produces is its entire output, and the
+      timing of systole within it is what a downstream vascular model is driven
+      by.  Shifting the inflow by one timestep shifts that timing, silently and
+      by an amount that grows with the timestep -- and unlike a stability
+      failure there is no indication in the result, which stays smooth and
+      physiologically plausible.  The relevance depends on whether the
+      downstream product reads waveform timing (rather than cycle-averaged
+      pressure) and on how coarse its timestep is; the node records no
+      validated timestep range at all, so there is nothing bounding it.
+      Compounding this, a user who switches between `update()` and
+      `integrate_node()`/`implicit_residual()` -- both documented paths through
+      this node -- changes the waveform they are integrating, not only the
+      integration order.
+    affected_components:
+      - "maddening.nodes.heart_pump.HeartPumpNode.update"
+      - "maddening.nodes.heart_pump.HeartPumpNode.derivatives"
+      - "maddening.nodes.heart_pump._cardiac_output"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Keep the timestep small relative to systole -- with the default
+      systole_fraction of 0.35 at 72 bpm, systole lasts 0.29 s, so dt <= 1e-3 s
+      keeps the offset under 0.5% of it -- and do not compare a run made with
+      `update()` against one made with `integrate_node()` or the implicit
+      solver, which sample the waveform one step earlier.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_implements_the_scheme_its_metadata_names"
+      - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_converges_at_its_declared_temporal_order"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-012"
+    title: "HeartPumpNode downcasts its backpressure boundary input to float32"
+    description: >
+      `HeartPumpNode.update` and `HeartPumpNode.derivatives` both run
+      `P_downstream = jnp.asarray(P_downstream, dtype=jnp.float32)` on the
+      `backpressure` boundary input, unconditionally.  `backpressure` is the
+      node's coupling variable -- the pressure fed back from a downstream
+      domain such as an LBM outlet -- so the coupling is pinned to single
+      precision whatever the caller's precision is.  No other MADDENING node
+      downcasts a boundary input this way; HeatNode, LBMNode and RigidBodyNode
+      all run in float64 under `jax_enable_x64`, which is what their MMS
+      studies rely on.
+      Two consequences, both reproduced at 0.4.0.dev0 under
+      `jax_enable_x64`.  (1) Precision: two backpressures differing by 1e-6 at
+      100 units -- about 1/7 of a float32 ulp there, and 5e8 float64 ulps --
+      produce bit-identical arterial pressures.  On a manufactured-solution
+      ladder with the inflow waveform disabled this puts a floor under the
+      study: the observed order is 1.03, 0.78, -1.18, -0.52 over a
+      1000/4000/16000/64000/256000 step ladder, turning over at about 6e-6
+      relative error, which the harness reports as a non-converging ladder.
+      MADD-VER-012 therefore stops at 1600 steps and 1.9e-3 relative error.
+      (2) Dtype: a *weakly* typed float64 pressure -- which is what
+      `jnp.asarray(80.0)` produces under `jax_enable_x64`, the natural way to
+      write a state by hand -- loses the promotion against the node's strong
+      float32 and the whole pressure update, and the state field `update()`
+      returns, becomes float32.  The returned state is then a different type
+      from the one passed in, and `jax.lax.scan`/`fori_loop` rejects the carry
+      with a type-mismatch error that names neither this node nor the cast.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The truncation is silent and sits exactly on the variable that carries
+      information between coupled domains, so it limits how tightly a coupled
+      pressure iteration can converge and how accurately a gradient can be
+      taken through that interface -- for parameter identification against
+      measured pressure, the adjoint with respect to backpressure is computed
+      in single precision regardless of the precision the rest of the fit runs
+      in.  At the framework's float32 default the truncation changes nothing,
+      which is why the severity is minor; it matters to anyone who enables
+      float64 precisely in order to get a converged or verifiable result, and
+      to any future convergence evidence for this node, whose achievable
+      accuracy is capped at around 1e-6 relative by the cast alone.  The dtype
+      consequence is loud (an exception) rather than silent.
+    affected_components:
+      - "maddening.nodes.heart_pump.HeartPumpNode.update"
+      - "maddening.nodes.heart_pump.HeartPumpNode.derivatives"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Run this node at the framework default of float32, where the cast is a
+      no-op, or keep any float64 study above about 1e-5 relative error.  Pass
+      the pressure state as a *strongly* typed array
+      (`jnp.asarray(p, dtype=jnp.float64)`) to avoid the dtype demotion inside
+      a scanned loop.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_resolves_a_backpressure_difference_below_float32"
+      - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given"
+    github_issue: null

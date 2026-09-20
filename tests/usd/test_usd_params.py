@@ -183,26 +183,44 @@ def test_an_unknown_dtype_on_a_stage_warns_and_falls_back():
     assert np.dtype(reloaded._external_inputs[0].dtype) == np.dtype("float32")
 
 
-def test_a_non_finite_param_makes_the_params_attribute_non_standard_json():
-    """The USD third of ``MADD-ANO-006``, pinned.
+def _refuse(token):
+    """A strict reader: RFC 8259 has no literal for these."""
+    raise ValueError(f"non-standard JSON token {token!r}")
 
-    ``maddening:paramsJson`` is written with ``json.dumps``, whose default
-    ``allow_nan=True`` emits the bare tokens ``NaN`` / ``Infinity``.
-    Python reads them back, so the stage round-trips exactly; they are not
-    JSON, so any other reader of the ``.usda`` rejects the attribute.
 
-    The anomaly is **open**: closing it means choosing an encoding for a
-    format that has shipped, and no existing reader of a MADDENING stage
-    would understand a tagged one.  This test states the behaviour the
-    registry documents, so that changing it fails here and the registry
-    entry is updated with it.
+def _strict_loads(text):
+    return json.loads(text, parse_constant=_refuse)
+
+
+class _NonFiniteArrayNode(SpringDamperNode):
+    """A spring carrying a diverged array and an empty one in ``params``."""
+
+    def __init__(self, name, timestep, *, diverged=None, empty_2d=None, **kwargs):
+        super().__init__(name, timestep, **kwargs)
+        self.params["diverged"] = np.asarray(
+            [np.inf, 1.0, np.nan] if diverged is None else diverged)
+        self.params["empty_2d"] = np.asarray(
+            np.zeros((0, 3)) if empty_2d is None else empty_2d)
+
+
+_NON_FINITE_NODE_QUALNAME = (
+    f"{_NonFiniteArrayNode.__module__}.{_NonFiniteArrayNode.__qualname__}")
+
+
+def test_a_non_finite_param_writes_a_stage_a_strict_reader_accepts():
+    """The USD third of ``MADD-ANO-006``.
+
+    ``maddening:paramsJson`` used to be written with ``json.dumps`` at its
+    default ``allow_nan=True``, so a diverged param went onto the stage as
+    the bare token ``Infinity``.  Python read it back, which is why
+    nothing here noticed; every other reader of the ``.usda`` rejected the
+    attribute.  It is now the quoted token, which is JSON.
     """
-    def _refuse(token):
-        raise ValueError(f"non-standard JSON token {token!r}")
-
     gm = GraphManager()
     node = SpringDamperNode("s", 0.01, stiffness=30.0)
     node.params["cap"] = float("inf")
+    node.params["floor"] = float("-inf")
+    node.params["bad"] = float("nan")
     gm.add_node(node)
 
     stage = Usd.Stage.CreateInMemory()
@@ -210,23 +228,88 @@ def test_a_non_finite_param_makes_the_params_attribute_non_standard_json():
     stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
         "maddening:paramsJson").Get()
 
-    assert "Infinity" in stored, (
-        "MADD-ANO-006 says the stage carries the bare token; if that "
-        "changed, update the registry entry"
-    )
-    assert json.loads(stored)["cap"] == float("inf")     # Python reads it back
-    with pytest.raises(ValueError):
-        json.loads(stored, parse_constant=_refuse)       # a strict reader does not
+    parsed = _strict_loads(stored)
+    assert parsed["cap"] == "Infinity"
+    assert parsed["floor"] == "-Infinity"
+    assert parsed["bad"] == "NaN"
+
+
+def test_a_non_finite_array_param_round_trips_beside_a_zero_size_one():
+    """The two awkward shapes together, through a real save/load.
+
+    A zero-size array carries no value to encode and its shape is
+    recorded in a separate attribute; the non-finite entries beside it
+    must still be found by the walk and come back as the same floats.
+    """
+    gm = GraphManager()
+    gm.add_node(_NonFiniteArrayNode("s", 0.01, stiffness=30.0))
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+
+    stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
+        "maddening:paramsJson").Get()
+    assert _strict_loads(stored)["diverged"] == ["Infinity", 1.0, "NaN"]
+
+    reloaded = load_graph_from_usd(
+        stage, node_registry={_NON_FINITE_NODE_QUALNAME: _NonFiniteArrayNode})
+    params = reloaded.get_node("s").params
+    back = np.asarray(params["diverged"])
+    assert np.isposinf(back[0]) and back[1] == 1.0 and np.isnan(back[2])
+    assert np.asarray(params["empty_2d"]).shape == (0, 3)
+
+
+def test_an_infinite_param_spec_bound_is_written_as_a_quoted_token():
+    """The override attribute is JSON too, and carries ParamSpec bounds."""
+    gm = _gm()
+    gm.set_param_spec("s", "mass", ParamSpec(bounds=(-float("inf"), float("inf"))))
+
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
+        "maddening:paramSpecOverridesJson").Get()
+    assert _strict_loads(stored)["mass"]["bounds"] == ["-Infinity", "Infinity"]
+
+    reloaded = load_graph_from_usd(stage)
+    reloaded.compile()
+    assert reloaded.param_specs()["nodes"]["s"]["mass"].bounds == (
+        -float("inf"), float("inf"))
+
+
+def test_a_stage_written_before_040_still_loads_its_bare_tokens():
+    """Backward compatibility, pinned on a literal attribute value.
+
+    ``json.loads`` parses the bare tokens itself, so the loader needs no
+    special case -- but it must not acquire one that rejects them.
+    """
+    gm = _gm()
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=True))
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    prim = stage.GetPrimAtPath("/Simulation/nodes/s")
+    prim.GetAttribute("maddening:paramsJson").Set(
+        '{"stiffness": Infinity, "damping": NaN, "mass": 1.0, '
+        '"rest_length": 1.0, "initial_position": -Infinity, '
+        '"initial_velocity": 0.0}')
+    prim.GetAttribute("maddening:paramSpecOverridesJson").Set(
+        '{"mass": {"trainable": true, "bounds": [-Infinity, Infinity], '
+        '"transform": null, "description": "", "units": ""}}')
+
+    reloaded = load_graph_from_usd(stage)
+    params = reloaded.get_node("s").params
+    assert float(params["stiffness"]) == float("inf")
+    assert np.isnan(float(params["damping"]))
+    assert float(params["initial_position"]) == -float("inf")
+    reloaded.compile()
+    assert reloaded.param_specs()["nodes"]["s"]["mass"].bounds == (
+        -float("inf"), float("inf"))
 
 
 def test_a_finite_graph_writes_strict_json_to_the_stage():
-    """The anomaly is confined to non-finite numbers, not to the attribute."""
-    def _refuse(token):
-        raise ValueError(f"non-standard JSON token {token!r}")
-
+    """The fix is confined to non-finite numbers, not to the attribute."""
     stage = Usd.Stage.CreateInMemory()
     save_graph_to_usd(_gm(), stage)
     stored = stage.GetPrimAtPath("/Simulation/nodes/s").GetAttribute(
         "maddening:paramsJson").Get()
 
-    assert json.loads(stored, parse_constant=_refuse)["stiffness"] == 30.0
+    assert _strict_loads(stored)["stiffness"] == 30.0

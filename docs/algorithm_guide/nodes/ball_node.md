@@ -47,7 +47,7 @@ order is unaffected, but the sign of the leading position error and the
 long-run energy behaviour are not what the metadata implies, and
 `update()` does not agree with
 `maddening.core.simulation.integrators.integrate_node(node, ..., method="euler")`.
-Recorded as **MADD-ANO-010**.
+Recorded as **MADD-ANO-011**.
 ```
 
 ## Implementation Mapping
@@ -83,7 +83,7 @@ Recorded as **MADD-ANO-010**.
 3. **Tunnelling**: contact is tested once per step, so $|v|\Delta t$ larger than the gap passes through the surface.
 4. **No order across a contact**: the restitution law is non-smooth, so the declared order does not apply to a step containing a bounce.
 5. `derivatives()` ignores injected `params` and returns the gravity as float32.
-6. **Scheme/metadata mismatch**: MADD-ANO-010, above.
+6. **Scheme/metadata mismatch**: MADD-ANO-011, above.
 
 ## Stability Conditions
 
@@ -121,11 +121,11 @@ The collision-free scheme is unconditionally stable: the acceleration does not d
 
 - Benchmark: `MADD-VER-010` — observed temporal order of accuracy by the Method of Manufactured Solutions, in the collision-free regime. Because the node exposes no force input, the manufactured acceleration is injected as a time-varying `gravity` parameter. Over a 100/200/400/800 step ladder at fixed final time, in float64, the observed order over the finest pair is **1.002** against the declared 1.0.
 - Test file: `tests/verification/test_mms_order_ode_nodes.py`
-- Anomaly: `MADD-ANO-010`, pinned as a strict xfail in the same file.
+- Anomaly: `MADD-ANO-011`, pinned as a strict xfail in the same file.
 
 ## Changelog
 
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2025-03-01 | Initial implementation |
-| 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-010); MADD-ANO-010 recorded |
+| 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-010); MADD-ANO-011 recorded |

@@ -41,13 +41,13 @@ declared order.  Each is pinned below as a strict xfail so that fixing
 the node turns it into an XPASS that has to be dealt with:
 
 * ``BallNode`` names forward Euler and implements semi-implicit
-  (symplectic) Euler (MADD-ANO-010);
+  (symplectic) Euler (MADD-ANO-011);
 * ``HeartPumpNode`` names forward Euler and samples its inflow
   waveform at the *end* of the step, disagreeing with its own
-  ``derivatives()`` (MADD-ANO-011);
+  ``derivatives()`` (MADD-ANO-012);
 * ``HeartPumpNode`` downcasts ``backpressure`` to float32, which puts
   a floor under any convergence study or adjoint through that coupling
-  variable (MADD-ANO-012).
+  variable (MADD-ANO-013).
 
 The first two are invisible to an order study -- forward and
 semi-implicit Euler are both 1st order -- which is why each has its
@@ -460,7 +460,7 @@ def _hp_state(pressure):
     typed float64 pressure meets the node's hard float32 cast of
     ``backpressure`` and is silently demoted, which makes the state
     returned by ``update()`` a different type from the one passed in
-    and fails inside ``lax.fori_loop``.  That is MADD-ANO-012, pinned
+    and fails inside ``lax.fori_loop``.  That is MADD-ANO-013, pinned
     below.
     """
     return {
@@ -505,7 +505,7 @@ def _heart_pump_error(n_steps, *, t_final=1.0, dt_map=None, freeze_source=False)
         "Observed temporal order over the finest pair of a 200/400/800/1600 "
         "step ladder within [-0.25, +1.0] of the declared 1.0 "
         "(measured: 1.000).  The ladder stops at 1600 steps: the float32 "
-        "downcast of backpressure (MADD-ANO-012) turns it over below about "
+        "downcast of backpressure (MADD-ANO-013) turns it over below about "
         "6e-6 relative error, two orders of magnitude finer than the 1.9e-3 "
         "this ladder reaches."
     ),
@@ -673,8 +673,8 @@ class TestTheLaddersCanFail:
         """The limit of the method, asserted rather than assumed.
 
         Both schemes are 1st order, so swapping one for the other leaves
-        the measured order inside the band.  That is why MADD-ANO-010
-        and MADD-ANO-011 -- both of which are exactly this swap -- are
+        the measured order inside the band.  That is why MADD-ANO-011
+        and MADD-ANO-012 -- both of which are exactly this swap -- are
         pinned by the scheme-identity tests below and not by a ladder.
         A reader who takes "measured 1.0" as evidence that the node
         implements the scheme its metadata names is reading more into
@@ -754,7 +754,7 @@ def _forward_euler_agrees(node, state, boundary_inputs, dt, field):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "MADD-ANO-010: BallNode.meta.discretization names 'Forward Euler "
+        "MADD-ANO-011: BallNode.meta.discretization names 'Forward Euler "
         "(explicit, 1st-order)', but update() advances the position with the "
         "already-updated velocity -- semi-implicit (symplectic) Euler.  A "
         "forward-Euler step built from the node's own derivatives() gives a "
@@ -779,7 +779,7 @@ def test_ball_implements_the_scheme_its_metadata_names():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "MADD-ANO-011: HeartPumpNode.meta.discretization names 'Forward Euler "
+        "MADD-ANO-012: HeartPumpNode.meta.discretization names 'Forward Euler "
         "(explicit, 1st-order)', but update() advances the cardiac phase "
         "first and evaluates the inflow waveform at the END of the step, "
         "while the node's own derivatives() evaluates it at the start.  The "
@@ -796,7 +796,7 @@ def test_heart_pump_implements_the_scheme_its_metadata_names():
              "flow_rate": jnp.asarray(0.0, dtype=jnp.float32)}
     assert _forward_euler_agrees(node, state, {}, 0.05, "arterial_pressure"), (
         "update() is not the forward-Euler step of the node's own "
-        "derivatives(); see MADD-ANO-011"
+        "derivatives(); see MADD-ANO-012"
     )
 
 
@@ -821,14 +821,14 @@ def test_spring_implements_the_semi_implicit_scheme_its_metadata_names():
 
 
 # --------------------------------------------------------------------------
-# MADD-ANO-012: the float32 downcast of backpressure
+# MADD-ANO-013: the float32 downcast of backpressure
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "MADD-ANO-012: HeartPumpNode.update casts backpressure to float32 "
+        "MADD-ANO-013: HeartPumpNode.update casts backpressure to float32 "
         "unconditionally, so a difference below float32 resolution in the "
         "coupling variable is discarded even under jax_enable_x64.  That "
         "puts a floor under any convergence study or adjoint through the "
@@ -849,14 +849,14 @@ def test_heart_pump_resolves_a_backpressure_difference_below_float32(float64):
     )["arterial_pressure"]
     assert float(coarse) != float(fine), (
         "the two backpressures differ by 1e-6 and the node returned "
-        f"bit-identical pressures ({float(coarse)!r}); see MADD-ANO-012"
+        f"bit-identical pressures ({float(coarse)!r}); see MADD-ANO-013"
     )
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "MADD-ANO-012: the same float32 cast demotes a weakly-typed float64 "
+        "MADD-ANO-013: the same float32 cast demotes a weakly-typed float64 "
         "pressure carry -- which is what jnp.asarray(80.0) produces under "
         "jax_enable_x64 -- to float32, so update() returns a state of a "
         "different dtype from the one it was given and lax.scan/fori_loop "
@@ -871,5 +871,5 @@ def test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given(float6
     out = node.update(state, {}, 0.05)
     assert out["arterial_pressure"].dtype == jnp.float64, (
         f"a float64 pressure came back as {out['arterial_pressure'].dtype}; "
-        "see MADD-ANO-012"
+        "see MADD-ANO-013"
     )

@@ -56,11 +56,11 @@ The node's own `derivatives()` evaluates the same waveform at $\phi^n$, so
 the explicit path and the `derivatives()`-based paths
 (`integrate_node`, `implicit_residual`) integrate inflow waveforms offset
 by one timestep.  Both samplings are 1st order, so the declared order is
-unaffected.  Recorded as **MADD-ANO-011**.
+unaffected.  Recorded as **MADD-ANO-012**.
 
 `backpressure` is also cast to float32 unconditionally, which pins the
 coupling variable to single precision under any caller precision
-(**MADD-ANO-012**).
+(**MADD-ANO-013**).
 ```
 
 ## Implementation Mapping
@@ -70,10 +70,10 @@ coupling variable to single precision under any caller precision
 | $\dot\phi = \text{HR}/60$ (cycle phase) | `maddening.nodes.heart_pump.HeartPumpNode.update` | `jnp.fmod(phase + dt * hr / 60, 1.0)`; exact, not approximated |
 | $Q_{\text{heart}}(\phi)$ (cardiac inflow) | `maddening.nodes.heart_pump._cardiac_output` | Half-sine during systole, zero otherwise, branch-free via `jnp.where` |
 | $Q_{\max}$ from stroke volume | `maddening.nodes.heart_pump.HeartPumpNode._compute_q_max` | $\text{SV}\,\pi f / (2 f_s)$ |
-| $(P_{\text{art}} - P_{\text{down}})/R$ (outflow) | `maddening.nodes.heart_pump.HeartPumpNode.update` | `Q_out`; `P_downstream` is cast to float32 (MADD-ANO-012) |
+| $(P_{\text{art}} - P_{\text{down}})/R$ (outflow) | `maddening.nodes.heart_pump.HeartPumpNode.update` | `Q_out`; `P_downstream` is cast to float32 (MADD-ANO-013) |
 | $P_{\text{down}}$ (downstream pressure) | `maddening.nodes.heart_pump.HeartPumpNode.boundary_input_spec` | `backpressure`; falls back to `venous_pressure` when absent |
 | Time integration of $P$ | `maddening.nodes.heart_pump.HeartPumpNode.update` | `P_art + dP_dt * dt` |
-| Continuous right-hand side | `maddening.nodes.heart_pump.HeartPumpNode.derivatives` | Samples the inflow at $\phi^n$, not $\phi^{n+1}$ (MADD-ANO-011) |
+| Continuous right-hand side | `maddening.nodes.heart_pump.HeartPumpNode.derivatives` | Samples the inflow at $\phi^n$, not $\phi^{n+1}$ (MADD-ANO-012) |
 | Backward-Euler residual | `maddening.nodes.heart_pump.HeartPumpNode.implicit_residual` | $x^{n+1} - x^n - \Delta t f(x^{n+1})$ |
 | $P_{\text{art}}$ published downstream | `maddening.nodes.heart_pump.HeartPumpNode.compute_boundary_fluxes` | `inlet_pressure` |
 
@@ -101,8 +101,8 @@ coupling variable to single precision under any caller precision
 1. **1st-order integration**: the pressure error is $O(\Delta t)$
 2. **No stability check on $\Delta t$** relative to the $RC$ time constant; forward Euler on this ODE is stable only for $\Delta t < 2RC$, and nothing enforces it
 3. **Negative pressures** are reachable with a large $\Delta t$ or a low compliance
-4. **Source sampled at the end of the step**: MADD-ANO-011, above
-5. **`backpressure` truncated to float32**: MADD-ANO-012, above. A float64 convergence study is floored at about $10^{-6}$ relative error, and a weakly typed float64 pressure state is demoted to float32 by the same cast, which makes `lax.scan` reject the carry
+4. **Source sampled at the end of the step**: MADD-ANO-012, above
+5. **`backpressure` truncated to float32**: MADD-ANO-013, above. A float64 convergence study is floored at about $10^{-6}$ relative error, and a weakly typed float64 pressure state is demoted to float32 by the same cast, which makes `lax.scan` reject the carry
 6. `derivatives()` ignores injected `params`
 7. The inflow waveform is continuous but has a corner at the systole/diastole transition, so it is not $C^1$; higher-order integrators would not recover their order across it
 
@@ -114,7 +114,7 @@ $$
 \Delta t < 2 R C
 $$
 
-and non-oscillatory for $\Delta t < RC$. With the defaults ($R = C = 1$) that is a 2-second bound, so stability is rarely the binding constraint; accuracy relative to the systolic pulse is (see the workaround recorded with MADD-ANO-011).
+and non-oscillatory for $\Delta t < RC$. With the defaults ($R = C = 1$) that is a 2-second bound, so stability is rarely the binding constraint; accuracy relative to the systolic pulse is (see the workaround recorded with MADD-ANO-012).
 
 ## State Variables
 
@@ -156,13 +156,13 @@ and non-oscillatory for $\Delta t < RC$. With the defaults ($R = C = 1$) that is
 
 ## Verification Evidence
 
-- Benchmark: `MADD-VER-012` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured arterial pressure history is injected through `backpressure`, which enters the outflow linearly, so the downstream pressure that makes the trajectory exact is available in closed form. Over a 200/400/800/1600 step ladder across one second of cardiac cycles, in float64, the observed order over the finest pair is **1.000** against the declared 1.0. The ladder stops at 1600 steps because MADD-ANO-012 turns it over below about $6 \times 10^{-6}$ relative error, two orders of magnitude finer than the $1.9 \times 10^{-3}$ this ladder reaches.
+- Benchmark: `MADD-VER-012` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured arterial pressure history is injected through `backpressure`, which enters the outflow linearly, so the downstream pressure that makes the trajectory exact is available in closed form. Over a 200/400/800/1600 step ladder across one second of cardiac cycles, in float64, the observed order over the finest pair is **1.000** against the declared 1.0. The ladder stops at 1600 steps because MADD-ANO-013 turns it over below about $6 \times 10^{-6}$ relative error, two orders of magnitude finer than the $1.9 \times 10^{-3}$ this ladder reaches.
 - Test file: `tests/verification/test_mms_order_ode_nodes.py`
-- Anomalies: `MADD-ANO-011` and `MADD-ANO-012`, both pinned as strict xfails in the same file.
+- Anomalies: `MADD-ANO-012` and `MADD-ANO-013`, both pinned as strict xfails in the same file.
 
 ## Changelog
 
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2025-03-01 | Initial implementation |
-| 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-012); MADD-ANO-011 and MADD-ANO-012 recorded |
+| 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-012); MADD-ANO-012 and MADD-ANO-013 recorded |

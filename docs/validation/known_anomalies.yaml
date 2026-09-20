@@ -546,7 +546,7 @@ anomalies:
       - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-010"
+  - anomaly_id: "MADD-ANO-011"
     title: "BallNode's declared discretisation is forward Euler; the implementation is semi-implicit Euler"
     description: >
       `BallNode.meta.discretization` reads "Forward Euler (explicit,
@@ -600,7 +600,7 @@ anomalies:
       - "tests/verification/test_mms_order_ode_nodes.py::test_ball_converges_at_its_declared_temporal_order"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-011"
+  - anomaly_id: "MADD-ANO-012"
     title: "HeartPumpNode samples its cardiac inflow at the end of the step, disagreeing with its own derivatives()"
     description: >
       `HeartPumpNode.meta.discretization` reads "Forward Euler (explicit,
@@ -661,7 +661,7 @@ anomalies:
       - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_converges_at_its_declared_temporal_order"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-012"
+  - anomaly_id: "MADD-ANO-013"
     title: "HeartPumpNode downcasts its backpressure boundary input to float32"
     description: >
       `HeartPumpNode.update` and `HeartPumpNode.derivatives` both run

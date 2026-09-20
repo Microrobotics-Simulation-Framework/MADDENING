@@ -421,7 +421,7 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
-- MADD-ANO-010/011/012 (BallNode, HeartPumpNode, all open): both nodes name
+- MADD-ANO-011/011/012 (BallNode, HeartPumpNode, all open): both nodes name
   forward Euler and implement something else, and `backpressure` is truncated to
   float32 -- read the scheme from the algorithm guide, not from `discretization`
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which

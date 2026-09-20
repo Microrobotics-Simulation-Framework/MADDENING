@@ -110,9 +110,9 @@ class HeartPumpNode(SimulationNode):
                 "evaluates the inflow waveform at the *end* of the step, "
                 "while the node's own ``derivatives()`` evaluates it at the "
                 "start, so the two disagree at O(dt) in the source term "
-                "(MADD-ANO-011).  Both samplings are 1st order.  The "
+                "(MADD-ANO-012).  Both samplings are 1st order.  The "
                 "measured order is also floored by the float32 downcast of "
-                "``backpressure`` (MADD-ANO-012), which caps the usable "
+                "``backpressure`` (MADD-ANO-013), which caps the usable "
                 "refinement ladder."
             ),
         ),

@@ -58,7 +58,7 @@ class BallNode(SimulationNode):
                 "forward Euler ``discretization`` above names: the position "
                 "update uses the already-updated velocity, so it disagrees "
                 "with a forward-Euler step built from this node's own "
-                "``derivatives()`` at O(dt).  See MADD-ANO-010.  Both "
+                "``derivatives()`` at O(dt).  See MADD-ANO-011.  Both "
                 "schemes are 1st order, which is why the declared order is "
                 "unaffected.  The order claim also covers the smooth "
                 "(collision-free) regime only: a ``table_position`` contact "

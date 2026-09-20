@@ -101,7 +101,8 @@ bug.  Almost everything encodes at its write boundary, inside
 `MappingSpec.to_dict()` and `ParamSpec.to_dict()` all hand it plain
 floats.  `GraphManager.to_dict()` is the exception: it encodes the whole
 assembled config itself, so that plain `json.dumps` of the result is
-valid.  That result, and anything read back out of a written config, is
+valid.  That result, and anything plain `json.loads` reads back out of a
+written config (`json_codec.loads` decodes, so its result is raw), is
 therefore *already encoded* and is written with `json.dumps` or
 `json_codec.dumps_encoded` — never `json_codec.dumps`, which would
 encode it a second time and refuse its own tokens.  Reading composes

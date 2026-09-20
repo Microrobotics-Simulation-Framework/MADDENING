@@ -50,7 +50,8 @@ frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()`` all hand
 :func:`dumps` plain floats.  ``GraphManager.to_dict()`` is the one that
 does not: it encodes the whole assembled tree itself, so that plain
 ``json.dumps`` of a config is valid.  Its result, and anything read back
-out of a written config or a ``paramsJson`` attribute, is therefore
+out of a written config or a ``paramsJson`` attribute with plain
+``json.loads`` (not :func:`loads`, which decodes), is therefore
 *already encoded* and is written with :func:`dumps_encoded` or plain
 ``json.dumps``, never with :func:`dumps`, which would encode it again
 and refuse its own output.  :func:`decode_non_finite` *is* idempotent
@@ -240,8 +241,9 @@ def dumps(obj: Any, **kwargs: Any) -> str:
     FMI frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()``
     all produce plain floats and encode here.  A document that has
     already been through :func:`encode_non_finite` -- what
-    ``GraphManager.to_dict()`` returns, and what comes back out of a
-    written config -- goes to :func:`dumps_encoded` instead: encoding is
+    ``GraphManager.to_dict()`` returns, and what plain ``json.loads``
+    reads back out of a written config -- goes to :func:`dumps_encoded`
+    instead: encoding is
     not idempotent, so ``dumps`` would walk it a second time, meet the
     tokens the first walk wrote and refuse them as ambiguous strings.
 
@@ -281,7 +283,8 @@ def dumps_encoded(obj: Any, **kwargs: Any) -> str:
     The write boundary for the documents that were encoded as they were
     built -- in this tree, ``GraphManager.to_dict()``, which encodes the
     assembled config so that plain ``json.dumps`` of it is valid, and
-    anything loaded back out of such a config.  Handing one of those to
+    anything plain ``json.loads`` reads back out of such a config
+    (:func:`loads` decodes, so its result is raw).  Handing one of those to
     :func:`dumps` is the natural thing to write and raises, because the
     encoding is not idempotent (see the module docstring); this function
     is that call, spelled so it composes.

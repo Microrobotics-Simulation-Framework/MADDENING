@@ -102,6 +102,7 @@ import time.  Levels:
 | `maddening.nodes.table.TableNode` | stable |
 | `maddening.serialization.json_codec.decode_non_finite` | evolving |
 | `maddening.serialization.json_codec.dumps` | evolving |
+| `maddening.serialization.json_codec.dumps_encoded` | evolving |
 | `maddening.serialization.json_codec.encode_non_finite` | evolving |
 | `maddening.serialization.json_codec.loads` | evolving |
 | `maddening.surrogates.architecture.SurrogateArchitecture` | experimental |
@@ -124,4 +125,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*105 API surfaces registered.*
+*106 API surfaces registered.*

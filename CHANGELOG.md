@@ -235,6 +235,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Audit fixes on the serialisation surfaces** (`MADD-ANO-010`): an FMU or node named
+  `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
+  reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
 - **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
   every stage holds the one value you pass. The arithmetic is unchanged; carry time
   as a state field with derivative 1 to get 4.00 back — see the new solvers guide

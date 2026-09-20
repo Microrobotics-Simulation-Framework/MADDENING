@@ -5,26 +5,39 @@ Drop-in replacement for any physics node: same state dict, same
 boundary_inputs contract, works with jit/scan/grad/vmap.
 """
 
+from collections.abc import Mapping
+from typing import Any, Callable
+
 import jax
 import jax.numpy as jnp
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.stability import stability
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
 
 
 # ------------------------------------------------------------------
 # Built-in integrators for derivative-mode surrogates
 # ------------------------------------------------------------------
 
-def euler_integrator(state: dict, deriv_fn, dt: float) -> dict:
+# shape: state, the deriv_fn arg/result, result are {field: Array} -- TypedDict candidate (phase 3)
+def euler_integrator(
+    state: dict,
+    deriv_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    dt: float,
+) -> dict:
     """Forward Euler: state + dt * d(state)/dt."""
     derivs = deriv_fn(state)
     return {k: state[k] + dt * derivs[k] for k in state}
 
 
-def rk4_integrator(state: dict, deriv_fn, dt: float) -> dict:
+# shape: state, the deriv_fn arg/result, result are {field: Array} -- TypedDict candidate (phase 3)
+def rk4_integrator(
+    state: dict,
+    deriv_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    dt: float,
+) -> dict:
     """Classical 4th-order Runge-Kutta over a state dict."""
     k1 = deriv_fn(state)
     s2 = {k: state[k] + 0.5 * dt * k1[k] for k in state}
@@ -89,12 +102,15 @@ class SurrogateNode(SimulationNode):
         name: str,
         timestep: float,
         architecture: SurrogateArchitecture,
-        weights,
+        weights: PyTree,
         state_spec: dict[str, tuple],
         boundary_spec: dict[str, tuple],
         initial_values: dict,
-        integrator=None,
-    ):
+        integrator: Callable[
+            [dict[str, Any], Callable[[dict[str, Any]], dict[str, Any]], float],
+            dict[str, Any],
+        ] | None = None,
+    ) -> None:
         super().__init__(
             name,
             timestep,
@@ -158,8 +174,14 @@ class SurrogateNode(SimulationNode):
         ]
         return jax.tree_util.tree_unflatten(treedef, merged)
 
+    # shape: params is {weights<leafpath>: Array} -- TypedDict candidate (phase 3)
     def update(
-        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+        self,
+        state: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> dict:
         weights = self._resolve_weights(params)
         arch = self.architecture
@@ -168,7 +190,7 @@ class SurrogateNode(SimulationNode):
             return arch.forward(weights, state, boundary_inputs, dt)
         else:
             # derivative mode: integrate d(state)/dt
-            def deriv_fn(s):
+            def deriv_fn(s: dict[str, Any]) -> dict[str, Any]:
                 return arch.forward(weights, s, boundary_inputs, dt)
             return self._integrator(state, deriv_fn, dt)
 

@@ -6,8 +6,13 @@ thread writes snapshots (fast, lock-protected reference swap); the
 renderer polls ``latest_snapshot()`` at its own cadence.
 """
 
+from __future__ import annotations
+
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
 
 
 class StateRelay:
@@ -21,7 +26,7 @@ class StateRelay:
         simulations where intermediate states are not needed.
     """
 
-    def __init__(self, stride: int = 1):
+    def __init__(self, stride: int = 1) -> None:
         self._lock = threading.Lock()
         self._snapshot: Optional[dict] = None
         self._sim_time: float = 0.0
@@ -37,7 +42,7 @@ class StateRelay:
     def stride(self, value: int) -> None:
         self._stride = max(1, int(value))
 
-    def attach(self, graph_manager) -> None:
+    def attach(self, graph_manager: GraphManager) -> None:
         """Register as an observer on *graph_manager*.
 
         Extracts the common timestep so we can compute ``sim_time``

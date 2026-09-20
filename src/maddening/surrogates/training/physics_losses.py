@@ -20,7 +20,7 @@ Pass as ``physics_loss_fn`` and ``physics_loss_weight`` to
     )
 """
 
-from typing import Callable
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -60,7 +60,14 @@ def residual_loss(update_fn: Callable) -> Callable:
     callable
         Physics loss function with the standard signature.
     """
-    def loss_fn(weights, state, boundary_inputs, pred, dt):
+    # shape: state, boundary_inputs, pred are {field: Array} -- TypedDict candidate (phase 3)
+    def loss_fn(
+        weights: Any,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        pred: dict[str, Any],
+        dt: float,
+    ) -> jax.Array:
         target = update_fn(state, boundary_inputs, dt)
         total = jnp.float32(0.0)
         count = 0
@@ -103,7 +110,14 @@ def energy_conservation_loss(
         PE = lambda s: 9.81 * s["position"]
         loss = energy_conservation_loss(KE, PE)
     """
-    def loss_fn(weights, state, boundary_inputs, pred, dt):
+    # shape: state, boundary_inputs, pred are {field: Array} -- TypedDict candidate (phase 3)
+    def loss_fn(
+        weights: Any,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        pred: dict[str, Any],
+        dt: float,
+    ) -> jax.Array:
         e_before = kinetic_fn(state) + potential_fn(state)
         e_after = kinetic_fn(pred) + potential_fn(pred)
         return (e_after - e_before) ** 2
@@ -131,7 +145,14 @@ def momentum_conservation_loss(
     callable
         Physics loss function.
     """
-    def loss_fn(weights, state, boundary_inputs, pred, dt):
+    # shape: state, boundary_inputs, pred are {field: Array} -- TypedDict candidate (phase 3)
+    def loss_fn(
+        weights: Any,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        pred: dict[str, Any],
+        dt: float,
+    ) -> jax.Array:
         p_before = momentum_fn(state)
         p_after = momentum_fn(pred)
         if force_fn is not None:
@@ -154,7 +175,14 @@ def smoothness_loss() -> Callable:
     callable
         Physics loss function.
     """
-    def loss_fn(weights, state, boundary_inputs, pred, dt):
+    # shape: state, boundary_inputs, pred are {field: Array} -- TypedDict candidate (phase 3)
+    def loss_fn(
+        weights: Any,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        pred: dict[str, Any],
+        dt: float,
+    ) -> jax.Array:
         total = jnp.float32(0.0)
         count = 0
         for k in pred:
@@ -188,7 +216,14 @@ def composite_loss(*loss_fns_and_weights: tuple[Callable, float]) -> Callable:
             (smoothness_loss(), 0.1),
         )
     """
-    def loss_fn(weights, state, boundary_inputs, pred, dt):
+    # shape: state, boundary_inputs, pred are {field: Array} -- TypedDict candidate (phase 3)
+    def loss_fn(
+        weights: Any,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        pred: dict[str, Any],
+        dt: float,
+    ) -> jax.Array:
         total = jnp.float32(0.0)
         for fn, w in loss_fns_and_weights:
             total = total + w * fn(weights, state, boundary_inputs, pred, dt)

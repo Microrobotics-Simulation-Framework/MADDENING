@@ -2,8 +2,10 @@
 SurrogateTrainer -- Optax-based training loop for surrogate models.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +19,11 @@ try:
     import optax
 except ImportError:
     optax = None
+
+if TYPE_CHECKING:
+    from optax import GradientTransformation
+
+    from maddening.surrogates.node import SurrogateNode
 
 PyTree = Any
 
@@ -50,7 +57,14 @@ class TrainResult:
     state_spec: dict
     boundary_spec: dict
 
-    def to_node(self, name, timestep, initial_values, integrator=None):
+    # shape: initial_values is {field: float | Array} -- TypedDict candidate (phase 3)
+    def to_node(
+        self,
+        name: str,
+        timestep: float,
+        initial_values: dict[str, Any],
+        integrator: Optional[Callable] = None,
+    ) -> SurrogateNode:
         """Create a SurrogateNode from this training result."""
         from maddening.surrogates.node import SurrogateNode
         return SurrogateNode(
@@ -87,7 +101,11 @@ class TrainResult:
         )
 
     @staticmethod
-    def load(path: str, architecture: SurrogateArchitecture, rng_key=None):
+    def load(
+        path: str,
+        architecture: SurrogateArchitecture,
+        rng_key: Optional[jax.Array] = None,
+    ) -> TrainResult:
         """Load a TrainResult from a saved checkpoint.
 
         Parameters
@@ -132,11 +150,11 @@ class SurrogateTrainer:
         self,
         architecture: SurrogateArchitecture,
         dataset: SurrogateDataset,
-        optimizer=None,
+        optimizer: Optional[GradientTransformation] = None,
         loss_fn: Optional[Callable] = None,
         physics_loss_fn: Optional[Callable] = None,
         physics_loss_weight: float = 0.0,
-    ):
+    ) -> None:
         _check_optax()
         self.architecture = architecture
         self.dataset = dataset
@@ -149,7 +167,7 @@ class SurrogateTrainer:
         self,
         n_epochs: int,
         batch_size: int = 32,
-        rng_key=None,
+        rng_key: Optional[jax.Array] = None,
         validation_split: float = 0.1,
         callback: Optional[Callable] = None,
         callbacks: Optional[list] = None,
@@ -225,7 +243,14 @@ class SurrogateTrainer:
         # contains non-array objects like activation functions.
 
         # Build per-sample loss
-        def sample_loss(arrays, state, boundary, target):
+        # shape: state, boundary, target are {field: Array} -- TypedDict candidate (phase 3)
+        def sample_loss(
+            arrays: PyTree,
+            state: dict[str, Any],
+            boundary: dict[str, Any],
+            target: dict[str, Any],
+            # -> Any: the data loss comes back from a user-supplied, unannotated loss_fn
+        ) -> Any:
             pred = arch.forward((arrays, static), state, boundary, dt)
             data_loss = loss_fn(pred, target)
             if physics_loss_fn is not None:
@@ -235,7 +260,13 @@ class SurrogateTrainer:
             return data_loss
 
         # Batch loss: mean over batch
-        def batch_loss(arrays, states_b, boundary_b, targets_b):
+        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
+        def batch_loss(
+            arrays: PyTree,
+            states_b: dict[str, Any],
+            boundary_b: dict[str, Any],
+            targets_b: dict[str, Any],
+        ) -> jax.Array:
             # vmap over sample dimension
             losses = jax.vmap(
                 lambda s, b, t: sample_loss(arrays, s, b, t)
@@ -243,7 +274,15 @@ class SurrogateTrainer:
             return jnp.mean(losses)
 
         @jax.jit
-        def train_step(arrays, opt_state, states_b, boundary_b, targets_b, lr_mult):
+        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
+        def train_step(
+            arrays: PyTree,
+            opt_state: PyTree,
+            states_b: dict[str, Any],
+            boundary_b: dict[str, Any],
+            targets_b: dict[str, Any],
+            lr_mult: jax.Array,
+        ) -> tuple[PyTree, PyTree, jax.Array]:
             loss, grads = jax.value_and_grad(batch_loss)(
                 arrays, states_b, boundary_b, targets_b,
             )
@@ -254,7 +293,13 @@ class SurrogateTrainer:
             return new_arrays, new_opt_state, loss
 
         @jax.jit
-        def eval_loss(arrays, states_b, boundary_b, targets_b):
+        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
+        def eval_loss(
+            arrays: PyTree,
+            states_b: dict[str, Any],
+            boundary_b: dict[str, Any],
+            targets_b: dict[str, Any],
+        ) -> jax.Array:
             return batch_loss(arrays, states_b, boundary_b, targets_b)
 
         train_losses = []

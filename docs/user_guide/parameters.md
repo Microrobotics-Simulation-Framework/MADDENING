@@ -203,6 +203,44 @@ leaf says exactly which constants it touched.  Gradients through the
 whole graph come from a single `jax.value_and_grad`; a non-finite
 gradient raises rather than continuing.
 
+`fit` also keeps out of the directions the data cannot determine.  Every
+gradient of a least-squares loss is `Jᵀr`, so a direction `v` with `Jv = 0`
+has `g·v = 0` at every iterate — but Adam's step is `−lr·D g` for a diagonal
+`D`, and `(D g)·v` is not zero, so plain Adam wanders inside the flat
+manifold.  The loss does not notice; the parameters do.  On the spring above,
+unguarded, the fitted scale of `(k, c, m)` lands anywhere from −7.5% to +46%
+of the value it started at depending only on `lr` and `n_iter`, with the loss
+unchanged in its first six digits.
+
+`fit` therefore accumulates the run's gradients and removes the net
+displacement's component along the directions none of them pointed in,
+leaving those at the values you supplied — the data has not contradicted
+them.  The loss is flat there, so nothing is paid for it, and a fit whose
+gradients spanned everything gets its iterate back bit for bit.
+
+```python
+res = fit(gm, loss, n_iter=300, lr=0.1)
+res.excited_rank         # 2 of 3: the data left one direction undetermined
+res.undetermined_drift   # how far the raw iterate had drifted along it
+```
+
+`excited_rank is None` means the question was not answered, not that the
+answer was "full rank": fewer iterations than parameters, more than 512
+trainable leaves, or `hold_undetermined=False`.  The cutoff is numerical —
+a direction the data resolves *weakly* is kept, not held; for "well enough
+to use", read `crb` against a tolerance you declare.  And the degeneracy has
+to be a fixed direction in the unconstrained coordinates: `SpringDamperNode`
+gives `damping` the identity transform so that zero damping stays
+representable, which makes the scale direction `(c, 1, 1)` and rotates it as
+`c` moves.  Declare `transform="log"` on every parameter a scale degeneracy
+mixes — the coordinates `fim(scale="relative")` already assumes — and it
+becomes constant:
+
+```python
+gm.set_param_spec("spring", "damping",
+                  ParamSpec(bounds=(0.0, None), transform="log"))
+```
+
 All three fitters take a `mask=` that *narrows* `gm.trainable_mask()` —
 fit two of the three trainable constants, say.  It cannot widen it: a
 mask naming a leaf whose spec says `trainable=False` is a `ValueError`,

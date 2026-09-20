@@ -300,6 +300,82 @@ class TestCitationGate:
         result = _run("check_citations")
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_the_headline_count_excludes_the_citations_it_declined(self):
+        """It reported "50 citation(s) verified" having verified 45.
+
+        The five allowlisted syntax examples are ``continue``d before the
+        existence check and were still in the headline.  Verified and
+        declined are now two numbers, as check_heat_stability.py's summary
+        already did for its unchecked constructions.
+        """
+        result = _run("check_citations")
+        assert result.returncode == 0, result.stdout + result.stderr
+        verified = int(
+            result.stdout.split("OK: ")[1].split(" citation(s)")[0]
+        )
+        declined = result.stdout.count(
+            "is a syntax example and was NOT checked"
+        )
+        assert declined > 0, "nothing was declined; the test proves nothing"
+        assert f"{declined} not checked" in result.stdout
+
+        gate = _load("check_citations")
+        total = len(gate.scan_directory(str(REPO_ROOT / "docs")))
+        assert verified == total - declined
+
+
+class TestCitationTemplateAllowlist:
+    """``_TEMPLATE_CITATIONS`` was the one allowlist with no reason, no cap
+    and no staleness check.  These are the guards its two neighbours have."""
+
+    def test_every_entry_carries_a_reason(self, citations_gate):
+        for key, reason in citations_gate._TEMPLATE_CITATIONS.items():
+            assert isinstance(reason, str) and reason.strip(), key
+
+    def test_the_allowlist_stays_small(self, citations_gate):
+        allowlist = citations_gate._TEMPLATE_CITATIONS
+        cap = citations_gate._MAX_TEMPLATE_CITATIONS
+        assert len(allowlist) <= cap, (
+            f"{len(allowlist)} allowlisted dangling citations (cap {cap}).  "
+            f"Each one is a citation nobody checks; add the key to the "
+            f"bibliography instead of raising the cap."
+        )
+
+    def test_no_entry_is_stale(self, citations_gate):
+        """An entry whose file no longer carries that citation is dead."""
+        for (relpath, key) in citations_gate._TEMPLATE_CITATIONS:
+            path = REPO_ROOT / relpath
+            if not path.is_file():
+                continue
+            cited = {k for _lineno, k in citations_gate.extract_citations(str(path))}
+            assert key in cited, (
+                f"{relpath} no longer cites [@{key}]; remove the "
+                f"_TEMPLATE_CITATIONS entry"
+            )
+
+    def test_an_allowlisted_pair_does_not_exempt_the_same_key_elsewhere(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        bib, docs = _bib_and_doc(
+            tmp_path, "@book{Crank1975,\n}\n",
+            "See [@Crank1975] and [@Key].\n",
+        )
+        monkeypatch.setenv("BIB_PATH", str(bib))
+        assert citations_gate.main([str(docs)]) == 1
+
+    def test_a_scope_of_nothing_but_allowlisted_citations_fails(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        """Verified zero is not a pass, whatever the headline would say."""
+        bib = tmp_path / "bibliography.bib"
+        bib.write_text("@book{Crank1975,\n}\n")
+        docs = tmp_path / "docs" / "developer_guide"
+        docs.mkdir(parents=True)
+        (docs / "node_authoring.md").write_text("Cite as [@Key].\n")
+        monkeypatch.setenv("BIB_PATH", str(bib))
+        monkeypatch.setattr(citations_gate, "_REPO_ROOT", str(tmp_path))
+        assert citations_gate.main([str(tmp_path / "docs")]) == 1
+
 
 # ---------------------------------------------------------------------------
 # check_anomalies.py
@@ -629,3 +705,145 @@ class TestHeatStabilityGate:
         defaults = heat_stability_gate._defaults()
         for key, value in defaults.items():
             assert value == sig.parameters[key].default
+
+
+class TestHeatStabilityCallForms:
+    """A construction the constructor accepts must be a construction the
+    gate can see, however it is spelled.
+
+    Three spellings were invisible.  Each is replayed here against a rod
+    ``HeatNode.__init__`` genuinely refuses, so a regression is a gate that
+    passes a build that cannot run.
+    """
+
+    def test_a_positional_stencil_order_is_judged_against_that_order(
+        self, heat_stability_gate, tmp_path
+    ):
+        """``stencil_order`` is the 7th parameter; the list stopped at the 5th.
+
+        Fourier 0.4 is stable at order 2 (limit 0.5) and unstable at order 4
+        (limit 0.3125).  With the order invisible it defaulted to 2 and the
+        gate passed a rod the constructor refuses.
+        """
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 4)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_same_rod_at_order_two_still_passes(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The failure above is the order, not the widened parameter list."""
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 2)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 0
+
+    def test_an_attribute_spelled_construction_is_seen(
+        self, heat_stability_gate, tmp_path
+    ):
+        """``ast.Attribute`` carries ``.attr``, not ``.id``."""
+        (tmp_path / "attr_form.py").write_text(
+            "import maddening.nodes.heat as heat\n"
+            'n = heat.HeatNode("e", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "                  thermal_diffusivity=0.1, stencil_order=4)\n"
+        )
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_an_aliased_import_is_seen(self, heat_stability_gate, tmp_path):
+        (tmp_path / "alias_form.py").write_text(
+            "from maddening.nodes.heat import HeatNode as Rod\n"
+            'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "        thermal_diffusivity=0.1)\n"
+        )
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_a_rebound_name_is_seen(self, heat_stability_gate, tmp_path):
+        """``Rod = HeatNode`` is the rebinding an import alias avoids."""
+        (tmp_path / "rebound.py").write_text(
+            "from maddening.nodes.heat import HeatNode\n"
+            "Rod = HeatNode\n"
+            'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "        thermal_diffusivity=0.1)\n"
+        )
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_positional_order_is_the_constructor_signature_order(
+        self, heat_stability_gate
+    ):
+        """A hand-maintained list is what went short by two parameters."""
+        import inspect
+
+        from maddening.nodes.heat import HeatNode
+
+        expected = [
+            name for name, param
+            in inspect.signature(HeatNode.__init__).parameters.items()
+            if name != "self"
+            and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        assert heat_stability_gate._POSITIONAL == expected
+        assert "stencil_order" in heat_stability_gate._POSITIONAL
+
+
+class TestHeatStabilityCounts:
+    """``seen`` is the number the summary calls "verified", so nothing may
+    reach it without having been evaluated.
+
+    ``seen.append`` ran before both ``continue``s, so a rod with a
+    non-positive argument and one with an unknown stencil order were counted
+    as verified having had no Fourier number computed: 132 reported against
+    131 evaluated.
+    """
+
+    def _scan(self, gate, source):
+        unstable, unchecked, seen = [], [], []
+        gate.scan_source(source, "probe.py", gate._defaults(),
+                         unstable, unchecked, seen)
+        return unstable, unchecked, seen
+
+    def test_a_non_positive_argument_is_not_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("a", timestep=1.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.0)\n",
+        )
+        assert seen == []
+        assert len(unchecked) == 1
+        assert "non-positive" in unchecked[0][2]
+
+    def test_an_unknown_stencil_order_is_not_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("c", timestep=1.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=100.0, stencil_order=3)\n",
+        )
+        assert seen == []
+        assert len(unchecked) == 1
+        assert "MAX_FOURIER_NUMBER" in unchecked[0][2]
+
+    def test_an_evaluated_rod_is_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        """The other direction: the counter still counts what it should."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("ok", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert len(seen) == 1 and unchecked == [] and unstable == []
+
+
+class TestHeatStabilityAllowlist:
+    def test_every_entry_carries_a_reason(self, heat_stability_gate):
+        for path, reason in heat_stability_gate._ALLOWED_UNSTABLE.items():
+            assert isinstance(reason, str) and reason.strip(), path
+
+    def test_the_allowlist_stays_small(self, heat_stability_gate):
+        allowlist = heat_stability_gate._ALLOWED_UNSTABLE
+        cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
+        assert len(allowlist) <= cap, (
+            f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
+            f"whole file this gate stops reading; fix the rod instead of "
+            f"raising the cap."
+        )

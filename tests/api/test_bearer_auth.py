@@ -455,6 +455,37 @@ def test_a_generated_token_is_logged_once_and_only_when_it_is_needed(caplog):
     assert local.token not in caplog.text
 
 
+def test_a_generated_token_says_it_exists_even_on_a_loopback_bind(caplog):
+    """``uvicorn.run(app, host="0.0.0.0")`` without telling the app.
+
+    That is exactly the case the peer backstop exists for: a remote
+    caller is correctly refused with a token that was never logged and
+    never written to MADDENING_API_TOKEN_FILE, because both live behind
+    the ``enforced`` check.  Fail-closed, and recoverable -- the 401 body
+    says what to do -- but the operator should not have to discover it
+    from a 401.  One INFO line, once, and never the value: this fires on
+    every loopback start-up, and a live credential in a developer's log
+    is not a fix.
+    """
+    auth = APIAuth(bind_host="127.0.0.1", environ={})
+    with caplog.at_level(logging.INFO, logger="maddening.api.auth"):
+        assert auth.announce(8000) is False
+        assert auth.announce(8000) is False
+
+    assert auth.token not in caplog.text
+    assert "bind_host" in caplog.text
+    assert caplog.text.count("generated at start-up") == 1
+
+
+def test_a_configured_token_is_not_announced_on_a_loopback_bind(caplog):
+    """Nothing to say: the operator chose it and no token is demanded."""
+    auth = APIAuth(bind_host="127.0.0.1", environ={TOKEN_ENV: "chosen"})
+    with caplog.at_level(logging.INFO, logger="maddening.api.auth"):
+        assert auth.announce(8000) is False
+
+    assert caplog.text == ""
+
+
 def test_a_configured_token_is_not_echoed_into_the_log(caplog):
     """Announcing a secret the operator already holds only spreads it."""
     auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_ENV: "operator-chose-this"})

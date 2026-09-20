@@ -438,7 +438,27 @@ class APIAuth:
         bool
             ``True`` when a token was logged by this call.
         """
-        if self._announced or not self.enforced:
+        if not self.enforced:
+            # uvicorn.run(app, host="0.0.0.0") without bind_host or
+            # MADDENING_HOST is exactly the case the peer backstop exists
+            # for: remote callers are correctly refused, with a token
+            # that was never logged and never written to
+            # MADDENING_API_TOKEN_FILE, because both live in the branch
+            # below.  Say so once -- without the value, which is not
+            # needed here and would put a live credential in a
+            # developer's log on every loopback start-up.
+            if self.generated and not self._announced:
+                self._announced = True
+                logger.info(
+                    "A %s was generated at start-up. It is not needed for a "
+                    "loopback bind, and it is not shown here -- but if this "
+                    "server is in fact reachable from off-host, the peer "
+                    "backstop will demand it and nothing will have printed "
+                    "it. Pass bind_host (or set MADDENING_HOST) so it is "
+                    "logged, or set %s yourself.", TOKEN_ENV, TOKEN_ENV,
+                )
+            return False
+        if self._announced:
             return False
         self._announced = True
         if not self.generated:

@@ -406,7 +406,12 @@ def main():
                         metavar=("NX", "NY", "NZ"),
                         help="LBM grid resolution (default: 64 32 32)")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", type=str, default="0.0.0.0")
+    # Loopback by default.  This demo builds its own FastAPI app with no
+    # credential of any kind, so a 0.0.0.0 default handed the simulation
+    # to anyone who could reach the port -- while every other shipped
+    # example server moved to 127.0.0.1 in 0.4.0.  Pass --host 0.0.0.0
+    # deliberately if you mean it; the warning below still prints.
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--profile", action="store_true",
                         help="Run profiler before starting server")
     args = parser.parse_args()

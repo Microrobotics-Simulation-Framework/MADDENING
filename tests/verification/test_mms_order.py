@@ -607,9 +607,10 @@ class TestTheReportedBoundaryFluxIsAtTheRodEnd:
             measurement.table()
         )
 
+    @pytest.mark.parametrize("end", ["left", "right"])
     @pytest.mark.parametrize("stencil_order", [2, 4])
     def test_the_flux_without_a_dirichlet_datum_is_still_at_the_rod_end(
-        self, float64, stencil_order,
+        self, float64, stencil_order, end,
     ):
         """No boundary input: extrapolate to the end, do not move it.
 
@@ -624,7 +625,7 @@ class TestTheReportedBoundaryFluxIsAtTheRodEnd:
         """
         measurement = measure_order(
             lambda n: _heat_boundary_flux_error(
-                n, stencil_order=stencil_order, datum=False,
+                n, end=end, stencil_order=stencil_order, datum=False,
             ),
             levels=(10, 20, 40, 80, 160),
             axis=RefinementAxis.SPACE,

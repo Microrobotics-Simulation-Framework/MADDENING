@@ -9,12 +9,16 @@ the snapshot fails with a message that says what to do about it.
 
 from __future__ import annotations
 
+import ast
+import builtins
 import importlib.util
+import inspect
 import json
 import os
 import shutil
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 import pytest
@@ -450,3 +454,290 @@ class TestFlatteningKeepsEveryRecord:
         n_surfaces = len(json.loads(SNAPSHOT.read_text())["surfaces"])
         assert written.startswith(f"{n_surfaces} STABLE surface(s), ")
         assert "0 member(s)" not in written
+
+
+# ---------------------------------------------------------------------------
+# A STABLE signature must not name an untagged MADDENING type
+# ---------------------------------------------------------------------------
+
+def _classes_defined_in_source() -> dict[str, set[str]]:
+    """``{class name: {dotted name}}`` read from ``src/maddening`` with ast.
+
+    Not by import: a class that only an ``if TYPE_CHECKING:`` block brings
+    into the annotating module -- ``UncertaintySpec`` is one -- cannot be
+    resolved from that module's namespace at runtime, and a survey that
+    skipped what it could not resolve would report a clean sheet.
+    """
+    src = REPO_ROOT / "src"
+    found: dict[str, set[str]] = {}
+    for path in (src / "maddening").rglob("*.py"):
+        parts = list(path.relative_to(src).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        module = ".".join(parts)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:                                  # pragma: no cover
+            continue
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                found.setdefault(node.name, set()).add(f"{module}.{node.name}")
+    return found
+
+
+def _qualified(obj) -> str:
+    return f"{obj.__module__}.{obj.__qualname__}"
+
+
+def _names_in_annotation(text: str) -> tuple[set[str], set[tuple[str, ...]]]:
+    """``(bare names, dotted paths)`` mentioned by an annotation's source text.
+
+    A string constant is a forward reference and is recursed into, because
+    ``list['ShardingIssue']`` parses to a ``Constant``, not a ``Name`` -- the
+    case a first version of this survey silently missed.  A constant inside
+    ``Literal[...]`` is a value, not a type, and is skipped.
+    """
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return set(), set()
+    literal_values: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript):
+            base = node.value
+            if (getattr(base, "attr", None) or getattr(base, "id", None)) == "Literal":
+                literal_values.update(id(sub) for sub in ast.walk(node.slice))
+
+    bare: set[str] = set()
+    dotted: set[tuple[str, ...]] = set()
+    nested: set[str] = set()
+    inside_dotted: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            parts, cur = [], node
+            while isinstance(cur, ast.Attribute):
+                parts.append(cur.attr)
+                inside_dotted.add(id(cur))
+                cur = cur.value
+            if isinstance(cur, ast.Name):
+                inside_dotted.add(id(cur))
+                parts.append(cur.id)
+                dotted.add(tuple(reversed(parts)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and id(node) not in inside_dotted:
+            bare.add(node.id)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in literal_values):
+            nested.add(node.value)
+    for text in nested:
+        more_bare, more_dotted = _names_in_annotation(text)
+        bare |= more_bare
+        dotted |= more_dotted
+    return bare, dotted
+
+
+def _survey_stable_annotations(guard) -> dict:
+    """Which MADDENING types the ``STABLE`` surface's signatures name."""
+    from maddening.core.compliance.metadata import StabilityLevel
+
+    registry, _skipped = guard.load_registry()
+    source_classes = {
+        name: sorted(paths) for name, paths in _classes_defined_in_source().items()
+    }
+
+    named: set[str] = set()
+    unresolved: set[str] = set()
+    signatures = 0
+
+    def record_text(text: str, module) -> None:
+        bare, dotted = _names_in_annotation(text)
+        for parts in dotted:
+            for i in range(len(parts) - 1, 0, -1):
+                mod = sys.modules.get(".".join(parts[:i]))
+                if mod is None:
+                    continue
+                obj = mod
+                try:
+                    for attr in parts[i:]:
+                        obj = getattr(obj, attr)
+                except AttributeError:
+                    break
+                if inspect.isclass(obj) and _is_ours(obj):
+                    named.add(_qualified(obj))
+                break
+        for name in bare:
+            if hasattr(builtins, name) or hasattr(typing, name):
+                continue
+            obj = getattr(module, name, None) if module is not None else None
+            if inspect.isclass(obj):
+                if _is_ours(obj):
+                    named.add(_qualified(obj))
+                continue
+            if obj is not None:
+                continue
+            candidates = source_classes.get(name)
+            if candidates and len(candidates) == 1:
+                named.add(candidates[0])
+            elif candidates:
+                unresolved.add(f"{name} (ambiguous: {candidates})")
+            else:
+                unresolved.add(name)
+
+    def _is_ours(obj) -> bool:
+        return (getattr(obj, "__module__", "") or "").startswith("maddening")
+
+    def record(annotation, module) -> None:
+        if isinstance(annotation, str):
+            record_text(annotation, module)
+        elif isinstance(annotation, typing.ForwardRef):
+            record_text(annotation.__forward_arg__, module)
+        elif inspect.isclass(annotation):
+            if _is_ours(annotation):
+                named.add(_qualified(annotation))
+        else:
+            for arg in typing.get_args(annotation):
+                record(arg, module)
+
+    for name, level in sorted(registry.items()):
+        if level is not StabilityLevel.STABLE:
+            continue
+        obj = guard.resolve(name)
+        callables = [obj]
+        if inspect.isclass(obj):
+            for member in dir(obj):
+                if member.startswith("_"):
+                    continue
+                static = inspect.getattr_static(obj, member, None)
+                if static is None or not guard._owned_by_maddening(static):
+                    continue
+                attr = static.fget if isinstance(static, property) else getattr(obj, member, None)
+                if callable(attr):
+                    callables.append(attr)
+        for target in callables:
+            try:
+                sig = inspect.signature(target)
+            except (TypeError, ValueError):                   # pragma: no cover
+                continue
+            signatures += 1
+            module = sys.modules.get(getattr(target, "__module__", "") or "")
+            for parameter in sig.parameters.values():
+                if parameter.annotation is not inspect.Signature.empty:
+                    record(parameter.annotation, module)
+            if sig.return_annotation is not inspect.Signature.empty:
+                record(sig.return_annotation, module)
+
+    return {
+        "signatures": signatures,
+        "named": named,
+        "untagged": sorted(n for n in named if n not in registry),
+        "unresolved": sorted(unresolved),
+        "source_classes": source_classes,
+    }
+
+
+#: MADDENING types named by a ``STABLE`` signature that deliberately carry no
+#: ``@stability`` tag, and why.  A stable method whose return type is unfrozen
+#: is half a promise, so every entry here is an accepted gap rather than an
+#: oversight, and the set is pinned in both directions: a new one fails, and
+#: one that gets tagged fails until it is removed from here.
+_UNTAGGED_BY_DESIGN: dict[str, str] = {
+    "maddening.core.compliance.metadata.DiscretizationOrder":
+        "metadata.py defines StabilityLevel itself, and "
+        "compliance/stability.py imports it, so metadata cannot import the "
+        "@stability decorator without a cycle. Named by "
+        "HeatNode.discretization_order.",
+}
+
+#: Names that appear in a ``STABLE`` annotation, resolve to nothing MADDENING
+#: owns, and are therefore outside this check.  Listed rather than skipped:
+#: an unresolvable name is exactly how a gate comes to verify nothing, so the
+#: test asserts each of these really is unresolvable as a MADDENING class.
+_NOT_OURS: dict[str, str] = {
+    "Path": "pathlib.Path, imported under `if TYPE_CHECKING:` by "
+            "core/graph_manager.py so it is not in the module namespace",
+}
+
+
+class TestAStableSignatureNamesNoUntaggedType:
+    """The finding the freeze branch opened with, mechanised.
+
+    ``sharded_cg`` is ``STABLE`` and returns ``SharedSolveResult``;
+    ``SimulationNode`` is ``STABLE`` and its ``boundary_input_spec`` returns
+    ``BoundaryInputSpec``.  Freezing the method while the type it hands back
+    is free to change is half a promise, and nothing said which types were in
+    that position: the set was found by hand on 2026-09-17, and three days
+    and 470 commits later it was unchanged *and had grown by one*.
+
+    The check reads the annotations rather than the rendered snapshot text,
+    because a forward reference nested in a subscript (``list['ShardingIssue']``)
+    is a string constant in the parse tree and was invisible to a first
+    attempt that only looked at ``ast.Name``.
+    """
+
+    @pytest.fixture(scope="class")
+    def survey(self, guard):
+        return _survey_stable_annotations(guard)
+
+    def test_the_survey_actually_inspected_the_stable_surface(self, survey, guard):
+        """A survey that inspected nothing would report no findings.
+
+        This is the assertion the 'verified zero references' gate in this
+        repository was missing.
+        """
+        assert survey["signatures"] > 100, survey["signatures"]
+        assert survey["named"], "no MADDENING type is named by any STABLE signature"
+        # the ones we know are there, one of each hard kind
+        assert "maddening.core.node.BoundaryInputSpec" in survey["named"]
+        assert "maddening.core.graph_manager.ShardingIssue" in survey["named"], (
+            "the nested-forward-reference case is not being seen"
+        )
+        assert "maddening.core.compliance.uq.UncertaintySpec" in survey["named"], (
+            "the TYPE_CHECKING-only import case is not being seen"
+        )
+
+    def test_every_maddening_type_a_stable_signature_names_is_itself_tagged(
+        self, survey,
+    ):
+        untagged = set(survey["untagged"])
+        unexpected = sorted(untagged - set(_UNTAGGED_BY_DESIGN))
+        assert not unexpected, (
+            "a STABLE signature names these MADDENING types, which carry no "
+            "@stability tag of their own -- freezing the method while its "
+            "type is free to change is half a promise. Tag them, or record "
+            "the reason in _UNTAGGED_BY_DESIGN in this file:\n  "
+            + "\n  ".join(unexpected)
+        )
+
+    def test_a_recorded_exemption_is_still_needed(self, survey):
+        """An exemption that has been fixed must be deleted, not left to rot."""
+        stale = sorted(set(_UNTAGGED_BY_DESIGN) - set(survey["untagged"]))
+        assert not stale, (
+            "these are recorded in _UNTAGGED_BY_DESIGN but are no longer "
+            "untagged types named by a STABLE signature; delete the "
+            f"entries: {stale}"
+        )
+        for name, why in _UNTAGGED_BY_DESIGN.items():
+            assert why.strip(), f"{name} has no recorded reason"
+
+    def test_no_name_in_a_stable_annotation_goes_unaccounted_for(self, survey):
+        """Fail closed.
+
+        A name the survey cannot resolve is not evidence of anything, and
+        silently dropping it is how a gate comes to pass on an empty scope.
+        """
+        unknown = sorted(set(survey["unresolved"]) - set(_NOT_OURS))
+        assert not unknown, (
+            "these names appear in a STABLE annotation and resolve to "
+            "nothing: account for each in _NOT_OURS (with the reason) or "
+            f"make it resolvable: {unknown}"
+        )
+
+    def test_a_name_recorded_as_not_ours_really_is_not_ours(self, survey):
+        """Otherwise ``_NOT_OURS`` becomes a way to hide a real finding."""
+        for name in _NOT_OURS:
+            assert name not in survey["source_classes"], (
+                f"{name} is recorded in _NOT_OURS but src/maddening defines a "
+                f"class by that name ({survey['source_classes'].get(name)}); "
+                f"it is ours after all"
+            )
+            assert _NOT_OURS[name].strip(), f"{name} has no recorded reason"

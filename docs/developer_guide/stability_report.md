@@ -30,6 +30,7 @@ import time.  Levels:
 | `maddening.cloud.multigpu.halo_unstructured.exchange_unstructured` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.gather_value` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.partition_value` | evolving |
+| `maddening.cloud.multigpu.iterative_solver.SharedSolveResult` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.block_jacobi_preconditioner` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.jacobi_preconditioner` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.sharded_cg` | stable |
@@ -41,6 +42,8 @@ import time.  Levels:
 | `maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode.invalidate_static_cache` | stable |
 | `maddening.cloud.providers.CloudProvider` | evolving |
 | `maddening.cloud.resume.download_and_load_state` | evolving |
+| `maddening.core.compliance.uq.UncertaintySpec` | evolving |
+| `maddening.core.coupling.group.CouplingGroup` | evolving |
 | `maddening.core.coupling.mapping.StaticLinearMapping` | evolving |
 | `maddening.core.coupling.mapping.matrix_mapping` | evolving |
 | `maddening.core.coupling.mapping.nearest_neighbor_mapping` | evolving |
@@ -53,6 +56,9 @@ import time.  Levels:
 | `maddening.core.coupling.mapping_spec.point_array_digest` | evolving |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
+| `maddening.core.graph_manager.ShardingIssue` | evolving |
+| `maddening.core.node.BoundaryFluxSpec` | evolving |
+| `maddening.core.node.BoundaryInputSpec` | evolving |
 | `maddening.core.node.SimulationNode` | stable |
 | `maddening.core.node.SimulationNode.invalidate_static_cache` | stable |
 | `maddening.core.node.SimulationNode.static_data_deps` | stable |
@@ -126,4 +132,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*107 API surfaces registered.*
+*113 API surfaces registered.*

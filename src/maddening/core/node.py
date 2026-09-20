@@ -26,6 +26,7 @@ from maddening.core.params import ParamSpec
 
 
 @dataclass(frozen=True)
+@stability(StabilityLevel.EVOLVING)
 class BoundaryInputSpec:
     """Descriptor for an expected boundary input.
 
@@ -51,6 +52,7 @@ class BoundaryInputSpec:
 
 
 @dataclass(frozen=True)
+@stability(StabilityLevel.EVOLVING)
 class BoundaryFluxSpec:
     """Descriptor for a declared boundary flux output.
 

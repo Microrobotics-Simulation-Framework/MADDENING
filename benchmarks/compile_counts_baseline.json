@@ -24,12 +24,12 @@
     },
     "heat_chain": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 157,
-      "hlo_op_count": 177,
+      "jaxpr_primitive_count": 243,
+      "hlo_op_count": 287,
       "scan_steps": 16,
       "scan_retrace_count": 1,
-      "scan_jaxpr_primitive_count": 158,
-      "scan_hlo_op_count": 188
+      "scan_jaxpr_primitive_count": 244,
+      "scan_hlo_op_count": 298
     },
     "sharded_heat": {
       "retrace_count": 1,

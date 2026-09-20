@@ -197,19 +197,34 @@ class WorkerClient:
             except zmq.Again:
                 continue
 
+        # The CURVE asymmetry is the single most likely cause of either
+        # failure below, so it is decided by self._secure and attached to
+        # both.  It used to live only on the ConnectionError, which
+        # requires every send to raise zmq.Again for the whole timeout --
+        # and a DEALER that has connect()ed accepts ZMQ_SNDHWM (1000)
+        # messages regardless of the handshake, so with a 250ms recv
+        # timeout that branch needs a deadline of about 250 seconds.
+        # Measured: every realistic call reached the TimeoutError, which
+        # said nothing about CURVE, and the test could not tell because
+        # it accepted either exception type.
+        curve_hint = (
+            f" This worker has CURVE {'on' if self._secure else 'off'}, and "
+            f"the coordinator's setting is decided by the address it bound: "
+            f"the two have to match. A coordinator bound to a non-loopback "
+            f"address has CURVE on, while a worker reaching it over a "
+            f"loopback address (an SSH tunnel, or rank 0's own worker) turns "
+            f"it off by default -- pass secure=True to WorkerClient in that "
+            f"case, and give both ends the same MADDENING_TRANSPORT_TOKEN "
+            f"(or MADDENING_API_TOKEN)."
+        )
+
         if not ack_received and not deliverable:
             sock.close()
             ctx.term()
             raise ConnectionError(
                 f"Could not deliver a registration to the coordinator at "
                 f"{self._coordinator_addr}: it accepted no message in "
-                f"{timeout:.0f}s. This worker has CURVE "
-                f"{'on' if self._secure else 'off'}. A coordinator bound to a "
-                f"non-loopback address has CURVE on, and a worker reaching it "
-                f"over a loopback address (a tunnel, or rank 0's own worker) "
-                f"turns it off by default -- pass secure=True to WorkerClient "
-                f"in that case, and give both ends the same "
-                f"MADDENING_API_TOKEN."
+                f"{timeout:.0f}s." + curve_hint
             )
 
         if not ack_received:
@@ -217,7 +232,9 @@ class WorkerClient:
             ctx.term()
             raise TimeoutError(
                 f"No ACK from coordinator at {self._coordinator_addr} "
-                f"within {timeout}s"
+                f"within {timeout}s: the registration was accepted by the "
+                f"local socket but never answered, which is what a refused "
+                f"security handshake looks like from this side." + curve_hint
             )
 
         # Now poll for topology broadcast

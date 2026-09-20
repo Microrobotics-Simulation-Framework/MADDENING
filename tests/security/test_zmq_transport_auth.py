@@ -559,13 +559,24 @@ class TestWorkerClientFailsFastOnAMismatch:
         )
         started = time.monotonic()
         try:
-            with pytest.raises((ConnectionError, TimeoutError)):
+            with pytest.raises((ConnectionError, TimeoutError)) as excinfo:
                 client.register_and_wait(timeout=3)
             # Measured before the teardown below, which sleeps.
             elapsed = time.monotonic() - started
         finally:
             coord.shutdown()
             time.sleep(1.2)
+        # The *text*, not just the type.  Accepting either exception is
+        # why this test could not see that the CURVE explanation lived
+        # only on the ConnectionError branch -- which is unreachable,
+        # because a connected DEALER accepts ZMQ_SNDHWM (1000) sends
+        # whatever the handshake did, so every realistic call lands on
+        # the TimeoutError.  A user who hits this must be told about
+        # CURVE whichever branch they reach.
+        message = str(excinfo.value)
+        assert "CURVE off" in message
+        assert "secure=True" in message
+        assert "MADDENING_TRANSPORT_TOKEN" in message
         # Not merely "it finished": it must honour the deadline it was
         # given.  The recv timeout is the loop's poll interval, so a recv
         # timeout longer than `timeout` silently overshoots it -- which is
@@ -575,6 +586,120 @@ class TestWorkerClientFailsFastOnAMismatch:
             f"deadline is only checked between recv calls, so the recv "
             f"timeout must be short compared to it"
         )
+
+
+class TestTheCurveAsymmetryIsNotSilent:
+    """A refused handshake must not look like an idle simulation.
+
+    A relay inside a container binds ``tcp://0.0.0.0:P``, which turns
+    CURVE on.  A client on the host reaching the published port over
+    ``tcp://127.0.0.1:P`` sees loopback and turns CURVE off.  Neither end
+    is misconfigured on its own, libzmq treats the refused handshake as
+    an ordinary connection that carries nothing, and before this the SUB
+    side raised nothing, logged nothing and exposed no flag:
+    ``latest_snapshot()`` returned ``(0.0, None)`` for ever.  For
+    ``CommandReceiver`` that is a silently dead actuation path.
+    """
+
+    @staticmethod
+    def _wait_for_error(receiver, emit, seconds: float = 6.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            emit()
+            if receiver.handshake_error is not None:
+                return receiver.handshake_error
+            time.sleep(0.05)
+        return receiver.handshake_error
+
+    def test_a_state_receiver_says_why_no_state_arrives(self):
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=False)
+        receiver.start()
+        try:
+            error = self._wait_for_error(receiver, lambda: graph.emit(STATE))
+            snapshot = receiver.latest_snapshot()
+        finally:
+            receiver.stop()
+            relay.close()
+
+        assert snapshot == (0.0, None), (
+            "state arrived despite the mismatch, so this test is not "
+            "measuring the silent case"
+        )
+        assert error is not None, (
+            "the receiver returned (0.0, None) for ever with no explanation, "
+            "which is indistinguishable from an idle simulation"
+        )
+        assert "CURVE" in error and "secure=True" in error
+
+    def test_a_command_receiver_says_why_the_actuation_path_is_dead(self):
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        publisher = CommandPublisher(address=address, secure=True, token=TOKEN)
+        receiver = CommandReceiver(address=address, secure=False)
+        receiver.start()
+        command = {"robot": {"joint_torques": [0.1, -0.2, 0.0]}}
+        try:
+            error = self._wait_for_error(
+                receiver, lambda: publisher.send(command),
+            )
+            commands = receiver.latest_commands()
+        finally:
+            receiver.stop()
+            publisher.close()
+
+        assert commands is None
+        assert error is not None
+        assert "CURVE" in error
+
+    def test_a_matched_pair_reports_no_handshake_error(self):
+        """The control.  A flag that is always set says nothing."""
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=True, token=TOKEN)
+        receiver.start()
+        try:
+            deadline = time.monotonic() + _SETTLE
+            while time.monotonic() < deadline:
+                graph.emit(STATE)
+                if receiver.latest_snapshot()[1] is not None:
+                    break
+                time.sleep(0.02)
+            snapshot = receiver.latest_snapshot()
+            error = receiver.handshake_error
+        finally:
+            receiver.stop()
+            relay.close()
+
+        assert snapshot[1] is not None
+        assert error is None
+
+    def test_the_mismatch_is_logged_and_not_only_exposed(self, caplog):
+        """An operator reading a log has to be told, not asked to poll."""
+        import logging
+
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=False)
+        with caplog.at_level(logging.WARNING, logger="maddening.viz.network"):
+            receiver.start()
+            try:
+                self._wait_for_error(receiver, lambda: graph.emit(STATE))
+            finally:
+                receiver.stop()
+                relay.close()
+
+        assert "No ZeroMQ handshake" in caplog.text
 
 
 # ---------------------------------------------------------------------

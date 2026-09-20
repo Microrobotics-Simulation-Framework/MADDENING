@@ -455,10 +455,20 @@ class TestWorkerClientFailsFastOnAMismatch:
         try:
             with pytest.raises((ConnectionError, TimeoutError)):
                 client.register_and_wait(timeout=3)
+            # Measured before the teardown below, which sleeps.
+            elapsed = time.monotonic() - started
         finally:
             coord.shutdown()
             time.sleep(1.2)
-        assert time.monotonic() - started < 20, "register_and_wait hung"
+        # Not merely "it finished": it must honour the deadline it was
+        # given.  The recv timeout is the loop's poll interval, so a recv
+        # timeout longer than `timeout` silently overshoots it -- which is
+        # what a 5s RCVTIMEO did to a 3s deadline before this was pinned.
+        assert elapsed < 3 + 1.5, (
+            f"register_and_wait(timeout=3) took {elapsed:.1f}s; the "
+            f"deadline is only checked between recv calls, so the recv "
+            f"timeout must be short compared to it"
+        )
 
 
 # ---------------------------------------------------------------------

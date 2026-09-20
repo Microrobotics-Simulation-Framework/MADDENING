@@ -149,7 +149,11 @@ class WorkerClient:
         ctx = zmq.Context()
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s recv timeout
+        # Short, because this is the loop's poll interval: the deadline
+        # below is only checked between recv calls, so a 5s RCVTIMEO made
+        # register_and_wait(timeout=3) take 5s and overshoot every
+        # deadline shorter than itself.
+        sock.setsockopt(zmq.RCVTIMEO, 250)
         self._secure_socket(sock)
         # A DEALER whose peer rejects the security handshake enters mute
         # state, and an unbounded send on a mute socket blocks forever --

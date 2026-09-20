@@ -1115,7 +1115,18 @@ def _sub_residual(gm, obs, base_params, names, node="s"):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIMMaskingAndScaling:
+    """Both generator-driven tests here draw from ``analytic_residual()``,
+    the same sweep ``TestFIMAgainstFiniteDifference`` filters for: it reaches
+    genuinely floor-level conditioning on some draws, so the warning fires
+    intermittently.  Every assertion in this class is about the *matrix* --
+    a submatrix identity, ``F(sigma) == F / sigma**2``, ``cond`` invariance,
+    and a CRB scaling in which a shared rank judgement cancels -- and none
+    reads a rank verdict, which is what the warning speaks to.  The sibling
+    class was filtered when this one was missed."""
+
 
     @given(problem=analytic_residual(), data=st.data(),
            scale=st.sampled_from([None, "relative"]))

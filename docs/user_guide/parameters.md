@@ -139,7 +139,8 @@ gm.check_params(p)         # ValueError naming the first leaf out of range
 ## System identification: `maddening.sysid`
 
 ```python
-from maddening.sysid import fim, fit, observations_from_history, windowed_loss
+from maddening.sysid import (fim, fim_core, fit, observations_from_history,
+                             windowed_loss)
 
 init = {n: gm.get_node_state(n) for n in gm.node_names}
 _, hist = gm.run_scan_with_history(1000)
@@ -173,6 +174,43 @@ than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]` and in
 float32 rescaling the residual (by `noise_std`, say) can round the
 smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
 `rank`'s threshold scales with the matrix.  Freeze one of them, then fit:
+
+### Asking the same question inside a loop
+
+`fim` is the reporting path: it reads the answer back to the host so it
+can raise on a non-finite matrix, warn when the verdict rests on
+rounding, and name the parameters `scale="relative"` found at zero.  For
+a control loop, `fim_core` is the same computation with none of that —
+it returns device arrays, reads nothing back, and traces:
+
+```python
+core_fn = jax.jit(functools.partial(fim_core, residual_fn))
+core = core_fn(params)                       # no host sync at all
+ok = core.finite & ~core.precision_limited & (core.crb[i] < tol)
+```
+
+Hoist `residual_fn` out of the loop either way.  `fim` caches the traced
+Jacobian on `(residual_fn, scale, mask)`, so a fresh closure per
+iteration re-traces the whole rollout — which is what made `fim` cost a
+flat ~100 ms per call whatever the problem size, against ~0.3 ms warm
+and ~0.04 ms for `fim_core`.
+
+`FIMCore` carries the same verdicts as `FIMReport` — `rank`, `cond`,
+`crb`, `zero_scaled` — plus `finite`, which is what `fim` raises on, and
+`precision_limited`, which is what it warns on.  Read them as a third
+outcome rather than a refusal: a `precision_limited` core means *verdict
+unavailable*, not *unidentifiable*.  `crb` keeps `fim`'s polarity, `+inf`
+unless finiteness was positively established, so `crb < tol` is False for
+an unidentifiable parameter and for a `NaN` matrix alike.
+
+The two are not bit-identical and are not meant to be: `fim_core`
+computes its verdicts at the matrix's own precision and lets the
+compiler schedule `J.T @ J`, where `fim` widens to float64 on the host
+and keeps the Gram product eager.  Measured over 40,000 synthetic Fisher
+matrices spanning six decades of eigenvalue ratio, they reach a
+different `(rank, precision_limited)` on 0.39% of them, never above five
+times the rank cutoff, and 62% of the differences sit in the half-to-two
+times band where `precision_limited` fires on 97% of cases anyway.
 
 ```python
 gm.set_param_spec("spring", "mass", ParamSpec(trainable=False))

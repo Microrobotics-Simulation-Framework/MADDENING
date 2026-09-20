@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
+  trip** — jittable, zero device syncs, device-array verdicts for a control
+  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers
 - **The 0.4.0 stability freeze round** (`docs/developer_guide/api_freeze_proposal.md`)
   plus a guard that a `stable` signature cannot change unannounced
   (`scripts/check_stable_signatures.py`): 141 surfaces tagged, none promoted

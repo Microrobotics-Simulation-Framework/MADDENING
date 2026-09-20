@@ -116,9 +116,11 @@ import time.  Levels:
 | `maddening.surrogates.dataset.DatasetGenerator` | experimental |
 | `maddening.surrogates.node.SurrogateNode` | experimental |
 | `maddening.surrogates.training.trainer.SurrogateTrainer` | experimental |
+| `maddening.sysid.FIMCore` | experimental |
 | `maddening.sysid.FIMReport` | evolving |
 | `maddening.sysid.FitResult` | evolving |
 | `maddening.sysid.fim` | evolving |
+| `maddening.sysid.fim_core` | experimental |
 | `maddening.sysid.fit` | evolving |
 | `maddening.sysid.fit_lm` | evolving |
 | `maddening.sysid.fit_multiple_shooting` | evolving |
@@ -160,4 +162,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*141 API surfaces registered.*
+*143 API surfaces registered.*

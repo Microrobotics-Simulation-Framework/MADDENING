@@ -2925,6 +2925,29 @@ class GraphManager:
                 f"Node name {node.name!r} is invalid: must be non-empty and must "
                 f"not contain {bad or ['/', '#', '->']}"
             )
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            NON_FINITE_TOKENS,
+        )
+        if node.name in NON_FINITE_TOKENS:
+            # MADD-ANO-010: the JSON surfaces refuse a string that spells a
+            # non-finite token, and a node name is a JSON *value* in
+            # ``to_dict`` (``nodes[i]["name"]``) and in any mapping point
+            # reference.  It reached the stage untouched, though, because
+            # ``save_graph_to_usd`` writes it to a typed USD String
+            # attribute that never sees the codec -- so a ``.usda`` could
+            # round-trip to a graph that could not be written as a config,
+            # and the same graph was refused or accepted depending on which
+            # surface it met.  Refused here instead, at the point of entry,
+            # which is what the anomaly's own workaround recommends
+            # ("validate names ... where they are accepted, not where they
+            # are saved") and what makes the three surfaces agree.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: it spells a non-finite "
+                f"JSON token, which the serialisers reserve (MADD-ANO-010), so "
+                f"a graph holding it could not be written as a config or "
+                f"referenced from an interface mapping.  A different spelling "
+                f"({node.name.lower()!r}, say) is fine."
+            )
 
         spec = _NodeSpec(
             node=node,
@@ -3570,6 +3593,37 @@ class GraphManager:
         schedule = topological_sort(node_names, self._edges)
         back_edges = identify_back_edges(schedule, self._edges)
 
+        # Explicit accelerated_fields must name state fields of the group's
+        # nodes (a boundary flux is not a state field; use the default,
+        # which maps a flux edge to the producer's state fields).
+        #
+        # Before *everything* that reads the field, and in particular
+        # before the ``iqn-imvj`` ``_meta`` seeding below, which calls
+        # ``flatten_coupled_state(..., fields=...)`` with the user's list
+        # and dies on an unknown field with a bare ``KeyError: 'typo'``.
+        # That shadowed this message under the one acceleration in which
+        # ``accelerated_fields`` is most used, while it fired cleanly
+        # under ``acceleration="none"``, where ``CouplingGroup`` already
+        # warns that the field is ignored altogether.  The block reads
+        # only ``self._coupling_groups``, ``self._nodes`` and
+        # ``self._state``, all of which are final here.
+        for g in self._coupling_groups:
+            if g.accelerated_fields is None:
+                continue
+            for nn, fields in g.accelerated_fields.items():
+                if nn not in self._nodes or nn not in g.nodes:
+                    raise ValueError(
+                        f"accelerated_fields names node {nn!r}, not in coupling "
+                        f"group {sorted(g.nodes)}"
+                    )
+                have = set(self._state.get(nn, {}).keys())
+                bad = [f for f in fields if f not in have]
+                if bad:
+                    raise ValueError(
+                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
+                        f"of {nn!r} (state fields: {sorted(have)})"
+                    )
+
         # ``_meta`` is *state*, not derived data: ``step_count`` decides
         # which sub-steps a node with a rate divider > 1 fires on, and the
         # ``coupling_*`` entries are the predictor history and the IQN
@@ -3584,10 +3638,12 @@ class GraphManager:
         # zero the counters.
         previous_meta = dict(self._state.get(_META_KEY, {}))
         # From the last *successful* compile, not from ``_rate_dividers``:
-        # a compile that raises after recomputing them (an
-        # ``accelerated_fields`` typo, the static-data refusal) leaves
-        # them describing a step that was never built, and comparing
-        # against those would restart the phase on the repair.
+        # a compile that raises after recomputing them (the static-data
+        # refusal, a failing ``_build_step_fn``) leaves them describing a
+        # step that was never built, and comparing against those would
+        # restart the phase on the repair.  (The ``accelerated_fields``
+        # typo used to be one of those; it is now refused above, before
+        # the dividers are touched at all.)
         previous_dividers = dict(self._committed_rate_dividers)
 
         # Compute multi-rate info.
@@ -3734,26 +3790,6 @@ class GraphManager:
         # validation below, the static-data refusal and ``_build_step_fn``
         # can all still raise, and a compile that fails must leave the
         # sub-step phase and the warm starts exactly as it found them.
-
-        # Explicit accelerated_fields must name state fields of the group's
-        # nodes (a boundary flux is not a state field; use the default,
-        # which maps a flux edge to the producer's state fields).
-        for g in self._coupling_groups:
-            if g.accelerated_fields is None:
-                continue
-            for nn, fields in g.accelerated_fields.items():
-                if nn not in self._nodes or nn not in g.nodes:
-                    raise ValueError(
-                        f"accelerated_fields names node {nn!r}, not in coupling "
-                        f"group {sorted(g.nodes)}"
-                    )
-                have = set(self._state.get(nn, {}).keys())
-                bad = [f for f in fields if f not in have]
-                if bad:
-                    raise ValueError(
-                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
-                        f"of {nn!r} (state fields: {sorted(have)})"
-                    )
 
         # ``subcycling=True`` on a group whose nodes all share a
         # timestep is demoted to ``use_subcycling = False`` in
@@ -5697,6 +5733,20 @@ class GraphManager:
         numbers (the USD writer sets typed stage attributes from
         :meth:`CouplingGroup.to_dict`).  See
         :mod:`maddening.serialization.json_codec`.
+
+        Because the encoding is applied here rather than at the write
+        boundary -- so that plain ``json.dumps`` of this result is valid,
+        which is what every caller in the tree does -- the result is
+        *already encoded*.  Write it with ``json.dumps`` or
+        :func:`~maddening.serialization.json_codec.dumps_encoded`, and
+        **not** with :func:`~maddening.serialization.json_codec.dumps`:
+        that one encodes what it is given, the encoding is not
+        idempotent, and the second walk refuses the tokens the first one
+        wrote (``$.param_specs.<node>.<key>.bounds[0]: the string
+        '-Infinity' cannot be written to JSON``, from any graph with an
+        unbounded :class:`~maddening.core.params.ParamSpec`).  Read it
+        back with :func:`~maddening.serialization.json_codec.loads`,
+        which *is* composable.
         """
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             encode_non_finite,

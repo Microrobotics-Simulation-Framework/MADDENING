@@ -103,6 +103,7 @@ import time.  Levels:
 | `maddening.nodes.table.TableNode` | stable |
 | `maddening.serialization.json_codec.decode_non_finite` | evolving |
 | `maddening.serialization.json_codec.dumps` | evolving |
+| `maddening.serialization.json_codec.dumps_encoded` | evolving |
 | `maddening.serialization.json_codec.encode_non_finite` | evolving |
 | `maddening.serialization.json_codec.loads` | evolving |
 | `maddening.surrogates.architecture.SurrogateArchitecture` | experimental |

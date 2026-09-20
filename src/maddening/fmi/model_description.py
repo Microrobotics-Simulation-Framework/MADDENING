@@ -45,6 +45,7 @@ from maddening.core.compliance.stability import (
     _STABILITY_REGISTRY,
     stability,
 )
+from maddening.serialization.json_codec import NON_FINITE_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +545,33 @@ def build_model_description(
     Returns
     -------
     ModelDescription
+
+    Raises
+    ------
+    ValueError
+        If *model_name* is exactly ``"NaN"``, ``"Infinity"`` or
+        ``"-Infinity"``.  The name goes back to the importer in the
+        bridge's ``hello`` reply, where the JSON codec refuses it
+        (``MADD-ANO-010``); refusing it here is the only point at which
+        the caller still has the name in its hand and can change it.
+        See :data:`maddening.serialization.json_codec.NON_FINITE_TOKENS`.
     """
+    if model_name in NON_FINITE_TOKENS:
+        # MADD-ANO-010's refusal is otherwise reached from the *reply*
+        # side: ``FmuTcpBridge``'s hello carries ``model``, so an FMU with
+        # this name answered every connection with an unencodable frame.
+        # The bridge now turns that into an error reply rather than a dead
+        # worker thread, but an error reply on every hello is still an
+        # unusable FMU, and by then the caller is a C wrapper on the far
+        # end of a socket with no way to act on the name.
+        raise ValueError(
+            f"model_name {model_name!r} spells a non-finite JSON token, which "
+            f"the FMI wire encoding reserves (MADD-ANO-010): the bridge's "
+            f"hello reply carries the model name, and a reply carrying this "
+            f"string cannot be written as unambiguous JSON.  Name the model "
+            f"something else (a different spelling, such as "
+            f"{model_name.lower()!r}, is fine)."
+        )
     # Inputs: read external-input edges from the graph manager.  The
     # graph manager exposes them via ``_external_input_specs`` (an
     # internal dict) — we accept a duck-typed view for tests.

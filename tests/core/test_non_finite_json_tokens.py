@@ -37,6 +37,7 @@ from maddening.serialization.json_codec import (
     NON_FINITE_TOKENS,
     decode_non_finite,
     dumps,
+    dumps_encoded,
     encode_non_finite,
     loads,
 )
@@ -338,3 +339,125 @@ def test_any_float_round_trips_through_a_param_value(value):
     back = float(from_dict(strict_loads(text), REGISTRY)
                  .effective_node_params("s")["damping"])
     assert _same_number(value, back)
+
+
+# ------------------------------------------ the walk, and encoding exactly once
+
+def test_the_walk_reaches_inside_a_tuple():
+    """The docstring promises dicts, lists *and* tuples.
+
+    No production ``to_dict`` tree holds a tuple today, so stopping the
+    recursion at ``isinstance(obj, list)`` left every other test in this
+    file green -- a gate gap found by mutation, closed here.  The shape
+    is preserved too: a tuple encodes to a tuple, because the walk is
+    also used on trees that are not on their way to ``json.dumps``.
+    """
+    out = encode_non_finite({"b": (1.0, math.inf, (math.nan,))})
+
+    assert isinstance(out["b"], tuple)
+    assert out["b"][0] == 1.0
+    assert out["b"][1] == INF_TOKEN
+    assert isinstance(out["b"][2], tuple) and out["b"][2][0] == NAN_TOKEN
+    assert decode_non_finite(out)["b"][1] == math.inf
+
+    # ... and the refusal reaches in there as well, with the index in the path
+    with pytest.raises(ValueError, match=r"\$\.b\[1\]"):
+        encode_non_finite({"b": (1.0, NAN_TOKEN)})
+
+
+def test_encoding_twice_is_refused_rather_than_being_idempotent():
+    """Non-idempotence is the disambiguation, not an oversight.
+
+    ``encode_non_finite`` cannot tell a token it wrote from a data
+    string that spells one -- that inability is precisely why the
+    collision is refused at all.  Making the second walk pass such a
+    string through would mean the first walk's output was ambiguous,
+    which is the defect ``MADD-ANO-010`` exists to prevent.  So this
+    raises, and says what to do instead.
+    """
+    once = encode_non_finite({"bounds": [-math.inf, math.inf]})
+    assert once == {"bounds": [NEG_INF_TOKEN, INF_TOKEN]}
+
+    with pytest.raises(ValueError) as exc:
+        encode_non_finite(once)
+    assert "$.bounds[0]" in str(exc.value)
+    assert "dumps_encoded" in str(exc.value), \
+        "the message must name the writer for an already-encoded document"
+
+    # the read side has no such constraint: decoding composes freely
+    assert decode_non_finite(decode_non_finite(once))["bounds"][1] == math.inf
+
+
+def test_dumps_encoded_writes_what_to_dict_returns():
+    """The two public APIs of this release compose through ``dumps_encoded``.
+
+    ``to_dict()`` returns an *already encoded* document, so
+    ``json_codec.dumps`` -- which encodes what it is given -- walks it a
+    second time and refuses its own tokens.  Any graph with an unbounded
+    ``ParamSpec``, the documented way to say "no bound", is enough to hit
+    it.
+    """
+    # the audit's canonical trigger on its own: an unbounded ParamSpec
+    unbounded = _graph()
+    unbounded.set_param_spec("s", "stiffness", ParamSpec(bounds=(-math.inf, math.inf)))
+    with pytest.raises(ValueError) as exc:
+        dumps(to_dict(unbounded))
+    assert "$.param_specs.s.stiffness.bounds[0]" in str(exc.value)
+    assert "dumps_encoded" in str(exc.value)
+
+    gm = _graph(damping=math.nan)
+    gm.set_param_spec("s", "stiffness", ParamSpec(bounds=(-math.inf, math.inf)))
+    document = to_dict(gm)
+
+    with pytest.raises(ValueError):
+        dumps(document)
+
+    text = dumps_encoded(document, sort_keys=True)
+    assert text == json.dumps(document, allow_nan=False, sort_keys=True)
+    strict_loads(text)                       # a conforming reader accepts it
+
+    back = from_dict(loads(text), REGISTRY)
+    assert math.isnan(float(back.effective_node_params("s")["damping"]))
+    spec = back.param_spec_overrides()["s"]["stiffness"]
+    assert spec.bounds == (-math.inf, math.inf)
+    # and writing it again is a fixed point
+    assert dumps_encoded(to_dict(back), sort_keys=True) == text
+
+
+def test_dumps_encoded_still_refuses_a_bare_non_finite_float():
+    """``allow_nan=False`` is kept: "already encoded" is not "trusted".
+
+    A tree that reaches this function with a live ``inf`` in it was not
+    encoded after all, and writing a bare token is the failure this
+    module exists to remove.
+    """
+    with pytest.raises(ValueError):
+        dumps_encoded({"v": math.inf})
+    assert dumps_encoded({"v": INF_TOKEN}) == '{"v": "Infinity"}'
+
+
+# ------------------------------------------- node names, on every surface
+
+@pytest.mark.parametrize("token", sorted(NON_FINITE_TOKENS))
+def test_a_node_name_spelling_a_token_is_refused_where_names_are_accepted(token):
+    """``add_node``, not ``to_dict`` -- so every surface agrees.
+
+    ``to_dict`` put the name in the JSON tree and refused it; USD wrote
+    it to a typed String attribute and did not, so a ``.usda`` could
+    round-trip to a graph that could not be saved as a config.  The name
+    is refused at the point of entry instead, which is what
+    ``MADD-ANO-010``'s own workaround recommends.
+    """
+    gm = GraphManager()
+    with pytest.raises(ValueError, match="non-finite JSON token"):
+        gm.add_node(SpringDamperNode(token, 0.01, stiffness=30.0))
+    assert gm._nodes == {}, "a refused node must leave the graph untouched"
+
+
+@pytest.mark.parametrize("name", ["nan", "INF", "Infinity2", "-infinity", "NaN ",
+                                  "+Infinity", "s"])
+def test_a_node_name_that_only_looks_like_a_token_is_still_accepted(name):
+    """Exact matches only, like the codec's own refusal."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode(name, 0.01, stiffness=30.0))
+    assert strict_loads(json.dumps(to_dict(gm)))["nodes"][0]["name"] == name

@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`py.typed`: MADDENING's annotations now reach your type checker.** Under
+  PEP 561 they were all ignored downstream; nothing to do but upgrade. The
+  pyright job is blocking too — `core`/`nodes`/`fmi`/`cloud`/… at zero errors
 - **GCI / Richardson mode in `maddening.testing.mms`** for nodes MMS cannot
   reach: `assert_node_gci_verified(node, solution_at=..., levels=...)` needs
   no source term and no reference — three refinements give an error band

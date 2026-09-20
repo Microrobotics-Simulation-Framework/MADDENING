@@ -45,6 +45,10 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 5,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
+    os.path.join("docs", "algorithm_guide", "nodes", "spring_node.md"): 9,
+    os.path.join("docs", "algorithm_guide", "nodes", "ball_node.md"): 7,
+    os.path.join("docs", "algorithm_guide", "nodes", "rigid_body_2d_node.md"): 7,
+    os.path.join("docs", "algorithm_guide", "nodes", "heart_pump_node.md"): 9,
 }
 
 _QNAME = re.compile(r"`(maddening\.[^`]+)`")

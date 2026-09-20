@@ -181,13 +181,15 @@ class TestStabilityReportGeneratorCoverage:
         tagged = self._modules_using_stability()
         assert "maddening.cloud.resume" in tagged  # sanity: the grep sees the tag
         listed = self._listed_modules()
-        # a listed package covers the modules whose tag is re-exported via its
-        # __init__ only when the package itself is the tagged module; require
-        # each tagged module (or one of its parent packages) to be listed
-        missing = sorted(
-            m for m in tagged
-            if not any(m == p or m.startswith(p + ".") for p in listed)
-        )
+        # Exact membership, deliberately not a prefix match.  The generator
+        # imports exactly the names in STABILITY_MODULES, and importing
+        # maddening.nodes does not import maddening.nodes.ball, so a listed
+        # parent never makes a tagged submodule reachable.  An earlier version
+        # accepted "one of its parent packages", and because "maddening" is
+        # itself listed every module matched: the assertion could not fail, and
+        # 25 tagged modules -- including the whole api.auth surface -- were
+        # absent from the report while this test passed.
+        missing = sorted(m for m in tagged if m not in listed)
         assert not missing, (
             "modules using @stability that scripts/generate_stability_report.py "
             f"never imports (add them to STABILITY_MODULES): {missing}"

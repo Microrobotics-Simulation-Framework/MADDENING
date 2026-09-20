@@ -459,8 +459,8 @@ guidance; the itemized changes follow.
   per-member and total declared-size caps
 - **REST checkpoint endpoints are confined to a directory**: paths are
   relative to `SimulationServer(checkpoint_root=)` (default `./checkpoints`).
-  The API still has no authentication — bind it to localhost or authenticate
-  in front of it
+  Since this release the API *does* authenticate on a non-loopback bind
+  (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
 - **MADD-ANO-015**: the ZeroMQ transports bound every interface unauthenticated

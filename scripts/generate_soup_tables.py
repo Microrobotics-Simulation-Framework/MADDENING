@@ -278,7 +278,8 @@ def _enum(value: object) -> str:
     return f"`{value}`"
 
 
-def render_software_identification(pyproject: dict, citation: dict) -> str:
+def render_software_identification(pyproject: dict, citation: dict,
+                                   ci: dict) -> str:
     project = pyproject["project"]
     version = package_version(pyproject)
 
@@ -299,7 +300,13 @@ def render_software_identification(pyproject: dict, citation: dict) -> str:
         ["Release Date", release_date],
         ["Licence", project.get("license", "")],
         ["Source Repository", repo],
-        ["Python Version", project.get("requires-python", "")],
+        # The floor is what pip permits; it is not what was tested, and this
+        # is the identification table a downstream reader treats as "what
+        # this software is".  State both, the way the verification table
+        # already does for JAX.
+        ["Python Version", f'{project.get("requires-python", "")} permitted; '
+                           f'verified on {", ".join(ci["pythons"])} '
+                           f'(the CI matrix)'],
         ["Base Dependencies", deps],
         ["Build System", backend.split(".")[0] if backend else ""],
         ["Install", INSTALL_COMMAND],
@@ -586,7 +593,7 @@ def build() -> tuple[dict[Path, str], list[str]]:
 
     soup = SOUP_PACKAGE.read_text()
     soup = splice(soup, "software-identification",
-                  render_software_identification(pyproject, citation),
+                  render_software_identification(pyproject, citation, ci),
                   SOUP_PACKAGE)
     soup = splice(soup, "known-anomalies",
                   render_known_anomalies(registry), SOUP_PACKAGE)

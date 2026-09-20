@@ -249,8 +249,8 @@ def websocket_credentials(token: str) -> list[str]:
 
     Examples
     --------
-    >>> websocket_credentials("abc")[1]
-    'maddening.v1'
+    >>> websocket_credentials("abc")
+    ['maddening.bearer.YWJj', 'maddening.v1']
     """
     return [encode_ws_bearer(token), WS_SUBPROTOCOL]
 

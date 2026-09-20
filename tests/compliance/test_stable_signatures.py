@@ -293,15 +293,15 @@ class TestComparison:
     def test_an_identical_snapshot_reports_nothing(self, guard):
         record = {"kind": "function", "module": "pkg.mod",
                   "parameters": [{"name": "x", "kind": "POSITIONAL_OR_KEYWORD"}]}
-        breaking, additions = guard.compare(self._snap(record), self._snap(record))
-        assert (breaking, additions) == ([], [])
+        result = guard.compare(self._snap(record), self._snap(record))
+        assert result == ([], [], [])
 
     def test_a_changed_return_annotation_is_breaking(self, guard):
         old = {"kind": "function", "module": "pkg.mod", "parameters": [],
                "returns": "dict"}
         new = dict(old, returns="dict[str, float]")
-        breaking, additions = guard.compare(self._snap(old), self._snap(new))
-        assert len(breaking) == 1 and additions == []
+        breaking, compatible, additions = guard.compare(self._snap(old), self._snap(new))
+        assert len(breaking) == 1 and (compatible, additions) == ([], [])
         assert "CHANGED" in breaking[0]
 
     def test_reordering_two_parameters_is_breaking(self, guard):
@@ -309,8 +309,8 @@ class TestComparison:
         b = {"name": "b", "kind": "POSITIONAL_OR_KEYWORD"}
         old = {"kind": "function", "module": "pkg.mod", "parameters": [a, b]}
         new = {"kind": "function", "module": "pkg.mod", "parameters": [b, a]}
-        breaking, _ = guard.compare(self._snap(old), self._snap(new))
-        assert len(breaking) == 1
+        breaking, compatible, _ = guard.compare(self._snap(old), self._snap(new))
+        assert len(breaking) == 1 and compatible == []
 
     def test_turning_a_keyword_into_positional_is_breaking(self, guard):
         old = {"kind": "function", "module": "pkg.mod",
@@ -318,14 +318,14 @@ class TestComparison:
         new = {"kind": "function", "module": "pkg.mod",
                "parameters": [{"name": "x", "kind": "POSITIONAL_OR_KEYWORD",
                                "default": "1"}]}
-        breaking, _ = guard.compare(self._snap(old), self._snap(new))
-        assert len(breaking) == 1
+        breaking, compatible, _ = guard.compare(self._snap(old), self._snap(new))
+        assert len(breaking) == 1 and compatible == []
 
     def test_a_new_surface_is_an_addition_not_a_break(self, guard):
         old = {"format": 1, "surfaces": {}}
         new = self._snap({"kind": "function", "module": "pkg.mod", "parameters": []})
-        breaking, additions = guard.compare(old, new)
-        assert breaking == [] and len(additions) == 1
+        breaking, compatible, additions = guard.compare(old, new)
+        assert (breaking, compatible) == ([], []) and len(additions) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -749,3 +749,203 @@ class TestAStableSignatureNamesNoUntaggedType:
                 f"it is ours after all"
             )
             assert _NOT_OURS[name].strip(), f"{name} has no recorded reason"
+
+
+# ---------------------------------------------------------------------------
+# Additive is not breaking
+# ---------------------------------------------------------------------------
+
+class TestAnAdditiveChangeIsNotReportedAsABreak:
+    """The guard's message has always promised this distinction.
+
+    "A new keyword-only parameter with a default is compatible; renaming,
+    reordering or removing one is not" -- and the comparison made no such
+    distinction: any difference at all came out as a break.  Three surfaces
+    gained a trailing ``params=None`` this release, all compatible, and a
+    guard that calls those a breach of the frozen contract is a guard that
+    gets switched off.  Both directions are pinned here: an additive change
+    must be classified *compatible*, and each way of making one incompatible
+    must be classified *breaking*.
+    """
+
+    BASE = {
+        "kind": "function", "module": "pkg.mod", "returns": "None",
+        "parameters": [
+            {"name": "state", "kind": "POSITIONAL_OR_KEYWORD", "annotation": "dict"},
+            {"name": "dt", "kind": "POSITIONAL_OR_KEYWORD", "annotation": "float"},
+        ],
+    }
+
+    def _with(self, *extra, **over):
+        record = dict(self.BASE, **over)
+        record["parameters"] = list(self.BASE["parameters"]) + list(extra)
+        return record
+
+    def _snap(self, record):
+        return {"format": 1, "surfaces": {"pkg.mod.thing": record}}
+
+    def _classify(self, guard, new):
+        breaking, compatible, additions = guard.compare(
+            self._snap(self.BASE), self._snap(new),
+        )
+        assert additions == []
+        if breaking:
+            assert compatible == []
+            return "breaking"
+        if compatible:
+            return "compatible"
+        return "unchanged"
+
+    # -- the shapes that must NOT fire ------------------------------------
+
+    def test_a_trailing_parameter_with_a_default_is_compatible(self, guard):
+        """The literal shape of this release's three `params=None` additions."""
+        new = self._with({"name": "params", "kind": "POSITIONAL_OR_KEYWORD",
+                          "annotation": "Optional[dict]", "default": "None"})
+        assert self._classify(guard, new) == "compatible"
+
+    def test_a_trailing_keyword_only_parameter_with_a_default_is_compatible(self, guard):
+        new = self._with({"name": "strict", "kind": "KEYWORD_ONLY",
+                          "annotation": "bool", "default": "False"})
+        assert self._classify(guard, new) == "compatible"
+
+    def test_growing_var_keyword_is_compatible(self, guard):
+        new = self._with({"name": "kwargs", "kind": "VAR_KEYWORD"})
+        assert self._classify(guard, new) == "compatible"
+
+    def test_two_new_defaulted_parameters_at_once_are_compatible(self, guard):
+        new = self._with(
+            {"name": "params", "kind": "KEYWORD_ONLY", "default": "None"},
+            {"name": "strict", "kind": "KEYWORD_ONLY", "default": "False"},
+        )
+        assert self._classify(guard, new) == "compatible"
+
+    def test_an_identical_record_is_neither(self, guard):
+        assert self._classify(guard, dict(self.BASE)) == "unchanged"
+
+    # -- and the shapes that must ------------------------------------------
+
+    def test_a_new_parameter_without_a_default_is_breaking(self, guard):
+        new = self._with({"name": "params", "kind": "POSITIONAL_OR_KEYWORD"})
+        assert self._classify(guard, new) == "breaking"
+
+    def test_a_new_parameter_inserted_before_an_existing_one_is_breaking(self, guard):
+        """It has a default, but it moves ``dt``'s positional index."""
+        new = dict(self.BASE, parameters=[
+            self.BASE["parameters"][0],
+            {"name": "params", "kind": "POSITIONAL_OR_KEYWORD", "default": "None"},
+            self.BASE["parameters"][1],
+        ])
+        assert self._classify(guard, new) == "breaking"
+
+    def test_a_renamed_parameter_is_breaking(self, guard):
+        new = dict(self.BASE, parameters=[
+            self.BASE["parameters"][0],
+            dict(self.BASE["parameters"][1], name="timestep"),
+        ])
+        assert self._classify(guard, new) == "breaking"
+
+    def test_reordering_two_existing_parameters_is_breaking(self, guard):
+        new = dict(self.BASE, parameters=list(reversed(self.BASE["parameters"])))
+        assert self._classify(guard, new) == "breaking"
+
+    def test_removing_a_parameter_is_breaking(self, guard):
+        new = dict(self.BASE, parameters=self.BASE["parameters"][:1])
+        assert self._classify(guard, new) == "breaking"
+
+    def test_changing_an_existing_default_is_breaking(self, guard):
+        """Silent at the call site, which the policy rates worse than a failure."""
+        base = self._with({"name": "strict", "kind": "KEYWORD_ONLY",
+                           "default": "False"})
+        changed = self._with({"name": "strict", "kind": "KEYWORD_ONLY",
+                              "default": "True"})
+        breaking, compatible, _ = guard.compare(
+            self._snap(base), self._snap(changed),
+        )
+        assert len(breaking) == 1 and compatible == []
+
+    def test_changing_the_return_annotation_is_breaking(self, guard):
+        assert self._classify(guard, dict(self.BASE, returns="dict")) == "breaking"
+
+    def test_changing_an_existing_annotation_is_breaking(self, guard):
+        new = dict(self.BASE, parameters=[
+            dict(self.BASE["parameters"][0], annotation="Mapping[str, Any]"),
+            self.BASE["parameters"][1],
+        ])
+        assert self._classify(guard, new) == "breaking"
+
+    def test_turning_a_property_settable_is_breaking(self, guard):
+        base = dict(self.BASE, kind="property", settable=False)
+        new = dict(base, settable=True)
+        breaking, compatible, _ = guard.compare(self._snap(base), self._snap(new))
+        assert len(breaking) == 1 and compatible == []
+
+    # -- and the operator can tell which happened --------------------------
+
+    def test_the_two_verdicts_say_different_things_to_the_operator(self, tmp_path):
+        """An exit code alone is not an assertion: both still exit 1, so the
+        message is the only thing that distinguishes a breach from a stale
+        snapshot."""
+        # A compatible drift: drop a trailing defaulted parameter from the
+        # *snapshot*, so the tree looks like it grew one.
+        data = json.loads(SNAPSHOT.read_text())
+        params = data["surfaces"]["maddening.nodes.ball.BallNode"]["parameters"]
+        assert "default" in params[-1], "the last parameter must be defaulted"
+        dropped = params.pop()
+        compatible_path = tmp_path / "compatible.json"
+        compatible_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+        # A breaking drift: rename the first parameter instead.
+        data = json.loads(SNAPSHOT.read_text())
+        data["surfaces"]["maddening.nodes.ball.BallNode"]["parameters"][0]["name"] = "label"
+        breaking_path = tmp_path / "breaking.json"
+        breaking_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+        ok = _run("--snapshot", str(compatible_path))
+        bad = _run("--snapshot", str(breaking_path))
+
+        assert ok.returncode == bad.returncode == 1, "the rc cannot tell them apart"
+        assert "COMPATIBLE STABLE signature change" in ok.stdout, ok.stdout
+        assert "NOT a break of the contract" in ok.stdout
+        assert dropped["name"] in ok.stdout
+        assert "major version" not in ok.stdout
+
+        assert "BREAKING STABLE signature change" in bad.stdout, bad.stdout
+        assert "major version" in bad.stdout
+        assert "NOT a break of the contract" not in bad.stdout
+
+
+class TestTheSnapshotSeesEveryDataclassField:
+    """A field the constructor does not carry is invisible to the snapshot.
+
+    The snapshot records signatures, so a ``dataclasses.field(init=False)`` on
+    a ``stable`` dataclass would be part of the public shape and outside the
+    guard entirely.  There is none today — this fails when the first one
+    appears, rather than letting it through silently.
+    """
+
+    def test_no_stable_dataclass_has_a_field_outside_its_constructor(self, guard):
+        import dataclasses
+
+        from maddening.core.compliance.metadata import StabilityLevel
+
+        registry, _skipped = guard.load_registry()
+        checked = []
+        invisible = []
+        for name, level in sorted(registry.items()):
+            if level is not StabilityLevel.STABLE:
+                continue
+            obj = guard.resolve(name)
+            if not inspect.isclass(obj) or not dataclasses.is_dataclass(obj):
+                continue
+            checked.append(name)
+            parameters = set(inspect.signature(obj).parameters)
+            for field in dataclasses.fields(obj):
+                if field.name not in parameters:
+                    invisible.append(f"{name}.{field.name}")
+        assert checked, "no STABLE surface is a dataclass; this test is vacuous"
+        assert not invisible, (
+            "these dataclass fields are public shape the signature snapshot "
+            "cannot see, because the constructor does not take them; record "
+            "them in the snapshot or make them private: " + str(invisible)
+        )

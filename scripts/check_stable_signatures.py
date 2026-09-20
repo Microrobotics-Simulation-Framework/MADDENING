@@ -352,30 +352,108 @@ def _render(record: dict[str, Any]) -> str:
     return rendered
 
 
-def compare(recorded: dict[str, Any], current: dict[str, Any]) -> tuple[list[str], list[str]]:
+#: Parameter kinds an existing caller supplies positionally.
+_POSITIONAL = ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD")
+
+
+def is_additive(recorded: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Is the change from *recorded* to *current* one no caller can observe?
+
+    The failure message has always claimed that "a new keyword-only parameter
+    with a default is compatible; renaming, reordering or removing one is
+    not", and the comparison did not make that distinction: any difference at
+    all was reported as a break.  A guard that cries breach over the three
+    additive `params=None` parameters this release added is a guard somebody
+    switches off, so the classification has to match the promise.
+
+    A change is additive when **every recorded parameter survives byte for
+    byte, in the same relative order, with its positional index intact**, the
+    return annotation and the kind are unchanged, and **every new parameter is
+    one an existing call can omit** — it has a default, or it is ``*args`` /
+    ``**kwargs``.  Anything else is breaking, including a widened annotation:
+    the annotation is part of what a type checker holds callers to, and
+    deciding which widenings are safe is not something this can do from text.
+    """
+    if recorded.get("kind") != current.get("kind"):
+        return False
+    if recorded.get("returns") != current.get("returns"):
+        return False
+    if recorded.get("settable") != current.get("settable"):
+        return False
+
+    old_params = recorded.get("parameters", [])
+    new_params = current.get("parameters", [])
+    new_by_name = {p["name"]: p for p in new_params}
+
+    # every recorded parameter is still there, unchanged
+    for parameter in old_params:
+        if new_by_name.get(parameter["name"]) != parameter:
+            return False
+
+    # ... in the same relative order
+    recorded_names = [p["name"] for p in old_params]
+    kept = [p["name"] for p in new_params if p["name"] in set(recorded_names)]
+    if kept != recorded_names:
+        return False
+
+    # ... and a positional parameter keeps its index, so nothing is inserted
+    # in front of one an existing caller passes by position
+    old_positional = [p["name"] for p in old_params if p["kind"] in _POSITIONAL]
+    new_positional = [p["name"] for p in new_params if p["kind"] in _POSITIONAL]
+    if new_positional[:len(old_positional)] != old_positional:
+        return False
+
+    # every new parameter is one an existing call can leave out
+    for parameter in new_params:
+        if parameter["name"] in set(recorded_names):
+            continue
+        if parameter["kind"] in ("VAR_POSITIONAL", "VAR_KEYWORD"):
+            continue
+        if "default" not in parameter:
+            return False
+    return True
+
+
+def compare(
+    recorded: dict[str, Any], current: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
     """Compare two snapshots.
 
     Returns
     -------
-    tuple of (list of str, list of str)
-        ``(breaking, additions)`` — human-readable lines.  A *breaking* line
-        is a signature that changed or a surface that vanished; an *addition*
-        is a surface or member the snapshot does not record yet.
+    tuple of (list of str, list of str, list of str)
+        ``(breaking, compatible, additions)`` — human-readable lines.
+
+        A *breaking* line is a signature that changed in a way a caller can
+        observe, or a surface that vanished.  A *compatible* line is a change
+        :func:`is_additive` accepts: the snapshot is out of date, the contract
+        is not.  An *addition* is a surface or member the snapshot does not
+        record yet.
+
+        All three still fail the check, because the snapshot has to move or
+        the next change is measured against a stale baseline.  They fail with
+        different messages, and the caller must read the classification rather
+        than the exit code: two different defects with the same ``rc`` make a
+        check nothing can be asserted about.
     """
     old, new = _flatten(recorded), _flatten(current)
-    breaking, additions = [], []
+    breaking, compatible, additions = [], [], []
     for name in sorted(set(old) | set(new)):
         if name not in new:
             breaking.append(f"  {name}: REMOVED (was {_render(old[name])})")
         elif name not in old:
             additions.append(f"  {name}: new {_render(new[name])}")
         elif old[name] != new[name]:
-            breaking.append(
-                f"  {name}: CHANGED\n"
+            line = (
+                f"  {name}: {{verdict}}\n"
                 f"      recorded: {_render(old[name])}\n"
                 f"      current : {_render(new[name])}"
             )
-    return breaking, additions
+            if is_additive(old[name], new[name]):
+                compatible.append(line.format(verdict="WIDENED"))
+            else:
+                breaking.append(line.format(verdict="CHANGED"))
+    return breaking, compatible, additions
 
 
 # --------------------------------------------------------------------------
@@ -437,25 +515,44 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
 
-    breaking, additions = compare(recorded, current)
+    breaking, compatible, additions = compare(recorded, current)
+
+    def _also(label: str, lines: list[str]) -> None:
+        if lines:
+            print(f"\nAlso {len(lines)} {label}:")
+            for line in lines:
+                print(line)
+
     if breaking:
-        print(f"FAIL: {len(breaking)} STABLE signature change(s):")
+        print(f"FAIL: {len(breaking)} BREAKING STABLE signature change(s):")
         for line in breaking:
             print(line)
         print(
             "\nA STABLE surface's signature is frozen until the next major "
             "version (docs/developer_guide/deprecation_policy.md).  Either:\n"
-            "  - revert the change, or keep it additive (a new keyword-only "
-            "parameter with a default is compatible; renaming, reordering or "
-            "removing one is not); or\n"
+            "  - revert the change, or keep it additive (a new parameter with "
+            "a default, added after the existing ones, is compatible; "
+            "renaming, reordering or removing one is not); or\n"
             "  - land it behind a major version bump, then accept it with\n"
             "      python scripts/check_stable_signatures.py --update\n"
             "    and record the break under '### Removed' in CHANGELOG.md."
         )
-        if additions:
-            print(f"\nAlso {len(additions)} unrecorded addition(s):")
-            for line in additions:
-                print(line)
+        _also("compatible change(s)", compatible)
+        _also("unrecorded addition(s)", additions)
+        return 1
+
+    if compatible:
+        print(f"FAIL: {len(compatible)} COMPATIBLE STABLE signature change(s):")
+        for line in compatible:
+            print(line)
+        print(
+            "\nEvery recorded parameter survives unchanged and each new one "
+            "has a default, so no existing call is affected: this is the "
+            "snapshot being out of date, NOT a break of the contract.  "
+            "Record it:\n"
+            "      python scripts/check_stable_signatures.py --update"
+        )
+        _also("unrecorded addition(s)", additions)
         return 1
 
     if additions:

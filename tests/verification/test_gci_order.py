@@ -354,6 +354,24 @@ class TestTheGciGateCanFail:
         assert result.failed
         assert "not in the asymptotic range" in result.detail
 
+    def test_a_coarse_triple_that_oscillates_blocks_the_asymptotic_verdict(self):
+        """A longer ladder must not launder a bad sub-triple into silence.
+
+        The finest three values converge monotonically and would pass on
+        their own.  The coarse triple oscillates, so the order is not
+        settling and the four levels are not in the asymptotic range --
+        adding the fourth level has to be able to *remove* a verdict,
+        not only confirm one.
+        """
+        study = richardson_study(
+            [1.10, 0.95, 1.02, 1.03], (0.8, 0.4, 0.2, 0.1), axis=SPACE,
+        )
+        assert study.regime is ConvergenceRegime.MONOTONE
+        assert math.isnan(study.triplet_orders[0])
+        assert study.in_asymptotic_range is False
+        assert "do not converge monotonically" in study.asymptotic_detail
+        assert check_gci(study, max_gci=1.0).failed
+
     def test_refinement_ratios_that_determine_no_order_are_refused(self):
         """Ratios far enough apart, and the equation has no root at all.
 

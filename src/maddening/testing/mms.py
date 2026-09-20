@@ -1519,7 +1519,11 @@ def richardson_study(
     for i in range(len(values) - 2):
         ec = values[i] - values[i + 1]
         ef = values[i + 1] - values[i + 2]
-        if ef == 0.0 or ec == 0.0 or ef / ec <= 0.0:
+        # Only a monotonically converging triple has an order at all; a
+        # sub-triple that oscillates or diverges contributes ``nan``,
+        # which _assess_asymptotic_range reads as evidence against the
+        # asymptotic range rather than dropping from the comparison.
+        if ef == 0.0 or ec == 0.0 or not 0.0 < ef / ec < 1.0:
             triplet_orders.append(nan)
             continue
         got = apparent_order(ef, ec, h[i + 1] / h[i + 2], h[i] / h[i + 1])
@@ -1601,14 +1605,22 @@ def _assess_asymptotic_range(
             f"observed p = {p:.3f} against the declared {formal_order:g} "
             f"({'within' if ok else 'outside'} +/-{tolerance:g})"
         )
-    if len(stable) > 1:
-        spread = max(stable) - min(stable)
-        ok = spread <= tolerance
-        verdicts.append(ok)
-        checks.append(
-            f"per-triple orders span {spread:.3f} "
-            f"({'within' if ok else 'outside'} {tolerance:g})"
-        )
+    if len(triplet_orders) > 1:
+        unusable = len(triplet_orders) - len(stable)
+        if unusable:
+            verdicts.append(False)
+            checks.append(
+                f"{unusable} of {len(triplet_orders)} triples do not converge "
+                f"monotonically, so the order is not settling"
+            )
+        else:
+            spread = max(stable) - min(stable)
+            ok = spread <= tolerance
+            verdicts.append(ok)
+            checks.append(
+                f"per-triple orders span {spread:.3f} "
+                f"({'within' if ok else 'outside'} {tolerance:g})"
+            )
 
     if not verdicts:
         return None, (

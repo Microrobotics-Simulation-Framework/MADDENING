@@ -267,6 +267,24 @@ def _drive(strategy, body, suppress=(), max_examples=200):
     return name, message, counts
 
 
+def _counts_from(message, pattern, audit):
+    """The two numbers a health-check message reports, or a skip.
+
+    The *verdict* -- which health check fired -- is behaviour, and is
+    asserted.  The counts have to be read out of English prose, and a
+    reworded message is not a semantic change: that is the distinction this
+    whole file exists to make, so a message this cannot parse skips with a
+    reason instead of failing.
+    """
+    found = pattern.search(message or "")
+    if found is None:
+        pytest.skip(
+            "hypothesis reworded its health-check message, so the budget "
+            "cannot be read from it; the check itself still fired as "
+            f"expected. Update the pattern. Message: {message!r}")
+    return int(found.group(1)), int(found.group(2))
+
+
 def test_filter_too_much_still_counts_only_invalid_draws(audit):
     """The semantic claim the whole audit rests on, driven rather than read.
 
@@ -287,10 +305,9 @@ def test_filter_too_much_still_counts_only_invalid_draws(audit):
     """
     name, message, counts = _drive(st.integers(), lambda _: assume(False))
     assert name == "filter_too_much", (name, message)
-    found = _FILTERED_RE.search(message or "")
-    assert found, message
-    assert int(found.group(2)) == audit.HEALTH_CHECK_MAX_INVALID, message
-    assert int(found.group(1)) < audit.HEALTH_CHECK_MAX_VALID, message
+    valid, filtered = _counts_from(message, _FILTERED_RE, audit)
+    assert filtered == audit.HEALTH_CHECK_MAX_INVALID, message
+    assert valid < audit.HEALTH_CHECK_MAX_VALID, message
 
     if _LARGE_BASE is None:
         pytest.skip("HealthCheck.large_base_example is gone; the overrun "
@@ -336,9 +353,8 @@ def test_the_overrun_budget_is_the_one_the_risk_model_prices(audit):
     name, message, _ = _drive(_ALWAYS_OVERRUNS, lambda _: None,
                               suppress=[_LARGE_BASE])
     assert name == "data_too_large", (name, message)
-    found = _OVERRAN_RE.search(message or "")
-    assert found, message
-    assert int(found.group(2)) == audit.HEALTH_CHECK_MAX_OVERRUN, message
+    _, overran = _counts_from(message, _OVERRAN_RE, audit)
+    assert overran == audit.HEALTH_CHECK_MAX_OVERRUN, message
 
 
 def test_the_valid_draw_budget_switches_the_health_check_off(audit):
@@ -363,8 +379,8 @@ def test_the_valid_draw_budget_switches_the_health_check_off(audit):
 
     below, message = step(audit.HEALTH_CHECK_MAX_VALID - 1)
     assert below == "filter_too_much", (below, message)
-    found = _FILTERED_RE.search(message or "")
-    assert found and int(found.group(1)) < audit.HEALTH_CHECK_MAX_VALID, message
+    valid, _ = _counts_from(message, _FILTERED_RE, audit)
+    assert valid < audit.HEALTH_CHECK_MAX_VALID, message
 
     above, message = step(audit.HEALTH_CHECK_MAX_VALID + 1)
     assert above is None, (

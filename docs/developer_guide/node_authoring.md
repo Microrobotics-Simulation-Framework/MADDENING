@@ -383,6 +383,47 @@ that closes this node's discrete energy balance. The two differ by
 `O(dx**k)`. Report the physical flux — that is what a coupled
 neighbour needs — and say so.
 
+### Compute a coefficient where it is known, not where it is used
+
+The same discipline applies one level down, to *how* a coefficient is
+built rather than to where the quantity is reported.  **A value known at
+trace time should be computed in Python, not with `jnp` operations.**
+
+`compute_boundary_fluxes` above is the worked example.  Its first cut
+built the Lagrange interpolation weights out of traced arithmetic —
+`jnp` operations on the offsets, inside the step function — which is
+`O(k**3)` primitives per rod end.  None of those offsets was ever
+unknown at build time: on a uniform grid they are the fixed multiples
+`(2j+1)/2` of `dx`, and on a non-uniform one they are entries of
+`grid_points`, which is `ParamSpec(trainable=False)` geometry.  Measured
+on `heat_chain`, two 64-cell rods at `stencil_order=4`:
+
+| | jaxpr primitives | HLO ops |
+|---|---|---|
+| before the flux change | 243 | 287 |
+| traced coefficients | **557** | 287 |
+| Python coefficients (shipped) | 271 | 287 |
+
+**XLA constant-folded every one of those 314 primitives away, so the
+lowered program was byte-identical and the HLO count could not see the
+regression** — while the graph builder did 2.3x the work on every
+compile.  The `+28` between the first and last rows is the real cost of
+reading more cells.
+
+So this is guidance about *compile* cost, not runtime: the executable is
+the same either way, which is exactly why it is easy to miss, and why
+the compile-count gate counts jaxpr primitives as well as HLO ops.
+`docs/developer_guide/profiling.md` describes `jaxpr_primitive_count` as
+"how much work the graph builder emits", and
+`python scripts/compile_counts.py --check` is what noticed this one.
+
+A systematic compile-cost pass over the framework is deliberately left
+to 0.5.0: Phase 3 changes the representation of `state`,
+`boundary_inputs` and `static_data`, and optimising before that lands
+would mean measuring a structure that is about to change.  Writing a
+constant in Python in the first place costs nothing and does not wait
+for it.
+
 ## Additive vs Replacive Inputs
 
 By default, if multiple edges write to the same boundary input, the last one wins ("replacive"). For inputs that should accumulate (e.g., forces from multiple sources), mark them as `"additive"`:

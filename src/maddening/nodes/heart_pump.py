@@ -21,7 +21,12 @@ each heartbeat at a rate of ``heart_rate / 60``.
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -93,6 +98,24 @@ class HeartPumpNode(SimulationNode):
         description="2-element Windkessel heart pump model",
         governing_equations="dP/dt = (Q_heart - (P-P_v)/R) / C",
         discretization="Forward Euler (explicit, 1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "1st order globally in the arterial pressure, measured by "
+                "MADD-VER-012.  No spatial order -- the Windkessel "
+                "compartment is lumped.  The order holds, but the scheme is "
+                "not the plain forward Euler ``discretization`` above "
+                "names: ``update()`` advances the cardiac phase first and "
+                "evaluates the inflow waveform at the *end* of the step, "
+                "while the node's own ``derivatives()`` evaluates it at the "
+                "start, so the two disagree at O(dt) in the source term "
+                "(MADD-ANO-012).  Both samplings are 1st order.  The "
+                "measured order is also floored by the float32 downcast of "
+                "``backpressure`` (MADD-ANO-013), which caps the usable "
+                "refinement ladder."
+            ),
+        ),
         assumptions=(
             "Lumped parameters (spatially uniform arterial compartment)",
             "Rigid arterial walls (compliance is constant)",

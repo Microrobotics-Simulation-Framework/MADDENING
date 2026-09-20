@@ -389,6 +389,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Four more nodes measured rather than skipped** (MADD-VER-009..012): `spring`,
+  `ball`, `rigid_body_2d` and `heart_pump` declare a temporal order and meet it
+  (1.029/1.002/1.000/1.000 against 1.0); 12 mutations confirm the ladders can fail
 - **`LBMPipeNode` has a convergence verdict for the first time**
   (MADD-VER-013): the ladder converges, but a fourth level shows it is *not*
   in the asymptotic range, so no error band is quoted for it
@@ -448,6 +451,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- MADD-ANO-011/011/012 (BallNode, HeartPumpNode, all open): both nodes name
+  forward Euler and implement something else, and `backpressure` is truncated to
+  float32 -- read the scheme from the algorithm guide, not from `discretization`
 - **MADD-ANO-010**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
   refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
   read back as that float -- spell such a value differently (minor, context_dependent)

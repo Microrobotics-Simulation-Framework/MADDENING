@@ -13,20 +13,29 @@ refinement — not its size.  A wrong stencil weight or a mishandled
 boundary leaves the absolute error looking perfectly acceptable and
 shows up as order 1 where order 2 was claimed.
 
-Two of the studies below currently fail, and are recorded as strict
-xfails so that fixing the node turns them into an XPASS that has to be
-dealt with rather than a silent pass:
+Two of the HeatNode studies below were strict xfails when this module
+landed, recording defects the harness had just found.  Both are fixed
+and both now assert:
 
-* ``stencil_order=4`` measures order 1.0 against its claim of 4
-  (MADD-ANO-008), and is *less* accurate than the default second-order
-  stencil at every resolution measured;
+* ``stencil_order=4`` measured order 0.954 against its claim of 4 and
+  was 10x *less* accurate than the default stencil (MADD-ANO-008); it
+  now measures 3.957;
 * supplying the Dirichlet data at the rod ends, which is what
-  ``boundary_input_spec`` documents, measures order 1.0 against the
-  node's claim of 2 (MADD-ANO-007).
+  ``boundary_input_spec`` documents, measured order 1.001 against the
+  node's claim of 2 (MADD-ANO-007); it now measures 2.000, and the
+  rod-end reading is the only one the node implements.
 
 Both sat comfortably inside the acceptance criteria of MADD-VER-001 and
-MADD-VER-002, which are pointwise-error and "rate between 0.7 and 2.5"
-tests over the same node.
+MADD-VER-002, which were a pointwise-error test and a convergence study
+whose band had been widened to "rate between 0.7 and 2.5" — wide enough
+to accept the 1.0 it was measuring.  MADD-VER-002's band is now
+[1.7, 2.3]; see ``tests/verification/test_heat_analytical.py``.
+
+Each fix is pinned twice over: by the ladder that measures the order,
+and by a cheap direct test that fails on the defect alone
+(:class:`TestHeatBoundaryPlacement`, :class:`TestHeatStencilGhosts`).
+The order ladders are the specification; the direct tests are what
+makes a regression legible without reading a refinement table.
 
 Precision: the studies run under ``jax_enable_x64``.  The observed
 order is a ratio of small numbers, and in float32 these ladders measure
@@ -55,7 +64,7 @@ from maddening.core.compliance.validation import (  # noqa: E402
     verification_benchmark,
 )
 from maddening.core.node import SimulationNode  # noqa: E402
-from maddening.nodes.heat import HeatNode  # noqa: E402
+from maddening.nodes.heat import MAX_FOURIER_NUMBER, HeatNode  # noqa: E402
 from maddening.nodes.lbm import LBMNode  # noqa: E402
 from maddening.nodes.rigid_body import RigidBodyNode  # noqa: E402
 from maddening.testing.mms import (  # noqa: E402
@@ -107,11 +116,29 @@ def float64():
 _L = 1.0
 _ALPHA = 1.0
 
-#: Steady manufactured profile.  Non-symmetric (the linear term) and
-#: with a non-vanishing fourth derivative (the sine), so neither the
-#: second- nor the fourth-order stencil is accidentally exact on it.
+#: Steady manufactured profile.  Three properties, each load-bearing and
+#: each pinned by :class:`TestTheSteadyProfileCanSeeABrokenScheme`:
+#:
+#: * non-symmetric (the linear term), so a symmetric error cannot cancel;
+#: * non-vanishing fourth derivative (the sine), so neither stencil is
+#:   accidentally exact on it in the interior;
+#: * **non-vanishing second derivative at both rod ends** (the quadratic
+#:   term).  This one was missing until 0.4.0 and the omission mattered.
+#:
+#: The boundary rows' leading error term is proportional to ``u''`` at
+#: the rod end, so a profile flat there cannot see a wrong boundary
+#: closure at all.  ``sin(2 pi x) + 0.5x + 1`` has ``u'' = 0`` at both
+#: ends exactly, and on it a linear ghost extrapolation -- which is a
+#: genuinely 2nd-order closure -- measures 4.357, 4.257, 4.150, 4.080
+#: and sails through a band centred on 4.  Adding ``0.4 x^2`` makes the
+#: same wrong closure measure 3.206, 2.129, 2.006, 2.000, caught by two
+#: whole orders, and moves the correct closure not at all (3.957 either
+#: way).  A manufactured solution that cannot fail is the same defect as
+#: an acceptance band that cannot fail, one layer down.
 _STEADY = ManufacturedSolution(
-    exact=lambda x, t: jnp.sin(2.0 * jnp.pi * x / _L) + 0.5 * x + 1.0,
+    exact=lambda x, t: (
+        jnp.sin(2.0 * jnp.pi * x / _L) + 0.5 * x + 1.0 + 0.4 * x * x
+    ),
     operator=diffusion_operator(_ALPHA),
 )
 
@@ -132,7 +159,7 @@ def _relaxation_steps(n_cells, fourier, decay=16.0):
     return int(decay * n_cells**2 / (fourier * np.pi**2)) + 50
 
 
-def _heat_steady_error(n_cells, *, stencil_order=2, fourier=0.4, bc="cell_centre"):
+def _heat_steady_error(n_cells, *, stencil_order=2, fourier=0.4, bc="rod_ends"):
     """Relative L2 error of the steady manufactured profile.
 
     A steady manufactured solution is what isolates the *spatial* order
@@ -143,6 +170,13 @@ def _heat_steady_error(n_cells, *, stencil_order=2, fourier=0.4, bc="cell_centre
     steady problem — the spatial error and nothing else.  Refining
     space and time together (the usual CFL-locked ladder) would instead
     measure the minimum of the two orders.
+
+    ``bc`` selects which reading of ``left_temperature`` the study
+    feeds the node.  ``"rod_ends"`` is the documented one and the one
+    the node implements; ``"cell_centre"`` is the reading the node used
+    to implement, kept so that
+    :class:`TestHeatBoundaryPlacement` can show the two are not
+    interchangeable and that the wrong one still costs an order.
     """
     dx = _L / n_cells
     dt = fourier * dx * dx / _ALPHA
@@ -151,12 +185,13 @@ def _heat_steady_error(n_cells, *, stencil_order=2, fourier=0.4, bc="cell_centre
     source = _STEADY.source_field(x, 0.0)
 
     if bc == "cell_centre":
-        # What the code implements: Dirichlet data at the first and
-        # last cell centre, which is where update() writes it.
+        # The pre-0.4.0 reading: the value at the first and last cell
+        # centre, which is where update() used to write it.  Supplying
+        # it now is supplying the boundary datum half a cell out.
         t_left, t_right = exact[0], exact[-1]
     else:
-        # What boundary_input_spec documents: "Dirichlet BC at left
-        # end", i.e. the value at the rod's end, x = 0 and x = L.
+        # What boundary_input_spec documents and what the node now
+        # implements: the value at the rod's ends, x = 0 and x = L.
         t_left = float(_STEADY.exact(jnp.float64(0.0), jnp.float64(0.0)))
         t_right = float(_STEADY.exact(jnp.float64(_L), jnp.float64(0.0)))
 
@@ -194,9 +229,11 @@ def _heat_steady_error(n_cells, *, stencil_order=2, fourier=0.4, bc="cell_centre
     benchmark_type=BenchmarkType.MANUFACTURED_SOLUTION,
     acceptance_criteria=(
         "Observed spatial order over the finest pair of a 10/20/40/80/160 "
-        "ladder within [-0.25, +1.0] of the declared 2.0 (measured: 1.982). "
-        "Applies to the boundary convention the code implements, Dirichlet "
-        "data at the first and last cell centre; see MADD-ANO-007."
+        "ladder within [-0.25, +1.0] of the declared 2.0 (measured: 2.000). "
+        "Dirichlet data supplied at the rod ends x=0 and x=L, which is what "
+        "boundary_input_spec documents and, since 0.4.0, what the node "
+        "implements; before 0.4.0 the same ladder measured 1.001 "
+        "(MADD-ANO-007)."
     ),
     references=(
         "Roache2002: Code Verification by the Method of Manufactured Solutions",
@@ -215,22 +252,18 @@ def test_heat_second_order_stencil_converges_at_its_declared_spatial_order(float
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MADD-ANO-008: HeatNode(stencil_order=4) converges at order 1, not 4. "
-        "The two ghost cells of the 5-point stencil are populated one cell "
-        "out of position -- the ghost at x=-dx is given the boundary value, "
-        "which is the value at x=0 -- so the local truncation error at the "
-        "first interior cell is O(1/dx) and the global error is O(dx).  "
-        "Remove this xfail when the ghost construction is corrected."
-    ),
-)
 def test_heat_fourth_order_stencil_converges_at_its_declared_spatial_order(float64):
-    """The 4th-order stencil does not meet its claim of 4th order.
+    """The 4th-order stencil meets its claim of 4th order in space.
 
-    Run at a Fourier number of 0.3: the 5-point stencil is unstable
-    above 3/8, not the 1/2 the node documents (MADD-ANO-009).
+    Run at a Fourier number of 0.3.  The limit for this stencil is
+    5/16 = 0.3125, not the 1/2 the node used to document and not the
+    3/8 of the bare 5-point symbol either: the cubic boundary closure
+    that makes the stencil actually 4th-order tightens it further.  See
+    :data:`maddening.nodes.heat.MAX_FOURIER_NUMBER` and
+    :class:`TestHeatStabilityBound`.
+
+    This was a strict xfail measuring 0.954 until the ghost
+    construction was corrected (MADD-ANO-008).
     """
     node = HeatNode("mms_heat4", timestep=1e-5, n_cells=10, length=_L,
                     thermal_diffusivity=_ALPHA, stencil_order=4)
@@ -239,55 +272,327 @@ def test_heat_fourth_order_stencil_converges_at_its_declared_spatial_order(float
         node,
         axis=RefinementAxis.SPACE,
         error_at=lambda n: _heat_steady_error(n, stencil_order=4, fourier=0.3),
-        levels=(10, 20, 40, 80),
-    )
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MADD-ANO-007: HeatNode applies left_temperature/right_temperature at "
-        "the first and last CELL CENTRE (x = dx/2, L - dx/2), while "
-        "boundary_input_spec documents them as the Dirichlet BC 'at the left "
-        "end' / 'at the right end'.  A caller who supplies T(0) and T(L), as "
-        "documented, gets a globally 1st-order scheme.  Remove this xfail "
-        "when the node and its documentation agree."
-    ),
-)
-def test_heat_converges_at_its_declared_order_with_the_documented_boundary_data(
-    float64,
-):
-    """The documented boundary semantics cost a full order of accuracy."""
-    node = HeatNode("mms_heat_bc", timestep=1e-4, n_cells=10, length=_L,
-                    thermal_diffusivity=_ALPHA)
-    assert_node_order_verified(
-        node,
-        axis=RefinementAxis.SPACE,
-        error_at=lambda n: _heat_steady_error(n, bc="rod_ends"),
         levels=(10, 20, 40, 80, 160),
     )
 
 
-def test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit():
-    """MADD-ANO-009: the 5-point stencil's stability bound is 3/8, not 1/2.
+def test_the_fourth_order_stencil_beats_the_second_order_one(float64):
+    """The option sold as more accurate has to actually be more accurate.
 
-    ``NodeMeta.limitations`` and MADD-ANO-002 both give the limit as
-    ``dt < dx^2 / (2*alpha)`` — a Fourier number of 1/2 — for the node
-    as a whole.  That is the bound for the 3-point stencil.  The
-    4th-order stencil's is ``3/8``, and between the two the run
-    diverges silently, which is the failure mode MADD-ANO-002 exists to
-    record.
+    MADD-ANO-008's sharpest symptom was not the order: it was that
+    ``stencil_order=4`` was 10x *less* accurate than the default at
+    every resolution measured, which no order test states in so many
+    words.  A ghost construction that is wrong but not catastrophically
+    wrong could recover an order and still lose this.
     """
-    stable = _heat_steady_error(20, stencil_order=4, fourier=0.37)
-    assert np.isfinite(stable) and stable < 1.0, (
-        f"Fo=0.37 should be stable for the 4th-order stencil, got {stable}"
+    for n_cells in (20, 80):
+        second = _heat_steady_error(n_cells, stencil_order=2, fourier=0.3)
+        fourth = _heat_steady_error(n_cells, stencil_order=4, fourier=0.3)
+        assert fourth < second, (
+            f"at n={n_cells} the 4th-order stencil is less accurate than the "
+            f"default: {fourth:.3e} against {second:.3e}"
+        )
+
+
+class TestTheSteadyProfileCanSeeABrokenScheme:
+    """The manufactured solution must be able to fail the node.
+
+    An order study is only as good as the field it refines.  These
+    check the three properties ``_STEADY`` is chosen for, so that a
+    later edit to it cannot quietly disarm every ladder above.
+    """
+
+    def test_the_curvature_does_not_vanish_at_either_rod_end(self):
+        """Where the boundary closure's error term lives.
+
+        The first and last rows of the discrete operator have a leading
+        truncation error proportional to ``u''`` at the rod end.  A
+        manufactured solution with ``u'' = 0`` there cannot distinguish
+        a correct boundary closure from a wrong one: measured on the
+        profile this module used before 0.4.0, a linear ghost
+        extrapolation (genuinely 2nd order) read 4.080 on a 4th-order
+        ladder.  With this term present the same closure reads 2.000.
+        """
+        d2 = jax.grad(jax.grad(lambda x: _STEADY.exact(x, 0.0)))
+        for end, x in (("left", 0.0), ("right", _L)):
+            curvature = float(d2(jnp.asarray(x)))
+            assert abs(curvature) > 0.1, (
+                f"the manufactured solution is flat at the {end} rod end "
+                f"(u'' = {curvature:.3g}), so the boundary closure's error "
+                f"term vanishes there and no ladder built on it can see a "
+                f"wrong closure"
+            )
+
+    def test_the_fourth_derivative_does_not_vanish(self):
+        """Otherwise the 5-point stencil is exact and measures nothing.
+
+        Sampled across the rod rather than at a point: the sine's
+        fourth derivative has zeros (at x = 0, L/2 and L for this
+        profile), and a zero at one point says nothing about the
+        truncation error of a ladder that integrates over all of them.
+        """
+        d4 = jax.grad(jax.grad(jax.grad(jax.grad(
+            lambda x: _STEADY.exact(x, 0.0)
+        ))))
+        sampled = [
+            abs(float(d4(jnp.asarray(x))))
+            for x in np.linspace(0.0, _L, 21)
+        ]
+        assert max(sampled) > 1.0, (
+            "the manufactured solution has no fourth derivative anywhere on "
+            "the rod, so the 5-point stencil is exact on it and the "
+            "4th-order ladder measures nothing"
+        )
+
+    def test_the_profile_is_not_symmetric_about_the_rod_centre(self):
+        """A symmetric profile lets the two ends' errors cancel in L2."""
+        left = float(_STEADY.exact(jnp.asarray(0.25 * _L), jnp.asarray(0.0)))
+        right = float(_STEADY.exact(jnp.asarray(0.75 * _L), jnp.asarray(0.0)))
+        assert abs(left - right) > 0.1
+
+
+class TestHeatBoundaryPlacement:
+    """MADD-ANO-007: where the Dirichlet datum actually lands.
+
+    The order ladder above is the specification, but it takes five
+    relaxation runs to read.  These tests fail on the defect alone, in
+    milliseconds, and say which half-cell the boundary condition went
+    to.
+    """
+
+    def test_a_linear_profile_between_the_rod_ends_is_reproduced_exactly(self):
+        """The steady state of T(0)=0, T(L)=1 is T = x/L, at the cell centres.
+
+        A linear profile is the exact solution of the steady heat
+        equation with no source, and the discrete operator reproduces
+        it exactly at every cell *if and only if* the boundary data is
+        imposed at x=0 and x=L.  Impose it half a cell in and the
+        steady state is instead the line through (dx/2, 0) and
+        (L - dx/2, 1) — a different line, off by dx/2 of slope at every
+        cell, which is the whole of MADD-ANO-007 in one number.
+        """
+        n_cells = 10
+        node = HeatNode("rod", timestep=0.4, n_cells=n_cells, length=1.0,
+                        thermal_diffusivity=1.0 / n_cells**2)
+        boundary = {"left_temperature": jnp.float32(0.0),
+                    "right_temperature": jnp.float32(1.0)}
+        step = jax.jit(
+            lambda T: node.update({"temperature": T}, boundary, 0.4)[
+                "temperature"
+            ]
+        )
+        # ~400 steps relax the slowest mode by exp(-16); 1200 is margin.
+        T = jax.lax.fori_loop(
+            0, 1200, lambda _, t: step(t),
+            jnp.zeros(n_cells, dtype=jnp.float32),
+        )
+        x = np.linspace(0.05, 0.95, n_cells)
+        np.testing.assert_allclose(np.asarray(T), x, atol=2e-4)
+
+    def test_the_boundary_cell_is_not_pinned_to_the_supplied_value(self):
+        """T[0] is a cell centre half a cell in, not the rod end.
+
+        Until 0.4.0 ``update`` overwrote T[0] with ``left_temperature``,
+        so this assertion was exactly inverted.  Pinning it is what
+        stops the overwrite coming back as a "convenience".
+        """
+        node = HeatNode("rod", timestep=0.001, n_cells=10, length=1.0,
+                        thermal_diffusivity=0.01)
+        state = {"temperature": jnp.zeros(10, dtype=jnp.float32)}
+        out = node.update(
+            state, {"left_temperature": jnp.float32(100.0)}, 0.001,
+        )
+        first = float(out["temperature"][0])
+        assert first != pytest.approx(100.0), (
+            "T[0] was set to the Dirichlet value, so the boundary condition "
+            "is being imposed at the first cell centre again (MADD-ANO-007)"
+        )
+        assert 0.0 < first < 100.0, (
+            f"T[0] should warm towards the boundary value, got {first}"
+        )
+
+    def test_the_cell_centre_reading_of_the_boundary_data_still_costs_an_order(
+        self, float64,
+    ):
+        """Supplying the old reading is now the thing that measures 1.
+
+        The node implements one convention.  Feeding it the other one
+        is a caller error, and this records what that error costs, so
+        the 2.000 above cannot be mistaken for insensitivity to the
+        boundary data.
+        """
+        measurement = measure_order(
+            lambda n: _heat_steady_error(n, bc="cell_centre"),
+            (10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.observed == pytest.approx(1.0, abs=0.1), (
+            f"expected ~1 from the wrong boundary datum, got "
+            f"{measurement.observed:.3f}\n{measurement.table()}"
+        )
+
+
+class TestHeatStencilGhosts:
+    """MADD-ANO-008: the 5-point stencil's ghost values.
+
+    Direct algebraic checks on ``_compute_laplacian``, so a regression
+    is a one-line failure rather than a refinement table.
+    """
+
+    def test_the_laplacian_is_exact_on_a_cubic_for_the_fourth_order_stencil(self):
+        """A 4th-order stencil with a cubic closure is exact on cubics.
+
+        Including at the boundary cells: the ghost extrapolation is
+        itself a cubic through the rod end, so nothing in the row has
+        any error left on a cubic field.  The old ghosts failed this by
+        a factor of order 1/dx at the first interior cell.
+        """
+        n_cells, length = 12, 1.0
+        dx = length / n_cells
+        x = np.linspace(dx / 2, length - dx / 2, n_cells)
+        poly = lambda t: 1.0 + 0.3 * t - 0.7 * t**2 + 0.45 * t**3
+        curvature = lambda t: -1.4 + 2.7 * t
+        node = HeatNode("rod", timestep=1e-4, n_cells=n_cells, length=length,
+                        thermal_diffusivity=1e-3, stencil_order=4)
+        lap = node._compute_laplacian(
+            jnp.asarray(poly(x), dtype=jnp.float32),
+            jnp.float32(poly(0.0)),
+            jnp.float32(poly(length)),
+        )
+        np.testing.assert_allclose(
+            np.asarray(lap), curvature(x), rtol=2e-3, atol=2e-3,
+        )
+
+    def test_the_second_order_laplacian_is_exact_on_a_linear_profile(self):
+        """The mirror ghost makes the 3-point row exact on linears.
+
+        That is the property the conservative closure buys, and it is
+        what lets the temporal study below isolate the time integrator.
+        """
+        n_cells, length = 12, 1.0
+        dx = length / n_cells
+        x = np.linspace(dx / 2, length - dx / 2, n_cells)
+        line = lambda t: 2.0 - 1.3 * t
+        node = HeatNode("rod", timestep=1e-4, n_cells=n_cells, length=length,
+                        thermal_diffusivity=1e-3)
+        lap = node._compute_laplacian(
+            jnp.asarray(line(x), dtype=jnp.float32),
+            jnp.float32(line(0.0)),
+            jnp.float32(line(length)),
+        )
+        np.testing.assert_allclose(np.asarray(lap), 0.0, atol=1e-3)
+
+    def test_an_unsupplied_boundary_condition_conserves_energy(self):
+        """No Dirichlet data means no flux through the ends, exactly.
+
+        With ``left_temperature`` defaulted to ``T[0]`` the mirror ghost
+        is ``T[0]`` itself, so the end face carries zero gradient and
+        the total heat is conserved to round-off.  Before 0.4.0 the end
+        cells were frozen at their previous values instead, which both
+        leaked energy and made the ends unphysically static.
+        """
+        node = HeatNode("rod", timestep=0.1, n_cells=8, length=1.0,
+                        thermal_diffusivity=0.01)
+        rng = np.random.default_rng(0)
+        T = jnp.asarray(rng.uniform(10.0, 100.0, 8), dtype=jnp.float32)
+        state = {"temperature": T}
+        before = float(jnp.sum(T))
+        for _ in range(50):
+            state = node.update(state, {}, 0.1)
+        after = float(jnp.sum(state["temperature"]))
+        assert after == pytest.approx(before, rel=1e-5)
+
+
+class TestHeatStabilityBound:
+    """MADD-ANO-009: the Fourier limit, per stencil, and the guard on it."""
+
+    def test_the_second_order_stencil_is_stable_up_to_one_half(self, float64):
+        error = _heat_steady_error(20, fourier=MAX_FOURIER_NUMBER[2])
+        assert np.isfinite(error) and error < 1.0, (
+            f"Fo=1/2 should be stable for the default stencil, got {error}"
+        )
+
+    def test_the_fourth_order_stencil_is_stable_up_to_five_sixteenths(
+        self, float64,
+    ):
+        error = _heat_steady_error(
+            20, stencil_order=4, fourier=MAX_FOURIER_NUMBER[4],
+        )
+        assert np.isfinite(error) and error < 1.0, (
+            f"Fo=5/16 should be stable for the 4th-order stencil, got {error}"
+        )
+
+    def test_the_fourth_order_limit_is_below_the_three_eighths_of_its_symbol(
+        self, float64,
+    ):
+        """Driven past 5/16 by hand, the 4th-order stencil does diverge.
+
+        The constructor refuses this configuration, so the run has to be
+        built by passing an oversized ``dt`` to ``update`` — which is
+        also an honest demonstration of what the guard does *not*
+        cover.  3/8 is the bound of the 5-point symbol alone and was
+        what MADD-ANO-009 recorded; the cubic boundary closure brings
+        the whole operator's bound down to 0.3249.
+        """
+        n_cells = 20
+        dx = _L / n_cells
+        safe_dt = 0.3 * dx * dx / _ALPHA
+        node = HeatNode("rod4", timestep=safe_dt, n_cells=n_cells, length=_L,
+                        thermal_diffusivity=_ALPHA, stencil_order=4)
+        x = _cell_centres(n_cells)
+        exact = np.asarray(_STEADY.field(x, 0.0), dtype=np.float64)
+        boundary = {
+            "left_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(0.0), jnp.float64(0.0)))
+            ),
+            "right_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(_L), jnp.float64(0.0)))
+            ),
+            "heat_source": jnp.asarray(_STEADY.source_field(x, 0.0)),
+        }
+        unstable_dt = 0.375 * dx * dx / _ALPHA
+        T = jnp.asarray(exact)
+        for _ in range(400):
+            T = node.update({"temperature": T}, boundary, unstable_dt)[
+                "temperature"
+            ]
+        peak = float(jnp.max(jnp.abs(T)))
+        assert not np.isfinite(peak) or peak > 1e3, (
+            f"Fo=3/8 is above this operator's 0.3249 bound and should "
+            f"diverge, but max|T| was {peak}; if the boundary closure has "
+            f"changed, re-measure MAX_FOURIER_NUMBER and MADD-ANO-009"
+        )
+
+    @pytest.mark.parametrize(
+        ("stencil_order", "fourier"), [(2, 0.51), (4, 0.33)],
     )
-    unstable = _heat_steady_error(20, stencil_order=4, fourier=0.4)
-    assert not np.isfinite(unstable) or unstable > 1.0, (
-        "Fo=0.4 is above the 4th-order stencil's 3/8 stability bound and "
-        f"should diverge, but the error was {unstable}; if the stencil has "
-        "been changed, re-measure the bound and update MADD-ANO-009"
-    )
+    def test_the_constructor_refuses_an_unstable_configuration(
+        self, stencil_order, fourier,
+    ):
+        """A silent NaN is the worst available behaviour, so it is an error.
+
+        ``fourier=0.33`` is inside both the 1/2 the node used to
+        document and the 3/8 of the bare 5-point symbol, and it
+        diverges: that combination is why this is refused rather than
+        merely written down.
+        """
+        n_cells = 20
+        dx = _L / n_cells
+        with pytest.raises(ValueError, match="Fourier number"):
+            HeatNode(
+                "rod", timestep=fourier * dx * dx / _ALPHA, n_cells=n_cells,
+                length=_L, thermal_diffusivity=_ALPHA,
+                stencil_order=stencil_order,
+            )
+
+    def test_a_stable_configuration_is_accepted(self):
+        """The guard must not be a blanket refusal of the 4th-order stencil."""
+        dx = _L / 20
+        node = HeatNode(
+            "rod", timestep=0.31 * dx * dx / _ALPHA, n_cells=20, length=_L,
+            thermal_diffusivity=_ALPHA, stencil_order=4,
+        )
+        assert node.params["stencil_order"] == 4
 
 
 # --------------------------------------------------------------------------
@@ -296,12 +601,23 @@ def test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit():
 
 _OMEGA = 20.0
 
-#: Quadratic in x, so the second-order central difference reproduces
-#: ``d2u/dx2`` exactly and the spatial error is identically zero: what
-#: is left is the time integrator.  Oscillating fast enough in t that
-#: the temporal error stays well clear of round-off.
+#: Linear in x, so the discrete Laplacian returns exactly zero at every
+#: cell and the spatial error vanishes identically: what is left is the
+#: time integrator.  Oscillating fast enough in t that the temporal
+#: error stays well clear of round-off.
+#:
+#: This was quadratic in x until 0.4.0, because the old scheme
+#: *overwrote* the end cells with the exact solution and so was exact on
+#: quadratics there for the wrong reason.  The conservative mirror
+#: closure that replaced it (MADD-ANO-007) is exact on linears at the
+#: boundary rows and 0.75x the curvature on quadratics, which would have
+#: left a dt-independent spatial floor in this ladder and turned it
+#: non-monotone.  A linear profile is the one this scheme represents
+#: exactly everywhere, which is what the axis-isolation rule in
+#: ``maddening.testing.mms`` asks for.  The spatial operator is measured
+#: by MADD-VER-005, not here.
 _TRANSIENT = ManufacturedSolution(
-    exact=lambda x, t: (1.0 + 0.7 * x + 0.4 * x * x) * jnp.cos(_OMEGA * t),
+    exact=lambda x, t: (1.0 + 0.7 * x) * jnp.cos(_OMEGA * t),
     operator=diffusion_operator(_ALPHA),
 )
 
@@ -324,8 +640,9 @@ def _heat_transient_error(n_steps, *, n_cells=21, t_final=0.2):
     def step(k, T):
         t = k * dt
         boundary = {
-            "left_temperature": _TRANSIENT.exact(xj[0], t),
-            "right_temperature": _TRANSIENT.exact(xj[-1], t),
+            # At the rod ends, which is where the node imposes them.
+            "left_temperature": _TRANSIENT.exact(jnp.asarray(0.0), t),
+            "right_temperature": _TRANSIENT.exact(jnp.asarray(_L), t),
             "heat_source": _TRANSIENT.source_field(xj, t),
         }
         return node.update({"temperature": T}, boundary, dt)["temperature"]
@@ -342,9 +659,9 @@ def _heat_transient_error(n_steps, *, n_cells=21, t_final=0.2):
     benchmark_id="MADD-VER-006",
     description=(
         "HeatNode temporal order of accuracy by the Method of Manufactured "
-        "Solutions: manufactured solution quadratic in x, so the spatial "
-        "error vanishes identically and the timestep ladder measures the "
-        "forward-Euler integration alone"
+        "Solutions: manufactured solution linear in x, so the discrete "
+        "Laplacian is identically zero, the spatial error vanishes and the "
+        "timestep ladder measures the forward-Euler integration alone"
     ),
     node_type="HeatNode",
     benchmark_type=BenchmarkType.MANUFACTURED_SOLUTION,

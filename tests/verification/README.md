@@ -45,9 +45,10 @@ verification/
 | SpringDamperNode div-by-zero | `spring.py` | `mass=0` | `mass > 0` validation |
 | IQN-ILS condition squaring | `acceleration.py` | `V.T @ V` squares cond# | `jnp.linalg.lstsq` |
 
-| HeatNode `stencil_order=4` converges at order 1, not 4 | `heat.py` | MMS spatial refinement | open, MADD-ANO-008 |
-| HeatNode Dirichlet data lands at the cell centre, not the documented rod end | `heat.py` | MMS with the documented boundary data | open, MADD-ANO-007 |
-| HeatNode 4th-order stencil diverges inside the documented CFL limit | `heat.py` | Fo = 0.40 with `stencil_order=4` | open, MADD-ANO-009 |
+| HeatNode `stencil_order=4` converges at order 1, not 4 | `heat.py` | MMS spatial refinement | fixed in 0.4.0, MADD-ANO-008 — cubic ghost extrapolation through the rod end; 0.954 -> 3.957 |
+| HeatNode Dirichlet data lands at the cell centre, not the documented rod end | `heat.py` | MMS with the documented boundary data | fixed in 0.4.0, MADD-ANO-007 — mirror ghost, end cells no longer overwritten; 1.001 -> 2.000 |
+| HeatNode 4th-order stencil diverges inside the documented CFL limit | `heat.py` | Fo = 0.40 with `stencil_order=4` | fixed in 0.4.0, MADD-ANO-009 — per-stencil bound documented and refused at construction |
+| MADD-VER-002's acceptance band had been widened to accept the order-1 result it was measuring | `test_heat_analytical.py` | Re-reading the benchmark against what it asserts | fixed in 0.4.0 — band is now [1.7, 2.3] |
 
 ## Physical limitations (not code bugs)
 

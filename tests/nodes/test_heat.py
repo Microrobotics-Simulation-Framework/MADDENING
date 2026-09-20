@@ -2,6 +2,7 @@
 
 import warnings
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -55,8 +56,14 @@ class TestHeatNodeUnit:
             f"Max deviation: {float(jnp.max(jnp.abs(T - T_expected)))}"
 
     def test_heat_source_increases_temperature_uniformly(self):
-        """Uniform source with matching BCs should increase temperature uniformly
-        in the interior (boundaries are pinned by Dirichlet BCs)."""
+        """A uniform source raises every cell, including the end cells.
+
+        With zero diffusivity the Dirichlet data has nothing to act
+        through, so ``source * dt`` is the whole update.  Until 0.4.0
+        the end cells were overwritten with the boundary value
+        afterwards and stayed at 0 regardless of the source
+        (MADD-ANO-007); they are ordinary cells now.
+        """
         n = 20
         h = HeatNode(name="rod", timestep=0.001, n_cells=n,
                      initial_temperature=0.0, thermal_diffusivity=0.0)
@@ -69,11 +76,8 @@ class TestHeatNodeUnit:
               "heat_source": source}
         state = h.update(state, bi, 0.001)
         T = state["temperature"]
-        # Boundary cells are pinned at 0 by Dirichlet BCs
-        assert float(T[0]) == pytest.approx(0.0)
-        assert float(T[-1]) == pytest.approx(0.0)
-        # Interior cells should increase by source * dt = 10 * 0.001 = 0.01
-        for i in range(1, n - 1):
+        # Every cell increases by source * dt = 10 * 0.001 = 0.01
+        for i in range(n):
             assert float(T[i]) == pytest.approx(0.01, abs=1e-6)
 
     def test_energy_conservation_insulated(self):
@@ -216,10 +220,14 @@ class TestHeatNodeInGraph:
         final, history = gm.run_scan_with_history(200, external_inputs=ext)
         assert final["rod"]["temperature"].shape == (n,)
         assert history["rod"]["temperature"].shape == (200, n)
-        # Left end should be hot
-        assert float(final["rod"]["temperature"][0]) == pytest.approx(100.0)
-        # Right end should be cold
-        assert float(final["rod"]["temperature"][-1]) == pytest.approx(0.0)
+        T = final["rod"]["temperature"]
+        # The Dirichlet data is imposed at the rod ends, so the first and
+        # last CELL sit half a cell inside them and are strictly between
+        # the two boundary values -- not equal to them (MADD-ANO-007).
+        assert 0.0 < float(T[0]) < 100.0
+        assert 0.0 < float(T[-1]) < float(T[0])
+        # Left end hot, right end cold, monotone in between.
+        assert np.all(np.diff(np.asarray(T)) < 0.0)
 
     def test_two_rods_connected_by_edge(self):
         """Temperature from one heat node drives the BC of another via an edge."""
@@ -266,8 +274,10 @@ class TestHeatNodeInGraph:
                             jnp.full(n, 100.0), atol=1.0)
         # rod_b's left end should be warm (driven by rod_a's right end ~100)
         assert float(final["rod_b"]["temperature"][0]) > 50.0
-        # rod_b's right end pinned at 0
-        assert float(final["rod_b"]["temperature"][-1]) == pytest.approx(0.0)
+        # rod_b's right BC is 0 at the rod end, so the last cell centre is
+        # just above it rather than exactly 0 (MADD-ANO-007).
+        last = float(final["rod_b"]["temperature"][-1])
+        assert 0.0 < last < 10.0
 
     def test_graph_serialization_round_trip(self):
         """GraphManager.to_dict / from_dict should work with HeatNode."""

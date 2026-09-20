@@ -67,6 +67,11 @@ _POSITIONAL = ["name", "timestep", "n_cells", "length", "thermal_diffusivity"]
 _ALLOWED_UNSTABLE = {
     "tests/compliance/test_gate_scripts.py":
         "plants unstable rods as fixtures to prove this gate rejects them",
+    "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
+    "e_genuinely_unstable.py":
+        "archived audit probe: the positive control for this gate, a rod the "
+        "guard must refuse.  Committed as round-2 evidence, so the gate now "
+        "scans it",
 }
 
 

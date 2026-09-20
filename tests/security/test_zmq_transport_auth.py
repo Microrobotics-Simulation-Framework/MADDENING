@@ -27,6 +27,8 @@ zmq = pytest.importorskip("zmq", reason="ZMQ transport security needs pyzmq")
 
 from maddening.cloud.multigpu.coordinator import Coordinator  # noqa: E402
 from maddening.transport_auth import (  # noqa: E402
+    TOKEN_ENV,
+    TRANSPORT_TOKEN_ENV,
     TransportAuth,
     TransportAuthError,
     address_is_loopback,
@@ -497,6 +499,7 @@ class TestLoopbackStaysFrictionless:
 
     def test_the_shipped_defaults_bind_loopback(self, monkeypatch):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         relay = NetworkRelay()
         publisher = CommandPublisher()
         try:
@@ -511,6 +514,7 @@ class TestLoopbackStaysFrictionless:
     ):
         """The whole local viz flow, with MADDENING_API_TOKEN unset."""
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         port = _free_port()
         address = f"tcp://127.0.0.1:{port}"
         relay = NetworkRelay(address=address)
@@ -533,6 +537,7 @@ class TestLoopbackStaysFrictionless:
 
     def test_a_loopback_coordinator_needs_no_token(self, monkeypatch):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         coord = Coordinator(expected_workers=["a"], edges=[], port=_free_port())
         assert coord.secure is False
         assert coord.bind_address.startswith("tcp://127.0.0.1:")
@@ -575,6 +580,7 @@ class TestReachableAddressesFailClosed:
         self, monkeypatch,
     ):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         with pytest.raises(TransportAuthError, match="MADDENING_API_TOKEN"):
             NetworkRelay(address=f"tcp://0.0.0.0:{_free_port()}")
 
@@ -589,6 +595,7 @@ class TestReachableAddressesFailClosed:
         from one that succeeded.
         """
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         with pytest.raises(TransportAuthError, match="MADDENING_API_TOKEN"):
             Coordinator(expected_workers=["a"], edges=[],
                         port=_free_port(), bind_host="0.0.0.0")
@@ -598,6 +605,7 @@ class TestReachableAddressesFailClosed:
             resolve_security("tcp://0.0.0.0:5555", False)
 
     def test_a_blank_token_is_a_configuration_error(self, monkeypatch):
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", "   ")
         with pytest.raises(TransportAuthError, match="blank"):
             TransportAuth()
@@ -609,6 +617,7 @@ class TestReachableAddressesFailClosed:
         loopback.  This one proves the *automatic* path -- the one a
         user actually hits -- reaches the same place.
         """
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", TOKEN)
         port = _free_port()
         relay = NetworkRelay(address=f"tcp://0.0.0.0:{port}")
@@ -662,6 +671,164 @@ class TestKeyDerivation:
         assert zmq.curve_public(secret) == public
 
     def test_the_token_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", TOKEN)
         assert TransportAuth().server_keypair() == (
             TransportAuth(token=TOKEN).server_keypair())
+
+    def test_the_derivation_matches_a_pinned_vector(self):
+        """A golden vector, so the derivation cannot drift between versions.
+
+        Everything else here checks *self-consistency*, which is
+        automatic when both ends run the same code and therefore cannot
+        see a change to the personalisation string, the role literals,
+        the separator or the hash.  Measured: changing ``_CURVE_PERSON``
+        from ``b"maddening-curve"`` to ``b"maddening-CURVE"`` left all 36
+        tests in this file green, while making 0.4.x and 0.5.x unable to
+        talk to each other -- and the failure mode of that is the silent
+        one in ``NetworkReceiver``, not an exception.
+
+        These are the keys ``TransportAuth(token="the-shared-token")``
+        must produce for ever.  If this fails, the derivation changed and
+        that is a wire-compatibility break, not a test to update.
+        """
+        auth = TransportAuth(token="the-shared-token")
+
+        assert auth.server_keypair() == (
+            b"wG#*&<Nt]&7xpdy={R1&}&A#?Hoq3SygSb?=B=Ru",
+            b"ULh/<s#hK!!wx<$/U9(0ek11I?)Ug:G:])]J]Q&h",
+        )
+        assert auth.client_keypair() == (
+            b"i%y(@xeWQ{xK$.wl?oOZw)<VO-.8@>wSR3!0Zioc",
+            b"9]+A6Y2q:E2w#NO{U6nI9iCJpqe/i:gqxs<V?G5H",
+        )
+
+
+# ---------------------------------------------------------------------
+# The transport secret is separable from the HTTP bearer credential
+# ---------------------------------------------------------------------
+
+class TestTransportSecretIsSeparableFromTheApiToken:
+    """The CURVE seed must not have to be the cleartext HTTP credential.
+
+    There is no TLS in front of the HTTP API, so ``MADDENING_API_TOKEN``
+    is visible in an ``Authorization`` header on every request.  While
+    that token was also the CURVE seed, one sniffed request yielded both
+    keypairs and the "encrypted" state stream was readable -- measured
+    over a real socket, not inferred.  ``MADDENING_TRANSPORT_TOKEN``
+    exists so the streams need not inherit that exposure;
+    ``MADDENING_API_TOKEN`` remains the fallback so a single-variable
+    deployment keeps working.
+    """
+
+    def test_the_transport_variable_is_preferred(self, monkeypatch):
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+
+        auth = TransportAuth()
+
+        assert auth.token == "the-transport-secret"
+        assert auth.token_env == TRANSPORT_TOKEN_ENV
+
+    def test_the_api_token_is_the_documented_fallback(self, monkeypatch):
+        """A single-variable setup keeps working, exactly as before."""
+        monkeypatch.delenv(TRANSPORT_TOKEN_ENV, raising=False)
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+
+        auth = TransportAuth()
+
+        assert auth.token == "the-http-credential"
+        assert auth.token_env == TOKEN_ENV
+
+    def test_the_explicit_argument_still_wins_over_both(self, monkeypatch):
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+
+        auth = TransportAuth(token="explicit")
+
+        assert auth.token == "explicit"
+        assert auth.token_env is None
+
+    def test_a_blank_transport_token_does_not_fall_back(self, monkeypatch):
+        """A variable that is set is the operator's answer.
+
+        Falling through to a *different* secret because this one is
+        blank would leave two ends deriving different keys, which fails
+        as a handshake timeout and reads as a network problem.
+        """
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "  ")
+
+        with pytest.raises(TransportAuthError, match=TRANSPORT_TOKEN_ENV):
+            TransportAuth()
+
+    def test_with_both_set_the_http_credential_does_not_open_the_stream(
+        self, monkeypatch,
+    ):
+        """The gate, over a real socket.
+
+        An attacker who sniffed one ``Authorization`` header holds
+        ``MADDENING_API_TOKEN``.  With the transport variable set that is
+        no longer the CURVE seed, so the attacker derives the wrong
+        keypair and reads nothing -- while the peer holding the transport
+        secret reads the stream, which is what stops this passing
+        vacuously.
+        """
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        context = zmq.Context()
+        subs = {
+            "authorised": _sub(context, address, token="the-transport-secret"),
+            "holds-the-http-token": _sub(
+                context, address, token="the-http-credential",
+            ),
+        }
+        try:
+            counts = _exchange(lambda: graph.emit(STATE), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            relay.close()
+
+        assert counts["authorised"] > 0, (
+            "the peer holding the transport secret read nothing, so this "
+            "test proves nothing about the peer that holds only the HTTP "
+            "credential"
+        )
+        assert counts["holds-the-http-token"] == 0
+
+    def test_the_fallback_is_what_makes_a_sniffed_api_token_sufficient(
+        self, monkeypatch,
+    ):
+        """The control run for the test above: remove the separation.
+
+        With only ``MADDENING_API_TOKEN`` set, the sniffed HTTP
+        credential *is* the CURVE seed and does open the stream.  That is
+        the documented cost of the single-variable setup, and asserting
+        it is what makes the test above a measurement rather than a
+        restatement of the code.
+        """
+        monkeypatch.delenv(TRANSPORT_TOKEN_ENV, raising=False)
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        context = zmq.Context()
+        subs = {"authorised": _sub(context, address, token="the-http-credential")}
+        try:
+            counts = _exchange(lambda: graph.emit(STATE), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            relay.close()
+
+        assert counts["authorised"] > 0

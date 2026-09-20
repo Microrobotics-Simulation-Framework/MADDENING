@@ -542,6 +542,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("\npytest itself failed; the audit is not trustworthy",
                   file=sys.stderr)
             return status
+        # Zero records means zero `over`, so the gate used to pass having
+        # measured nothing -- printing "no Hypothesis runs were observed" and
+        # exiting 0.  An empty *collection* is caught by pytest's exit 5, but
+        # an all-skipped or all-deselected run is not, and neither is a
+        # Hypothesis refactor that stops calling ``hypothesis.statistics``.
+        # A gate that verifies nothing cannot fail
+        # (audit_040_r2/gates, finding G7).
+        if not records:
+            print(
+                f"\nFAIL: no Hypothesis runs were observed in "
+                f"{list(args.paths)}.\n"
+                "A gate that measures nothing cannot fail.  Either every test "
+                "in scope skipped or was deselected, or the statistics hook "
+                "is no longer being called; fix the scope rather than "
+                "trusting the exit code.",
+                file=sys.stderr,
+            )
+            return 1
         return 1 if over else 0
     return status
 

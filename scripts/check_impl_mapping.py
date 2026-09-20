@@ -255,6 +255,24 @@ def main(argv=None) -> int:
         )
         return 1
 
+    # A scanned scope with nothing in it verified nothing, whatever the pins
+    # did.  The pins resolve against _REPO_ROOT rather than the scanned
+    # directory, so they still ran -- but the line this gate prints names the
+    # scanned scope, and that line is what gets quoted as coverage.  The same
+    # guard check_heat_stability.py and check_transforms.py already have
+    # (audit_040_r2/gates, finding G7).
+    if checked == 0:
+        print(
+            f"FAIL: 0 implementation mapping(s) found in {guide_dir}"
+            + (f" ({len(skipped)} reference(s) could not be checked in this "
+               f"environment)" if skipped else "")
+            + ".\nA gate that verifies nothing cannot fail.  Either the scan "
+              "scope is wrong or every guide has lost its Implementation "
+              "Mapping table; fix the scope rather than trusting the OK.",
+            file=sys.stderr,
+        )
+        return 1
+
     suffix = f", {len(skipped)} not checked" if skipped else ""
     print(
         f"OK: {checked} implementation mapping(s) verified{suffix} "

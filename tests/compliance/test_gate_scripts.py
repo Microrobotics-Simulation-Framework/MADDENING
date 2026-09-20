@@ -213,6 +213,16 @@ class TestImplementationMappingGate:
         result = _run("check_impl_mapping")
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_a_scanned_scope_with_no_mappings_fails(self, mapping_gate, tmp_path):
+        """It printed "OK: 0 implementation mapping(s) verified" and exited 0.
+
+        The pinned minimums do still run against the repository, so the gate
+        was not blind -- but the line it printed named a scope it had
+        verified nothing in, and that line is what gets quoted as coverage.
+        """
+        (tmp_path / "not_a_guide.md").write_text("# No table here\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
 
 # ---------------------------------------------------------------------------
 # check_citations.py
@@ -295,6 +305,10 @@ class TestCitationGate:
 # check_anomalies.py
 # ---------------------------------------------------------------------------
 
+# One anomaly carrying one resolvable reference.  The reference is not
+# decoration: the gate now refuses a registry whose anomalies declare no
+# references at all, because that registry resolves nothing and proves
+# nothing, so a fixture without one is no longer a *valid* registry.
 _MINIMAL_ANOMALY = """\
 schema_version: "1.0"
 generated_date: "2026-03-12"
@@ -306,6 +320,27 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+"""
+
+_ANOMALY_WITHOUT_REFERENCES = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "open"
+"""
+
+_EMPTY_REGISTRY = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies: []
 """
 
 
@@ -326,6 +361,54 @@ class TestAnomalyGate:
     def test_the_repository_registry_passes_with_the_prefix_ci_uses(self):
         result = _run("check_anomalies", "--prefix", "MADD-ANO-")
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestAnomalyGateVerifiesSomething:
+    """The two guards check_heat_stability.py has and this gate claimed to.
+
+    Its zero-scope guard sat inside ``if notes:``, and ``notes`` holds only
+    references *skipped as unavailable* -- so it was empty in exactly the
+    case it was meant to catch.  Both shapes below printed
+    ``OK: ... is valid`` and exited 0.
+    """
+
+    def test_an_empty_registry_fails(self, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_EMPTY_REGISTRY)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "no anomalies" in result.stderr
+
+    def test_a_registry_whose_anomalies_declare_no_references_fails(
+        self, tmp_path
+    ):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_ANOMALY_WITHOUT_REFERENCES)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "no affected_components and no verification" in result.stderr
+
+    def test_the_empty_registry_guard_survives_no_resolve(self, tmp_path):
+        """``--no-resolve`` turns resolution off, not counting."""
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_EMPTY_REGISTRY)
+        result = _run("check_anomalies", str(path), "--repo-root",
+                      str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+
+    def test_the_summary_separates_verified_from_not_checked(self):
+        """One headline count that folds in declined references is how
+        "50 citations verified" came to mean 45."""
+        result = _run("check_anomalies", "--prefix", "MADD-ANO-")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "reference(s) verified" in result.stdout
+        assert "not checked" in result.stdout
+
+    def test_no_resolve_does_not_claim_anything_was_verified(self):
+        result = _run("check_anomalies", "--prefix", "MADD-ANO-", "--no-resolve")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "NOT resolved" in result.stdout
+        assert "verified" not in result.stdout
 
 
 class TestTransformGateConstantBinding:

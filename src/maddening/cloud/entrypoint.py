@@ -65,9 +65,15 @@ def main() -> None:
         # from maddening.usd import load_graph
         # gm = load_graph(graph_usd)
 
-    # Start FastAPI server
+    # Start FastAPI server.  The bind address is read here rather than
+    # just before uvicorn.run() because the app has to know it: a
+    # non-loopback bind is what turns the API's bearer token on, and the
+    # app cannot see the socket uvicorn opens.
+    host = os.environ.get("MADDENING_HOST", "0.0.0.0")
+    port = int(os.environ.get("MADDENING_PORT", "8000"))
+
     from maddening.api.server import SimulationServer, warn_if_publicly_bound
-    server = SimulationServer(node_registry={})
+    server = SimulationServer(node_registry={}, bind_host=host)
 
     # v0.2 #8: resume from a remote checkpoint URL if requested.
     resume_from_env(server)
@@ -86,14 +92,15 @@ def main() -> None:
     # Run uvicorn
     import uvicorn
 
-    host = os.environ.get("MADDENING_HOST", "0.0.0.0")
-    port = int(os.environ.get("MADDENING_PORT", "8000"))
-
     logger.info("Starting server on %s:%d", host, port)
     # The default is 0.0.0.0 because a container bound to 127.0.0.1 is
     # unreachable even with a published port.  That makes the exposure
-    # the normal case here, so say so loudly rather than leaving it to
-    # the release notes.
+    # the normal case here, so the API demands a bearer token: print it
+    # (when it was generated) and then say what is still exposed.
+    #
+    # A container whose log nobody reads must set MADDENING_API_TOKEN,
+    # or MADDENING_API_TOKEN_FILE to a path on a mounted volume.
+    server.auth.announce(port)
     warn_if_publicly_bound(host, port)
     uvicorn.run(
         server.create_app(),

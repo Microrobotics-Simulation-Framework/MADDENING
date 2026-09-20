@@ -1,7 +1,9 @@
 """No single request may name an unbounded amount of work or memory.
 
-The server is unauthenticated by design, so the caller of every endpoint
-here is potentially anonymous: ``POST /sim/run`` used to accept any
+A loopback bind is served without a credential, so the caller of every
+endpoint here can be anyone with a shell on the box, and the bounds are
+what keeps one request from naming the whole machine: ``POST /sim/run``
+used to accept any
 ``n_steps``, ``POST /graph/nodes`` let the caller pick an array dimension
 (the audit measured +433 MB of RSS from one request), and
 ``TrainSurrogateRequest`` had no bounds at all.  The limits are on the
@@ -258,7 +260,10 @@ class TestPublicBindWarning:
             assert warn_if_publicly_bound(host, 8000) is True
         message = "\n".join(r.getMessage() for r in caplog.records)
         # The warning has to name the actual risk, not just "be careful".
+        # Such a bind now demands a bearer token, so the risk it names is
+        # the one that is left: no TLS, and two exempt route families.
         assert host in message
-        assert "NO AUTHENTICATION" in message
-        assert "/cloud/launch" in message
+        assert "NO TLS" in message
+        assert "Bearer" in message
+        assert "/viz/" in message
         assert "127.0.0.1" in message

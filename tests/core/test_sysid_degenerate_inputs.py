@@ -16,6 +16,9 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import contextlib
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,6 +27,7 @@ import pytest
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import _rank_and_crb, fim, fit, fit_lm
+from maddening.warnings import PrecisionLimitWarning
 
 
 def _spring_gm():
@@ -307,3 +311,300 @@ def test_fim_report_cannot_be_built_positionally():
     assert report.rank == 2 and report.cond == 1.0
     with pytest.raises(TypeError):
         FIMReport(*kwargs.values())            # type: ignore[misc]
+
+
+def test_fit_result_cannot_be_built_positionally():
+    """The same guard on the other public dataclass in this module.
+
+    ``FitResult`` has had no field inserted into it, so this assertion
+    is expected to be redundant today -- and it is the only thing that
+    keeps it so.  Its ``converged``/``n_iter`` pair is the worse case of
+    the two: a shift there does not even change the field *types*, so a
+    positional caller of a four-field ``FitResult`` that grew a fifth
+    field would read ``n_iter`` as ``converged`` -- truthy for every
+    run that took a step -- and report an unconverged fit as converged.
+    """
+    from maddening.sysid import FitResult
+
+    kwargs = dict(
+        params={"a": 1.0}, losses=np.zeros(3), converged=False, n_iter=12,
+    )
+    result = FitResult(**kwargs)
+    assert result.converged is False and result.n_iter == 12
+    with pytest.raises(TypeError):
+        FitResult(*kwargs.values())            # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# A rank verdict decided at the float32 noise floor says so
+# ---------------------------------------------------------------------------
+
+
+def _linear_fim(eig_ratio, *, n=2, m=3, seed=0, dtype=jnp.float32, **kw):
+    """``fim`` of a linear residual whose Fisher matrix has a known
+    smallest-to-largest eigenvalue ratio."""
+    rng = np.random.default_rng(seed)
+    # ``geomspace(a, b, 1)`` is ``[a]``, not ``[b]``, so pin the largest
+    # eigenvalue explicitly: ``eig_ratio`` is a ratio to it and the whole
+    # helper is meaningless if it is not 1.0.
+    mid = np.geomspace(1e-2, 1.0, max(n - 1, 1))
+    mid[-1] = 1.0
+    lam = np.sort(np.concatenate([[eig_ratio], mid]))[:n]
+    assert lam[-1] == 1.0 and lam[0] == eig_ratio
+    q, rr = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(rr))
+    U = np.linalg.qr(rng.standard_normal((max(m, n), n)))[0]
+    A = jnp.asarray((U * np.sqrt(lam)) @ V.T, dtype=dtype)
+    params = {f"p{i}": jnp.asarray(1.0, dtype=dtype) for i in range(n)}
+    keys = tuple(params)
+
+    def residual_fn(p):
+        return A @ jnp.stack([p[k] for k in keys])
+
+    return fim(residual_fn, params, scale=None, **kw)
+
+
+def test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers():
+    """The case this guard was built from: an eigenvalue ratio of
+    2.08e-07 against a 2.38e-07 cutoff.
+
+    A rank determination resting on a difference smaller than float32
+    epsilon, reported as fact -- ``rank=1``, ``crb=[inf, inf]``, no
+    signal of any kind that the verdict was a coin flip.  The warning
+    has to carry the two numbers, or a reader cannot tell how close the
+    call was, and it has to name ``jax_enable_x64``, which is the whole
+    remedy.
+    """
+    with pytest.warns(PrecisionLimitWarning) as rec:
+        report = _linear_fim(2.08e-07)
+    assert report.rank == 1
+    ev = np.asarray(report.eigvals, dtype=np.float64)
+    ratio = ev[0] / ev[-1]
+    cutoff = 2 * float(np.finfo(np.float32).eps)
+    assert abs(ratio / 2.08e-07 - 1.0) < 0.05, ratio
+    msg = str(rec[0].message)
+    assert f"{ratio:.4g}" in msg and f"{cutoff:.4g}" in msg
+    assert "jax_enable_x64" in msg
+
+
+def test_a_well_conditioned_fim_is_silent():
+    """Non-vacuity, and the property that keeps the warning worth
+    reading: it must not fire on an ordinary problem.  A warning that
+    fires routinely gets suppressed, which is worse than silence."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(1e-3)
+    assert report.rank == 2
+
+
+def test_an_exactly_singular_fim_is_silent_about_precision():
+    """An exactly rank-deficient ``F`` is a real rank deficiency, not a
+    verdict decided by rounding.
+
+    ``scale="relative"`` with a parameter sitting at ``0.0`` produces
+    exactly this -- an exactly zero column, so an exactly zero
+    eigenvalue -- and it is the first thing a user meets on the default
+    scale, since ``SpringDamperNode.initial_velocity`` defaults to
+    ``0.0``.  Warning there would fire on every such report for a
+    verdict float64 agrees with completely.
+    """
+    params = {"a": jnp.float32(1.0), "b": jnp.float32(0.0)}
+
+    def residual_fn(p):
+        return jnp.stack([p["a"] + p["b"], p["a"] - p["b"]])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = fim(residual_fn, params, scale="relative")
+    assert report.zero_scaled == ("['b']",)
+    assert report.rank == 1
+
+
+def test_rank_rtol_zero_leaves_no_threshold_to_sit_near():
+    """``rank_rtol=0`` resolves every positive eigenvalue by request, so
+    there is no cutoff a ratio can be near and nothing to warn about --
+    rather than a division by zero inside the check."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(2.08e-07, rank_rtol=0.0)
+    assert report.rank == 2
+
+
+def test_the_warning_names_the_eigenvalue_nearest_the_cutoff():
+    """Not ``eigvals[0]``.  A spectrum whose smallest eigenvalue is far
+    below the cutoff can still have a *different* one sitting on it, and
+    that one is what a rounding error would carry across.  Reporting the
+    smallest would name a ratio nowhere near the number being compared.
+    """
+    from maddening.sysid import _precision_limited
+
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = 3 * eps
+    # smallest is 1e-4 of the cutoff; the middle one is sitting on it
+    ev = jnp.asarray([1e-4 * cutoff, 1.1 * cutoff, 1.0], dtype=jnp.float32)
+    limited = _precision_limited(ev, cutoff, cutoff)
+    assert limited is not None
+    ratio, cut = limited
+    assert cut == cutoff
+    assert abs(ratio / (1.1 * cutoff) - 1.0) < 1e-3, ratio
+
+
+@contextlib.contextmanager
+def _x64():
+    """``jax_enable_x64`` for the duration of the block.
+
+    Process-global and normally set before the first JAX import, which
+    is exactly why the warning recommends it rather than doing it: it
+    changes every library in the process.  Toggling it here is safe only
+    because the block restores it.
+    """
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+def test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict():
+    """The warning is worth emitting only if its remedy works.
+
+    The pinned case -- ratio 2.08e-07, cutoff 2.38e-07 -- reads
+    ``rank=1`` in float32.  Under x64 the cutoff drops to ``n * 2.2e-16``
+    and the same data resolve both directions, so the answer the warning
+    said was undetermined is determined, and the other way round from
+    the float32 verdict.  If this ever stopped holding, the warning
+    would be sending users on an errand that does not pay.
+    """
+    with _x64():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            report = _linear_fim(2.08e-07, dtype=jnp.float64)
+    assert report.rank == 2
+    assert np.all(np.isfinite(np.asarray(report.crb)))
+
+
+def test_under_x64_the_message_does_not_send_the_user_round_again():
+    """At float64 the remedy has already been taken and there is no
+    third precision, so the message has to say something else.  Pointing
+    a user who is already at x64 back at x64 is a loop."""
+    with _x64():
+        with pytest.warns(PrecisionLimitWarning) as rec:
+            # sitting on the float64 cutoff, n * 2.22e-16
+            _linear_fim(2.0 * float(np.finfo(np.float64).eps),
+                        dtype=jnp.float64)
+    msg = str(rec[0].message)
+    assert "float64 noise floor" in msg
+    assert "jax_enable_x64" not in msg
+    assert "widest precision" in msg
+
+
+@contextlib.contextmanager
+def _x64():
+    """``jax_enable_x64`` for the duration of the block.
+
+    Process-global and normally set before the first JAX import, which
+    is exactly why the warning recommends it rather than doing it:
+    flipping it changes every library in the process.
+    """
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+def test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict():
+    """The warning is only actionable if its remedy works.
+
+    The float32 report calls the 2.08e-07 direction unresolved because
+    that ratio is under a 2.38e-07 cutoff.  Under x64 the cutoff drops
+    to ``n * 2.22e-16``, the same direction clears it by nine decades,
+    and the answer is rank 2 with a finite bound -- so the warning's
+    "re-run under x64 to settle it" is a claim this test holds it to,
+    not a form of words.  It is also the non-vacuity check on the
+    warning: the two precisions really do answer differently here.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+        f32 = _linear_fim(2.08e-07)
+    assert f32.rank == 1 and not np.isfinite(np.asarray(f32.crb)).any()
+
+    with _x64():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            f64 = _linear_fim(2.08e-07, dtype=jnp.float64)
+    assert f64.rank == 2
+    assert np.isfinite(np.asarray(f64.crb)).all()
+
+
+def test_under_x64_the_warning_stops_recommending_x64():
+    """A verdict at the *float64* floor has no wider precision to
+    escalate to, so repeating the x64 advice would send a reader round a
+    loop they have already finished.  The message has to say what is
+    actually left to do instead."""
+    cutoff = 2 * float(np.finfo(np.float64).eps)
+    with _x64():
+        with pytest.warns(PrecisionLimitWarning) as rec:
+            report = _linear_fim(0.9 * cutoff, dtype=jnp.float64)
+    assert report.rank == 1
+    msg = str(rec[0].message)
+    assert "float64" in msg
+    assert "jax_enable_x64" not in msg
+    assert "widest precision" in msg
+
+
+def test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit():
+    """Raising ``rank_rtol`` moves the cutoff decades above the noise
+    floor, and a close call there is not a close call about precision.
+
+    ``rank_rtol=1e-3`` says "I call anything below 1e-3 unidentifiable
+    in practice".  An eigenvalue ratio of 7e-4 against that cutoff is
+    *inside* the factor-2 band around it -- and float32 knows both
+    numbers to three further decimal places, so the verdict is exact and
+    warning about rounding would be simply wrong.  The band is anchored
+    to ``n * eps`` as well as to the cutoff, and that second anchor is
+    the only thing stopping this.
+
+    The ratio is deliberately inside the multiplicative band: at 4e-4 it
+    would fall outside anyway and the test would pass with the anchor
+    deleted, which is how the first version of it escaped a mutation.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        report = _linear_fim(7e-4, rank_rtol=1e-3)
+    assert report.rank == 1          # 7e-4 is below the 1e-3 cutoff
+
+
+def test_a_rank_rtol_under_the_noise_floor_still_warns():
+    """The guard cuts one way only.  Lowering ``rank_rtol`` below
+    ``n * eps`` asks for a cutoff finer than the decomposition can
+    resolve, so every verdict at it is rounding -- the case the warning
+    exists for, reached from the other side."""
+    eps = float(np.finfo(np.float32).eps)
+    with pytest.warns(PrecisionLimitWarning):
+        _linear_fim(0.4 * eps, rank_rtol=0.5 * eps)
+
+
+def test_a_negative_eigenvalue_does_not_mask_a_ratio_that_is_on_the_cutoff():
+    """What the "positive ratios only" filter is actually for.
+
+    A PSD matrix whose smallest eigenvalue comes back negative is
+    reporting rounding, and that eigenvalue is *closest* to the cutoff
+    by any distance measure that admits it -- ``log`` of a negative is
+    NaN, and ``argmin`` over an array holding a NaN returns the NaN.  So
+    letting non-positive ratios into the search does not make them warn;
+    it makes them **hijack** the search and hide a genuine in-band ratio
+    sitting further up the spectrum.  Silence on a verdict that really
+    is at the floor, caused by the guard meant to describe it.
+    """
+    from maddening.sysid import _precision_limited
+
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = 3 * eps
+    ev = jnp.asarray([-2.0 * eps, 1.3 * cutoff, 1.0], dtype=jnp.float32)
+    limited = _precision_limited(ev, cutoff, cutoff)
+    assert limited is not None, "the in-band ratio was masked"
+    ratio, _ = limited
+    assert abs(ratio / (1.3 * cutoff) - 1.0) < 1e-3, ratio

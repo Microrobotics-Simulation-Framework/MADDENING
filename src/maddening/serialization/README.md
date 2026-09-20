@@ -47,6 +47,42 @@ gm_restored = from_dict(config, registry)
 }
 ```
 
+## Non-finite numbers
+
+`NaN` and the infinities have no JSON literal, so they are written as the
+quoted tokens `"NaN"`, `"Infinity"` and `"-Infinity"` — a diverged param, an
+infinite `ParamSpec` bound — and `from_dict` turns them back into floats:
+
+```json
+{"params": {"stiffness": "NaN"}, "bounds": ["-Infinity", "Infinity"]}
+```
+
+Before 0.4.0 these went out as the *bare* tokens `json.dumps` writes at its
+default `allow_nan=True`, which only Python reads (`MADD-ANO-006`).  Those are
+still accepted on load, so an older config needs no migration.
+
+Because a decoder cannot tell the float `NaN` from a string that reads
+`"NaN"`, `to_dict` **raises** on a string leaf equal to one of the three
+tokens, naming its path.  Spell such a value differently.  This is a real
+limitation on a wire format and is registered as **`MADD-ANO-010`**; the
+registry entry has the reasoning, the workaround and why a tagged object
+such as `{"__nonfinite__": "Infinity"}` was not used instead (it relocates
+the ambiguity to a rarer shape and makes it silent on read rather than
+loud on write, and it costs the FMU's C wrapper a JSON parser it does not
+otherwise have).
+
+The rule applies to a node *name* as well as a parameter value, and to a
+header a client puts on the FMI wire, but not to dict **keys** — nothing
+decodes a key.  Both the refusal and the decode are exact string matches,
+so `"nan"`, `"inf"`, `"+Infinity"` and `"NaN "` are all stored and read
+back as the strings they are.  Do not make them case-insensitive to match
+the C wrapper's `strtod`: that would turn every one of those into a float
+with nothing left to notice.
+
+The same encoding is used by the USD stage (`maddening:paramsJson` and the
+other JSON attributes) and the FMI sidecar wire; the shared implementation is
+`maddening.serialization.json_codec`.
+
 ## What is / is not serialized
 
 - **Serialized:** node descriptors (type, name, timestep, params), edges (registered transform names, interface mappings as their `MappingSpec` — kind, hyper-parameters and point references; `from_dict(..., base_dir=)` locates `{"asset": ...}` files), external input specs

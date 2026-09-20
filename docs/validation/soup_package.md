@@ -65,12 +65,13 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-003 | AdaptiveNode frozen-set gradient omits a first-order term at active-set switches | `major` | `context_dependent` | `open` | >=0.4.0 |
 | MADD-ANO-004 | ShardedPointwiseNode ignored every parameter write; PUT /graph/params answered 200 without changing the physics | `major` | `context_dependent` | `resolved` (in 0.4.0) | 0.3.0, 0.3.1 |
 | MADD-ANO-005 | A coupling group's converged flag was a residual test, not a bound on the distance to the fixed point | `minor` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
-| MADD-ANO-006 | Non-finite numbers are written as non-standard JSON tokens | `minor` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-006 | Non-finite numbers are written as non-standard JSON tokens | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-007 | HeatNode applies its Dirichlet boundary data at the first cell centre, not at the rod ends it documents | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-008 | HeatNode's 4th-order stencil converges at 1st order and is less accurate than the 2nd-order one | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-009 | HeatNode's documented CFL limit is the 2nd-order stencil's; the 4th-order stencil diverges below it | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0 |
+| MADD-ANO-010 | A string spelling a non-finite token is refused by the JSON serialisers | `minor` | `context_dependent` | `open` | >=0.4.0 |
 
-*9 anomalies registered, 3 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*10 anomalies registered, 3 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

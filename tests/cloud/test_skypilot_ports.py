@@ -43,12 +43,14 @@ class _Recorder:
     def __init__(self) -> None:
         self.run = ""
         self.resource_ports = "unset"
+        self.envs = "unset"
 
         recorder = self
 
         class Task:
-            def __init__(self, run: str = "") -> None:
+            def __init__(self, run: str = "", envs=None) -> None:
                 recorder.run = run
+                recorder.envs = envs
 
             def set_resources(self, resources) -> None:
                 pass
@@ -155,3 +157,65 @@ def test_launch_vm_still_returns_the_vm_ip_and_cluster_name(recorder):
 
     assert vm_ip == "203.0.113.7"
     assert job_id.startswith("maddening-")
+
+
+# ----------------------------------------------------------------------
+# Credentials reach the container, and only by a carrier that is not argv
+# ----------------------------------------------------------------------
+
+SECRET = "s3cret-operator-token"
+
+
+def test_launch_vm_hands_the_container_the_credentials_it_was_given(recorder):
+    """Without this the container generates a token nobody can present.
+
+    ``CloudSession``'s health probes authenticate against the container,
+    so the launcher and the container have to hold the same token.  A
+    launch that passes none leaves ``wait_ready()`` unable to succeed.
+    """
+    _skypilot.launch_vm(
+        _Config(ports=[8000]), envs={"MADDENING_API_TOKEN": SECRET},
+    )
+
+    assert recorder.envs == {"MADDENING_API_TOKEN": SECRET}
+    assert "-e MADDENING_API_TOKEN " in recorder.run
+
+
+def test_a_credential_value_never_reaches_the_docker_command_line(recorder):
+    """The gate: ``/proc/<pid>/cmdline`` on the VM is world-readable.
+
+    ``-e NAME`` makes docker read the value from its own environment;
+    ``-e NAME=value`` would put the secret in the argv of every process
+    in the chain.  The name is interpolated, the value is not.
+    """
+    _skypilot.launch_vm(
+        _Config(ports=[8000]),
+        envs={"MADDENING_API_TOKEN": SECRET,
+              "MADDENING_TRANSPORT_TOKEN": "a-different-secret"},
+    )
+
+    assert SECRET not in recorder.run
+    assert "a-different-secret" not in recorder.run
+    assert "-e MADDENING_API_TOKEN=" not in recorder.run
+    assert "-e MADDENING_TRANSPORT_TOKEN=" not in recorder.run
+
+
+def test_launch_vm_passes_no_environment_when_it_was_given_none(recorder):
+    """The pre-existing shape is unchanged for a caller that passes none."""
+    _skypilot.launch_vm(_Config(ports=[8000]))
+
+    assert recorder.envs is None
+    assert "-e MADDENING_API_TOKEN" not in recorder.run
+    assert "-e MADDENING_TRANSPORT_TOKEN" not in recorder.run
+
+
+@pytest.mark.parametrize("bad", [
+    "MADDENING API TOKEN", "TOKEN; rm -rf /", "$(id)", "", "8TOKEN",
+    "TOKEN\nFOO",
+])
+def test_launch_vm_refuses_an_environment_name_that_is_not_an_identifier(
+    recorder, bad,
+):
+    """Names are interpolated into a shell command line, so they fail closed."""
+    with pytest.raises(ValueError):
+        _skypilot.launch_vm(_Config(ports=[8000]), envs={bad: SECRET})

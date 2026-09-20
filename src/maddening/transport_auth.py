@@ -34,18 +34,41 @@ One token, no key files
 -----------------------
 CURVE normally means a keypair per peer and a public-key exchange.
 That is the ceremony nobody performs, so this module does not ask for
-it.  Both CURVE keypairs are **derived deterministically from the
-shared ``MADDENING_API_TOKEN``** -- the same token
-:class:`maddening.api.auth.APIAuth` already demands on the HTTP API.
-A Curve25519 secret key is 32 bytes of any origin, so the secret
-scalar is a domain-separated BLAKE2b of the token and the public key
-comes from :func:`zmq.curve_public` (libsodium's basepoint
+it.  Both CURVE keypairs are **derived deterministically from a shared
+secret**.  A Curve25519 secret key is 32 bytes of any origin, so the
+secret scalar is a domain-separated BLAKE2b of that secret and the
+public key comes from :func:`zmq.curve_public` (libsodium's basepoint
 multiplication).  Both sides compute both keypairs, so neither has to
 learn anything from the other.
 
-The consequence is that key management is exactly the key management
-the HTTP API already has: **set ``MADDENING_API_TOKEN`` to the same
-value on both sides, or use an SSH tunnel and set nothing at all.**
+Which secret: ``MADDENING_TRANSPORT_TOKEN`` first
+-------------------------------------------------
+The secret is :data:`TRANSPORT_TOKEN_ENV`
+(``MADDENING_TRANSPORT_TOKEN``) when it is set, and
+:data:`~maddening.api.auth.TOKEN_ENV` (``MADDENING_API_TOKEN``)
+otherwise.
+
+**Prefer the transport variable, and understand the fallback before you
+rely on it.**  ``MADDENING_API_TOKEN`` is the HTTP API's bearer
+credential, and there is **no TLS**: it crosses the wire in cleartext
+in an ``Authorization`` header on *every* API request.  Where that
+token is also the CURVE seed, anyone who can see one such request can
+derive both CURVE keypairs and read the "encrypted" state and command
+streams -- measured over a real socket, not inferred.  The two
+variables exist so that the streams do not inherit the HTTP
+credential's exposure:
+
+* set **both** variables, to *different* values, whenever the API port
+  and a ZMQ port are published on the same untrusted network;
+* setting only ``MADDENING_API_TOKEN`` keeps the single-variable setup
+  that earlier releases documented, and it keeps the exposure above.
+  It is convenient and it is the reason the fallback is spelled out
+  here rather than hidden.
+
+Both ends of a socket must hold the same value, whichever variable it
+came from -- a relay reading ``MADDENING_TRANSPORT_TOKEN`` and a
+receiver reading ``MADDENING_API_TOKEN`` derive different keys and will
+not talk.  Or use an SSH tunnel and set nothing at all.
 
 What this does and does not buy
 -------------------------------
@@ -86,12 +109,19 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "TOKEN_ENV",
+    "TRANSPORT_TOKEN_ENV",
     "TransportAuth",
     "TransportAuthError",
     "address_is_loopback",
     "address_requires_security",
     "resolve_security",
 ]
+
+#: Environment variable holding the secret the CURVE keys are derived
+#: from.  Read in preference to :data:`~maddening.api.auth.TOKEN_ENV`,
+#: which is the cleartext HTTP bearer credential; see the module
+#: docstring for why sharing that one exposes the streams.
+TRANSPORT_TOKEN_ENV = "MADDENING_TRANSPORT_TOKEN"
 
 #: BLAKE2b personalisation for the key derivation (max 16 bytes).
 _CURVE_PERSON = b"maddening-curve"
@@ -235,7 +265,8 @@ def resolve_security(address: str, secure: Optional[bool]) -> bool:
             f"routable endpoint: the full simulation state and the command "
             f"channel would be readable by anyone who can reach the port. "
             f"Bind a loopback address and forward it over SSH, or set "
-            f"{TOKEN_ENV} on both sides and leave secure unset."
+            f"{TRANSPORT_TOKEN_ENV} (or {TOKEN_ENV}) on both sides and "
+            f"leave secure unset."
         )
     return bool(secure)
 
@@ -247,8 +278,14 @@ class TransportAuth:
     Parameters
     ----------
     token : str, optional
-        The shared secret.  ``None`` reads ``MADDENING_API_TOKEN`` from
-        *environ*.
+        The shared secret.  ``None`` reads
+        :data:`TRANSPORT_TOKEN_ENV` (``MADDENING_TRANSPORT_TOKEN``)
+        from *environ*, then falls back to
+        :data:`~maddening.api.auth.TOKEN_ENV`
+        (``MADDENING_API_TOKEN``).  The fallback keeps a
+        single-variable deployment working; it also means the CURVE
+        seed is the credential the HTTP API sends in cleartext on every
+        request.  See the module docstring.
     environ : mapping, optional
         Environment to read; defaults to :data:`os.environ`.
 
@@ -256,6 +293,11 @@ class TransportAuth:
     ----------
     token : str
         The shared secret both sides must hold.
+    token_env : str or None
+        Which environment variable the secret came from, or ``None``
+        when it was passed as *token*.  Callers that propagate the
+        secret -- the cloud launch path does -- use this to pass on the
+        variable the operator actually set.
 
     Raises
     ------
@@ -265,8 +307,12 @@ class TransportAuth:
         would be known to one end of the socket only, so the peer could
         never connect.  A blank value raises for the same reason it
         does in :class:`maddening.api.auth.APIAuth` -- it is what
-        ``MADDENING_API_TOKEN=$UNSET_VARIABLE`` produces, and reading it
-        as "encryption off" would reopen the hole.
+        ``MADDENING_TRANSPORT_TOKEN=$UNSET_VARIABLE`` produces, and
+        reading it as "encryption off" would reopen the hole.  A blank
+        ``MADDENING_TRANSPORT_TOKEN`` does **not** fall through to
+        ``MADDENING_API_TOKEN``: a variable that is set is the
+        operator's answer, and silently using a different secret than
+        the one they named is how two ends stop agreeing.
 
     Examples
     --------
@@ -284,25 +330,38 @@ class TransportAuth:
         environ: Optional[Mapping[str, str]] = None,
     ) -> None:
         env = os.environ if environ is None else environ
-        source = token if token is not None else env.get(TOKEN_ENV)
+        source: Optional[str] = token
+        origin: Optional[str] = None
+        if source is None:
+            source = env.get(TRANSPORT_TOKEN_ENV)
+            origin = TRANSPORT_TOKEN_ENV
+        if source is None:
+            source = env.get(TOKEN_ENV)
+            origin = TOKEN_ENV
         if source is None:
             raise TransportAuthError(
                 f"This ZeroMQ endpoint is reachable from other hosts, so it "
                 f"is encrypted with ZMQ CURVE, and that needs a shared "
-                f"secret: set {TOKEN_ENV} to the same value on both sides. "
-                f"It is the same token the HTTP API uses -- there is only "
-                f"one. If you did not mean to expose the port, bind a "
-                f"loopback address (the default) and forward it with "
+                f"secret: set {TRANSPORT_TOKEN_ENV} to the same value on "
+                f"both sides. {TOKEN_ENV} is accepted as a fallback so a "
+                f"single-variable setup keeps working, but it is the HTTP "
+                f"API's bearer credential and there is no TLS, so anyone "
+                f"who sees one API request can then read these streams: "
+                f"prefer a separate {TRANSPORT_TOKEN_ENV}. If you did not "
+                f"mean to expose the port, bind a loopback address (the "
+                f"default) and forward it with "
                 f"'ssh -L 5555:127.0.0.1:5555 <host>', which needs no token."
             )
         if not source.strip():
+            named = origin or "the token= argument"
             raise TransportAuthError(
-                f"{TOKEN_ENV} is set but blank. A blank token is a "
+                f"{named} is set but blank. A blank token is a "
                 f"configuration error, not a request to disable encryption "
-                f"-- it is what {TOKEN_ENV}=$UNSET_VARIABLE produces. Unset "
+                f"-- it is what {named}=$UNSET_VARIABLE produces. Unset "
                 f"it and bind loopback, or set it to a value."
             )
         self.token = source
+        self.token_env = origin
 
     # -- key derivation -------------------------------------------------
 
@@ -424,6 +483,9 @@ class _AllowOnly:
             return True
         logger.warning(
             "Rejected a ZeroMQ peer whose CURVE public key is not the one "
-            "derived from %s. Both ends must share the same token.", TOKEN_ENV,
+            "derived from this endpoint's transport secret. Both ends must "
+            "share the same value, and must read it from the same variable: "
+            "%s is used when it is set, otherwise %s.",
+            TRANSPORT_TOKEN_ENV, TOKEN_ENV,
         )
         return False

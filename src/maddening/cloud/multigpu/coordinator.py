@@ -88,6 +88,7 @@ class Coordinator:
         cleartext, anything else is secured.  ``True`` forces it on.
     token : str, optional
         Shared secret the CURVE keys are derived from; ``None`` reads
+        ``MADDENING_TRANSPORT_TOKEN``, falling back to
         ``MADDENING_API_TOKEN``.  Workers must present the same one.
     heartbeat_interval : float
         Seconds between expected heartbeats.

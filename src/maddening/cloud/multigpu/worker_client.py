@@ -73,6 +73,7 @@ class WorkerClient:
         naming the mismatch.
     token : str, optional
         Shared secret the CURVE keys are derived from; ``None`` reads
+        ``MADDENING_TRANSPORT_TOKEN``, falling back to
         ``MADDENING_API_TOKEN``.  Must match the coordinator's.
     """
 

@@ -19,7 +19,7 @@ Security
 Every socket here defaults to a **loopback** address, so the local
 development flow needs no configuration.  Giving any of them an address
 another host can reach turns on ZMQ CURVE encryption and
-authentication, keyed by the shared ``MADDENING_API_TOKEN``; see
+authentication, keyed by the shared ``MADDENING_TRANSPORT_TOKEN``; see
 :mod:`maddening.transport_auth`.  The recommended way to reach a remote
 simulation remains an SSH tunnel to the loopback port, which needs no
 token at all.
@@ -195,8 +195,11 @@ class NetworkReceiver:
         :mod:`maddening.transport_auth`.
     token : str, optional
         The shared secret both ends derive their CURVE keys from.
-        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
-        HTTP API uses.  Only consulted when the socket is secured.
+        ``None`` reads ``MADDENING_TRANSPORT_TOKEN``, falling back to
+        ``MADDENING_API_TOKEN`` -- which is the HTTP API's cleartext
+        bearer credential, so prefer the transport variable; see
+        :mod:`maddening.transport_auth`.  Only consulted when the
+        socket is secured.
     """
 
     def __init__(
@@ -283,8 +286,11 @@ class CommandPublisher:
         :mod:`maddening.transport_auth`.
     token : str, optional
         The shared secret both ends derive their CURVE keys from.
-        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
-        HTTP API uses.  Only consulted when the socket is secured.
+        ``None`` reads ``MADDENING_TRANSPORT_TOKEN``, falling back to
+        ``MADDENING_API_TOKEN`` -- which is the HTTP API's cleartext
+        bearer credential, so prefer the transport variable; see
+        :mod:`maddening.transport_auth`.  Only consulted when the
+        socket is secured.
 
     Example
     -------
@@ -293,7 +299,7 @@ class CommandPublisher:
         pub = CommandPublisher()          # loopback, no token needed
         pub.send({"robot": {"joint_torques": [0.1, -0.2, 0.0, ...]}})
 
-        # Off-box, with MADDENING_API_TOKEN set on both sides:
+        # Off-box, with MADDENING_TRANSPORT_TOKEN set on both sides:
         pub = CommandPublisher("tcp://0.0.0.0:5556")
     """
 
@@ -361,8 +367,11 @@ class CommandReceiver:
         :mod:`maddening.transport_auth`.
     token : str, optional
         The shared secret both ends derive their CURVE keys from.
-        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
-        HTTP API uses.  Only consulted when the socket is secured.
+        ``None`` reads ``MADDENING_TRANSPORT_TOKEN``, falling back to
+        ``MADDENING_API_TOKEN`` -- which is the HTTP API's cleartext
+        bearer credential, so prefer the transport variable; see
+        :mod:`maddening.transport_auth`.  Only consulted when the
+        socket is secured.
     """
 
     def __init__(

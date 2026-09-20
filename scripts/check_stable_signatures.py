@@ -282,14 +282,54 @@ def write_snapshot(snapshot: dict[str, Any], path: Path) -> None:
 # --------------------------------------------------------------------------
 
 def _flatten(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """``{"surface" or "surface.member": record}`` for a readable diff."""
+    """``{"surface" or "surface.member": record}`` for a readable diff.
+
+    A method can be **both** a member of a tagged class and a tagged surface
+    in its own right: ``SimulationNode.static_data_deps`` carries its own
+    ``@stability``, and so does ``invalidate_static_cache`` on three classes.
+    Those two renderings land on the same key and are not byte-identical --
+    the surface is resolved from the unbound function and keeps ``self``, the
+    member record drops it -- so one silently overwrote the other, and the
+    "N member(s) unchanged" line understated the snapshot by exactly the
+    number of such surfaces (4 of 243 today).
+
+    The registered surface wins, because that is the thing the registry
+    promises, and the duplicate member is not emitted at all rather than
+    written and clobbered.  Surfaces are laid down first so the outcome does
+    not depend on dict order.
+    """
     flat: dict[str, Any] = {}
     for name, record in snapshot.get("surfaces", {}).items():
-        members = record.get("members", {})
         flat[name] = {k: v for k, v in record.items() if k != "members"}
-        for member, mrecord in members.items():
-            flat[f"{name}.{member}"] = mrecord
+    for name, record in snapshot.get("surfaces", {}).items():
+        for member, mrecord in record.get("members", {}).items():
+            key = f"{name}.{member}"
+            if key in flat:                  # also tagged in its own right
+                continue
+            flat[key] = mrecord
     return flat
+
+
+def _counts(snapshot: dict[str, Any]) -> tuple[int, int, int]:
+    """``(surfaces, distinct members, members that are also surfaces)``.
+
+    Reported by both ``--update`` and the passing path, from one place, so
+    the two can no longer print different totals for the same snapshot.
+    """
+    surfaces = snapshot.get("surfaces", {})
+    n_surfaces = len(surfaces)
+    n_flat = len(_flatten(snapshot))
+    n_recorded = sum(len(r.get("members", {})) for r in surfaces.values())
+    n_members = n_flat - n_surfaces
+    return n_surfaces, n_members, n_recorded - n_members
+
+
+def _count_line(snapshot: dict[str, Any]) -> str:
+    n_surfaces, n_members, n_dual = _counts(snapshot)
+    line = f"{n_surfaces} STABLE surface(s), {n_members} member(s)"
+    if n_dual:
+        line += f" ({n_dual} of them tagged in their own right)"
+    return line
 
 
 def _render(record: dict[str, Any]) -> str:
@@ -361,9 +401,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.update:
         write_snapshot(current, args.snapshot)
-        n = len(current["surfaces"])
-        n_members = sum(len(r.get("members", {})) for r in current["surfaces"].values())
-        print(f"Wrote {args.snapshot}: {n} STABLE surfaces, {n_members} members")
+        print(f"Wrote {args.snapshot}: {_count_line(current)}")
         return 0
 
     if not args.snapshot.exists():
@@ -431,9 +469,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    flat = _flatten(current)
-    print(f"OK: {len(current['surfaces'])} STABLE surface(s), "
-          f"{len(flat) - len(current['surfaces'])} member(s) unchanged")
+    print(f"OK: {_count_line(current)} unchanged")
     return 0
 
 

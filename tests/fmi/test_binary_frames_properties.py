@@ -23,11 +23,44 @@ from hypothesis.extra import numpy as hnp
 from maddening.fmi.tcp_bridge import (
     decode_binary, encode_binary, recv_message, send_message, values_of,
 )
+from maddening.serialization.json_codec import (
+    INF_TOKEN, NAN_TOKEN, NEG_INF_TOKEN, NON_FINITE_TOKENS,
+)
 from tests.fmi.test_c_wrapper import _bridge, _graph, _vr
 from tests.conftest import EXAMPLES_CHEAP
 
 _BINARY = 0x80000000
 _HDR = struct.Struct(">I")
+
+# ----------------------------------------------------------- header strings
+# A header goes out through ``json_codec.dumps``, which refuses a *string*
+# leaf spelling one of the three non-finite tokens: the decoder would read
+# it back as that float, so the frame would be ambiguous (``MADD-ANO-007``).
+# The strategies below therefore have to generate strings the codec accepts.
+#
+# They generate them; they do not filter them out.  Drawing one of the
+# tokens is not a freak event: Hypothesis injects the string constants it
+# finds in the modules under test, and ``NaN`` / ``Infinity`` /
+# ``-Infinity`` are module constants of ``maddening.serialization.
+# json_codec``.  Measured on the installed Hypothesis, ``st.text(max_size=16)``
+# draws one of them about once per thousand draws -- which is how CI found
+# this test, with ``header={'': 'Infinity'}``, and why ``assume()`` is the
+# wrong tool: a rejected draw is wall-clock spent and a step towards
+# ``HealthCheck.filter_too_much``, and neither shows up in a green run
+# (``scripts/audit_property_rejection.py``).
+#
+# A colliding draw is mapped to the nearest spelling the codec *does*
+# accept, which is the more interesting example anyway: these three are
+# exactly the lookalikes a decoder must leave as strings.  A ``.map`` costs
+# no draw and rejects nothing.
+_LOOKALIKES = {NAN_TOKEN: "Nan", INF_TOKEN: "infinity", NEG_INF_TOKEN: "-infinity"}
+assert not (set(_LOOKALIKES.values()) & NON_FINITE_TOKENS)
+assert all(len(k) == len(v) for k, v in _LOOKALIKES.items())   # size bounds hold
+
+
+def header_text(max_size: int):
+    """Text for a header *value*: never one of the non-finite tokens."""
+    return st.text(max_size=max_size).map(lambda s: _LOOKALIKES.get(s, s))
 
 # ------------------------------------------------------------------ codec
 
@@ -78,13 +111,46 @@ def test_any_payload_decodes_consistently_or_raises_value_error(payload):
 
 @given(header=st.dictionaries(st.text(max_size=8),
                               st.one_of(st.none(), st.booleans(), st.integers(), st.floats(allow_nan=False),
-                                        st.text(max_size=16), st.lists(st.integers(), max_size=4)),
+                                        header_text(16), st.lists(st.integers(), max_size=4)),
                               max_size=6),
        raw=st.binary(max_size=256))
 @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
 def test_encode_then_decode_is_the_identity_for_any_json_header(header, raw):
     got_header, got_raw = decode_binary(encode_binary(header, raw))
     assert got_header == json.loads(json.dumps(header)) and got_raw == raw
+
+
+@given(key=st.text(max_size=8),
+       token=st.sampled_from(sorted(NON_FINITE_TOKENS)),
+       raw=st.binary(max_size=64))
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+def test_a_header_string_spelling_a_non_finite_token_is_refused(key, token, raw):
+    """The one header the codec will not write, and it says which value.
+
+    ``decode_binary`` turns ``"NaN"`` back into ``float('nan')``, so a
+    header carrying that *string* cannot survive the round trip above.
+    The frame is refused where the path is still known rather than sent
+    and silently mis-read at the far end (``MADD-ANO-007``).
+    """
+    with pytest.raises(ValueError, match="cannot be written to JSON") as exc:
+        encode_binary({key: token}, raw)
+    assert token in str(exc.value)
+
+
+@given(key=st.text(max_size=8),
+       look=st.sampled_from(sorted(_LOOKALIKES.values())),
+       raw=st.binary(max_size=64))
+@settings(max_examples=EXAMPLES_CHEAP, deadline=None)
+def test_a_header_string_that_only_looks_like_a_token_stays_a_string(key, look, raw):
+    """``Nan`` / ``infinity`` / ``-infinity`` are data, not numbers.
+
+    The refusal and the decode are exact string matches, deliberately:
+    the FMU's C wrapper reads the tokens with ``strtod``, which *is*
+    case-insensitive, and harmonising the Python side with it would turn
+    every one of these strings into a float with nothing to notice.
+    """
+    header, _ = decode_binary(encode_binary({key: look}, raw))
+    assert header[key] == look and isinstance(header[key], str)
 
 
 # ------------------------------------------------- the bridge's connection loop
@@ -130,7 +196,7 @@ def _structured_requests():
         optional={
             "op": st.one_of(st.sampled_from(["set", "set_state", "get", "step", "hello", "reset", "nope"]),
                             st.integers(), st.none()),
-            "n": st.one_of(st.integers(-3, 40), st.booleans(), st.text(max_size=3), st.floats(allow_nan=False)),
+            "n": st.one_of(st.integers(-3, 40), st.booleans(), header_text(3), st.floats(allow_nan=False)),
             "dtype": st.one_of(st.just("f64"), st.sampled_from(["f32", "i64", ""]), st.none()),
             "vr": st.one_of(vr_list, st.integers(), st.none()),
             "values": st.lists(st.floats(allow_nan=False), max_size=3),

@@ -234,6 +234,9 @@ jobs:
       - name: Check transform registry
         run: python scripts/check_transforms.py
 
+      - name: Check HeatNode configurations are constructible
+        run: python scripts/check_heat_stability.py
+
       - name: Run compliance tests
         env:
           JAX_PLATFORMS: cpu

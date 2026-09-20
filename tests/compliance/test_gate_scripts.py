@@ -61,6 +61,11 @@ def citations_gate():
     return _load("check_citations")
 
 
+@pytest.fixture(scope="module")
+def heat_stability_gate():
+    return _load("check_heat_stability")
+
+
 # ---------------------------------------------------------------------------
 # check_transforms.py
 # ---------------------------------------------------------------------------
@@ -401,3 +406,143 @@ class TestTransformAllowlist:
             'gm.add_edge("a", "b", "x", "y", transform="this_does_not_exist")\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+
+
+def _rod(tmp_path, body, name="mod.py"):
+    (tmp_path / name).write_text(
+        "from maddening.nodes.heat import HeatNode\n" + body + "\n"
+    )
+    return tmp_path
+
+
+class TestHeatStabilityGate:
+    """``scripts/check_heat_stability.py``: no caller may build a rod that
+    ``HeatNode.__init__`` refuses.
+
+    The gate exists because a real one got through code review, two
+    greps and a partial local test run, and was caught only by CI:
+    ``tests/core/test_compile_cache.py`` built a 257-cell 4th-order rod
+    at a Fourier number of 0.66 inside a ``textwrap.dedent`` string
+    passed to ``python -c``.  Each test below replays a way of hiding
+    such a construction, or a way the gate could claim an OK it has not
+    earned.
+    """
+
+    def test_it_passes_on_the_repository_as_it_stands(self, heat_stability_gate):
+        assert heat_stability_gate.main([]) == 0
+
+    def test_a_rod_past_the_fourth_order_limit_fails(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The exact configuration CI caught: Fo = 0.66 against 5/16."""
+        _rod(tmp_path, 'HeatNode("h", 1e-4, n_cells=257, '
+                       'thermal_diffusivity=0.1, stencil_order=4)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_a_rod_past_the_second_order_limit_fails(
+        self, heat_stability_gate, tmp_path
+    ):
+        _rod(tmp_path, 'HeatNode("h", 0.51, n_cells=10, length=1.0, '
+                       'thermal_diffusivity=1.0)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_a_rod_hidden_in_a_dedented_string_still_fails(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The reason this gate walks the AST instead of grepping.
+
+        ``HeatNode(`` inside a string literal is not a call to anything
+        scanning for calls, and the string is indented until
+        ``textwrap.dedent`` runs, so it does not even parse as source
+        until the gate dedents it.  This is how the real one hid.
+        """
+        (tmp_path / "child.py").write_text(
+            'import textwrap\n'
+            '_CHILD = textwrap.dedent("""\n'
+            '    from maddening.nodes.heat import HeatNode\n'
+            '    def factory():\n'
+            '        return HeatNode("h", 1e-4, n_cells=257,\n'
+            '                        thermal_diffusivity=0.1, stencil_order=4)\n'
+            '""")\n'
+        )
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_a_stable_rod_passes(self, heat_stability_gate, tmp_path):
+        _rod(tmp_path, 'HeatNode("h", 1e-5, n_cells=257, '
+                       'thermal_diffusivity=0.1, stencil_order=4)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 0
+
+    def test_it_refuses_to_pass_when_it_verified_nothing(
+        self, heat_stability_gate, tmp_path
+    ):
+        """A computed argument is unchecked, and unchecked is not a pass.
+
+        A cruder regex sweep of the same question produced three false
+        positives by trying to read expressions like
+        ``thermal_diffusivity=1.0/n_cells**2``.  This gate declines to
+        evaluate them -- but a file whose every construction is
+        computed means the gate verified nothing, and it says so rather
+        than reporting OK.
+        """
+        _rod(tmp_path, 'nc = 257\n'
+                       'HeatNode("h", 1.0 / 3.0, n_cells=nc, '
+                       'thermal_diffusivity=0.1, stencil_order=4)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_an_empty_scope_fails(self, heat_stability_gate, tmp_path):
+        """A gate that verifies nothing cannot fail."""
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_limits_come_from_the_node_not_a_copy(self, heat_stability_gate):
+        """A second source of truth would drift from the guard silently."""
+        from maddening.nodes.heat import MAX_FOURIER_NUMBER
+
+        assert heat_stability_gate.MAX_FOURIER_NUMBER is MAX_FOURIER_NUMBER
+
+    def test_the_allowlisted_file_still_plants_a_defect(
+        self, heat_stability_gate
+    ):
+        """An exemption that no longer exempts anything is scope creep.
+
+        This file is allowlisted because it must contain unstable rods
+        to prove the gate rejects them.  If those fixtures ever move or
+        change, the exemption stops being earned and has to go -- an
+        allowlist entry left behind would silently stop checking a real
+        file.
+        """
+        for relpath in heat_stability_gate._ALLOWED_UNSTABLE:
+            path = REPO_ROOT / relpath
+            if not path.is_file():
+                continue
+            unstable, unchecked, seen = [], [], []
+            heat_stability_gate.scan_source(
+                path.read_text(), relpath,
+                heat_stability_gate._defaults(), unstable, unchecked, seen,
+            )
+            assert unstable, (
+                f"{relpath} is allowlisted as deliberately containing an "
+                f"unstable HeatNode construction, but no longer does; remove "
+                f"the _ALLOWED_UNSTABLE entry"
+            )
+
+    def test_the_allowlist_does_not_exempt_an_ordinary_file(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The exemption is by exact path, not by resemblance to one."""
+        _rod(tmp_path, 'HeatNode("h", 1e-4, n_cells=257, '
+                       'thermal_diffusivity=0.1, stencil_order=4)',
+             name="test_gate_scripts.py")
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_parameter_defaults_come_from_the_constructor_signature(
+        self, heat_stability_gate
+    ):
+        """Same reason: a hard-coded default would go stale on a rename."""
+        import inspect
+
+        from maddening.nodes.heat import HeatNode
+
+        sig = inspect.signature(HeatNode.__init__)
+        defaults = heat_stability_gate._defaults()
+        for key, value in defaults.items():
+            assert value == sig.parameters[key].default

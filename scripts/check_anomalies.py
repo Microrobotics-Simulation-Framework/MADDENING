@@ -25,6 +25,18 @@ from maddening.compliance._validate import validate_anomaly_registry
 
 #: Reference fields whose entries this gate resolves.  Both count towards
 #: the scope: a registry that declares neither verifies nothing.
+#:
+#: Measured after the guards below landed (2026-09-20), because the scope
+#: guard was suspected of being conditional on ``notes`` and is not:
+#: stripping every ``affected_components`` *and* every ``verification``
+#: entry from the shipped registry exits 1, while stripping
+#: ``affected_components`` alone exits 0 with 57 verification entries
+#: still resolving -- so the run that passed genuinely verified something.
+#: The residual gap is narrower than the suspicion: losing one *whole
+#: kind* of reference leaves the gate green, because the sum is what is
+#: guarded and not each field.  Recorded rather than fixed; a per-field
+#: floor would be a ratchet, and this registry has entries for which one
+#: of the two is legitimately absent.
 _REFERENCE_FIELDS = ("affected_components", "verification")
 
 

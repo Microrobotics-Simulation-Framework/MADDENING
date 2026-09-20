@@ -155,8 +155,13 @@ $$
 The step is stable where $|R(z)| \le 1$.  $R$ also serves as an exact
 identity check on the coefficients, which a convergence ladder cannot
 provide: under a frozen time-varying input all three methods measure
-order ~1.02 with errors agreeing to three significant figures, so a
-ladder cannot distinguish one scheme from another.
+order ~1.02, so the *order* alone cannot distinguish one scheme from
+another.  The errors do not all agree — `heun` and `rk4` do, to three
+significant figures (7.038e-3 and 7.034e-3 relative at $dt = 0.0047$),
+but `euler` sits at 4.567e-3, a factor of 1.540 better than either, which
+is the same measurement the limitation above states as "1.5x worse".  An
+earlier revision of this sentence said all three errors agreed, which
+would have made the two paragraphs contradict each other.
 
 ## State Variables
 

@@ -76,7 +76,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-013 | HeartPumpNode downcasts its backpressure boundary input to float32 | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-014 | Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 
-*14 anomalies registered, 6 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*15 anomalies registered, 6 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

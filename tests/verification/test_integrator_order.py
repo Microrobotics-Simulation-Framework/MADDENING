@@ -342,6 +342,63 @@ def test_each_stepper_reproduces_its_own_stability_polynomial(
     assert float(out["x"]) == pytest.approx(expected, rel=1e-13, abs=1e-15)
 
 
+class _LinearNode(SimulationNode):
+    """``x' = rate * x``, so one step is ``x0 * R(rate*dt)`` exactly."""
+
+    def __init__(self, rate, **kwargs):
+        super().__init__(**kwargs)
+        self.rate = rate
+
+    def initial_state(self):
+        return {"x": jnp.asarray(1.5)}
+
+    def update(self, state, boundary_inputs, dt):
+        return euler_step(self.derivatives, state, boundary_inputs, dt)
+
+    def derivatives(self, state, boundary_inputs):
+        return {"x": self.rate * state["x"]}
+
+
+@pytest.mark.parametrize("method", ["euler", "heun", "rk4"])
+@pytest.mark.parametrize("z", [-2.5, -0.3, 0.7])
+def test_integrate_node_dispatches_to_the_method_it_names(float64, method, z):
+    """``method=`` selects the scheme it is named after, pinned exactly.
+
+    Without this, the dispatch table is unguarded.  Mutation-tested: with
+    only the ladders above in place, rewiring ``"rk4"`` to ``heun_step``
+    and ``"heun"`` to ``euler_step`` left the whole module green, because
+    the only study that reaches ``integrate_node`` is the frozen-input
+    one -- where all three methods are 1st order with errors agreeing to
+    three significant figures.  A convergence band cannot see a scheme
+    substitution; ``R(z)`` can.
+    """
+    dt = 0.25
+    node = _LinearNode(z / dt, name="linear", timestep=dt)
+    out = integrate_node(node, node.initial_state(), {}, dt, method=method)
+    expected = 1.5 * _STABILITY_POLYNOMIAL[method](z)
+    assert float(out["x"]) == pytest.approx(expected, rel=1e-13, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    "method,stepper",
+    [("euler", euler_step), ("heun", heun_step), ("rk4", rk4_step)],
+)
+def test_integrate_node_is_exactly_the_free_function_it_names(float64, method, stepper):
+    """Redundant given the polynomials, and kept anyway.
+
+    It says the dispatch contract directly -- ``integrate_node`` adds
+    nothing to the stepper it selects -- so it survives someone editing
+    ``_STABILITY_POLYNOMIAL`` and the implementation in step.
+    """
+    dt = 0.05
+    node = _ForcedDecayNode(name="forced_decay", timestep=dt)
+    state = {"x": jnp.asarray(0.3)}
+    bi = {"u": _forcing(0.2)}
+    assert float(integrate_node(node, state, bi, dt, method=method)["x"]) == (
+        float(stepper(node.derivatives, state, bi, dt)["x"])
+    )
+
+
 def test_the_three_steppers_are_distinguishable_on_a_single_step(float64):
     """Redundant given the polynomials above, and kept anyway.
 

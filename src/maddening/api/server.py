@@ -51,7 +51,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Iterable, Optional
+from urllib.parse import urlsplit
 
 import jax
 import jax.numpy as jnp
@@ -326,6 +327,101 @@ def _dry_run_node(node, state: Any = None) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
+#: Methods a cross-origin page could use to change this server's state.
+#:
+#: ``GET`` and ``HEAD`` are left out deliberately: without an
+#: ``Access-Control-Allow-Origin`` header -- which this API never sends
+#: -- a cross-origin page cannot read the response, so a read is not an
+#: exfiltration path, and refusing one would break embedding the viz
+#: pages.  WebSockets are not on this list because they are not HTTP
+#: methods; they are checked in :class:`_WebSocketAuthMiddleware`, and
+#: they *are* a read path, because WebSocket is exempt from the
+#: same-origin policy.
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+@stability(StabilityLevel.EVOLVING)
+def origin_is_same_site(
+    origin: Optional[str],
+    host: Optional[str],
+    allowed_origins: Iterable[str] = (),
+) -> bool:
+    """Whether a browser's ``Origin`` header names this server.
+
+    The loopback threat model -- "the caller is anyone with a shell on
+    this box" -- omits every web page the developer's browser loads.  A
+    cross-origin *simple* request (``POST`` with
+    ``Content-Type: text/plain``) needs no preflight and reaches the
+    handler from any origin, and the peer backstop cannot help because
+    the peer is 127.0.0.1 by construction.  A loopback-bound API has no
+    legitimate cross-origin caller, so the answer is "same origin, or a
+    named one, or no".
+
+    Parameters
+    ----------
+    origin : str or None
+        The ``Origin`` request header.  Absent means the caller is not a
+        browser (curl, a script, a test client), which this rule does
+        not constrain: ``True``.
+    host : str or None
+        The ``Host`` request header, which an attacker's page cannot
+        choose.  The comparison ignores the scheme, because a
+        TLS-terminating proxy makes the browser's ``https`` disagree
+        with the server's own view of the connection while the authority
+        still matches.
+    allowed_origins : iterable of str, optional
+        Origins an embedder serves its UI from, matched literally
+        (case-insensitively, trailing slash ignored).
+
+    Returns
+    -------
+    bool
+        ``True`` when the request may proceed.  Anything that cannot be
+        resolved to this host fails closed -- including ``null`` (a
+        sandboxed iframe or a ``file://`` page) and an authority with
+        userinfo, ``https://evil.example@host``, which reads as *host*
+        to a careless parser and is not one.
+
+    Examples
+    --------
+    >>> origin_is_same_site("http://127.0.0.1:8000", "127.0.0.1:8000")
+    True
+    >>> origin_is_same_site("https://evil.example", "127.0.0.1:8000")
+    False
+    >>> origin_is_same_site(None, "127.0.0.1:8000")
+    True
+    """
+    if not origin:
+        return True
+    candidate = origin.strip()
+    normalised = candidate.rstrip("/").lower()
+    for allowed in allowed_origins:
+        if normalised == allowed.strip().rstrip("/").lower():
+            return True
+    parts = urlsplit(candidate)
+    if not parts.scheme or not parts.netloc:
+        return False
+    try:
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        return False
+    if not hostname or parts.username is not None or parts.password is not None:
+        return False
+    authority = hostname if port is None else f"{hostname}:{port}"
+    return authority == (host or "").strip().lower()
+
+
+#: The 403 body.  Says what happened and what an embedder does about it.
+_CROSS_ORIGIN_DETAIL = (
+    "This request carried an Origin header that is not this server's own "
+    "origin. A MADDENING server has no legitimate cross-origin caller: on a "
+    "loopback bind the API is unauthenticated, so a page on any origin could "
+    "otherwise reset the simulation or write a checkpoint from the "
+    "developer's browser. If you are embedding the UI on another origin, "
+    "pass allowed_origins to SimulationServer."
+)
+
+
 class _WebSocketAuthMiddleware:
     """Default-deny for WebSocket handshakes.
 
@@ -351,9 +447,10 @@ class _WebSocketAuthMiddleware:
         The token and the rule for when it is demanded.
     """
 
-    def __init__(self, app, auth: APIAuth) -> None:
+    def __init__(self, app, auth: APIAuth, allowed_origins: Iterable[str] = ()) -> None:
         self.app = app
         self._auth = auth
+        self._allowed_origins = frozenset(allowed_origins)
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "websocket":
@@ -361,11 +458,26 @@ class _WebSocketAuthMiddleware:
             return
         client = scope.get("client") or (None,)
         peer = client[0]
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in (scope.get("headers") or ())
+        }
+        # The origin check runs whether or not a token is demanded.  A
+        # loopback bind demands none, and WebSocket is exempt from the
+        # same-origin policy, so without this a page on any origin could
+        # open /ws/state and *read* the simulation state -- a disclosure,
+        # not the write-only exposure the HTTP half has.
+        if not origin_is_same_site(
+            headers.get("origin"), headers.get("host"), self._allowed_origins,
+        ):
+            logger.warning(
+                "Refused WebSocket %s from origin %r: not this server's origin",
+                scope.get("path", "?"), headers.get("origin"),
+            )
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})
+            return
         if self._auth.required_for_peer(peer):
-            headers = {
-                key.decode("latin-1").lower(): value.decode("latin-1")
-                for key, value in (scope.get("headers") or ())
-            }
             offered = list(scope.get("subprotocols") or [])
             presented = (
                 bearer_from_headers(headers)
@@ -494,6 +606,11 @@ class SimulationServer:
         ``MADDENING_HOST`` and falls back to ``"127.0.0.1"``.
     api_token : str, optional
         An explicit bearer token, overriding ``MADDENING_API_TOKEN``.
+    allowed_origins : iterable of str, optional
+        Browser origins allowed to change state or open a WebSocket, for
+        an embedder that serves its UI from another port.  The default
+        -- none -- means same-origin only, which is the safe answer for
+        every shipped configuration: see :func:`origin_is_same_site`.
 
     Attributes
     ----------
@@ -516,9 +633,11 @@ class SimulationServer:
         frame_renderer: Optional[Any] = None,
         bind_host: Optional[str] = None,
         api_token: Optional[str] = None,
+        allowed_origins: Optional[Iterable[str]] = None,
     ) -> None:
         self.registry = dict(node_registry)
         self.auth = APIAuth(bind_host=bind_host, token=api_token)
+        self.allowed_origins = frozenset(allowed_origins or ())
         self.gm = graph_manager if graph_manager is not None else GraphManager()
         # /checkpoint/{save,load} only touch files under this directory:
         # a client must not choose arbitrary server paths.  That holds
@@ -704,7 +823,11 @@ class SimulationServer:
         # Two of them, because one cannot cover both: ``@app.middleware("http")``
         # is a BaseHTTPMiddleware and never runs for a WebSocket scope, so
         # the WebSocket half is a pure-ASGI middleware of its own.
-        app.add_middleware(_WebSocketAuthMiddleware, auth=self.auth)
+        app.add_middleware(
+            _WebSocketAuthMiddleware,
+            auth=self.auth,
+            allowed_origins=self.allowed_origins,
+        )
 
         @app.middleware("http")
         async def _require_bearer_token(request, call_next):
@@ -723,6 +846,21 @@ class SimulationServer:
                         content={"detail": self._unauthorized_detail(peer)},
                         headers={"WWW-Authenticate": "Bearer"},
                     )
+            if (request.method in _STATE_CHANGING_METHODS
+                    and not origin_is_same_site(
+                        request.headers.get("origin"),
+                        request.headers.get("host"),
+                        self.allowed_origins,
+                    )):
+                logger.warning(
+                    "Refused %s %s from origin %r: not this server's origin",
+                    request.method, request.url.path,
+                    request.headers.get("origin"),
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": _CROSS_ORIGIN_DETAIL},
+                )
             return await call_next(request)
 
         @app.get("/healthz", tags=["meta"])

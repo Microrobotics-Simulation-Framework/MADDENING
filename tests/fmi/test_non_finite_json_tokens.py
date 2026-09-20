@@ -425,3 +425,43 @@ def test_the_last_resort_error_reply_is_always_itself_sendable(exc):
     assert text.isprintable(), text
     assert len(text) <= 440
     assert _strict_loads(json_codec_dumps(reply))["error"] == text
+
+
+@needs_cc
+def test_the_importer_is_told_which_string_broke_the_hello(tmp_path, compiled_graph):
+    """End to end, through the shipped binary: the importer learns why.
+
+    The C wrapper sends ``hello`` from inside
+    ``fmi3InstantiateCoSimulation``, so before the repair the importer
+    got a closed socket and a bare "cannot instantiate": every trace of
+    *why* was a traceback on the bridge's stderr, in another process.
+    The bridge's error reply now reaches the wrapper, which pulls it out
+    of the frame and hands it to the importer's log callback.
+    """
+    pytest.importorskip("fmpy")
+    from fmpy import extract, read_model_description
+    from fmpy.fmi3 import FMU3Slave
+
+    md = _hand_built_description(compiled_graph, "Infinity")
+    bridge = _bridge_for(compiled_graph, md)
+    so = build_fmu_binary(tmp_path)
+    logged = []
+
+    with bridge:
+        fmu = write_fmu(md, tmp_path / "badname.fmu", binary=so,
+                        endpoint=bridge.endpoint)
+        unz = extract(str(fmu))
+        desc = read_model_description(unz)
+        inst = FMU3Slave(guid=desc.guid, unzipDirectory=unz,
+                         modelIdentifier=desc.coSimulation.modelIdentifier,
+                         instanceName="i")
+        with pytest.raises(Exception):          # noqa: B017 - fmpy's own wording
+            inst.instantiate(
+                loggingOn=True,
+                logMessage=lambda _env, _status, _cat, message: logged.append(
+                    message.decode("utf-8", "replace")),
+            )
+
+    assert bridge.replies_unencodable == 1
+    assert any("could not encode its reply" in m for m in logged), logged
+    assert any("Infinity" in m for m in logged), logged

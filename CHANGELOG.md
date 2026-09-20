@@ -365,6 +365,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
+  declare `NodeMeta(discretization_order=...)` and the harness refines a
+  manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
 - **The committed stability report is compared with a fresh generation** in
   CI: it had rotted to 42 of 85 surfaces, hiding every deprecation.  Four
   surfaces that warn deprecated now carry the `DEPRECATED` tag
@@ -418,6 +421,9 @@ guidance; the itemized changes follow.
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07
+- MADD-ANO-007/008/009 (HeatNode, all open): Dirichlet data is applied at the
+  first cell centre, not the documented rod end (order 1, not 2);
+  `stencil_order=4` converges at order 1 and is less accurate than the default
 - Every anomaly whose defect is still reachable now records an open-ended
   `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had

@@ -19,7 +19,12 @@ from typing import Any
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -127,6 +132,19 @@ class RigidBodyNode(SimulationNode):
             "dq/dt = 0.5 * ω_quat ⊗ q; semi-implicit Euler integration"
         ),
         discretization="Semi-implicit Euler (1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "Semi-implicit (symplectic) Euler: 1st order globally in "
+                "velocity and angular velocity, measured by MADD-VER-008.  "
+                "No spatial order -- the node integrates an ODE.  Position "
+                "converges at 2nd order for a state-independent force "
+                "because the position update uses the already-updated "
+                "velocity; the declared order is the one that holds for the "
+                "state as a whole."
+            ),
+        ),
         assumptions=(
             "Rigid body (no deformation)",
             "Constant mass and diagonal inertia tensor",

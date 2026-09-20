@@ -567,6 +567,14 @@ def verify_node(
     Returns
     -------
     dict[str, VerificationResult]
+
+    See Also
+    --------
+    maddening.testing.mms.verify_node_order : the order-of-accuracy half
+        of the battery.  Every check here compares the node to itself,
+        so none of them can see a wrong discretisation — a stencil with
+        the wrong weight is finite, deterministic, JIT-consistent and
+        differentiable.  That one compares it to the mathematics.
     """
     inputs = make_inputs(
         node, bounds, boundary_bounds=boundary_bounds,
@@ -609,6 +617,12 @@ def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
 
         def test_my_node():
             assert_node_verified(my_node, bounds={"T": (200.0, 5000.0)})
+
+    See Also
+    --------
+    maddening.testing.mms.assert_node_order_verified : the same one-line
+        shape for the node's order of accuracy, which this battery
+        cannot see.
     """
     results = verify_node(node, bounds, **kwargs)
     bad = [r for r in results.values() if not r.passed]

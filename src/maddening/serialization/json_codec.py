@@ -44,9 +44,14 @@ means the second walk meets a string leaf spelling a token, and the
 whole point of the disambiguation above is that such a leaf is refused.
 A function that could tell "a token I wrote" from "a data string that
 spells one" is exactly the function this module does not have.  So a
-tree is encoded once, and a document that has already been encoded --
-``GraphManager.to_dict()``, ``MappingSpec.to_dict()``, the USD JSON
-attributes -- is written with :func:`dumps_encoded` or plain
+tree is encoded once.  Almost everything here encodes at its write
+boundary, inside :func:`dumps` -- the USD JSON attributes, the FMI
+frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()`` all hand
+:func:`dumps` plain floats.  ``GraphManager.to_dict()`` is the one that
+does not: it encodes the whole assembled tree itself, so that plain
+``json.dumps`` of a config is valid.  Its result, and anything read back
+out of a written config or a ``paramsJson`` attribute, is therefore
+*already encoded* and is written with :func:`dumps_encoded` or plain
 ``json.dumps``, never with :func:`dumps`, which would encode it again
 and refuse its own output.  :func:`decode_non_finite` *is* idempotent
 (a float passes through), so the reading side composes freely.
@@ -162,10 +167,10 @@ def encode_non_finite(obj: Any, *, _path: str = "$") -> Any:
                 f"read back as that float.  Store it as something else (a "
                 f"different spelling, or a tagged value of your own).  If "
                 f"this tree was already encoded -- GraphManager.to_dict() "
-                f"and the MappingSpec / USD helpers return encoded "
-                f"documents -- write it with dumps_encoded() or json.dumps(), "
-                f"not dumps(): encoding twice refuses the encoder's own "
-                f"output."
+                f"returns an encoded document, as does anything read back "
+                f"from a config -- write it with dumps_encoded() or "
+                f"json.dumps(), not dumps(): encoding twice refuses the "
+                f"encoder's own output."
             )
         return obj
     if _is_float_leaf(obj):
@@ -231,12 +236,14 @@ def dumps(obj: Any, **kwargs: Any) -> str:
     here rather than leaving a bare token in the document.
 
     *obj* must be a **raw** tree -- one whose non-finite values are still
-    floats.  A document that has already been through
-    :func:`encode_non_finite` (``GraphManager.to_dict()``,
-    ``MappingSpec.to_dict()``, the USD JSON attributes) goes to
-    :func:`dumps_encoded` instead: encoding is not idempotent, so
-    ``dumps`` would walk it a second time, meet the tokens the first
-    walk wrote and refuse them as ambiguous strings.
+    floats.  That is what nearly every caller has: the USD writer, the
+    FMI frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()``
+    all produce plain floats and encode here.  A document that has
+    already been through :func:`encode_non_finite` -- what
+    ``GraphManager.to_dict()`` returns, and what comes back out of a
+    written config -- goes to :func:`dumps_encoded` instead: encoding is
+    not idempotent, so ``dumps`` would walk it a second time, meet the
+    tokens the first walk wrote and refuse them as ambiguous strings.
 
     Parameters
     ----------
@@ -271,13 +278,13 @@ def dumps(obj: Any, **kwargs: Any) -> str:
 def dumps_encoded(obj: Any, **kwargs: Any) -> str:
     """``json.dumps`` of a document :func:`encode_non_finite` already walked.
 
-    The write boundary for everything that encodes as it builds:
-    ``GraphManager.to_dict()``, ``MappingSpec.to_dict()`` and the USD
-    JSON attributes all return documents whose non-finite values are
-    already quoted tokens.  Handing one of those to :func:`dumps` is the
-    natural thing to write and raises, because the encoding is not
-    idempotent (see the module docstring); this function is that call,
-    spelled so it composes.
+    The write boundary for the documents that were encoded as they were
+    built -- in this tree, ``GraphManager.to_dict()``, which encodes the
+    assembled config so that plain ``json.dumps`` of it is valid, and
+    anything loaded back out of such a config.  Handing one of those to
+    :func:`dumps` is the natural thing to write and raises, because the
+    encoding is not idempotent (see the module docstring); this function
+    is that call, spelled so it composes.
 
     ``allow_nan=False`` is kept, so a non-finite float that never reached
     an encoder still fails here rather than becoming a bare token in the

@@ -96,10 +96,15 @@ bridge writes puts such a string there — only a third-party client could
 **Encode once.**  `encode_non_finite` is not idempotent and cannot be:
 the second walk meets the tokens the first one wrote and refuses them as
 ambiguous strings, which is the same refusal working, not a separate
-bug.  Anything that encodes as it builds — `GraphManager.to_dict()`,
-`MappingSpec.to_dict()`, the USD JSON attributes — therefore returns an
-*already encoded* document, and is written with `json.dumps` or
-`json_codec.dumps_encoded`, never `json_codec.dumps`.  Reading composes
+bug.  Almost everything encodes at its write boundary, inside
+`json_codec.dumps` — the USD attributes, the FMI frames,
+`MappingSpec.to_dict()` and `ParamSpec.to_dict()` all hand it plain
+floats.  `GraphManager.to_dict()` is the exception: it encodes the whole
+assembled config itself, so that plain `json.dumps` of the result is
+valid.  That result, and anything read back out of a written config, is
+therefore *already encoded* and is written with `json.dumps` or
+`json_codec.dumps_encoded` — never `json_codec.dumps`, which would
+encode it a second time and refuse its own tokens.  Reading composes
 freely: `decode_non_finite` passes a float through.
 
 The same encoding is used by the USD stage (`maddening:paramsJson` and the

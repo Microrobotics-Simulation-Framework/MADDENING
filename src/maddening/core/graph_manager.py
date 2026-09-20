@@ -5734,8 +5734,10 @@ class GraphManager:
         :meth:`CouplingGroup.to_dict`).  See
         :mod:`maddening.serialization.json_codec`.
 
-        Because the result is *already encoded*, write it with
-        ``json.dumps`` or
+        Because the encoding is applied here rather than at the write
+        boundary -- so that plain ``json.dumps`` of this result is valid,
+        which is what every caller in the tree does -- the result is
+        *already encoded*.  Write it with ``json.dumps`` or
         :func:`~maddening.serialization.json_codec.dumps_encoded`, and
         **not** with :func:`~maddening.serialization.json_codec.dumps`:
         that one encodes what it is given, the encoding is not

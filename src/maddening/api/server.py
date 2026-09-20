@@ -326,6 +326,65 @@ def _dry_run_node(node, state: Any = None) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
+class _WebSocketAuthMiddleware:
+    """Default-deny for WebSocket handshakes.
+
+    ``@app.middleware("http")`` builds a Starlette ``BaseHTTPMiddleware``,
+    which runs only for ``scope["type"] == "http"``.  Without this, every
+    WebSocket handler had to remember to call
+    :meth:`SimulationServer._authorise_ws` first, and a handler that
+    forgot served an anonymous caller on a ``0.0.0.0`` bind -- measured:
+    a ``@app.websocket`` route added with no authorisation passed the
+    whole bearer-token suite and accepted the connection.
+
+    This is pure ASGI rather than ``BaseHTTPMiddleware`` for exactly that
+    reason.  It refuses before the route is reached, so the handlers'
+    own ``_authorise_ws`` calls become the second of two independent
+    checks rather than the only one.  A rejected handshake is closed with
+    1008, the same code and the same behaviour a handler produces.
+
+    Parameters
+    ----------
+    app : ASGI application
+        The application to wrap.
+    auth : maddening.api.auth.APIAuth
+        The token and the rule for when it is demanded.
+    """
+
+    def __init__(self, app, auth: APIAuth) -> None:
+        self.app = app
+        self._auth = auth
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "websocket":
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client") or (None,)
+        peer = client[0]
+        if self._auth.required_for_peer(peer):
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in (scope.get("headers") or ())
+            }
+            offered = list(scope.get("subprotocols") or [])
+            presented = (
+                bearer_from_headers(headers)
+                or bearer_from_subprotocols(offered)
+            )
+            if not self._auth.verify(presented):
+                logger.warning(
+                    "Refused WebSocket %s from %s: %s bearer token",
+                    scope.get("path", "?"), peer or "?",
+                    "invalid" if presented else "missing",
+                )
+                # The connect message must be consumed before the close
+                # is sent, or the server has nothing to answer.
+                await receive()
+                await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
 @stability(StabilityLevel.EVOLVING)
 def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
     """Log a warning when *host* is not a loopback address.
@@ -641,6 +700,12 @@ class SimulationServer:
         # added later is protected by default: forgetting the dependency
         # is exactly how this hole gets rebuilt.  It also covers the
         # FastAPI-generated docs routes, which take no dependencies.
+        #
+        # Two of them, because one cannot cover both: ``@app.middleware("http")``
+        # is a BaseHTTPMiddleware and never runs for a WebSocket scope, so
+        # the WebSocket half is a pure-ASGI middleware of its own.
+        app.add_middleware(_WebSocketAuthMiddleware, auth=self.auth)
+
         @app.middleware("http")
         async def _require_bearer_token(request, call_next):
             peer = request.client.host if request.client else None

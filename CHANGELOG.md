@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **GCI / Richardson mode in `maddening.testing.mms`** for nodes MMS cannot
+  reach: `assert_node_gci_verified(node, solution_at=..., levels=...)` needs
+  no source term and no reference — three refinements give an error band
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships
@@ -368,6 +371,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **`LBMPipeNode` has a convergence verdict for the first time**
+  (MADD-VER-013): the ladder converges, but a fourth level shows it is *not*
+  in the asymptotic range, so no error band is quoted for it
 - **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
   declare `NodeMeta(discretization_order=...)` and the harness refines a
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)

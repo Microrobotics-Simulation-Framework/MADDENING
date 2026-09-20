@@ -458,10 +458,13 @@ class TestFIM:
         ``crb`` in either direction.
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 16-26% of
-        draws under the ``ci`` profile -- the two ends are two ci runs of
-        the same test, which is how much sampling noise 80 examples carry --
-        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-26% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
         number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
@@ -515,10 +518,13 @@ class TestFIM:
 
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 22-24% of
-        draws under the ``ci`` profile -- the two ends are two ci runs of
-        the same test, which is how much sampling noise 80 examples carry --
-        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 15-24% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
         number says.  It is not removable by generation: what is left is a
         soft, heavily damped spring that barely moves inside a 20-sample
         window, and an envelope that excluded those would also exclude the
@@ -562,9 +568,12 @@ class TestFIM:
         Rejected draws
         --------------
         ``assume(_position_variance(obs) > 1e-2)`` still rejects 8-16% of
-        draws under the ``ci`` profile -- the two ends are two ci runs of
-        the same test, which is how much sampling noise 80 examples carry --
-        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
         number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff
@@ -602,10 +611,13 @@ class TestFIM:
 
         Rejected draws
         --------------
-        ``assume(_position_variance(obs) > 1e-2)`` still rejects 18-27% of
-        draws under the ``ci`` profile -- the two ends are two ci runs of
-        the same test, which is how much sampling noise 80 examples carry --
-        so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-27% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
         number says.  It is not removable by generation: what is left is a soft, heavily damped
         spring that barely moves inside a 20-sample window, and an envelope
         that excluded those would also exclude the lightly-damped stiff

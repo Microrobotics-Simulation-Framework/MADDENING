@@ -63,10 +63,12 @@ _META_KEY = "_meta"
 #: Factor either side of the rank cutoff within which a float32 rank
 #: verdict is treated as not reproducible.  Measured on this module's
 #: own arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
-#: float64 reference applying the *same* rank rule, over 171,000
+#: float64 reference applying the *same* rank rule, over 228,000
 #: synthetic Fisher matrices of known spectrum (n = 2..25 parameters,
 #: m = 20..2000 residual rows, spread / clustered / twin-null spectra),
-#: in two independently seeded sweeps that agree.
+#: in three independently seeded sweeps.  The tables below are the last
+#: of them (57,000 matrices, seed 771003); the other two agree with it
+#: to the digits shown.
 #:
 #: **Re-measured when the cutoff gained its ``sqrt(m)`` term, because the
 #: two are not independent.**  The band is the width of the arithmetic's
@@ -78,18 +80,18 @@ _META_KEY = "_meta"
 #: =====================  ==============  ==================
 #: true ratio / cutoff    at ``n * eps``  at ``max(n,√m)*eps``
 #: =====================  ==============  ==================
-#: 0.10 -- 0.22           0.0067          0.0000
-#: 0.22 -- 0.32           0.0124          0.0000
-#: 0.32 -- 0.46           0.0205          0.0000
-#: 0.46 -- 0.68           0.0450          0.0128
-#: 0.68 -- 1.0            0.1045          0.0477
-#: 1.0  -- 1.47           0.1089          0.0442
-#: 1.47 -- 2.15           0.0102          0.0000
-#: 2.15 -- 3.16           0.0022          0.0000
+#: 0.10 -- 0.22           0.0077          0.0000
+#: 0.22 -- 0.32           0.0117          0.0000
+#: 0.32 -- 0.46           0.0176          0.0006
+#: 0.46 -- 0.68           0.0432          0.0114
+#: 0.68 -- 1.0            0.1148          0.0467
+#: 1.0  -- 1.47           0.1075          0.0422
+#: 1.47 -- 2.15           0.0043          0.0000
+#: 2.15 -- 3.16           0.0010          0.0000
 #: 3.16 and above         0.0000          0.0000
 #: =====================  ==============  ==================
 #:
-#: The population itself shrank, from 1.17% of draws to 0.35%: two
+#: The population itself shrank, from 1.21% of draws to 0.35%: two
 #: thirds of the verdicts that used to rest on rounding do not any more,
 #: because the cutoff no longer sits *below* the arithmetic's own floor
 #: at long residuals.  What is left is gathered tightly on the cutoff
@@ -97,42 +99,44 @@ _META_KEY = "_meta"
 #:
 #: **The factor stays at 2.0, and it now buys something different.**
 #: What the band actually tests is the *float32* deciding ratio, and at
-#: a disagreement that lies in ``[0.566x, 1.326x]`` of the cutoff --
-#: asymmetric, with the lower edge binding, so symmetric coverage needs
-#: at least 1.77.  Recall over the disagreements, and fire rate on
-#: verdicts the two precisions *agree* about, by true ratio:
+#: a disagreement that lies in ``[0.566x, 1.562x]`` of the cutoff over
+#: all three sweeps -- asymmetric, with the lower edge binding, so
+#: symmetric coverage needs at least 1.77.  Recall over the
+#: disagreements, and fire rate on verdicts the two precisions *agree*
+#: about, by true ratio:
 #:
 #: =========  ========  ==========  =========  ======
 #: factor     recall    2x .. 5x    5x .. 10x  10x+
 #: =========  ========  ==========  =========  ======
-#: 1.5        0.9967    0.0000      0.000      0.000
-#: 1.8        1.0000    0.0005      0.000      0.000
-#: 2.0        1.0000    0.0094      0.000      0.000
-#: 2.5        1.0000    0.2451      0.000      0.000
-#: 3.0        1.0000    0.4470      0.000      0.000
-#: 8.0        1.0000    1.0000      0.682      0.000
+#: 1.5        0.9949    0.0000      0.000      0.000
+#: 1.8        1.0000    0.0002      0.000      0.000
+#: 2.0        1.0000    0.0110      0.000      0.000
+#: 2.5        1.0000    0.2522      0.000      0.000
+#: 3.0        1.0000    0.4578      0.000      0.000
+#: 8.0        1.0000    1.0000      0.692      0.000
 #: =========  ========  ==========  =========  ======
 #:
-#: Against the old cutoff the same sweep put 2.0's recall at **0.916**;
-#: against this one it is 1.000.  The ~8% that were unreachable were the
+#: Against the old cutoff the same sweep put 2.0's recall at **0.912**
+#: (0.916 in the earlier pair); against this one it is 1.000.  The ~9%
+#: that were unreachable were the
 #: long-residual verdicts -- not because no factor was wide enough, but
 #: because the cutoff was below the floor there, so the disagreements
 #: were not near the cutoff at all.  Making the cutoff see ``m`` is what
 #: brought them into reach; no change to this constant could have.
 #:
 #: 2.0 rather than the 1.8 that first attains full recall, because 1.8
-#: is fitted to the single most extreme of 605 disagreements (1/1.8 =
+#: is fitted to the single most extreme of 803 disagreements (1/1.8 =
 #: 0.556 against an observed edge of 0.566, i.e. no margin at all on an
 #: extreme order statistic), while 2.0 keeps 13% of margin for a false
-#: fire rate of 0.94% on ordinary ``2x..5x`` verdicts -- less than the
-#: 2.5% it cost under the old cutoff.  Past 2.0 the curve turns: 2.5
+#: fire rate of ~1% on ordinary ``2x..5x`` verdicts -- less than the
+#: 2.8% it cost under the old cutoff.  Past 2.0 the curve turns: 2.5
 #: fires on a quarter of ordinary ``2x..5x`` reports and 8 on two thirds
 #: of ``5x..10x`` ones, which this project's own spring-damper
 #: identification tests produce routinely, for no recall at all.  A
 #: warning that fires routinely gets suppressed, which is worse than
 #: silence.
 #:
-#: Full recall here is a statement about 605 measured disagreements, not
+#: Full recall here is a statement about 803 measured disagreements, not
 #: a proof.  The residual risk is sampling error on that population,
 #: which is a far better place to be than the previous structural blind
 #: spot; ``TestPrecisionLimitedRank`` holds the separation from both
@@ -1064,7 +1068,7 @@ def fim(
         cores).  The design goal is that the cases which need it say so.
 
         Measured, not assumed: the factor covers the band where float32
-        and float64 verdicts were observed to diverge over 171,000
+        and float64 verdicts were observed to diverge over 228,000
         synthetic Fisher matrices of known rank, re-measured against the
         ``max(n, sqrt(m)) * eps`` cutoff this release introduced; see
         ``_PRECISION_WARN_FACTOR`` for the distribution and for the
@@ -1080,7 +1084,7 @@ def fim(
 
         Over that population it caught every precision-limited verdict,
         which it did not before 0.4.0: against the old ``n * eps``
-        cutoff the same measurement put its recall at 0.916, and the
+        cutoff the same measurement put its recall at 0.912-0.916, and the
         misses were the long-residual cases where the cutoff sat below
         the arithmetic's own noise floor.  Those are now inside the
         cutoff rather than outside the band.  "Every" is still 605

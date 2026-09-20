@@ -796,11 +796,11 @@ class TestPrecisionLimitedRank:
     would have been asserting something measured to be false.
 
     ``rank_rtol`` now carries a ``sqrt(m)`` term, the cutoff tracks the
-    floor, and the misses are gone: over 171,000 synthetic matrices
+    floor, and the misses are gone: over 228,000 synthetic matrices
     (n = 2..25, m = 20..2000) recall is 1.000 at the current factor, by
     every ``m`` bucket separately -- ``m`` in [20, 50], [50, 200],
-    [200, 800] and [800, 2000] all measure 1.000, against 0.916 overall
-    under the old cutoff.  The cap coming off is the property getting
+    [200, 800] and [800, 2000] all measure 1.000, against 0.912-0.916
+    overall under the old cutoff.  The cap coming off is the property getting
     its teeth back, and a regression in the cutoff shows up here as a
     failure rather than as a region nobody asserts anything about.
     """

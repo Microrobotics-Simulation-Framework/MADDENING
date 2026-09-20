@@ -38,6 +38,25 @@ The alternative -- decoding only at leaves the schema types as float --
 is not available here: node params are typed by the node class, and
 ``to_dict`` has no schema for them.
 
+**Encode once, at one boundary.**  :func:`encode_non_finite` is
+deliberately *not* idempotent, and cannot be made so: running it twice
+means the second walk meets a string leaf spelling a token, and the
+whole point of the disambiguation above is that such a leaf is refused.
+A function that could tell "a token I wrote" from "a data string that
+spells one" is exactly the function this module does not have.  So a
+tree is encoded once.  Almost everything here encodes at its write
+boundary, inside :func:`dumps` -- the USD JSON attributes, the FMI
+frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()`` all hand
+:func:`dumps` plain floats.  ``GraphManager.to_dict()`` is the one that
+does not: it encodes the whole assembled tree itself, so that plain
+``json.dumps`` of a config is valid.  Its result, and anything read back
+out of a written config or a ``paramsJson`` attribute with plain
+``json.loads`` (not :func:`loads`, which decodes), is therefore
+*already encoded* and is written with :func:`dumps_encoded` or plain
+``json.dumps``, never with :func:`dumps`, which would encode it again
+and refuse its own output.  :func:`decode_non_finite` *is* idempotent
+(a float passes through), so the reading side composes freely.
+
 **Reading is lenient, writing is strict.**  :func:`loads` accepts the
 bare tokens a 0.3.x document carries as well as the quoted form, because
 ``json.loads`` already parses them into floats and
@@ -75,7 +94,7 @@ _DECODE = {NAN_TOKEN: math.nan, INF_TOKEN: math.inf, NEG_INF_TOKEN: -math.inf}
 
 __all__ = [
     "NAN_TOKEN", "INF_TOKEN", "NEG_INF_TOKEN", "NON_FINITE_TOKENS",
-    "encode_non_finite", "decode_non_finite", "dumps", "loads",
+    "encode_non_finite", "decode_non_finite", "dumps", "dumps_encoded", "loads",
 ]
 
 
@@ -108,6 +127,15 @@ def encode_non_finite(obj: Any, *, _path: str = "$") -> Any:
     contents did not change are returned as they are rather than copied,
     so a finite document costs one walk and no allocation.
 
+    **Not idempotent.**  ``encode_non_finite(encode_non_finite(x))``
+    raises wherever ``x`` held a non-finite float, because the first
+    walk left a string spelling a token where the second walk refuses
+    one.  That is the disambiguation working, not a bug: nothing can
+    distinguish the token this function wrote from a data string that
+    spells the same three characters, which is why the collision is
+    refused at all.  Encode once; write an already-encoded document
+    with :func:`dumps_encoded`.
+
     Parameters
     ----------
     obj : Any
@@ -138,7 +166,12 @@ def encode_non_finite(obj: Any, *, _path: str = "$") -> Any:
                 f"{_path}: the string {obj!r} cannot be written to JSON, "
                 f"because it is how a non-finite float is encoded and would "
                 f"read back as that float.  Store it as something else (a "
-                f"different spelling, or a tagged value of your own)."
+                f"different spelling, or a tagged value of your own).  If "
+                f"this tree was already encoded -- GraphManager.to_dict() "
+                f"returns an encoded document, as does anything read back "
+                f"from a config -- write it with dumps_encoded() or "
+                f"json.dumps(), not dumps(): encoding twice refuses the "
+                f"encoder's own output."
             )
         return obj
     if _is_float_leaf(obj):
@@ -203,10 +236,21 @@ def dumps(obj: Any, **kwargs: Any) -> str:
     ``allow_nan=False`` so that anything the walk did not reach raises
     here rather than leaving a bare token in the document.
 
+    *obj* must be a **raw** tree -- one whose non-finite values are still
+    floats.  That is what nearly every caller has: the USD writer, the
+    FMI frames, ``MappingSpec.to_dict()`` and ``ParamSpec.to_dict()``
+    all produce plain floats and encode here.  A document that has
+    already been through :func:`encode_non_finite` -- what
+    ``GraphManager.to_dict()`` returns, and what plain ``json.loads``
+    reads back out of a written config -- goes to :func:`dumps_encoded`
+    instead: encoding is
+    not idempotent, so ``dumps`` would walk it a second time, meet the
+    tokens the first walk wrote and refuse them as ambiguous strings.
+
     Parameters
     ----------
     obj : Any
-        A JSON-shaped tree.
+        A JSON-shaped tree that has *not* been encoded yet.
     **kwargs
         Passed to ``json.dumps``.  ``allow_nan`` is fixed to ``False``.
 
@@ -218,12 +262,66 @@ def dumps(obj: Any, **kwargs: Any) -> str:
     Raises
     ------
     ValueError
-        From :func:`encode_non_finite` for an ambiguous string leaf, or
-        from ``json.dumps`` for a non-finite float the walk did not reach
-        (a value inside a ``numpy`` array, say, or a custom container).
+        From :func:`encode_non_finite` for an ambiguous string leaf --
+        including every token in an already-encoded document, which is
+        what :func:`dumps_encoded` exists for -- or from ``json.dumps``
+        for a non-finite float the walk did not reach (a value inside a
+        ``numpy`` array, say, or a custom container).
+
+    See Also
+    --------
+    dumps_encoded : the same output for an already-encoded document.
     """
     kwargs.pop("allow_nan", None)
     return json.dumps(encode_non_finite(obj), allow_nan=False, **kwargs)
+
+
+@stability(StabilityLevel.EVOLVING)
+def dumps_encoded(obj: Any, **kwargs: Any) -> str:
+    """``json.dumps`` of a document :func:`encode_non_finite` already walked.
+
+    The write boundary for the documents that were encoded as they were
+    built -- in this tree, ``GraphManager.to_dict()``, which encodes the
+    assembled config so that plain ``json.dumps`` of it is valid, and
+    anything plain ``json.loads`` reads back out of such a config
+    (:func:`loads` decodes, so its result is raw).  Handing one of those to
+    :func:`dumps` is the natural thing to write and raises, because the
+    encoding is not idempotent (see the module docstring); this function
+    is that call, spelled so it composes.
+
+    ``allow_nan=False`` is kept, so a non-finite float that never reached
+    an encoder still fails here rather than becoming a bare token in the
+    document -- the backstop is the half of :func:`dumps` that is about
+    the *output*, and it applies just as much to input somebody else
+    encoded.
+
+    Parameters
+    ----------
+    obj : Any
+        A JSON-shaped tree whose non-finite floats are already quoted
+        tokens.
+    **kwargs
+        Passed to ``json.dumps``.  ``allow_nan`` is fixed to ``False``.
+
+    Returns
+    -------
+    str
+        A document every conforming JSON reader accepts.
+
+    Raises
+    ------
+    ValueError
+        From ``json.dumps`` if *obj* still holds a non-finite float --
+        which means it was not encoded after all, and belongs in
+        :func:`dumps`.
+
+    Examples
+    --------
+    >>> dumps_encoded({"bounds": ["-Infinity", 1.0]})
+    '{"bounds": ["-Infinity", 1.0]}'
+    """
+    kwargs.pop("allow_nan", None)
+    return json.dumps(obj, allow_nan=False, **kwargs)
 
 
 @stability(StabilityLevel.EVOLVING)

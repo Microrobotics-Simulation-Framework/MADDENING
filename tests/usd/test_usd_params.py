@@ -313,3 +313,50 @@ def test_a_finite_graph_writes_strict_json_to_the_stage():
         "maddening:paramsJson").Get()
 
     assert _strict_loads(stored)["stiffness"] == 30.0
+
+
+# ---------------------------------------- node names agree with the config surface
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_a_stage_carrying_a_token_spelled_node_name_is_refused_on_load(tmp_path, token):
+    """The stage surface and the config surface agree about node names.
+
+    A node name goes to a typed USD ``String`` attribute, which never
+    meets the JSON codec, while ``GraphManager.to_dict`` puts it in the
+    JSON tree and refuses it (``MADD-ANO-010``).  A ``.usda`` written
+    before the refusal therefore reloaded into a graph that could not be
+    written as a config -- the same graph accepted or refused depending
+    on the surface.  ``load_graph_from_usd`` builds through ``add_node``,
+    so the refusal now lands on the load, naming the node.
+    """
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0))
+    gm.compile()
+    written = tmp_path / "written.usda"
+    stage = Usd.Stage.CreateNew(str(written))
+    save_graph_to_usd(gm, stage)
+    stage.Save()
+
+    # a stage as an older MADDENING would have written it
+    text = (written.read_text()
+            .replace('string maddening:nodeName = "s"',
+                     f'string maddening:nodeName = "{token}"'))
+    assert f'maddening:nodeName = "{token}"' in text
+    legacy = tmp_path / "legacy.usda"          # a new path: USD caches layers
+    legacy.write_text(text)
+
+    with pytest.raises(ValueError, match="non-finite JSON token"):
+        load_graph_from_usd(Usd.Stage.Open(str(legacy)))
+
+
+def test_an_ordinary_node_name_still_round_trips_through_the_stage(tmp_path):
+    """The refusal is exact: a name that merely resembles a token is fine."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("nan", 0.01, stiffness=30.0, damping=2.0))
+    gm.compile()
+    path = tmp_path / "lookalike.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    save_graph_to_usd(gm, stage)
+    stage.Save()
+
+    assert sorted(load_graph_from_usd(Usd.Stage.Open(str(path)))._nodes) == ["nan"]

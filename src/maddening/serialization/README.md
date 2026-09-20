@@ -73,11 +73,40 @@ otherwise have).
 
 The rule applies to a node *name* as well as a parameter value, and to a
 header a client puts on the FMI wire, but not to dict **keys** — nothing
-decodes a key.  Both the refusal and the decode are exact string matches,
-so `"nan"`, `"inf"`, `"+Infinity"` and `"NaN "` are all stored and read
-back as the strings they are.  Do not make them case-insensitive to match
-the C wrapper's `strtod`: that would turn every one of those into a float
-with nothing left to notice.
+decodes a key.  A node name is refused by `add_node`, where the name is
+still the caller's to change, rather than at save time on whichever
+surface happens to be reached first: it is a JSON value in `to_dict` and
+in a mapping point reference, but a typed USD `String` attribute on the
+stage, so refusing it only at the writers left a `.usda` that reloaded
+into a graph no config could hold.  An FMU's `model_name` is refused by
+`build_model_description` for the same reason — the bridge's `hello`
+reply carries it.
+
+Both the refusal and the decode are exact string matches, so `"nan"`,
+`"inf"`, `"+Infinity"` and `"NaN "` are stored in a config or a stage and
+read back as the strings they are.  Do not make them case-insensitive to
+match the C wrapper's `strtod`: that would turn every one of those into a
+float with nothing left to notice.  (The FMI `values` array is the
+exception, and not because of this codec: `values` is declared numeric,
+so `values_of` runs `np.asarray(..., dtype=float64)` over it and numpy
+coerces `"nan"`, `"INF"` and `"+Infinity"` to floats itself.  Nothing the
+bridge writes puts such a string there — only a third-party client could
+— but do not read the sentence above as covering that path.)
+
+**Encode once.**  `encode_non_finite` is not idempotent and cannot be:
+the second walk meets the tokens the first one wrote and refuses them as
+ambiguous strings, which is the same refusal working, not a separate
+bug.  Almost everything encodes at its write boundary, inside
+`json_codec.dumps` — the USD attributes, the FMI frames,
+`MappingSpec.to_dict()` and `ParamSpec.to_dict()` all hand it plain
+floats.  `GraphManager.to_dict()` is the exception: it encodes the whole
+assembled config itself, so that plain `json.dumps` of the result is
+valid.  That result, and anything plain `json.loads` reads back out of a
+written config (`json_codec.loads` decodes, so its result is raw), is
+therefore *already encoded* and is written with `json.dumps` or
+`json_codec.dumps_encoded` — never `json_codec.dumps`, which would
+encode it a second time and refuse its own tokens.  Reading composes
+freely: `decode_non_finite` passes a float through.
 
 The same encoding is used by the USD stage (`maddening:paramsJson` and the
 other JSON attributes) and the FMI sidecar wire; the shared implementation is

@@ -94,6 +94,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import socket
 import struct
 import threading
@@ -112,6 +113,8 @@ from maddening.fmi.sidecar import FmuSidecar
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
 
+logger = logging.getLogger(__name__)
+
 _HEADER = struct.Struct(">I")
 _MAX_MESSAGE = 64 * 1024 * 1024
 """Frame limit in bytes, both directions and both frame kinds (the C wrapper's FRAME_MAX)."""
@@ -121,6 +124,22 @@ _NPY_SLACK = 4096
 """Bytes an ``npz`` member may exceed its array by (the ``.npy`` header)."""
 PROTOCOL_VERSION = 2
 """Highest sidecar protocol this bridge speaks (1 = JSON only, 2 = + binary frames)."""
+
+_UNENCODABLE_PREFIX = "the bridge could not encode its reply: "
+"""Prefix of the last-resort error reply (:meth:`FmuTcpBridge._unencodable_reply`).
+
+A prefix, not a bare message, for two reasons: it can never itself equal
+one of the three non-finite tokens -- so the reply that reports an
+unencodable reply cannot be unencodable in turn -- and it says the
+failure was on the bridge's side of the wire rather than in the
+request."""
+
+_ERROR_TEXT_MAX = 400
+"""Characters of an exception's text carried in an error reply.
+
+Long enough for the codec's path-naming message, short enough that the
+reply cannot approach the frame limit however the exception was
+formatted."""
 
 # ---------------------------------------------------------------- timeouts
 # A connection holds the bridge's single instance slot (``_busy``) for as
@@ -455,6 +474,7 @@ class FmuTcpBridge:
         self.binary_frames_served = 0     # binary replies sent (get / get_state)
         self.binary_frames_received = 0   # binary requests accepted (set / set_state)
         self.connections_refused_over_cap = 0
+        self.replies_unencodable = 0      # replies that could not be framed (answered as errors)
 
     # ----------------------------------------------------------------- server
     @property
@@ -616,6 +636,11 @@ class FmuTcpBridge:
                         # get should not be cut off by the handshake budget.
                         conn.settimeout(_IDLE_TIMEOUT)
                     is_binary, body = got
+                    # Bound before the parse: a malformed *first* frame
+                    # leaves the name unset otherwise, and the reply-failure
+                    # handler below reads it.
+                    req: Any = None
+                    negotiated: Optional[bool] = None
                     try:
                         if is_binary:
                             if not binary:
@@ -634,12 +659,50 @@ class FmuTcpBridge:
                     else:
                         reply = self._dispatch(req)
                         if req.get("op") == "hello" and reply.get("ok"):
-                            binary = bool(reply.get("binary"))
+                            # Applied only once the reply is on the wire
+                            # (below): a hello whose reply could not be sent
+                            # must not leave this end speaking a protocol the
+                            # peer never heard agreed to.
+                            negotiated = bool(reply.get("binary"))
                     try:
                         if self._send_reply(conn, reply, binary):
                             self.binary_frames_served += 1
                     except OSError:
                         break          # the importer hung up mid-reply: nobody to tell
+                    except Exception as exc:  # noqa: BLE001 - see below
+                        # Building the frame failed, not the socket.  The
+                        # protocol answers *every* request, including the
+                        # ones the bridge itself cannot serve, so this is
+                        # an error reply rather than an exception -- and
+                        # this handler is the reason the protocol can keep
+                        # that promise.  Without it the exception unwinds
+                        # out of ``_serve_conn`` and ends the worker
+                        # thread: the importer gets EOF instead of a
+                        # reply, and the only record is a traceback from
+                        # ``threading.excepthook``.  The reachable case is
+                        # a ``model_name`` spelling a non-finite token
+                        # (``MADD-ANO-010``), which used to kill the
+                        # worker on the *first* frame of every connection
+                        # and made the FMU unusable with nothing naming
+                        # the model; ``build_model_description`` now
+                        # refuses that name, but a ``ModelDescription``
+                        # built by hand still reaches here, and the
+                        # free-text surface of the protocol will grow.
+                        # Logged, never swallowed: a genuine bug in reply
+                        # construction must still be visible.
+                        self.replies_unencodable += 1
+                        logger.exception(
+                            "FMU bridge could not encode the reply to op %r; "
+                            "answering with an error reply",
+                            req.get("op") if isinstance(req, dict) else None,
+                        )
+                        try:
+                            send_message(conn, self._unencodable_reply(exc))
+                        except OSError:
+                            break
+                    else:
+                        if negotiated is not None:
+                            binary = negotiated
             finally:
                 if held:
                     self._busy.release()
@@ -671,6 +734,40 @@ class FmuTcpBridge:
         send_message(conn, {"ok": False, "error": f"reply of {len(body)} bytes exceeds the "
                                                    f"{_MAX_MESSAGE}-byte frame limit"})
         return False
+
+    @staticmethod
+    def _unencodable_reply(exc: BaseException) -> dict:
+        """A JSON error reply for a reply that could not be framed.
+
+        Everything about it is chosen so that sending it cannot fail the
+        way the reply it replaces did: the text is prefixed (so it can
+        never itself equal a non-finite token, which is the collision
+        that makes a reply unencodable in the first place), reduced to
+        printable ASCII (the C wrapper pulls it out of the frame with
+        ``strstr`` and hands it to the importer's log callback as a C
+        string) and length-capped well below the frame limit.
+
+        Parameters
+        ----------
+        exc : BaseException
+            What :meth:`_send_reply` raised.
+
+        Returns
+        -------
+        dict
+            ``{"ok": False, "error": ...}`` -- the protocol's failure
+            reply, which the C wrapper already logs and turns into
+            ``fmi3Error``.
+        """
+        try:
+            text = f"{type(exc).__name__}: {exc}"
+        except Exception:  # noqa: BLE001 - an exception's own __str__ may raise
+            text = type(exc).__name__
+        text = text.encode("ascii", "backslashreplace").decode("ascii")
+        text = "".join(c if " " <= c <= "~" else " " for c in text)
+        if len(text) > _ERROR_TEXT_MAX:
+            text = text[:_ERROR_TEXT_MAX - 3] + "..."
+        return {"ok": False, "error": _UNENCODABLE_PREFIX + text}
 
     @staticmethod
     def _binary_request(header: dict, raw) -> dict:

@@ -333,9 +333,28 @@ class TestConservationCheck:
         key = "rod_a.right_heat_flux-rod_b.left_heat_flux"
         assert key in result
 
-        # For converged heat transfer, fluxes should be reasonably balanced.
-        # The sign convention is: right_heat_flux and left_heat_flux may not
-        # perfectly cancel because they're computed at different cell locations,
-        # but the imbalance should be bounded.
+        # Since 0.4.0 both rods report the flux at their own rod end, and
+        # this pair is a mirror image across the interface, so the two
+        # agree exactly: measured 0.0 here, against 1.43e-06 under the
+        # pre-0.4.0 cell-centre reading.  The old assertion was
+        # `< 100.0` on a quantity whose largest recorded value is 1.4e-06,
+        # i.e. a check that could not fail.
+        #
+        # This setup cannot see the rod-end/cell-centre distinction at
+        # all -- the symmetry cancels it on both readings -- so it is not
+        # a regression test for that; what it pins is that the two sides
+        # of a converged interface agree and that the flux being compared
+        # is not trivially zero.
         imbalance = abs(result[key])
-        assert imbalance < 100.0, f"Flux imbalance too large: {imbalance}"
+        assert imbalance < 1e-4, f"Flux imbalance too large: {imbalance}"
+        interface_flux = abs(float(
+            gm.get_node("rod_a").compute_boundary_fluxes(
+                state["rod_a"],
+                {"right_temperature": state["rod_b"]["temperature"][0]},
+                0.001,
+            )["right_heat_flux"]
+        ))
+        assert interface_flux > 1.0, (
+            f"the interface carries only {interface_flux}, so a zero "
+            f"imbalance says nothing"
+        )

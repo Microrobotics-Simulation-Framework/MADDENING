@@ -125,7 +125,8 @@ off-by-one in a flux normally leaves the absolute error looking perfectly
 acceptable on the one grid a threshold test runs on, and shows up only as
 order 1 where order 2 was claimed.  Both defects this harness found in
 MADDENING's own nodes (MADD-ANO-007 and MADD-ANO-008) sat inside the
-thresholds of the tests that already covered them.
+thresholds of the tests that already covered them; both are fixed in
+0.4.0.
 
 ### Declare the order
 
@@ -208,15 +209,16 @@ assert_node_order_verified(
 
 | Node | Axis | Declared | Observed | Benchmark |
 |------|------|----------|----------|-----------|
-| `HeatNode` (`stencil_order=2`) | space | 2 | 1.982 | MADD-VER-005 |
+| `HeatNode` (`stencil_order=2`, boundary data at the rod ends) | space | 2 | 2.000 | MADD-VER-005 |
 | `HeatNode` | time | 1 | 0.998 | MADD-VER-006 |
+| `HeatNode` (`stencil_order=4`) | space | 4 | 3.957 | — |
 | `LBMNode` (D2Q9, periodic, Guo forcing [@Guo2002]) | space | 2 | 1.998 | MADD-VER-007 |
 | `RigidBodyNode` (symplectic Euler [@Hairer2006]) | time | 1 | 0.999 | MADD-VER-008 |
-| `HeatNode` (`stencil_order=4`) | space | 4 | **0.954** | MADD-ANO-008 |
-| `HeatNode`, boundary data at the rod ends | space | 2 | **1.001** | MADD-ANO-007 |
 
-The last two are recorded as strict xfails, so correcting either node turns
-the test into an XPASS that has to be dealt with rather than a silent pass.
+The two HeatNode spatial rows were strict xfails when this harness landed,
+measuring 1.001 (MADD-ANO-007) and 0.954 (MADD-ANO-008).  Both node defects
+are fixed in 0.4.0 and the xfails are now ordinary assertions; a strict xfail
+that starts passing is a failure, so the two had to land together.
 
 Every other node is undeclared and skips.  `LBMNode` declares no *temporal*
 order on purpose: the lattice fixes `dx = dt = 1` and `update` ignores its

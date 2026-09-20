@@ -449,17 +449,42 @@ anomalies:
       x = L - dx/2 with dx = length / n_cells.  For a boundary condition that
       is constant in space near the ends the difference is negligible; for one
       with a gradient it is the whole defect.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Closing it is a choice between two incompatible fixes, both of which
-      change results for existing callers: move the grid so that the end cells
-      sit on the rod ends (changing every cell coordinate), or interpolate the
-      supplied boundary value to the cell centre (changing the meaning of the
-      input).  That is a maintainer's call on a stable node, so it is recorded
-      here rather than made inside the branch that measured it.
+      The fix changes results for every existing caller, which is why it was
+      recorded as a maintainer's call rather than made in the branch that
+      measured it.  Neither of the two options considered when this was filed
+      was taken: the grid was not moved (every cell coordinate is unchanged)
+      and the meaning of the input was not changed (it is still the rod-end
+      temperature, as documented).  What changed is the enforcement.  The
+      datum is now imposed through the ghost cell -- T_ghost = 2*T_b - T[0],
+      the conservative cell-centred closure -- and the first and last cells
+      are advanced by the scheme like any other.  Observed spatial order over
+      the 10/20/40/80/160 ladder with rod-end data moves from
+      1.028/1.009/1.003/1.001 to 2.022/2.006/2.001/2.000, and the error at
+      160 cells from 0.88% to 0.0066%.
+      What a caller sees change: `T[0]` no longer equals `left_temperature`
+      exactly.  It never should have -- it is a cell centre half a cell inside
+      the rod -- but code that read the boundary value back out of the state
+      array will now read a slightly different number, and code that relied on
+      the end cells being frozen when no boundary data was supplied will find
+      them evolving under a zero-flux closure instead.  Four assertions in the
+      suite encoded the old behaviour and were updated.
+      Two knock-on effects are recorded rather than fixed here.  The
+      `compute_interface_correction` hook now returns exactly what `update`
+      already produced, so applying it is an identity; it is kept because the
+      coupling system asks every node with interface DOFs for one.  And
+      `compute_boundary_fluxes` still reports the flux across the face between
+      the first two cells rather than the flux at the rod end, which is a
+      separate (smaller) inconsistency of the same kind and is not touched by
+      this change.
     verification:
-      - "tests/verification/test_mms_order.py::test_heat_converges_at_its_declared_order_with_the_documented_boundary_data"
       - "tests/verification/test_mms_order.py::test_heat_second_order_stencil_converges_at_its_declared_spatial_order"
+      - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_a_linear_profile_between_the_rod_ends_is_reproduced_exactly"
+      - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_the_boundary_cell_is_not_pinned_to_the_supplied_value"
+      - "tests/verification/test_mms_order.py::TestHeatBoundaryPlacement::test_the_cell_centre_reading_of_the_boundary_data_still_costs_an_order"
+      - "tests/verification/test_heat_analytical.py::test_heat_spatial_convergence"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-008"
@@ -505,9 +530,39 @@ anomalies:
       (`update_padded`, via `ShardedStencilNode`) is not affected in the
       interior: it takes real halo values from the neighbouring shard rather
       than constructing ghosts, so only the global domain boundary is at risk.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Two details of the diagnosis above did not survive being re-derived
+      before the fix was written, and are corrected here because the entry is
+      cited as evidence.  The grid is cell centred, so the ghosts sit at
+      x = -dx/2 and x = -3dx/2, not at the x = -dx and x = -2dx this entry
+      named; and the oracle experiment -- substituting the exact solution at
+      the ghost positions -- restores observed orders of 3.759/3.898/3.954,
+      converging cleanly on 4, not the 3.775/5.021/4.792 recorded.  Repeating
+      that oracle at the positions this entry named restores nothing at all
+      (0.762/0.888/0.950), which is what exposed the discrepancy.  The
+      conclusion the entry drew -- that the defect is in the ghost
+      construction alone -- is the part that held, and it is what the fix was
+      built on.
+      The fix builds both ghosts by cubic extrapolation through the rod end
+      and the three nearest cell centres.  A cubic is the lowest degree that
+      works: the 5-point stencil divides ghost errors by 12*dx^2, so linear
+      or quadratic extrapolation caps the scheme at order 1 or 3 (measured
+      0.95 and 2.97), while a quartic is accurate enough but spectrally
+      unstable.  Observed orders over a 10/20/40/80/160 ladder are
+      3.759/3.830/3.913/3.957 and the error at 80 cells falls from 2.65e-3 to
+      2.03e-7, so the 4th-order option is now 1260x *more* accurate than the
+      default rather than 10x less.
+      Two consequences worth recording.  Under the cubic closure the 5-point
+      and 3-point forms are algebraically identical at cells 0 and n-1, so the
+      2nd-order fallback that this node has always applied there now costs
+      nothing; it used to cost an order.  And the closure tightens the
+      stability bound -- see MADD-ANO-009.
     verification:
       - "tests/verification/test_mms_order.py::test_heat_fourth_order_stencil_converges_at_its_declared_spatial_order"
+      - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_beats_the_second_order_one"
+      - "tests/verification/test_mms_order.py::TestHeatStencilGhosts::test_the_laplacian_is_exact_on_a_cubic_for_the_fourth_order_stencil"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-009"
@@ -538,10 +593,40 @@ anomalies:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0"
     workaround: >
-      With `stencil_order=4`, keep timestep * thermal_diffusivity / dx**2
-      below 0.375 (dx = length / n_cells), not the documented 0.5.  The
-      default `stencil_order=2` is unaffected.
-    resolution_status: "open"
+      No longer needed: the constructor refuses a configuration above its
+      stencil's limit.  On 0.3.x and earlier, with `stencil_order=4`, keep
+      timestep * thermal_diffusivity / dx**2 below 0.375 (dx = length /
+      n_cells), not the documented 0.5.  The default `stencil_order=2` is
+      unaffected.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Fixed as documentation *and* as a runtime check, because documentation
+      alone had already been tried and had failed in exactly this way: the
+      published bound was wrong, so a caller who honoured it was not
+      protected, and the consequence was a silent divergence to NaN rather
+      than a degraded answer.  A limit that can only be honoured by reading a
+      document, where the document was wrong, is not a control.
+      The number moved again during the fix.  3/8 is the bound of the bare
+      5-point symbol; the cubic boundary closure that resolves MADD-ANO-008
+      raises the spectral radius of the whole operator and brings the sharp
+      bound down to 0.3169 at n_cells = 5, rising monotonically to 0.3249 as
+      n_cells grows.  `maddening.nodes.heat.MAX_FOURIER_NUMBER` records 5/16
+      = 0.3125, which is below all of them, so one number is safe at every
+      resolution the node accepts.  For `stencil_order=2` the mirror closure
+      is exact on the operator's eigenvectors and the bound is exactly 1/2,
+      unchanged.
+      What the check does not cover, and this is the whole of the residual
+      risk: it sees the constructor's `timestep`, `thermal_diffusivity` and
+      `length` only.  A `dt` handed to `update()`, and a `thermal_diffusivity`
+      or `length` moved by a calibration run -- both are trainable -- bypass
+      it entirely, and cannot be checked inside a traced step without a host
+      callback.  MADD-ANO-002 stays open for that reason and is the right
+      place to read about it.  The check is also skipped for a non-uniform
+      grid, where `dx` is not a single number.
     verification:
-      - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit"
+      - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_stencil_is_stable_up_to_five_sixteenths"
+      - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_limit_is_below_the_three_eighths_of_its_symbol"
+      - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_constructor_refuses_an_unstable_configuration"
+      - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_a_stable_configuration_is_accepted"
     github_issue: null

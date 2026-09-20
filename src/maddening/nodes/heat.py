@@ -381,7 +381,7 @@ class HeatNode(SimulationNode):
                 raise ValueError(
                     f"timestep {timestep!r} is unstable for this rod: the "
                     f"Fourier number dt*alpha/dx^2 is {fourier:.4g}, above "
-                    f"the {limit:g} limit of the {stencil_order}-point-order "
+                    f"the {limit:g} limit of the order-{stencil_order} "
                     f"stencil (dx = length/n_cells = {dx:.6g}, alpha = "
                     f"{thermal_diffusivity!r}).  The explicit update "
                     f"diverges to NaN there rather than losing accuracy "

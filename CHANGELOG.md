@@ -217,6 +217,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`HeatNode` imposes its Dirichlet data at the rod ends, not half a cell in**,
+  and its 4th-order ghosts sit where the stencil reads them: measured spatial
+  order 1.001 -> 2.000 and 0.954 -> 3.957. `T[0]` no longer equals the datum
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact
@@ -365,6 +368,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **MADD-VER-002's acceptance band no longer admits the defect it measured**:
+  `[0.7, 2.5]` -> `[1.7, 2.3]` around the theoretical 2.0 (measured 1.900); it
+  cited MADD-ANO-002 for a boundary defect. MADD-VER-001: 5% -> 1e-4
 - **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
   declare `NodeMeta(discretization_order=...)` and the harness refines a
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
@@ -418,12 +424,17 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- **MADD-ANO-007/008/009 (HeatNode) are resolved in this release.** ANO-008's
+  recorded diagnosis was corrected on re-derivation: the ghosts sit at
+  -dx/2 and -3dx/2, and the oracle restores 3.76/3.90/3.95, not 3.78/5.02/4.79
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07
-- MADD-ANO-007/008/009 (HeatNode, all open): Dirichlet data is applied at the
-  first cell centre, not the documented rod end (order 1, not 2);
-  `stencil_order=4` converges at order 1 and is less accurate than the default
+- MADD-ANO-007/008/009 (HeatNode, all found by the MMS harness and all fixed
+  before release): Dirichlet data was applied at the first cell centre, not the
+  documented rod end (order 1, not 2); `stencil_order=4` converged at order 1
+  and was less accurate than the default; the documented Fourier bound of 1/2
+  was the 3-point stencil's, and the 4th-order stencil diverged inside it
 - Every anomaly whose defect is still reachable now records an open-ended
   `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had

@@ -382,6 +382,7 @@ class HeatNode(SimulationNode):
         if (
             grid_points is None
             and concrete is not None
+            and n_cells > 0
             and all(v > 0 for v in concrete)
         ):
             timestep_f, length_f, alpha_f = concrete
@@ -397,7 +398,7 @@ class HeatNode(SimulationNode):
                     f"{thermal_diffusivity!r}).  The explicit update "
                     f"diverges to NaN there rather than losing accuracy "
                     f"gracefully.  Use timestep <= "
-                    f"{limit * dx * dx / thermal_diffusivity:.6g}, or more "
+                    f"{limit * dx * dx / alpha_f:.6g}, or more "
                     f"cells, or a smaller thermal_diffusivity."
                 )
 

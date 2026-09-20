@@ -190,6 +190,12 @@ ci = [
     # dependency, so the base install already provides it.)
     # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
+    # The declared build backend, so tests/test_packaging_py_typed.py can
+    # build a real wheel and assert the PEP 561 marker is in it without
+    # reaching the network for an isolated build.  MADDENING_REQUIRE_PACKAGING_TESTS
+    # in the CI test job turns "hatchling missing" into a failure rather
+    # than a silent skip of the only check that proves py.typed ships.
+    "hatchling>=1.21",
     # Static type check (non-blocking `typecheck` CI job; see
     # docs/developer_guide/typing.md).  Pinned exactly: the baseline in
     # that document (395 errors / 94 warnings) is tied to this pyright
@@ -228,6 +234,12 @@ Issues        = "https://github.com/Microrobotics-Simulation-Framework/MADDENING
 packages = ["src/maddening"]
 
 [tool.hatch.build.targets.wheel.force-include]
+# PEP 561 marker.  Without it a downstream type checker MUST ignore every
+# annotation in the package, so the whole typing effort is invisible to
+# users of the wheel.  `tests/test_py_typed_marker.py` builds the wheel and
+# asserts the member is present -- a force-include that looks right and
+# ships nothing is indistinguishable from no marker at all.
+"src/maddening/py.typed" = "maddening/py.typed"
 "src/maddening/usd/schema/generatedSchema.usda" = "maddening/usd/schema/generatedSchema.usda"
 "src/maddening/usd/schema/plugInfo.json" = "maddening/usd/schema/plugInfo.json"
 

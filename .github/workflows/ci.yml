@@ -104,6 +104,12 @@ jobs:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # tests/test_packaging_py_typed.py builds a wheel and asserts the
+          # PEP 561 marker is in it.  It skips when the build backend is
+          # absent; here the backend is installed (`hatchling` in the ci
+          # extra), so a skip would mean the environment changed and the
+          # proof stopped running -- fail instead.
+          MADDENING_REQUIRE_PACKAGING_TESTS: "1"
         run: |
           python -m pytest tests/ -v --tb=short --ignore=tests/viz
 

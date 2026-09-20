@@ -1294,14 +1294,23 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
 
 
 #: Largest trainable-parameter count for which :func:`fit` accumulates the
-#: gradient Gram matrix that :class:`_ExcitationTracker` uses.  The tracker
-#: costs one ``n x n`` outer product per iteration and holds one ``n x n``
-#: float64 matrix: at 512 that is 2.1 MB and ~0.26 MFLOP per iteration
-#: (measured at ~0.1 ms on the reference CPU), against one full rollout and
-#: one reverse pass for the gradient itself.  Above it the tracker is not
-#: built and :attr:`FitResult.excited_rank` is ``None`` -- "not measured",
-#: never "full rank", because a silent full-rank verdict would read as
-#: "no undetermined direction was found" when nothing looked.
+#: gradient Gram matrix that :class:`_ExcitationTracker` uses.
+#:
+#: The tracker holds one ``n x n`` float64 matrix and costs one ``n x n``
+#: outer product per iteration plus one ``eigh`` at the end -- ``n**2``
+#: fused multiply-adds per iteration and ``O(n**3)`` once, against the full
+#: rollout and reverse pass the gradient itself costs, and it only runs at
+#: all once there are ``n`` gradients to pool.  At the cap that is 2.1 MB,
+#: 0.26 MFLOP per iteration and ~0.13 GFLOP for the decomposition.  Wall
+#: clock is not quoted: measured on this box the same 512-wide ``eigh``
+#: ranged over 52-892 ms across five back-to-back runs, which is contention
+#: from the other work sharing it and not a property of the code.  A caller
+#: who does not want the cost at all passes ``hold_undetermined=False``.
+#:
+#: Above the cap the tracker is not built and
+#: :attr:`FitResult.excited_rank` is ``None`` -- "not measured", never
+#: "full rank", because a silent full-rank verdict would read as "no
+#: undetermined direction was found" when nothing looked.
 _EXCITATION_MAX_PARAMS = 512
 
 

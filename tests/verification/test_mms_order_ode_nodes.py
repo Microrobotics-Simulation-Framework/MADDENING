@@ -1092,3 +1092,84 @@ def test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given(float6
         f"a float64 pressure came back as {out['arterial_pressure'].dtype}; "
         "see MADD-ANO-013"
     )
+
+
+# --------------------------------------------------------------------------
+# BallNode's float32 gravity: one node, two answers
+# --------------------------------------------------------------------------
+#
+# MADD-ANO-013 registers one float32 downcast (HeartPumpNode.backpressure),
+# and the audit of 2026-09-20 found at least five more.  Most of them are
+# *consistent* -- RigidBodyNode casts inertia and gravity the same way in
+# update() and derivatives(), so the node agrees with itself and the cast
+# is only a precision floor -- and are left alone here, because removing
+# them changes state dtypes and is the public-contract decision TODO
+# records under "AdaptiveNode dtype policy".
+#
+# BallNode was the exception: update() read p["gravity"] raw while
+# derivatives() pinned it to float32, so the same node integrated two
+# different accelerations depending on which entry point was used.  That
+# is a defect on its own terms, independent of any dtype policy, and it
+# is the MADD-ANO-011/012 pattern reached by a different mechanism.
+
+
+class TestBallNodeAgreesWithItselfAboutGravity:
+    """``update()`` and ``derivatives()`` must integrate the same ``g``."""
+
+    def test_the_two_entry_points_return_the_same_acceleration(self, float64):
+        """Measured disagreement before the fix: 4.196e-07 absolute."""
+        node = BallNode("ball", timestep=0.01, initial_position=10.0,
+                        initial_velocity=0.0, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=jnp.float64),
+                 "velocity": jnp.asarray(0.0, dtype=jnp.float64)}
+        dt = 1.0
+        explicit = float(node.update(state, {}, dt)["velocity"]) / dt
+        from_derivatives = float(node.derivatives(state, {})["velocity"])
+        assert explicit == from_derivatives, (
+            f"update() integrates g = {explicit!r} while derivatives() "
+            f"reports {from_derivatives!r}: the node holds two values of g, "
+            f"differing by {abs(explicit - from_derivatives):.3e}"
+        )
+        assert from_derivatives == -9.81
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_the_acceleration_follows_the_dtype_of_the_velocity(
+        self, float64, dtype,
+    ):
+        """It follows the state rather than pinning a dtype of its own."""
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=dtype),
+                 "velocity": jnp.asarray(0.0, dtype=dtype)}
+        derivatives = node.derivatives(state, {})
+        assert derivatives["velocity"].dtype == dtype
+        assert derivatives["position"].dtype == dtype
+
+    def test_a_float32_carry_is_not_promoted_by_the_derivatives(self, float64):
+        """The promotion consequence, measured rather than assumed.
+
+        Following the state cannot widen anything: a float32 state under
+        ``jax_enable_x64`` steps to float32, which is what
+        ``lax.scan``'s carry requires.  Dropping the cast entirely --
+        rather than following the state -- would have returned a
+        float64 ``g`` here and changed the carry dtype mid-scan, which
+        is the breakage the AdaptiveNode dtype policy records.
+        """
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        state = {"position": jnp.asarray(10.0, dtype=jnp.float32),
+                 "velocity": jnp.asarray(0.0, dtype=jnp.float32)}
+        stepped = euler_step(node.derivatives, state, {}, 0.01)
+        assert jnp.asarray(stepped["velocity"]).dtype == jnp.float32
+        assert jnp.asarray(stepped["position"]).dtype == jnp.float32
+
+    def test_the_default_precision_result_is_unchanged(self):
+        """No float32 user sees anything move.
+
+        Outside ``jax_enable_x64`` the state is float32 and so is ``g``,
+        exactly as when the cast was unconditional.
+        """
+        node = BallNode("ball", timestep=0.01, gravity=-9.81)
+        derivatives = node.derivatives(node.initial_state(), {})
+        assert derivatives["velocity"].dtype == jnp.float32
+        assert float(derivatives["velocity"]) == float(
+            jnp.asarray(-9.81, dtype=jnp.float32)
+        )

@@ -42,7 +42,7 @@ T_{-1} = \frac{16 T_b - 15 T_0 + 5 T_1 - T_2}{5},
 T_{-2} = \frac{64 T_b - 90 T_0 + 40 T_1 - 9 T_2}{5}
 $$
 
-  A cubic is the lowest degree that works.  The 5-point stencil divides ghost errors by $12\Delta x^2$, so a linear or quadratic extrapolation caps the scheme at order 1 or 3 (measured 0.95 and 2.97); a quartic is accurate enough but spectrally unstable.  Under this closure the 5-point and 3-point forms are algebraically identical at cells $0$ and $N-1$, so the 2nd-order fallback applied there costs nothing.
+  A cubic is the lowest degree that works.  The 5-point stencil divides ghost errors by $12\Delta x^2$, so a linear or quadratic extrapolation caps the scheme at order 2 or 3 (measured 2.000 and 2.987 on the finest pair of a 10/20/40/80/160 ladder, against 3.957 for this cubic); a quartic is accurate enough but spectrally unstable.  The linear figure is worth reading twice: a linear ghost is genuinely 2nd order, so on a manufactured solution whose curvature vanishes at the rod ends it measures 4.08 and looks correct — see `maddening.nodes.heat._dirichlet_ghosts_4th_order` and `TestTheSteadyProfileCanSeeABrokenScheme`.  Under this closure the 5-point and 3-point forms are algebraically identical at cells $0$ and $N-1$, so the 2nd-order fallback applied there costs nothing.
 
 Before 0.4.0 the Dirichlet value was written into the first and last cell after the update, which imposed it half a cell inside the rod and made the scheme globally 1st-order (MADD-ANO-007), and the 4th-order ghosts were built one cell out of position (MADD-ANO-008).
 

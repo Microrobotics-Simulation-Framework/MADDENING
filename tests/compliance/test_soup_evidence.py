@@ -344,3 +344,138 @@ class TestDriftIsClassified:
         message = gen.describe_drift("doc.md", self._ROWS, generated)
         assert "doc.md (committed)" in message
         assert "-| MADD-ANO-002 | b |" in message
+
+
+# ---------------------------------------------------------------------------
+# MADD-ANO-001: the resolution is a dependency floor, so the floor is the
+# evidence
+# ---------------------------------------------------------------------------
+# MADD-ANO-001 (LBM GPU segfault on CUDA 12.2 + jaxlib 0.5.1) is recorded
+# `resolved` in 0.4.0 "by the dependency floor moving past the affected jaxlib
+# rather than by any change to MADDENING's own code".  Nothing pinned that
+# floor.  Restoring `jax>=0.4,<0.6` to pyproject.toml — which readmits the
+# exact jaxlib the anomaly names — left `scripts/check_anomalies.py` printing
+# OK and every compliance test passing but one: the generated-table equality
+# gate, whose own message says to regenerate and commit, which would have
+# rewritten §1 of soup_package.md around the regression and turned everything
+# green again (measured 2026-09-20: 1 failed, 253 passed).
+#
+# So the resolution had no verification entry that could fail, which for an
+# anomaly whose fix IS a version range is the whole of the evidence.  This is
+# that entry.  It is deliberately about the *declared* range and not the
+# installed version: what a user of 0.4.0 can install is what the anomaly
+# claims, and CI's own pin is a single point inside the range.
+_ANO_001_AFFECTED_JAXLIB = (0, 5, 1)
+
+
+def _floor_of(requirement: str) -> tuple:
+    """The ``>=`` floor of a PEP 508 requirement, as a version tuple."""
+    _, _, rest = requirement.partition(">=")
+    assert rest, f"{requirement!r} declares no >= floor"
+    floor = rest.split(",")[0].strip()
+    return tuple(int(part) for part in floor.split(".") if part.isdigit())
+
+
+def test_the_dependency_floor_still_excludes_the_jaxlib_madd_ano_001_names():
+    """Lowering the jax/jaxlib floor back over jaxlib 0.5.1 fails here.
+
+    MADD-ANO-001's `resolution_status: resolved` rests on this and on
+    nothing else in the tree.
+    """
+    pyproject = gen.read_pyproject()
+    project = pyproject["project"]
+    requirements = list(project["dependencies"])
+    for extra in ("cuda12", "tpu"):
+        requirements += list(project["optional-dependencies"].get(extra, []))
+
+    checked = []
+    for requirement in requirements:
+        name = requirement.split(">=")[0].split("[")[0].strip()
+        if name not in ("jax", "jaxlib"):
+            continue
+        checked.append(requirement)
+        assert _floor_of(requirement) > _ANO_001_AFFECTED_JAXLIB, (
+            f"{requirement!r} admits jaxlib "
+            f"{'.'.join(str(n) for n in _ANO_001_AFFECTED_JAXLIB)}, the "
+            f"version MADD-ANO-001 records as segfaulting the LBM GPU path.  "
+            f"That anomaly is marked `resolved` solely because the floor "
+            f"moved past it; lowering the floor reopens it, so either raise "
+            f"the floor again or reopen MADD-ANO-001 in "
+            f"docs/validation/known_anomalies.yaml."
+        )
+
+    assert len(checked) >= 4, (
+        f"expected jax and jaxlib pins in [project.dependencies] and in the "
+        f"cuda12 and tpu extras; found only {checked}.  An assertion that "
+        f"iterates over nothing passes trivially — if a pin moved, point this "
+        f"test at where it went."
+    )
+
+
+def test_madd_ano_001_is_recorded_resolved_by_that_floor():
+    """The pin above is only evidence while the entry rests on it.
+
+    If MADD-ANO-001 is ever reopened, or its resolution is re-attributed
+    to a code change, this test's sibling stops being its verification
+    and the registry should say so.
+    """
+    entry = next(
+        a for a in gen.read_registry()["anomalies"]
+        if a["anomaly_id"] == "MADD-ANO-001"
+    )
+    assert entry["resolution_status"] == "resolved"
+    assert "0.5.1" in entry["description"], (
+        "MADD-ANO-001 no longer names the affected jaxlib; "
+        "_ANO_001_AFFECTED_JAXLIB above is stale"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The §3 headline counts reachable defects, not unclosed tickets
+# ---------------------------------------------------------------------------
+def test_the_anomaly_headline_counts_every_reachable_defect():
+    """`partially_resolved` with a live residual risk is still reachable.
+
+    The headline used to read "15 anomalies registered, 6 open", counting
+    only `resolution_status == "open"` — while MADD-ANO-005 falls back to
+    the pre-0.4.0 residual test on a reachable path and MADD-ANO-014's own
+    residual risk says the degraded path "is still the default and still
+    silent".  Eight defects were reachable and the document said six, in
+    the direction that understates.
+
+    The predicate is shared with `_check_unresolved_anomalies_are_open_ended`
+    so the headline and the version-range gate cannot drift apart.
+    """
+    registry = gen.read_registry()
+    reachable = [
+        a["anomaly_id"] for a in registry["anomalies"]
+        if a.get("resolution_status")
+        not in gen._STATUSES_THAT_MAY_CLOSE_A_RANGE
+    ]
+    assert reachable, "no reachable anomalies — the predicate matched nothing"
+
+    rendered = gen.render_known_anomalies(registry)
+    assert f"{len(reachable)} have a defect reachable in this version" in rendered, (
+        f"the §3 headline does not report the {len(reachable)} reachable "
+        f"defects {sorted(reachable)}:\n{rendered.splitlines()[-1]}"
+    )
+
+
+def test_a_partially_resolved_anomaly_is_counted_as_reachable():
+    """The distinction the headline exists to make, pinned directly.
+
+    Without this, flipping the headline back to `== "open"` still passes
+    the test above on any registry that happens to hold no
+    `partially_resolved` entry.
+    """
+    registry = {"anomalies": [
+        {"anomaly_id": "MADD-ANO-001", "resolution_status": "open"},
+        {"anomaly_id": "MADD-ANO-002",
+         "resolution_status": "partially_resolved"},
+        {"anomaly_id": "MADD-ANO-003", "resolution_status": "resolved"},
+        {"anomaly_id": "MADD-ANO-004", "resolution_status": "wont_fix"},
+        {"anomaly_id": "MADD-ANO-005", "resolution_status": "duplicate"},
+    ]}
+    rendered = gen.render_known_anomalies(registry)
+    assert "3 have a defect reachable in this version" in rendered, rendered
+    assert "1 `open`" in rendered and "2 `partially_resolved`" in rendered, rendered

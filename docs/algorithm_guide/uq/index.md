@@ -6,7 +6,7 @@ MADDENING's UQ support is in early development (Phase 4 per the documentation ar
 
 ## UQ Interface
 
-The `UncertaintySpec` and `UncertainParameter` dataclasses in `maddening.core.uq` define the interface for nodes to declare their UQ capabilities.
+The `UncertaintySpec` and `UncertainParameter` dataclasses in `maddening.core.compliance.uq` define the interface for nodes to declare their UQ capabilities.  (This page named a `maddening.core.uq` module, which has never existed.  It survived because `scripts/check_impl_mapping.py` resolves only the symbols inside an Implementation Mapping table, and this guide has none — so it carries no `MIN_MAPPINGS` pin and no gate checks a symbol named here.  The same is true of `coupling/interface_mapping.md` and `coupling/unit_transforms.md`; both of their symbols happen to resolve today, but nothing would say so if they stopped.)
 
 ### Node UQ Readiness
 

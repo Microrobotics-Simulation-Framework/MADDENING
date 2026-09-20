@@ -139,6 +139,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`soup_package.md` §3 counts *reachable* defects, not `open` tickets**: it
+  said "6 open" where 8 entries have a live defect; a `partially_resolved` entry
+  with a live residual risk now counts, by the version-range gate's own predicate
 - **`fim`'s rank cutoff now sees the residual length**: `rank_rtol` defaults to
   `max(n, sqrt(m)) * eps`, not `n * eps`.  `rank` falls and `crb` goes `+inf`
   for some long-residual (`m > n**2`) fits; pass `rank_rtol=n * eps` to opt out
@@ -478,29 +481,38 @@ guidance; the itemized changes follow.
 - **MADD-ANO-015**: the ZeroMQ transports bound every interface unauthenticated
   and in cleartext from 0.1.0, and `launch_vm` published them whatever the job
   config said -- resolved in 0.4.0 (critical, safety_relevant)
-- **MADD-ANO-007/008/009 (HeatNode) are resolved in this release.** ANO-008's
-  recorded diagnosis was corrected on re-derivation: the ghosts sit at
-  -dx/2 and -3dx/2, and the oracle restores 3.76/3.90/3.95, not 3.78/5.02/4.79
-- MADD-ANO-011/011/012 (BallNode, HeartPumpNode, all open): both nodes name
-  forward Euler and implement something else, and `backpressure` is truncated to
-  float32 -- read the scheme from the algorithm guide, not from `discretization`
+- MADD-ANO-011/012/013 (BallNode, HeartPumpNode, the rigid bodies; all open):
+  both ODE nodes name forward Euler and implement something else, and a float64
+  quantity is pinned to float32 in several places -- HeartPumpNode's
+  `backpressure`, and the `inertia`, `gravity` and `initial_state` casts in
+  `RigidBodyNode`, `RigidBody2DNode` and `HeatNode` -- read the scheme from the
+  algorithm guide, not from `discretization`
 - **MADD-ANO-010**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
   refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
   read back as that float -- spell such a value differently (minor, context_dependent)
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07
-- MADD-ANO-007/008/009 (HeatNode, all found by the MMS harness and all fixed
-  before release): Dirichlet data was applied at the first cell centre, not the
-  documented rod end (order 1, not 2); `stencil_order=4` converged at order 1
-  and was less accurate than the default; the documented Fourier bound of 1/2
-  was the 3-point stencil's, and the 4th-order stencil diverged inside it
+- **MADD-ANO-007/008/009 (HeatNode) are resolved in this release**, all found
+  by the MMS harness and all fixed before release: Dirichlet data was applied at
+  the first cell centre, not the documented rod end (order 1, not 2);
+  `stencil_order=4` converged at order 1 and was less accurate than the default;
+  and the documented Fourier bound of 1/2 was the 3-point stencil's, with the
+  4th-order stencil diverging inside it.  ANO-008's recorded diagnosis was
+  corrected on re-derivation: the ghosts sit at -dx/2 and -3dx/2, and the oracle
+  restores 3.76/3.90/3.95, not 3.78/5.02/4.79.  ANO-007 also said
+  `compute_boundary_fluxes` was "not touched"; it is fixed too, the reported
+  left flux moving from 10.6% error at n=10 to 0.13% and from order 1.005 to
+  2.005
 - Every anomaly whose defect is still reachable now records an open-ended
   `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had
-- MADD-ANO-005: `converged=True` is a residual test, not a bound on the
-  distance to the fixed point -- calibrate it by re-solving at a 100x tighter
-  tolerance (minor, open, context_dependent)
+- MADD-ANO-005: before 0.4.0 `converged=True` was a residual test, not a bound
+  on the distance to the fixed point.  0.4.0 applies the threshold to an error
+  *estimate* instead; read `coupling_diagnostics()['ratio_usable']` to see
+  whether the contraction ratio was usable, and treat `False` as the old
+  behaviour.  The estimate is not a bound and can understate by 122x on a
+  hidden slow mode (minor, partially_resolved in 0.4.0, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
   swap rank, so no Clarke subgradient exists there and the integral of the

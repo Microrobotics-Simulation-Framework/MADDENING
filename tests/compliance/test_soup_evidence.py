@@ -19,6 +19,7 @@ was being rewritten concurrently.
 
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 import sys
@@ -328,16 +329,86 @@ class TestDriftIsClassified:
         )
         assert message != removed
 
+    @staticmethod
+    def _opcodes(committed: str, generated: str) -> set:
+        """Which ``difflib`` opcodes a fixture actually produces.
+
+        Asserted in the tests below because the classifier reads those
+        opcodes, so a fixture that cannot produce the opcode a defect
+        lives in cannot see the defect however it is worded.  That is
+        what happened here: ``test_a_mixed_drift_leads_with_the_dangerous_half``
+        was written for exactly the missed case and keeps an anchor
+        after the deleted row, so it only ever emitted ``delete`` +
+        ``insert`` and never the ``replace`` the bug was in.
+        """
+        return {tag for tag, *_ in difflib.SequenceMatcher(
+            None, committed.splitlines(keepends=True),
+            generated.splitlines(keepends=True), autojunk=False).get_opcodes()}
+
     def test_a_mixed_drift_leads_with_the_dangerous_half(self):
         """One row lost and one row gained is still a potential deletion."""
         generated = (
             "| MADD-ANO-001 | a |\n| MADD-ANO-003 | c |\n| MADD-ANO-004 | d |\n"
+        )
+        # `003` survives unchanged directly after the deleted row, so this
+        # shape is `delete` + `insert`.  It does NOT cover `replace`; the
+        # test below does.
+        assert self._opcodes(self._ROWS, generated) == {"equal", "delete", "insert"}
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "DO NOT regenerate yet" in message
+        assert "MADD-ANO-002" in message
+
+    def test_a_row_deleted_next_to_an_edited_row_is_still_a_deletion(self):
+        """The shape with no anchor after the deletion: one `replace`.
+
+        Deleting ``MADD-ANO-012`` from ``known_anomalies.yaml`` and
+        rewording the next anomaly's title is one change, and it is the
+        shape of every "re-derive the registry" commit in this release.
+        ``SequenceMatcher`` folds the two into a single ``replace``,
+        whose old lines the classifier filed under "changed in place" --
+        so it reported *0 lines only in the COMMITTED file* and printed
+        the regenerate-and-commit instruction it exists to suppress,
+        with the lost row visible in the diff underneath.
+        """
+        generated = (
+            "| MADD-ANO-001 | a |\n| MADD-ANO-003 | c, reworded |\n"
+        )
+        assert self._opcodes(self._ROWS, generated) == {"equal", "replace"}, (
+            "this fixture must produce a `replace` opcode or it cannot "
+            "express the defect it is written for"
         )
         message = self._explanation(
             gen.describe_drift("doc.md", self._ROWS, generated)
         )
         assert "DO NOT regenerate yet" in message
         assert "MADD-ANO-002" in message
+        # The count has to move with the verdict: a headline of "0 line(s)
+        # only in the COMMITTED file" above a "DO NOT regenerate" would
+        # read as a bug in the gate rather than a lost row.
+        assert "1 line(s) only in the COMMITTED file" in message
+        # The row that was only reworded is still reported as such.
+        assert "1 line(s) changed in place" in message
+        assert "MADD-ANO-003" not in message
+
+    def test_an_edit_that_loses_no_row_is_still_a_plain_regenerate(self):
+        """The fix must not turn every `replace` into a refusal.
+
+        Two rows reworded in one block is a single `replace` with nothing
+        lost; the remedy there really is to regenerate and commit.
+        """
+        generated = (
+            "| MADD-ANO-001 | a |\n| MADD-ANO-002 | B |\n| MADD-ANO-003 | C |\n"
+        )
+        assert self._opcodes(self._ROWS, generated) == {"equal", "replace"}
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "DO NOT regenerate yet" not in message
+        assert "generate_soup_tables.py` and commit" in message
+        assert "0 line(s) only in the COMMITTED file" in message
+        assert "2 line(s) changed in place" in message
 
     def test_the_unified_diff_is_still_printed(self):
         generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")

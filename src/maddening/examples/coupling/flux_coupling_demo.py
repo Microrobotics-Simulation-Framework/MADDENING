@@ -40,11 +40,13 @@ def demo_dd_heat_coupling():
     """Two heat rods coupled via Dirichlet-Dirichlet value exchange.
 
     Key point: use INTERIOR cells (T[-2], T[1]) as the interface
-    values, not boundary cells (T[-1], T[0]).  The boundary cells
-    are overwritten by the Dirichlet BC in HeatNode.update, so
-    feeding them back creates a "cold lock" where heat never
-    transfers between rods.  Using interior cells avoids this and
-    gives proper energy-conserving coupling.
+    values, not the end cells (T[-1], T[0]).  Feeding an end cell
+    straight back as the neighbour's Dirichlet datum couples each rod
+    to its own boundary layer, which used to be a hard "cold lock"
+    when HeatNode overwrote its end cells with the datum, and is still
+    the wrong thing to exchange now that it does not (MADD-ANO-007):
+    the end cell is the one the boundary closure has just acted on.
+    Using interior cells gives proper energy-conserving coupling.
     """
     print("=" * 60)
     print("1. Correct DD heat coupling (interior cell interface)")
@@ -61,7 +63,7 @@ def demo_dd_heat_coupling():
     gm.add_node(HeatNode("rod_b", dt, n_cells=n_cells,
                           thermal_diffusivity=0.01,
                           initial_temperature=0.0))
-    # Interior cells as interface values (avoid boundary-cell overwrite)
+    # Interior cells as interface values (see the docstring)
     add_symmetric_value_coupling(
         gm, "rod_a", "rod_b",
         field_a="temperature", input_a="right_temperature",

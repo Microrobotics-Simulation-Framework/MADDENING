@@ -315,18 +315,24 @@ class CloudSession:
             self._advance_stage(CloudStage.STREAM_STARTING)
 
             # Stage 4: Wait for stream
-            stream_url = f"http://{vm_ip}:8080/health"
-            try:
-                wait_for(
-                    lambda: probe_http(stream_url, timeout=5),
-                    timeout=60, interval=3,
-                )
-            except HealthProbeError:
-                # Stream health endpoint may not exist; proceed anyway
-                pass
+            #
+            # This probed http://<vm>:8080/health for sixty seconds and
+            # then swallowed the failure.  Nothing in MADDENING has ever
+            # served port 8080 -- the WebRTC signaling server listens on
+            # 8443 (``cloud.selkies_session``) and the HTTP API on 8000 --
+            # so the probe could only ever time out, and launch_vm was
+            # publishing 8080 to the VM's public interface to support it.
+            # Both are gone; the stage is kept so the reported sequence of
+            # stages is unchanged.
             self._advance_stage(CloudStage.STREAM_READY)
 
             # Stage 5: Wait for data channel
+            #
+            # Reachable only if the job's config asked for 5555/5556 in
+            # JobConfig.ports; launch_vm no longer publishes them by
+            # default.  The probe failure is swallowed below, so an
+            # unpublished port just leaves the endpoints advertised for a
+            # caller who has set up an SSH tunnel.
             zmq_endpoint = f"tcp://{vm_ip}:5555"
             with self._lock:
                 self._info.zmq_state_endpoint = zmq_endpoint

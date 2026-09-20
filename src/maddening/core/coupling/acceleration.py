@@ -301,7 +301,7 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     to extrapolate), a zero or non-finite predecessor, or a non-finite
     current residual.  Callers fall back to the raw residual test and
     report that they did; see
-    ``GraphManager.coupling_diagnostics``' ``bound_valid``.  Rejecting
+    ``GraphManager.coupling_diagnostics``' ``ratio_usable``.  Rejecting
     is deliberate: a trusted bad estimate is worse than an honest
     fallback, and the fallback is exactly the criterion that shipped
     before 0.4.0.
@@ -319,7 +319,8 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     produces.  Nothing computable from the residual norms alone
     separates that from a genuine 0.2 contraction; it needs the
     spectrum.  So a rate this function accepts is an estimate, and
-    ``bound_valid`` reports a usable *ratio*, not a valid *bound*.  The
+    ``ratio_usable`` (named ``bound_valid`` before 0.4.0, for exactly
+    this reason) reports a usable *ratio*, not a valid *bound*.  The
     full list of what the estimate rests on is in
     ``graph_manager._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.

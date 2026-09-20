@@ -127,6 +127,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
+  `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
+  of the four conditions the estimate rests on, not that it is a bound
 - **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
   between `unit` and `shape`, so a positional call silently bound the wrong
   fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`
@@ -195,6 +198,8 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `coupling_diagnostics()['bound_valid']` and `['gradient_error_bound']` warn on
+  read and are removed in 0.5.0; read `ratio_usable` / `gradient_error_estimate`
 - `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
   read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and

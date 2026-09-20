@@ -339,6 +339,19 @@ draws it throws away, and the next person to narrow that strategy has
 nothing to notice. Measure it and fix the generator, or measure it and
 record the residual; suppressing is neither.
 
+**A rejection rate is a property of the checkout path, not just the test.**
+Since the 6.16x line Hypothesis harvests the literal constants out of every
+*local* module and injects them into draws. Whether a module counts as local
+is decided by `is_local_module_file`, which excludes any path containing a
+`test` or `tests` component — so a git worktree under
+`MADDENING-wt/test/<branch>/` has the whole of `src/` classified as test
+files and injection silently **off**, while CI at
+`/home/runner/work/MADDENING/MADDENING` has it **on**. Measured on one
+commit: 0 local constants in such a worktree against 497 without the
+component, and the four `TestFIM` rates came out 3–10 points *lower* with
+injection on. The audit prints which side it ran on with every run; if you
+are comparing two measurements, check that line first.
+
 **Overruns are a different problem.** The audit reports them in their own
 column. An `overrun` is Hypothesis running out of entropy for a large draw,
 not the test rejecting an input; it answers to `HealthCheck.data_too_large`

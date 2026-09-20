@@ -198,6 +198,69 @@ def test_the_overrun_gate_is_separate_and_can_fire_on_its_own(audit):
 
 
 # ---------------------------------------------------------------------------
+# What configuration the measurement was taken in
+# ---------------------------------------------------------------------------
+def _fake_checkout(root, *parts):
+    probe = root.joinpath(*parts, "src", "maddening", "__init__.py")
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("VERSION = '0.0.0'\n")
+    return root.joinpath(*parts)
+
+
+def test_the_audit_says_whether_constant_injection_was_on(audit, tmp_path):
+    """A rate measured with constant injection off is a different number.
+
+    Since the 6.16x line Hypothesis harvests the literals out of every local
+    module and injects them into draws, which changes the value distribution
+    and so can change a rejection rate.  Whether it is on depends on the
+    **path the tree sits at**: ``is_local_module_file`` excludes any path
+    with a ``test`` or ``tests`` component, so a git worktree under
+    ``MADDENING-wt/test/<branch>/`` has the whole of ``src/`` classified as
+    test files and injection silently off -- while CI, at
+    ``/home/runner/work/MADDENING/MADDENING``, has it on.
+
+    Measured: 0 local constants in such a worktree against 497 at a path
+    without the component, same commit.  That is a difference between the
+    measurement and the thing measured, and the only defence is for every
+    run to print which side it was on.
+    """
+    clean = _fake_checkout(tmp_path, "workspace", "maddening")
+    assert "ON" in audit.describe_constant_injection(clean)
+
+    for component in ("test", "tests"):
+        shadowed = _fake_checkout(tmp_path, component, "branch")
+        message = audit.describe_constant_injection(shadowed)
+        assert "OFF" in message, message
+        assert repr(component) in message, message
+
+
+def test_the_configuration_line_never_takes_the_gate_down(audit, tmp_path):
+    """It reads Hypothesis internals, so it has to fail soft.
+
+    The whole point of this branch is that a gate must not go red because a
+    library moved something.  This line is a diagnostic; if it cannot be
+    computed it says so and the audit still runs.
+    """
+    assert audit.describe_constant_injection(tmp_path / "nope")
+    assert audit.describe_constant_injection(audit.REPO_ROOT)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def explode(name, *a, **k):
+        if "constants_ast" in name or "conjecture" in name:
+            raise ImportError("pretend hypothesis moved it")
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = explode
+    try:
+        message = audit.describe_constant_injection(audit.REPO_ROOT)
+    finally:
+        builtins.__import__ = real_import
+    assert "unknown" in message, message
+
+
+# ---------------------------------------------------------------------------
 # The risk model
 # ---------------------------------------------------------------------------
 # The probes below drive the installed Hypothesis until its health checks

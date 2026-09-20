@@ -384,6 +384,59 @@ def _fmt_risk(p: float) -> str:
     return f"{p:.2%}"
 
 
+def describe_constant_injection(package_root: Path) -> str:
+    """One line saying whether Hypothesis is seeding draws from this tree.
+
+    Since the 6.16x line Hypothesis harvests the literal constants out of
+    every *local* module in ``sys.modules`` and injects them into draws
+    (``hypothesis.internal.constants_ast``).  That changes the value
+    distribution, so it can change a measured rejection rate -- and whether
+    it is on depends on the **path the tree is checked out at**, not on
+    anything in the tree: ``is_local_module_file`` excludes any path with a
+    ``test`` or ``tests`` component, and a git worktree under, say,
+    ``MADDENING-wt/test/<branch>/`` therefore has the whole of ``src/``
+    classified as test files and injection silently off.
+
+    CI checks out to ``/home/runner/work/MADDENING/MADDENING``, where it is
+    on.  A rate measured in such a worktree is therefore not measured in
+    CI's configuration, which is exactly the sort of thing this script
+    exists to stop being invisible.  So it is printed with every run.
+
+    Best effort: this reads Hypothesis internals, so any failure degrades to
+    "unknown" rather than taking the gate down with it.
+    """
+    try:
+        from hypothesis.internal.constants_ast import is_local_module_file
+        from hypothesis.internal.conjecture import providers
+    except Exception as exc:                                # pragma: no cover
+        return f"constant injection: unknown ({type(exc).__name__})"
+
+    probe = package_root / "src" / "maddening" / "__init__.py"
+    try:
+        harvested = providers._get_local_constants()
+        pool = (len(harvested.integers) + len(harvested.floats)
+                + len(harvested.strings) + len(harvested.bytes))
+    except Exception as exc:                                # pragma: no cover
+        return f"constant injection: unknown ({type(exc).__name__})"
+
+    if not probe.exists():
+        return f"constant injection: {pool} local constants in the pool"
+    try:
+        local = is_local_module_file(str(probe))
+    except Exception as exc:                                # pragma: no cover
+        return f"constant injection: unknown ({type(exc).__name__})"
+
+    if local:
+        return (f"constant injection: ON for src/maddening "
+                f"({pool} local constants harvested)")
+    bad = [part for part in probe.parts if part in ("test", "tests")]
+    why = (f" because the checkout path has a {bad[0]!r} component"
+           if bad else "")
+    return (f"constant injection: OFF for src/maddening{why} -- CI's "
+            f"checkout path has none, so CI's draw distribution differs "
+            f"from the one measured here")
+
+
 def summarise(records: Sequence[RejectionRecord]) -> str:
     """One-paragraph description of the distribution, for the report header."""
     if not records:
@@ -460,6 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = os.environ.get("MADDENING_HYPOTHESIS_PROFILE", "dev")
     print()
     print(f"draw-rejection audit (hypothesis profile: {profile})")
+    print(describe_constant_injection(REPO_ROOT))
     print(summarise(records))
     print()
     print(format_table(shown, markdown=args.markdown,

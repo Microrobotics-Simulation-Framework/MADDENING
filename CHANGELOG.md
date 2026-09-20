@@ -365,6 +365,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Four more nodes measured rather than skipped** (MADD-VER-009..012): `spring`,
+  `ball`, `rigid_body_2d` and `heart_pump` declare a temporal order and meet it
+  (1.029/1.002/1.000/1.000 against 1.0); 12 mutations confirm the ladders can fail
 - **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
   declare `NodeMeta(discretization_order=...)` and the harness refines a
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
@@ -418,6 +421,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- MADD-ANO-010/011/012 (BallNode, HeartPumpNode, all open): both nodes name
+  forward Euler and implement something else, and `backpressure` is truncated to
+  float32 -- read the scheme from the algorithm guide, not from `discretization`
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07

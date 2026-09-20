@@ -75,8 +75,9 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-012 | HeartPumpNode samples its cardiac inflow at the end of the step, disagreeing with its own derivatives() | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-013 | Several nodes pin a float64 quantity to float32: HeartPumpNode's backpressure, and the rigid-body and HeatNode parameter and initial_state casts | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-014 | Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
+| MADD-ANO-016 | cloud/_skypilot.py was written against a SkyPilot API older than the supported floor | `major` | `not_safety_relevant` | `partially_resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 
-*15 anomalies registered.  8 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 6 `open` plus 2 `partially_resolved` whose residual risk is still live.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*16 anomalies registered.  9 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 6 `open` plus 3 `partially_resolved` whose residual risk is still live.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

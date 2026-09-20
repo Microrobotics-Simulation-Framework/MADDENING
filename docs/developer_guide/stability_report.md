@@ -126,4 +126,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*106 API surfaces registered.*
+*107 API surfaces registered.*

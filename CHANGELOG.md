@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **GCI / Richardson mode in `maddening.testing.mms`** for nodes MMS cannot
+  reach: `assert_node_gci_verified(node, solution_at=..., levels=...)` needs
+  no source term and no reference — three refinements give an error band
 - **Draw-rejection audit** (`scripts/audit_property_rejection.py`): measures what
   fraction of each property test's Hypothesis draws `assume`/`.filter` throws
   away, and fails CI over the gate — run it before narrowing a strategy
@@ -136,6 +139,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`fim`'s rank cutoff now sees the residual length**: `rank_rtol` defaults to
+  `max(n, sqrt(m)) * eps`, not `n * eps`.  `rank` falls and `crb` goes `+inf`
+  for some long-residual (`m > n**2`) fits; pass `rank_rtol=n * eps` to opt out
 - **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
   `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
   of the four conditions the estimate rests on, not that it is a bound
@@ -383,6 +389,12 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Four more nodes measured rather than skipped** (MADD-VER-009..012): `spring`,
+  `ball`, `rigid_body_2d` and `heart_pump` declare a temporal order and meet it
+  (1.029/1.002/1.000/1.000 against 1.0); 12 mutations confirm the ladders can fail
+- **`LBMPipeNode` has a convergence verdict for the first time**
+  (MADD-VER-013): the ladder converges, but a fourth level shows it is *not*
+  in the asymptotic range, so no error band is quoted for it
 - **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
   declare `NodeMeta(discretization_order=...)` and the harness refines a
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
@@ -445,6 +457,9 @@ guidance; the itemized changes follow.
 - **MADD-ANO-015**: the ZeroMQ transports bound every interface unauthenticated
   and in cleartext from 0.1.0, and `launch_vm` published them whatever the job
   config said -- resolved in 0.4.0 (critical, safety_relevant)
+- MADD-ANO-011/011/012 (BallNode, HeartPumpNode, all open): both nodes name
+  forward Euler and implement something else, and `backpressure` is truncated to
+  float32 -- read the scheme from the algorithm guide, not from `discretization`
 - **MADD-ANO-010**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
   refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
   read back as that float -- spell such a value differently (minor, context_dependent)

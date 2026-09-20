@@ -21,7 +21,12 @@ import warnings
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -89,6 +94,20 @@ class RigidBody2DNode(SimulationNode):
         description="2D rigid body with translational and rotational dynamics",
         governing_equations="F = m*a; τ = I*α; semi-implicit Euler integration",
         discretization="Semi-implicit Euler (1st-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=None,
+            temporal=1.0,
+            notes=(
+                "Semi-implicit (symplectic) Euler in both the "
+                "translational and the rotational degrees of freedom: 1st "
+                "order globally, measured by MADD-VER-011.  No spatial "
+                "order -- the node integrates an ODE.  For a "
+                "state-independent force the position and angle alone "
+                "converge at 2nd order, because they use the "
+                "already-updated velocities; the declared order is the one "
+                "that holds for the state as a whole."
+            ),
+        ),
         assumptions=(
             "Rigid body (no deformation)",
             "Constant mass and inertia",

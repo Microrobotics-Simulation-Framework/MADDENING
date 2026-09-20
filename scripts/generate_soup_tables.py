@@ -92,6 +92,8 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 BENCHMARK_MODULES: tuple[str, ...] = (
     "tests.verification.test_heat_analytical",
     "tests.verification.test_mms_order",
+    "tests.verification.test_mms_order_ode_nodes",
+    "tests.verification.test_gci_order",
     "tests.cloud.multigpu.test_lbm_poiseuille",
     "tests.nodes.adaptive.test_verification",
 )

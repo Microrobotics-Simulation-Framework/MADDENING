@@ -223,7 +223,7 @@ def static_data_dep_violations(
             if id(obj) in inner_seen:
                 continue
             inner_seen.add(id(obj))
-            pytree_of = getattr(obj, "params_pytree", None)
+            pytree_of: Any = getattr(obj, "params_pytree", None)
             if callable(pytree_of):
                 for key in pytree_of() or {}:
                     if key in overrides:
@@ -238,9 +238,12 @@ def static_data_dep_violations(
         if id(obj) in seen:
             continue
         seen.add(id(obj))
-        deps = getattr(obj, "static_data_deps", None)
-        specs_of = getattr(obj, "param_specs", None)
-        pytree_of = getattr(obj, "params_pytree", None)
+        # Duck-typed: a node may implement none, some or all of these,
+        # so the annotations say `Any` rather than pretending to a
+        # protocol the tree is not required to satisfy.
+        deps: Any = getattr(obj, "static_data_deps", None)
+        specs_of: Any = getattr(obj, "param_specs", None)
+        pytree_of: Any = getattr(obj, "params_pytree", None)
         if callable(deps) and callable(specs_of) and callable(pytree_of):
             declared = deps() or {}
             if declared:

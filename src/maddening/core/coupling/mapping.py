@@ -304,7 +304,10 @@ def rbf_mapping(
         raise ValueError(f"mode={mode!r} not in {_MODES}")
     epsilon = _finite_real("epsilon", epsilon)
     ridge = _finite_real("ridge", ridge)
-    kw = dict(kernel=kernel, epsilon=epsilon, polynomial=polynomial, ridge=ridge)
+    # Annotated: the literal mixes `str` and `float`, so without this the
+    # `**kw` expansion offers `str | float` to every keyword parameter.
+    kw: dict[str, Any] = dict(kernel=kernel, epsilon=epsilon,
+                              polynomial=polynomial, ridge=ridge)
     if mode == "consistent":
         H = rbf_matrix(source_points, target_points, **kw)
     else:

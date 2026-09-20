@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 # ------------------------------------------------------------------
@@ -465,7 +466,7 @@ def flatten_coupled_state(
 _IMAGE_SMALL = ("bool", "int8", "uint8", "int16", "uint16")
 
 
-def float_image(v):
+def float_image(v) -> tuple[jnp.ndarray, tuple]:
     """``(image, meta)``: a float32 array carrying ``v`` exactly.
 
     ``meta`` is what :func:`from_float_image` needs to rebuild ``v``:
@@ -478,7 +479,10 @@ def float_image(v):
     dt = v.dtype
     if jnp.issubdtype(dt, jnp.floating):
         return v, ("float", dt)
-    if jax.dtypes.issubdtype(dt, jax.dtypes.prng_key):
+    # `jax.dtypes.issubdtype` is documented public API but is not in the
+    # submodule's `__all__`, so pyright reads it as a private import.
+    if jax.dtypes.issubdtype(  # pyright: ignore[reportPrivateImportUsage]
+            dt, jax.dtypes.prng_key):
         data = jax.random.key_data(v)               # uint32, shape (*v.shape, 2)
         img, (_, _, n) = float_image(data)
         return img, ("key", jax.random.key_impl(v), n)
@@ -531,7 +535,7 @@ def state_from_float_image(imgs: dict, metas: dict) -> dict:
 
 
 def unflatten_coupled_state(
-    flat: jnp.ndarray,
+    flat: jnp.ndarray | np.ndarray,
     template: dict[str, dict],
     node_names: list[str],
     fields: Optional[dict[str, tuple[str, ...]]] = None,

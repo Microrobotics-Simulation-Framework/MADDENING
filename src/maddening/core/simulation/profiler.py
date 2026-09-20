@@ -487,12 +487,15 @@ def compile_counts(
 
     counts = CompileCounts(retrace_count=int(gm.trace_count))
 
+    step_fn = gm._compiled_step
+    assert step_fn is not None  # the compile guard at the top of this function
+
     saved_traces = gm._n_traces
     try:
-        lowered = gm._compiled_step.lower(gm._state, resolved_ext, resolved_params)
+        lowered = step_fn.lower(gm._state, resolved_ext, resolved_params)
         counts.hlo_op_count = count_hlo_ops(lowered)
         counts.jaxpr_primitive_count = count_jaxpr_primitives(
-            jax.make_jaxpr(gm._compiled_step)(gm._state, resolved_ext, resolved_params)
+            jax.make_jaxpr(step_fn)(gm._state, resolved_ext, resolved_params)
         )
     finally:
         gm._n_traces = saved_traces
@@ -903,7 +906,9 @@ def profile_graph(
 
     # Identify bottleneck
     if report.node_times_ms:
-        worst = max(report.node_times_ms, key=report.node_times_ms.get)
+        # `dict.get` as the key function is typed as returning `float |
+        # None`, which is not orderable; subscripting says what is meant.
+        worst = max(report.node_times_ms, key=lambda k: report.node_times_ms[k])
         worst_ms = report.node_times_ms[worst]
         if worst_ms > 0.8 * report.mean_step_ms:
             report.bottleneck = (

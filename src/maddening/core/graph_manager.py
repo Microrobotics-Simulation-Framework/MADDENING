@@ -21,9 +21,12 @@ import warnings
 from collections import defaultdict
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, NamedTuple, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, Sequence, cast
 
 import jax
+# `jax.core` is not re-exported by `jax/__init__.py`, so the attribute
+# only resolves for a type checker when the submodule is imported by name.
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 
@@ -35,6 +38,12 @@ logger = logging.getLogger(__name__)
 # Only users who opt into ``solver='ift'`` pay it.  The import needs no
 # guard — a missing lineax is now an installation fault, not a
 # user-recoverable "install the extra" condition.
+
+if TYPE_CHECKING:
+    # `save_state` / `load_state` annotate with `Path`; the runtime
+    # import stays inside the method so importing this module does
+    # not pay for it.
+    from pathlib import Path
 
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
@@ -533,7 +542,10 @@ def _fixed_point_while(
     is_iqn = acceleration in ("iqn-ils", "iqn-imvj")
 
     if acceleration in ("none", "fixed"):
-        acc0 = ()
+        # Annotated: the three branches below build tuples of different
+        # arity, and the empty one would otherwise fix the declared type
+        # at `tuple[()]` for the `acc[0]`/`acc[1]` read after the loop.
+        acc0: tuple = ()
     elif acceleration == "aitken":
         acc0 = (one, zeros)  # omega, prev_residual
     elif is_iqn:
@@ -877,7 +889,9 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # ``solver='ift'`` pay this import cost.
         import lineax as lx  # noqa: PLC0415  (lazy by design)
 
-        atol = 1e-8 + rtol * jnp.max(jnp.abs(b))
+        # lineax declares `atol: float`, but it only ever compares against
+        # it, and under `jit` this is a traced scalar that must stay one.
+        atol = cast(float, 1e-8 + rtol * jnp.max(jnp.abs(b)))
         op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
         if effective_solver == "bicgstab":
             # BiCGStab has no ``restart`` parameter (it operates on a
@@ -1944,7 +1958,7 @@ def _run_coupled_block_impl(
             first_below = first_r <= conv_threshold
 
             if track_diag:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
                      icount, fres, famp, omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
@@ -1982,7 +1996,7 @@ def _run_coupled_block_impl(
                 iter_count, final_res = final_carry[5], final_carry[6]
                 final_amp, prev_loop_res = final_carry[7], final_carry[4]
             else:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
                      omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
@@ -2019,7 +2033,7 @@ def _run_coupled_block_impl(
             init_flat = _flatten(state_after_first)
 
             if track_diag:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      famp, V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
@@ -2059,7 +2073,7 @@ def _run_coupled_block_impl(
                 final_amp, prev_loop_res = final_carry[6], final_carry[3]
                 final_V, final_W = final_carry[7], final_carry[8]
             else:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2,
                      V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
@@ -2096,7 +2110,7 @@ def _run_coupled_block_impl(
             omega_val = group.relaxation
 
             if track_diag:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      famp) = carry
                     s_raw = one_pass(s_cur)
@@ -2126,7 +2140,7 @@ def _run_coupled_block_impl(
                 iter_count, final_res = final_carry[4], final_carry[5]
                 final_amp, prev_loop_res = final_carry[6], final_carry[3]
             else:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
@@ -2150,7 +2164,7 @@ def _run_coupled_block_impl(
         else:
             # No acceleration ("none")
             if track_diag:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
                      famp) = carry
                     s_new = one_pass(s_cur)
@@ -2175,7 +2189,7 @@ def _run_coupled_block_impl(
                 iter_count, final_res = final_carry[4], final_carry[5]
                 final_amp, prev_loop_res = final_carry[6], final_carry[3]
             else:
-                def body_fn(i, carry):
+                def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
@@ -2637,7 +2651,7 @@ class GraphManager:
         constructor snapshot again (no recompile needed)."""
         self.params = self._snapshot_params()
 
-    def _params_or_default(self, params):
+    def _params_or_default(self, params) -> dict:
         """``gm.params`` when ``params`` is None; otherwise ``params``
         completed from ``gm.params``: a node or key the caller left out
         keeps its *live* value (not the constructor constant), so a
@@ -2751,7 +2765,9 @@ class GraphManager:
                     f"params['mappings'] names unknown edge {key!r}; mapped "
                     f"edges: {sorted(mapped)}"
                 )
-            known = set(edge.mapping.params_pytree())
+            mapping = edge.mapping
+            assert mapping is not None  # `mapped` is filtered on it above
+            known = set(mapping.params_pytree())
             unknown = set(weights) - known
             if unknown:
                 raise ValueError(
@@ -2806,7 +2822,9 @@ class GraphManager:
             raise TypeError(f"spec must be a ParamSpec, got {type(spec).__name__}")
         mapped = {e.key: e for e in self._edges if e.mapping is not None}
         if node in mapped:
-            known = mapped[node].mapping.params_pytree()
+            node_mapping = mapped[node].mapping
+            assert node_mapping is not None  # `mapped` is filtered on it above
+            known = node_mapping.params_pytree()
             if key not in known:
                 raise KeyError(
                     f"mapping on edge {node!r} has no weight {key!r}; it exposes "
@@ -4080,6 +4098,7 @@ class GraphManager:
         graph_axis_names = tuple(self._multigpu_mesh.axis_names)
         for name, node in sharded_nodes:
             node_mesh = getattr(node, "_mesh", None)
+            assert node_mesh is not None  # `sharded_nodes` is filtered on it
             node_axes = tuple(node_mesh.axis_names)
             if node_axes != graph_axis_names:
                 issues.append(ShardingIssue(
@@ -4831,12 +4850,13 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
+        step_fn = self._compiled_step
+        assert step_fn is not None  # `compile()` above always sets it
+
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
-        self._store_state(
-            self._compiled_step(self._state, external_inputs, params)
-        )
+        self._store_state(step_fn(self._state, external_inputs, params))
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -4869,12 +4889,15 @@ class GraphManager:
         if self._dirty or self._compiled_step is None:
             self.compile()
 
+        step_fn = self._compiled_step
+        assert step_fn is not None  # `compile()` above always sets it
+
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
         for i in range(n_steps):
             self._store_state(
-                self._compiled_step(self._state, external_inputs, params)
+                step_fn(self._state, external_inputs, params)
             )
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
@@ -5164,6 +5187,9 @@ class GraphManager:
                         scan_body, carry, None, length=int(n_steps),
                     )
                     if return_history:
+                        # `scan_body` yields `None` for the stacked output
+                        # only when `return_history` is False.
+                        assert hist is not None
                         return self._user_state(final), self._user_state(hist)
                     return self._user_state(final)
 
@@ -5631,7 +5657,7 @@ class GraphManager:
                     fresh_meta[key] = jnp.zeros_like(value)
 
         self._state.update(fresh)
-        if fresh_meta is not None:
+        if live_meta is not None and fresh_meta is not None:
             # Refilled, not replaced: the compiled step and any caller
             # holding the dict keep the object they were given.
             live_meta.clear()

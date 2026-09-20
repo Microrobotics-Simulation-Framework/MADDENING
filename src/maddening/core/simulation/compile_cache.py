@@ -24,12 +24,17 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import jax
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+if TYPE_CHECKING:
+    # Type-checking only: importing the graph module at runtime would
+    # make the dependency circular.
+    from maddening.core.graph_manager import GraphManager
 
 ENV_VAR = "MADDENING_COMPILATION_CACHE_DIR"
 
@@ -80,7 +85,7 @@ def enable_from_env() -> Optional[str]:
 
 @stability(StabilityLevel.EVOLVING)
 def warm_cache(
-    gm_factory: Callable[[], object],
+    gm_factory: Callable[[], "GraphManager"],
     *,
     external_inputs: Optional[dict] = None,
     n_steps: int = 1,

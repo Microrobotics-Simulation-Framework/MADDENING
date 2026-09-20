@@ -16,6 +16,12 @@
  * base64, no %.17g / strtod).  A bridge whose hello reply lacks
  * "protocol" is protocol 1: everything stays JSON, as before.
  *
+ * On the JSON path a non-finite value arrives as a quoted token
+ * ("NaN", "Infinity", "-Infinity"), because the bare tokens are not
+ * JSON; parse_values steps over the quotes and lets C99 strtod read
+ * the token.  Bare tokens are still accepted.  Non-finite values are
+ * never *sent*: do_set refuses them before the request is built.
+ *
  * The endpoint is read from "<resourcePath>/endpoint.txt" ("host:port"),
  * or from the MADDENING_FMU_ENDPOINT environment variable.
  *
@@ -330,12 +336,32 @@ static fmi3Status parse_values(Instance *in, double *out, size_t n) {
             inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: too few values in reply");
             return fmi3Error;
         }
+        /* A non-finite value arrives as a *quoted* token -- "NaN",
+         * "Infinity", "-Infinity" -- because the bare tokens json.dumps
+         * used to write are not JSON and no conforming parser but
+         * Python's accepts them (MADD-ANO-006).  C99 strtod parses the
+         * token itself, case-insensitively, including "infinity"; the
+         * quote is the only thing it cannot step over, so step over it
+         * here.  The bare form is still accepted, so this wrapper reads
+         * a reply from a bridge of either vintage. */
+        int quoted = (*p == '"');
+        if (quoted) ++p;
         out[i] = strtod(p, &end);
         if (end == p) {
             inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: malformed number in reply");
             return fmi3Error;
         }
         p = end;
+        if (quoted) {
+            /* Only a closing quote may follow: "1e5xyz" must not pass as
+             * 1e5 with trailing junk silently dropped. */
+            if (*p != '"') {
+                inst_log(in, fmi3Error, "logStatusError",
+                         "maddening_fmu: malformed quoted number in reply");
+                return fmi3Error;
+            }
+            ++p;
+        }
     }
     FUZZ_COUNT(parse_values_ok);
     return fmi3OK;

@@ -274,10 +274,20 @@ jobs:
           restore-keys: |
             hypothesis-examples-${{ runner.os }}-
 
-      - name: Run hypothesis property tests
+      # Run through the draw-rejection audit rather than pytest directly.
+      # It is a pytest plugin, so this runs exactly the tests the plain
+      # invocation ran, at the same cost, and additionally fails the job if
+      # any property test throws away more of its draws than
+      # scripts/audit_property_rejection.py's measured gate allows.  A test
+      # that filters most of its input searches a fraction of what its
+      # max_examples claims and is one unrelated strategy change away from
+      # a FailedHealthCheck; see docs/developer_guide/testing_standards.md.
+      - name: Run hypothesis property tests (with draw-rejection audit)
         env:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           MADDENING_HYPOTHESIS_PROFILE: ci
         run: |
-          python -m pytest tests/verification/hypothesis/ -v --tb=short
+          python scripts/audit_property_rejection.py \
+            tests/verification/hypothesis/ \
+            --check --pytest-arg=-v --pytest-arg=--tb=short

@@ -5677,7 +5677,23 @@ class GraphManager:
         than nothing: a group that came back missing its acceleration or
         its iteration cap would still be a group, and would quietly
         solve the same graph a different way.
+
+        The result is JSON-*valid*, not merely JSON-shaped: a non-finite
+        float anywhere in it -- a diverged param, an infinite ParamSpec
+        bound -- is the quoted token ``"NaN"`` / ``"Infinity"`` /
+        ``"-Infinity"``, not the bare token ``json.dumps`` writes by
+        default and no conforming reader accepts (``MADD-ANO-006``).
+        :meth:`from_dict` turns those back into floats, and reads the
+        bare tokens an older config carries as well.  The encoding is
+        applied once, to the assembled tree, so each part's own
+        ``to_dict`` still returns plain floats for the callers that want
+        numbers (the USD writer sets typed stage attributes from
+        :meth:`CouplingGroup.to_dict`).  See
+        :mod:`maddening.serialization.json_codec`.
         """
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            encode_non_finite,
+        )
         if strict_mappings:
             from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
                 check_mapping_serialisable,
@@ -5698,7 +5714,7 @@ class GraphManager:
             n: {k: s.to_dict() for k, s in o.items()}
             for n, o in self.param_spec_overrides().items()
         }
-        return {
+        return encode_non_finite({
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
@@ -5712,7 +5728,7 @@ class GraphManager:
             # exactly the config it wrote before this key existed.
             **({"coupling_groups": [g.to_dict() for g in self._coupling_groups]}
                if self._coupling_groups else {}),
-        }
+        })
 
     @classmethod
     def from_dict(
@@ -5745,7 +5761,17 @@ class GraphManager:
         in another group, a misspelled enum — raises ``ValueError``
         naming the group and what is wrong with it.  A config without
         the key (one written before it existed) loads unchanged.
+
+        Non-finite numbers are decoded first, so both spellings load:
+        the quoted ``"NaN"`` / ``"Infinity"`` / ``"-Infinity"`` that
+        :meth:`to_dict` writes since 0.4.0, and the bare tokens an older
+        config carries, which ``json.loads`` has already turned into
+        floats by the time the dict arrives here (``MADD-ANO-006``).
         """
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            decode_non_finite,
+        )
+        config = decode_non_finite(config)
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]

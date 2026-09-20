@@ -11,7 +11,32 @@ import on demand.
 """
 
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.surrogates.training
+    # import X` is an error.  Nothing here runs at import time.
+    from maddening.surrogates.training.callbacks import (
+        EarlyStopping,
+        LRSchedule,
+        ModelCheckpoint,
+        TrainingCallback,
+    )
+    from maddening.surrogates.training.physics_losses import (
+        composite_loss,
+        energy_conservation_loss,
+        momentum_conservation_loss,
+        residual_loss,
+        smoothness_loss,
+    )
+    from maddening.surrogates.training.trainer import (
+        SurrogateTrainer,
+        TrainResult,
+        mse_loss,
+    )
 
 _LAZY: dict[str, str] = {
     # Trainer & validation
@@ -47,4 +72,21 @@ def __dir__() -> list[str]:
     return sorted(_LAZY.keys())
 
 
-__all__ = list(_LAZY.keys())
+# Spelled out rather than `list(_LAZY.keys())`: a type checker cannot
+# evaluate a computed `__all__`, so a downstream `from ... import X`
+# against this package would be an error.  Kept in `_LAZY` order; the
+# `tests/test_lazy_reexports.py` pins the two against each other.
+__all__ = [
+    "SurrogateTrainer",
+    "TrainResult",
+    "mse_loss",
+    "TrainingCallback",
+    "EarlyStopping",
+    "ModelCheckpoint",
+    "LRSchedule",
+    "residual_loss",
+    "energy_conservation_loss",
+    "momentum_conservation_loss",
+    "smoothness_loss",
+    "composite_loss",
+]

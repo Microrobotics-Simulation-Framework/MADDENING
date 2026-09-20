@@ -127,6 +127,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
+  `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
+  of the four conditions the estimate rests on, not that it is a bound
 - **Breaking:** `FMIVariable` is keyword-only (0.4.0 inserted `node` / `field`
   between `unit` and `shape`, so a positional call silently bound the wrong
   fields) and `load_graph_from_usd` gained `node_registry=` / `allow_import=`
@@ -195,6 +198,8 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
+- `coupling_diagnostics()['bound_valid']` and `['gradient_error_bound']` warn on
+  read and are removed in 0.5.0; read `ratio_usable` / `gradient_error_estimate`
 - `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
   read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and
@@ -215,6 +220,9 @@ guidance; the itemized changes follow.
 - **Non-finite numbers are written as valid JSON** (config, USD `paramsJson`, FMI
   wire): `NaN` / `Infinity` / `-Infinity` are quoted, and both spellings load
 - **An FMU instance may reconnect at once**: the bridge no longer refuses the slot
+- **A failed `compile()` leaves the graph exactly as it was**: schedule, rate
+  dividers, external-input zeros and `params` commit after the last refusal.
+  `auto_couple` keeps groups it cannot replace; `run_adaptive` checks after it
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact
@@ -363,6 +371,9 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
+- **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
+  declare `NodeMeta(discretization_order=...)` and the harness refines a
+  manufactured solution and fails the node on a shortfall (MADD-VER-005..008)
 - **The committed stability report is compared with a fresh generation** in
   CI: it had rotted to 42 of 85 surfaces, hiding every deprecation.  Four
   surfaces that warn deprecated now carry the `DEPRECATED` tag
@@ -413,12 +424,15 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
-- **MADD-ANO-007**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
+- **MADD-ANO-010**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
   refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
   read back as that float -- spell such a value differently (minor, context_dependent)
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07
+- MADD-ANO-007/008/009 (HeatNode, all open): Dirichlet data is applied at the
+  first cell centre, not the documented rod end (order 1, not 2);
+  `stencil_order=4` converges at order 1 and is less accurate than the default
 - Every anomaly whose defect is still reachable now records an open-ended
   `affected_versions`; ANO-005 no longer claims 0.4.0 is clean, and ANO-002's
   workaround names `thermal_diffusivity`, not the `alpha=` `HeatNode` never had

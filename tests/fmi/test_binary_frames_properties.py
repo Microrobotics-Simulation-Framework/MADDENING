@@ -35,7 +35,7 @@ _HDR = struct.Struct(">I")
 # ----------------------------------------------------------- header strings
 # A header goes out through ``json_codec.dumps``, which refuses a *string*
 # leaf spelling one of the three non-finite tokens: the decoder would read
-# it back as that float, so the frame would be ambiguous (``MADD-ANO-007``).
+# it back as that float, so the frame would be ambiguous (``MADD-ANO-010``).
 # The strategies below therefore have to generate strings the codec accepts.
 #
 # They generate them; they do not filter them out.  Drawing one of the
@@ -130,7 +130,7 @@ def test_a_header_string_spelling_a_non_finite_token_is_refused(key, token, raw)
     ``decode_binary`` turns ``"NaN"`` back into ``float('nan')``, so a
     header carrying that *string* cannot survive the round trip above.
     The frame is refused where the path is still known rather than sent
-    and silently mis-read at the far end (``MADD-ANO-007``).
+    and silently mis-read at the far end (``MADD-ANO-010``).
     """
     with pytest.raises(ValueError, match="cannot be written to JSON") as exc:
         encode_binary({key: token}, raw)

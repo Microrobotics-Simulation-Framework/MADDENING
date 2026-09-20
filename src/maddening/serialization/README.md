@@ -64,7 +64,7 @@ still accepted on load, so an older config needs no migration.
 Because a decoder cannot tell the float `NaN` from a string that reads
 `"NaN"`, `to_dict` **raises** on a string leaf equal to one of the three
 tokens, naming its path.  Spell such a value differently.  This is a real
-limitation on a wire format and is registered as **`MADD-ANO-007`**; the
+limitation on a wire format and is registered as **`MADD-ANO-010`**; the
 registry entry has the reasoning, the workaround and why a tagged object
 such as `{"__nonfinite__": "Infinity"}` was not used instead (it relocates
 the ambiguity to a rarer shape and makes it silent on read rather than

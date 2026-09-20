@@ -18,7 +18,8 @@ verification/
 │   ├── nodes/                           # Per-node properties (ball, spring, heat)
 │   └── conftest.py                      # Disable hypothesis deadline (JIT warmup)
 ├── test_gradient_health.py              # Gradient checks
-└── test_heat_analytical.py              # Analytical benchmark
+├── test_heat_analytical.py              # Analytical benchmark
+└── test_mms_order.py                    # Observed order of convergence (MMS)
 ```
 
 ## Properties covered
@@ -31,6 +32,7 @@ verification/
 | L2 / mixed norm: non-negative, symmetric, triangle inequality, finite with atol=0 | |
 | Integrator zero-step identity, constant-deriv exact, finite output | Euler, Heun, RK4 |
 | Node update finite / structure-preserving / deterministic / JIT-consistent | All built-in nodes |
+| Observed order of convergence matches the declared one | HeatNode (space + time), LBMNode (space), RigidBodyNode (time) |
 | Graph topology robustness | Random topologies |
 | Multi-rate sync consistency | Rate ratios |
 
@@ -42,6 +44,10 @@ verification/
 | Mixed norm div-by-zero | `acceleration.py` (3 sites) | `scale = 0` with `atol=0` | `jnp.where(scale > 0, diff/jnp.maximum(scale, 1e-300), 0.0)` |
 | SpringDamperNode div-by-zero | `spring.py` | `mass=0` | `mass > 0` validation |
 | IQN-ILS condition squaring | `acceleration.py` | `V.T @ V` squares cond# | `jnp.linalg.lstsq` |
+
+| HeatNode `stencil_order=4` converges at order 1, not 4 | `heat.py` | MMS spatial refinement | open, MADD-ANO-008 |
+| HeatNode Dirichlet data lands at the cell centre, not the documented rod end | `heat.py` | MMS with the documented boundary data | open, MADD-ANO-007 |
+| HeatNode 4th-order stencil diverges inside the documented CFL limit | `heat.py` | Fo = 0.40 with `stencil_order=4` | open, MADD-ANO-009 |
 
 ## Physical limitations (not code bugs)
 
@@ -58,6 +64,18 @@ from maddening.testing.verification import assert_node_verified
 def test_my_node():
     assert_node_verified(
         my_node, bounds={"temperature": (200.0, 5000.0), "pressure": (1e3, 1e7)},
+    )
+```
+
+For the order of accuracy, declare it on the node and measure it:
+
+```python
+from maddening.testing.mms import RefinementAxis, assert_node_order_verified
+
+def test_my_node_is_second_order_in_space():
+    assert_node_order_verified(
+        my_node, axis=RefinementAxis.SPACE,
+        error_at=error_at, levels=(10, 20, 40, 80),
     )
 ```
 

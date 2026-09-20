@@ -46,7 +46,12 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    NodeMeta,
+    StabilityLevel,
+    ValidatedRegime,
+)
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
@@ -573,6 +578,20 @@ class LBMNode(SimulationNode):
             "streaming: f_i(x+e_i, t+1) = f_i(x, t)"
         ),
         discretization="Lattice Boltzmann (D3Q19/D2Q9, explicit, 2nd-order)",
+        discretization_order=DiscretizationOrder(
+            spatial=2.0,
+            temporal=None,
+            notes=(
+                "2nd order in the grid spacing under diffusive scaling "
+                "(lattice viscosity held fixed, velocity scaled with 1/N), "
+                "measured by MADD-VER-007.  No temporal order is declared "
+                "because there is no independent timestep: the lattice fixes "
+                "dx = dt = 1 and ``update`` ignores its ``dt`` argument, so "
+                "refining time *is* refining the grid.  Degrades to 1st "
+                "order at curved bounce-back walls (see ``limitations``); "
+                "the measurement is on a wall-free periodic domain."
+            ),
+        ),
         assumptions=(
             "Incompressible flow (Mach number << 1)",
             "BGK single-relaxation-time collision operator",

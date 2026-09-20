@@ -10,7 +10,7 @@ Usage (from a downstream library like MIME)::
     from maddening.compliance import (
         # Metadata schemas
         NodeMeta, EdgeMeta, ValidatedRegime, Reference,
-        StabilityLevel, UQReadiness,
+        StabilityLevel, UQReadiness, DiscretizationOrder,
         # Anomaly management
         AnomalyRecord, AnomalySeverity, SafetyRelevance, ResolutionStatus,
         # Validation infrastructure
@@ -34,6 +34,7 @@ from maddening.core.compliance.metadata import (
     Reference,
     StabilityLevel,
     UQReadiness,
+    DiscretizationOrder,
     collect_node_metadata,
     collect_hazard_hints,
 )
@@ -64,7 +65,7 @@ from maddening.compliance._validate import validate_anomaly_registry
 __all__ = [
     # Metadata
     "NodeMeta", "EdgeMeta", "ValidatedRegime", "Reference",
-    "StabilityLevel", "UQReadiness",
+    "StabilityLevel", "UQReadiness", "DiscretizationOrder",
     # Anomaly
     "AnomalyRecord", "AnomalySeverity", "SafetyRelevance", "ResolutionStatus",
     # Validation

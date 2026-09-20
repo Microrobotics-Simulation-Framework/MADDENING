@@ -1,4 +1,4 @@
-"""F2c: `gradient_error_bound` does not bound the adjoint/FD gap on the
+"""F2c: `gradient_error_estimate` does not bound the adjoint/FD gap on the
 two-mode contraction, exactly as `error_estimate` does not bound the
 distance.  Same assertion as
 tests/core/test_coupling_error_bound.py::test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap
@@ -66,9 +66,9 @@ print(f"exact d sum(x*)/d gain            = {exact:.6f}")
 print(f"IFT adjoint                       = {analytic:.6f}")
 print(f"finite difference of the forward  = {fd:.6f}")
 print(f"|adjoint - fd|                    = {abs(analytic-fd):.6f}")
-print(f"bound_valid                       = {d['bound_valid']}")
+print(f"ratio_usable                      = {d['ratio_usable']}")
 print(f"converged                         = {d['converged']}")
-print(f"gradient_error_bound              = {d['gradient_error_bound']:.6e}")
-ok = abs(analytic - fd) <= max(d["gradient_error_bound"], 1e-5)
-print(f"assertion |adjoint-fd| <= bound   = {ok}   "
-      f"(exceeded by {abs(analytic-fd)/max(d['gradient_error_bound'],1e-5):.1f}x)")
+print(f"gradient_error_estimate           = {d['gradient_error_estimate']:.6e}")
+ok = abs(analytic - fd) <= max(d["gradient_error_estimate"], 1e-5)
+print(f"assertion |adjoint-fd| <= estimate = {ok}   "
+      f"(exceeded by {abs(analytic-fd)/max(d['gradient_error_estimate'],1e-5):.1f}x)")

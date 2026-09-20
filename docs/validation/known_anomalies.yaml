@@ -439,6 +439,148 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-007"
+    title: "HeatNode applies its Dirichlet boundary data at the first cell centre, not at the rod ends it documents"
+    description: >
+      `HeatNode.boundary_input_spec` documents `left_temperature` as the
+      "Dirichlet BC at left end" and `right_temperature` as the BC "at right
+      end", and the class docstring says the same.  The implementation writes
+      those values into the first and last *cell*, whose centres are at
+      x = dx/2 and x = L - dx/2, not at x = 0 and x = L.  A caller who
+      supplies T(0, t) and T(L, t), as documented, is imposing the boundary
+      value half a cell away from where it belongs, which is an O(dx) error
+      in the boundary data and drops the scheme from 2nd order to 1st order
+      globally.
+      Measured at 0.4.0.dev0 by the Method of Manufactured Solutions on a
+      steady manufactured profile (float64, Fourier number 0.4, relaxed to
+      steady state).  Supplying the exact solution at the first and last cell
+      centre -- what the code implements -- gives observed spatial orders of
+      1.847, 1.926, 1.963, 1.982 over a 10/20/40/80/160 ladder, converging on
+      the declared 2.  Supplying it at the rod ends -- what the code
+      documents -- gives 1.028, 1.009, 1.003, 1.001 and an error of 0.88% at
+      160 cells, against 0.0065% for the same ladder under the other reading.
+      The pre-existing convergence benchmark MADD-VER-002 measured the same
+      first-order rate, but attributed it to the node rather than to the
+      boundary convention and accepted any rate between 0.7 and 2.5.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent loss of an order of accuracy.  Nothing fails, warns or looks
+      wrong: the simulation runs, the field is smooth, and the error is a
+      plausible-looking fraction of a percent.  A downstream product that
+      sized its grid from the documented 2nd-order convergence would be
+      getting an error that falls only linearly with resolution, so a
+      refinement that was expected to give a 4x accuracy gain gives 2x.  The
+      relevance depends on whether the downstream product supplies boundary
+      data at the rod ends (the documented reading) and on whether its
+      accuracy budget was derived from the declared order.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode.update"
+      - "maddening.nodes.heat.HeatNode.boundary_input_spec"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Supply the Dirichlet data at the first and last cell centre rather than
+      at the rod ends: evaluate the boundary condition at x = dx/2 and
+      x = L - dx/2 with dx = length / n_cells.  For a boundary condition that
+      is constant in space near the ends the difference is negligible; for one
+      with a gradient it is the whole defect.
+    resolution_status: "open"
+    residual_risk: >
+      Closing it is a choice between two incompatible fixes, both of which
+      change results for existing callers: move the grid so that the end cells
+      sit on the rod ends (changing every cell coordinate), or interpolate the
+      supplied boundary value to the cell centre (changing the meaning of the
+      input).  That is a maintainer's call on a stable node, so it is recorded
+      here rather than made inside the branch that measured it.
+    verification:
+      - "tests/verification/test_mms_order.py::test_heat_converges_at_its_declared_order_with_the_documented_boundary_data"
+      - "tests/verification/test_mms_order.py::test_heat_second_order_stencil_converges_at_its_declared_spatial_order"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-008"
+    title: "HeatNode's 4th-order stencil converges at 1st order and is less accurate than the 2nd-order one"
+    description: >
+      `HeatNode(stencil_order=4)` is documented as a 4th-order central
+      difference and declares `DiscretizationOrder(spatial=4.0)`.  It
+      converges at order 1.
+      The 5-point stencil needs the two ghost values at x = -dx and x = -2dx
+      (and their mirrors).  `_compute_laplacian` builds them as
+      `ghost_left_1 = T_left` and `ghost_left_2 = 2*T_left - T[1]`, which are
+      the value *at* the boundary cell and a linear extrapolation to one cell
+      beyond it -- both shifted one cell inwards from the positions the
+      stencil reads them at.  The resulting local truncation error at the
+      first interior cell is O(1/dx) rather than O(dx^4), and the global error
+      is O(dx).  The two boundary cells themselves are overwritten with the
+      Dirichlet data afterwards, which is why the defect is invisible there.
+      Measured at 0.4.0.dev0 by the Method of Manufactured Solutions (float64,
+      Fourier number 0.3, steady manufactured profile relaxed to steady
+      state): observed spatial orders 0.717, 0.896, 0.954 over a 10/20/40/80
+      ladder.  At 80 cells the error is 2.65e-3, against 2.56e-4 for the
+      default 2nd-order stencil on the same problem -- the "4th-order" option
+      is 10x *less* accurate, and the gap widens with refinement.  Replacing
+      only the two ghost values with the exact solution at x = -dx and x =
+      -2dx, changing nothing else, restores observed orders of 3.775, 5.021,
+      4.792, which locates the defect in the ghost construction alone.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A user selects `stencil_order=4` to buy accuracy and receives less than
+      the default gives, with no error, no warning and a result that looks
+      converged.  As with MADD-ANO-007 the failure is silent and the output
+      plausible.  The relevance depends on whether the downstream product uses
+      the 4th-order option and on whether its accuracy budget was derived from
+      the declared order.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode.update"
+      - "maddening.nodes.heat._laplacian_4th_order_uniform"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use the default `stencil_order=2`, which meets its declared 2nd order
+      and is more accurate at every resolution measured.  The sharded path
+      (`update_padded`, via `ShardedStencilNode`) is not affected in the
+      interior: it takes real halo values from the neighbouring shard rather
+      than constructing ghosts, so only the global domain boundary is at risk.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_mms_order.py::test_heat_fourth_order_stencil_converges_at_its_declared_spatial_order"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-009"
+    title: "HeatNode's documented CFL limit is the 2nd-order stencil's; the 4th-order stencil diverges below it"
+    description: >
+      `HeatNode.meta.limitations`, its `validated_regimes` entry for CFL and
+      MADD-ANO-002 all give the stability limit as dt < dx^2 / (2*alpha), a
+      Fourier number of 0.5, without qualification.  That is the bound for the
+      3-point stencil.  The 5-point 4th-order stencil is stable only up to a
+      Fourier number of 3/8.
+      Measured at 0.4.0.dev0 on a 20-cell rod, alpha = 1.0, length 1.0, with
+      `stencil_order=4`: Fo = 0.37 converges normally, Fo = 0.40 -- inside the
+      documented limit -- diverges to a non-finite field with no warning.  The
+      failure mode is the one MADD-ANO-002 already describes; this entry
+      records that the stated bound is wrong for one of the two stencils, so
+      following the documentation is not sufficient to avoid it.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The consequence is MADD-ANO-002's, and inherits its rationale: an
+      unstable timestep produces incorrect results with no indication of
+      error.  What this entry adds is that the documented safe region is
+      itself unsafe for `stencil_order=4`, so a caller who honours the
+      published limit is not protected.  Divergence to non-finite values is
+      loud in any downstream check for finiteness, which is why the severity
+      is minor rather than major.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      With `stencil_order=4`, keep timestep * thermal_diffusivity / dx**2
+      below 0.375 (dx = length / n_cells), not the documented 0.5.  The
+      default `stencil_order=2` is unaffected.
+    resolution_status: "open"
+    verification:
+      - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-010"
     title: "A string spelling a non-finite token is refused by the JSON serialisers"
     description: >
       Since 0.4.0 a non-finite float is written as the quoted token

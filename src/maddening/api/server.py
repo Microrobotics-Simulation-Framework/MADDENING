@@ -23,13 +23,22 @@ Usage
 
 Security
 --------
-This API has no authentication and no TLS.  Every route -- including
-``POST /cloud/launch``, which provisions paid GPU instances with this
-host's cloud credentials -- is open to anyone who can reach the port.
-Bind it to ``127.0.0.1`` and reach it through an SSH tunnel, or put an
-authenticating, TLS-terminating reverse proxy in front of it.  Call
-:func:`warn_if_publicly_bound` with the bind address before starting the
-server so a non-loopback bind is announced in the log.
+A **loopback bind is unauthenticated**, exactly as it always was: bind
+``127.0.0.1`` and nothing changes for local development.  **Any other
+bind requires a bearer token on every route** except ``/healthz`` and
+the static ``/viz/*`` pages -- see :mod:`maddening.api.auth` for where
+the token comes from and how a client presents it.  Tell the server
+which address it will be bound to::
+
+    server = SimulationServer(registry, bind_host=host)
+    server.auth.announce(port)          # logs a generated token once
+    warn_if_publicly_bound(host, port)  # logs the remaining exposure
+    uvicorn.run(server.create_app(), host=host, port=port)
+
+There is still **no TLS**.  The token crosses the network in cleartext,
+so a non-loopback bind belongs on a private network or behind a
+TLS-terminating proxy; an SSH tunnel to a loopback-bound server remains
+the best-supported way to reach this API from another machine.
 """
 
 from __future__ import annotations
@@ -50,7 +59,7 @@ import numpy as np
 
 try:
     from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
 except ImportError as _exc:
     raise ImportError(
@@ -61,6 +70,15 @@ except ImportError as _exc:
 _STATIC_DIR = Path(__file__).parent / "static"
 
 from maddening import __version__ as _maddening_version
+from maddening.api.auth import (
+    LOOPBACK_HOSTS,
+    UNAUTHENTICATED_PATHS,
+    WS_SUBPROTOCOL,
+    APIAuth,
+    bearer_from_headers,
+    bearer_from_subprotocols,
+    is_loopback,
+)
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
@@ -308,24 +326,19 @@ def _dry_run_node(node, state: Any = None) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
-#: Addresses that only this machine can reach.
-LOOPBACK_HOSTS = frozenset({
-    "127.0.0.1", "localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1",
-})
-
-
 @stability(StabilityLevel.EVOLVING)
 def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
     """Log a warning when *host* is not a loopback address.
 
-    The API has no authentication and no TLS, and the documented posture
-    is to bind it to localhost or to front it with an authenticating
-    proxy.  Every shipped container path does the opposite, so a silent
-    non-loopback bind is the single most likely way a user ends up with
-    an open ``POST /cloud/launch`` -- an endpoint that provisions paid
-    GPU instances with the host's stored provider credentials.  Call this
-    immediately before handing the app to uvicorn so an operator sees the
-    exposure in the first screen of logs.
+    Such a bind now demands a bearer token (see
+    :class:`maddening.api.auth.APIAuth`), so this is no longer the
+    difference between private and open.  It is still the difference
+    between a port only this machine can reach and a port on the
+    network with **no TLS** in front of it: the token, and every
+    simulation state the API returns, cross the wire in cleartext, and
+    ``/healthz`` and the ``/viz/*`` pages answer without a credential.
+    Call this immediately before handing the app to uvicorn so an
+    operator sees what is exposed in the first screen of logs.
 
     Parameters
     ----------
@@ -344,24 +357,23 @@ def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
     -----
     This warns; it does not refuse.  Changing the bind default would
     break containerised deployments, where binding 127.0.0.1 makes the
-    server unreachable even with a published port.
+    server unreachable even with a published port.  What refuses is the
+    token check, which the same non-loopback bind switches on.
     """
-    normalised = (host or "").strip().lower()
-    if normalised in LOOPBACK_HOSTS or normalised.startswith("127."):
+    if is_loopback(host):
         return False
     logger.warning(
         "\n"
         "============================================================\n"
-        "  MADDENING API is listening on %s:%s -- NOT loopback.\n"
-        "  This API has NO AUTHENTICATION and NO TLS.  Anyone who can\n"
-        "  reach this address can read and rewrite the graph, and can\n"
-        "  POST /cloud/launch, which provisions paid GPU instances\n"
-        "  with this host's cloud credentials (and /cloud/teardown,\n"
-        "  which destroys them).  /docs lists every route.\n"
+        "  MADDENING API is listening on %s:%s -- NOT loopback, so\n"
+        "  every route needs 'Authorization: Bearer <token>'.\n"
+        "  There is still NO TLS: the token and every state snapshot\n"
+        "  cross the network in cleartext, and /healthz and the\n"
+        "  /viz/* pages answer without a credential.\n"
         "  Bind MADDENING_HOST=127.0.0.1 and reach the server through\n"
-        "  an SSH tunnel (ssh -L %s:127.0.0.1:%s <host>), or put an\n"
-        "  authenticating, TLS-terminating proxy in front of it and\n"
-        "  keep this port closed in the firewall / security group.\n"
+        "  an SSH tunnel (ssh -L %s:127.0.0.1:%s <host>), or put a\n"
+        "  TLS-terminating proxy in front of it and keep this port\n"
+        "  closed in the firewall / security group.\n"
         "============================================================",
         host, port, port, port,
     )
@@ -415,6 +427,26 @@ class SimulationServer:
         If provided, enables the ``/ws/render`` WebSocket endpoint that
         streams server-side rendered frames to thin browser clients.
         Any renderer implementing ``ServerFrameRendererBase`` works.
+    bind_host : str, optional
+        The address this server will be bound to.  A loopback address
+        leaves the API unauthenticated, as it has always been; anything
+        else turns on the bearer token.  The app cannot see the socket
+        uvicorn binds, so it has to be told.  ``None`` reads
+        ``MADDENING_HOST`` and falls back to ``"127.0.0.1"``.
+    api_token : str, optional
+        An explicit bearer token, overriding ``MADDENING_API_TOKEN``.
+
+    Attributes
+    ----------
+    auth : maddening.api.auth.APIAuth
+        The token and the rule for when it is demanded.  Call
+        ``auth.announce(port)`` before serving so a generated token
+        reaches the log.
+
+    Raises
+    ------
+    ValueError
+        If ``MADDENING_API_TOKEN`` or *api_token* is set but blank.
     """
 
     def __init__(
@@ -423,12 +455,16 @@ class SimulationServer:
         graph_manager: Optional[GraphManager] = None,
         checkpoint_root: Optional[str] = None,
         frame_renderer: Optional[Any] = None,
+        bind_host: Optional[str] = None,
+        api_token: Optional[str] = None,
     ) -> None:
         self.registry = dict(node_registry)
+        self.auth = APIAuth(bind_host=bind_host, token=api_token)
         self.gm = graph_manager if graph_manager is not None else GraphManager()
-        # /checkpoint/{save,load} only touch files under this directory
-        # (an unauthenticated client must not choose arbitrary server
-        # paths).  Bind the server to localhost or put it behind auth.
+        # /checkpoint/{save,load} only touch files under this directory:
+        # a client must not choose arbitrary server paths.  That holds
+        # whether or not the bearer token is enforced -- on a loopback
+        # bind the caller is anyone with a shell on this box.
         self.checkpoint_root = Path(checkpoint_root or Path.cwd() / "checkpoints").resolve()
         self.relay = StateRelay()
         self.runner: Optional[RealtimeRunner] = None
@@ -458,6 +494,66 @@ class SimulationServer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _unauthorized_detail(self, peer: Optional[str]) -> str:
+        """The 401 body: why a token is needed and where to find it."""
+        if self.auth.enforced:
+            return (
+                "This server is bound to a non-loopback address, so every "
+                "route requires 'Authorization: Bearer <token>'. The token "
+                "is $MADDENING_API_TOKEN, or was logged once at start-up."
+            )
+        return (
+            f"This server was configured for a loopback bind "
+            f"({self.auth.bind_host!r}) but the request arrived from "
+            f"{peer!r}. A request from off-host needs "
+            f"'Authorization: Bearer <token>'. If the bind really is "
+            f"public, pass bind_host to SimulationServer (or set "
+            f"MADDENING_HOST) so the token is logged at start-up."
+        )
+
+    async def _authorise_ws(self, websocket: WebSocket) -> tuple[bool, Optional[str]]:
+        """Authenticate a WebSocket handshake before accepting it.
+
+        A browser cannot set ``Authorization`` on a WebSocket handshake,
+        but it can offer subprotocols, so the token may arrive either as
+        the header (non-browser clients) or inside a
+        ``maddening.bearer.*`` subprotocol.  See
+        :func:`maddening.api.auth.websocket_credentials`.
+
+        Parameters
+        ----------
+        websocket : WebSocket
+            The un-accepted connection.
+
+        Returns
+        -------
+        tuple of (bool, str or None)
+            ``(False, None)`` when the connection was refused -- it has
+            already been closed with 1008 and the caller must return.
+            Otherwise ``(True, subprotocol)``, where *subprotocol* is
+            what ``accept()`` must echo: RFC 6455 requires the server to
+            select one of the offered names, and a browser aborts the
+            connection when it selects none.
+        """
+        offered = list(websocket.scope.get("subprotocols") or [])
+        selected = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
+        peer = websocket.client.host if websocket.client else None
+        if not self.auth.required_for_peer(peer):
+            return True, selected
+        presented = (
+            bearer_from_headers(websocket.headers)
+            or bearer_from_subprotocols(offered)
+        )
+        if self.auth.verify(presented):
+            return True, selected
+        logger.warning(
+            "Refused WebSocket %s from %s: %s bearer token",
+            websocket.url.path, peer or "?",
+            "invalid" if presented else "missing",
+        )
+        await websocket.close(code=1008, reason="Invalid or missing bearer token")
+        return False, None
 
     def _ensure_relay_attached(self) -> None:
         if self._relay_attached:
@@ -512,16 +608,85 @@ class SimulationServer:
     # ------------------------------------------------------------------
 
     def create_app(self) -> FastAPI:
-        """Build and return the FastAPI application."""
+        """Build and return the FastAPI application.
+
+        Returns
+        -------
+        FastAPI
+            The application.  When :attr:`auth` is enforced -- i.e. the
+            bind address is not loopback -- every route but
+            :data:`maddening.api.auth.UNAUTHENTICATED_PATHS` requires
+            ``Authorization: Bearer <token>``, and ``/docs``, ``/redoc``
+            and ``/openapi.json`` are not served at all.
+        """
+        # Swagger UI is a browser page that fetches /openapi.json with no
+        # Authorization header, so it cannot work behind a bearer token.
+        # A half-working docs page that 401s on its own schema is worse
+        # than none: when the token is enforced these are switched off,
+        # and the way to read them is an SSH tunnel to a loopback bind.
+        interactive_docs = not self.auth.enforced
         app = FastAPI(
             title="MADDENING Simulation Server",
             description="HTTP/WebSocket API for the MADDENING simulation graph.",
             # The package version, not a separately maintained API
             # version: this was pinned at "0.3.0" and went stale.
             version=_maddening_version,
+            docs_url="/docs" if interactive_docs else None,
+            redoc_url="/redoc" if interactive_docs else None,
+            openapi_url="/openapi.json" if interactive_docs else None,
         )
 
+        # -- authentication ---------------------------------------------------
+        # A middleware rather than a per-route ``Depends`` so that a route
+        # added later is protected by default: forgetting the dependency
+        # is exactly how this hole gets rebuilt.  It also covers the
+        # FastAPI-generated docs routes, which take no dependencies.
+        @app.middleware("http")
+        async def _require_bearer_token(request, call_next):
+            peer = request.client.host if request.client else None
+            if (self.auth.required_for_peer(peer)
+                    and request.url.path not in UNAUTHENTICATED_PATHS):
+                if not self.auth.verify(bearer_from_headers(request.headers)):
+                    logger.warning(
+                        "Refused %s %s from %s: %s bearer token",
+                        request.method, request.url.path, peer or "?",
+                        "invalid" if request.headers.get("authorization")
+                        else "missing",
+                    )
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": self._unauthorized_detail(peer)},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            return await call_next(request)
+
+        @app.get("/healthz", tags=["meta"])
+        def healthz():
+            """Liveness probe.  Served without a token, on purpose.
+
+            A container health check has no credential, and this answer
+            says nothing about the graph -- only that the process is up
+            and which version it is.
+            """
+            return {"status": "ok", "version": _maddening_version}
+
         # -- visualization endpoints -----------------------------------------
+
+        @app.get("/viz/auth.js", tags=["viz"], response_class=PlainTextResponse)
+        def viz_auth_js():
+            """Serve the token helper the bundled pages load.
+
+            Static and secret-free: it *finds* a token (a ``#token=``
+            fragment, then ``?token=``, then ``sessionStorage``, then a
+            prompt), it never contains one.  That is why it, and the
+            pages that load it, are served without a credential --
+            otherwise the page that asks for the token could not load.
+            """
+            js_path = _STATIC_DIR / "auth.js"
+            return PlainTextResponse(
+                content=js_path.read_text(),
+                media_type="application/javascript",
+            )
 
         @app.get("/viz/graph", tags=["viz"], response_class=HTMLResponse)
         def viz_graph():
@@ -1404,8 +1569,14 @@ class SimulationServer:
               snapshots.  Send ``{"type": "subscribe", "fields": null}``
               to reset to full state.
             * ``{"type": "config", "fps": 15}`` — change poll rate.
+
+            Authentication is the same rule as every HTTP route; see
+            :meth:`SimulationServer._authorise_ws`.
             """
-            await websocket.accept()
+            authorised, subprotocol = await self._authorise_ws(websocket)
+            if not authorised:
+                return
+            await websocket.accept(subprotocol=subprotocol)
             logger.info("WebSocket client connected to /ws/state")
             self._ensure_relay_attached()
 
@@ -1485,8 +1656,14 @@ class SimulationServer:
               to reset to full state; omit ``compression`` to keep the
               current mode.
             * ``{"type": "config", "fps": 30}`` — change poll rate.
+
+            Authentication is the same rule as every HTTP route; see
+            :meth:`SimulationServer._authorise_ws`.
             """
-            await websocket.accept()
+            authorised, subprotocol = await self._authorise_ws(websocket)
+            if not authorised:
+                return
+            await websocket.accept(subprotocol=subprotocol)
             logger.info("WebSocket client connected to /ws/state/binary")
             self._ensure_relay_attached()
 
@@ -1583,6 +1760,12 @@ class SimulationServer:
             All rendering happens server-side -- suitable for deployment
             behind services like AWS AppStream.
             """
+            # Authenticate first: whether this deployment configured a
+            # renderer is not something an anonymous caller gets to learn.
+            authorised, subprotocol = await self._authorise_ws(websocket)
+            if not authorised:
+                return
+
             if self._frame_renderer is None:
                 await websocket.close(
                     code=1008,
@@ -1590,7 +1773,7 @@ class SimulationServer:
                 )
                 return
 
-            await websocket.accept()
+            await websocket.accept(subprotocol=subprotocol)
             logger.info("WebSocket client connected to /ws/render")
             self._ensure_relay_attached()
 

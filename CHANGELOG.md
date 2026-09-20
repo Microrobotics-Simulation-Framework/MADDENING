@@ -14,9 +14,15 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Draw-rejection audit** (`scripts/audit_property_rejection.py`): measures what
+  fraction of each property test's Hypothesis draws `assume`/`.filter` throws
+  away, and fails CI over the gate — run it before narrowing a strategy
 - **`fim` says when `rank` was decided at the float32 noise floor**: a
   `PrecisionLimitWarning` naming the eigenvalue ratio, the cutoff and the
   `jax_enable_x64` re-run that settles it.  Quiet on well-conditioned problems
+- **A performance regression gate on compile counts, not the clock**:
+  `profile_graph` reports retraces, jaxpr primitives and lowered HLO ops;
+  `python scripts/compile_counts.py --check` gates them and CI runs it
 - **`ResolutionStatus.PARTIALLY_RESOLVED`** — MADDENING's own
   `known_anomalies.yaml` has used `partially_resolved` since MADD-ANO-005 was
   written; the enum could not represent the registry this project ships
@@ -226,6 +232,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Non-finite numbers are written as valid JSON** (config, USD `paramsJson`, FMI
+  wire): `NaN` / `Infinity` / `-Infinity` are quoted, and both spellings load
+- **An FMU instance may reconnect at once**: the bridge no longer refuses the slot
 - **A failed `compile()` leaves the graph exactly as it was**: schedule, rate
   dividers, external-input zeros and `params` commit after the last refusal.
   `auto_couple` keeps groups it cannot replace; `run_adaptive` checks after it
@@ -409,6 +418,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **The API requires a bearer token unless it is bound to loopback** (CRITICAL):
+  set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
+  no longer defaults to `[8000]`, so a cloud launch stops opening the API port
 - **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
   bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
   stage no longer imports the class it names — pass `node_registry=` to allow one
@@ -430,6 +442,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- **MADD-ANO-010**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
+  refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
+  read back as that float -- spell such a value differently (minor, context_dependent)
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07

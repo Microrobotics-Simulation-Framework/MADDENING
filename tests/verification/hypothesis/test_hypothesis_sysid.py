@@ -90,6 +90,27 @@ initial_state_st = st.fixed_dictionaries({
     "position": _finite(-5.0, 5.0),
     "velocity": _finite(-2.0, 2.0),
 })
+# The spring's equilibrium is ``anchor_position + rest_length``, and with no
+# anchor edge that is ``REST``.  A state started *at* equilibrium and at rest
+# never moves, so a rollout from it carries no information about ``(k, c)``
+# and the FIM properties below cannot say anything -- which is what
+# ``assume(_position_variance(obs) > 1e-2)`` was throwing away.  Hypothesis
+# samples exactly 0.0 far more often than a uniform draw would, so that gate
+# fired on 13-31% of draws depending on the test, measured, against ~7% for
+# uniform sampling of the same ranges.
+#
+# Displacing the start by at least half a unit removes the at-rest draws
+# without narrowing the dynamics: the envelope on ``(k, c, m)`` is untouched,
+# so the lightly-damped stiff spring at ``k=49, c=0.125, m=3`` that
+# ``test_crb_is_finite_exactly_where_the_pair_is_identifiable`` documents as
+# its counter-example is still drawn. It does not reach zero rejection --
+# a soft, heavily damped spring still barely moves inside a 20-step window,
+# and constraining *that* away would delete the counter-example. Each test
+# records what it still rejects.
+displaced_state_st = st.fixed_dictionaries({
+    "position": st.one_of(_finite(-5.0, REST - 0.5), _finite(REST + 0.5, 5.0)),
+    "velocity": _finite(-2.0, 2.0),
+})
 # Multiplicative perturbation of the fitted constants (stiffness, damping).
 perturb_st = st.fixed_dictionaries({
     "stiffness": _finite(0.5, 2.0),
@@ -411,7 +432,7 @@ class TestFIM:
         assert name in rep.param_names
         assert 0.0 < weight <= 1.0 + 1e-6
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_crb_is_finite_exactly_where_the_pair_is_identifiable(
         self, single, truth, init, n,
@@ -435,6 +456,22 @@ class TestFIM:
         stronger than what it replaced: it holds for every draw, identifiable
         or not, and it would catch a ``rank`` that disagreed with its own
         ``crb`` in either direction.
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-26% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
         """
         gm = single
         note(f"truth={truth} init={init} n={n}")
@@ -464,7 +501,7 @@ class TestFIM:
             assert bool((crb[finite] > 0.0).all()), rep.crb
             assert bool(np.isinf(crb[~finite]).all()), rep.crb
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_common_scale_of_k_c_m_is_the_null_direction(
         self, single, truth, init, n,
@@ -478,6 +515,23 @@ class TestFIM:
         for some draws ``fim`` correctly reports that the rank verdict
         sits at the float32 noise floor.  What is asserted here is the
         eigen*vector*, which the warning says nothing about.
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 15-24% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a
+        soft, heavily damped spring that barely moves inside a 20-sample
+        window, and an envelope that excluded those would also exclude the
+        lightly-damped stiff spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
         """
         gm = single
         note(f"truth={truth} init={init} n={n}")
@@ -502,14 +556,32 @@ class TestFIM:
         proj = np.linalg.norm(null.T @ d)
         assert proj > 0.98, (proj, ev / ev[-1], V[:, 0])
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st)
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_valued_parameter_is_exact_null_direction_under_relative_scaling(
         self, single, truth, init, n,
     ):
         """At ``damping == 0`` the relative FIM has a zero damping row and
         column, so the weakest direction is exactly the damping axis with
-        eigenvalue 0 (a relative change of zero is no change)."""
+        eigenvalue 0 (a relative change of zero is no change).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 8-16% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         truth = {**truth, "damping": 0.0}
         note(f"truth={truth} init={init} n={n}")
@@ -526,7 +598,7 @@ class TestFIM:
         assert abs(v[0]) > 0.999, v  # param_names[0] == "['damping']"
         assert rep.least_identifiable()[0] == "['damping']"
 
-    @given(truth=fim_truth_st, init=initial_state_st, n=fim_n_st,
+    @given(truth=fim_truth_st, init=displaced_state_st, n=fim_n_st,
            split=_finite(0.1, 0.9))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_duplicated_parameter_null_direction_is_difference(
@@ -535,7 +607,25 @@ class TestFIM:
         """Inject an exact null direction: stiffness = a + b.  With raw
         sensitivities the two columns of J are identical, so the FIM's
         weakest eigenvector is (1, -1)/sqrt(2) with eigenvalue 0 and the
-        strongest is (1, 1)/sqrt(2)."""
+        strongest is (1, 1)/sqrt(2).
+
+        Rejected draws
+        --------------
+        ``assume(_position_variance(obs) > 1e-2)`` still rejects 12-27% of
+        draws under the ``ci`` profile.  The spread is three ci runs of the
+        same test: two from a worktree and one from a checkout path without
+        a ``test`` component, which is the only difference that decides
+        whether Hypothesis injects this tree's own literals into the draws
+        (see ``scripts/audit_property_rejection.py``).  It is what an
+        80-example estimate is worth here, so ``EXAMPLES_COSTLY`` buys that much less search here than the
+        number says.  It is not removable by generation: what is left is a soft, heavily damped
+        spring that barely moves inside a 20-sample window, and an envelope
+        that excluded those would also exclude the lightly-damped stiff
+        spring at ``k=49, c=0.125, m=3`` that
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        documents as this suite's counter-example.  See
+        ``displaced_state_st`` and ``scripts/audit_property_rejection.py``.
+        """
         gm = single
         note(f"truth={truth} init={init} n={n} split={split}")
         p_truth = _with_params(gm, "s", truth)
@@ -751,7 +841,15 @@ class TestPrecisionLimitedRank:
                 f"eigvals={np.asarray(report.eigvals)}"
             )
 
-    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    # Twice the profile's count, because the assertion below is guarded by
+    # ``if warned`` rather than reached through ``assume(warned)`` and only
+    # about half of this generator's draws warn (measured: 51.5% of draws
+    # were discarded when this was an ``assume``).  Doubling restores the
+    # number of *warned* cases the property is checked on -- ~80, as before
+    # -- at the same number of draws the ``assume`` form already cost, with
+    # none of them thrown away.  See
+    # docs/developer_guide/testing_standards.md on rejection budgets.
+    @settings(max_examples=2 * EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
         m=st.integers(min_value=2, max_value=1024),
@@ -765,11 +863,21 @@ class TestPrecisionLimitedRank:
         within the measured factor of the cutoff -- and the number the
         message quotes is that ratio, not ``eigvals[0]``, which can be
         decades away from the comparison being made.
+
+        The implication is tested as an implication, the way
+        :meth:`test_a_verdict_the_two_precisions_disagree_about_warns`
+        does one line above.  It used to be ``assume(warned)``, which
+        threw away every draw that did not warn -- half of them, the
+        highest rejection rate in either property suite -- and narrowing
+        ``log_ratio`` towards the band to raise that rate would have
+        deleted exactly the draws a spuriously-fired warning would show
+        up in, which is the bug this property hunts.
         """
         J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
                                                float(np.exp(log_ratio)), seed)
         report, warned = _fim_of(J64)
-        assume(warned)
+        if not warned:
+            return
         ev = np.asarray(report.eigvals, dtype=np.float64)
         assert float(ev[-1]) > 0.0
         ratios = ev / float(ev[-1])

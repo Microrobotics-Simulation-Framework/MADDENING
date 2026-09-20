@@ -29,6 +29,7 @@ Usage:
 import argparse
 import json
 import os
+import secrets
 import shlex
 import sys
 import time
@@ -84,6 +85,11 @@ PIP_INSTALL = (
 # Server script that runs on the VM.
 # Uses SelkiesRenderer wrapping ServerFrameRenderer for WebRTC streaming.
 # Also profiles performance.
+# The VM's API binds 0.0.0.0, which is not loopback, so it requires a
+# bearer token.  This script chooses it, hands it to the remote process
+# in MADDENING_API_TOKEN, and presents it on every request.
+API_TOKEN = secrets.token_urlsafe(32)
+
 SERVER_SCRIPT = r'''
 import sys, time, warnings, json
 import jax
@@ -275,6 +281,9 @@ server = SimulationServer(
     },
     graph_manager=gm,
     frame_renderer=frame_renderer,
+    # The bind address has to be handed to the server: it turns on the
+    # bearer token, and the app cannot see the socket uvicorn opens.
+    bind_host="0.0.0.0",
 )
 app = server.create_app()
 
@@ -311,6 +320,10 @@ def main():
         ),
         run="echo 'VM ready'; sleep 7200",
         workdir=project_root,
+        # JobConfig.ports is empty by default so a launch does not open
+        # the API in the provider's firewall.  This demo needs the public
+        # NAT mapping for both the API and the signaling port.
+        ports=[8000, 8443],
     )
 
     launcher = CloudLauncher()
@@ -355,7 +368,9 @@ def main():
     # --- Upload and run server script ---
     print("\nStarting WebRTC server (with performance profiling)...")
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/webrtc_server.py", check=True)
-    job.ssh_run_background(f"{PYTHON} /tmp/webrtc_server.py")
+    job.ssh_run_background(
+        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} {PYTHON} /tmp/webrtc_server.py"
+    )
 
     # --- Wait for perf results (server profiles before starting uvicorn) ---
     print("Waiting for profiling to complete...")
@@ -415,7 +430,10 @@ def main():
     print("\nWaiting for FastAPI server...")
     for _ in range(30):
         try:
-            req = urllib.request.Request(f"{base_url}/graph", method="GET")
+            req = urllib.request.Request(
+                f"{base_url}/graph", method="GET",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+            )
             with urllib.request.urlopen(req, timeout=5):
                 break
         except Exception:
@@ -426,7 +444,10 @@ def main():
     # --- Verify server-rendered WS works alongside WebRTC ---
     print("\nVerifying /ws/render endpoint (server-side rendering)...")
     try:
-        req = urllib.request.Request(f"{base_url}/graph", method="GET")
+        req = urllib.request.Request(
+            f"{base_url}/graph", method="GET",
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             graph = json.loads(resp.read())
             nodes = [n["name"] for n in graph["nodes"]] if isinstance(graph["nodes"], list) else list(graph["nodes"])
@@ -444,7 +465,7 @@ def main():
     print(f"  and enter the signaling URL:")
     print(f"\n    Signaling: {signaling_url or 'unknown'}")
     print(f"\n  Or use the server-rendered viewer (JPEG over WS):")
-    print(f"    {base_url}/viz/render")
+    print(f"    {base_url}/viz/render#token={API_TOKEN}")
     print(f"\n  REST API:")
     print(f"    {base_url}/graph")
     print(f"    {base_url}/graph/state")

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import pytest
-from hypothesis import assume, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -195,7 +195,15 @@ def test_a_small_field_is_not_dropped_merely_for_being_small(
     ``0.0`` and the group exited after one pass, whatever the small
     field was doing.
     """
-    assume(small < 1e-6)
+    # Asserted, not assumed: every value ``small`` is drawn from is already
+    # below the 1e-6 the property needs, so this rejected 0.0% of draws even
+    # as an ``assume`` -- measured.  Stated as an assertion it keeps saying
+    # what the strategy owes the property, and fails loudly if a value is
+    # ever added to that ``sampled_from`` that does not.
+    assert small < 1e-6, (
+        f"the small-field scale {small} is not six decades below the O(1) "
+        f"field this property is about"
+    )
     threshold = 1e-5
     gm = _graph(big=1.0, small=small, gain=gain, norm=norm, solver="ift",
                 acceleration="none", threshold=threshold)

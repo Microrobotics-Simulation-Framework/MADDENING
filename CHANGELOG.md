@@ -139,6 +139,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`fim`'s rank cutoff now sees the residual length**: `rank_rtol` defaults to
+  `max(n, sqrt(m)) * eps`, not `n * eps`.  `rank` falls and `crb` goes `+inf`
+  for some long-residual (`m > n**2`) fits; pass `rank_rtol=n * eps` to opt out
 - **`coupling_diagnostics()` renames `bound_valid` to `ratio_usable` and
   `gradient_error_bound` to `gradient_error_estimate`** — the flag reports one
   of the four conditions the estimate rests on, not that it is a bound

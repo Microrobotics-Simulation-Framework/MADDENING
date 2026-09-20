@@ -23,17 +23,19 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short --ignore=
 
 ### 2. Compliance CI Scripts Pass
 
-Run all five compliance validation scripts:
+Run every compliance validation script -- the list is `scripts/check_*.py`,
+and today that is six:
 
 ```bash
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 python scripts/check_transforms.py
+python scripts/check_heat_stability.py
 python scripts/check_stable_signatures.py
 ```
 
-**Gate**: All five must exit 0. Fix any errors before continuing.
+**Gate**: All six must exit 0. Fix any errors before continuing.
 
 ### 3. Commit Message Convention
 

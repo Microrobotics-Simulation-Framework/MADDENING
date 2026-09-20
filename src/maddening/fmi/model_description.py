@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -301,7 +301,10 @@ class ModelDescription:
                 # FMI 3.0 §2.2.9: a Clock has no value type; a constant
                 # interval is declared inline.
                 attrib["intervalVariability"] = "constant"
-                attrib["intervalDecimal"] = repr(float(var.interval_decimal))
+                interval = var.interval_decimal
+                # `__post_init__` refuses a clock without one.
+                assert interval is not None
+                attrib["intervalDecimal"] = repr(float(interval))
                 ET.SubElement(mv, "Clock", attrib=attrib)
                 continue
             if var.clocks:
@@ -735,7 +738,10 @@ def build_model_description(
         used = {v.name for v in variables}
         node_params = getattr(graph_manager, "params", {}) or {}
         node_params = node_params.get("nodes", {}) if isinstance(node_params, dict) else {}
-        specs_fn = getattr(graph_manager, "param_specs", None)
+        # Declared callable so the `callable()` guard narrows to something
+        # whose return is `Any` rather than `object` (see maddening.core.node).
+        specs_fn: Callable[..., Any] | None = getattr(
+            graph_manager, "param_specs", None)
         all_specs = specs_fn().get("nodes", {}) if callable(specs_fn) else {}
         for node_name, leaves in node_params.items():
             node_spec = nodes.get(node_name)

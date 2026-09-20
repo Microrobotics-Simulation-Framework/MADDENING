@@ -27,12 +27,17 @@ Requires: pyvista, scipy
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
 from maddening.viz._imports import _import_pyvista
 from maddening.viz.renderer import Renderer, GraphInfo
+
+if TYPE_CHECKING:
+    from maddening.viz.network import NetworkReceiver
+    from maddening.viz.relay import StateRelay
+    from maddening.viz.runner import RealtimeRunner
 
 
 # ------------------------------------------------------------------
@@ -87,7 +92,7 @@ class PyVistaLiveRenderer(Renderer):
         window_size: tuple[int, int] = (1400, 800),
         background: str = "#f0f0f0",
         title: str = "MADDENING -- Live Simulation",
-    ):
+    ) -> None:
         self._window_size = window_size
         self._background = background
         self._title = title
@@ -118,7 +123,7 @@ class PyVistaLiveRenderer(Renderer):
         node: str,
         field: str,
         centerline: np.ndarray,
-        **kwargs,
+        **kwargs: Any,
     ) -> "PyVistaLiveRenderer":
         """Add a tube along a 3D centerline, colored by a scalar field."""
         self._tube_configs.append(CurveTubeConfig(
@@ -132,7 +137,7 @@ class PyVistaLiveRenderer(Renderer):
         self,
         node: str,
         field: str,
-        **kwargs,
+        **kwargs: Any,
     ) -> "PyVistaLiveRenderer":
         """Add a 1D scalar field rendered as a 3D line."""
         self._line_configs.append(LinePlotConfig(
@@ -141,7 +146,7 @@ class PyVistaLiveRenderer(Renderer):
         return self
 
     def add_static_mesh(
-        self, mesh, color: str = "#BBBBBB", opacity: float = 0.3
+        self, mesh: Any, color: str = "#BBBBBB", opacity: float = 0.3
     ) -> "PyVistaLiveRenderer":
         """Add a static mesh (vessel wall, bounding box, etc.)."""
         self._static_meshes.append((mesh, color, opacity))
@@ -368,8 +373,8 @@ class PyVistaLiveRenderer(Renderer):
 
     def run_live(
         self,
-        relay,
-        runner=None,
+        relay: StateRelay | NetworkReceiver,
+        runner: RealtimeRunner | None = None,
         target_fps: int = 30,
     ) -> None:
         """Open the interactive window and render live until closed.

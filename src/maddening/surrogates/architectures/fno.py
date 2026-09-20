@@ -11,12 +11,12 @@ through the FNO layers.
 """
 
 import math
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
 
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
 from maddening.surrogates.architectures._utils import check_equinox
 
 try:
@@ -234,7 +234,7 @@ class FNODirect(SurrogateArchitecture):
         n_layers: int = 2,
         activation: Callable = jax.nn.gelu,
         scalar_hidden: Sequence[int] = (16,),
-    ):
+    ) -> None:
         check_equinox()
         self.spatial_field = spatial_field
         self.n_modes = tuple(n_modes)
@@ -244,7 +244,12 @@ class FNODirect(SurrogateArchitecture):
         self.activation = activation
         self.scalar_hidden = tuple(scalar_hidden)
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         k1, k2 = jax.random.split(rng_key)
 
         # FNO params — input is spatial field as 1-channel
@@ -276,7 +281,14 @@ class FNODirect(SurrogateArchitecture):
 
         return (fno_params, scalar_mlp_params)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    def forward(
+        self,
+        params: PyTree,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        dt: float,
+    ) -> dict[str, Any]:
         (fno_arrays, fno_static), scalar_mlp_params = params
 
         fno_net = eqx.combine(fno_arrays, fno_static)
@@ -350,7 +362,7 @@ class FNODerivative(SurrogateArchitecture):
         n_layers: int = 2,
         activation: Callable = jax.nn.gelu,
         scalar_hidden: Sequence[int] = (16,),
-    ):
+    ) -> None:
         check_equinox()
         self.spatial_field = spatial_field
         self.n_modes = tuple(n_modes)
@@ -360,7 +372,12 @@ class FNODerivative(SurrogateArchitecture):
         self.activation = activation
         self.scalar_hidden = tuple(scalar_hidden)
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         k1, k2 = jax.random.split(rng_key)
 
         fno_params = _build_fno_net(
@@ -390,7 +407,14 @@ class FNODerivative(SurrogateArchitecture):
 
         return (fno_params, scalar_mlp_params)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    def forward(
+        self,
+        params: PyTree,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        dt: float,
+    ) -> dict[str, Any]:
         (fno_arrays, fno_static), scalar_mlp_params = params
 
         fno_net = eqx.combine(fno_arrays, fno_static)

@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -172,7 +172,7 @@ class GPUHistoryViewer:
         playback_fps: int = 30,
         autoplay: bool = True,
         camera_up: tuple[float, float, float] | None = None,
-    ):
+    ) -> None:
         _check_pygfx()
         self._history = history
         self._dt = dt
@@ -231,7 +231,7 @@ class GPUHistoryViewer:
         clim: tuple[float, float] | None = None,
         opacity: float = 0.92,
         show_colorbar: bool = True,
-    ):
+    ) -> None:
         self._slices.append(_SliceDef(
             node, field, component, normal, origin_frac,
             cmap, clim, opacity, show_colorbar,
@@ -247,7 +247,7 @@ class GPUHistoryViewer:
         scale: float = 200.0,
         cmap: str = "coolwarm",
         clim: tuple[float, float] | None = None,
-    ):
+    ) -> None:
         self._arrows.append(_ArrowDef(
             node, field, normal, origin_frac, stride, scale, cmap, clim,
         ))
@@ -265,7 +265,7 @@ class GPUHistoryViewer:
         tube_radius: float = 0.06,
         cmap: str = "coolwarm",
         interval: int = 15,
-    ):
+    ) -> None:
         self._streamlines.append(_StreamlineDef(
             node, field, dims, n_lines, source_center, source_radius,
             source_normal, max_length, tube_radius, cmap, interval,
@@ -279,31 +279,31 @@ class GPUHistoryViewer:
         color: str = "#4488CC",
         opacity: float = 0.6,
         smooth_n_iter: int = 30,
-    ):
+    ) -> None:
         self._isosurfaces.append(_IsosurfaceDef(
             node, field, threshold, color, opacity, smooth_n_iter,
         ))
 
     def add_static_mesh(
         self,
-        mesh,
+        mesh: Any,
         color: str = "#BBBBBB",
         opacity: float = 0.1,
         smooth_shading: bool = True,
-    ):
+    ) -> None:
         self._static_meshes.append(_StaticMeshDef(
             mesh, color, opacity, smooth_shading,
         ))
 
     def add_rotating_mesh(
         self,
-        mesh,
+        mesh: Any,
         axis: str = "x",
         speed: float = 5.0,
         center: tuple[float, float, float] = (0.0, 0.0, 0.0),
         color: str = "#DD5533",
         opacity: float = 0.85,
-    ):
+    ) -> None:
         self._rotating_meshes.append(_RotatingMeshDef(
             mesh, axis, speed, center, color, opacity,
         ))
@@ -319,7 +319,7 @@ class GPUHistoryViewer:
         clamp_y: tuple[float, float] | None = None,
         clamp_z: tuple[float, float] | None = None,
         periodic_x: float | None = None,
-    ):
+    ) -> None:
         self._particles.append(_ParticleDef(
             node, field, start_pos, radius, color, opacity,
             clamp_y, clamp_z, periodic_x,
@@ -831,7 +831,7 @@ class GPUHistoryViewer:
     # Show
     # ------------------------------------------------------------------
 
-    def show(self):
+    def show(self) -> None:
         """Open the interactive viewer window."""
         import pygfx as gfx
         from rendercanvas.auto import RenderCanvas, loop
@@ -963,7 +963,7 @@ class GPUHistoryViewer:
 
         # Keyboard handler
         @renderer.add_event_handler("key_down")
-        def on_key(event):
+        def on_key(event: Any) -> None:
             nonlocal last_advance
             key = event.key
             if key == " ":
@@ -982,7 +982,7 @@ class GPUHistoryViewer:
                 self._go_to_end()
 
         # Animation loop
-        def animate():
+        def animate() -> None:
             nonlocal last_advance
             now = time.perf_counter()
             if self._playing:

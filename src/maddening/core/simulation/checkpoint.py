@@ -118,7 +118,11 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
         for wname, value in weights.items():
             arrays[f"{_MAPPINGS_KEY}/{edge_key}/{wname}"] = np.asarray(value)
 
-    np.savez(path, **arrays)
+    # numpy types `savez` as `savez(file, *args, allow_pickle=True,
+    # **kwds)`, so a checker matches every `**` value against
+    # `allow_pickle: bool` as well as against `**kwds`.  Every member
+    # name built above is prefixed, so none can collide with it.
+    np.savez(path, **arrays)  # pyright: ignore[reportArgumentType]
 
     # numpy.savez appends .npz if not already present
     resolved = path if path.suffix == ".npz" else path.with_suffix(path.suffix + ".npz")

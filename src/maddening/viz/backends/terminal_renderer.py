@@ -7,7 +7,7 @@ dependencies.
 """
 
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from rich.live import Live
@@ -40,7 +40,11 @@ class TerminalRenderer(Renderer):
         - ``"refresh_hz"``: float -- display refresh rate (default 20).
     """
 
-    def __init__(self, relay: StateRelay, config: dict = None):
+    # config shape: {"fields": {node: [field, ...]}, "precision": int,
+    #   "title": str, "refresh_hz": float} -- TypedDict candidate (phase 3)
+    def __init__(
+        self, relay: StateRelay, config: Optional[dict[str, Any]] = None
+    ) -> None:
         self._relay = relay
         self._config = config or {}
         self._tracked: list[tuple[str, str]] = []
@@ -117,7 +121,7 @@ class TerminalRenderer(Renderer):
     def teardown(self) -> None:
         self.stop()
 
-    def requested_fields(self):
+    def requested_fields(self) -> Optional[dict[str, list[str]]]:
         return self._config.get("fields", None)
 
     # -- internal --

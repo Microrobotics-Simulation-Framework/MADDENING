@@ -10,6 +10,10 @@ Both poll a ``StateRelay`` and are driven by ``matplotlib.animation.FuncAnimatio
 Use ``run_matplotlib()`` to drive one or more renderers from a single event loop.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
@@ -28,7 +32,10 @@ from maddening.viz.relay import StateRelay
 # Helpers
 # ------------------------------------------------------------------
 
-def run_matplotlib(*renderers, interval_ms: int = 33) -> None:
+def run_matplotlib(
+    *renderers: MatplotlibTimeSeriesRenderer | MatplotlibSceneRenderer,
+    interval_ms: int = 33,
+) -> None:
     """Drive one or more matplotlib renderers and block on ``plt.show()``.
 
     Each renderer must already have had ``setup()`` called.  This function
@@ -70,7 +77,11 @@ class MatplotlibTimeSeriesRenderer(Renderer):
         - ``"figsize"``: tuple -- matplotlib figure size.
     """
 
-    def __init__(self, relay: StateRelay, plot_config: dict = None):
+    # plot_config shape: {"fields": {node: [field, ...]}, "window": int,
+    #   "title": str, "figsize": tuple} -- TypedDict candidate (phase 3)
+    def __init__(
+        self, relay: StateRelay, plot_config: dict[str, Any] | None = None
+    ) -> None:
         self._relay = relay
         self._config = plot_config or {}
         self._fig = None
@@ -154,7 +165,7 @@ class MatplotlibTimeSeriesRenderer(Renderer):
         if self._fig is not None:
             plt.close(self._fig)
 
-    def requested_fields(self):
+    def requested_fields(self) -> dict[str, list[str]] | None:
         return self._config.get("fields", None)
 
 
@@ -228,7 +239,10 @@ class MatplotlibSceneRenderer(Renderer):
         }
     """
 
-    def __init__(self, relay: StateRelay, scene_config: dict):
+    # scene_config shape: {"figsize": tuple, "xlim": tuple, "ylim": tuple,
+    #   "aspect": str, "title": str, "objects": [obj_spec, ...]}
+    #   -- TypedDict candidate (phase 3)
+    def __init__(self, relay: StateRelay, scene_config: dict[str, Any]) -> None:
         self._relay = relay
         self._config = scene_config
         self._fig = None
@@ -353,7 +367,7 @@ class MatplotlibSceneRenderer(Renderer):
         if self._fig is not None:
             plt.close(self._fig)
 
-    def requested_fields(self):
+    def requested_fields(self) -> dict[str, list[str]] | None:
         fields = {}
         for obj in self._config.get("objects", []):
             node = obj["node"]

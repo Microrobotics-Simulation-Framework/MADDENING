@@ -7,11 +7,16 @@ inputs and dt, and return either a new state (direct mode) or d(state)/dt
 used inside concrete implementations.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+if TYPE_CHECKING:
+    import jax
 
 PyTree = Any
 
@@ -32,7 +37,7 @@ class SurrogateArchitecture(ABC):
     @abstractmethod
     def init_params(
         self,
-        rng_key,
+        rng_key: jax.Array,
         state_spec: dict[str, tuple],
         boundary_spec: dict[str, tuple],
     ) -> PyTree:

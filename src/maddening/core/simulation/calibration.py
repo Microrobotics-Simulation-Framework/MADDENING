@@ -124,7 +124,9 @@ def tune_coupling_params(
 
     # Default metric: sum of all state values
     if state_metric is None:
-        def state_metric(state):
+        # Bound to the parameter afterwards rather than defined under its
+        # name: a nested `def` that shadows a parameter is a redeclaration.
+        def _default_state_metric(state):
             total = 0.0
             for nn in state:
                 if nn.startswith("_"):
@@ -132,6 +134,8 @@ def tune_coupling_params(
                 for field in state[nn]:
                     total = total + float(jnp.sum(state[nn][field]))
             return total
+
+        state_metric = _default_state_metric
 
     # Generate parameter combinations
     configs = _make_param_grid(param_grid)
@@ -311,13 +315,16 @@ def calibrate(
     import jax
 
     if loss_fn is None:
-        def loss_fn(predicted, reference):
+        # See the note in `tune_coupling_params`: bound, not shadowed.
+        def _default_loss_fn(predicted, reference):
             leaves_pred = jax.tree.leaves(predicted)
             leaves_ref = jax.tree.leaves(reference)
             total = jnp.array(0.0)
             for p, r in zip(leaves_pred, leaves_ref):
                 total = total + jnp.mean((p - r) ** 2)
             return total
+
+        loss_fn = _default_loss_fn
 
     params = {k: jnp.asarray(v) for k, v in initial_params.items()}
     loss_history = []

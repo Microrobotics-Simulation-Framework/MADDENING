@@ -9,9 +9,14 @@ holding a reference to the mutable ``GraphManager``.
 implement.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
 
 
 @dataclass(frozen=True)
@@ -25,7 +30,7 @@ class GraphInfo:
     timestep: float
 
     @classmethod
-    def from_graph_manager(cls, gm) -> "GraphInfo":
+    def from_graph_manager(cls, gm: GraphManager) -> "GraphInfo":
         """Build a ``GraphInfo`` from a live ``GraphManager`` instance."""
         node_names = list(gm._nodes.keys())
         node_params = {

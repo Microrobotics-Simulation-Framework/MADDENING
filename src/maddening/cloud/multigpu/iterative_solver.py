@@ -151,6 +151,9 @@ def _materialise_b(
     """Place b on the right sharding so the solver inherits the layout."""
     if mesh is None:
         return jnp.asarray(b)
+    # `_validate_sharding_args` refuses a mesh without in_specs, and every
+    # caller runs it first.
+    assert in_specs is not None
     sharding = NamedSharding(mesh, in_specs)
     return jax.device_put(jnp.asarray(b), sharding)
 
@@ -287,8 +290,12 @@ def _gmres_loop(
         original_matvec = matvec
         M = preconditioner
 
-        def matvec_pc(x):
+        # Bound below rather than defined under the name: a `def` and an
+        # assignment in the other branch are two declarations of one name.
+        def _preconditioned_matvec(x):
             return M(original_matvec(x))
+
+        matvec_pc = _preconditioned_matvec
 
         # Also precondition b on the left.
         b_eff = M(b)
@@ -412,7 +419,8 @@ def _differentiable_solve(
     ``solve`` returns the vector only), so ``iters`` is reported as -1;
     ``residual_norm`` / ``converged`` come from one extra matvec.
     """
-    kw = {"symmetric": True} if symmetric else {"transpose_solve": transpose_solve_value}
+    kw: dict[str, Any] = ({"symmetric": True} if symmetric
+                          else {"transpose_solve": transpose_solve_value})
     x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
     res = b - matvec(x)
     res_norm = jnp.linalg.norm(res)

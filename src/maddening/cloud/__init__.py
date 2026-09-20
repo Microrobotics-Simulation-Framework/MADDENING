@@ -27,6 +27,8 @@ Resume-from-URL transport (fsspec only for cloud-storage schemes)::
 """
 
 # Eagerly import pure-Python types (stdlib only, no deps)
+from typing import TYPE_CHECKING, Any
+
 from maddening.cloud.streaming import (
     GPUFramebuffer,
     QualityPreset,
@@ -37,6 +39,46 @@ from maddening.cloud.streaming import (
     StreamingSession,
 )
 from maddening.cloud._auth import generate_session_token, validate_session_token
+
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening.cloud import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.cloud.launcher import (
+        CloudJob,
+        CloudLauncher,
+        CostLimitError,
+        CostPolicy,
+        CredentialError,
+        JobConfig,
+        JobPhase,
+        LaunchError,
+    )
+    from maddening.cloud.mock_session import MockCloudSession
+    from maddening.cloud.mock_streaming import MockStreamSession
+    from maddening.cloud.providers import (
+        AWSProvider,
+        CloudProvider,
+        GCPProvider,
+        LambdaLabsProvider,
+        PROVIDERS,
+        RunPodProvider,
+    )
+    from maddening.cloud.resume import download_and_load_state
+    from maddening.cloud.selkies_session import SelkiesSession
+    from maddening.cloud.session import (
+        CloudConfig,
+        CloudReadyResult,
+        CloudSession,
+        CloudSessionError,
+        CloudSessionInfo,
+        CloudStage,
+        PreemptionPolicy,
+    )
+
 
 
 _INSTALL_HINTS = {
@@ -103,7 +145,7 @@ _LAZY = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Lazy imports for components that need external dependencies.
 
     Only a :class:`ModuleNotFoundError` for a module *outside*
@@ -129,7 +171,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module 'maddening.cloud' has no attribute {name!r}")
 
 
-def __dir__():
+def __dir__() -> list[str]:
     """``dir(maddening.cloud)`` lists the lazy names too."""
     return sorted(set(globals()) | set(__all__))
 

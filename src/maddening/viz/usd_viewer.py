@@ -41,9 +41,12 @@ Requires: pyvista, pxr (usd-core), scipy
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from maddening.viz._imports import _import_pyvista, _import_pxr
+
+if TYPE_CHECKING:
+    from maddening.viz.history_viewer import HistoryViewer3D
 
 import numpy as np
 
@@ -159,8 +162,8 @@ def _read_history_from_usd(stage, node_names=None):
 def viewer_from_usd(
     filepath: str,
     node_names: list[str] | None = None,
-    **viewer_kwargs,
-):
+    **viewer_kwargs: Any,
+) -> HistoryViewer3D:
     """Create a HistoryViewer3D from a USD results file.
 
     Parameters
@@ -188,10 +191,13 @@ def viewer_from_usd(
 def viewer_from_usd_with_geometry(
     results_path: str,
     geometry_path: str,
+    # tube_configs entry shape: {"prim": str, "node": str, "field": str,
+    #   "radius": float, "cmap": str, "clim": tuple, "label": str}
+    #   -- TypedDict candidate (phase 3)
     tube_configs: list[dict],
     node_names: list[str] | None = None,
-    **viewer_kwargs,
-):
+    **viewer_kwargs: Any,
+) -> HistoryViewer3D:
     """Create a HistoryViewer3D with curve tubes from USD geometry.
 
     Combines simulation results (time-sampled scalars) with vessel
@@ -282,7 +288,7 @@ def render_usd_frame(
     camera_position: str = "xy",
     zoom: float = 1.5,
     node_names: list[str] | None = None,
-):
+) -> str:
     """Render a single frame from USD data to an image file.
 
     Parameters

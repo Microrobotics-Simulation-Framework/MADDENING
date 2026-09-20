@@ -43,10 +43,15 @@ Typical SSH-tunnel topology::
     RealtimeRunner.step(ext_inputs)    Renderer(s)
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import threading
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
 
 from maddening.transport_auth import (
     TOKEN_ENV,
@@ -221,7 +226,7 @@ class NetworkRelay:
         fields: dict[str, list[str]] | None = None,
         secure: bool | None = None,
         token: str | None = None,
-    ):
+    ) -> None:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
@@ -265,7 +270,7 @@ class NetworkRelay:
                 out[node] = slot
         return out
 
-    def attach(self, graph_manager) -> None:
+    def attach(self, graph_manager: GraphManager) -> None:
         """Register as an observer on *graph_manager*."""
         self._timestep = graph_manager.timestep
         graph_manager.add_observer(self._on_event)
@@ -332,7 +337,7 @@ class NetworkReceiver:
         address: str = "tcp://localhost:5555",
         secure: bool | None = None,
         token: str | None = None,
-    ):
+    ) -> None:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
@@ -462,7 +467,7 @@ class CommandPublisher:
         address: str = "tcp://127.0.0.1:5556",
         secure: bool | None = None,
         token: str | None = None,
-    ):
+    ) -> None:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
@@ -533,7 +538,7 @@ class CommandReceiver:
         address: str = "tcp://localhost:5556",
         secure: bool | None = None,
         token: str | None = None,
-    ):
+    ) -> None:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)

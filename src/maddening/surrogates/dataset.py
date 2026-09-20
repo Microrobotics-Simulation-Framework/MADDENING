@@ -3,13 +3,18 @@ SurrogateDataset and DatasetGenerator -- extract training data from physics
 simulations for surrogate model training.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax.numpy as jnp
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
 
 
 @dataclass
@@ -32,7 +37,9 @@ class DatasetGenerator:
     """Generate training datasets from physics graph simulations."""
 
     @staticmethod
-    def from_graph(gm, target_node: str, n_steps: int) -> SurrogateDataset:
+    def from_graph(
+        gm: GraphManager, target_node: str, n_steps: int,
+    ) -> SurrogateDataset:
         """Extract a dataset from a single trajectory.
 
         Runs ``gm.run_scan_with_history(n_steps)`` and extracts
@@ -88,7 +95,7 @@ class DatasetGenerator:
 
     @staticmethod
     def from_sweep(
-        gm,
+        gm: GraphManager,
         target_node: str,
         n_steps: int,
         initial_states_batch: dict[str, dict],

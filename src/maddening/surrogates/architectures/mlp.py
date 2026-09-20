@@ -5,12 +5,12 @@ Uses Equinox for the MLP implementation but exposes weights as a
 plain JAX pytree for framework-independence at the SurrogateNode level.
 """
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
 
-from maddening.surrogates.architecture import SurrogateArchitecture
+from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
 from maddening.surrogates.architectures._utils import (
     check_equinox,
     compute_sizes,
@@ -43,12 +43,17 @@ class MLPDirect(SurrogateArchitecture):
         self,
         hidden_sizes: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.relu,
-    ):
+    ) -> None:
         check_equinox()
         self.hidden_sizes = tuple(hidden_sizes)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
 
         mlp = eqx.nn.MLP(
@@ -61,7 +66,14 @@ class MLPDirect(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    def forward(
+        self,
+        params: PyTree,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        dt: float,
+    ) -> dict[str, Any]:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -93,12 +105,17 @@ class MLPDerivative(SurrogateArchitecture):
         self,
         hidden_sizes: Sequence[int] = (64, 64),
         activation: Callable = jax.nn.relu,
-    ):
+    ) -> None:
         check_equinox()
         self.hidden_sizes = tuple(hidden_sizes)
         self.activation = activation
 
-    def init_params(self, rng_key, state_spec, boundary_spec):
+    def init_params(
+        self,
+        rng_key: jax.Array,
+        state_spec: dict[str, tuple[int, ...]],
+        boundary_spec: dict[str, tuple[int, ...]],
+    ) -> PyTree:
         input_size, output_size = compute_sizes(state_spec, boundary_spec)
 
         mlp = eqx.nn.MLP(
@@ -111,7 +128,14 @@ class MLPDerivative(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    def forward(self, params, state, boundary_inputs, dt):
+    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    def forward(
+        self,
+        params: PyTree,
+        state: dict[str, Any],
+        boundary_inputs: dict[str, Any],
+        dt: float,
+    ) -> dict[str, Any]:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(

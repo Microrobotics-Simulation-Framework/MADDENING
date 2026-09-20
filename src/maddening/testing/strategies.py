@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 try:
     from hypothesis import strategies as st
@@ -89,7 +90,9 @@ def node_states(
     field_strategies = {}
     for field, arr in initial.items():
         shape = tuple(int(d) for d in arr.shape)
-        init_dtype = np.dtype(getattr(arr, "dtype", np.float32))
+        # `Any`: the branches below select on it with `np.issubdtype`,
+        # which the checker cannot use to narrow a `dtype[...]` union.
+        init_dtype: Any = np.dtype(getattr(arr, "dtype", np.float32))
         if init_dtype == np.bool_:
             # Flags (a health monitor's status bits): sample both values.
             field_strategies[field] = arrays(
@@ -151,7 +154,7 @@ def boundary_inputs_for(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,
     *,
-    dtype: np.dtype = np.float64,
+    dtype: npt.DTypeLike = np.float64,
 ) -> st.SearchStrategy:
     """Strategy that generates boundary inputs matching a node's spec.
 

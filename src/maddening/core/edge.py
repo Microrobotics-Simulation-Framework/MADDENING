@@ -122,7 +122,7 @@ class EdgeSpec:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        d = {
+        d: dict[str, Any] = {
             "source_node": self.source_node,
             "target_node": self.target_node,
             "source_field": self.source_field,

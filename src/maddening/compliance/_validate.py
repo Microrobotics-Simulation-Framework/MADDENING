@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+from types import ModuleType
 from typing import NamedTuple, Optional
 
 import yaml
@@ -76,7 +77,7 @@ class Resolution(NamedTuple):
 class _PrefixImport(NamedTuple):
     """Result of walking a dotted name's module prefixes."""
 
-    module: object = None
+    module: Optional[ModuleType] = None
     attrs: tuple[str, ...] = ()
     #: A real import failure seen at a *longer* prefix than the one that
     #: imported.  Kept even when a shorter prefix succeeds.
@@ -439,7 +440,7 @@ def validate_anomaly_registry(
                 f"{aid}: cannot resolve verification entries -- no repository "
                 f"root found above {path}; pass repo_root explicitly"
             )
-        elif verification:
+        elif verification and repo_root is not None:
             for ref in verification:
                 reason = resolve_test_reference(str(ref), repo_root)
                 if reason:

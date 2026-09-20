@@ -202,7 +202,7 @@ class ServerFrameRenderer(ServerFrameRendererBase):
         fmt: str = "jpeg",
         quality: int = 85,
         redraw_every: int = 30,
-    ):
+    ) -> None:
         self.scene_config = scene
         self.timeseries_configs = timeseries or []
         self.heatmap_configs = heatmaps or []
@@ -544,7 +544,7 @@ class ServerFrameRenderer(ServerFrameRendererBase):
 
         return self._encode_buffer()
 
-    def reset(self):
+    def reset(self) -> None:
         """Clear time-series buffers (e.g. after simulation reset)."""
         for key in self._time_buffers:
             self._time_buffers[key] = []
@@ -552,7 +552,7 @@ class ServerFrameRenderer(ServerFrameRendererBase):
         # Force a full redraw on next render
         self._frame_count = self.redraw_every - 1
 
-    def resize(self, width: int, height: int):
+    def resize(self, width: int, height: int) -> None:
         """Change the output resolution.  Rebuilds the figure."""
         self._width = width
         self._height = height
@@ -563,7 +563,7 @@ class ServerFrameRenderer(ServerFrameRendererBase):
         self._ts_lines = {}
         self._build_figure()
 
-    def set_format(self, fmt: str, quality: Optional[int] = None):
+    def set_format(self, fmt: str, quality: Optional[int] = None) -> None:
         """Change the image format and/or quality."""
         self._fmt = fmt
         if quality is not None:
@@ -579,7 +579,7 @@ class ServerFrameRenderer(ServerFrameRendererBase):
             "webp": "image/webp",
         }.get(self.fmt, "image/jpeg")
 
-    def close(self):
+    def close(self) -> None:
         """Release matplotlib resources."""
         if self._fig is not None:
             import matplotlib.pyplot as plt

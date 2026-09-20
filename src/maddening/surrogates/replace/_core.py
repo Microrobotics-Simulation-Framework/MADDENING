@@ -2,10 +2,16 @@
 replace_node -- swap a physics node for a surrogate while preserving wiring.
 """
 
+from __future__ import annotations
+
 import logging
 from dataclasses import fields as dataclass_fields
+from typing import TYPE_CHECKING
 
 from maddening.surrogates.node import SurrogateNode
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
 
 
 logger = logging.getLogger(__name__)
@@ -64,7 +70,9 @@ def _restore_kwargs(spec, table):
     return {kwarg: getattr(spec, name) for name, kwarg in table.items()}
 
 
-def replace_node(gm, original_name: str, surrogate_node: SurrogateNode):
+def replace_node(
+    gm: GraphManager, original_name: str, surrogate_node: SurrogateNode,
+) -> None:
     """Replace a node in a GraphManager with a surrogate, preserving edges.
 
     Every attribute of every edge and external input that touches the

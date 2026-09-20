@@ -112,7 +112,11 @@ def serialize_fmu_state(
     members[_PATHS_MEMBER] = np.array(json.dumps([path for path, _ in items]))
     members[_EMPTY_MEMBER] = np.array(json.dumps(empty))
     buf = io.BytesIO()
-    np.savez(buf, **members)
+    # See the note in `maddening.core.simulation.checkpoint.save_state`:
+    # `**` values are matched against `savez`'s keyword-only
+    # `allow_pickle` too.  Member names here are `a<i>` and the three
+    # module constants, so none collides.
+    np.savez(buf, **members)  # pyright: ignore[reportArgumentType]
     return FMUState(payload=buf.getvalue(), schema_token=schema_token)
 
 

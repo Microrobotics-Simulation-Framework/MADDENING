@@ -2,13 +2,20 @@
 SurrogateValidator -- compare surrogate predictions against physics nodes.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import jax
 import jax.numpy as jnp
 
 from maddening.surrogates.dataset import SurrogateDataset
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
+    from maddening.core.node import SimulationNode
+    from maddening.surrogates.node import SurrogateNode
 
 
 @dataclass
@@ -38,8 +45,8 @@ class SurrogateValidator:
 
     @staticmethod
     def compare_nodes(
-        physics_node,
-        surrogate_node,
+        physics_node: SimulationNode,
+        surrogate_node: SurrogateNode,
         test_dataset: SurrogateDataset,
     ) -> ValidationReport:
         """One-step prediction accuracy on test data.
@@ -61,7 +68,8 @@ class SurrogateValidator:
         n_samples = next(iter(ds.states.values())).shape[0]
 
         # Run surrogate on each sample
-        def predict_one(idx):
+        # shape: result is {field: Array} -- TypedDict candidate (phase 3)
+        def predict_one(idx: jax.Array) -> dict[str, Any]:
             state = {k: v[idx] for k, v in ds.states.items()}
             boundary = {k: v[idx] for k, v in ds.boundary_inputs.items()}
             return surrogate_node.update(state, boundary, ds.dt)
@@ -98,8 +106,8 @@ class SurrogateValidator:
 
     @staticmethod
     def compare_graphs(
-        gm_physics,
-        gm_surrogate,
+        gm_physics: GraphManager,
+        gm_surrogate: GraphManager,
         n_steps: int,
         node_name: str,
     ) -> ValidationReport:

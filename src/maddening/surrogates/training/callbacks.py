@@ -5,10 +5,15 @@ Provides a composable callback system for monitoring, early stopping,
 model checkpointing, and learning rate scheduling during training.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import jax.numpy as jnp
+
+if TYPE_CHECKING:
+    from maddening.surrogates.training.trainer import SurrogateTrainer
 
 
 class TrainingCallback:
@@ -22,7 +27,8 @@ class TrainingCallback:
 
     should_stop: bool = False
 
-    def on_train_begin(self, trainer, state: dict) -> None:
+    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
+    def on_train_begin(self, trainer: SurrogateTrainer, state: dict) -> None:
         """Called once before the first epoch."""
 
     def on_epoch_end(self, epoch: int, metrics: dict, state: dict) -> None:
@@ -65,7 +71,7 @@ class EarlyStopping(TrainingCallback):
         min_delta: float = 1e-6,
         monitor: str = "val_loss",
         restore_best: bool = True,
-    ):
+    ) -> None:
         self.patience = patience
         self.min_delta = min_delta
         self.monitor = monitor
@@ -75,14 +81,20 @@ class EarlyStopping(TrainingCallback):
         self.wait = 0
         self._best_weights = None
 
-    def on_train_begin(self, trainer, state):
+    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
+    def on_train_begin(
+        self, trainer: SurrogateTrainer, state: dict[str, Any],
+    ) -> None:
         self.best_value = float("inf")
         self.best_epoch = 0
         self.wait = 0
         self.should_stop = False
         self._best_weights = None
 
-    def on_epoch_end(self, epoch, metrics, state):
+    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
+    def on_epoch_end(
+        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+    ) -> None:
         current = metrics.get(self.monitor, metrics.get("val_loss"))
         if current < self.best_value - self.min_delta:
             self.best_value = current
@@ -100,7 +112,10 @@ class EarlyStopping(TrainingCallback):
             if self.wait >= self.patience:
                 self.should_stop = True
 
-    def on_train_end(self, metrics, state):
+    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
+    def on_train_end(
+        self, metrics: dict[str, Any], state: dict[str, Any],
+    ) -> None:
         if self.restore_best and self._best_weights is not None:
             state["weights"] = self._best_weights
 
@@ -124,7 +139,7 @@ class ModelCheckpoint(TrainingCallback):
         path: str = "surrogate_checkpoint.npz",
         monitor: str = "val_loss",
         save_best_only: bool = True,
-    ):
+    ) -> None:
         self.path = path
         self.monitor = monitor
         self.save_best_only = save_best_only
@@ -133,13 +148,19 @@ class ModelCheckpoint(TrainingCallback):
         self._state_spec = None
         self._boundary_spec = None
 
-    def on_train_begin(self, trainer, state):
+    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
+    def on_train_begin(
+        self, trainer: SurrogateTrainer, state: dict[str, Any],
+    ) -> None:
         self.best_value = float("inf")
         self._architecture = trainer.architecture
         self._state_spec = trainer.dataset.state_spec
         self._boundary_spec = trainer.dataset.boundary_spec
 
-    def on_epoch_end(self, epoch, metrics, state):
+    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
+    def on_epoch_end(
+        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+    ) -> None:
         current = metrics.get(self.monitor, metrics.get("val_loss"))
         if not self.save_best_only or current < self.best_value:
             self.best_value = current
@@ -177,7 +198,7 @@ class LRSchedule(TrainingCallback):
         )
     """
 
-    def __init__(self, schedule_fn: Callable[[int], float]):
+    def __init__(self, schedule_fn: Callable[[int], float]) -> None:
         self.schedule_fn = schedule_fn
         self._lr_multiplier = 1.0
 
@@ -185,5 +206,8 @@ class LRSchedule(TrainingCallback):
     def lr_multiplier(self) -> float:
         return self._lr_multiplier
 
-    def on_epoch_end(self, epoch, metrics, state):
+    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
+    def on_epoch_end(
+        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+    ) -> None:
         self._lr_multiplier = self.schedule_fn(epoch + 1)

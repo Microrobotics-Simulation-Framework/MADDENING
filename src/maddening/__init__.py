@@ -14,6 +14,25 @@ Install extras for optional features::
 """
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # PEP 562: the names below are resolved lazily by the module
+    # `__getattr__`, which a type checker cannot see through -- without
+    # these re-exports it reports every one of them as missing from
+    # `__all__`, and a downstream `from maddening import X` is an error.
+    # Nothing here runs at import time; the lazy table stays the only
+    # runtime path.
+    from maddening.cloud.session import CloudConfig, CloudSession
+    from maddening.core.coupling import CouplingGroup
+    from maddening.core.edge import EdgeSpec
+    from maddening.core.graph_manager import GraphManager
+    from maddening.core.node import SimulationNode
+    from maddening.core.simulation.adaptive import AdaptiveConfig
+    from maddening.core.simulation.history_logger import HistoryLogger
+    from maddening.surrogates.architecture import SurrogateArchitecture
+    from maddening.surrogates.node import SurrogateNode
+
 
 try:
     __version__ = _pkg_version("maddening")
@@ -21,7 +40,7 @@ except PackageNotFoundError:  # source tree without install metadata
     __version__ = "0.4.0.dev0"
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Lazy imports so that ``maddening.viz`` can be used without JAX."""
     _lazy = {
         "AdaptiveConfig": "maddening.core.simulation.adaptive",

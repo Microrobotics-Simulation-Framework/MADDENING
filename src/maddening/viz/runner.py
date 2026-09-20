@@ -6,10 +6,17 @@ Optionally reads external inputs from a ``CommandReceiver`` and
 injects them into the simulation each step.
 """
 
+from __future__ import annotations
+
 import logging
 import time
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from maddening.core.graph_manager import GraphManager
+    from maddening.viz.network import CommandReceiver, NetworkRelay
+    from maddening.viz.relay import StateRelay
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +46,12 @@ class RealtimeRunner:
 
     def __init__(
         self,
-        graph_manager,
-        relay,
+        graph_manager: GraphManager,
+        relay: StateRelay | NetworkRelay,
         time_scale: float = 1.0,
         steps_per_frame: int = 1,
-        command_receiver=None,
-    ):
+        command_receiver: CommandReceiver | None = None,
+    ) -> None:
         self._gm = graph_manager
         self._relay = relay
         self._time_scale = time_scale

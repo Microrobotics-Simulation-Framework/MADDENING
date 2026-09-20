@@ -84,6 +84,26 @@ class _NodeSpec:
     flux_accepts_params: bool = False
 
 
+@dataclass(frozen=True)
+class _StepPlan:
+    """The derived values ``_build_step_fn`` closes over.
+
+    ``compile()`` recomputes all of them and can still raise afterwards
+    (the ``accelerated_fields`` validation, the static-data refusal,
+    ``_build_step_fn`` itself), so they travel as a plan and are written
+    onto the graph only at the commit point at the end of a successful
+    compile.  A failed ``compile()`` leaves the graph exactly as it was:
+    anything reading ``_schedule``, ``_is_multirate``, ``_rate_dividers``
+    or :attr:`~GraphManager.params` as a description of the step that is
+    actually running would otherwise read a step that was never built.
+    """
+    schedule: list[str]
+    back_edges: list[EdgeSpec]
+    is_multirate: bool
+    rate_dividers: dict[str, int]
+    params: dict
+
+
 def _correction_accepts_params(node: SimulationNode) -> bool:
     fn = getattr(node, "compute_interface_correction", None)
     if fn is None:
@@ -3184,26 +3204,44 @@ class GraphManager:
         CouplingGroup
             The created coupling group descriptor.
         """
-        for name in nodes:
-            if name not in self._nodes:
-                raise KeyError(f"No node named '{name}'.")
-        # Check for overlap with existing coupling groups
         new_set = frozenset(nodes)
+        # Check for overlap with existing coupling groups
         for existing in self._coupling_groups:
             overlap = new_set & existing.nodes
             if overlap:
                 raise ValueError(
                     f"Nodes {overlap} already belong to a coupling group."
                 )
-        group = CouplingGroup(
-            nodes=new_set,
-            max_iterations=max_iterations,
-            tolerance=tolerance,
-            **kwargs,
+        group = self._make_coupling_group(
+            nodes, max_iterations, tolerance, **kwargs
         )
         self._coupling_groups.append(group)
         self._dirty = True
         return group
+
+    def _make_coupling_group(
+        self,
+        nodes: Sequence[str],
+        max_iterations: int = 10,
+        tolerance: float = 1e-6,
+        **kwargs,
+    ) -> CouplingGroup:
+        """Validate and construct a group without registering it.
+
+        Everything that can refuse a group -- an unknown node name,
+        ``CouplingGroup``'s own validation of the knobs -- happens here,
+        so a caller replacing several groups at once can build them all
+        before it touches the graph.
+        """
+        for name in nodes:
+            if name not in self._nodes:
+                raise KeyError(f"No node named '{name}'.")
+        return CouplingGroup(
+            nodes=frozenset(nodes),
+            max_iterations=max_iterations,
+            tolerance=tolerance,
+            **kwargs,
+        )
 
     def remove_coupling_group(self, nodes: Sequence[str]) -> None:
         """Remove a coupling group by its node set."""
@@ -3240,24 +3278,25 @@ class GraphManager:
         list of CouplingGroup
             The created coupling groups.
         """
-        # Clearing is itself a change to the compiled step, and
-        # ``add_coupling_group`` below is the only thing that used to set
-        # the flag -- so an ``auto_couple`` that found no cycles left the
-        # graph describing itself as uncoupled while still running the
-        # coupled step it was compiled with.  Flagged before the clear:
-        # a graph marked dirty whose groups are unchanged costs one
-        # recompile, the reverse costs a wrong step.
-        self._dirty = True
-        self._coupling_groups.clear()
+        # Every group built before any of them is registered.  The old
+        # order cleared the groups first and built them one at a time, so
+        # a ``kwargs`` the ``CouplingGroup`` constructor refuses -- a
+        # misspelled knob -- destroyed the groups the graph already had
+        # and put nothing back.  Clearing is itself a change to the
+        # compiled step, so the dirty flag is part of the same commit:
+        # ``add_coupling_group`` used to be the only thing that set it,
+        # and an ``auto_couple`` that found no cycles left the graph
+        # describing itself as uncoupled while still running the coupled
+        # step it was compiled with.
         sccs = find_strongly_connected_components(
             list(self._nodes.keys()), self._edges
         )
-        groups = []
-        for scc in sccs:
-            g = self.add_coupling_group(
-                scc, max_iterations, tolerance, **kwargs
-            )
-            groups.append(g)
+        groups = [
+            self._make_coupling_group(scc, max_iterations, tolerance, **kwargs)
+            for scc in sccs
+        ]
+        self._coupling_groups[:] = groups
+        self._dirty = True
         return groups
 
     # ------------------------------------------------------------------
@@ -3514,9 +3553,15 @@ class GraphManager:
                 "edge validation failed", validation_errors
             )
 
+        # Everything from here to the commit point at the end of the
+        # method is computed into locals.  The ``accelerated_fields``
+        # validation, the static-data refusal and ``_build_step_fn`` can
+        # all still raise, and a compile that fails must leave the graph
+        # bit-identical to what it was -- not describing a step that was
+        # never built.  See ``_StepPlan``.
         node_names = list(self._nodes.keys())
-        self._schedule = topological_sort(node_names, self._edges)
-        self._back_edges = identify_back_edges(self._schedule, self._edges)
+        schedule = topological_sort(node_names, self._edges)
+        back_edges = identify_back_edges(schedule, self._edges)
 
         # ``_meta`` is *state*, not derived data: ``step_count`` decides
         # which sub-steps a node with a rate divider > 1 fires on, and the
@@ -3557,21 +3602,21 @@ class GraphManager:
 
         timesteps = sorted(set(effective_timesteps.values()))
         if len(timesteps) > 1:
-            self._is_multirate = True
+            is_multirate = True
             base_dt = _multi_gcd(timesteps)
-            self._rate_dividers = {
+            rate_dividers = {
                 name: round(effective_timesteps[name] / base_dt)
                 for name in self._nodes
             }
         else:
-            self._is_multirate = False
-            self._rate_dividers = {name: 1 for name in self._nodes}
+            is_multirate = False
+            rate_dividers = {name: 1 for name in self._nodes}
 
         # Build ``_meta`` fresh over the key set *this* graph needs, so a
         # key whose owning coupling group is gone cannot linger in the
         # scan carry, then carry the previous values back over it below.
         meta: dict = {}
-        if self._is_multirate:
+        if is_multirate:
             meta["step_count"] = jnp.array(0, dtype=jnp.int32)
 
         # Ensure _meta exists with correct structure when coupling
@@ -3666,7 +3711,7 @@ class GraphManager:
         # which is the whole point of preserving the counter.
         phase_still_means_the_same = all(
             previous_dividers[name] == divider
-            for name, divider in self._rate_dividers.items()
+            for name, divider in rate_dividers.items()
             if name in previous_dividers
         )
         for key_, seed in meta.items():
@@ -3741,10 +3786,10 @@ class GraphManager:
 
         # A weak-typed leaf in the seed state would retrace the jitted
         # step once it comes back strongly typed after the first step.
-        self._state = _strong_typed(self._state)
+        state = _strong_typed(self._state)
         # Zero external inputs are allocated once per compile, not per
         # step (``jnp.zeros`` per input per call cost ~1.5 ms/step on GPU).
-        self._default_ext_leaves = {
+        default_ext_leaves = {
             (ei.target_node, ei.target_field): jnp.zeros(ei.shape, dtype=ei.dtype)
             for ei in self._external_inputs
         }
@@ -3756,18 +3801,18 @@ class GraphManager:
         # edge or an external input must not discard a fit); anything
         # that no longer fits is dropped with a warning.  ``reset_params``
         # restores the constructor values on purpose.
-        self.params = self._merge_live_params(self._snapshot_params(), self.params)
-        self._params_dtypes = {
+        params = self._merge_live_params(self._snapshot_params(), self.params)
+        params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
-                for owner, leaves in self.params.get(section, {}).items()
+                for owner, leaves in params.get(section, {}).items()
             }
             for section in ("nodes", "mappings")
         }
-        self._params_shapes = {
+        params_shapes = {
             section: {
                 owner: {k: tuple(jnp.shape(v)) for k, v in leaves.items()}
-                for owner, leaves in self.params.get(section, {}).items()
+                for owner, leaves in params.get(section, {}).items()
             }
             for section in ("nodes", "mappings")
         }
@@ -3849,7 +3894,55 @@ class GraphManager:
             if callable(invalidate):
                 invalidate()
 
-        step_fn = self._build_step_fn()
+        # Built against the plan, not against the graph: the build is the
+        # last thing that can raise, and it must be able to fail without
+        # having moved the graph off the step it is running.
+        plan = _StepPlan(
+            schedule=schedule,
+            back_edges=back_edges,
+            is_multirate=is_multirate,
+            rate_dividers=rate_dividers,
+            params=params,
+        )
+        step_fn = self._build_step_fn(plan)
+
+        def _counted_step(full_state, external_inputs, params=None):
+            self._n_traces += 1
+            return step_fn(full_state, external_inputs, params)
+
+        compiled_step = jax.jit(_counted_step)
+
+        # Snapshot static_data hashes so we can detect drift.
+        # ``static_data_hash`` is a node-supplied method, so this is the
+        # last thing in the method that can raise -- it stays above the
+        # commit point.
+        static_data_hashes = {
+            name: spec.node.static_data_hash()
+            for name, spec in self._nodes.items()
+        }
+
+        # ------------------------------------------------------------------
+        # Commit point.  Nothing below raises, so everything computed above
+        # is written onto the graph here, together: the plan the step was
+        # built from, the state and parameter snapshots it closes over, the
+        # ``_meta`` built above (see there) and the dividers the next
+        # compile will judge its phase against.  Up to here, a raise leaves
+        # the graph running exactly the step it was running before.
+        # ------------------------------------------------------------------
+        self._schedule = plan.schedule
+        self._back_edges = plan.back_edges
+        self._is_multirate = plan.is_multirate
+        self._rate_dividers = plan.rate_dividers
+        self.params = plan.params
+        self._params_dtypes = params_dtypes
+        self._params_shapes = params_shapes
+        self._state = state
+        self._default_ext_leaves = default_ext_leaves
+        if meta:
+            self._state[_META_KEY] = meta
+        else:
+            self._state.pop(_META_KEY, None)
+        self._committed_rate_dividers = dict(plan.rate_dividers)
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -3857,27 +3950,8 @@ class GraphManager:
         # graph; a growing count means something in the call signature
         # (weak types, dtypes, params structure) keeps changing.
         self._n_traces = 0
-
-        def _counted_step(full_state, external_inputs, params=None):
-            self._n_traces += 1
-            return step_fn(full_state, external_inputs, params)
-
-        self._compiled_step = jax.jit(_counted_step)
-
-        # Snapshot static_data hashes so we can detect drift.
-        self._static_data_hashes = {
-            name: spec.node.static_data_hash()
-            for name, spec in self._nodes.items()
-        }
-
-        # Nothing below raises, so this is the commit point for the
-        # ``_meta`` built above (see there) and for the dividers the next
-        # compile will judge its phase against.
-        if meta:
-            self._state[_META_KEY] = meta
-        else:
-            self._state.pop(_META_KEY, None)
-        self._committed_rate_dividers = dict(self._rate_dividers)
+        self._compiled_step = compiled_step
+        self._static_data_hashes = static_data_hashes
 
         self._dirty = False
         # A rebuilt step invalidates every scan built against the old
@@ -4025,22 +4099,43 @@ class GraphManager:
                 "with iteration_mode='jacobi'"
             )
 
-        self._multigpu_mesh = create_device_mesh(
+        # Mesh and device map into locals, committed together below.
+        # ``assign_nodes_to_devices`` and ``EdgeSpec.to_dict`` can raise,
+        # and a mesh committed on its own leaves ``validate_sharding``
+        # judging the nodes against a mesh the graph is not using while
+        # the step still runs on the previous device map -- with
+        # ``_dirty`` never set, so nothing recompiles to reconcile them.
+        mesh = create_device_mesh(
             n_devices, shape=mesh_shape, axis_names=mesh_axes
         )
-        n = len(self._multigpu_mesh.devices.reshape(-1))
+        n = len(mesh.devices.reshape(-1))
 
         coupling_sets = [set(g.nodes) for g in self._coupling_groups]
         edges_dicts = [e.to_dict() for e in self._edges]
-        self._multigpu_device_map = assign_nodes_to_devices(
+        device_map = assign_nodes_to_devices(
             node_names=list(self._nodes.keys()),
             edges=edges_dicts,
             coupling_groups=coupling_sets,
             n_devices=n,
         )
+        self._multigpu_mesh = mesh
+        self._multigpu_device_map = device_map
         self._dirty = True
 
-    def _build_step_fn(self) -> Callable:
+    def _committed_plan(self) -> "_StepPlan":
+        """The plan the graph is currently running, as last committed by
+        ``compile()``.  Rebuilding the step from this reproduces the step
+        that is live, which is what a caller that asks for a step function
+        outside ``compile()`` means."""
+        return _StepPlan(
+            schedule=list(self._schedule),
+            back_edges=list(self._back_edges),
+            is_multirate=self._is_multirate,
+            rate_dividers=dict(self._rate_dividers),
+            params=self.params,
+        )
+
+    def _build_step_fn(self, plan: Optional["_StepPlan"] = None) -> Callable:
         """Create a pure function ``(full_state, ext_inputs) -> full_state``.
 
         When multi-rate is active, the step function increments an
@@ -4053,12 +4148,24 @@ class GraphManager:
         When coupling groups are defined, nodes within each group are
         wrapped in a ``jax.lax.while_loop`` that iterates
         (Gauss-Seidel) until convergence or max_iterations.
+
+        Parameters
+        ----------
+        plan : _StepPlan, optional
+            The schedule, multi-rate info and parameter snapshot to build
+            against.  ``compile()`` passes the plan it has computed but
+            not yet committed, so the build -- which can raise -- happens
+            before the graph is touched.  ``None`` builds against what is
+            committed on the graph, which is what a caller rebuilding the
+            step of an already-compiled graph wants.
         """
-        schedule = list(self._schedule)
+        if plan is None:
+            plan = self._committed_plan()
+        schedule = list(plan.schedule)
         nodes = dict(self._nodes)
-        back_edge_set = set(self._back_edges)
-        is_multirate = self._is_multirate
-        rate_dividers = dict(self._rate_dividers)
+        back_edge_set = set(plan.back_edges)
+        is_multirate = plan.is_multirate
+        rate_dividers = dict(plan.rate_dividers)
         coupling_groups = list(self._coupling_groups)
 
         # Map node -> coupling group
@@ -4113,7 +4220,7 @@ class GraphManager:
         # baked in as constants, exactly the pre-params behaviour.  An
         # explicit ``params`` is a traced input, so ``jax.grad`` reaches
         # it and a new value needs no recompile.
-        params_snapshot = self.params
+        params_snapshot = plan.params
 
         def _resolve_params(params):
             if params is None:
@@ -5201,15 +5308,21 @@ class GraphManager:
             ``dt_history`` (list of used timesteps), and
             ``t_history`` (list of simulation times).
         """
+        self._recover_from_escaped_tracers()
+        self._check_static_data_dirty()
+        if self._dirty or self._compiled_step is None:
+            self.compile()
+        # Judged after the recompile, not before it.  ``_is_multirate`` is
+        # derived by ``compile()``, so on a graph that has been edited --
+        # or never compiled -- it describes the step last built rather
+        # than the one about to run.  Asked first, the refusal let a graph
+        # that had just become multi-rate through, and refused one that
+        # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(
                 "Adaptive timestepping is incompatible with multi-rate "
                 "graphs.  All nodes must share the same timestep."
             )
-        self._recover_from_escaped_tracers()
-        self._check_static_data_dirty()
-        if self._dirty or self._compiled_step is None:
-            self.compile()
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
@@ -5352,14 +5465,15 @@ class GraphManager:
             *history*: stacked state at each step (shape ``(max_steps, ...)``).
             *info*: dict with ``n_steps`` (actual steps taken, as JAX array).
         """
-        if self._is_multirate:
-            raise RuntimeError(
-                "Adaptive timestepping is incompatible with multi-rate graphs."
-            )
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        # After the recompile, for the reason given in ``run_adaptive``.
+        if self._is_multirate:
+            raise RuntimeError(
+                "Adaptive timestepping is incompatible with multi-rate graphs."
+            )
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
@@ -5563,7 +5677,23 @@ class GraphManager:
         than nothing: a group that came back missing its acceleration or
         its iteration cap would still be a group, and would quietly
         solve the same graph a different way.
+
+        The result is JSON-*valid*, not merely JSON-shaped: a non-finite
+        float anywhere in it -- a diverged param, an infinite ParamSpec
+        bound -- is the quoted token ``"NaN"`` / ``"Infinity"`` /
+        ``"-Infinity"``, not the bare token ``json.dumps`` writes by
+        default and no conforming reader accepts (``MADD-ANO-006``).
+        :meth:`from_dict` turns those back into floats, and reads the
+        bare tokens an older config carries as well.  The encoding is
+        applied once, to the assembled tree, so each part's own
+        ``to_dict`` still returns plain floats for the callers that want
+        numbers (the USD writer sets typed stage attributes from
+        :meth:`CouplingGroup.to_dict`).  See
+        :mod:`maddening.serialization.json_codec`.
         """
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            encode_non_finite,
+        )
         if strict_mappings:
             from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
                 check_mapping_serialisable,
@@ -5584,7 +5714,7 @@ class GraphManager:
             n: {k: s.to_dict() for k, s in o.items()}
             for n, o in self.param_spec_overrides().items()
         }
-        return {
+        return encode_non_finite({
             "nodes": nodes,
             **({"param_specs": overrides} if overrides else {}),
             "edges": [e.to_dict() for e in self._edges],
@@ -5598,7 +5728,7 @@ class GraphManager:
             # exactly the config it wrote before this key existed.
             **({"coupling_groups": [g.to_dict() for g in self._coupling_groups]}
                if self._coupling_groups else {}),
-        }
+        })
 
     @classmethod
     def from_dict(
@@ -5631,7 +5761,17 @@ class GraphManager:
         in another group, a misspelled enum — raises ``ValueError``
         naming the group and what is wrong with it.  A config without
         the key (one written before it existed) loads unchanged.
+
+        Non-finite numbers are decoded first, so both spellings load:
+        the quoted ``"NaN"`` / ``"Infinity"`` / ``"-Infinity"`` that
+        :meth:`to_dict` writes since 0.4.0, and the bare tokens an older
+        config carries, which ``json.loads`` has already turned into
+        floats by the time the dict arrives here (``MADD-ANO-006``).
         """
+        from maddening.serialization.json_codec import (  # noqa: PLC0415
+            decode_non_finite,
+        )
+        config = decode_non_finite(config)
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]

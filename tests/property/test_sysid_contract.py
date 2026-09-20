@@ -151,6 +151,39 @@ def _finite_f32_normal(lo, hi):
 # ---------------------------------------------------------------------------
 
 
+@st.composite
+def _flags_with_at_least_one_set(draw, length: int, allowed=None):
+    """``length`` booleans, at least one of them ``True``.
+
+    A mask of all ``False`` selects nothing, and ``fim`` and ``fit`` both
+    refuse it -- correctly, but that refusal is a different property, so
+    every such draw used to be thrown away by ``assume(any(flags))``.  With
+    two to five leaves that is a quarter of the search on the small graphs:
+    measured at 21.3% on ``test_a_mask_built_from_the_params_tree_is_accepted``
+    and 39.4% on ``test_fit_moves_only_the_masked_trainable_leaves``.
+
+    Drawing freely and then *setting* one flag rather than rejecting the draw
+    keeps every all-``False`` example as a valid single-``True`` one, which is
+    the boundary case worth having, and rejects nothing.
+
+    Parameters
+    ----------
+    length : int
+        How many booleans to return.
+    allowed : sequence of int, optional
+        Positions that may be set.  The guaranteed ``True`` lands in one of
+        these, for a caller whose mask is meaningful only at some positions
+        (``fit`` can only move a *trainable* leaf).  ``None`` means all of
+        them; an empty sequence means no flag can be guaranteed and the draw
+        is returned as-is, which the caller must handle.
+    """
+    flags = draw(st.lists(st.booleans(), min_size=length, max_size=length))
+    positions = list(range(length)) if allowed is None else list(allowed)
+    if positions and not any(flags[i] for i in positions):
+        flags[draw(st.sampled_from(positions))] = True
+    return [bool(f) for f in flags]
+
+
 def _leaf_paths(tree):
     return [jax.tree_util.keystr(p)
             for p, _ in jax.tree_util.tree_flatten_with_path(tree)[0]]
@@ -246,8 +279,19 @@ def _observe(gm, n_steps, params, sample_every=1):
     return jax.tree.map(lambda x: x[::sample_every], obs)
 
 
+#: Where :func:`_sum_squares` is stationary.  A leaf drawn exactly here has
+#: gradient zero, so no optimiser moves it and no non-vacuity claim may be
+#: made about it.
+_SUM_SQUARES_MINIMUM = 1.5
+
+
 def _sum_squares(p):
     """A loss with a non-zero gradient in every direction, and no rollout.
+
+    "Every direction" except one: the gradient w.r.t. a leaf is
+    ``2 * (leaf - _SUM_SQUARES_MINIMUM)``, which vanishes for a leaf drawn
+    at exactly 1.5.  Callers asserting that a fit *moved* something have to
+    exclude that point.
 
     Cast to float32 because a generated graph may carry an integer leaf
     (a trainable matrix-mapping weight), which ``jnp.sum`` would keep
@@ -255,7 +299,8 @@ def _sum_squares(p):
     """
     total = jnp.float32(0.0)
     for leaf in jax.tree.leaves(p):
-        total = total + jnp.sum((jnp.asarray(leaf, jnp.float32) - 1.5) ** 2)
+        total = total + jnp.sum(
+            (jnp.asarray(leaf, jnp.float32) - _SUM_SQUARES_MINIMUM) ** 2)
     return total
 
 
@@ -279,6 +324,20 @@ class TestTrainableContract:
            n_iter=st.integers(min_value=1, max_value=4))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fit_moves_only_the_masked_trainable_leaves(self, recipe, data, n_iter):
+        """A fit moves the masked trainable leaves and nothing else.
+
+        Rejected draws
+        --------------
+        17.5% under the ``ci`` profile, measured, down from 39.4%.  The
+        mask is now generated rather than filtered (see
+        :func:`_flags_with_at_least_one_set`); what is left is a drawn graph
+        whose every leaf is frozen (two ``TableNode`` graphs: their ``position``
+        is an initial condition), and a start that ``reset_params`` could
+        not bring inside its declared bounds.  Both are properties of the
+        drawn graph, and ``graph_recipes`` has no knob for either -- adding
+        one is the follow-up, and it belongs in the shared strategy module
+        rather than in this file.
+        """
         gm = recipe.build()
         if not _in_bounds(gm):
             # ``graph_recipes`` multiplies a "calibrated" leaf by up to
@@ -289,10 +348,17 @@ class TestTrainableContract:
         assume(_in_bounds(gm))
 
         trainable = jax.tree.leaves(gm.trainable_mask())
-        picked = data.draw(st.lists(st.booleans(), min_size=len(trainable),
-                                    max_size=len(trainable)))
+        trainable_at = [i for i, t in enumerate(trainable) if t]
+        # A graph whose every leaf is frozen has no mask to draw; that is
+        # ``fit``'s "nothing to fit" refusal, tested elsewhere.
+        assume(trainable_at)
+        picked = data.draw(_flags_with_at_least_one_set(len(trainable),
+                                                        allowed=trainable_at))
         flags = [bool(t and p) for t, p in zip(trainable, picked)]
-        assume(any(flags))
+        assert any(flags), (
+            "_flags_with_at_least_one_set(allowed=trainable_at) must set a "
+            "trainable position"
+        )
         mask = jax.tree_util.tree_unflatten(
             jax.tree_util.tree_structure(gm.params), flags)
         masked = {path for path, f in zip(_leaf_paths(gm.params), flags) if f}
@@ -320,15 +386,26 @@ class TestTrainableContract:
         # The result is still a legal starting point.
         assert _in_bounds(gm, result.params)
 
-        # Non-vacuity: a masked leaf that is float-valued and strictly
-        # inside its bounds has nowhere to be clipped to, so Adam's first
+        # Non-vacuity: a masked leaf that is float-valued, strictly inside
+        # its bounds and not already at the loss's stationary point has
+        # nowhere to be clipped to and a non-zero gradient, so Adam's first
         # step must move it.
+        #
+        # ``_sum_squares`` is minimised at 1.5 in every direction, so a leaf
+        # that starts there has gradient exactly zero and Adam moves it
+        # exactly zero -- correctly.  That case was unreachable while the
+        # mask was drawn freely and filtered with ``assume(any(flags))``;
+        # generating a mask that always names a trainable leaf reached it on
+        # the first run, with a ``SpringDamperNode`` drawn at
+        # ``stiffness=1.5``.  The claim being made is about a leaf the loss
+        # depends on, and now says so.
         movable = {
             path
             for (path, spec), f, leaf in zip(_spec_leaves(gm), flags,
                                              jax.tree.leaves(before))
             if f and jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
             and _strictly_inside(spec, leaf)
+            and not np.allclose(np.asarray(leaf), _SUM_SQUARES_MINIMUM)
         }
         if movable:
             assert moved, f"nothing moved although {sorted(movable)} could"
@@ -392,7 +469,16 @@ class TestTrainableContract:
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fit_defaults_its_mask_to_the_trainable_set(self, recipe):
-        """With no ``mask``, a ``trainable=False`` leaf is bit-identical."""
+        """With no ``mask``, a ``trainable=False`` leaf is bit-identical.
+
+        Rejected draws
+        --------------
+        14.0% under the ``ci`` profile, measured.  Same cause as
+        ``test_fit_moves_only_the_masked_trainable_leaves``: the property
+        needs a graph with both a frozen leaf and a trainable one, and
+        which leaves a drawn graph has is not something this test can
+        ask for without a knob on ``graph_recipes``.
+        """
         gm = recipe.build()
         if not _in_bounds(gm):
             gm.reset_params()
@@ -737,7 +823,23 @@ def analytic_residual(draw):
     return residual, keys, tuple(theta)
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIMAgainstFiniteDifference:
+    """``fim``'s matrix against a finite difference of the same residual.
+
+    The class carries a ``PrecisionLimitWarning`` filter.  These sweep
+    spring parameters across regimes that include genuinely floor-level
+    conditioning -- position-only data cannot separate a common scaling
+    of ``(k, c, m)``, so the weakest eigenvalue sits at the noise floor
+    by construction for some draws -- and ``fim`` now says so.  The
+    warning is a true statement about those matrices and is beside the
+    point of what is asserted here, which is the *matrix*, not the rank
+    verdict read off it.  Filtered rather than asserted because it fires
+    on some generated draws and not others, and marked on the class
+    rather than the methods for the same reason: which draw crosses the
+    band is not stable between runs.
+    """
 
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -774,7 +876,21 @@ class TestFIMAgainstFiniteDifference:
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fim_matches_a_finite_difference_of_a_rollout(self, truth, init, n):
         """The same check against a real graph rollout, at the tolerance
-        float32 actually supports (module docstring)."""
+        float32 actually supports (module docstring).
+
+        Rejected draws
+        --------------
+        25.2% under the ``ci`` profile, measured -- the highest left in
+        ``tests/property/`` -- so ``EXAMPLES_COSTLY`` buys about a quarter
+        less search here than the number says.  Three gates, none of them
+        a shape: the rollout has to have moved (``jnp.var(position) >
+        1e-2``), the float32 round trip of the finite-difference endpoints
+        has to leave a non-zero step, and the matrix has to have a
+        non-zero scale to compare against.  All three are outcomes of the
+        numbers, and an envelope narrow enough to guarantee them would
+        also delete the high-stiffness tail this test's 2e-2 bound was
+        measured on (module docstring).
+        """
         gm = _spring_gm()
         gm.set_node_state("s", {"position": jnp.float32(init["position"]),
                                 "velocity": jnp.float32(init["velocity"])})
@@ -810,7 +926,18 @@ class TestFIMAgainstFiniteDifference:
     def test_crb_is_consistent_with_the_matrix_it_came_from(self, problem):
         """For a non-singular FIM the reported bound is the diagonal of the
         inverse, and the Cramér--Rao inequality ``crb_i >= 1 / F_ii`` holds
-        (a parameter is never easier to estimate jointly than alone)."""
+        (a parameter is never easier to estimate jointly than alone).
+
+        Rejected draws
+        --------------
+        10.7% under the ``ci`` profile, measured.  The property is about
+        a *non-singular* FIM, and whether a drawn residual produces one
+        is a fact about the matrix, not about the draw.  Generating only
+        well-conditioned problems would make the property vacuous: the
+        rank-deficient case is what
+        ``test_crb_is_finite_exactly_where_the_pair_is_identifiable``
+        exists to cover.
+        """
         residual, keys, theta = problem
         with x64_enabled():
             params = {k: jnp.asarray(v, jnp.float64)
@@ -998,9 +1125,8 @@ class TestFIMMaskingAndScaling:
     ):
         residual, keys, theta = problem
         order = sorted(keys)
-        flags = data.draw(st.lists(st.booleans(), min_size=len(order),
-                                   max_size=len(order)))
-        assume(any(flags))
+        flags = data.draw(_flags_with_at_least_one_set(len(order)))
+        assert any(flags), "_flags_with_at_least_one_set must set one"
         note(f"order={order} flags={flags} scale={scale}")
 
         params = {k: jnp.asarray(v, jnp.float32) for k, v in zip(keys, theta)}
@@ -1185,9 +1311,8 @@ class TestMaskStructure:
         """Non-vacuity: the refusal above is about the keys, not about
         masks."""
         params = self._params(keys)
-        flags = data.draw(st.lists(st.booleans(), min_size=len(keys),
-                                   max_size=len(keys)))
-        assume(any(flags))
+        flags = data.draw(_flags_with_at_least_one_set(len(keys)))
+        assert any(flags), "_flags_with_at_least_one_set must set one"
         mask = dict(zip(sorted(params), flags))
         report = fim(self._residual, params, scale=None, mask=mask)
         assert len(report.param_names) == sum(flags)
@@ -1212,6 +1337,18 @@ _TILINGS = tuple(
 )
 
 
+#: ``(n_steps, window)`` pairs where the window does *not* tile the
+#: observations: ``T - 1 == n_steps`` samples do not divide by ``window``.
+#: Enumerated rather than drawn-and-filtered -- ``window`` over 1..30 against
+#: these three step counts divides 28.6% of the time, measured, and each
+#: rejected draw still paid for a rollout.  Sampling from a finite set is also
+#: what the ``max_examples`` house rule calls an exhausted search space, so
+#: the tier above is a ceiling here, not a target.
+_NON_DIVIDING_TILINGS = st.sampled_from([
+    (n, w) for n in (12, 16, 24) for w in range(1, 31) if n % w != 0
+])
+
+
 class TestWindowTilings:
 
     @given(tiling=st.sampled_from(_TILINGS))
@@ -1232,20 +1369,27 @@ class TestWindowTilings:
         ws = init_window_states(obs, window)
         assert ws["s"]["position"].shape[0] == n_windows
 
-    @given(n_steps=st.sampled_from((12, 16, 24)),
-           window=st.integers(min_value=1, max_value=30))
+    @given(tiling=_NON_DIVIDING_TILINGS)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_a_tiling_that_does_not_divide_is_refused_by_both_helpers(
-        self, n_steps, window,
+        self, tiling,
     ):
         """The awkward cases: a window that leaves a remainder, a
         non-positive window, and a window wider than the data (which
         divides ``T - 1 == 0`` arithmetically but leaves nothing to
         integrate)."""
+        n_steps, window = tiling
         gm = _spring_gm()
         obs = _observe(gm, n_steps, gm.params)
         T = int(obs["s"]["position"].shape[0])
-        assume((T - 1) % window != 0)
+        # Asserted, not assumed: ``_NON_DIVIDING_TILINGS`` enumerates the
+        # pairs that leave a remainder, so a draw that divides means the
+        # enumeration and the rollout have drifted apart -- which would
+        # silently turn this into a test of the divides-exactly path.
+        assert (T - 1) % window != 0, (
+            f"_NON_DIVIDING_TILINGS produced a tiling that divides: "
+            f"T={T} window={window}"
+        )
         note(f"T={T} window={window}")
         for bad in (window, 0, -window):
             with pytest.raises(ValueError, match="window"):

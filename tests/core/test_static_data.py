@@ -817,14 +817,21 @@ class TestStaticDataDepsRefusedAtCompile:
         ``gm.set_param_spec`` is the graph-level half of the same knob --
         it is what ``gm.trainable_mask()`` and ``maddening.sysid`` read --
         so a freeze applied there has to clear the refusal too.
+
+        The mask is read after the compile the freeze makes succeed, not
+        between the refusal and it.  ``gm.params`` is a snapshot
+        ``compile()`` takes, and a *failed* compile now leaves it as it
+        found it -- empty, on a graph that has never compiled.  Reading it
+        in between passed only while a failed compile committed a snapshot
+        of the step it had just refused to build.
         """
         gm = GraphManager()
         gm.add_node(_DerivedStaticNode("d", timestep=0.01, trainable=True))
         with pytest.raises(ValueError):
             gm.compile()
         gm.set_param_spec("d", "scale", ParamSpec(trainable=False))
-        assert gm.trainable_mask()["nodes"]["d"]["scale"] is False
         gm.compile()
+        assert gm.trainable_mask()["nodes"]["d"]["scale"] is False
         gm.step()
 
     def test_unfreezing_through_set_param_spec_is_refused(self):

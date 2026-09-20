@@ -64,9 +64,22 @@ from maddening.core.transforms import (
     get_transform_name,
     resolve_transform,
 )
+from maddening.serialization.json_codec import dumps as _json_dumps
+from maddening.serialization.json_codec import loads as _json_loads
 
 if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
+
+# Every JSON-valued attribute on the stage goes through
+# ``maddening.serialization.json_codec`` rather than ``json`` directly: a
+# non-finite param used to be written as the bare token ``NaN`` /
+# ``Infinity``, which is not JSON, so every reader of the ``.usda`` but
+# Python's own rejected the attribute (``MADD-ANO-006``).  ``_json_dumps``
+# writes the quoted token and, with ``allow_nan=False`` underneath,
+# cannot emit a bare one even for a value its walk did not reach;
+# ``_json_loads`` reads the quoted form and the bare one a stage written
+# before 0.4.0 carries.  ``json`` stays imported for
+# ``json.JSONDecodeError``, which ``_json_loads`` still raises.
 
 
 # ------------------------------------------------------------------
@@ -339,14 +352,14 @@ def save_graph_to_usd(
                 attr = prim.CreateAttribute(
                     _PARAM_SHAPES_ATTR, Sdf.ValueTypeNames.String, custom=True,
                 )
-                attr.Set(json.dumps(lost, sort_keys=True))
+                attr.Set(_json_dumps(lost, sort_keys=True))
             overrides = gm.param_spec_overrides().get(node_name)
             if overrides:
                 attr = prim.CreateAttribute(
                     "maddening:paramSpecOverridesJson",
                     Sdf.ValueTypeNames.String,
                 )
-                attr.Set(json.dumps({k: s.to_dict() for k, s in overrides.items()}))
+                attr.Set(_json_dumps({k: s.to_dict() for k, s in overrides.items()}))
 
         # Edge attributes
         for i, edge in enumerate(gm._edges):
@@ -380,7 +393,7 @@ def save_graph_to_usd(
                 attr = prim.CreateAttribute(
                     "maddening:mappingSpecJson", Sdf.ValueTypeNames.String,
                 )
-                attr.Set(json.dumps(edge.mapping.describe()))
+                attr.Set(_json_dumps(edge.mapping.describe()))
                 # ParamSpec overrides keyed by the edge key (a mapping whose
                 # weights were made trainable for sysid) belong to the edge,
                 # not to any node prim, so they are written here.
@@ -389,7 +402,7 @@ def save_graph_to_usd(
                     ov_attr = prim.CreateAttribute(
                         "maddening:paramSpecOverridesJson", Sdf.ValueTypeNames.String,
                     )
-                    ov_attr.Set(json.dumps(
+                    ov_attr.Set(_json_dumps(
                         {k: s.to_dict() for k, s in edge_overrides.items()}))
 
         # Coupling group attributes.  ``CouplingGroup.to_dict`` is the
@@ -406,7 +419,7 @@ def save_graph_to_usd(
             accelerated = stored["accelerated_fields"]
             prim.GetAttribute(_COUPLING_GROUP_FIELDS_ATTR).Set(
                 "" if accelerated is None
-                else json.dumps(accelerated, sort_keys=True)
+                else _json_dumps(accelerated, sort_keys=True)
             )
 
         # External input attributes
@@ -507,7 +520,7 @@ def load_graph_from_usd(
             if not node_type:
                 continue
 
-            params = json.loads(params_json) if params_json else {}
+            params = _json_loads(params_json) if params_json else {}
             params = _restore_param_shapes(child, params)
             cls = _resolve_node_class(node_type, node_registry,
                                       allow_import=allow_import)
@@ -529,7 +542,7 @@ def load_graph_from_usd(
                 import warnings  # noqa: PLC0415
 
                 from maddening.core.params import ParamSpec  # noqa: PLC0415
-                for key, spec_dict in json.loads(overrides_json).items():
+                for key, spec_dict in _json_loads(overrides_json).items():
                     try:
                         gm.set_param_spec(node_name, key, ParamSpec.from_dict(spec_dict))
                     except (KeyError, ValueError) as exc:
@@ -565,7 +578,7 @@ def load_graph_from_usd(
                 where = (f"{source_node}.{source_field} -> "
                          f"{target_node}.{target_field}")
                 try:
-                    spec_dict = json.loads(spec_json)
+                    spec_dict = _json_loads(spec_json)
                 except json.JSONDecodeError as exc:
                     # A hand-edited / truncated attribute must name its edge
                     # like every other rebuild failure does.
@@ -606,7 +619,7 @@ def load_graph_from_usd(
 
                 from maddening.core.params import ParamSpec  # noqa: PLC0415
                 edge_key = gm.edges[-1].key
-                for key, ov_dict in json.loads(edge_overrides_json).items():
+                for key, ov_dict in _json_loads(edge_overrides_json).items():
                     try:
                         gm.set_param_spec(edge_key, key, ParamSpec.from_dict(ov_dict))
                     except (KeyError, ValueError) as exc:
@@ -637,7 +650,7 @@ def load_graph_from_usd(
                     stored[field_name] = convert(val)
             accelerated = child.GetAttribute(_COUPLING_GROUP_FIELDS_ATTR).Get()
             if accelerated:
-                stored["accelerated_fields"] = json.loads(accelerated)
+                stored["accelerated_fields"] = _json_loads(accelerated)
 
             nodes, kwargs = coupling_group_kwargs(stored)
             try:
@@ -797,7 +810,7 @@ def _restore_param_shapes(prim, params: dict) -> dict:
     raw = attr.Get() if attr else None
     if not raw:
         return params
-    for key, shape in json.loads(raw).items():
+    for key, shape in _json_loads(raw).items():
         if key in params:
             params[key] = np.asarray(params[key]).reshape(tuple(shape))
     return params
@@ -815,7 +828,7 @@ def _params_json(params: dict, node_name: str) -> str:
     time rather than on the one that fails much later somewhere else.
     """
     try:
-        return json.dumps(_params_to_serializable(params))
+        return _json_dumps(_params_to_serializable(params))
     except TypeError as exc:
         bad = sorted(
             k for k, v in _params_to_serializable(params).items()

@@ -86,16 +86,21 @@ RUN python3 -c "import jax; print(f'JAX: {jax.__version__}')" && \
 #   5556  — ZMQ command SUB
 #   5580  — Multi-job coordinator (ROUTER socket)
 #
-#   SECURITY: port 8000 serves an API with NO AUTHENTICATION and NO TLS.
-#   Anyone who can reach it can rewrite the simulation graph and call
-#   POST /cloud/launch, which provisions paid GPU instances with the
-#   credentials on this host; /docs lists every route.  Do not publish
-#   8000 to a public address: keep it inside a private network, or
-#   publish it only to loopback (docker run -p 127.0.0.1:8000:8000) and
-#   reach it over an SSH tunnel, or front it with an authenticating,
-#   TLS-terminating proxy.  Port 8443 (signaling) authenticates clients
-#   with HMAC tokens, but only once MADDENING_STREAM_SECRET is set --
-#   without it no client can connect at all.
+#   SECURITY: this image binds MADDENING_HOST=0.0.0.0, which is not
+#   loopback, so port 8000 requires "Authorization: Bearer <token>" on
+#   every route but /healthz and /viz/*.  Set MADDENING_API_TOKEN, or
+#   read the token the server generates and logs once at start-up; if
+#   nothing reads this container's log, set MADDENING_API_TOKEN or point
+#   MADDENING_API_TOKEN_FILE at a mounted volume.  A blank
+#   MADDENING_API_TOKEN makes the server refuse to start.
+#
+#   There is still NO TLS, so the token and every state snapshot cross
+#   the network in cleartext.  Prefer publishing 8000 to loopback only
+#   (docker run -p 127.0.0.1:8000:8000) and reaching it over an SSH
+#   tunnel, or front it with a TLS-terminating proxy.  Port 8443
+#   (signaling) authenticates clients with HMAC tokens, but only once
+#   MADDENING_STREAM_SECRET is set -- without it no client can connect
+#   at all.
 EXPOSE 8000 8443 5555 5556 5580
 
 # ── Entrypoint ───────────────────────────────────────────────────────

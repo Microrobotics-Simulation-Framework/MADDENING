@@ -438,6 +438,21 @@ def main():
         raise SystemExit(0)
     signal.signal(signal.SIGINT, _shutdown)
 
+    # This demo builds its own FastAPI app rather than using
+    # SimulationServer, so it does NOT get the bearer token a non-loopback
+    # SimulationServer bind now requires -- and it defaults to 0.0.0.0.
+    # Its routes only drive this one simulation (no /cloud/launch, no
+    # caller-chosen paths), but they are open to anyone who can reach the
+    # port, so do not leave the message to the docs.
+    from maddening.api.auth import is_loopback
+    if not is_loopback(args.host):
+        print(
+            f"\n  WARNING: listening on {args.host}:{args.port}, which is not"
+            f"\n  loopback. This demo has no authentication and no TLS:"
+            f"\n  anyone who can reach the port can drive the simulation."
+            f"\n  Use --host 127.0.0.1 unless you mean it.\n"
+        )
+
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:

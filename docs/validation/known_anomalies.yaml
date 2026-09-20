@@ -363,8 +363,32 @@ anomalies:
       and GraphManager.to_dict has always returned a dict whose caller
       serialises it the same way.  The third, the FMI JSON wire, arrived
       with FmuTcpBridge in 0.4.0.  The range is open-ended because the
-      defect is still reachable in the current version, not because
+      defect was reachable on every version up to the fix, not because
       every version is affected on every surface.
+
+      Fixed in 0.4.0.  All three surfaces write a non-finite float as the
+      quoted token "NaN", "Infinity" or "-Infinity", through the shared
+      maddening.serialization.json_codec.  Quoted tokens rather than a
+      tagged object: a pre-0.4.0 document and a 0.4.0 one then differ by
+      two characters per value so a config stays diffable, every
+      container keeps the shape it had, and the FMU's C wrapper needs two
+      lines rather than a JSON parser.  json_codec.dumps also passes
+      allow_nan=False, so a value its walk did not reach fails at the
+      call site instead of leaving an invalid document behind.  Reading
+      stays lenient -- json.loads parses the bare tokens into floats
+      itself and the decoder passes a float through -- so a config, stage
+      or peer written before 0.4.0 still loads and nothing that was saved
+      needs migrating.
+
+      This entry's residual_risk used to say a tagged form "would also
+      break the shipped C wrapper, which parses values with strtod and
+      would reject a quoted token".  That was wrong about the mechanism,
+      and was measured before the fix: C99 strtod parses NaN, Infinity
+      and -Infinity case-insensitively, and the quote character was the
+      only thing it could not step over.  parse_values now steps over it
+      and requires the closing quote, so "1e5xyz" cannot pass as 1e5, and
+      the bare form is still accepted.  do_set refuses a non-finite value
+      before building a request, so the wrapper never writes one.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -381,26 +405,36 @@ anomalies:
       - "maddening.fmi.tcp_bridge.FmuTcpBridge"
     affected_versions: ">=0.1.0"
     workaround: >
-      Keep parameters finite -- an infinite ParamSpec bound means "no
-      bound", which is also what leaving the bound None means, and a
+      Before 0.4.0: keep parameters finite -- an infinite ParamSpec
+      bound means "no bound", which is also what leaving the bound
+      None means, and a
       non-finite parameter value is refused by ParamSpec.check anyway.
       A client reading the sidecar wire in another language should
       negotiate protocol 2 and read values from the binary frames, which
       carry raw float64 and represent every value exactly.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Closing it needs a format decision rather than a fix.  JSON has no
-      literal for NaN, so the value must either be encoded (a tagged
-      object, which no existing reader of a MADDENING config or stage
-      understands) or dropped (null, which loses it).  On the FMI wire a
-      tagged form would also break the shipped C wrapper, which parses
-      values with strtod and would reject a quoted token.  That is a
-      maintainer's call about a shipped format, not a bug fix, so it is
-      recorded here instead of being made unilaterally.
+      One ambiguity is closed by construction rather than by encoding.  A
+      decoder cannot tell the float NaN from a string that reads "NaN",
+      and to_dict has no schema for node params to decode against, so
+      encode_non_finite raises on a string leaf equal to one of the three
+      tokens rather than writing a document that would read back wrong.
+      Two consequences, both narrow: a graph that stored one of those
+      three strings as a parameter value used to serialise and now raises
+      with the path named (spell the value differently), and a pre-0.4.0
+      document that carries such a string reads back as the float.  The
+      second is the one migration case with no detection; it needs a
+      parameter whose value is exactly "NaN", "Infinity" or "-Infinity".
     verification:
-      - "tests/core/test_non_finite_json_tokens.py::test_an_infinite_param_spec_bound_makes_to_dict_non_standard_json"
-      - "tests/usd/test_usd_params.py::test_a_non_finite_param_makes_the_params_attribute_non_standard_json"
-      - "tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_not_standard_json"
+      - "tests/core/test_non_finite_json_tokens.py::test_an_infinite_param_spec_bound_serialises_as_strict_json"
+      - "tests/core/test_non_finite_json_tokens.py::test_a_config_written_before_040_still_loads"
+      - "tests/core/test_non_finite_json_tokens.py::test_any_tree_dumps_to_a_document_a_strict_parser_accepts"
+      - "tests/core/test_non_finite_json_tokens.py::test_a_string_that_collides_with_a_token_is_refused_at_write_time"
+      - "tests/usd/test_usd_params.py::test_a_non_finite_param_writes_a_stage_a_strict_reader_accepts"
+      - "tests/usd/test_usd_params.py::test_a_stage_written_before_040_still_loads_its_bare_tokens"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_strict_json"
+      - "tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json"
       - "tests/fmi/test_non_finite_json_tokens.py::test_the_binary_frames_carry_the_same_values_exactly"
     github_issue: null
 
@@ -546,6 +580,81 @@ anomalies:
       - "tests/verification/test_mms_order.py::test_the_fourth_order_stencil_is_unstable_below_the_documented_cfl_limit"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-010"
+    title: "A string spelling a non-finite token is refused by the JSON serialisers"
+    description: >
+      Since 0.4.0 a non-finite float is written as the quoted token
+      "NaN", "Infinity" or "-Infinity" (MADD-ANO-006), and the decoder
+      turns those three strings back into floats wherever it meets them,
+      because GraphManager.to_dict has no schema for node params to
+      decode against.  A *string* leaf that happens to spell one of the
+      three is therefore ambiguous, and encode_non_finite refuses to
+      write it: saving a graph with a node named "NaN", or a string
+      parameter whose value is exactly "Infinity", raises ValueError
+      naming the path instead of producing a document that would read
+      back as a float.
+
+      The refusal is on every surface that shares the codec:
+      GraphManager.to_dict, the USD JSON attributes written by
+      save_graph_to_usd, and the FMI JSON wire helpers send_message and
+      encode_binary.  On the wire the protocol has no free-text field --
+      op, dtype, vr, values, t, dt and the base64 state are all
+      constrained -- so no request or reply FmuTcpBridge itself builds
+      can reach it; a third-party client that puts its own strings in a
+      binary header can, and a property test drawing arbitrary headers
+      does.
+
+      The alternative encoding, a tagged object such as
+      {"__nonfinite__": "Infinity"}, does not remove the ambiguity.  A
+      user dict of exactly that shape decodes to a float in the same
+      way; it just does so silently on read instead of loudly on write,
+      and it costs the FMU's C wrapper a nested-object parser where the
+      quoted token costs eight lines (the wrapper has no JSON parser at
+      all -- it is strstr and strtod).  The loud narrow failure was
+      chosen over the quiet rarer one.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The refusal is a fail-stop at write time that names the path to
+      the offending value, so no wrong number reaches a document and
+      nothing is lost silently; what it carries is an availability risk,
+      not a correctness one.  It is context-dependent because the write
+      it can stop is the one a diverged run most wants to make: a
+      product that serialises a graph on a fault path, and whose node
+      names or string parameters come from field or operator data rather
+      than being fixed in code, can have that save fail at exactly the
+      moment the state was worth recording.  Such a product should
+      validate names and string parameters against the three tokens
+      where they are accepted, not where they are saved, so the refusal
+      lands on data entry rather than on the fault path.
+    affected_components:
+      - "maddening.serialization.json_codec.encode_non_finite"
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.usd.serialization.save_graph_to_usd"
+      - "maddening.fmi.tcp_bridge.encode_binary"
+    affected_versions: ">=0.4.0"
+    workaround: >
+      Spell the value differently.  The refusal names the path, and
+      every other spelling -- "nan", "inf", "+Infinity", "NaN " -- is
+      stored and read back as the string it is, because both the
+      refusal and the decode are exact matches.  A node name is under
+      the same rule.  A client that needs to put arbitrary text on the
+      FMI wire should send it base64-encoded, as set_state already does.
+    resolution_status: "open"
+    residual_risk: >
+      Reading carries the mirror of the same ambiguity with no refusal
+      available to it: a document written before 0.4.0 whose parameter
+      value is the string "NaN" reads back as the float, because the
+      decoder cannot tell it from the token this version writes.  That
+      case belongs to MADD-ANO-006, the change that created it, and is
+      recorded there; it is undetectable rather than merely unfixed.
+      Refusing at write time is what keeps the set of ambiguous
+      documents closed at the documents older MADDENING wrote.
+    verification:
+      - "tests/core/test_non_finite_json_tokens.py::test_a_string_that_collides_with_a_token_is_refused_at_write_time"
+      - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused"
+      - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_that_only_looks_like_a_token_stays_a_string"
+    github_issue: null
   - anomaly_id: "MADD-ANO-011"
     title: "BallNode's declared discretisation is forward Euler; the implementation is semi-implicit Euler"
     description: >

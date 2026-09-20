@@ -8,7 +8,7 @@ analysis cannot verify due to JAX's select_n tracing both branches.
 
 import jax.numpy as jnp
 import numpy as np
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 
@@ -85,7 +85,17 @@ class TestAitkenDivisionGuard:
         residual = x_raw_j - x_old_j
         delta_r = residual - prev_r_j
         denom = float(jnp.sum(delta_r ** 2))
-        assume(denom <= 1e-30)
+        # Asserted, not assumed.  ``small_arrays`` bounds every element by
+        # 1e-16, so ``delta_r`` is bounded by 3e-16 and an 8-entry sum of its
+        # squares by 7.2e-31 -- the degenerate branch is reached by
+        # construction, not by luck, and this measured 0.0% rejection even at
+        # 800 examples.  If the strategy is ever widened, this fails here
+        # rather than quietly turning the test into a measure of how often a
+        # random draw happens to be degenerate.
+        assert denom <= 1e-30, (
+            f"small_arrays must keep the division guard's denominator "
+            f"degenerate; got {denom}"
+        )
 
         _, new_omega, _ = aitken_relaxation(
             x_old_j, x_raw_j, prev_r_j, omega_j

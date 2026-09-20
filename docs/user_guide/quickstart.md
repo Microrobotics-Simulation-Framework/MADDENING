@@ -185,26 +185,29 @@ job.teardown()
 See `src/maddening/examples/cloud/` for complete examples and config templates.
 
 ```{warning}
-**The simulation API on port 8000 has no authentication and no TLS.**  The
-cloud image binds `0.0.0.0`, and `JobConfig.ports` defaults to `[8000]`,
-which opens that port in the provider's firewall — so a default launch
-serves a fully graph-mutating API on a public address.  Among its routes
-are `POST /cloud/launch` and `POST /cloud/teardown`, which provision and
-destroy paid GPU instances using the credentials stored on that host, and
-`/docs`, which lists the rest.
+**The simulation API requires a bearer token unless it is bound to
+loopback, and it still has no TLS.**  Running locally on `127.0.0.1`
+nothing changes.  The cloud image binds `0.0.0.0`, so every route there
+— including `POST /cloud/launch` and `POST /cloud/teardown`, which
+provision and destroy paid GPU instances using the credentials stored on
+that host — needs `Authorization: Bearer <token>`.  Set
+`MADDENING_API_TOKEN` in your job's `envs:`, or read the token the server
+generates and logs once at startup.  A blank `MADDENING_API_TOKEN` is a
+configuration error and the server refuses to start.
 
-Drop `8000` from `ports:` in your job config and reach the API through an
-SSH tunnel instead:
+`JobConfig.ports` no longer defaults to `[8000]`, so the provider's
+firewall stays shut unless you ask for the port.  Reach the API through
+an SSH tunnel:
 
     ssh -L 8000:127.0.0.1:8000 root@<vm-ip> -p <ssh-port>
     # then talk to http://localhost:8000
 
-or put an authenticating, TLS-terminating reverse proxy in front of it.
-Running locally, bind loopback: `uvicorn module:app --host 127.0.0.1`, or
-`MADDENING_HOST=127.0.0.1` for the container entry point.  The server logs
-a warning at startup whenever it binds a non-loopback address.  WebRTC
-signaling on 8443 does authenticate, but only once you set
-`MADDENING_STREAM_SECRET` and share it with the viewer.
+Because there is no TLS, the token crosses the network in cleartext:
+prefer the tunnel, or a TLS-terminating reverse proxy, to a public port.
+`/docs` is not served when the token is enforced (Swagger UI cannot send
+a bearer header when it fetches its own schema).  WebRTC signaling on
+8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
+share it with the viewer.
 ```
 
 ## Next Steps

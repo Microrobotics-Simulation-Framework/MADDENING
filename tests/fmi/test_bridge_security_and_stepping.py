@@ -7,7 +7,9 @@
   timestep is refused (the FMU advertises a fixed step, no event mode);
 * ``set`` is atomic across parameters and inputs and refuses non-finite
   inputs;
-* a second FMU instance on one bridge gets a clear error, not a hang.
+* a second FMU instance on one bridge gets a clear error, not a hang,
+  while a *reconnecting* instance waits out the departing one's
+  hand-over instead of being refused a slot nobody holds.
 
 Originally written from the independent audit of 2026-09-16 (round 3; report and
 reproducers under ``benchmarks/results/audit3/``).
@@ -119,23 +121,78 @@ def test_set_is_atomic_and_refuses_non_finite_inputs():
 
 
 def test_second_instance_on_one_bridge_is_refused_not_blocked():
+    # The socket budget is well clear of ``_HANDOVER_GRACE``: the refusal
+    # below is deliberately made to wait out a possible hand-over, so a
+    # timeout of a couple of seconds would be measuring the grace.
     gm = _graph()
     md, bridge = _bridge(gm)
     with bridge:
         host, port = bridge.endpoint.split(":")
-        with socket.create_connection((host, int(port)), timeout=5) as first:
+        with socket.create_connection((host, int(port)), timeout=30) as first:
             send_message(first, {"op": "hello"})
             assert recv_message(first)["ok"]
-            with socket.create_connection((host, int(port)), timeout=5) as second:
+            with socket.create_connection((host, int(port)), timeout=30) as second:
                 send_message(second, {"op": "hello"})
                 r = recv_message(second)
                 assert not r["ok"] and "one FmuTcpBridge per instance" in r["error"]
             send_message(first, {"op": "step", "t": 0.0, "dt": DT})
             assert recv_message(first)["ok"]
         # after the first disconnects, a new instance may connect
-        with socket.create_connection((host, int(port)), timeout=5) as third:
+        with socket.create_connection((host, int(port)), timeout=30) as third:
             send_message(third, {"op": "hello"})
             assert recv_message(third)["ok"]
+
+
+class _SlowHandover:
+    """The bridge's instance lock with its hand-over gap made deterministic.
+
+    The real gap is the scheduler's: the departing connection's worker
+    releases the slot in a ``finally`` that runs after its socket has
+    reached EOF, so a reconnect can arrive while the slot is still held
+    by a connection that no longer exists.  Racing it is not a test --
+    it passed 500 times out of 500 on an idle box and failed 21-28% of
+    the time on one CPU under load, which is how it reached CI as a
+    flake.  Delaying the release by a fixed amount is the same situation
+    with the timing pinned.
+    """
+
+    def __init__(self, inner, delay):
+        self._inner, self._delay = inner, delay
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self):
+        time.sleep(self._delay)
+        self._inner.release()
+
+
+def test_a_reconnecting_instance_waits_out_the_previous_ones_hand_over():
+    """An importer that frees an instance and immediately makes another is
+    not refused a slot nobody holds.
+
+    ``fmi3FreeInstance`` followed by ``fmi3InstantiateCoSimulation`` is
+    what every co-simulation master does between runs, and the two are
+    one round trip apart.  Before ``_HANDOVER_GRACE`` the second
+    ``hello`` was answered "bridge already serves an FMU instance"
+    whenever the old worker had not been scheduled yet -- a refusal with
+    no second instance anywhere, and nothing for the importer to do
+    about it but retry.
+    """
+    gm = _graph()
+    md, bridge = _bridge(gm)
+    # Far longer than a scheduler slice, far shorter than the grace.
+    bridge._busy = _SlowHandover(bridge._busy, 0.3)
+    with bridge:
+        host, port = bridge.endpoint.split(":")
+        with socket.create_connection((host, int(port)), timeout=30) as first:
+            send_message(first, {"op": "hello"})
+            assert recv_message(first)["ok"]
+        # ``first`` has hung up; its worker is still inside the release.
+        with socket.create_connection((host, int(port)), timeout=30) as second:
+            send_message(second, {"op": "hello"})
+            r = recv_message(second)
+            assert r["ok"], f"a reconnect was refused a slot nobody holds: {r}"
 
 
 def test_model_description_advertises_fixed_step():

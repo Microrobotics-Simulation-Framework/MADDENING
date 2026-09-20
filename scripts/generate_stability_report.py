@@ -192,10 +192,20 @@ def main(argv: list[str] | None = None) -> int:
                      if v in (StabilityLevel.EVOLVING, StabilityLevel.PROVISIONAL))
     n_experimental = sum(1 for v in _STABILITY_REGISTRY.values()
                          if v == StabilityLevel.EXPERIMENTAL)
+    # Name the modules that are NOT in the count.  --allow-missing-optional
+    # writes a deliberately incomplete report, and a headline that says only
+    # "N surfaces" reads as full coverage of a tree it did not see.
+    incomplete = ""
+    if SKIPPED_MODULES:
+        incomplete = (
+            f"; INCOMPLETE -- {len(SKIPPED_MODULES)} module(s) were skipped "
+            f"for missing optional dependencies and contribute no surfaces "
+            f"({', '.join(sorted(SKIPPED_MODULES))})"
+        )
     print(
         f"Wrote {out_path}: {n} surfaces "
         f"({n_stable} stable, {n_evolving} evolving, "
-        f"{n_experimental} experimental)"
+        f"{n_experimental} experimental){incomplete}"
     )
     return 0
 

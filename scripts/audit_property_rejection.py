@@ -447,9 +447,14 @@ def summarise(records: Sequence[RejectionRecord]) -> str:
     def pct(q: float) -> float:
         return rates[min(n - 1, int(q * n))]
 
-    zero = sum(1 for r in rates if r == 0.0)
+    # "Filtered nothing" and "drew nothing" are both rate 0.0, and folding
+    # them together would let a test that measured nothing count towards the
+    # population the gate's threshold was derived from.
+    drew_nothing = sum(1 for r in records if r.drawn == 0)
+    zero = sum(1 for r in records if r.drawn and r.rate == 0.0)
+    nothing = f", {drew_nothing} drew nothing at all" if drew_nothing else ""
     return (
-        f"{n} tests with Hypothesis draws; {zero} filter nothing at all. "
+        f"{n} tests observed; {zero} drew and filtered nothing{nothing}. "
         f"filter rate: median {pct(0.5):.1%}, p90 {pct(0.9):.1%}, "
         f"max {rates[-1]:.1%}. "
         f"Total draws {sum(r.drawn for r in records)}, of which "

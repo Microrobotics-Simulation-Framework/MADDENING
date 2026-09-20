@@ -41,7 +41,15 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 # Minimum number of resolvable ``maddening.*`` references per guide, keyed by
 # path relative to the repository root.  Pinned so that a deleted table, or a
 # row that loses its backticks, fails instead of reporting a smaller "OK".
-# Raise a number when a guide gains rows; never lower one to make CI pass.
+# Raise a number when a guide gains rows.
+#
+# Lowering one is not a convention any more: ``tests/compliance/
+# min_mappings_floor.json`` holds a committed floor and
+# ``TestMinMappingsRatchet`` asserts ``MIN_MAPPINGS[path] >= floor[path]``,
+# so a pin can only go down together with an edit to another file.  It used
+# to be a comment saying "never lower one to make CI pass", and dropping a
+# pin from 9 to 1 while deleting 8 rows of the guide left every gate and
+# every mapping test green (audit_040_r2/gates, finding G6).
 MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,

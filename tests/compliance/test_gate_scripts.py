@@ -11,6 +11,7 @@ Each test names the mutation it replays.
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -391,6 +392,70 @@ class TestImplementationMappingGate:
         """
         (tmp_path / "not_a_guide.md").write_text("# No table here\n")
         assert mapping_gate.main([str(tmp_path)]) == 1
+
+
+class TestMinMappingsRatchet:
+    """``MIN_MAPPINGS`` must not be lowerable from inside one file.
+
+    It is the only protection the Implementation Mapping tables have, and it
+    lives in the file an author editing a guide is already editing: dropping
+    ``heat_node.md`` from 9 to 1 and deleting 8 of its 9 rows left the gate
+    green and every mapping test green with it, because
+    ``test_every_pinned_guide_is_satisfied_by_the_repository`` reads the
+    *current* ``MIN_MAPPINGS`` and moves with the mutation.
+
+    The floor beside this file is the second half of the ratchet: lowering a
+    pin now takes an edit to two files in opposite directions.
+    """
+
+    @staticmethod
+    def _floor():
+        with open(Path(__file__).parent / "min_mappings_floor.json") as fh:
+            return {
+                os.path.normpath(path): value
+                for path, value in json.load(fh)["floor"].items()
+            }
+
+    @staticmethod
+    def _pins(mapping_gate):
+        return {
+            os.path.normpath(path): value
+            for path, value in mapping_gate.MIN_MAPPINGS.items()
+        }
+
+    def test_no_pin_is_below_its_committed_floor(self, mapping_gate):
+        pins, floor = self._pins(mapping_gate), self._floor()
+        lowered = {
+            path: (pins[path], minimum)
+            for path, minimum in floor.items()
+            if path in pins and pins[path] < minimum
+        }
+        assert not lowered, (
+            f"MIN_MAPPINGS has been lowered below its committed floor: "
+            f"{lowered} (pin, floor).  A guide that legitimately shrank needs "
+            f"both numbers lowered, in one commit, with the reason."
+        )
+
+    def test_every_pin_has_a_floor(self, mapping_gate):
+        """Otherwise a new guide could be pinned at 1 and never ratchet."""
+        missing = set(self._pins(mapping_gate)) - set(self._floor())
+        assert not missing, (
+            f"pinned in MIN_MAPPINGS with no entry in "
+            f"min_mappings_floor.json: {sorted(missing)}"
+        )
+
+    def test_every_floor_has_a_pin(self, mapping_gate):
+        """Deleting the pin must not be a way round the floor."""
+        missing = set(self._floor()) - set(self._pins(mapping_gate))
+        assert not missing, (
+            f"floored in min_mappings_floor.json but no longer pinned in "
+            f"MIN_MAPPINGS: {sorted(missing)}.  Removing a pin removes the "
+            f"only check on that guide's table."
+        )
+
+    def test_the_floor_itself_is_satisfied_by_the_repository(self, mapping_gate):
+        """The floor is a claim about the tree, not a number in a file."""
+        assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
 
 
 # ---------------------------------------------------------------------------

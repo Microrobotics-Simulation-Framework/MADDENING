@@ -41,7 +41,15 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 # Minimum number of resolvable ``maddening.*`` references per guide, keyed by
 # path relative to the repository root.  Pinned so that a deleted table, or a
 # row that loses its backticks, fails instead of reporting a smaller "OK".
-# Raise a number when a guide gains rows; never lower one to make CI pass.
+# Raise a number when a guide gains rows.
+#
+# Lowering one is not a convention any more: ``tests/compliance/
+# min_mappings_floor.json`` holds a committed floor and
+# ``TestMinMappingsRatchet`` asserts ``MIN_MAPPINGS[path] >= floor[path]``,
+# so a pin can only go down together with an edit to another file.  It used
+# to be a comment saying "never lower one to make CI pass", and dropping a
+# pin from 9 to 1 while deleting 8 rows of the guide left every gate and
+# every mapping test green (audit_040_r2/gates, finding G6).
 MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
@@ -251,6 +259,24 @@ def main(argv=None) -> int:
             print(f"ERROR: {e}", file=sys.stderr)
         print(
             f"\n{len(errors)} stale mapping(s) found out of {checked} checked",
+            file=sys.stderr,
+        )
+        return 1
+
+    # A scanned scope with nothing in it verified nothing, whatever the pins
+    # did.  The pins resolve against _REPO_ROOT rather than the scanned
+    # directory, so they still ran -- but the line this gate prints names the
+    # scanned scope, and that line is what gets quoted as coverage.  The same
+    # guard check_heat_stability.py and check_transforms.py already have
+    # (audit_040_r2/gates, finding G7).
+    if checked == 0:
+        print(
+            f"FAIL: 0 implementation mapping(s) found in {guide_dir}"
+            + (f" ({len(skipped)} reference(s) could not be checked in this "
+               f"environment)" if skipped else "")
+            + ".\nA gate that verifies nothing cannot fail.  Either the scan "
+              "scope is wrong or every guide has lost its Implementation "
+              "Mapping table; fix the scope rather than trusting the OK.",
             file=sys.stderr,
         )
         return 1

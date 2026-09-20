@@ -53,8 +53,26 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from maddening.nodes.heat import MAX_FOURIER_NUMBER, HeatNode  # noqa: E402
 
+def _positional_order() -> list:
+    """``HeatNode.__init__``'s parameters, in order, so the gate cannot drift.
+
+    This list used to stop at ``thermal_diffusivity``, five names in.
+    ``stencil_order`` is the *seventh* parameter, so a rod that passes all
+    seven arguments positionally had its order silently default to 2 and was
+    judged against a limit of 0.5 instead of 0.3125 --
+    the gate passed a construction ``__init__`` refuses.  Deriving the order
+    from the signature is the same defence ``_defaults`` already uses for the
+    values (audit_040_r2/gates, finding G4).
+    """
+    return [
+        name for name, param in inspect.signature(HeatNode.__init__).parameters.items()
+        if name != "self"
+        and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+    ]
+
+
 #: Constructor parameters this gate needs, in positional order.
-_POSITIONAL = ["name", "timestep", "n_cells", "length", "thermal_diffusivity"]
+_POSITIONAL = _positional_order()
 
 #: Files whose unstable constructions are deliberate, with the reason.
 #:
@@ -72,7 +90,24 @@ _ALLOWED_UNSTABLE = {
         "archived audit probe: the positive control for this gate, a rod the "
         "guard must refuse.  Committed as round-2 evidence, so the gate now "
         "scans it",
+    "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
+    "c_positional_stencil.py":
+        "archived audit probe: a 4th-order rod whose stencil_order is passed "
+        "POSITIONALLY.  It was invisible while _POSITIONAL stopped at five "
+        "names; widening it to the full signature made this probe the first "
+        "thing the gate caught",
+    "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
+    "d_attribute_call.py":
+        "archived audit probe: the same unstable rod spelled as the "
+        "attribute heat.HeatNode.  It was invisible while the gate matched "
+        "ast.Name only",
 }
+
+#: A ceiling, not a target.  One test file has to plant defects to prove the
+#: gate catches them, and the archived round-2 probes are the positive
+#: controls for the three holes this gate has had.  A sixth entry means
+#: unstable rods are being allowlisted rather than fixed.
+_MAX_ALLOWED_UNSTABLE = 6
 
 
 def _defaults() -> dict:
@@ -110,6 +145,48 @@ def _parse(src: str):
     return None
 
 
+def _local_aliases(tree) -> set:
+    """Every name in this source that is bound to ``HeatNode``.
+
+    ``from maddening.nodes.heat import HeatNode as Rod`` binds a different
+    ``ast.Name``, and matching only the literal identifier made the rod
+    invisible.  An attribute-spelled call -- ``heat.HeatNode`` -- is handled
+    separately: an ``ast.Attribute`` carries ``.attr``, not ``.id``.
+    """
+    names = {"HeatNode"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "HeatNode" and alias.asname:
+                    names.add(alias.asname)
+        elif isinstance(node, ast.Assign):
+            # ``Rod = HeatNode`` -- the rebinding an import alias avoids.
+            if isinstance(node.value, ast.Name) and node.value.id in names:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif (isinstance(node.value, ast.Attribute)
+                  and node.value.attr == "HeatNode"):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+    return names
+
+
+def _is_heat_node_call(node, aliases) -> bool:
+    """Is this call constructing a ``HeatNode``, however it is spelled?
+
+    Matching ``ast.Attribute`` can in principle pick up an unrelated
+    ``something.HeatNode`` -- which is harmless here, because the worst it
+    can do is report a construction as unchecked.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    if getattr(node.func, "attr", None) == "HeatNode":
+        return True
+    return getattr(node.func, "id", None) in aliases
+
+
 def scan_source(src, origin, defaults, unstable, unchecked, seen):
     """Walk one source string, recursing into embedded source."""
     tree = _parse(src)
@@ -118,14 +195,14 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
             unchecked.append((origin, 0, "unparseable source mentioning HeatNode"))
         return
 
+    aliases = _local_aliases(tree)
     for node in ast.walk(tree):
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                 and "HeatNode(" in node.value):
             scan_source(node.value, f"{origin} [embedded source]",
                         defaults, unstable, unchecked, seen)
             continue
-        if not (isinstance(node, ast.Call)
-                and getattr(node.func, "id", None) == "HeatNode"):
+        if not _is_heat_node_call(node, aliases):
             continue
 
         args = {kw.arg: kw.value for kw in node.keywords if kw.arg}
@@ -148,18 +225,34 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
             unchecked.append((origin, node.lineno,
                               "a constructor argument is computed, not literal"))
             continue
-        seen.append((origin, node.lineno))
 
         dt = values["timestep"]
         n_cells = values["n_cells"]
         length = values["length"]
         alpha = values["thermal_diffusivity"]
         order = values["stencil_order"]
+        # ``seen`` is appended *after* every way out of this block, because
+        # it is the count the summary line calls "verified".  It used to be
+        # appended above, so the two ``continue``s below inflated the
+        # headline: 132 reported against 131 actually evaluated
+        # (audit_040_r2/gates, finding G3).
         if min(dt, n_cells, length, alpha) <= 0:
+            unchecked.append((
+                origin, node.lineno,
+                f"a non-positive constructor argument (dt={dt!r}, "
+                f"n_cells={n_cells!r}, length={length!r}, alpha={alpha!r}); "
+                f"no Fourier number is defined, so this was NOT checked"
+            ))
             continue
         limit = MAX_FOURIER_NUMBER.get(order)
         if limit is None:
+            unchecked.append((
+                origin, node.lineno,
+                f"stencil_order={order!r} has no entry in MAX_FOURIER_NUMBER "
+                f"({sorted(MAX_FOURIER_NUMBER)}), so this was NOT checked"
+            ))
             continue
+        seen.append((origin, node.lineno))
 
         dx = length / n_cells
         fourier = dt * alpha / (dx * dx)
@@ -249,8 +342,12 @@ def main(argv=None) -> int:
 
     note = ""
     if unchecked:
-        note = (f"; {len(unchecked)} further construction(s) have computed "
-                f"arguments and were NOT checked")
+        # Says what it means: these were not evaluated, for any of the
+        # reasons recorded against them (a computed argument, a non-positive
+        # one, an unparseable embedded snippet, or a stencil order with no
+        # stability limit).  They are NOT part of the verified count.
+        note = (f"; {len(unchecked)} further construction(s) could not be "
+                f"evaluated statically and were NOT checked")
     print(f"OK: {len(seen)} HeatNode construction(s) verified within their "
           f"stencil's stability limit{note}")
     return 0

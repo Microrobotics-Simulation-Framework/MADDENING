@@ -664,3 +664,89 @@ def test_the_json_report_carries_every_column_the_table_shows(tmp_path):
             "drawn", "rejected", "effective_examples", "rate", "overrun",
             "overrun_rate", "health_check_risk", "starved",
         }
+
+
+_ALL_SKIPPED_SUITE = '''
+import pytest
+from hypothesis import given, strategies as st
+
+
+@pytest.mark.skip(reason="stand-in for a suite skipped for a missing extra")
+@given(st.integers())
+def test_property_that_never_runs(x):
+    assert x == x
+'''
+
+
+def _run_audit_on(tmp_path, source, *args):
+    suite = tmp_path / "test_nothing_observed.py"
+    suite.write_text(textwrap.dedent(source))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["JAX_PLATFORMS"] = "cpu"
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    return subprocess.run(
+        [sys.executable, str(AUDIT_SCRIPT), str(suite), *args],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path),
+    )
+
+
+def test_the_gate_fails_when_no_hypothesis_run_was_observed(tmp_path):
+    """Zero records means zero over-budget tests, which used to exit 0.
+
+    The banner even said "no Hypothesis runs were observed" and the gate
+    passed anyway.  pytest's exit 5 catches an empty *collection*; an
+    all-skipped or all-deselected run, or a Hypothesis refactor that stops
+    calling the statistics collector, produces a green tick on a
+    measurement that never happened.
+    """
+    result = _run_audit_on(tmp_path, _ALL_SKIPPED_SUITE, "--check")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "no Hypothesis runs were observed" in result.stderr
+
+
+_DESELECTED_TO_A_PLAIN_TEST = '''
+from hypothesis import given, strategies as st
+
+
+@given(st.integers())
+def test_a_property(x):
+    assert x == x
+
+
+def test_a_plain_assertion_that_draws_nothing():
+    assert True
+'''
+
+
+def test_a_run_deselected_down_to_no_property_test_is_the_same_failure(tmp_path):
+    """Nothing observed is nothing observed, however the scope emptied.
+
+    Deselecting *everything* is already caught, by pytest's own exit 5.  The
+    gap is a run that collects and passes tests, none of which draw: pytest
+    exits 0, the plugin records nothing, and the gate used to agree.
+    """
+    result = _run_audit_on(
+        tmp_path, _DESELECTED_TO_A_PLAIN_TEST, "--check",
+        "--pytest-arg=-k", "--pytest-arg=plain_assertion",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "no Hypothesis runs were observed" in result.stderr
+
+
+def test_an_empty_collection_is_still_caught_by_pytest_itself(tmp_path):
+    """Recorded because it was already covered: exit 5, not the new guard."""
+    result = _run_audit_on(
+        tmp_path, _SYNTHETIC_SUITE, "--check",
+        "--pytest-arg=-k", "--pytest-arg=no_such_test_name",
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "pytest itself failed" in result.stderr
+
+
+def test_the_empty_scope_guard_does_not_fire_on_a_real_run(tmp_path):
+    """The other direction: a suite that does run still passes."""
+    result = _run_audit_on(
+        tmp_path, _SYNTHETIC_SUITE, "--check", "--max-rejection", "0.95"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -47,13 +47,126 @@ def _run_check() -> subprocess.CompletedProcess:
 
 
 def test_the_committed_soup_tables_match_a_fresh_generation():
-    """A table that has drifted from its source fails here, not in review."""
+    """A table that has drifted from its source fails here, not in review.
+
+    This message deliberately does *not* tell you to regenerate and commit.
+    It used to, and the generator's own error said the same thing, so the
+    instruction was the same whichever kind of drift had occurred.  When the
+    committed document holds a row the source no longer produces -- an
+    anomaly deleted from the registry, a benchmark ID overwritten by a
+    duplicate decorator -- regenerating removes that row from the evidence
+    set and turns every gate green.  The generator now classifies the drift;
+    read what it says before running anything.
+    """
     result = _run_check()
     assert result.returncode == 0, (
-        "docs/validation/ is stale — run "
-        "`python scripts/generate_soup_tables.py` and commit the result.\n\n"
+        "The SOUP evidence set does not match the sources it summarises.  "
+        "The generator's report below says which KIND of difference it found "
+        "— a row missing from the committed document is not the same "
+        "defect as a row the source has stopped producing, and only the "
+        "first is fixed by regenerating.\n\n"
         + result.stdout + result.stderr
     )
+
+
+# ---------------------------------------------------------------------------
+# Registry membership: the document -> registry direction
+# ---------------------------------------------------------------------------
+# Every other check in this file runs registry -> document.  Nothing ran the
+# other way and nothing pinned either registry's size or ID set, so an entry
+# could be deleted from the source and the evidence set regenerated around the
+# hole: 188 compliance tests green, the anomaly gone from soup_package.md
+# (audit_040_r2/gates, finding G5).  Both ID spaces are contiguous, which is
+# what makes a committed high-water mark a complete pin.
+#
+# These constants fail on a deletion AND on an unannounced addition.  The
+# second is deliberate: adding an anomaly or a benchmark is a considered act,
+# and bumping the number here is part of it.
+#
+# RETIRING AN ID: never delete the entry and never reuse the number.  Put the
+# ID in the matching ``_RETIRED_*`` frozenset below, with a comment saying
+# what was retired and when.  The number stays spoken for, the high-water mark
+# stays honest, and the retirement is a visible line in the diff instead of a
+# gap nobody can account for.
+_HIGHEST_ANOMALY_ID = 15
+_RETIRED_ANOMALY_IDS: frozenset = frozenset()
+
+_HIGHEST_BENCHMARK_ID = 13
+_RETIRED_BENCHMARK_IDS: frozenset = frozenset()
+
+
+def _expected_ids(prefix: str, highest: int, retired: frozenset) -> set:
+    return {f"{prefix}{n:03d}" for n in range(1, highest + 1)} - set(retired)
+
+
+def _membership_message(kind: str, missing: set, unexpected: set) -> str:
+    parts = []
+    if missing:
+        parts.append(
+            f"{kind} missing from the registry: {sorted(missing)}.  An entry "
+            f"in the committed set is IEC 62304 evidence; restore it, or "
+            f"record the retirement in the _RETIRED_* frozenset in "
+            f"tests/compliance/test_soup_evidence.py rather than deleting it."
+        )
+    if unexpected:
+        parts.append(
+            f"{kind} in the registry but not in the committed set: "
+            f"{sorted(unexpected)}.  Raise the high-water mark in "
+            f"tests/compliance/test_soup_evidence.py in the same commit that "
+            f"adds the entry."
+        )
+    return "  ".join(parts)
+
+
+def test_the_anomaly_registry_holds_exactly_the_committed_id_set():
+    """Deleting an anomaly must turn something red before the generator runs."""
+    actual = {a["anomaly_id"] for a in gen.read_registry()["anomalies"]}
+    expected = _expected_ids(
+        "MADD-ANO-", _HIGHEST_ANOMALY_ID, _RETIRED_ANOMALY_IDS
+    )
+    assert actual == expected, _membership_message(
+        "anomaly ID(s)", expected - actual, actual - expected
+    )
+
+
+def test_the_benchmark_registry_holds_exactly_the_committed_id_set():
+    """The same pin for ``@verification_benchmark``.
+
+    A duplicate ``benchmark_id`` now raises at import time, but this is the
+    pin that does not depend on *how* an entry went missing: a decorator
+    deleted, a module dropped from ``BENCHMARK_MODULES``, or a test file
+    removed all land here.
+    """
+    actual = set(gen.load_benchmarks())
+    expected = _expected_ids(
+        "MADD-VER-", _HIGHEST_BENCHMARK_ID, _RETIRED_BENCHMARK_IDS
+    )
+    assert actual == expected, _membership_message(
+        "benchmark ID(s)", expected - actual, actual - expected
+    )
+
+
+def test_a_retired_id_is_recorded_and_not_reused():
+    """A retired ID stays retired: absent from the registry, inside the range.
+
+    An ID outside the high-water mark in ``_RETIRED_*`` is a typo, and one
+    still present in the registry means the retirement never happened.
+    """
+    for label, retired, highest, registry_ids in (
+        ("anomaly", _RETIRED_ANOMALY_IDS, _HIGHEST_ANOMALY_ID,
+         {a["anomaly_id"] for a in gen.read_registry()["anomalies"]}),
+        ("benchmark", _RETIRED_BENCHMARK_IDS, _HIGHEST_BENCHMARK_ID,
+         set(gen.load_benchmarks())),
+    ):
+        for rid in retired:
+            number = int(rid.rsplit("-", 1)[1])
+            assert 1 <= number <= highest, (
+                f"retired {label} ID {rid} is outside 1..{highest}"
+            )
+            assert rid not in registry_ids, (
+                f"{rid} is recorded as a retired {label} ID but is still in "
+                f"the registry"
+            )
 
 
 def test_every_anomaly_in_the_registry_reaches_the_summary_table():
@@ -152,3 +265,82 @@ def test_prerelease_detection_decides_whether_a_release_date_exists(
     version, expected
 ):
     assert gen.is_prerelease(version) is expected
+
+
+class TestDriftIsClassified:
+    """``describe_drift`` must distinguish the two opposite remedies.
+
+    The generator's error message is read as an instruction, and for one of
+    the two kinds of drift the old instruction -- regenerate and commit --
+    completed the defect rather than fixing it.
+    """
+
+    _ROWS = "| MADD-ANO-001 | a |\n| MADD-ANO-002 | b |\n| MADD-ANO-003 | c |\n"
+
+    @staticmethod
+    def _explanation(message: str) -> str:
+        """The classification, without the unified diff appended after it.
+
+        The diff repeats every changed line, so an assertion against the
+        whole message passes on the diff alone -- which is how a mutation
+        that stopped the classifier naming the IDs it would remove went
+        undetected by the first version of this test.
+        """
+        return message.split("--- ", 1)[0]
+
+    def test_a_row_the_source_stopped_producing_is_not_a_regenerate(self):
+        generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
+        explanation = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "DO NOT regenerate yet" in explanation
+        assert "1 line(s) only in the COMMITTED file" in explanation
+
+    def test_the_explanation_names_the_evidence_ids_it_would_remove(self):
+        """Not the diff below it: the sentence a reader acts on."""
+        generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
+        explanation = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "MADD-ANO-002" in explanation
+        assert "MADD-ANO-001" not in explanation
+
+    def test_a_row_the_document_is_missing_is_a_regenerate(self):
+        committed = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
+        message = self._explanation(
+            gen.describe_drift("doc.md", committed, self._ROWS)
+        )
+        assert "DO NOT regenerate yet" not in message
+        assert "generate_soup_tables.py` and commit" in message
+        assert "1 line(s) only in the GENERATED file" in message
+
+    def test_a_changed_cell_reads_differently_from_a_removed_row(self):
+        changed = self._ROWS.replace("| MADD-ANO-002 | b |", "| MADD-ANO-002 | B |")
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, changed)
+        )
+        assert "1 line(s) changed in place" in message
+        assert "DO NOT regenerate yet" not in message
+
+        removed = gen.describe_drift(
+            "doc.md", self._ROWS,
+            self._ROWS.replace("| MADD-ANO-002 | b |\n", ""),
+        )
+        assert message != removed
+
+    def test_a_mixed_drift_leads_with_the_dangerous_half(self):
+        """One row lost and one row gained is still a potential deletion."""
+        generated = (
+            "| MADD-ANO-001 | a |\n| MADD-ANO-003 | c |\n| MADD-ANO-004 | d |\n"
+        )
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "DO NOT regenerate yet" in message
+        assert "MADD-ANO-002" in message
+
+    def test_the_unified_diff_is_still_printed(self):
+        generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
+        message = gen.describe_drift("doc.md", self._ROWS, generated)
+        assert "doc.md (committed)" in message
+        assert "-| MADD-ANO-002 | b |" in message

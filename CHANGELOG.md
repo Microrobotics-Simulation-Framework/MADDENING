@@ -238,6 +238,9 @@ guidance; the itemized changes follow.
 - **Audit fixes on the serialisation surfaces** (`MADD-ANO-010`): an FMU or node named
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
+- **The compliance gates can now fail on the defects they exist to catch**: the
+  anomaly and benchmark ID sets are pinned, four gates that reported success
+  having verified nothing now fail closed, and two stopped inflating their counts
 - **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
   every stage holds the one value you pass. The arithmetic is unchanged; carry time
   as a state field with derivative 1 to get 4.00 back — see the new solvers guide

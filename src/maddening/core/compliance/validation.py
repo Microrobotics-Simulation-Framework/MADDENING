@@ -73,6 +73,23 @@ def verification_benchmark(
             references=references,
             test_function=qual_name,
         )
+        existing = _BENCHMARK_REGISTRY.get(benchmark_id)
+        if existing is not None and existing.test_function != qual_name:
+            # A plain dict assignment here meant a copy-pasted benchmark_id
+            # silently *deleted* the first benchmark.  Nothing downstream
+            # noticed: every check runs registry -> document, so once the
+            # registry had shrunk, regenerating the evidence tables made the
+            # committed document agree with it again and the lost benchmark
+            # was simply absent from the IEC 62304 verification index.
+            # Import time is where this belongs -- the second decorator is
+            # the defect, and it cannot execute without saying so.
+            raise ValueError(
+                f"duplicate verification benchmark_id {benchmark_id!r}: "
+                f"already registered by {existing.test_function}, now claimed "
+                f"by {qual_name}.  Benchmark IDs are IEC 62304 evidence "
+                f"identifiers and must be unique; give the new benchmark the "
+                f"next free ID rather than overwriting an existing one."
+            )
         _BENCHMARK_REGISTRY[benchmark_id] = benchmark
 
         @functools.wraps(func)

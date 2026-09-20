@@ -69,6 +69,7 @@ from maddening.core.compliance.stability import stability
 # ---------------------------------------------------------------------------
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SharedSolveResult:
     """Return type for :func:`sharded_cg` and :func:`sharded_gmres`.

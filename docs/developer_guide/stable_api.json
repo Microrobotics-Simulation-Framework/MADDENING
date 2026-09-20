@@ -1,0 +1,3296 @@
+{
+  "format": 1,
+  "surfaces": {
+    "maddening.cloud.multigpu.iterative_solver.sharded_cg": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.iterative_solver",
+      "parameters": [
+        {
+          "annotation": "Callable[[jax.Array], jax.Array]",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "matvec"
+        },
+        {
+          "annotation": "jax.Array",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "b"
+        },
+        {
+          "annotation": "Optional[Mesh]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "mesh"
+        },
+        {
+          "annotation": "Optional[PartitionSpec]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "in_specs"
+        },
+        {
+          "annotation": "Optional[jax.Array]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "x0"
+        },
+        {
+          "annotation": "float",
+          "default": "1e-06",
+          "kind": "KEYWORD_ONLY",
+          "name": "rtol"
+        },
+        {
+          "annotation": "float",
+          "default": "1e-08",
+          "kind": "KEYWORD_ONLY",
+          "name": "atol"
+        },
+        {
+          "annotation": "int",
+          "default": "200",
+          "kind": "KEYWORD_ONLY",
+          "name": "max_iters"
+        },
+        {
+          "annotation": "Optional[Callable[[jax.Array], jax.Array]]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "preconditioner"
+        },
+        {
+          "annotation": "str",
+          "default": "'auto'",
+          "kind": "KEYWORD_ONLY",
+          "name": "backend"
+        },
+        {
+          "annotation": "bool",
+          "default": "False",
+          "kind": "KEYWORD_ONLY",
+          "name": "differentiable"
+        }
+      ],
+      "returns": "SharedSolveResult"
+    },
+    "maddening.cloud.multigpu.iterative_solver.sharded_gmres": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.iterative_solver",
+      "parameters": [
+        {
+          "annotation": "Callable[[jax.Array], jax.Array]",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "matvec"
+        },
+        {
+          "annotation": "jax.Array",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "b"
+        },
+        {
+          "annotation": "Optional[Mesh]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "mesh"
+        },
+        {
+          "annotation": "Optional[PartitionSpec]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "in_specs"
+        },
+        {
+          "annotation": "Optional[jax.Array]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "x0"
+        },
+        {
+          "annotation": "float",
+          "default": "1e-06",
+          "kind": "KEYWORD_ONLY",
+          "name": "rtol"
+        },
+        {
+          "annotation": "float",
+          "default": "1e-08",
+          "kind": "KEYWORD_ONLY",
+          "name": "atol"
+        },
+        {
+          "annotation": "int",
+          "default": "50",
+          "kind": "KEYWORD_ONLY",
+          "name": "restart"
+        },
+        {
+          "annotation": "int",
+          "default": "200",
+          "kind": "KEYWORD_ONLY",
+          "name": "max_iters"
+        },
+        {
+          "annotation": "Optional[Callable[[jax.Array], jax.Array]]",
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "preconditioner"
+        },
+        {
+          "annotation": "str",
+          "default": "'auto'",
+          "kind": "KEYWORD_ONLY",
+          "name": "backend"
+        },
+        {
+          "annotation": "bool",
+          "default": "False",
+          "kind": "KEYWORD_ONLY",
+          "name": "differentiable"
+        }
+      ],
+      "returns": "SharedSolveResult"
+    },
+    "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "sharding": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "NamedSharding",
+          "settable": false
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.cloud.multigpu.sharded_node",
+      "parameters": [
+        {
+          "annotation": "SimulationNode",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "node"
+        },
+        {
+          "annotation": "Mesh",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mesh"
+        },
+        {
+          "annotation": "int | tuple[int, ...]",
+          "default": "(0,)",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "shard_axes"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.cloud.multigpu.sharded_node.ShardedStencilNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ]
+        }
+      },
+      "module": "maddening.cloud.multigpu.sharded_node",
+      "parameters": [
+        {
+          "annotation": "SimulationNode",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "node"
+        },
+        {
+          "annotation": "Mesh",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mesh"
+        },
+        {
+          "annotation": "dict[str, int]",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "axis_map"
+        },
+        {
+          "annotation": "str",
+          "default": "'edge'",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "boundary"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.cloud.multigpu.sharded_node.ShardedStencilNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.sharded_node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "gather_global": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "sharded_state"
+            }
+          ],
+          "returns": "dict"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "layout": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "UnstructuredPartitionLayout",
+          "settable": false
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.cloud.multigpu.sharded_unstructured",
+      "parameters": [
+        {
+          "annotation": "SimulationNode",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "node"
+        },
+        {
+          "annotation": "Mesh",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mesh"
+        },
+        {
+          "annotation": "UnstructuredPartitionLayout",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "layout"
+        },
+        {
+          "annotation": "str",
+          "default": "'devices'",
+          "kind": "KEYWORD_ONLY",
+          "name": "mesh_axis"
+        },
+        {
+          "annotation": "str",
+          "default": "'all_to_all'",
+          "kind": "KEYWORD_ONLY",
+          "name": "exchange"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.sharded_unstructured",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.core.edge.EdgeSpec": {
+      "kind": "class",
+      "members": {
+        "add_edge_kwargs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "key": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "str",
+          "settable": false
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.core.edge",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "source_node"
+        },
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "target_node"
+        },
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "source_field"
+        },
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "target_field"
+        },
+        {
+          "annotation": "Optional[Callable]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "transform"
+        },
+        {
+          "annotation": "bool",
+          "default": "False",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "additive"
+        },
+        {
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "source_units"
+        },
+        {
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "target_units"
+        },
+        {
+          "annotation": "Optional[Any]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mapping"
+        },
+        {
+          "annotation": "int",
+          "default": "0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "ordinal"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.core.graph_manager.GraphManager": {
+      "kind": "class",
+      "members": {
+        "add_coupling_group": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Sequence[str]",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "nodes"
+            },
+            {
+              "annotation": "int",
+              "default": "10",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "max_iterations"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-06",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tolerance"
+            },
+            {
+              "kind": "VAR_KEYWORD",
+              "name": "kwargs"
+            }
+          ],
+          "returns": "CouplingGroup"
+        },
+        "add_edge": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source_field"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target_field"
+            },
+            {
+              "annotation": "Optional[Callable]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "transform"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "additive"
+            },
+            {
+              "annotation": "Optional[str]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source_units"
+            },
+            {
+              "annotation": "Optional[str]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target_units"
+            },
+            {
+              "annotation": "Optional[Any]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "mapping"
+            }
+          ],
+          "returns": "None"
+        },
+        "add_external_input": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target_node"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target_field"
+            },
+            {
+              "annotation": "tuple",
+              "default": "()",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "shape"
+            },
+            {
+              "annotation": "Any",
+              "default": "<class 'jax.numpy.float32'>",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dtype"
+            }
+          ],
+          "returns": "None"
+        },
+        "add_node": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "SimulationNode",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "node"
+            }
+          ],
+          "returns": "None"
+        },
+        "add_observer": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Callable",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "callback"
+            }
+          ],
+          "returns": "None"
+        },
+        "auto_couple": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "default": "10",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "max_iterations"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-06",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "tolerance"
+            },
+            {
+              "kind": "VAR_KEYWORD",
+              "name": "kwargs"
+            }
+          ],
+          "returns": "list[CouplingGroup]"
+        },
+        "base_timestep": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "float",
+          "settable": false
+        },
+        "check_params": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "params"
+            }
+          ],
+          "returns": "None"
+        },
+        "compile": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "constrain": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "u"
+            }
+          ],
+          "returns": "dict"
+        },
+        "coupling_diagnostics": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, dict]"
+        },
+        "edges": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "list[EdgeSpec]",
+          "settable": false
+        },
+        "effective_node_params": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "name"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "enable_multigpu": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[int]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "n_devices"
+            },
+            {
+              "annotation": "str",
+              "default": "'auto'",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "partition_strategy"
+            },
+            {
+              "annotation": "Optional[tuple[int, ...]]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "mesh_shape"
+            },
+            {
+              "annotation": "Optional[tuple[str, ...]]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "mesh_axes"
+            }
+          ],
+          "returns": "None"
+        },
+        "from_dict": {
+          "kind": "classmethod",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "config"
+            },
+            {
+              "annotation": "dict[str, type]",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "node_registry"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "base_dir"
+            }
+          ],
+          "returns": "GraphManager"
+        },
+        "get_node": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "name"
+            }
+          ],
+          "returns": "SimulationNode"
+        },
+        "get_node_state": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "name"
+            }
+          ],
+          "returns": "dict"
+        },
+        "is_multirate": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "bool",
+          "settable": false
+        },
+        "load_state": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            }
+          ],
+          "returns": "None"
+        },
+        "node_names": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "list[str]",
+          "settable": false
+        },
+        "nodes_without_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "param_spec_overrides": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, dict[str, ParamSpec]]"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "point_resolver": {
+          "kind": "method",
+          "parameters": [
+            {
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "base_dir"
+            }
+          ],
+          "returns": "Callable[[dict], Any]"
+        },
+        "rate_dividers": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict[str, int]",
+          "settable": false
+        },
+        "remove_coupling_group": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Sequence[str]",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "nodes"
+            }
+          ],
+          "returns": "None"
+        },
+        "remove_edge": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source_field"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "target_field"
+            }
+          ],
+          "returns": "None"
+        },
+        "remove_node": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "name"
+            }
+          ],
+          "returns": "None"
+        },
+        "reset_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "reset_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "resolve_boundary_inputs": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "node_name"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "run": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "n_steps"
+            },
+            {
+              "annotation": "Optional[Callable]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "callback"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "None"
+        },
+        "run_adaptive": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "t_end"
+            },
+            {
+              "annotation": "float",
+              "default": "0.01",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_initial"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-06",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "atol"
+            },
+            {
+              "annotation": "float",
+              "default": "0.001",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "rtol"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-08",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_min"
+            },
+            {
+              "annotation": "float",
+              "default": "0.1",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_max"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[Callable]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "callback"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "tuple[dict[str, dict], dict]"
+        },
+        "run_adaptive_scan": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "t_end"
+            },
+            {
+              "annotation": "int",
+              "default": "10000",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "max_steps"
+            },
+            {
+              "annotation": "float",
+              "default": "0.01",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_initial"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-06",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "atol"
+            },
+            {
+              "annotation": "float",
+              "default": "0.001",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "rtol"
+            },
+            {
+              "annotation": "float",
+              "default": "1e-08",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_min"
+            },
+            {
+              "annotation": "float",
+              "default": "0.1",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt_max"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "tuple[dict[str, dict], dict[str, dict], dict]"
+        },
+        "run_scan": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "n_steps"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, dict]"
+        },
+        "run_scan_with_history": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "n_steps"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "tuple[dict[str, dict], dict[str, dict]]"
+        },
+        "run_sweep": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "n_steps"
+            },
+            {
+              "annotation": "dict[str, dict]",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "initial_states"
+            },
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "return_history"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ]
+        },
+        "save_state": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            }
+          ],
+          "returns": "Path"
+        },
+        "scan_trace_count": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "int",
+          "settable": false
+        },
+        "schedule": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "list[str]",
+          "settable": false
+        },
+        "set_node_state": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "name"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            }
+          ],
+          "returns": "None"
+        },
+        "set_param_spec": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "node"
+            },
+            {
+              "annotation": "str",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "key"
+            },
+            {
+              "annotation": "ParamSpec",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "spec"
+            }
+          ],
+          "returns": "None"
+        },
+        "step": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[dict[str, dict]]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, dict]"
+        },
+        "timestep": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "float",
+          "settable": false
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "bool",
+              "default": "True",
+              "kind": "KEYWORD_ONLY",
+              "name": "strict_mappings"
+            }
+          ],
+          "returns": "dict"
+        },
+        "trace_count": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "int",
+          "settable": false
+        },
+        "trainable_mask": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "unconstrain": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "validate": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "validate_sharding": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list['ShardingIssue']"
+        }
+      },
+      "module": "maddening.core.graph_manager",
+      "parameters": [],
+      "returns": "None"
+    },
+    "maddening.core.node.SimulationNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryInputSpec']"
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.core.node",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "annotation": "float",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timestep"
+        },
+        {
+          "kind": "VAR_KEYWORD",
+          "name": "params"
+        }
+      ]
+    },
+    "maddening.core.node.SimulationNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.core.node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.core.node.SimulationNode.static_data_deps": {
+      "kind": "function",
+      "module": "maddening.core.node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "dict[str, tuple[str, ...]]"
+    },
+    "maddening.core.static_data.StaticArray": {
+      "kind": "class",
+      "members": {
+        "dtype": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "Any",
+          "settable": false
+        },
+        "shape": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "tuple",
+          "settable": false
+        }
+      },
+      "module": "maddening.core.static_data",
+      "parameters": [
+        {
+          "annotation": "Any",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "value"
+        },
+        {
+          "annotation": "Literal['replicate', 'shard', 'partition']",
+          "default": "'replicate'",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "replication"
+        },
+        {
+          "annotation": "Optional[int]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "shard_axis"
+        },
+        {
+          "annotation": "Optional[Any]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "partition_assignment"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.nodes.ball.BallNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ]
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.nodes.ball",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "annotation": "float",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timestep"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_position"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_velocity"
+        },
+        {
+          "annotation": "float",
+          "default": "0.8",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "elasticity"
+        },
+        {
+          "annotation": "float",
+          "default": "-9.81",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "gravity"
+        }
+      ]
+    },
+    "maddening.nodes.heat.HeatNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ]
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ]
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ]
+        },
+        "discretization_order": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "DiscretizationOrder"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ]
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": []
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.nodes.heat",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "annotation": "float",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timestep"
+        },
+        {
+          "annotation": "int",
+          "default": "10",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "n_cells"
+        },
+        {
+          "annotation": "float",
+          "default": "1.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "length"
+        },
+        {
+          "annotation": "float",
+          "default": "0.01",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "thermal_diffusivity"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_temperature"
+        },
+        {
+          "annotation": "int",
+          "default": "2",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stencil_order"
+        },
+        {
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "grid_points"
+        },
+        {
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "geometry_source"
+        }
+      ]
+    },
+    "maddening.nodes.spring.SpringDamperNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": []
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ]
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ]
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ]
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.nodes.spring",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "annotation": "float",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timestep"
+        },
+        {
+          "annotation": "float",
+          "default": "100.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "stiffness"
+        },
+        {
+          "annotation": "float",
+          "default": "1.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "damping"
+        },
+        {
+          "annotation": "float",
+          "default": "1.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "mass"
+        },
+        {
+          "annotation": "float",
+          "default": "1.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "rest_length"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_position"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "initial_velocity"
+        }
+      ]
+    },
+    "maddening.nodes.table.TableNode": {
+      "kind": "class",
+      "members": {
+        "accepts_params": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "bool"
+        },
+        "boundary_flux_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryFluxSpec']"
+        },
+        "boundary_input_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, 'BoundaryInputSpec']"
+        },
+        "compute_boundary_fluxes": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "compute_interface_correction": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "pre_state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict[str, list[tuple[int, Any]]]"
+        },
+        "derivatives": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "domain_integral_axes": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "domain_integral_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "set[str]"
+        },
+        "halo_width": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[int, int]"
+        },
+        "implicit_residual": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_new"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_old"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            }
+          ],
+          "returns": "dict[str, Any]"
+        },
+        "initial_state": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "interface_dof_indices": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, int]]"
+        },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
+        "param_specs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params_pytree": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "state_fields": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "list[str]"
+        },
+        "static_data": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
+        },
+        "static_data_hash": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "int"
+        },
+        "to_dict": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
+        "uncertainty_spec": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional['UncertaintySpec']"
+        },
+        "update": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
+            }
+          ],
+          "returns": "dict"
+        },
+        "update_padded": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "state_padded"
+            },
+            {
+              "annotation": "dict",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "boundary_inputs"
+            },
+            {
+              "annotation": "float",
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "dt"
+            },
+            {
+              "annotation": "dict | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "static_padded"
+            },
+            {
+              "annotation": "dict[int, tuple[Any, int]] | None",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "shard_info"
+            }
+          ],
+          "returns": "dict"
+        }
+      },
+      "module": "maddening.nodes.table",
+      "parameters": [
+        {
+          "annotation": "str",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "name"
+        },
+        {
+          "annotation": "float",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "timestep"
+        },
+        {
+          "annotation": "float",
+          "default": "0.0",
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "position"
+        }
+      ]
+    }
+  }
+}

@@ -17,6 +17,7 @@ here rather than in a cloud bill.
 from __future__ import annotations
 
 import re
+import types
 from dataclasses import dataclass, field
 
 import pytest
@@ -37,13 +38,57 @@ class _Config:
     region: str = ""
 
 
+class _RequestId(str):
+    """A stand-in for ``sky.server.common.RequestId``.
+
+    The real one is a ``str`` subclass.  That is precisely why the pre-port
+    defect was silent: ``sky.status(...)[0]`` returned a *character*, and
+    ``.get("handle", {})`` on it raised ``AttributeError`` deep inside a
+    background thread.  A fake that handed back a list of dicts could not
+    reproduce it, and did not -- this file's previous fake mirrored the
+    pre-0.7 API and so proved the module consistent with itself.
+    """
+
+
+class _Handle:
+    """The ``ResourceHandle`` a resolved ``sky.launch`` hands back."""
+
+    def __init__(self, head_ip: str) -> None:
+        self.head_ip = head_ip
+
+
+class _ClusterRecord:
+    """A ``StatusResponse``: a pydantic model with dict-like ``get``."""
+
+    def __init__(self, **fields) -> None:
+        self._fields = fields
+
+    def get(self, key, default=None):
+        return self._fields.get(key, default)
+
+
 class _Recorder:
-    """A stand-in for the ``sky`` module that records what it was given."""
+    """A stand-in for the ``sky`` module that records what it was given.
+
+    Its call signatures are checked against the installed SkyPilot by
+    ``tests/cloud/test_skypilot_api_contract.py``, so it cannot drift away
+    from the real library the way its predecessor did.
+    """
+
+    #: What ``stream_and_get`` resolves a launch RequestId to.
+    HEAD_IP = "203.0.113.7"
 
     def __init__(self) -> None:
         self.run = ""
         self.resource_ports = "unset"
         self.envs = "unset"
+        self.cloud = None
+        self.launch_kwargs = None
+        self.down_calls = []
+        self.status_calls = []
+        #: RequestId -> the payload ``get`` / ``stream_and_get`` resolves.
+        self._pending = {}
+        self._next = 0
 
         recorder = self
 
@@ -58,17 +103,62 @@ class _Recorder:
         class Resources:
             def __init__(self, **kwargs) -> None:
                 recorder.resource_ports = kwargs.get("ports", "absent")
+                recorder.cloud = kwargs.get("cloud", "absent")
+
+        # ``launcher._resolve_sky_cloud_class`` finds a cloud by scanning
+        # for a ``sky.clouds.Cloud`` subclass whose ``_REPR`` matches, which
+        # is how the real ``sky.RunPod`` (``_REPR == "RunPod"``) is found.
+        # The fake carries the same shape, so the resolution the module does
+        # is the resolution the tests exercise.
+        class Cloud:
+            pass
+
+        class RunPod(Cloud):
+            _REPR = "RunPod"
+
+        class GCP(Cloud):
+            _REPR = "GCP"
 
         self.Task = Task
         self.Resources = Resources
-        self.RUNPOD = object()
-        self.GCP = lambda: object()
+        self.RunPod = RunPod
+        self.GCP = GCP
+        self.clouds = types.SimpleNamespace(Cloud=Cloud)
 
-    def launch(self, task, cluster_name: str, detach_run: bool = True):
-        return "job-1"
+    def _request(self, payload) -> _RequestId:
+        self._next += 1
+        rid = _RequestId(f"req-{self._next}")
+        self._pending[rid] = payload
+        return rid
 
-    def status(self, cluster_names):
-        return [{"handle": {"head_ip": "203.0.113.7"}}]
+    # -- the client-server surface -------------------------------------
+    # Parameter names match ``sky.launch`` / ``sky.status`` / ``sky.down``
+    # / ``sky.get`` / ``sky.stream_and_get`` on the installed SkyPilot.
+
+    def launch(self, task, cluster_name=None, **kwargs):
+        self.launch_kwargs = dict(kwargs)
+        return self._request((1, _Handle(self.HEAD_IP)))
+
+    def status(self, cluster_names=None, **kwargs):
+        self.status_calls.append(cluster_names)
+        return self._request(
+            [_ClusterRecord(handle=_Handle(self.HEAD_IP), status="UP")]
+        )
+
+    def down(self, cluster_name, purge=False, **kwargs):
+        self.down_calls.append((cluster_name, purge))
+        return self._request(None)
+
+    def get(self, request_id):
+        if not isinstance(request_id, _RequestId):
+            raise AssertionError(
+                f"sky.get was handed {request_id!r}, not a RequestId; the "
+                "caller resolved something it never requested"
+            )
+        return self._pending[request_id]
+
+    def stream_and_get(self, request_id=None, **kwargs):
+        return self.get(request_id)
 
 
 @pytest.fixture

@@ -41,6 +41,8 @@ import inspect
 import numpy as np
 import numpy.typing as npt
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
     bounded_dt,
@@ -61,6 +63,7 @@ except ImportError as e:  # pragma: no cover - exercised only without extra
 Bounds = dict[str, tuple[float, float]]
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass
 class VerificationResult:
     """Outcome of one check.
@@ -499,6 +502,7 @@ DEFAULT_CHECKS = (
 )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def make_inputs(
     node,
     bounds: Bounds | None = None,
@@ -515,6 +519,7 @@ def make_inputs(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def verify_node(
     node,
     bounds: Bounds | None = None,
@@ -611,6 +616,7 @@ def verify_node(
     return results
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def assert_node_verified(node, bounds: Bounds | None = None, **kwargs) -> None:
     """``verify_node`` that raises ``AssertionError`` listing every failure.
 

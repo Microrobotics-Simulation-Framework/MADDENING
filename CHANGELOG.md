@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **The 0.4.0 stability freeze round** (`docs/developer_guide/api_freeze_proposal.md`)
+  plus a guard that a `stable` signature cannot change unannounced
+  (`scripts/check_stable_signatures.py`): 141 surfaces tagged, none promoted
 - **`py.typed`: MADDENING's annotations now reach your type checker.** Under
   PEP 561 they were all ignored downstream; nothing to do but upgrade. The
   pyright job is blocking too — `core`/`nodes`/`fmi`/`cloud`/… at zero errors
@@ -244,6 +247,9 @@ guidance; the itemized changes follow.
 - **Three more gates that could not fail**: the pyright tiers now cover
   `maddening/__init__.py`, the SOUP drift classifier no longer calls a lost evidence
   row a safe regenerate, and `check_transforms` counts only confirmed references
+- **`cloud/_skypilot.py` ported to SkyPilot's client-server API** (`MADD-ANO-016`):
+  every call in it was written against the pre-0.7 API and could not work on the
+  `>=0.11` floor, and a failed teardown or preemption check is now loud
 - **Audit fixes on the serialisation surfaces** (`MADD-ANO-010`): an FMU or node named
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output
@@ -484,6 +490,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
+  the supported floor, so every `CloudSession` launch, teardown and preemption check
+  was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified
 - **MADD-ANO-015**: the ZeroMQ transports bound every interface unauthenticated
   and in cleartext from 0.1.0, and `launch_vm` published them whatever the job
   config said -- resolved in 0.4.0 (critical, safety_relevant)

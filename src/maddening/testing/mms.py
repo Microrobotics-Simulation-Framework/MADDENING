@@ -133,7 +133,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from maddening.core.compliance.metadata import DiscretizationOrder
+from maddening.core.compliance.metadata import (
+    DiscretizationOrder,
+    StabilityLevel,
+)
+from maddening.core.compliance.stability import stability
 from maddening.testing.verification import VerificationResult
 
 __all__ = [
@@ -171,6 +175,7 @@ __all__ = [
 ]
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 class RefinementAxis(Enum):
     """Which axis a convergence study refined.
 
@@ -198,6 +203,7 @@ class RefinementAxis(Enum):
         return "h" if self is RefinementAxis.SPACE else "dt"
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 class UndeclaredOrderError(Exception):
     """A node was asked for an order it has not declared.
 
@@ -217,6 +223,7 @@ class UndeclaredOrderError(Exception):
 # ---------------------------------------------------------------------------
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def diffusion_operator(alpha: Any) -> Callable[[Callable, Any, Any], Any]:
     """Spatial operator of the 1D diffusion equation, ``alpha * d2u/dx2``.
 
@@ -243,6 +250,7 @@ def diffusion_operator(alpha: Any) -> Callable[[Callable, Any, Any], Any]:
     return operator
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass(frozen=True)
 class ManufacturedSolution:
     """An analytic field plus the source term that makes it exact.
@@ -296,6 +304,7 @@ class ManufacturedSolution:
         return jax.vmap(lambda x: self.source(x, t))(jnp.asarray(xs))
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def manufactured_acceleration(
     trajectory: Callable[[Any], Any],
 ) -> Callable[[Any], Any]:
@@ -412,6 +421,7 @@ DEFAULT_ORDER_SHORTFALL = 0.25
 DEFAULT_ORDER_EXCESS = 1.0
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass(frozen=True)
 class OrderMeasurement:
     """Errors from a refinement ladder, and the orders they imply.
@@ -504,6 +514,7 @@ class OrderMeasurement:
         return "\n".join(lines)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def measure_order(
     error_at: Callable[[Any], float],
     levels: Sequence[Any],
@@ -561,6 +572,7 @@ def measure_order(
     return OrderMeasurement(axis=axis, levels=levels, h=h, errors=errors)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def check_order(
     measurement: OrderMeasurement,
     expected: float,
@@ -650,6 +662,7 @@ def check_order(
 # ---------------------------------------------------------------------------
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def declared_order(node: Any) -> DiscretizationOrder | None:
     """The order a node claims, or ``None`` if it claims none.
 
@@ -688,6 +701,7 @@ def _undeclared_detail(node: Any, axis: RefinementAxis) -> str:
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def verify_node_order(
     node: Any,
     *,
@@ -747,6 +761,7 @@ def verify_node_order(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def assert_node_order_verified(node: Any, **kwargs: Any) -> None:
     """:func:`verify_node_order` that raises on a shortfall.
 
@@ -846,6 +861,7 @@ MAX_APPARENT_ORDER = 40.0
 RECOMMENDED_MIN_REFINEMENT_RATIO = 1.3
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 class InconclusiveStudyError(Exception):
     """A grid convergence study could not reach a verdict.
 
@@ -858,6 +874,7 @@ class InconclusiveStudyError(Exception):
     """
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 class ConvergenceRegime(Enum):
     """How a triple of successively refined solutions behaves.
 
@@ -955,6 +972,7 @@ def _order_residual(
     return p * math.log(r_fine) - ln_ratio - q
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass(frozen=True)
 class ApparentOrder:
     """The solution of the observed-order equation, and how it was got.
@@ -981,6 +999,7 @@ class ApparentOrder:
     detail: str = ""
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def apparent_order(
     eps_fine: float,
     eps_coarse: float,
@@ -1189,6 +1208,7 @@ def apparent_order(
     return ApparentOrder(0.5 * (lo + hi), "bracketed", iterations=iterations)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 @dataclass(frozen=True)
 class GridConvergenceStudy:
     """A refinement ladder judged against itself, with no exact answer.
@@ -1452,6 +1472,7 @@ def _classify(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def richardson_study(
     values: Sequence[float],
     h: Sequence[float],
@@ -1698,6 +1719,7 @@ def _assess_asymptotic_range(
     return (all(verdicts), ("yes — " if all(verdicts) else "no — ") + joined)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def measure_gci(
     solution_at: Callable[[Any], float],
     levels: Sequence[Any],
@@ -1772,6 +1794,7 @@ def measure_gci(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def check_gci(
     study: GridConvergenceStudy,
     *,
@@ -1930,6 +1953,7 @@ def _no_criterion_detail(node: Any, axis: RefinementAxis) -> str:
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def verify_node_gci(
     node: Any,
     *,
@@ -2022,6 +2046,7 @@ def verify_node_gci(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def assert_node_gci_verified(node: Any, **kwargs: Any) -> None:
     """:func:`verify_node_gci` that raises rather than returning.
 

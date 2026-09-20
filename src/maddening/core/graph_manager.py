@@ -224,6 +224,7 @@ def _apply_edge(edge: EdgeSpec, value, params):
     return value
 
 
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class ShardingIssue:
     """A single issue found by :meth:`GraphManager.validate_sharding`.

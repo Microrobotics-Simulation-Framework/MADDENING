@@ -35,6 +35,7 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.core.edge",
     "maddening.core.static_data",
     "maddening.core.coupling",
+    "maddening.core.coupling.group",
     "maddening.core.coupling.mapping",
     "maddening.core.params",
     "maddening.core.solver_utils",
@@ -64,6 +65,7 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.api.auth",
     "maddening.api.server",
     "maddening.core.compliance.stability",
+    "maddening.core.compliance.uq",
     "maddening.core.coupling.mapping_spec",
     "maddening.fmi.directional_derivatives",
     "maddening.fmi.fmu_state",
@@ -86,6 +88,12 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.surrogates.architecture",
     "maddening.surrogates.dataset",
     "maddening.surrogates.node",
+    # The [verify] harnesses. Nothing imports maddening.testing on the way
+    # to anything else, so without these three lines their tags never fire
+    # and a 31-name documented module is absent from the report.
+    "maddening.testing.mms",
+    "maddening.testing.strategies",
+    "maddening.testing.verification",
 )
 
 

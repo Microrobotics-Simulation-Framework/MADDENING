@@ -23,16 +23,19 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short --ignore=
 
 ### 2. Compliance CI Scripts Pass
 
-Run all three compliance validation scripts:
+Run every compliance validation script -- the list is `scripts/check_*.py`,
+and today that is six:
 
 ```bash
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
 python scripts/check_transforms.py
+python scripts/check_heat_stability.py
+python scripts/check_stable_signatures.py
 ```
 
-**Gate**: All four must exit 0. Fix any errors before continuing.
+**Gate**: All six must exit 0. Fix any errors before continuing.
 
 ### 3. Commit Message Convention
 
@@ -121,12 +124,26 @@ If the commit adds or modifies edge transforms used in production examples or sc
 
 ### 9. API Stability Checks (if applicable)
 
-If the commit changes a public API surface:
+If the commit changes a public API surface, follow
+`docs/developer_guide/deprecation_policy.md` (this is its short form):
 
-- [ ] `@stability` decorator level is appropriate
-- [ ] If `STABLE`: change is backward-compatible (or this is a major version bump)
-- [ ] If `PROVISIONAL`: deprecation warning added for the old API
+- [ ] `@stability` decorator level is appropriate, and every newly public
+      surface has one (an untagged export is a decision nobody has made)
+- [ ] `python scripts/check_stable_signatures.py` passes.  If it flags a
+      change, either the change is compatible and
+      `python scripts/check_stable_signatures.py --update` runs in *this*
+      commit with the reason in the message, or the change does not belong
+      on a `STABLE` surface outside a major release
+- [ ] If `STABLE`: change is backward-compatible (or this is a major version
+      bump).  Lowering a surface's level is itself a breaking change
+- [ ] If `EVOLVING` / `PROVISIONAL`: an incompatible change ships the
+      replacement first and gives one minor release of `DeprecationWarning`
+      at `stacklevel=2`; `STABLE` gives two
+- [ ] Deprecations retag to `DEPRECATED`, name the replacement and the removal
+      release in the warning text, and have a `pytest.warns` test
 - [ ] If removing a `DEPRECATED` API: verify it's a major version bump
+- [ ] CHANGELOG `### Deprecated` / `### Removed` entry added
+- [ ] `python scripts/generate_stability_report.py` re-run if any tag changed
 
 ## Execution Steps
 

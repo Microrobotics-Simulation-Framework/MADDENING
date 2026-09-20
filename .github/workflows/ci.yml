@@ -264,6 +264,19 @@ jobs:
       - name: Check HeatNode configurations are constructible
         run: python scripts/check_heat_stability.py
 
+      - name: Check STABLE API signatures
+        # A @stability(STABLE) surface promises its signature until the next
+        # major version (docs/developer_guide/deprecation_policy.md).  This
+        # compares every STABLE signature against the committed snapshot
+        # docs/developer_guide/stable_api.json; an intended change is accepted
+        # with `python scripts/check_stable_signatures.py --update` in the same
+        # commit.  This job installs .[ci,usd], so every module imports; the
+        # script tolerates a module skipped for a missing optional extra only
+        # while no STABLE surface lives in it, and exits 2 if one ever does.
+        env:
+          JAX_PLATFORMS: cpu
+        run: python scripts/check_stable_signatures.py
+
       - name: Run compliance tests
         env:
           JAX_PLATFORMS: cpu

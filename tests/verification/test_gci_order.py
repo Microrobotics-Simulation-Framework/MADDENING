@@ -582,6 +582,54 @@ class TestApparentOrder:
     def test_the_search_interval_is_the_one_documented(self):
         assert (MIN_APPARENT_ORDER, MAX_APPARENT_ORDER) == (1e-3, 40.0)
 
+    def test_the_order_equation_has_at_most_one_root_over_the_ratios_swept(self):
+        """Pins why the multiple-root guard is unreachable, not forgotten.
+
+        :func:`apparent_order` fails closed when the signed residual
+        changes sign more than once, because a first root would be a
+        plausible-looking number for an equation that does not
+        determine one.  No configuration here reaches it, which is
+        worth recording: an untested branch that nobody can explain is
+        indistinguishable from a bug, and if a change to the residual
+        formulation ever makes a second root possible, this fails and
+        says so rather than letting the guard fire silently in the
+        field.
+        """
+        from maddening.testing.mms import _order_residual
+
+        n_scan = 257
+        grid = [
+            MIN_APPARENT_ORDER
+            * (MAX_APPARENT_ORDER / MIN_APPARENT_ORDER) ** (i / (n_scan - 1))
+            for i in range(n_scan)
+        ]
+        ratios = (1.02, 1.1, 1.3, 1.5, 2.0, 4.0, 16.0)
+        log_ratios = (-4.0, -1.0, -0.2, -0.01, 0.01, 0.2, 1.0, 4.0, 9.0)
+        for s in (1.0, -1.0):
+            for r_fine in ratios:
+                for r_coarse in ratios:
+                    if r_fine == r_coarse:
+                        continue
+                    for ln_ratio in log_ratios:
+                        residuals = [
+                            _order_residual(x, ln_ratio, r_fine, r_coarse, s)
+                            for x in grid
+                        ]
+                        crossings = sum(
+                            1
+                            for i in range(n_scan - 1)
+                            if math.isfinite(residuals[i])
+                            and math.isfinite(residuals[i + 1])
+                            and residuals[i] * residuals[i + 1] <= 0.0
+                        )
+                        assert crossings <= 1, (
+                            f"the observed-order equation has {crossings} "
+                            f"roots for s={s}, r_fine={r_fine}, "
+                            f"r_coarse={r_coarse}, ln_ratio={ln_ratio}; the "
+                            f"multiple-root branch of apparent_order is now "
+                            f"reachable and needs a test of its own"
+                        )
+
     def test_a_zero_difference_raises_rather_than_returning_a_number(self):
         with pytest.raises(ValueError, match="identical"):
             apparent_order(0.0, 1.0, 2.0, 2.0)

@@ -1088,6 +1088,14 @@ def apparent_order(
             ),
         )
     if len(brackets) > 1:
+        # Fail closed.  No configuration in the sweep of
+        # ``test_the_order_equation_has_at_most_one_root_over_the_ratios_swept``
+        # reaches this -- roughly 3,600 ratio pairs from 1.02 to 30 at both
+        # signs of s -- so it is a guard against a formulation change rather
+        # than an observed case, and that test is what would notice if the
+        # case started arising.  Returning the first root would be a
+        # plausible-looking number for an equation that does not determine
+        # one, which is the failure this whole module exists to avoid.
         return ApparentOrder(
             math.nan, "no-solution",
             detail=(

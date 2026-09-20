@@ -46,7 +46,7 @@ class USDWriter:
         stage: Usd.Stage,
         gm: "GraphManager",
         root_path: str = "/Simulation",
-    ):
+    ) -> None:
         self._stage = stage
         self._gm = gm
         self._root_path = root_path

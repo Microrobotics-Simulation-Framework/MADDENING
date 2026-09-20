@@ -444,7 +444,13 @@ def make_translate_updater(
     bouncing-ball demo, a 1-DOF mass on a spring, etc.).  The
     prim must have a single ``AddTranslateOp`` xform op already.
     """
-    def updater(stage, prim_path, node_state, time_code=None):
+    def updater(
+        stage: "Usd.Stage",
+        prim_path: str,
+        # shape: {"position": np.ndarray} -- TypedDict candidate (phase 3)
+        node_state: dict[str, Any],
+        time_code: Optional[Any] = None,
+    ) -> None:
         pos = node_state.get(field)
         if pos is None:
             return
@@ -473,7 +479,14 @@ def make_translate_orient_updater(
     quaternion).  Prim must have ``AddTranslateOp`` + ``AddOrientOp``
     in that order.
     """
-    def updater(stage, prim_path, node_state, time_code=None):
+    def updater(
+        stage: "Usd.Stage",
+        prim_path: str,
+        # shape: {"position": np.ndarray, "orientation": np.ndarray}
+        # -- TypedDict candidate (phase 3)
+        node_state: dict[str, Any],
+        time_code: Optional[Any] = None,
+    ) -> None:
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             return

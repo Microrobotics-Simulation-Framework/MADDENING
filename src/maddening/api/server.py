@@ -874,8 +874,8 @@ class SimulationServer:
                 )
             return await call_next(request)
 
-        @app.get("/healthz", tags=["meta"])
-        def healthz():
+        @app.get("/healthz", tags=["meta"], response_model=None)
+        def healthz() -> dict[str, str]:
             """Liveness probe.  Served without a token, on purpose.
 
             A container health check has no credential, and this answer
@@ -887,7 +887,7 @@ class SimulationServer:
         # -- visualization endpoints -----------------------------------------
 
         @app.get("/viz/auth.js", tags=["viz"], response_class=PlainTextResponse)
-        def viz_auth_js():
+        def viz_auth_js() -> PlainTextResponse:
             """Serve the token helper the bundled pages load.
 
             Static and secret-free: it *finds* a token (a ``#token=``
@@ -903,34 +903,34 @@ class SimulationServer:
             )
 
         @app.get("/viz/graph", tags=["viz"], response_class=HTMLResponse)
-        def viz_graph():
+        def viz_graph() -> HTMLResponse:
             html_path = _STATIC_DIR / "graph.html"
             return HTMLResponse(content=html_path.read_text(), status_code=200)
 
         @app.get("/viz/app", tags=["viz"], response_class=HTMLResponse)
-        def viz_app():
+        def viz_app() -> HTMLResponse:
             """Serve the interactive simulation app."""
             html_path = _STATIC_DIR / "app.html"
             return HTMLResponse(content=html_path.read_text(), status_code=200)
 
         @app.get("/viz/render", tags=["viz"], response_class=HTMLResponse)
-        def viz_render():
+        def viz_render() -> HTMLResponse:
             """Serve the server-side rendered viewer."""
             html_path = _STATIC_DIR / "render.html"
             return HTMLResponse(content=html_path.read_text(), status_code=200)
 
         # -- graph structure endpoints ---------------------------------------
 
-        @app.get("/graph", tags=["graph"])
-        def get_graph():
+        @app.get("/graph", tags=["graph"], response_model=None)
+        def get_graph() -> dict[str, Any]:
             # Display, not persistence: a mapping without point references
             # is shown as far as it describes itself rather than refused.
             data = self.gm.to_dict(strict_mappings=False)
             data["active_surrogates"] = list(self._active_surrogates)
             return data
 
-        @app.post("/graph/nodes", tags=["graph"], status_code=201)
-        def add_node(req: AddNodeRequest):
+        @app.post("/graph/nodes", tags=["graph"], status_code=201, response_model=None)
+        def add_node(req: AddNodeRequest) -> dict[str, Any]:
             if req.type not in self.registry:
                 raise HTTPException(
                     status_code=400,
@@ -995,16 +995,16 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok", "node": node.to_dict()}
 
-        @app.delete("/graph/nodes/{name}", tags=["graph"])
-        def remove_node(name: str):
+        @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
+        def remove_node(name: str) -> dict[str, str]:
             try:
                 self.gm.remove_node(name)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc))
             return {"status": "ok"}
 
-        @app.post("/graph/edges", tags=["graph"], status_code=201)
-        def add_edge(req: AddEdgeRequest):
+        @app.post("/graph/edges", tags=["graph"], status_code=201, response_model=None)
+        def add_edge(req: AddEdgeRequest) -> dict[str, str]:
             for n in (req.source_node, req.target_node):
                 if n not in self.gm._nodes:
                     raise HTTPException(status_code=404, detail=f"No node '{n}'.")
@@ -1029,42 +1029,42 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok"}
 
-        @app.delete("/graph/edges", tags=["graph"])
-        def remove_edge(req: RemoveEdgeRequest):
+        @app.delete("/graph/edges", tags=["graph"], response_model=None)
+        def remove_edge(req: RemoveEdgeRequest) -> dict[str, str]:
             self.gm.remove_edge(
                 source=req.source_node, target=req.target_node,
                 source_field=req.source_field, target_field=req.target_field,
             )
             return {"status": "ok"}
 
-        @app.post("/graph/compile", tags=["graph"])
-        def compile_graph():
+        @app.post("/graph/compile", tags=["graph"], response_model=None)
+        def compile_graph() -> dict[str, Any]:
             try:
                 self.gm.compile()
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok", "schedule": self.gm.schedule}
 
-        @app.post("/graph/validate", tags=["graph"])
-        def validate_graph():
+        @app.post("/graph/validate", tags=["graph"], response_model=None)
+        def validate_graph() -> dict[str, Any]:
             issues = self.gm.validate()
             return {"issues": issues}
 
         # -- state endpoints -------------------------------------------------
 
-        @app.get("/graph/state", tags=["state"])
-        def get_state():
+        @app.get("/graph/state", tags=["state"], response_model=None)
+        def get_state() -> dict[str, Any]:
             return self._state_json()
 
-        @app.get("/graph/state/{node_name}", tags=["state"])
-        def get_node_state(node_name: str):
+        @app.get("/graph/state/{node_name}", tags=["state"], response_model=None)
+        def get_node_state(node_name: str) -> dict[str, Any]:
             try:
                 return self._node_state_json(node_name)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc))
 
-        @app.put("/graph/state/{node_name}", tags=["state"])
-        def set_node_state(node_name: str, req: SetNodeStateRequest):
+        @app.put("/graph/state/{node_name}", tags=["state"], response_model=None)
+        def set_node_state(node_name: str, req: SetNodeStateRequest) -> dict[str, str]:
             """Replace a node's state.  Every field is required, coerced to
             the live leaf's dtype, and must match its shape and be finite;
             a 400 names the field and writes nothing."""
@@ -1096,8 +1096,8 @@ class SimulationServer:
 
         # -- parameter endpoints ---------------------------------------------
 
-        @app.get("/graph/params/{node_name}", tags=["params"])
-        def get_node_params(node_name: str):
+        @app.get("/graph/params/{node_name}", tags=["params"], response_model=None)
+        def get_node_params(node_name: str) -> dict[str, Any]:
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             node = self.gm._nodes[node_name].node
@@ -1106,8 +1106,8 @@ class SimulationServer:
             live = self.gm.params.get("nodes", {}).get(node_name) or {}
             return {**_jax_to_python(node.params), **_jax_to_python(live)}
 
-        @app.put("/graph/params/{node_name}", tags=["params"])
-        def set_node_params(node_name: str, req: SetNodeParamsRequest):
+        @app.put("/graph/params/{node_name}", tags=["params"], response_model=None)
+        def set_node_params(node_name: str, req: SetNodeParamsRequest) -> dict[str, Any]:
             """Update node parameters.
 
             Float parameters of nodes that accept injected params are
@@ -1213,8 +1213,8 @@ class SimulationServer:
                 )
             return target
 
-        @app.post("/checkpoint/save", tags=["checkpoint"])
-        def checkpoint_save(path: str = "checkpoint.npz"):
+        @app.post("/checkpoint/save", tags=["checkpoint"], response_model=None)
+        def checkpoint_save(path: str = "checkpoint.npz") -> dict[str, str]:
             target = _checkpoint_path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -1223,8 +1223,8 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
             return {"status": "ok", "path": str(saved or target)}
 
-        @app.post("/checkpoint/load", tags=["checkpoint"])
-        def checkpoint_load(path: str = "checkpoint.npz"):
+        @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
+        def checkpoint_load(path: str = "checkpoint.npz") -> dict[str, Any]:
             target = _checkpoint_path(path)
             if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
                 raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
@@ -1238,15 +1238,15 @@ class SimulationServer:
 
         # -- simulation control endpoints -----------------------------------
 
-        @app.post("/sim/step", tags=["sim"])
-        def sim_step():
+        @app.post("/sim/step", tags=["sim"], response_model=None)
+        def sim_step() -> dict[str, Any]:
             try:
                 self.gm.step()
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return self._state_json()
 
-        @app.post("/sim/run", tags=["sim"])
+        @app.post("/sim/run", tags=["sim"], response_model=None)
         def sim_run(
             n_steps: int = Query(
                 100, ge=0, le=MAX_RUN_STEPS,
@@ -1257,15 +1257,15 @@ class SimulationServer:
                             "cancelled; for a longer run use POST "
                             "/sim/start.",
             ),
-        ):
+        ) -> dict[str, Any]:
             try:
                 self.gm.run(n_steps)
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return self._state_json()
 
-        @app.post("/sim/start", tags=["sim"])
-        def sim_start():
+        @app.post("/sim/start", tags=["sim"], response_model=None)
+        def sim_start() -> dict[str, str]:
             runner = self._ensure_runner()
             if self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is already started.")
@@ -1277,29 +1277,29 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "started"}
 
-        @app.post("/sim/pause", tags=["sim"])
-        def sim_pause():
+        @app.post("/sim/pause", tags=["sim"], response_model=None)
+        def sim_pause() -> dict[str, str]:
             if self.runner is None or not self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is not started.")
             self.runner.pause()
             return {"status": "paused"}
 
-        @app.post("/sim/resume", tags=["sim"])
-        def sim_resume():
+        @app.post("/sim/resume", tags=["sim"], response_model=None)
+        def sim_resume() -> dict[str, str]:
             if self.runner is None or not self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is not started.")
             self.runner.resume()
             return {"status": "resumed"}
 
-        @app.post("/sim/stop", tags=["sim"])
-        def sim_stop():
+        @app.post("/sim/stop", tags=["sim"], response_model=None)
+        def sim_stop() -> dict[str, str]:
             if self.runner is None or not self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is not started.")
             self._stop_runner()
             return {"status": "stopped"}
 
-        @app.post("/sim/reset", tags=["sim"])
-        def sim_reset():
+        @app.post("/sim/reset", tags=["sim"], response_model=None)
+        def sim_reset() -> dict[str, Any]:
             """Stop the runner and reset all nodes to initial state."""
             was_running = self._runner_started
             self._stop_runner()
@@ -1307,8 +1307,8 @@ class SimulationServer:
             self.gm._dirty = True
             return {"status": "ok", "was_running": was_running, "state": self._state_json()}
 
-        @app.put("/sim/stride", tags=["sim"])
-        def sim_set_stride(steps_per_frame: int = 1, relay_stride: int = 1):
+        @app.put("/sim/stride", tags=["sim"], response_model=None)
+        def sim_set_stride(steps_per_frame: int = 1, relay_stride: int = 1) -> dict[str, int]:
             """Adjust physics-to-render rate decoupling.
 
             Parameters
@@ -1329,8 +1329,8 @@ class SimulationServer:
 
         # -- surrogate endpoints --------------------------------------------
 
-        @app.post("/surrogate/train", tags=["surrogate"])
-        def surrogate_train(req: TrainSurrogateRequest):
+        @app.post("/surrogate/train", tags=["surrogate"], response_model=None)
+        def surrogate_train(req: TrainSurrogateRequest) -> dict[str, str]:
             """Start training a surrogate in a background thread."""
             try:
                 from maddening.surrogates.dataset import DatasetGenerator
@@ -1436,8 +1436,8 @@ class SimulationServer:
             thread.start()
             return {"job_id": job_id, "status": "started"}
 
-        @app.get("/surrogate/status/{job_id}", tags=["surrogate"])
-        def surrogate_status(job_id: str):
+        @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None)
+        def surrogate_status(job_id: str) -> dict[str, Any]:
             if job_id not in self._surrogate_jobs:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
             job = self._surrogate_jobs[job_id]
@@ -1452,8 +1452,8 @@ class SimulationServer:
                 "error": job["error"],
             }
 
-        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"])
-        def surrogate_activate(job_id: str):
+        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None)
+        def surrogate_activate(job_id: str) -> dict[str, str]:
             """Replace the physics node with the trained surrogate."""
             if job_id not in self._surrogate_jobs:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
@@ -1503,8 +1503,8 @@ class SimulationServer:
 
             return {"status": "activated", "node": node_name}
 
-        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"])
-        def surrogate_deactivate(node_name: str):
+        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"], response_model=None)
+        def surrogate_deactivate(node_name: str) -> dict[str, str]:
             """Restore the original physics node."""
             if node_name not in self._original_nodes:
                 raise HTTPException(
@@ -1608,8 +1608,8 @@ class SimulationServer:
 
         # -- profile endpoints (v0.2 #9) -----------------------------------
 
-        @app.post("/sim/profile", tags=["sim"])
-        def sim_profile(n_steps: int = 50, n_warmup: int = 3):
+        @app.post("/sim/profile", tags=["sim"], response_model=None)
+        def sim_profile(n_steps: int = 50, n_warmup: int = 3) -> dict[str, Any]:
             """Run a step-time profile and return a Perfetto-loadable JSON trace.
 
             POST with ``?n_steps=N`` to override (default 50, capped at
@@ -1638,8 +1638,8 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=str(exc))
             return profile_report_to_perfetto(report)
 
-        @app.post("/sim/profile/jax/start", tags=["sim"])
-        def sim_profile_jax_start():
+        @app.post("/sim/profile/jax/start", tags=["sim"], response_model=None)
+        def sim_profile_jax_start() -> dict[str, Any]:
             """Begin a JAX-level XLA trace.
 
             All subsequent ``/sim/step`` and ``/sim/run`` calls (and
@@ -1662,8 +1662,8 @@ class SimulationServer:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "tracing", "log_dir": log_dir}
 
-        @app.post("/sim/profile/jax/stop", tags=["sim"])
-        def sim_profile_jax_stop():
+        @app.post("/sim/profile/jax/stop", tags=["sim"], response_model=None)
+        def sim_profile_jax_stop() -> dict[str, Any]:
             """End the active JAX trace and return the log directory."""
             from maddening.core.simulation.profiler import (
                 stop_jax_trace, jax_trace_active,
@@ -1676,8 +1676,8 @@ class SimulationServer:
             self._last_jax_trace_dir = log_dir
             return {"status": "stopped", "log_dir": log_dir}
 
-        @app.get("/sim/profile/jax/status", tags=["sim"])
-        def sim_profile_jax_status():
+        @app.get("/sim/profile/jax/status", tags=["sim"], response_model=None)
+        def sim_profile_jax_status() -> dict[str, Any]:
             from maddening.core.simulation.profiler import jax_trace_active
             return {
                 "active": jax_trace_active(),
@@ -1686,8 +1686,8 @@ class SimulationServer:
 
         # -- cloud endpoints ------------------------------------------------
 
-        @app.post("/cloud/launch", tags=["cloud"])
-        def cloud_launch(config: dict[str, Any] = {}):
+        @app.post("/cloud/launch", tags=["cloud"], response_model=None)
+        def cloud_launch(config: dict[str, Any] = {}) -> dict[str, Any]:
             """Launch a cloud GPU session."""
             if not _cloud_deps_available():
                 raise HTTPException(
@@ -1709,8 +1709,8 @@ class SimulationServer:
                 self._cloud_session = None
                 raise HTTPException(status_code=500, detail=str(exc))
 
-        @app.get("/cloud/status", tags=["cloud"])
-        def cloud_status():
+        @app.get("/cloud/status", tags=["cloud"], response_model=None)
+        def cloud_status() -> dict[str, Any]:
             """Get cloud session status."""
             if self._cloud_session is None:
                 raise HTTPException(
@@ -1729,8 +1729,8 @@ class SimulationServer:
                 "error_detail": result.error_detail,
             }
 
-        @app.post("/cloud/teardown", tags=["cloud"])
-        def cloud_teardown():
+        @app.post("/cloud/teardown", tags=["cloud"], response_model=None)
+        def cloud_teardown() -> dict[str, Any]:
             """Tear down the cloud session.
 
             If a JAX trace was captured during this session (see
@@ -1773,7 +1773,7 @@ class SimulationServer:
         # -- WebSocket endpoints --------------------------------------------
 
         @app.websocket("/ws/state")
-        async def ws_state(websocket: WebSocket):
+        async def ws_state(websocket: WebSocket) -> None:
             """Stream state snapshots as JSON at ~30 Hz.
 
             Client may send JSON messages to configure the stream:
@@ -1852,7 +1852,7 @@ class SimulationServer:
                 receiver.cancel()
 
         @app.websocket("/ws/state/binary")
-        async def ws_state_binary(websocket: WebSocket):
+        async def ws_state_binary(websocket: WebSocket) -> None:
             """Stream state snapshots as binary at ~60 Hz.
 
             Protocol:
@@ -1958,7 +1958,7 @@ class SimulationServer:
                 receiver.cancel()
 
         @app.websocket("/ws/render")
-        async def ws_render(websocket: WebSocket):
+        async def ws_render(websocket: WebSocket) -> None:
             """Stream server-side rendered frames as compressed images.
 
             Protocol:

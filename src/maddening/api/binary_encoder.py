@@ -80,7 +80,7 @@ class BinaryStateEncoder:
         *,
         compression: str = "none",
         zstd_level: int = 3,
-    ):
+    ) -> None:
         if compression not in VALID_COMPRESSIONS:
             raise ValueError(
                 f"compression must be one of {VALID_COMPRESSIONS!r}, "

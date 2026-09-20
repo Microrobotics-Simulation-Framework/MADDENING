@@ -68,6 +68,8 @@ from maddening.serialization.json_codec import dumps as _json_dumps
 from maddening.serialization.json_codec import loads as _json_loads
 
 if TYPE_CHECKING:
+    import os
+
     from maddening.core.graph_manager import GraphManager
 
 # Every JSON-valued attribute on the stage goes through
@@ -446,7 +448,7 @@ def save_graph_to_usd(
 def load_graph_from_usd(
     stage: Usd.Stage,
     root_path: str = "/Simulation",
-    base_dir=None,
+    base_dir: str | os.PathLike[str] | None = None,
     *,
     node_registry: Optional[dict[str, type]] = None,
     allow_import: bool = False,

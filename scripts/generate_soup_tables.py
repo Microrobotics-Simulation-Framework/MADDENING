@@ -131,6 +131,8 @@ TEST_DIRECTORY_SCOPE: dict[str, str] = {
              "RigidBody2DNode, SpringDamperNode, AdaptiveNode",
     "property": "Hypothesis property tests over generated graphs, meshes and "
                 "coupling configurations",
+    "security": "Transport authentication: ZMQ CURVE encryption and "
+                "key derivation for the state, command and coordinator sockets",
     "surrogates": "Neural {term}`surrogate <Surrogate>` training, "
                   "architectures, dataset generation",
     "usd": "USD stage serialization and round-trips, geometry sources, "

@@ -23,7 +23,7 @@ version CI had not used alone since 0.2, and "JAX: 0.4+" against a 0.10.2 pin.
 | Python versions | 3.11, 3.12 (floor: >=3.11) |
 | JAX | pinned to `0.10.2` in CI; `jax>=0.10,<0.13` supported |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
-| Test packages | 12 — listed below |
+| Test packages | 13 — listed below |
 <!-- END GENERATED: test-suite -->
 
 ## Test Organization
@@ -39,6 +39,7 @@ version CI had not used alone since 0.2, and "JAX: 0.4+" against a 0.10.2 pin.
 | `tests/fmi/` | FMI/FMU export and import: model description, binary frames, parameter variables |
 | `tests/nodes/` | Physics node correctness: HeatNode, LBMNode, LBMPipeNode, RigidBody2DNode, SpringDamperNode, AdaptiveNode |
 | `tests/property/` | Hypothesis property tests over generated graphs, meshes and coupling configurations |
+| `tests/security/` | Transport authentication: ZMQ CURVE encryption and key derivation for the state, command and coordinator sockets |
 | `tests/surrogates/` | Neural {term}`surrogate <Surrogate>` training, architectures, dataset generation |
 | `tests/usd/` | USD stage serialization and round-trips, geometry sources, interface mappings |
 | `tests/verification/` | Registered verification benchmarks (analytical comparisons, convergence studies) |

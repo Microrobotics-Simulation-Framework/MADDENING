@@ -18,6 +18,9 @@ import time.  Levels:
 
 | API Surface | Stability Level |
 |---|---|
+| `maddening.api.auth.APIAuth` | evolving |
+| `maddening.api.auth.is_loopback` | evolving |
+| `maddening.api.auth.is_routable_peer` | evolving |
 | `maddening.api.binary_encoder.BinaryStateEncoder` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.UnstructuredPartitionLayout` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.build_unstructured_partition` | evolving |
@@ -113,6 +116,11 @@ import time.  Levels:
 | `maddening.sysid.init_window_states` | evolving |
 | `maddening.sysid.observations_from_history` | evolving |
 | `maddening.sysid.windowed_loss` | evolving |
+| `maddening.transport_auth.TransportAuth` | evolving |
+| `maddening.transport_auth.TransportAuthError` | evolving |
+| `maddening.transport_auth.address_is_loopback` | evolving |
+| `maddening.transport_auth.address_requires_security` | evolving |
+| `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*96 API surfaces registered.*
+*104 API surfaces registered.*

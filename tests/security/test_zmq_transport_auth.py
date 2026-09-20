@@ -13,6 +13,18 @@ The rest pin the things that would let those two pass while the
 transport was still open: a wrong token, a self-generated keypair, a
 missing ZAP allowlist, and the defaults that decide whether any of it
 is switched on at all.
+
+The **own-keypair attacker** -- a peer that holds the server's public
+key (assume it leaked; CURVE does not put it on the wire, but nothing
+here relies on that) and brings a keypair of its own -- is run against
+all three CURVE servers: ``NetworkRelay``, ``CommandPublisher`` and
+``Coordinator``.  It is the only attacker the ZAP allowlist stops, so a
+server it is not run against has an untested allowlist.  Measured:
+deleting ``start_authenticator`` from ``CommandPublisher`` or from
+``Coordinator`` left all 36 tests in the earlier version of this file
+green while the attacker read command frames and registered
+``{'flow': 'attacker.example:5555'}`` with the coordinator -- the
+data-plane redirection MADD-ANO-015 calls its worst case.
 """
 
 from __future__ import annotations
@@ -293,6 +305,43 @@ class TestCommandChannelConfidentiality:
         assert counts["authorised"] > 0
         assert counts["no-credential"] == 0
 
+    def test_a_subscriber_with_its_own_keypair_cannot_read_the_command_stream(
+        self,
+    ):
+        """``CommandPublisher``'s ZAP allowlist, which nothing tested.
+
+        The command channel is fed straight into
+        ``GraphManager.step(external_inputs=...)``, so reading it
+        discloses the control input and -- for a PUB socket whose
+        subscribers cannot tell publishers apart -- knowing the server
+        key is the whole of what a forger needs.  CURVE without a ZAP
+        handler admits any client key, so the allowlist is the gate.
+        Measured with ``start_authenticator`` deleted from this class:
+        the attacker read command frames and every test still passed.
+        """
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        publisher = CommandPublisher(address=address, secure=True, token=TOKEN)
+        context = zmq.Context()
+        subs = {
+            "authorised": _sub(context, address, token=TOKEN),
+            "own-keypair": _sub(context, address, token=TOKEN, own_keypair=True),
+        }
+        command = {"robot": {"joint_torques": [0.1, -0.2, 0.0]}}
+        try:
+            counts = _exchange(lambda: publisher.send(command), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            publisher.close()
+
+        assert counts["authorised"] > 0, (
+            "the authorised subscriber received nothing, so this test "
+            "proves nothing about the attacker"
+        )
+        assert counts["own-keypair"] == 0
+
     def test_the_paired_receiver_reads_the_command_with_the_same_token(self):
         """The happy path: two MADDENING objects, one shared token."""
         port = _free_port()
@@ -345,8 +394,13 @@ class TestSecuredRelayRoundTrip:
 # ---------------------------------------------------------------------
 
 def _register(context, address: str, subgraph_id: str, *, token: str | None,
-              peer_address: str) -> None:
-    """Send one ``register`` frame to the coordinator's ROUTER."""
+              peer_address: str, own_keypair: bool = False) -> None:
+    """Send one ``register`` frame to the coordinator's ROUTER.
+
+    *own_keypair* is the attacker the ZAP allowlist exists to stop: it
+    knows the server's public key and brings a keypair of its own, which
+    plain CURVE would admit.
+    """
     sock = context.socket(zmq.DEALER)
     sock.setsockopt(zmq.LINGER, 0)
     # A DEALER whose peer refuses the handshake goes mute, and an unbounded
@@ -354,7 +408,15 @@ def _register(context, address: str, subgraph_id: str, *, token: str | None,
     # case hangs the test run instead of failing it.
     sock.setsockopt(zmq.SNDTIMEO, 500)
     if token is not None:
-        TransportAuth(token=token).secure_client(sock)
+        auth = TransportAuth(token=token)
+        if own_keypair:
+            server_public, _ = auth.server_keypair()
+            public, secret = zmq.curve_keypair()
+            sock.curve_secretkey = secret
+            sock.curve_publickey = public
+            sock.curve_serverkey = server_public
+        else:
+            auth.secure_client(sock)
     sock.connect(address)
     try:
         deadline = time.monotonic() + 2.0
@@ -424,6 +486,31 @@ class TestCoordinatorAuthentication:
         try:
             _register(context, address, "flow", token=OTHER_TOKEN,
                       peer_address="attacker.example:5555")
+        finally:
+            context.term()
+
+        assert coord.registered_workers == {}
+
+    def test_the_coordinator_ignores_a_registration_from_an_own_keypair_peer(
+        self, coordinator,
+    ):
+        """``Coordinator``'s ZAP allowlist, which nothing tested.
+
+        This is the worst case in MADD-ANO-015: the coordinator stores
+        the ``address`` a registration carries and later hands it to the
+        *other* workers as the peer to SUB-connect to, so an accepted
+        registration redirects a victim's data plane at a publisher the
+        attacker owns.  Plain CURVE admits any client key that knows the
+        server's public key; only the allowlist refuses this peer.
+        Measured with ``start_authenticator`` deleted from ``Coordinator``:
+        the attacker registered ``{'flow': 'attacker.example:5555'}`` and
+        every test still passed.
+        """
+        coord, address = coordinator
+        context = zmq.Context()
+        try:
+            _register(context, address, "flow", token=TOKEN,
+                      peer_address="attacker.example:5555", own_keypair=True)
         finally:
             context.term()
 

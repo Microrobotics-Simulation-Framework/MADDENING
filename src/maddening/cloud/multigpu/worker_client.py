@@ -62,6 +62,15 @@ class WorkerClient:
         (default) decides from *coordinator_addr*: a loopback
         coordinator is contacted in cleartext, a remote one is
         encrypted and authenticated.  ``True`` forces it on.
+
+        **Pass ``True`` explicitly when the coordinator binds a
+        non-loopback address but you reach it over a loopback one** --
+        rank 0's own worker talking to ``127.0.0.1:5580``, or any worker
+        going through an SSH tunnel.  The coordinator's posture is set
+        by *its* bind address, which this client cannot see, so the
+        address rule gets that case wrong.  It fails loudly rather than
+        silently: ``register_and_wait`` raises ``ConnectionError``
+        naming the mismatch.
     token : str, optional
         Shared secret the CURVE keys are derived from; ``None`` reads
         ``MADDENING_API_TOKEN``.  Must match the coordinator's.
@@ -142,6 +151,13 @@ class WorkerClient:
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s recv timeout
         self._secure_socket(sock)
+        # A DEALER whose peer rejects the security handshake enters mute
+        # state, and an unbounded send on a mute socket blocks forever --
+        # measured, not assumed: a plain DEALER sending to a CURVE ROUTER
+        # never returns from the first send_multipart.  That would make
+        # `timeout` a lie and hang the worker on the single most likely
+        # misconfiguration, a token that does not match the coordinator's.
+        sock.setsockopt(zmq.SNDTIMEO, 1000)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         # Send registration
@@ -151,14 +167,21 @@ class WorkerClient:
             "address": self._address,
             "zmq_ports": self._zmq_ports,
         }
-        sock.send_multipart([b"", json.dumps(reg_msg).encode()])
-        logger.info("Registered with coordinator at %s as %s",
-                     self._coordinator_addr, self._subgraph_id)
+        payload = [b"", json.dumps(reg_msg).encode()]
 
-        # Wait for ACK
+        # Wait for ACK, re-sending as we go so a coordinator that starts
+        # after this worker still gets the registration.
         deadline = time.monotonic() + timeout
         ack_received = False
+        deliverable = False
         while time.monotonic() < deadline:
+            try:
+                sock.send_multipart(payload)
+                deliverable = True
+            except zmq.Again:
+                # No peer will take it. Keep trying until the deadline:
+                # the coordinator may still be coming up.
+                pass
             try:
                 frames = sock.recv_multipart()
                 msg = json.loads(frames[-1])
@@ -168,6 +191,21 @@ class WorkerClient:
                     break
             except zmq.Again:
                 continue
+
+        if not ack_received and not deliverable:
+            sock.close()
+            ctx.term()
+            raise ConnectionError(
+                f"Could not deliver a registration to the coordinator at "
+                f"{self._coordinator_addr}: it accepted no message in "
+                f"{timeout:.0f}s. This worker has CURVE "
+                f"{'on' if self._secure else 'off'}. A coordinator bound to a "
+                f"non-loopback address has CURVE on, and a worker reaching it "
+                f"over a loopback address (a tunnel, or rank 0's own worker) "
+                f"turns it off by default -- pass secure=True to WorkerClient "
+                f"in that case, and give both ends the same "
+                f"MADDENING_API_TOKEN."
+            )
 
         if not ack_received:
             sock.close()
@@ -265,18 +303,25 @@ class WorkerClient:
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 2000)
+        # See register_and_wait: an unbounded send on a mute DEALER never
+        # returns, which would wedge this daemon thread past stop().
+        sock.setsockopt(zmq.SNDTIMEO, 1000)
         self._secure_socket(sock)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         while not self._stop_event.is_set():
             try:
-                sock.send_multipart([
-                    b"",
-                    json.dumps({
-                        "type": "heartbeat",
-                        "subgraph_id": self._subgraph_id,
-                    }).encode(),
-                ])
+                try:
+                    sock.send_multipart([
+                        b"",
+                        json.dumps({
+                            "type": "heartbeat",
+                            "subgraph_id": self._subgraph_id,
+                        }).encode(),
+                    ])
+                except zmq.Again:
+                    logger.debug("Heartbeat undeliverable to %s",
+                                 self._coordinator_addr)
                 try:
                     frames = sock.recv_multipart()
                     msg = json.loads(frames[-1])

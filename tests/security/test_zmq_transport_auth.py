@@ -330,18 +330,25 @@ def _register(context, address: str, subgraph_id: str, *, token: str | None,
     """Send one ``register`` frame to the coordinator's ROUTER."""
     sock = context.socket(zmq.DEALER)
     sock.setsockopt(zmq.LINGER, 0)
+    # A DEALER whose peer refuses the handshake goes mute, and an unbounded
+    # send on a mute socket never returns. Without this the "no credential"
+    # case hangs the test run instead of failing it.
+    sock.setsockopt(zmq.SNDTIMEO, 500)
     if token is not None:
         TransportAuth(token=token).secure_client(sock)
     sock.connect(address)
     try:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            sock.send_multipart([b"", json.dumps({
-                "type": "register",
-                "subgraph_id": subgraph_id,
-                "address": peer_address,
-                "zmq_ports": {"state": 5555},
-            }).encode()])
+            try:
+                sock.send_multipart([b"", json.dumps({
+                    "type": "register",
+                    "subgraph_id": subgraph_id,
+                    "address": peer_address,
+                    "zmq_ports": {"state": 5555},
+                }).encode()])
+            except zmq.Again:
+                pass  # mute socket: the peer refused us, which is the point
             time.sleep(0.1)
     finally:
         sock.close()
@@ -417,6 +424,41 @@ class TestCoordinatorAuthentication:
 
         assert "flow" in coord.registered_workers
         assert coord.registered_workers["flow"].address == "10.0.0.2:5555"
+
+
+class TestWorkerClientFailsFastOnAMismatch:
+    """A worker that cannot authenticate must fail, not hang."""
+
+    def test_a_worker_without_curve_does_not_hang_on_a_curve_coordinator(self):
+        """The asymmetric case the address rule cannot see.
+
+        A coordinator bound to a non-loopback address has CURVE on.  A
+        worker reaching it over a *loopback* address -- rank 0's own
+        worker, or anything through an SSH tunnel -- sees loopback and
+        turns CURVE off.  libzmq then puts the DEALER in mute state and
+        an unbounded send never returns, so before this was bounded the
+        worker hung forever and ``timeout`` meant nothing.
+        """
+        from maddening.cloud.multigpu.worker_client import WorkerClient
+
+        port = _free_port()
+        coord = Coordinator(expected_workers=["flow"], edges=[], port=port,
+                            bind_host="127.0.0.1", secure=True, token=TOKEN)
+        coord.start()
+        client = WorkerClient(
+            coordinator_addr=f"127.0.0.1:{port}",
+            subgraph_id="flow",
+            address="127.0.0.1:5555",
+            secure=False,          # the mismatch
+        )
+        started = time.monotonic()
+        try:
+            with pytest.raises((ConnectionError, TimeoutError)):
+                client.register_and_wait(timeout=3)
+        finally:
+            coord.shutdown()
+            time.sleep(1.2)
+        assert time.monotonic() - started < 20, "register_and_wait hung"
 
 
 # ---------------------------------------------------------------------

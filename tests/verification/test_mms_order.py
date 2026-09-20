@@ -503,6 +503,238 @@ class TestHeatStencilGhosts:
         assert after == pytest.approx(before, rel=1e-5)
 
 
+#: Exact gradient of :data:`_STEADY` at ``t = 0``, by AD rather than by
+#: hand, for the same reason the source term is: a hand-differentiated
+#: reference is a second place for the profile to be wrong.
+_STEADY_GRADIENT = jax.grad(lambda x: _STEADY.exact(x, jnp.float64(0.0)))
+
+
+def _heat_boundary_flux_error(
+    n_cells, *, end="left", stencil_order=2, datum=True,
+):
+    """Relative error of a reported rod-end flux on the steady profile.
+
+    The field is handed to the node exactly -- no relaxation -- because
+    what is being measured is the boundary *reconstruction*, not the
+    scheme that produced the field.  Mixing the two would let a
+    2nd-order state error mask a 1st-order flux.
+
+    ``datum=False`` withholds ``left_temperature`` /
+    ``right_temperature``, which is the path
+    ``compute_boundary_fluxes`` takes when a caller asks for a flux
+    without a Dirichlet boundary condition.
+    """
+    dx = _L / n_cells
+    x = _cell_centres(n_cells)
+    T = np.asarray(_STEADY.field(x, 0.0), dtype=np.float64)
+    node = HeatNode(
+        "flux_heat", timestep=0.3 * dx * dx / _ALPHA, n_cells=n_cells,
+        length=_L, thermal_diffusivity=_ALPHA, stencil_order=stencil_order,
+    )
+    boundary = {}
+    if datum:
+        boundary = {
+            "left_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(0.0), jnp.float64(0.0)))
+            ),
+            "right_temperature": jnp.asarray(
+                float(_STEADY.exact(jnp.float64(_L), jnp.float64(0.0)))
+            ),
+        }
+    fluxes = node.compute_boundary_fluxes(
+        {"temperature": jnp.asarray(T)}, boundary, dx * dx,
+    )
+    at = jnp.float64(0.0 if end == "left" else _L)
+    true_flux = -_ALPHA * float(_STEADY_GRADIENT(at))
+    reported = float(fluxes[f"{end}_heat_flux"])
+    return abs(reported - true_flux) / abs(true_flux)
+
+
+class TestTheReportedBoundaryFluxIsAtTheRodEnd:
+    """``compute_boundary_fluxes`` returns the flux the spec names.
+
+    Until 0.4.0 it returned ``-alpha (T[1] - T[0]) / dx``, the gradient
+    of the line through the first two cell *centres*, which for a
+    cell-centred grid sits at ``x = dx`` -- a full cell inside the end
+    ``boundary_flux_spec`` calls "the left boundary".  On ``T = exp(x)``
+    with ``alpha = 1`` and ``n = 10`` that is -1.10563 where the
+    rod-end flux is -1.0, a 10.6% error, and it matched the flux at
+    ``x = dx`` (-1.10517) to four figures.  It refined at order 1.005
+    against the node's own 2.000, so a flux-coupled solve was capped at
+    1st order by the flux alone.
+
+    Nothing asserted the value.  The three tests that touched it
+    checked ``isfinite`` and ``> 0.0``, and a *linear* profile cannot
+    see the defect at all -- the scheme is exact there and both
+    readings give exactly -1.0 -- so the profile these studies refine
+    has to be curved at the ends, exactly as
+    :class:`TestTheSteadyProfileCanSeeABrokenScheme` requires of the
+    state ladder one layer down.
+    """
+
+    @pytest.mark.parametrize("end", ["left", "right"])
+    def test_the_flux_converges_at_the_default_stencils_order(
+        self, float64, end,
+    ):
+        """2nd order, matching the state: measured 1.999 (was 1.005)."""
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(n, end=end),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(2.0, abs=0.2), (
+            measurement.table()
+        )
+
+    @pytest.mark.parametrize("end", ["left", "right"])
+    def test_the_flux_converges_at_the_fourth_order_stencils_order(
+        self, float64, end,
+    ):
+        """4th order for ``stencil_order=4``: measured 3.993.
+
+        The interface is not capped below the state it belongs to.  The
+        reconstruction reads the rod-end datum plus ``stencil_order``
+        cells, so it is accurate to ``stencil_order`` at either end.
+        """
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(n, end=end, stencil_order=4),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(4.0, abs=0.2), (
+            measurement.table()
+        )
+
+    @pytest.mark.parametrize("stencil_order", [2, 4])
+    def test_the_flux_without_a_dirichlet_datum_is_still_at_the_rod_end(
+        self, float64, stencil_order,
+    ):
+        """No boundary input: extrapolate to the end, do not move it.
+
+        With no datum the reconstruction is a pure extrapolation from
+        three cells and 2nd order for either stencil -- a higher-degree
+        extrapolant costs conditioning (coefficient L1 norm per ``dx``
+        of 6 for three cells against 28.3 for five) to buy accuracy
+        against a boundary condition that was never supplied.  What
+        matters is that it still reports the flux *at the rod end*:
+        measured 1.996, where the old expression measured 1.007 here
+        too.
+        """
+        measurement = measure_order(
+            lambda n: _heat_boundary_flux_error(
+                n, stencil_order=stencil_order, datum=False,
+            ),
+            levels=(10, 20, 40, 80, 160),
+            axis=RefinementAxis.SPACE,
+        )
+        assert measurement.monotone, measurement.table()
+        assert measurement.observed == pytest.approx(2.0, abs=0.2), (
+            measurement.table()
+        )
+
+    def test_the_reported_value_is_the_rod_end_flux_and_not_the_first_face(
+        self, float64,
+    ):
+        """The cheap direct test: one number, on ``T = exp(x)``.
+
+        An order ladder says a regression happened; this says what the
+        number is.  Both readings are pinned, so a fix that moved the
+        flux to some third location would fail this too.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_exp", timestep=0.3 * dx * dx, n_cells=n_cells, length=_L,
+            thermal_diffusivity=1.0,
+        )
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": jnp.asarray(np.exp(x))},
+            {"left_temperature": jnp.asarray(1.0),
+             "right_temperature": jnp.asarray(float(np.exp(_L)))},
+            dx * dx,
+        )
+        left = float(fluxes["left_heat_flux"])
+        # -alpha exp'(0) = -1; the flux one cell in is -exp(dx).
+        assert left == pytest.approx(-1.0, abs=5e-3), (
+            f"left flux {left} is not the rod-end flux -1.0"
+        )
+        assert abs(left - -float(np.exp(dx))) > 1e-2, (
+            f"left flux {left} is still the flux at x = dx "
+            f"({-float(np.exp(dx))})"
+        )
+        right = float(fluxes["right_heat_flux"])
+        assert right == pytest.approx(-float(np.exp(_L)), rel=5e-3), (
+            f"right flux {right} is not the rod-end flux {-np.exp(_L)}"
+        )
+        assert abs(right - -float(np.exp(_L - dx))) > 1e-2
+
+    def test_a_linear_profile_cannot_tell_the_two_readings_apart(
+        self, float64,
+    ):
+        """Why the studies above may not use a straight line.
+
+        On ``T = x`` the scheme is exact and *both* readings give
+        exactly -1.0 at both ends, so a linear-profile test -- the
+        obvious one to reach for, and the shape
+        ``tests/core/test_flux_coupling.py`` happened to use -- is
+        blind to the whole defect.  Recorded as an assertion so the
+        next person to simplify these studies finds out here.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_linear", timestep=0.3 * dx * dx, n_cells=n_cells,
+            length=_L, thermal_diffusivity=1.0,
+        )
+        T = jnp.asarray(x)
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": T},
+            {"left_temperature": jnp.asarray(0.0),
+             "right_temperature": jnp.asarray(_L)},
+            dx * dx,
+        )
+        old_reading_left = -float(T[1] - T[0]) / dx
+        assert float(fluxes["left_heat_flux"]) == pytest.approx(-1.0, abs=1e-12)
+        assert old_reading_left == pytest.approx(-1.0, abs=1e-12)
+        assert float(fluxes["right_heat_flux"]) == pytest.approx(
+            -1.0, abs=1e-12,
+        )
+
+    def test_the_two_ends_of_one_rod_report_a_balanced_pair(self, float64):
+        """A curved profile: the two ends must not err with one sign.
+
+        The old reading was the flux one cell *inside* each end, so on
+        any curved profile the two ends were wrong in opposite
+        directions and their sum -- the net flux into the rod, which is
+        what a conservation check reads -- carried the whole error.  On
+        ``T = exp(x)`` at n = 10 the old pair gave a net 1.35500
+        against the true 1.71828 -- 21.1% out -- while each end alone
+        was only 10.6% and 9.5% out; it is now within 0.25%.
+        """
+        n_cells = 10
+        dx = _L / n_cells
+        x = _cell_centres(n_cells)
+        node = HeatNode(
+            "flux_balance", timestep=0.3 * dx * dx, n_cells=n_cells,
+            length=_L, thermal_diffusivity=1.0,
+        )
+        fluxes = node.compute_boundary_fluxes(
+            {"temperature": jnp.asarray(np.exp(x))},
+            {"left_temperature": jnp.asarray(1.0),
+             "right_temperature": jnp.asarray(float(np.exp(_L)))},
+            dx * dx,
+        )
+        net = float(fluxes["left_heat_flux"]) - float(fluxes["right_heat_flux"])
+        true_net = -1.0 + float(np.exp(_L))
+        assert net == pytest.approx(true_net, rel=5e-3), (
+            f"net flux {net} against the true {true_net}"
+        )
+
+
 class TestHeatStabilityBound:
     """MADD-ANO-009: the Fourier limit, per stencil, and the guard on it."""
 

@@ -314,9 +314,12 @@ def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
     T = state["temperature"]
     dx = p["length"] / p["n_cells"]
     alpha = p["thermal_diffusivity"]
+    T_left = boundary_inputs.get("left_temperature")
+    # The rod end is at x = 0, half a cell outside T[0].  Anchor the
+    # reconstruction there; see "Report the flux where you say you do".
     return {
-        "left_heat_flux": -alpha * (T[1] - T[0]) / dx,
-        "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx,
+        "left_heat_flux": -alpha * (9.0 * T[0] - T[1] - 8.0 * T_left) / (3.0 * dx),
+        ...
     }
 ```
 
@@ -330,6 +333,53 @@ Requirements:
   every flux evaluation, so a calibrated constant changes the flux the
   edge delivers.  `verify_node`'s `params_consistent` fails a flux
   producer that forgets this.
+- `output_units` must be the units of the number you actually return.
+  `HeatNode` returns `-alpha dT/dx`, which is `K*m/s`; it declared
+  `W/m^2` until 0.4.0, short by the `rho*c_p` it has no parameter for.
+
+### Report the flux where you say you do
+
+On a cell-centred grid the obvious one-sided difference is at the
+wrong place, and nothing will tell you.  `-alpha * (T[1] - T[0]) / dx`
+is the gradient of the line through the first two cell *centres*, so it
+is the flux at `x = dx` — one whole cell inside the boundary the field
+name claims.  `HeatNode` shipped exactly that: on `T = exp(x)` with
+`alpha = 1` and 10 cells it reported -1.10563 where the rod-end flux is
+-1.0, and it refined at **order 1.005** while the node's own state
+converged at 2.000, capping any flux-coupled solve at first order
+through the flux alone.
+
+Three things make this class of defect hard to notice, and all three
+are worth checking in a new node:
+
+1. **A linear profile cannot see it.** The scheme is exact on a
+   straight line and every candidate reading gives the same number, so
+   the natural smoke test is blind. Pin the value against a *curved*
+   analytic profile.
+2. **`isfinite` and `> 0.0` are not value tests.** Those were the only
+   assertions on this flux for three releases.
+3. **Measure the order, not just the value.** A flux that is merely
+   *convergent* can still be convergent to the wrong point; the order
+   is what separates "approximate" from "misplaced".
+
+The fix is to anchor the reconstruction at the boundary. With the
+Dirichlet datum in `boundary_inputs`, fit a polynomial through
+`(0, T_boundary)` and the nearest cell centres and differentiate it
+there: with `k` cells the flux is `O(dx**k)`, so `k = stencil_order`
+keeps the interface at the accuracy of the node it belongs to. With no
+datum, extrapolate to the end from one extra cell instead of moving
+the reported point inwards.  `maddening.nodes.heat` does both through
+`_lagrange_gradient_at_origin`, and
+`tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd`
+measures 1.999 and 3.993 against the old 1.005.
+
+One trade-off to state in your docstring: a conservative
+finite-volume update's *own* face flux is the first-order
+`-alpha (T[0] - T_b) / (dx/2)`, and reporting the more accurate
+reconstruction means the reported flux is not bit-for-bit the flux
+that closes this node's discrete energy balance. The two differ by
+`O(dx**k)`. Report the physical flux — that is what a coupled
+neighbour needs — and say so.
 
 ## Additive vs Replacive Inputs
 

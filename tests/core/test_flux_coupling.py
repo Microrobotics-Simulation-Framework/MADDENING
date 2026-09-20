@@ -368,7 +368,14 @@ class TestBoundaryFluxSpec:
         spec = node.boundary_flux_spec()
         assert "left_heat_flux" in spec
         assert "right_heat_flux" in spec
-        assert spec["left_heat_flux"].output_units == "W/m^2"
+        # -alpha*dT/dx with alpha in m^2/s and T in K is K*m/s, not
+        # W/m^2: the conductive flux is -rho*c_p*alpha*dT/dx and
+        # neither rho nor c_p is a parameter of this node, so it cannot
+        # report W/m^2.  The declaration said W/m^2 until 0.4.0 and
+        # nothing checked it.
+        for field in ("left_heat_flux", "right_heat_flux"):
+            assert spec[field].output_units == "K*m/s"
+            assert spec[field].output_units != "W/m^2"
 
     def test_heart_pump_has_flux_spec(self):
         from maddening.nodes.heart_pump import HeartPumpNode

@@ -164,6 +164,99 @@ def _dirichlet_ghosts_4th_order(T, T_boundary):
     return far, near
 
 
+def _lagrange_gradient_at_origin(offsets, values):
+    """``d/dx`` at ``x = 0`` of the polynomial through ``(offsets, values)``.
+
+    A plain Lagrange derivative, written out so the rod-end flux
+    reconstruction can be stated once for the uniform and the
+    non-uniform grid, for either end, and with or without a Dirichlet
+    datum.  ``offsets`` are coordinates measured *from the point the
+    gradient is wanted at* -- the rod end -- and may include ``0.0``
+    itself, which is where the datum goes; they must be distinct.
+
+    Everything here is traced arithmetic, so the result is
+    differentiable in the offsets as well as in the values.  That is
+    what keeps ``length`` a trainable parameter of the reported flux.
+
+    With ``k + 1`` points the interpolant has degree ``k`` and its
+    gradient is accurate to ``O(h**k)``.
+
+    Parameters
+    ----------
+    offsets : sequence of scalar
+        Signed distances from the evaluation point, all distinct.
+    values : sequence of scalar
+        Field values at those offsets; same length as ``offsets``.
+
+    Returns
+    -------
+    scalar
+        The interpolant's first derivative at offset zero.
+    """
+    k = len(offsets)
+    grad = 0.0
+    for j in range(k):
+        denom = 1.0
+        for m in range(k):
+            if m != j:
+                denom = denom * (offsets[j] - offsets[m])
+        numer = 0.0
+        for i in range(k):
+            if i == j:
+                continue
+            term = 1.0
+            for m in range(k):
+                if m == j or m == i:
+                    continue
+                term = term * (-offsets[m])
+            numer = numer + term
+        grad = grad + values[j] * (numer / denom)
+    return grad
+
+
+def _rod_end_gradient(values, T_boundary, offsets):
+    """``dT/ds`` at a rod end, ``s`` measured inwards from that end.
+
+    ``values`` are cell-centre temperatures ordered *outwards from the
+    end*, and ``offsets`` their distances from it, so the caller
+    reverses both for the right-hand end.  ``T_boundary`` is the
+    Dirichlet datum at the end, or ``None`` when no boundary input
+    supplies one.
+
+    Why this and not ``(T[1] - T[0]) / dx``: that quotient is the
+    gradient of the straight line through the first two cell centres,
+    which for a cell-centred grid sits at ``x = dx``, a full cell
+    inside the end the flux is named for.  It converges to the rod-end
+    gradient at 1st order however good the interior stencil is, which
+    caps any flux-coupled solve at 1st order through the flux alone.
+    Measured on ``T = exp(x)``, ``alpha = 1``, ``n = 10``: it reports
+    -1.1056 where the rod-end flux is -1.0, and refines at order 1.005.
+
+    With the datum the polynomial is anchored at the rod end and
+    ``stencil_order`` cells make it accurate to ``stencil_order``
+    (measured 2.00 and 3.93-4.13 -- see
+    ``tests/verification/test_boundary_flux_order.py``, which pins
+    both).  Without it the reconstruction is a pure extrapolation; it
+    reads three cells and is 2nd order, and a higher-degree
+    extrapolant is not worth its conditioning (the coefficient L1 norm
+    per ``dx`` is 6 for three cells against 28.3 for five) when there
+    is no boundary condition for the flux to be consistent with.
+
+    One consequence worth recording: the flux this returns is *not*
+    the discrete face flux the conservative update uses at the first
+    cell, which is the 1st-order ``-alpha (T[0] - T_b) / (dx/2)``.  The
+    two differ by ``O(dx**stencil_order)`` and agree in the limit; the
+    reported number is the physical rod-end flux the spec names, which
+    is what a coupled neighbour needs, rather than the one that closes
+    this node's own discrete energy balance to the last bit.
+    """
+    if T_boundary is None:
+        return _lagrange_gradient_at_origin(list(offsets), list(values))
+    return _lagrange_gradient_at_origin(
+        [0.0, *offsets], [T_boundary, *values]
+    )
+
+
 def _laplacian_4th_order_pure(T_padded, dx):
     """4th-order central-difference Laplacian, no boundary fallback.
 
@@ -185,7 +278,12 @@ def _laplacian_4th_order_uniform(T_padded, dx):
     """4th-order central difference Laplacian on a uniform grid.
 
     Interior: (-T[i+2] + 16*T[i+1] - 30*T[i] + 16*T[i-1] - T[i-2]) / (12*dx^2)
-    Boundary cells (i=0,1,n-2,n-1): fall back to 2nd-order.
+    Boundary cells (i=0 and i=n-1 only): fall back to 2nd-order.  Cell 1
+    and cell n-2 keep the 5-point form -- with two ghosts per side they
+    have a full stencil -- and under the cubic ghost closure the
+    fallback is free anyway, because the two forms are algebraically
+    identical at cells 0 and n-1 (see
+    :func:`_dirichlet_ghosts_4th_order`).
 
     ``T_padded`` has shape ``(n+4,)`` with two ghost cells on each side.
     """
@@ -865,30 +963,120 @@ class HeatNode(SimulationNode):
         }
 
     def boundary_flux_spec(self):
+        """The two rod-end fluxes, in ``K*m/s``.
+
+        The units are **not** ``W/m^2``, which this declared until
+        0.4.0.  ``compute_boundary_fluxes`` returns ``-alpha dT/dx``
+        with ``alpha`` in m^2/s and ``T`` in K, so the quantity is
+        ``K*m/s``.  The conductive flux is ``-k dT/dx =
+        -rho*c_p*alpha*dT/dx``; ``rho`` and ``c_p`` are not parameters
+        of this node, so it cannot report W/m^2 and a consumer that
+        needs them must multiply by ``rho*c_p`` itself (~4.2e6 for
+        water).  Nothing in-tree converts using this field -- edge unit
+        checks only warn -- but it is copied into descriptions and
+        exports, so it should say what the number is.
+        """
         return {
             "left_heat_flux": BoundaryFluxSpec(
-                shape=(), description="Heat flux at left boundary",
-                output_units="W/m^2",
+                shape=(),
+                description="Heat flux at the left rod end (x = 0)",
+                output_units="K*m/s",
             ),
             "right_heat_flux": BoundaryFluxSpec(
-                shape=(), description="Heat flux at right boundary",
-                output_units="W/m^2",
+                shape=(),
+                description="Heat flux at the right rod end (x = L)",
+                output_units="K*m/s",
             ),
         }
 
     def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
+        """Conductive flux ``-alpha dT/dx`` **at the two rod ends**.
+
+        Both entries are the x-component of the flux, so on a rod
+        heated from the left both come out positive.  The gradient is
+        reconstructed at ``x = 0`` and ``x = L`` -- not at the first
+        interior face -- by :func:`_rod_end_gradient`, from the
+        Dirichlet datum in ``boundary_inputs`` when one is supplied
+        plus the nearest ``stencil_order`` cells, and from the nearest
+        three cells alone when it is not.  Before 0.4.0 this returned
+        the gradient between the first two cell *centres*, i.e. the
+        flux at ``x = dx``, a full cell inside the end it names; that
+        was 1st order at the rod end whatever the stencil, and this is
+        ``stencil_order`` (measured 2.00 / 3.93-4.13) with the datum
+        and 2nd order without it.
+
+        The units are ``K*m/s``: ``-alpha dT/dx`` is the conductive
+        flux divided by ``rho * c_p``, neither of which is a parameter
+        of this node.  See :meth:`boundary_flux_spec`.
+
+        Parameters
+        ----------
+        state : dict
+            Must contain ``"temperature"``, shape ``(n_cells,)``.
+        boundary_inputs : dict
+            ``left_temperature`` / ``right_temperature`` are read when
+            present; each end falls back to extrapolation on its own.
+        dt : float
+            Unused -- the flux is a function of the state alone.
+        params : dict, optional
+            Overrides for the trainable constants, as in ``update``.
+
+        Returns
+        -------
+        dict
+            ``left_heat_flux`` and ``right_heat_flux``, both scalars.
+        """
         # Same constants as ``update`` (see SpringDamperNode).
         p = self.params if params is None else {**self.params, **params}
         T = state["temperature"]
+        n = self.params["n_cells"]
         alpha = p["thermal_diffusivity"]
+        # The non-uniform path is 2nd order whatever ``stencil_order``
+        # says, because ``_compute_laplacian`` falls back to the
+        # variable-dx 3-point stencil there.
+        order = 2 if self._is_nonuniform else self.params.get("stencil_order", 2)
+
+        T_left = boundary_inputs.get("left_temperature")
+        T_right = boundary_inputs.get("right_temperature")
+        # Cells read, outwards from each end.  The datum anchors the
+        # polynomial at the rod end, so ``order`` cells reach order
+        # ``order``; without it three cells reach 2nd order.
+        k_left = min(n, order if T_left is not None else 3)
+        k_right = min(n, order if T_right is not None else 3)
+
         if self._is_nonuniform:
-            x = self._grid_x
-            dx_left = x[1] - x[0]
-            dx_right = x[-1] - x[-2]
+            # ``grid_points`` and not ``self._grid_x``: the latter is
+            # the float32 static-data copy the sharded stencil reads,
+            # and a coordinate rounded to float32 puts a ~2e-5 relative
+            # error on ``dx``, which floors the reconstruction above
+            # its own 2nd-order error from n = 40 up.  ``grid_points``
+            # is ``trainable=False`` and stored as Python floats, so
+            # reading it costs nothing and keeps the reported flux at
+            # the order it advertises.  The stencil itself still reads
+            # the float32 copy; that is the wider dtype question TODO
+            # records under "AdaptiveNode dtype policy".
+            x = p["grid_points"]
+            # The end faces sit midway between the first/last cell
+            # centre and the ghost that mirrors it -- the same
+            # placement ``_compute_laplacian`` uses.
+            face_left = 1.5 * x[0] - 0.5 * x[1]
+            face_right = 1.5 * x[-1] - 0.5 * x[-2]
+            off_left = [x[j] - face_left for j in range(k_left)]
+            off_right = [face_right - x[n - 1 - j] for j in range(k_right)]
         else:
-            dx_left = p["length"] / p["n_cells"]
-            dx_right = dx_left
+            dx = p["length"] / n
+            off_left = [(2 * j + 1) * dx / 2 for j in range(k_left)]
+            off_right = [(2 * j + 1) * dx / 2 for j in range(k_right)]
+
+        grad_left = _rod_end_gradient(
+            [T[j] for j in range(k_left)], T_left, off_left
+        )
+        # The right end measures inwards, so ``dT/dx = -dT/ds`` there
+        # and the sign of the flux flips back to match the left end.
+        grad_right = _rod_end_gradient(
+            [T[n - 1 - j] for j in range(k_right)], T_right, off_right
+        )
         return {
-            "left_heat_flux": -alpha * (T[1] - T[0]) / dx_left,
-            "right_heat_flux": -alpha * (T[-1] - T[-2]) / dx_right,
+            "left_heat_flux": -alpha * grad_left,
+            "right_heat_flux": alpha * grad_right,
         }

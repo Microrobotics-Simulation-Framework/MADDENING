@@ -131,15 +131,30 @@ def main() -> None:
     print()
 
     # ---- Verification ---------------------------------------------------
-    # 1. Boundary conditions should be enforced
-    assert abs(final_T[0] - T_left) < 1.0, (
-        f"Left BC not enforced: T[0]={final_T[0]:.4f}, expected {T_left}"
+    # 1. Boundary conditions should be enforced.
+    #
+    # Against the steady profile *at the cell centres*, not against the
+    # boundary data itself.  Since 0.4.0 the Dirichlet datum is the
+    # temperature at the rod end x = 0, and the first cell centre is half
+    # a cell inside it, so T[0] is T_left - (dx/2) * |dT/dx| = 97.5 here
+    # and never was 100.0 (MADD-ANO-007).  Asserting T[0] == T_left was
+    # checking the convention the 0.4.0 boundary rework removed; this
+    # checks the physics instead, and fails just as loudly if the
+    # boundary stops being imposed.
+    assert abs(final_T[0] - T_steady[0]) < 1.0, (
+        f"Left BC not enforced: T[0]={final_T[0]:.4f}, expected "
+        f"{T_steady[0]:.4f} (the steady profile at x={cell_centers[0]:.4f}, "
+        f"half a cell inside the rod end where T={T_left})"
     )
-    assert abs(final_T[-1] - T_right) < 1.0, (
-        f"Right BC not enforced: T[-1]={final_T[-1]:.4f}, expected {T_right}"
+    assert abs(final_T[-1] - T_steady[-1]) < 1.0, (
+        f"Right BC not enforced: T[-1]={final_T[-1]:.4f}, expected "
+        f"{T_steady[-1]:.4f} (the steady profile at "
+        f"x={cell_centers[-1]:.4f}, half a cell inside the rod end where "
+        f"T={T_right})"
     )
-    print(f"Check: boundary conditions enforced (T[0]={final_T[0]:.2f}, "
-          f"T[-1]={final_T[-1]:.2f}).")
+    print(f"Check: boundary conditions enforced (T[0]={final_T[0]:.2f} "
+          f"against {T_steady[0]:.2f}, T[-1]={final_T[-1]:.2f} against "
+          f"{T_steady[-1]:.2f}).")
 
     # 2. Temperature should be monotonically decreasing (left=hot, right=cold)
     diffs = np.diff(final_T)

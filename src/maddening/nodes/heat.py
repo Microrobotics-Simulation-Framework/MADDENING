@@ -164,42 +164,56 @@ def _dirichlet_ghosts_4th_order(T, T_boundary):
     return far, near
 
 
-def _lagrange_gradient_at_origin(offsets, values):
-    """``d/dx`` at ``x = 0`` of the polynomial through ``(offsets, values)``.
+def _lagrange_gradient_weights(offsets):
+    """Weights ``w`` such that ``p'(0) = sum_j w[j] * v[j]``.
 
-    A plain Lagrange derivative, written out so the rod-end flux
-    reconstruction can be stated once for the uniform and the
-    non-uniform grid, for either end, and with or without a Dirichlet
-    datum.  ``offsets`` are coordinates measured *from the point the
-    gradient is wanted at* -- the rod end -- and may include ``0.0``
-    itself, which is where the datum goes; they must be distinct.
+    ``p`` is the polynomial through ``(offsets[j], v[j])``; ``offsets``
+    are measured *from the point the gradient is wanted at* -- the rod
+    end -- may include ``0.0`` itself, which is where the Dirichlet
+    datum goes, and must be distinct.  With ``k + 1`` points the
+    interpolant has degree ``k`` and the gradient is ``O(h**k)``.
 
-    Everything here is traced arithmetic, so the result is
-    differentiable in the offsets as well as in the values.  That is
-    what keeps ``length`` a trainable parameter of the reported flux.
+    **Pure Python arithmetic, deliberately.**  A cell-centred grid's
+    offsets are known before anything is traced: on a uniform grid they
+    are the fixed multiples ``(2j+1)/2`` of ``dx``, and on a
+    non-uniform one they are entries of ``grid_points``, which is
+    ``ParamSpec(trainable=False)``.  So the whole Lagrange construction
+    folds away at graph-build time and the traced program is one dot
+    product -- ``k + 1`` multiplies, ``k`` adds and, on the uniform
+    grid, one divide by ``dx``.
 
-    With ``k + 1`` points the interpolant has degree ``k`` and its
-    gradient is accurate to ``O(h**k)``.
+    Writing the same construction as traced arithmetic costs O(k^3)
+    jaxpr primitives per rod end, which is not hypothetical: it took
+    ``heat_chain`` (two 64-cell rods, ``stencil_order=4``) from 243
+    jaxpr primitives to 557 in the first version of this reconstruction,
+    for a program XLA then constant-folded back to the same 287 HLO
+    ops.  The lowered graph was identical and the graph *builder* did
+    2.3x the work -- invisible to an HLO count and squarely what
+    ``benchmarks/compile_counts_baseline.json`` exists to catch.
+
+    Because the weights carry the offsets' units, the uniform grid
+    passes dimensionless offsets and divides the result by ``dx``
+    afterwards.  That keeps ``length`` -- which is trainable -- in the
+    traced program as the single factor the flux actually depends on,
+    exactly as the closed form says it should.
 
     Parameters
     ----------
-    offsets : sequence of scalar
+    offsets : sequence of float
         Signed distances from the evaluation point, all distinct.
-    values : sequence of scalar
-        Field values at those offsets; same length as ``offsets``.
 
     Returns
     -------
-    scalar
-        The interpolant's first derivative at offset zero.
+    tuple of float
+        One weight per offset, in the same order.
     """
     k = len(offsets)
-    grad = 0.0
+    weights = []
     for j in range(k):
         denom = 1.0
         for m in range(k):
             if m != j:
-                denom = denom * (offsets[j] - offsets[m])
+                denom *= offsets[j] - offsets[m]
         numer = 0.0
         for i in range(k):
             if i == j:
@@ -208,20 +222,22 @@ def _lagrange_gradient_at_origin(offsets, values):
             for m in range(k):
                 if m == j or m == i:
                     continue
-                term = term * (-offsets[m])
-            numer = numer + term
-        grad = grad + values[j] * (numer / denom)
-    return grad
+                term *= -offsets[m]
+            numer += term
+        weights.append(numer / denom)
+    return tuple(weights)
 
 
-def _rod_end_gradient(values, T_boundary, offsets):
+def _rod_end_gradient(values, T_boundary, offsets, scale=None):
     """``dT/ds`` at a rod end, ``s`` measured inwards from that end.
 
     ``values`` are cell-centre temperatures ordered *outwards from the
     end*, and ``offsets`` their distances from it, so the caller
     reverses both for the right-hand end.  ``T_boundary`` is the
     Dirichlet datum at the end, or ``None`` when no boundary input
-    supplies one.
+    supplies one.  ``scale`` divides the result: the uniform grid
+    passes ``dx`` because its offsets are in units of ``dx``, and the
+    non-uniform grid passes ``None`` because its offsets are in metres.
 
     Why this and not ``(T[1] - T[0]) / dx``: that quotient is the
     gradient of the straight line through the first two cell centres,
@@ -234,13 +250,14 @@ def _rod_end_gradient(values, T_boundary, offsets):
 
     With the datum the polynomial is anchored at the rod end and
     ``stencil_order`` cells make it accurate to ``stencil_order``
-    (measured 2.00 and 3.93-4.13 -- see
-    ``tests/verification/test_boundary_flux_order.py``, which pins
-    both).  Without it the reconstruction is a pure extrapolation; it
-    reads three cells and is 2nd order, and a higher-degree
-    extrapolant is not worth its conditioning (the coefficient L1 norm
-    per ``dx`` is 6 for three cells against 28.3 for five) when there
-    is no boundary condition for the flux to be consistent with.
+    (measured 1.999 and 3.993 -- see
+    ``tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd``,
+    which pins both).  Without it the reconstruction is a pure
+    extrapolation; it reads three cells and is 2nd order, and a
+    higher-degree extrapolant is not worth its conditioning (the
+    coefficient L1 norm per ``dx`` is 6 for three cells against 28.3
+    for five) when there is no boundary condition for the flux to be
+    consistent with.
 
     One consequence worth recording: the flux this returns is *not*
     the discrete face flux the conservative update uses at the first
@@ -251,10 +268,15 @@ def _rod_end_gradient(values, T_boundary, offsets):
     this node's own discrete energy balance to the last bit.
     """
     if T_boundary is None:
-        return _lagrange_gradient_at_origin(list(offsets), list(values))
-    return _lagrange_gradient_at_origin(
-        [0.0, *offsets], [T_boundary, *values]
-    )
+        weights = _lagrange_gradient_weights(tuple(offsets))
+        terms = list(values)
+    else:
+        weights = _lagrange_gradient_weights((0.0, *offsets))
+        terms = [T_boundary, *values]
+    grad = weights[0] * terms[0]
+    for weight, term in zip(weights[1:], terms[1:]):
+        grad = grad + weight * term
+    return grad if scale is None else grad / scale
 
 
 def _laplacian_4th_order_pure(T_padded, dx):
@@ -1044,18 +1066,25 @@ class HeatNode(SimulationNode):
         k_left = min(n, order if T_left is not None else 3)
         k_right = min(n, order if T_right is not None else 3)
 
+        # Offsets are plain Python floats in both branches, so
+        # ``_rod_end_gradient`` folds the whole Lagrange construction
+        # before tracing and emits one dot product.  See
+        # :func:`_lagrange_gradient_weights` for what writing it the
+        # other way cost.
         if self._is_nonuniform:
-            # ``grid_points`` and not ``self._grid_x``: the latter is
-            # the float32 static-data copy the sharded stencil reads,
-            # and a coordinate rounded to float32 puts a ~2e-5 relative
-            # error on ``dx``, which floors the reconstruction above
-            # its own 2nd-order error from n = 40 up.  ``grid_points``
-            # is ``trainable=False`` and stored as Python floats, so
-            # reading it costs nothing and keeps the reported flux at
-            # the order it advertises.  The stencil itself still reads
-            # the float32 copy; that is the wider dtype question TODO
-            # records under "AdaptiveNode dtype policy".
-            x = p["grid_points"]
+            # ``self.params["grid_points"]`` and not ``self._grid_x``:
+            # the latter is the float32 static-data copy the sharded
+            # stencil reads, and a coordinate rounded to float32 puts a
+            # ~2e-5 relative error on ``dx``, which floors the
+            # reconstruction above its own 2nd-order error from n = 40
+            # up.  ``grid_points`` is ``ParamSpec(trainable=False)`` --
+            # geometry, not a fitted constant -- and is stored as
+            # Python floats, so reading it is free and keeps the
+            # reported flux at the order it advertises.  The stencil
+            # itself still reads the float32 copy; that is the wider
+            # dtype question TODO records under "AdaptiveNode dtype
+            # policy".
+            x = self.params["grid_points"]
             # The end faces sit midway between the first/last cell
             # centre and the ghost that mirrors it -- the same
             # placement ``_compute_laplacian`` uses.
@@ -1063,18 +1092,23 @@ class HeatNode(SimulationNode):
             face_right = 1.5 * x[-1] - 0.5 * x[-2]
             off_left = [x[j] - face_left for j in range(k_left)]
             off_right = [face_right - x[n - 1 - j] for j in range(k_right)]
+            # Already in metres.
+            scale_left = scale_right = None
         else:
-            dx = p["length"] / n
-            off_left = [(2 * j + 1) * dx / 2 for j in range(k_left)]
-            off_right = [(2 * j + 1) * dx / 2 for j in range(k_right)]
+            # Dimensionless, in units of ``dx``; the single division
+            # below is where ``length`` -- which is trainable -- enters.
+            off_left = [(2 * j + 1) / 2 for j in range(k_left)]
+            off_right = [(2 * j + 1) / 2 for j in range(k_right)]
+            scale_left = scale_right = p["length"] / n
 
         grad_left = _rod_end_gradient(
-            [T[j] for j in range(k_left)], T_left, off_left
+            [T[j] for j in range(k_left)], T_left, off_left, scale_left
         )
         # The right end measures inwards, so ``dT/dx = -dT/ds`` there
         # and the sign of the flux flips back to match the left end.
         grad_right = _rod_end_gradient(
-            [T[n - 1 - j] for j in range(k_right)], T_right, off_right
+            [T[n - 1 - j] for j in range(k_right)], T_right, off_right,
+            scale_right,
         )
         return {
             "left_heat_flux": -alpha * grad_left,

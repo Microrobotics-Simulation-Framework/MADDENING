@@ -57,7 +57,7 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | Left/right Dirichlet BC, 2nd order | `maddening.nodes.heat._dirichlet_ghosts_2nd_order` | $T_{-1} = 2T_b - T_0$, imposing $T_b$ at the rod end |
 | Left/right Dirichlet BC, 4th order | `maddening.nodes.heat._dirichlet_ghosts_4th_order` | Cubic through the rod end and the three nearest cell centres |
 | Rod-end flux $-\alpha\,\partial T/\partial x$ at $x = 0, L$ | `maddening.nodes.heat._rod_end_gradient` | One-sided reconstruction anchored at the rod end; with the Dirichlet datum it reads `stencil_order` cells and is accurate to `stencil_order`, without one it extrapolates from three cells at 2nd order |
-| Lagrange derivative at the end face | `maddening.nodes.heat._lagrange_gradient_at_origin` | Written out so the uniform and non-uniform grids, both ends and both datum cases use one formula |
+| Lagrange derivative at the end face | `maddening.nodes.heat._lagrange_gradient_weights` | Pure-Python weights, folded before tracing: one formula for both grids, both ends and both datum cases, and one dot product in the graph |
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added as `source * dt` after diffusion step |
 | Time integration ($\partial T / \partial t$) | `maddening.nodes.heat.HeatNode.update` | Forward Euler: `T + alpha * dt * laplacian + source * dt` |
 | Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER` |

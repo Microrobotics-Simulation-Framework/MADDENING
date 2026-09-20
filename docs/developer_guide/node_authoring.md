@@ -371,7 +371,7 @@ there: with `k` cells the flux is `O(dx**k)`, so `k = stencil_order`
 keeps the interface at the accuracy of the node it belongs to. With no
 datum, extrapolate to the end from one extra cell instead of moving
 the reported point inwards.  `maddening.nodes.heat` does both through
-`_lagrange_gradient_at_origin`, and
+`_lagrange_gradient_weights`, and
 `tests/verification/test_mms_order.py::TestTheReportedBoundaryFluxIsAtTheRodEnd`
 measures 1.999 and 3.993 against the old 1.005.
 

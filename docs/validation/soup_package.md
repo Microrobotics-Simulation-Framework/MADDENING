@@ -70,9 +70,12 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-008 | HeatNode's 4th-order stencil converges at 1st order and is less accurate than the 2nd-order one | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-009 | HeatNode's documented CFL limit is the 2nd-order stencil's; the 4th-order stencil diverges below it | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-010 | A string spelling a non-finite token is refused by the JSON serialisers | `minor` | `context_dependent` | `open` | >=0.4.0 |
+| MADD-ANO-011 | BallNode's declared discretisation is forward Euler; the implementation is semi-implicit Euler | `minor` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-012 | HeartPumpNode samples its cardiac inflow at the end of the step, disagreeing with its own derivatives() | `minor` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-013 | HeartPumpNode downcasts its backpressure boundary input to float32 | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-014 | Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 
-*11 anomalies registered, 6 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*14 anomalies registered, 9 open.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

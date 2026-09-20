@@ -1,0 +1,27 @@
+    n   reported_left     true q(0)    true q(dx)   err vs q(0)  err vs q(dx)
+   10     -1.10563146   -1.00000000   -1.10517092     1.056e-01     4.167e-04
+   20     -1.05138061   -1.00000000   -1.05127110     5.138e-02     1.042e-04
+   40     -1.02534182   -1.00000000   -1.02531512     2.534e-02     2.604e-05
+   80     -1.01258504   -1.00000000   -1.01257845     1.259e-02     6.510e-06
+  160     -1.00627121   -1.00000000   -1.00626957     6.271e-03     1.628e-06
+  320     -1.00313030   -1.00000000   -1.00312989     3.130e-03     4.069e-07
+  640     -1.00156382   -1.00000000   -1.00156372     1.564e-03     1.017e-07
+
+Convergence of the reported left flux to the TRUE ROD-END flux:
+  n=  10->  20  err 1.0563e-01 -> 5.1381e-02  order 1.040
+  n=  20->  40  err 5.1381e-02 -> 2.5342e-02  order 1.020
+  n=  40->  80  err 2.5342e-02 -> 1.2585e-02  order 1.010
+  n=  80-> 160  err 1.2585e-02 -> 6.2712e-03  order 1.005
+  n= 160-> 320  err 6.2712e-03 -> 3.1303e-03  order 1.002
+
+What the correct rod-end reconstruction would give (one-sided, -alpha*(T[0]-T_left)/(dx/2)):
+  n=  10->  20  err 2.5422e-02 -> 1.2605e-02  order 1.012
+  n=  20->  40  err 1.2605e-02 -> 6.2761e-03  order 1.006
+  n=  40->  80  err 6.2761e-03 -> 3.1315e-03  order 1.003
+  n=  80-> 160  err 3.1315e-03 -> 1.5641e-03  order 1.002
+  n= 160-> 320  err 1.5641e-03 -> 7.8166e-04  order 1.001
+
+Global energy balance check on a steady linear profile T(x)=x (exact for the scheme; true flux is -1 at BOTH ends, so in == out):
+  n=  10  left=-1.000000 right=-1.000000  (true -1.000000 at both ends)
+  n=  40  left=-1.000000 right=-1.000000  (true -1.000000 at both ends)
+  n= 160  left=-1.000000 right=-1.000000  (true -1.000000 at both ends)

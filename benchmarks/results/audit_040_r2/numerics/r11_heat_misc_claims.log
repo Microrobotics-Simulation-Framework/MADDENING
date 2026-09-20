@@ -1,0 +1,27 @@
+CLAIM A (_dirichlet_ghosts_4th_order): under the cubic closure the 5-point
+  and 3-point forms are algebraically identical at cells 0 and n-1, both
+  reducing to (16 Tb - 25 T0 + 10 T1 - T2) / (5 dx^2).
+  trial 0: 5pt[0]=-305.0206070807 3pt[0]=-305.0206070807 closed=-305.0206070807  agree=True
+           cells 1..n-2 differ between 5pt and 3pt: True
+  trial 1: 5pt[0]=-154.7074549892 3pt[0]=-154.7074549892 closed=-154.7074549892  agree=True
+           cells 1..n-2 differ between 5pt and 3pt: True
+  trial 2: 5pt[0]=388.3984829816 3pt[0]=388.3984829816 closed=388.3984829816  agree=True
+           cells 1..n-2 differ between 5pt and 3pt: True
+
+CLAIM B (_laplacian_4th_order_uniform docstring): 'Boundary cells
+  (i=0,1,n-2,n-1): fall back to 2nd-order.'  The code's mask is
+  use_4th = (idx >= 1) & (idx <= n-2), i.e. only i=0 and i=n-1.
+  code: ['use_4th = (idx >= 1) & (idx <= n - 2)', 'lap = jnp.where(use_4th, lap_4th, lap_2nd)']
+
+CLAIM C (compute_interface_correction): 'the value this returns is the
+  one update() already produced and applying it is an identity'.
+  index   0: correction=-0.885255000178613  update()=-0.885255000178613  identical=True
+  index  -1: correction=0.699994058148290  update()=0.699994058148290  identical=True
+
+CLAIM D (boundary_flux_spec): output_units='W/m^2'.  The formula is
+  -alpha * dT/dx with alpha in m^2/s and T in K, i.e. K*m/s, not W/m^2:
+  the true conductive flux is -k dT/dx = -rho*c_p*alpha*dT/dx and
+  rho*c_p is not a parameter of this node.
+  declared units      : W/m^2
+  dimensional value   : -0.0109091  [alpha=0.01 m^2/s, dT/dx~1 K/m -> -0.01 K*m/s]
+  factor missing (rho*c_p for water ~4.18e6 J/(m^3 K)): -4.56e+04 W/m^2 would be the real flux

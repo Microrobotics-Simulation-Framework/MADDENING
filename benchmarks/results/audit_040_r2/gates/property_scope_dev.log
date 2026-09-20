@@ -1,0 +1,60 @@
+........................................................................ [100%]
+72 passed in 335.42s (0:05:35)
+
+draw-rejection audit (hypothesis profile: dev)
+constant injection: ON for src/maddening (670 local constants harvested)
+49 tests with Hypothesis draws; 41 filter nothing at all. filter rate: median 0.0%, p90 13.0%, max 39.4%. Total draws 4019, of which 51 filtered out and 544 overrun.
+
+test                                                                                                                                    drawn  filtered  rate   overrun  effective  risk/run
+--------------------------------------------------------------------------------------------------------------------------------------  -----  --------  -----  -------  ---------  --------
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_finite_difference_of_a_rollout                36     13        39.4%  8.3%     20         9e-13
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_crb_is_consistent_with_the_matrix_it_came_from              71     14        21.9%  9.9%     50         1e-24
+tests/property/test_sysid_contract.py::TestFIMMaskingAndScaling::test_the_noise_model_scales_the_information_by_one_over_sigma_squared  68     9         15.3%  13.2%    50         4e-32
+tests/property/test_mapping_spec_resolver.py::test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt                   62     8         13.8%  6.5%     50         3e-34
+tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_defaults_its_mask_to_the_trainable_set                           25     3         13.0%  8.0%     20         2e-35
+tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_moves_only_the_masked_trainable_leaves                           22     2         9.1%   0.0%     20         5e-43
+tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_built_from_the_params_tree_is_accepted                            303    1         0.5%   33.7%    200        8e-106
+tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_whose_keys_differ_from_params_is_refused                          319    1         0.5%   37.0%    200        8e-106
+tests/property/test_mapping_spec_resolver.py::test_a_mapped_edge_rewritten_to_asset_references_reloads_the_same_trajectory              20     0         0.0%   0.0%     20         0
+tests/property/test_mapping_spec_resolver.py::test_a_mutated_mapping_is_refused_by_name_or_loads_exactly_what_it_says                   20     0         0.0%   0.0%     20         0
+tests/property/test_mapping_spec_resolver.py::test_a_mutated_spec_dict_parses_to_a_canonical_spec_or_a_value_error                      208    0         0.0%   3.8%     200        0
+tests/property/test_mapping_spec_resolver.py::test_a_point_dtype_is_accepted_exactly_when_it_writes_and_hashes                          23     0         0.0%   0.0%     23         0
+tests/property/test_mapping_spec_resolver.py::test_a_spec_rewritten_without_changing_its_meaning_steps_the_same                         21     0         0.0%   4.8%     20         0
+tests/property/test_mapping_spec_resolver.py::test_an_asset_path_reaches_a_file_under_the_base_directory_or_nothing                     291    0         0.0%   31.3%    200        0
+tests/property/test_mapping_spec_resolver.py::test_an_asset_reference_normalises_only_paths_that_stay_relative                          280    0         0.0%   28.6%    200        0
+tests/property/test_mapping_spec_resolver.py::test_an_npz_member_name_cannot_widen_what_an_asset_path_reaches                           65     0         0.0%   23.1%    50         0
+tests/property/test_mapping_spec_resolver.py::test_normalise_point_reference_answers_or_raises_point_reference_error                    243    0         0.0%   17.7%    200        0
+tests/property/test_round_trips.py::test_a_checkpoint_beats_the_config_for_trained_mapping_weights                                      54     0         0.0%   7.4%     50         0
+tests/property/test_round_trips.py::test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout                          55     0         0.0%   9.1%     50         0
+tests/property/test_round_trips.py::test_a_config_round_trip_preserves_a_mapped_edge_and_its_weights                                    57     0         0.0%   12.3%    50         0
+tests/property/test_round_trips.py::test_a_config_round_trip_preserves_every_coupling_group_field                                       53     0         0.0%   5.7%     50         0
+tests/property/test_round_trips.py::test_a_config_round_trip_preserves_trajectory_params_and_specs                                      53     0         0.0%   5.7%     50         0
+tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_a_mapped_edge_and_its_weights                                       50     0         0.0%   0.0%     50         0
+tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_every_coupling_group_field                                          53     0         0.0%   5.7%     50         0
+tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_trajectory_params_and_specs                                         53     0         0.0%   5.7%     50         0
+tests/property/test_round_trips.py::test_config_and_usd_reload_to_the_same_graph                                                        53     0         0.0%   5.7%     50         0
+tests/property/test_round_trips.py::test_to_dict_is_idempotent_through_from_dict                                                        53     0         0.0%   5.7%     50         0
+tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_a_fit_that_starts_inside_the_bounds_finishes_inside_them           20     0         0.0%   0.0%     20         0
+tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_a_transform_refuses_the_bounds_it_cannot_work_with                 200    0         0.0%   0.0%     200        0
+tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_constrain_inverts_unconstrain_inside_the_bounds                    200    0         0.0%   0.0%     200        0
+tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_constrain_lands_inside_the_bounds_from_any_coordinate              200    0         0.0%   0.0%     200        0
+tests/property/test_sysid_contract.py::TestCalibrate::test_a_parameter_the_forward_ignores_is_bit_identical_afterwards                  50     0         0.0%   0.0%     50         0
+tests/property/test_sysid_contract.py::TestCalibrate::test_gradient_descent_on_a_convex_problem_decreases_and_converges                 50     0         0.0%   0.0%     50         0
+tests/property/test_sysid_contract.py::TestCalibrate::test_the_converged_flag_means_the_reported_loss_beat_the_tolerance                200    0         0.0%   0.0%     200        0
+tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_central_finite_difference                     56     0         0.0%   10.7%    50         0
+tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_a_sigma_that_is_not_a_noise_level_is_refused                              6      0         0.0%   0.0%     6          0
+tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_fim_raises_rather_than_reporting_on_a_non_finite_matrix                   2      0         0.0%   0.0%     2          0
+tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_no_parameter_is_reported_identifiable_on_a_non_finite_quantity            201    0         0.0%   0.5%     200        0
+tests/property/test_sysid_contract.py::TestFIMMaskingAndScaling::test_the_masked_matrix_is_the_submatrix_of_the_unmasked_one            55     0         0.0%   9.1%     50         0
+tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_a_discontinuous_window_start_costs_the_penalty                    20     0         0.0%   0.0%     20         0
+tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_the_continuity_penalty_is_affine_in_its_weight                    20     0         0.0%   0.0%     20         0
+tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_truth_seeded_windows_recover_the_unwindowed_loss                  20     0         0.0%   0.0%     20         0
+tests/property/test_sysid_contract.py::TestTrainableContract::test_a_mask_may_not_widen_the_trainable_set                               3      0         0.0%   0.0%     3          0
+tests/property/test_sysid_contract.py::TestTrainableContract::test_every_fitter_honours_the_same_frozen_set                             31     0         0.0%   35.5%    20         0
+tests/property/test_sysid_contract.py::TestTuneCouplingParams::test_the_reference_configuration_reproduces_itself_exactly               6      0         0.0%   0.0%     6          0
+tests/property/test_sysid_contract.py::TestTuneCouplingParams::test_the_report_describes_the_grid_it_searched                           24     0         0.0%   16.7%    20         0
+tests/property/test_sysid_contract.py::TestWindowTilings::test_a_non_positive_sampling_interval_is_refused                              4      0         0.0%   0.0%     4          0
+tests/property/test_sysid_contract.py::TestWindowTilings::test_a_tiling_that_divides_is_accepted_by_both_helpers                        20     0         0.0%   0.0%     20         0
+tests/property/test_sysid_contract.py::TestWindowTilings::test_a_tiling_that_does_not_divide_is_refused_by_both_helpers                 20     0         0.0%   0.0%     20         0
+
+wrote /home/nick/MSF/msf/MADDENING/benchmarks/results/audit_040_r2/gates/property_scope_dev.json

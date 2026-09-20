@@ -1,0 +1,40 @@
+
+SpringDamperNode   declared temporal order = 1.0
+   N=   100  err= 9.13862e-03 
+   N=   200  err= 4.54760e-03    1.007
+   N=   400  err= 2.26829e-03    1.003
+   N=   800  err= 1.13276e-03    1.002
+   N=  1600  err= 5.66032e-04    1.001
+   observed (finest pair) = 1.0009   monotone=True
+
+BallNode   declared temporal order = 1.0
+   N=   100  err= 2.76902e-03 
+   N=   200  err= 1.38227e-03    1.002
+   N=   400  err= 6.90579e-04    1.001
+   N=   800  err= 3.45150e-04    1.001
+   N=  1600  err= 1.72540e-04    1.000
+   observed (finest pair) = 1.0003   monotone=True
+
+RigidBodyNode   declared temporal order = 1.0
+   N=   100  err= 8.81911e-03 
+   N=   200  err= 4.40405e-03    1.002
+   N=   400  err= 2.20064e-03    1.001
+   N=   800  err= 1.09996e-03    1.000
+   N=  1600  err= 5.49878e-04    1.000
+   observed (finest pair) = 1.0003   monotone=True
+
+RigidBody2DNode   declared temporal order = 1.0
+   N=   100  err= 8.96176e-03 
+   N=   200  err= 4.47581e-03    1.002
+   N=   400  err= 2.23666e-03    1.001
+   N=   800  err= 1.11804e-03    1.000
+   N=  1600  err= 5.58968e-04    1.000
+   observed (finest pair) = 1.0001   monotone=True
+
+HeartPumpNode   declared temporal order = 1.0
+   N=   100  err= 2.26853e-03 
+   N=   200  err= 1.13331e-03    1.001
+   N=   400  err= 5.66414e-04    1.001
+   N=   800  err= 2.83147e-04    1.000
+   N=  1600  err= 1.41559e-04    1.000
+   observed (finest pair) = 1.0002   monotone=True

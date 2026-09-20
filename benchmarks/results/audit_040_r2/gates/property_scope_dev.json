@@ -1,0 +1,838 @@
+{
+  "profile": "dev",
+  "records": [
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_finite_difference_of_a_rollout",
+      "drawn": 36,
+      "rejected": 13,
+      "effective_examples": 20,
+      "rate": 0.3939393939393939,
+      "invalid": 13,
+      "overrun": 3,
+      "overrun_rate": 0.08333333333333333,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 9.232428442649252e-13,
+      "overrun_health_check_risk": 1.2418860052079712e-15,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_crb_is_consistent_with_the_matrix_it_came_from",
+      "drawn": 71,
+      "rejected": 14,
+      "effective_examples": 50,
+      "rate": 0.21875,
+      "invalid": 14,
+      "overrun": 7,
+      "overrun_rate": 0.09859154929577464,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 1.4241590941954477e-24,
+      "overrun_health_check_risk": 3.1076607552292725e-14,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMMaskingAndScaling::test_the_noise_model_scales_the_information_by_one_over_sigma_squared",
+      "drawn": 68,
+      "rejected": 9,
+      "effective_examples": 50,
+      "rate": 0.15254237288135594,
+      "invalid": 9,
+      "overrun": 9,
+      "overrun_rate": 0.1323529411764706,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 4.32247272988559e-32,
+      "overrun_health_check_risk": 8.118213329239009e-12,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_an_asset_whose_bytes_changed_since_the_save_is_refused_not_rebuilt",
+      "drawn": 62,
+      "rejected": 8,
+      "effective_examples": 50,
+      "rate": 0.13793103448275862,
+      "invalid": 8,
+      "overrun": 4,
+      "overrun_rate": 0.06451612903225806,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 3.2700601160920164e-34,
+      "overrun_health_check_risk": 8.83717435783576e-18,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_defaults_its_mask_to_the_trainable_set",
+      "drawn": 25,
+      "rejected": 3,
+      "effective_examples": 20,
+      "rate": 0.13043478260869565,
+      "invalid": 3,
+      "overrun": 2,
+      "overrun_rate": 0.08,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 2.158669492694338e-35,
+      "overrun_health_check_risk": 5.661589673678537e-16,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTrainableContract::test_fit_moves_only_the_masked_trainable_leaves",
+      "drawn": 22,
+      "rejected": 2,
+      "effective_examples": 20,
+      "rate": 0.09090909090909091,
+      "invalid": 2,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 4.6209561355007456e-43,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_built_from_the_params_tree_is_accepted",
+      "drawn": 303,
+      "rejected": 1,
+      "effective_examples": 200,
+      "rate": 0.004975124378109453,
+      "invalid": 1,
+      "overrun": 102,
+      "overrun_rate": 0.33663366336633666,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 8.322840916744395e-106,
+      "overrun_health_check_risk": 0.00011004396422332021,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestMaskStructure::test_a_mask_whose_keys_differ_from_params_is_refused",
+      "drawn": 319,
+      "rejected": 1,
+      "effective_examples": 200,
+      "rate": 0.004975124378109453,
+      "invalid": 1,
+      "overrun": 118,
+      "overrun_rate": 0.36990595611285265,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 8.322840916744395e-106,
+      "overrun_health_check_risk": 0.00047483827527856784,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_a_mapped_edge_rewritten_to_asset_references_reloads_the_same_trajectory",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_a_mutated_mapping_is_refused_by_name_or_loads_exactly_what_it_says",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_a_mutated_spec_dict_parses_to_a_canonical_spec_or_a_value_error",
+      "drawn": 208,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 8,
+      "overrun_rate": 0.038461538461538464,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 3.592310545920677e-22,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_a_point_dtype_is_accepted_exactly_when_it_writes_and_hashes",
+      "drawn": 23,
+      "rejected": 0,
+      "effective_examples": 23,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_a_spec_rewritten_without_changing_its_meaning_steps_the_same",
+      "drawn": 21,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 1,
+      "overrun_rate": 0.047619047619047616,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 2.3710338920404055e-20,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_an_asset_path_reaches_a_file_under_the_base_directory_or_nothing",
+      "drawn": 291,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 91,
+      "overrun_rate": 0.3127147766323024,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 3.377263764896356e-05,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_an_asset_reference_normalises_only_paths_that_stay_relative",
+      "drawn": 280,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 80,
+      "overrun_rate": 0.2857142857142857,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 7.642245404814516e-06,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_an_npz_member_name_cannot_widen_what_an_asset_path_reaches",
+      "drawn": 65,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 15,
+      "overrun_rate": 0.23076923076923078,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 1.982154603559694e-07,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_mapping_spec_resolver.py::test_normalise_point_reference_answers_or_raises_point_reference_error",
+      "drawn": 243,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 43,
+      "overrun_rate": 0.17695473251028807,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 1.7299742398015141e-09,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_checkpoint_beats_the_config_for_trained_mapping_weights",
+      "drawn": 54,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 4,
+      "overrun_rate": 0.07407407407407407,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 1.2830143890381838e-16,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout",
+      "drawn": 55,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 5,
+      "overrun_rate": 0.09090909090909091,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.5941203618717254e-15,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_config_round_trip_preserves_a_mapped_edge_and_its_weights",
+      "drawn": 57,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 7,
+      "overrun_rate": 0.12280701754385964,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 1.993342037344013e-12,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_config_round_trip_preserves_every_coupling_group_field",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_config_round_trip_preserves_trajectory_params_and_specs",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_a_mapped_edge_and_its_weights",
+      "drawn": 50,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_every_coupling_group_field",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_a_usd_round_trip_preserves_trajectory_params_and_specs",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_config_and_usd_reload_to_the_same_graph",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_round_trips.py::test_to_dict_is_idempotent_through_from_dict",
+      "drawn": 53,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 3,
+      "overrun_rate": 0.05660377358490566,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.935445666478863e-19,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_a_fit_that_starts_inside_the_bounds_finishes_inside_them",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_a_transform_refuses_the_bounds_it_cannot_work_with",
+      "drawn": 200,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_constrain_inverts_unconstrain_inside_the_bounds",
+      "drawn": 200,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_constrain_lands_inside_the_bounds_from_any_coordinate",
+      "drawn": 200,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestCalibrate::test_a_parameter_the_forward_ignores_is_bit_identical_afterwards",
+      "drawn": 50,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestCalibrate::test_gradient_descent_on_a_convex_problem_decreases_and_converges",
+      "drawn": 50,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestCalibrate::test_the_converged_flag_means_the_reported_loss_beat_the_tolerance",
+      "drawn": 200,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_fim_matches_a_central_finite_difference",
+      "drawn": 56,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 6,
+      "overrun_rate": 0.10714285714285714,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 1.5124951536778705e-13,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_a_sigma_that_is_not_a_noise_level_is_refused",
+      "drawn": 6,
+      "rejected": 0,
+      "effective_examples": 6,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_fim_raises_rather_than_reporting_on_a_non_finite_matrix",
+      "drawn": 2,
+      "rejected": 0,
+      "effective_examples": 2,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMFailsSafe::test_no_parameter_is_reported_identifiable_on_a_non_finite_quantity",
+      "drawn": 201,
+      "rejected": 0,
+      "effective_examples": 200,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 1,
+      "overrun_rate": 0.004975124378109453,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 8.282601993901178e-40,
+      "stopped_because": [
+        "settings.max_examples=200"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestFIMMaskingAndScaling::test_the_masked_matrix_is_the_submatrix_of_the_unmasked_one",
+      "drawn": 55,
+      "rejected": 0,
+      "effective_examples": 50,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 5,
+      "overrun_rate": 0.09090909090909091,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 6.5941203618717254e-15,
+      "stopped_because": [
+        "settings.max_examples=50"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_a_discontinuous_window_start_costs_the_penalty",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_the_continuity_penalty_is_affine_in_its_weight",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestMultipleShootingLoss::test_truth_seeded_windows_recover_the_unwindowed_loss",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTrainableContract::test_a_mask_may_not_widen_the_trainable_set",
+      "drawn": 3,
+      "rejected": 0,
+      "effective_examples": 3,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTrainableContract::test_every_fitter_honours_the_same_frozen_set",
+      "drawn": 31,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 11,
+      "overrun_rate": 0.3548387096774194,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0002509204114065858,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTuneCouplingParams::test_the_reference_configuration_reproduces_itself_exactly",
+      "drawn": 6,
+      "rejected": 0,
+      "effective_examples": 6,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestTuneCouplingParams::test_the_report_describes_the_grid_it_searched",
+      "drawn": 24,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 4,
+      "overrun_rate": 0.16666666666666666,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 5.799034192917155e-10,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestWindowTilings::test_a_non_positive_sampling_interval_is_refused",
+      "drawn": 4,
+      "rejected": 0,
+      "effective_examples": 4,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "nothing left to do"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestWindowTilings::test_a_tiling_that_divides_is_accepted_by_both_helpers",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    },
+    {
+      "nodeid": "tests/property/test_sysid_contract.py::TestWindowTilings::test_a_tiling_that_does_not_divide_is_refused_by_both_helpers",
+      "drawn": 20,
+      "rejected": 0,
+      "effective_examples": 20,
+      "rate": 0.0,
+      "invalid": 0,
+      "overrun": 0,
+      "overrun_rate": 0.0,
+      "runs": 1,
+      "starved": false,
+      "health_check_risk": 0.0,
+      "overrun_health_check_risk": 0.0,
+      "stopped_because": [
+        "settings.max_examples=20"
+      ]
+    }
+  ]
+}

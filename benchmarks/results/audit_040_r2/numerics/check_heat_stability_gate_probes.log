@@ -1,0 +1,22 @@
+--- a_nonpositive ---
+OK: 2 HeatNode construction(s) verified within their stencil's stability limit
+    exit=0
+--- b_unknown_order ---
+OK: 1 HeatNode construction(s) verified within their stencil's stability limit
+    exit=0
+--- c_positional_stencil ---
+OK: 1 HeatNode construction(s) verified within their stencil's stability limit
+    exit=0
+--- d_attribute_call ---
+FAIL: 0 HeatNode construction(s) found in /tmp/tmp.RJQDo0PaLN.
+A gate that verifies nothing cannot fail.  Either the scan scope is wrong or the call is spelled in a way this gate does not recognise; fix the scope rather than trusting the OK.
+    exit=1
+--- e_genuinely_unstable ---
+FAIL: 1 HeatNode construction(s) the stability guard refuses:
+  /tmp/tmp.RJQDo0PaLN/e_genuinely_unstable.py:2: Fourier number 0.6605 exceeds the 0.3125 limit of the order-4 stencil (dt=0.0001, alpha=0.1, dx=length/n_cells=0.00389105); HeatNode.__init__ raises ValueError. Use timestep <= 4.73134e-05, more cells, or a smaller thermal_diffusivity
+
+Fix: give the construction a stable timestep.  If the test does not care about the physics, it still cannot build a rod that diverges -- see MADD-ANO-009.
+    exit=1
+--- attribute-spelled unstable rod + one valid construction ---
+OK: 1 HeatNode construction(s) verified within their stencil's stability limit
+    exit=0

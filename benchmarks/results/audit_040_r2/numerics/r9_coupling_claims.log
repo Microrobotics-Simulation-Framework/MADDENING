@@ -1,0 +1,33 @@
+CLAIM 1: residuals 0.5, 5, 0.25, 2.5 converge at rho=0.71/pass, but every
+         second one-step ratio reads 0.05 and flatters the bound 14x.
+   one-step r2/r1 = 0.0500   two-step sqrt(r2/r0) = 0.7071
+   1/(1-rho) with one-step only = 1.0526
+   error_amplification(...)     = 3.4142   ratio = 0.31x  (claim: 14)
+
+CLAIM 2: two-mode contraction (0.999, 0.2): rho reads 0.2 while the
+         distance still to travel is 122x the estimate.
+   k=3: rho_eff=0.2000 amp=1.2500 est=8.0015e-03 true=2.5960e-03 understatement=0.3x
+   k=4: rho_eff=0.2001 amp=1.2502 est=1.6015e-03 true=1.3150e-03 understatement=0.8x
+   k=5: rho_eff=0.2006 amp=1.2510 est=3.2149e-04 true=1.0580e-03 understatement=3.3x
+
+CLAIM 3: relaxation_step_scale returns omega for 'fixed' and 1.0 otherwise
+   none       omega=1.5 -> 1.0
+   fixed      omega=1.5 -> 1.5
+   aitken     omega=1.5 -> 1.0
+   iqn-ils    omega=1.5 -> 1.0
+   iqn-imvj   omega=1.5 -> 1.0
+
+CLAIM 4: estimated_error is never smaller than the residual
+   violations over 20000 random (residual, amplification, step_scale): 0
+
+CLAIM 5: rejection cases return 0.0 (impossible amplification)
+   non-decreasing residual  -> 0.0
+   equal residuals          -> 0.0
+   zero predecessor         -> 0.0
+   nan current              -> 0.0
+   inf predecessor          -> 0.0
+   negative predecessor     -> 0.0
+   healthy contraction      -> 1.1111111111111112
+
+CLAIM 6: 'the two-step term is sqrt of the one-step one' when prev2 defaults
+   default prev2: amp=2.00000   expected 1/(1-0.5000)=2.00000

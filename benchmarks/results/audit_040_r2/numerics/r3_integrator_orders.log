@@ -1,0 +1,26 @@
+problem: dx/dt = -x + u(t), u sinusoidal, T=0.75, float64
+
+== frozen (u read once per step) ==
+  euler  order(finest pair) =  1.022   orders=['1.165', '1.085', '1.043', '1.022']
+  heun   order(finest pair) =  1.017   orders=['1.125', '1.065', '1.033', '1.017']
+  rk4    order(finest pair) =  1.016   orders=['1.120', '1.062', '1.032', '1.016']
+
+== constant u (autonomous) ==
+  euler  order(finest pair) =  1.003   orders=['1.027', '1.013', '1.007', '1.003']
+  heun   order(finest pair) =  2.005   orders=['2.041', '2.020', '2.010', '2.005']
+  rk4    order(finest pair) =  4.006   orders=['4.045', '4.023', '4.011', '4.006']
+
+== stage-time u (docstring recipe) ==
+  euler  order(finest pair) =  1.022   orders=['1.165', '1.085', '1.043', '1.022']
+  heun   order(finest pair) =  1.999   orders=['1.996', '1.998', '1.999', '1.999']
+  rk4    order(finest pair) =  4.002   orders=['4.018', '4.008', '4.004', '4.002']
+
+== frozen-input accuracy, euler vs rk4 ==
+  n=  80 dt=0.00937  euler=9.2735e-03  rk4=1.4225e-02  rk4/euler=1.534
+  n= 160 dt=0.00469  euler=4.5673e-03  rk4=7.0341e-03  rk4/euler=1.540
+  n= 320 dt=0.00234  euler=2.2664e-03  rk4=3.4975e-03  rk4/euler=1.543
+
+== Butcher nodes seen by the stages (docstring claim) ==
+  euler  seen=(0.0,)  expected=(0.0,)  match=True
+  heun   seen=(0.0, 1.0)  expected=(0.0, 1.0)  match=True
+  rk4    seen=(0.0, 0.5, 0.5, 1.0)  expected=(0.0, 0.5, 0.5, 1.0)  match=True

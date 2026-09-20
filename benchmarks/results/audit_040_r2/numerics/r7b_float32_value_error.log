@@ -1,0 +1,28 @@
+=== RigidBodyNode: omega(T) = torque/I * T, exact for symplectic Euler ===
+  I=0.33333333333333331  N=   10  omega=2.999999910593036  exact=3.000000000000000  rel err=2.980e-08
+  I=0.33333333333333331  N= 1000  omega=2.999999910592995  exact=3.000000000000000  rel err=2.980e-08
+  I=0.69999999999999996  N=   10  omega=1.428571452899856  exact=1.428571428571429  rel err=1.703e-08
+  I=0.69999999999999996  N= 1000  omega=1.428571452899870  exact=1.428571428571429  rel err=1.703e-08
+  I=1.3                  N=   10  omega=0.769230797445987  exact=0.769230769230769  rel err=3.668e-08
+  I=1.3                  N= 1000  omega=0.769230797445980  exact=0.769230769230769  rel err=3.668e-08
+
+=== RigidBodyNode: v(T) = g*T under free fall, exact ===
+  g=-9.81      N=   10  v=-9.810000658035278  exact=-9.810000000000000  rel err=6.708e-08
+  g=-9.81      N= 1000  v=-9.810000658035278  exact=-9.810000000000000  rel err=6.708e-08
+  g=-1.62      N=   10  v=-1.620000004768372  exact=-1.620000000000000  rel err=2.943e-09
+  g=-1.62      N= 1000  v=-1.620000111870468  exact=-1.620000000000000  rel err=6.906e-08
+  g=-0.1       N=   10  v=-0.100000007078052  exact=-0.100000000000000  rel err=7.078e-08
+  g=-0.1       N= 1000  v=-0.100000004749745  exact=-0.100000000000000  rel err=4.750e-08
+
+=== RigidBody2DNode: v_y(T) = g*T, exact  (TODO FOLLOW-UP C) ===
+  N=   10  v_y=-9.810000658035278  exact=-9.810000000000000  rel err=6.708e-08
+  N= 1000  v_y=-9.810000658035278  exact=-9.810000000000000  rel err=6.708e-08
+
+=== BallNode control: gravity NOT cast in update(), IS cast in derivatives() ===
+  update()      dv over dt=1 : -9.810000000000000   rel err=0.000e+00
+  derivatives() dv/dt        : -9.810000419616699   rel err=4.277e-08
+  -> update() and derivatives() of the SAME node disagree about g by 4.196e-07 absolute
+
+=== gradients survive the cast? d omega / d inertia ===
+  AD grad = -0.899999976   exact = -0.900000000   central FD(h=1e-6) = -0.898540047
+  central FD(h=1e-9) = 0.000000000   <- FD below the float32 ulp of inertia collapses

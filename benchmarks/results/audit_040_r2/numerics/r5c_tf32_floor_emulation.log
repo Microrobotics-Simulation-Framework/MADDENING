@@ -1,0 +1,10 @@
+  n      m     cutoff |       fp32       x |  TF32(10b)       x |   BF16(7b)       x
+  2   4000  7.539e-06 |  6.205e-08    0.01 |  1.210e-07    0.02 |  4.936e-06    0.65 
+  3   4000  7.539e-06 |  6.167e-08    0.01 |  4.230e-08    0.01 |  4.496e-06    0.60 
+  5   2000  5.331e-06 |  3.117e-08    0.01 |  6.318e-08    0.01 |  4.481e-06    0.84 
+ 12    800  3.372e-06 |  5.789e-08    0.02 |  5.858e-08    0.02 |  4.306e-06    1.28 
+ 25    800  3.372e-06 |  5.159e-08    0.02 |  7.162e-08    0.02 |  3.731e-06    1.11 
+
+x = floor / cutoff.  >1 means the arithmetic's own noise exceeds the
+cutoff, so an exactly rank-deficient F is reported as full rank with a
+finite crb and no PrecisionLimitWarning (the pre-0.4.0 failure mode).

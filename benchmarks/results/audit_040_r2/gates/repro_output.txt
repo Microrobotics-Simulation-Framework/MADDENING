@@ -1,0 +1,72 @@
+##################### g2_transforms_positional
+--- keyword form (the gate sees it) ---
+FAIL: 1 unresolvable transform reference(s):
+  tests/core/_g2_probe.py:2: transform 'definitely_not_registered' is neither in the TransformRegistry nor registered in this file
+
+Fix: register each transform with @register_transform('name') from maddening.core.transforms
+rc=1
+--- positional form, identical meaning (the gate does not) ---
+OK: 31 string transform reference(s) verified (6 transforms in registry)
+rc=0   <-- 0, the bogus name is invisible
+##################### g3_transforms_dead_registration
+OK: 32 string transform reference(s) verified (6 transforms in registry)
+gate rc=0
+in registry after import? False
+^ gate said verified; registry says no. add_edge would raise KeyError.
+##################### g4_heat_call_form
+OK: 124 HeatNode construction(s) verified within their stencil's stability limit; 73 further construction(s) have computed arguments and were NOT checked
+rc=0   <-- 0, with two rods in scope that HeatNode.__init__ refuses
+runtime: timestep 0.0001 is unstable for this rod: the Fourier number dt*alpha/dx^2 is 0.6605, abov
+##################### g6_min_mappings_no_ratchet
+removed 8 mapping rows from heat_node.md
+OK: 50 implementation mapping(s) verified across /home/nick/MSF/msf/MADDENING-wt/audit-r2-gates/docs/algorithm_guide
+gate rc=0
+.........                                                                [100%]
+9 passed, 33 deselected in 0.63s
+##################### g7_gates_that_verified_nothing
+=== check_anomalies.py on an EMPTY registry ===
+OK: anomaly registry at /tmp/tmp.sQP7O5mf8z/empty.yaml is valid
+rc=0
+
+=== check_anomalies.py on a registry with every reference stripped ===
+OK: anomaly registry at /tmp/tmp.sQP7O5mf8z/noref.yaml is valid
+rc=0
+
+=== check_impl_mapping.py on an empty scope ===
+OK: 0 implementation mapping(s) verified across /tmp/tmp.sQP7O5mf8z/guides
+rc=0
+
+=== audit_property_rejection.py --check where every property test skips ===
+draw-rejection audit (hypothesis profile: ci)
+constant injection: ON for src/maddening (66 local constants harvested)
+no Hypothesis runs were observed
+
+test  drawn  filtered  rate  overrun  effective  risk/run
+----  -----  --------  ----  -------  ---------  --------
+rc=0
+
+Compare: check_heat_stability.py and check_transforms.py both fail closed here.
+gate prints          : OK: 50 citation(s) verified
+actually verified    : 45
+skipped, but counted : 5
+    docs/developer_guide/documentation_standards.md 39 Key
+    docs/developer_guide/documentation_standards.md 71 Key
+    docs/developer_guide/node_authoring.md 155 Key
+    docs/developer_guide/node_authoring.md 181 Key
+    docs/developer_guide/node_authoring.md 528 Key
+
+FAIL: the headline count includes references the gate declined to check.
+##################### g5_registry_silent_deletion
+=== A. delete an OPEN anomaly from the registry ===
+OK: anomaly registry at docs/validation/known_anomalies.yaml is valid
+check_anomalies rc=0
+soup --check after regenerating rc=0
+MADD-ANO-012 in soup_package.md: 0
+............................................                             [100%]
+188 passed in 15.74s
+
+=== B. two @verification_benchmark decorators with the same id ===
+soup --check after regenerating rc=0
+MADD-VER-011 in framework_verification.md: 0
+..................                                                       [100%]
+18 passed in 1.03s

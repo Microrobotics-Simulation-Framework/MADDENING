@@ -277,23 +277,48 @@ class TestDriftIsClassified:
 
     _ROWS = "| MADD-ANO-001 | a |\n| MADD-ANO-002 | b |\n| MADD-ANO-003 | c |\n"
 
+    @staticmethod
+    def _explanation(message: str) -> str:
+        """The classification, without the unified diff appended after it.
+
+        The diff repeats every changed line, so an assertion against the
+        whole message passes on the diff alone -- which is how a mutation
+        that stopped the classifier naming the IDs it would remove went
+        undetected by the first version of this test.
+        """
+        return message.split("--- ", 1)[0]
+
     def test_a_row_the_source_stopped_producing_is_not_a_regenerate(self):
         generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
-        message = gen.describe_drift("doc.md", self._ROWS, generated)
-        assert "DO NOT regenerate yet" in message
-        assert "MADD-ANO-002" in message
-        assert "1 line(s) only in the COMMITTED file" in message
+        explanation = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "DO NOT regenerate yet" in explanation
+        assert "1 line(s) only in the COMMITTED file" in explanation
+
+    def test_the_explanation_names_the_evidence_ids_it_would_remove(self):
+        """Not the diff below it: the sentence a reader acts on."""
+        generated = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
+        explanation = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
+        assert "MADD-ANO-002" in explanation
+        assert "MADD-ANO-001" not in explanation
 
     def test_a_row_the_document_is_missing_is_a_regenerate(self):
         committed = self._ROWS.replace("| MADD-ANO-002 | b |\n", "")
-        message = gen.describe_drift("doc.md", committed, self._ROWS)
+        message = self._explanation(
+            gen.describe_drift("doc.md", committed, self._ROWS)
+        )
         assert "DO NOT regenerate yet" not in message
         assert "generate_soup_tables.py` and commit" in message
         assert "1 line(s) only in the GENERATED file" in message
 
     def test_a_changed_cell_reads_differently_from_a_removed_row(self):
         changed = self._ROWS.replace("| MADD-ANO-002 | b |", "| MADD-ANO-002 | B |")
-        message = gen.describe_drift("doc.md", self._ROWS, changed)
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, changed)
+        )
         assert "1 line(s) changed in place" in message
         assert "DO NOT regenerate yet" not in message
 
@@ -308,7 +333,9 @@ class TestDriftIsClassified:
         generated = (
             "| MADD-ANO-001 | a |\n| MADD-ANO-003 | c |\n| MADD-ANO-004 | d |\n"
         )
-        message = gen.describe_drift("doc.md", self._ROWS, generated)
+        message = self._explanation(
+            gen.describe_drift("doc.md", self._ROWS, generated)
+        )
         assert "DO NOT regenerate yet" in message
         assert "MADD-ANO-002" in message
 

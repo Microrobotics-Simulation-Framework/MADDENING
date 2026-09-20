@@ -292,6 +292,34 @@ class TestTransformLiveRegistration:
             "environment; the gate degraded rather than verified"
         )
 
+    def test_the_reported_registry_size_excludes_what_the_gate_imported(self):
+        """The live check imports modules that register transforms.
+
+        Those registrations are global, so the registry must be snapshotted
+        before any of them run -- otherwise a name one module registers
+        starts satisfying another module's reference, which is exactly what
+        "registered in another file does not count" forbids.  The headline
+        count is the visible half of that snapshot.
+        """
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        reported = int(
+            result.stdout.rsplit("(", 1)[1].split(" transforms")[0]
+        )
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from maddening.core.transforms import _TRANSFORM_REGISTRY;"
+             "print(len(_TRANSFORM_REGISTRY))"],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"),
+                 "JAX_PLATFORMS": "cpu"},
+        )
+        assert reported == int(probe.stdout.strip()), (
+            f"the gate reported {reported} transforms in the registry; a "
+            f"bare import registers {probe.stdout.strip()}.  The gate is "
+            f"counting names its own imports added."
+        )
+
     def test_the_summary_separates_allowlisted_from_verified(self):
         result = _run("check_transforms")
         assert result.returncode == 0, result.stdout + result.stderr
@@ -1014,6 +1042,10 @@ class TestHeatStabilityCallForms:
         """
         _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 4)')
         assert heat_stability_gate.main([str(tmp_path)]) == 1
+        # ...and for the right reason: the order-4 limit, not an empty scope.
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 4)',
+             name="probe.py")
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
 
     def test_the_same_rod_at_order_two_still_passes(
         self, heat_stability_gate, tmp_path
@@ -1022,34 +1054,64 @@ class TestHeatStabilityCallForms:
         _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 2)')
         assert heat_stability_gate.main([str(tmp_path)]) == 0
 
+    @staticmethod
+    def _with_a_recognised_rod(tmp_path, name, body):
+        """Write the probe beside a plainly-spelled *stable* rod.
+
+        Without it, a gate that cannot see the probe at all fails anyway --
+        on the empty-scope guard -- and the test passes for the wrong
+        reason.  A mutation removing the attribute match was missed exactly
+        this way.
+        """
+        _rod(tmp_path, 'HeatNode("stable", 1e-5, n_cells=10, length=1.0,'
+                       " thermal_diffusivity=0.01)", name="baseline_rod.py")
+        (tmp_path / name).write_text(body)
+
+    def _fails_naming_the_rod(self, gate, tmp_path, capsys):
+        rc = gate.main([str(tmp_path)])
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        assert "Fourier number" in out, out
+        return out
+
     def test_an_attribute_spelled_construction_is_seen(
-        self, heat_stability_gate, tmp_path
+        self, heat_stability_gate, tmp_path, capsys
     ):
         """``ast.Attribute`` carries ``.attr``, not ``.id``."""
-        (tmp_path / "attr_form.py").write_text(
+        self._with_a_recognised_rod(
+            tmp_path, "attr_form.py",
             "import maddening.nodes.heat as heat\n"
             'n = heat.HeatNode("e", timestep=1e-4, n_cells=257, length=1.0,\n'
-            "                  thermal_diffusivity=0.1, stencil_order=4)\n"
+            "                  thermal_diffusivity=0.1, stencil_order=4)\n",
         )
-        assert heat_stability_gate.main([str(tmp_path)]) == 1
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "attr_form.py" in out
 
-    def test_an_aliased_import_is_seen(self, heat_stability_gate, tmp_path):
-        (tmp_path / "alias_form.py").write_text(
+    def test_an_aliased_import_is_seen(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        self._with_a_recognised_rod(
+            tmp_path, "alias_form.py",
             "from maddening.nodes.heat import HeatNode as Rod\n"
             'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
-            "        thermal_diffusivity=0.1)\n"
+            "        thermal_diffusivity=0.1)\n",
         )
-        assert heat_stability_gate.main([str(tmp_path)]) == 1
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "alias_form.py" in out
 
-    def test_a_rebound_name_is_seen(self, heat_stability_gate, tmp_path):
+    def test_a_rebound_name_is_seen(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
         """``Rod = HeatNode`` is the rebinding an import alias avoids."""
-        (tmp_path / "rebound.py").write_text(
+        self._with_a_recognised_rod(
+            tmp_path, "rebound.py",
             "from maddening.nodes.heat import HeatNode\n"
             "Rod = HeatNode\n"
             'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
-            "        thermal_diffusivity=0.1)\n"
+            "        thermal_diffusivity=0.1)\n",
         )
-        assert heat_stability_gate.main([str(tmp_path)]) == 1
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "rebound.py" in out
 
     def test_the_positional_order_is_the_constructor_signature_order(
         self, heat_stability_gate

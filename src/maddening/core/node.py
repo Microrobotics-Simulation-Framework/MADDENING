@@ -15,7 +15,7 @@ import inspect
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -223,7 +223,8 @@ def static_data_dep_violations(
             if id(obj) in inner_seen:
                 continue
             inner_seen.add(id(obj))
-            pytree_of: Any = getattr(obj, "params_pytree", None)
+            pytree_of: Callable[..., Any] | None = getattr(
+                obj, "params_pytree", None)
             if callable(pytree_of):
                 for key in pytree_of() or {}:
                     if key in overrides:
@@ -238,12 +239,17 @@ def static_data_dep_violations(
         if id(obj) in seen:
             continue
         seen.add(id(obj))
-        # Duck-typed: a node may implement none, some or all of these,
-        # so the annotations say `Any` rather than pretending to a
-        # protocol the tree is not required to satisfy.
-        deps: Any = getattr(obj, "static_data_deps", None)
-        specs_of: Any = getattr(obj, "param_specs", None)
-        pytree_of: Any = getattr(obj, "params_pytree", None)
+        # Duck-typed: a node may implement none, some or all of these.
+        # Declared `Callable[..., Any] | None` rather than `Any` so the
+        # `callable()` guard below narrows to something whose *return*
+        # is `Any`; narrowing a bare `Any` yields `(...) -> object`,
+        # which is not iterable, indexable or `set()`-able.
+        deps: Callable[..., Any] | None = getattr(
+            obj, "static_data_deps", None)
+        specs_of: Callable[..., Any] | None = getattr(
+            obj, "param_specs", None)
+        pytree_of: Callable[..., Any] | None = getattr(
+            obj, "params_pytree", None)
         if callable(deps) and callable(specs_of) and callable(pytree_of):
             declared = deps() or {}
             if declared:

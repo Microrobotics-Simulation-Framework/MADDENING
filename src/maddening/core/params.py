@@ -141,7 +141,10 @@ class ParamSpec:
         if self.transform == "log":
             return jnp.log(p - self._lo())
         if self.transform == "logit":
-            lo, hi = (float(b) for b in self.bounds)
+            # `__post_init__` refuses transform='logit' without both bounds.
+            lo_b, hi_b = self.bounds
+            assert lo_b is not None and hi_b is not None
+            lo, hi = float(lo_b), float(hi_b)
             t = (p - lo) / (hi - lo)
             return jnp.log(t) - jnp.log1p(-t)
         return p
@@ -168,7 +171,10 @@ class ParamSpec:
             m = max(float(fi.tiny), 2.0 * float(fi.eps) * abs(lo))
             return lo + jnp.clip(jnp.exp(u), m, fi.max)
         if self.transform == "logit":
-            lo, hi = (float(b) for b in self.bounds)
+            # `__post_init__` refuses transform='logit' without both bounds.
+            lo_b, hi_b = self.bounds
+            assert lo_b is not None and hi_b is not None
+            lo, hi = float(lo_b), float(hi_b)
             # Clip the *result* (not the sigmoid) so rounding in
             # ``lo + (hi - lo) * t`` cannot land on a bound either: with
             # ``m >= 4 ulp`` of every quantity involved, ``p - lo`` and

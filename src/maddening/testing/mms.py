@@ -667,7 +667,10 @@ def declared_order(node: Any) -> DiscretizationOrder | None:
     -------
     DiscretizationOrder or None
     """
-    hook = getattr(node, "discretization_order", None)
+    # See the note in `maddening.core.node`: declaring the duck-typed
+    # lookup as a callable keeps `callable()` narrowing from collapsing
+    # the return type to `object`.
+    hook: Callable[..., Any] | None = getattr(node, "discretization_order", None)
     if callable(hook):
         return hook()
     meta = getattr(node, "meta", None)

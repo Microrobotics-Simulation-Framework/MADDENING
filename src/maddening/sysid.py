@@ -357,7 +357,9 @@ def windowed_loss(
         sq = jax.tree.map(
             lambda a, b: jnp.sum((a - b) ** 2), obs_fn(sim), obs_fn(truth),
         )
-        loss_w = sum(jax.tree.leaves(sq))
+        # `sum` is typed as returning `int` for its empty-sequence start
+        # value; every leaf here is an Array, so the result is one.
+        loss_w: Any = sum(jax.tree.leaves(sq))
         if mask_unconverged:
             loss_w = loss_w * ok.astype(loss_w.dtype)
         if window_states is not None and continuity_weight > 0.0:

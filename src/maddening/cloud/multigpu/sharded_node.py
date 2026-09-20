@@ -271,7 +271,11 @@ class ShardedPointwiseNode(SimulationNode):
         3-argument contract is called without it.
         """
         if self._inner_accepts_params and params is not None:
-            return self._inner.update(state, boundary_inputs, dt, params=params)
+            # `_inner_accepts_params` was computed from the inner node's
+            # signature; `SimulationNode.update` does not declare it.
+            return self._inner.update(
+                state, boundary_inputs, dt,
+                params=params)  # pyright: ignore[reportCallIssue]
         return self._inner.update(state, boundary_inputs, dt)
 
     def state_fields(self) -> list[str]:

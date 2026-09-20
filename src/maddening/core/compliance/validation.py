@@ -95,7 +95,7 @@ def verification_benchmark(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
-        wrapper._benchmark = benchmark
+        wrapper._benchmark = benchmark  # type: ignore[attr-defined]
         return wrapper
     return decorator
 

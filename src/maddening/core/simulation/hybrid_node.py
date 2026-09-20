@@ -81,7 +81,11 @@ class HybridNode(SimulationNode):
         """Physics update + additive correction (``params`` reaches the
         physics node when it takes them, so a hybrid stays calibratable)."""
         if params is not None and _accepts_params(self.physics_node.update):
-            physics_result = self.physics_node.update(state, boundary_inputs, dt, params=params)
+            # `_accepts_params` above proved this node takes the keyword;
+            # the `SimulationNode.update` contract does not declare it.
+            physics_result = self.physics_node.update(
+                state, boundary_inputs, dt,
+                params=params)  # pyright: ignore[reportCallIssue]
         else:
             physics_result = self.physics_node.update(state, boundary_inputs, dt)
         correction = self.correction_fn(state, boundary_inputs, dt)

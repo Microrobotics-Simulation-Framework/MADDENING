@@ -935,7 +935,11 @@ class FmuTcpBridge:
             for f, v in fields.items():
                 arrays[f"i/{node}/{f}"] = np.asarray(v)
         buf = io.BytesIO()
-        np.savez(buf, **arrays)
+        # numpy types `savez` as `savez(file, *args, allow_pickle=True,
+        # **kwds)`, so a checker matches every `**` value against
+        # `allow_pickle: bool` as well as against `**kwds`.  Every member
+        # name built above is prefixed, so none can collide with it.
+        np.savez(buf, **arrays)  # pyright: ignore[reportArgumentType]
         return buf.getvalue()
 
     def _member_caps(self) -> dict[str, int]:

@@ -81,6 +81,9 @@ def _validate_partition_statics(
     ref_pa = layout.partition_assignment
     for k, v in sharded.items():
         pa = v.partition_assignment
+        # `StaticArray.__post_init__` requires one for replication="partition",
+        # which is what `_partition_statics` selected on.
+        assert pa is not None
         if pa.shape != ref_pa.shape:
             raise ValueError(
                 f"ShardedUnstructuredNode: StaticArray {k!r} has "

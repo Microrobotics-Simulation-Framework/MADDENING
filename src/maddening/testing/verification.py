@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import inspect
 
 import numpy as np
+import numpy.typing as npt
 
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -505,7 +506,7 @@ def make_inputs(
     boundary_bounds: Bounds | None = None,
     boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
-    dtype: np.dtype = np.float32,
+    dtype: npt.DTypeLike = np.float32,
 ) -> _Inputs:
     """Bundle the sampling envelope for the standalone ``node_*`` checks."""
     return _Inputs(
@@ -522,7 +523,7 @@ def verify_node(
     boundary_bounds: Bounds | None = None,
     boundary_inputs: dict | None = None,
     dt_range: tuple[float, float] = (1e-4, 0.01),
-    dtype: np.dtype = np.float32,
+    dtype: npt.DTypeLike = np.float32,
     output_bounds: Bounds | None = None,
     energy_fn: Callable[[dict], Any] | None = None,
     invariants: dict[str, Callable[[dict, dict, dict, float], bool]] | None = None,

@@ -39,7 +39,7 @@ wall_mask_update : grid_shape bool
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -1043,7 +1043,9 @@ class LBMNode(SimulationNode):
         outlet_axis, outlet_side = _FACE_MAP[self._outlet_face]
 
         # Build slice for the outlet face
-        face_slices = [slice(None)] * self._D
+        # `list[Any]`: the entries start as slices and the outlet face is
+        # then replaced by an index, which narrows the element type away.
+        face_slices: list[Any] = [slice(None)] * self._D
         if outlet_side == "min":
             face_slices[outlet_axis] = 0
         else:

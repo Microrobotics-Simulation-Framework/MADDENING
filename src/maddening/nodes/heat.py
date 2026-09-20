@@ -32,6 +32,8 @@ stencil's ghosts were built at the wrong positions (MADD-ANO-008).
 Both are fixed here; see ``docs/algorithm_guide/nodes/heat_node.md``.
 """
 
+from typing import Optional
+
 import jax.numpy as jnp
 
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
@@ -464,7 +466,7 @@ class HeatNode(SimulationNode):
         initial_temperature: float = 0.0,
         stencil_order: int = 2,
         grid_points=None,
-        geometry_source: str = None,
+        geometry_source: Optional[str] = None,
     ):
         if stencil_order not in (2, 4):
             raise ValueError(
@@ -640,10 +642,12 @@ class HeatNode(SimulationNode):
         (MADD-ANO-008) and the documented boundary convention measured
         1.001 (MADD-ANO-007).
         """
+        meta = type(self).meta
+        assert meta is not None  # every shipped node declares NodeMeta
         return DiscretizationOrder(
             spatial=float(self.params.get("stencil_order", 2)),
             temporal=1.0,
-            notes=type(self).meta.discretization_order.notes,
+            notes=meta.discretization_order.notes,
         )
 
     def param_specs(self) -> dict[str, ParamSpec]:

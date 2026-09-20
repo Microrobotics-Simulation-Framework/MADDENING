@@ -21,9 +21,14 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import yaml
+
+if TYPE_CHECKING:
+    # `ssh_run` returns one; the runtime import stays in the method
+    # body, where it always was.
+    import subprocess
 
 from maddening.cloud.providers import PROVIDERS, CloudProvider
 
@@ -786,7 +791,9 @@ class CloudLauncher:
             # ``or [8000]`` used to live here and silently undid an
             # empty ``ports``: the default is now empty and must stay
             # empty all the way to the ingress rule.
-            ports=job_config.ports or None,
+            # SkyPilot's annotation says `List[str]`; it accepts a list of
+            # ints and normalises them (verified against skypilot 0.13).
+            ports=job_config.ports or None,  # pyright: ignore[reportArgumentType]
         )
         task.set_resources(resources)
 
@@ -843,11 +850,13 @@ class CloudLauncher:
         vm_ip = None
         ssh_port = 22
         if handle is not None:
-            if hasattr(handle, "head_ip"):
-                vm_ip = handle.head_ip
+            # `getattr` rather than attribute access: `ResourceHandle` is
+            # a SkyPilot base class and these live on backend subclasses.
+            vm_ip = getattr(handle, "head_ip", None)
             # SkyPilot stores the mapped SSH port for RunPod
-            if hasattr(handle, "stable_ssh_ports") and handle.stable_ssh_ports:
-                ssh_port = handle.stable_ssh_ports[0]
+            stable_ports = getattr(handle, "stable_ssh_ports", None)
+            if stable_ports:
+                ssh_port = stable_ports[0]
 
         spot_str = "spot" if use_spot else "on-demand"
         logger.info("Launched %s (%s, %s, $%.2f/hr)",
@@ -891,8 +900,9 @@ class CloudLauncher:
                 df = catalog.list_accelerators(
                     gpus_only=True, clouds=sky_cloud,
                 )
-                if hasattr(df, 'iterrows'):
-                    for _, row in df.iterrows():
+                iterrows = getattr(df, 'iterrows', None)
+                if iterrows is not None:
+                    for _, row in iterrows():
                         results.append({
                             "provider": cloud_name,
                             "gpu_type": row.get("AcceleratorName", ""),

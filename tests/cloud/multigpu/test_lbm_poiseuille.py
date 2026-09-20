@@ -81,7 +81,13 @@ def _run_poiseuille(node, sharded, n_steps: int, F: float):
         "After 500 steps: profile positive and peaked at the centre; a "
         "least-squares fit u = c0 + c1 r^2 concave with effective R^2 within "
         "[0.7, 1.5] of nominal; cross-section symmetric to rtol 1e-3; "
-        "centreline velocity within +/-25% of u_max = F R^2 / (4 mu)"
+        "centreline velocity in [0.75, 1.30] x u_max = F R^2 / (4 mu).  "
+        "The band is deliberately asymmetric: mid-link bounce-back puts "
+        "the hydrodynamic wall half a lattice unit outside the nominal R, "
+        "so the effective radius is larger and the ratio is biased above "
+        "1 (measured 1.130).  A symmetric +/-25% would leave 0.12 of "
+        "headroom above the measured value on the side the discretisation "
+        "pushes it"
     ),
     references=(
         "Hagen-Poiseuille steady laminar flow in a circular pipe",
@@ -171,7 +177,17 @@ def test_poiseuille_sharded_profile_is_parabolic():
     # velocity matches the textbook u_max = F R^2 / (4 mu) to within the
     # discretization offset (effective R > nominal R from mid-link
     # bounce-back placement).  Pre-fix the ratio was ~0.42; post-fix it
-    # lands at ~1.13.  Tolerance: within +/-25% of nominal u_max.
+    # lands at 1.130.
+    #
+    # The band below is [0.75, 1.30], NOT a symmetric +/-25%, and the
+    # asymmetry is the physics rather than slack: the bounce-back wall
+    # sits half a lattice unit outside the nominal R, so the effective
+    # radius is larger and the ratio is biased *up*.  1.25 would leave
+    # 0.12 above the measured 1.130 on exactly the side the
+    # discretisation pushes it.  ``acceptance_criteria`` above says the
+    # same thing, because that string -- not this comment -- is what
+    # docs/validation/framework_verification.md renders for a reader who
+    # never opens this file.  Keep the two in step.
     mu = 0.1  # nu * rho with rho = 1
     u_max_analytic = F * R * R / (4.0 * mu)
     u_center = u_x_cross[cy, cz]

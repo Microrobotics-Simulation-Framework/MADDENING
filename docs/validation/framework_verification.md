@@ -12,6 +12,18 @@ matches its source.  The previous hand-maintained version of this page listed
 one of four registered benchmarks, seven of twelve test packages, a Python
 version CI had not used alone since 0.2, and "JAX: 0.4+" against a 0.10.2 pin.
 
+```{warning}
+**What this evidence was generated against is only partly recorded.**  CI
+hard-pins `jax` and `jaxlib`; every other base dependency is installed from
+its range, so the resolved version differs between runs and no run records
+it.  Reading `jax>=0.10,<0.13` in the table below as "verified across that
+range" would be wrong — one point in it has been exercised.  Closing this
+properly needs a lock file or an SBOM captured per CI run (§6 of
+`soup_package.md` records the CycloneDX SBOM as still planned); until then
+the table says what is pinned and what is not, rather than letting the
+declared range stand in for the tested one.
+```
+
 ## Test Suite
 
 <!-- BEGIN GENERATED: test-suite -- scripts/generate_soup_tables.py; do not edit by hand -->
@@ -21,7 +33,8 @@ version CI had not used alone since 0.2, and "JAX: 0.4+" against a 0.10.2 pin.
 | CI system | GitHub Actions |
 | CI runners | `ubuntu-latest` |
 | Python versions | 3.11, 3.12 (floor: >=3.11) |
-| JAX | pinned to `0.10.2` in CI; `jax>=0.10,<0.13` supported |
+| JAX | evidence generated at `0.10.2`, the only version CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
+| Other base dependencies | `lineax>=0.0.7`, `numpy>=1.24`, `pyyaml>=6.0` — installed from these ranges, not pinned, so the resolved version differs between runs and **is not recorded** |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
 | Test packages | 13 — listed below |
 <!-- END GENERATED: test-suite -->
@@ -58,7 +71,7 @@ asserted.
 |---|---|---|---|---|
 | MADD-VER-001 | HeatNode | `analytical` | L2 relative error < 1e-4 after 100 steps at CFL=0.25 (n=50); measured 1.59e-5, a factor of 6.3 of margin. Was < 5% before 0.4.0, when the boundary-cell overwrite (MADD-ANO-007) put the error at 1.8% -- a threshold 2.8x the defect it was covering. | `tests.verification.test_heat_analytical.test_heat_fourier_benchmark` |
 | MADD-VER-002 | HeatNode | `convergence_study` | Mean of the pairwise global L2 convergence rates over a 20/40/80 ladder at CFL=0.25 within [1.7, 2.3] of the theoretical 2.0 (measured: 1.900), and the error strictly decreasing. Before 0.4.0 this study measured ~1.0 -- the boundary-cell overwrite of MADD-ANO-007 -- and its band had been widened to [0.7, 2.5], which admitted that result; the band now rejects it by 0.7. | `tests.verification.test_heat_analytical.test_heat_spatial_convergence` |
-| MADD-VER-003 | LBMNode | `analytical` | After 500 steps: profile positive and peaked at the centre; a least-squares fit u = c0 + c1 r^2 concave with effective R^2 within [0.7, 1.5] of nominal; cross-section symmetric to rtol 1e-3; centreline velocity within +/-25% of u_max = F R^2 / (4 mu) | `tests.cloud.multigpu.test_lbm_poiseuille.test_poiseuille_sharded_profile_is_parabolic` |
+| MADD-VER-003 | LBMNode | `analytical` | After 500 steps: profile positive and peaked at the centre; a least-squares fit u = c0 + c1 r^2 concave with effective R^2 within [0.7, 1.5] of nominal; cross-section symmetric to rtol 1e-3; centreline velocity in [0.75, 1.30] x u_max = F R^2 / (4 mu). The band is deliberately asymmetric: mid-link bounce-back puts the hydrodynamic wall half a lattice unit outside the nominal R, so the effective radius is larger and the ratio is biased above 1 (measured 1.130). A symmetric +/-25% would leave 0.12 of headroom above the measured value on the side the discretisation pushes it | `tests.cloud.multigpu.test_lbm_poiseuille.test_poiseuille_sharded_profile_is_parabolic` |
 | MADD-VER-004 | AdaptiveNode | `analytical` | Full-basis (K = n = 256) L2 relative error < 1e-4 on the grid and sensor error < 1e-6; over K in (4, 8, 16, 32) the K = 32 sensor error is the smallest of the four, is < 1e-6, and is at least two orders of magnitude below the K = 4 error. Not strictly decreasing in K: top-K on a non-nested basis means the K = 8 set is not a superset of the K = 4 set (9 of 48 swept configurations are non-monotone) | `tests.nodes.adaptive.test_verification.test_adaptive_solve_matches_greens_function_and_converges_in_k` |
 | MADD-VER-005 | HeatNode | `manufactured_solution` | Observed spatial order over the finest pair of a 10/20/40/80/160 ladder within [-0.25, +1.0] of the declared 2.0 (measured: 2.000). Dirichlet data supplied at the rod ends x=0 and x=L, which is what boundary_input_spec documents and, since 0.4.0, what the node implements; before 0.4.0 the same ladder measured 1.001 (MADD-ANO-007). | `tests.verification.test_mms_order.test_heat_second_order_stencil_converges_at_its_declared_spatial_order` |
 | MADD-VER-006 | HeatNode | `manufactured_solution` | Observed temporal order over the finest pair of a 250/500/1000/2000 step ladder within [-0.25, +1.0] of the declared 1.0 (measured: 0.998) | `tests.verification.test_mms_order.test_heat_converges_at_its_declared_temporal_order` |

@@ -397,15 +397,36 @@ def render_test_suite(pyproject: dict, packages: list[str], ci: dict) -> str:
         (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
         "",
     )
+    # Which base dependencies CI actually pins, and which float.  The
+    # row used to read "`jax>=0.10,<0.13` supported", which asserts a
+    # range on evidence taken at one point inside it, and nothing said
+    # anything at all about the other base dependencies -- CI installs
+    # them from their ranges, so the resolved version differs run to
+    # run and is recorded nowhere.  A SOUP document that cannot say what
+    # its evidence was generated against is missing the part IEC 62304
+    # cares most about, so this now says what is pinned, what is not,
+    # and that the unpinned ones are unrecorded rather than assumed.
+    pinned_names = {"jax", "jaxlib"}
+    floating = [
+        d for d in pyproject["project"]["dependencies"]
+        if re.split(r"[<>=!~\[]", d, 1)[0].strip() not in pinned_names
+    ]
     rows = [
         ["Test runner", "pytest"],
         ["CI system", "GitHub Actions"],
         ["CI runners", ", ".join(f"`{r}`" for r in ci["runners"])],
         ["Python versions", ", ".join(ci["pythons"]) + " (floor: "
                             f"{pyproject['project'].get('requires-python', '')})"],
-        ["JAX", "pinned to "
+        ["JAX", "evidence generated at "
                 + ", ".join(f"`{v}`" for v in ci["jax_pins"])
-                + f" in CI; `{jax_spec}` supported"],
+                + f", the only version CI installs; `{jax_spec}` is the "
+                  "*declared* range and no other point in it has been "
+                  "exercised"],
+        ["Other base dependencies", ", ".join(f"`{d}`" for d in floating)
+                                    + " — installed from these ranges, "
+                                      "not pinned, so the resolved version "
+                                      "differs between runs and **is not "
+                                      "recorded**"],
         ["Backend", "CPU (GPU tests are not run in CI — MADD-ANO-001)"],
         ["Test packages", f"{len(packages)} — listed below"],
     ]

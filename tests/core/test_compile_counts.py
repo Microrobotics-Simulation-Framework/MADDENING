@@ -25,7 +25,9 @@ exit code and message are then asserted.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -264,10 +266,12 @@ def test_a_changing_state_aval_is_reported_as_an_extra_compile():
 # has to run in a child process for its numbers to mean anything.
 
 
-def _run(*args: str) -> subprocess.CompletedProcess:
+def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run the real script.  *env* overrides entries of the inherited one."""
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         capture_output=True, text=True, cwd=REPO_ROOT,
+        env={**os.environ, **(env or {})},
     )
 
 
@@ -276,6 +280,154 @@ def test_the_committed_baseline_matches_what_the_code_compiles_to():
     the message says how to regenerate the baseline if it is intended."""
     done = _run("--check")
     assert done.returncode == 0, done.stderr or done.stdout
+
+
+# ---------------------------------------------------------------------------
+# The pinned environment
+# ---------------------------------------------------------------------------
+#
+# JAX fixes its device count when its backend initialises, so a process
+# that has already imported JAX cannot change it.  Hence the child
+# process -- and hence the child must not inherit the *parent's* device
+# count either.  It very nearly does: ``tests/cloud/multigpu/conftest.py``
+# appends ``--xla_force_host_platform_device_count=16`` to ``os.environ``
+# at import time, so in a whole-suite run (which is what CI does) every
+# subprocess spawned after collection sees sixteen virtual devices, while
+# running this file on its own sees none.  The gate's numbers must not
+# depend on which tests happened to be collected beside it.
+
+#: What ``os.environ["XLA_FLAGS"]`` actually holds in CI once the
+#: multigpu conftest has been imported.  CI itself sets only the first of
+#: the two flags (``.github/workflows/ci.yml``).
+CI_INHERITED_XLA_FLAGS = (
+    "--xla_gpu_autotune_level=0 --xla_force_host_platform_device_count=16"
+)
+HOST_DEVICE_FLAG = "--xla_force_host_platform_device_count"
+
+
+@pytest.fixture
+def script():
+    """The gate script imported into this process, environment restored.
+
+    Importing it pins ``JAX_PLATFORMS`` and ``XLA_FLAGS`` process-wide --
+    that is the script's job -- which would otherwise leak into every
+    subprocess spawned later in the session, so the previous values are
+    put back.  JAX is already imported here, so the pin cannot change
+    this process's own devices; the import exists only to reach the pure
+    functions, which is what lets the tests below run in microseconds and
+    on any machine.
+    """
+    saved = {name: os.environ.get(name) for name in ("JAX_PLATFORMS", "XLA_FLAGS")}
+    try:
+        spec = importlib.util.spec_from_file_location("compile_counts_gate", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@pytest.mark.parametrize("inherited", [
+    "",
+    "--xla_gpu_autotune_level=0",
+    CI_INHERITED_XLA_FLAGS,
+    f"{HOST_DEVICE_FLAG}=16",
+    f"{HOST_DEVICE_FLAG} 16",                      # absl's other spelling
+    f"{HOST_DEVICE_FLAG}=4",                       # already right: still once
+    f"{HOST_DEVICE_FLAG}=2 {HOST_DEVICE_FLAG}=16",  # repeated
+])
+def test_the_pinned_device_count_survives_any_inherited_xla_flags(script, inherited):
+    """Whatever the caller had, the child is told four devices, once.
+
+    An inherited count is stripped rather than respected.  Deferring to
+    it is what made the gate unrunnable in CI: the baseline records four
+    devices and CI presented sixteen, so the gate refused to compare --
+    correctly, but then nothing was gated at all.
+    """
+    pinned = script.pin_device_count(inherited)
+    tokens = pinned.split()
+    assert [t for t in tokens if t.startswith(HOST_DEVICE_FLAG)] == \
+        [f"{HOST_DEVICE_FLAG}=4"]
+    # the space-separated spelling must not leave its value behind
+    assert "16" not in tokens, f"a stray flag value survived: {pinned!r}"
+
+
+def test_pinning_keeps_the_callers_other_xla_flags(script):
+    """Only the device count is the script's business.
+
+    Dropping CI's ``--xla_gpu_autotune_level=0`` would silently change
+    the environment the counts were taken in.
+    """
+    assert script.pin_device_count(CI_INHERITED_XLA_FLAGS) == \
+        f"--xla_gpu_autotune_level=0 {HOST_DEVICE_FLAG}=4"
+
+
+def test_the_gate_measures_its_own_device_count_not_the_ambient_one():
+    """The CI failure this branch was red for, end to end.
+
+    Before the pin, ``--check`` under this environment exited 1 with
+    "expected 4 JAX devices, got 16" and every test in this file that
+    drives the script failed or errored with it.
+    """
+    hostile = {"JAX_PLATFORMS": "cpu", "XLA_FLAGS": CI_INHERITED_XLA_FLAGS}
+    shown = _run("--show", env=hostile)
+    assert shown.returncode == 0, shown.stderr
+    assert "4 devices" in shown.stdout, shown.stdout
+    assert _run("--check", env=hostile).returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# The comparison, against synthetic documents
+# ---------------------------------------------------------------------------
+#
+# ``compare`` is pure, so these need no subprocess, no JAX workload and
+# no particular machine.  The end-to-end mutation tests further down
+# drive the same logic through the real script.
+
+
+def _doc(device_count: int = 4, jax_version: str = "0.10.2", **counts) -> dict:
+    """A minimal baseline document, for driving ``compare`` directly."""
+    return {
+        "environment": {"jax": jax_version, "jaxlib": jax_version,
+                        "platform": "cpu", "device_count": device_count},
+        "workloads": {"w": {"retrace_count": 1, "jaxpr_primitive_count": 100,
+                            "hlo_op_count": 100, **counts}},
+    }
+
+
+def test_two_matching_documents_compare_clean(script):
+    """Guard the negatives below against passing for the wrong reason."""
+    assert script.compare(_doc(), _doc()) == []
+
+
+def test_the_gate_refuses_a_baseline_taken_on_another_device_count(script):
+    """Counts from another topology are not comparable at any tolerance.
+
+    ``sharded_heat`` meshes over every device, so its counts are a
+    function of the mesh size.  Silently comparing across topologies
+    would be worse than having no gate, so this is a reported problem
+    rather than a skip -- and it is checked here, on the numbers, rather
+    than only by the hard guard in ``measure``.
+    """
+    problems = script.compare(_doc(device_count=16), _doc(device_count=4))
+    assert problems, "the gate compared counts across device topologies"
+    assert any("device count" in p for p in problems), problems
+    assert any("16" in p and "4" in p for p in problems), problems
+
+
+def test_the_gate_refuses_a_baseline_that_records_no_device_count(script):
+    """Fail closed on the field's absence rather than assuming four.
+
+    Where this repository's compliance gates have been wrong before, they
+    have been wrong by quietly ignoring what they did not recognise.
+    """
+    stale = _doc()
+    del stale["environment"]["device_count"]
+    assert script.compare(stale, _doc()), "a baseline with no topology passed"
 
 
 def test_every_baseline_workload_records_one_retrace():

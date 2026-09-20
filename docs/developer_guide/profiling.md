@@ -156,8 +156,21 @@ multi-rate graph, a heat chain with a `run_scan` program, and a
 `ShardedStencilNode` over a four-device mesh — and compared to
 `benchmarks/compile_counts_baseline.json`.  The script pins
 `JAX_PLATFORMS=cpu` and the device count before importing JAX, because
-both change the counts; `tests/core/test_compile_counts.py` therefore
-runs it as a subprocess.
+both change the counts; JAX fixes its device count when its backend
+initialises, so `tests/core/test_compile_counts.py` runs the script as a
+subprocess rather than calling it.
+
+The pin **overrides** an inherited
+`--xla_force_host_platform_device_count`; it does not defer to it.  That
+matters more than it sounds.  `tests/cloud/multigpu/conftest.py` appends
+`--xla_force_host_platform_device_count=16` to `os.environ` when it is
+imported, so in a whole-suite run — which is what CI does — every
+subprocess spawned after collection inherits sixteen virtual devices,
+while running `tests/core/test_compile_counts.py` on its own inherits
+none.  If the gate took the inherited value, its device count would be a
+function of which tests were collected beside it, and no contributor
+could regenerate a baseline CI would accept.  Do not "fix" the pin to
+respect the caller.
 
 ### If the gate fails on your branch
 
@@ -173,6 +186,13 @@ command.  Two cases:
   the running JAX matches the baseline's, ±max(10 ops, 25%) otherwise.
   If the change is intended, regenerate and commit the new baseline,
   saying in the commit message why the counts moved.
+- **The device count moved.**  Never banded and never widened: the
+  sharded workload meshes over every device, so counts taken on another
+  topology are not comparable at any tolerance.  A baseline recording a
+  different `device_count` — or none at all — is rejected rather than
+  compared.  Regenerating fixes it, because the script pins the count
+  itself; if you see this, the pin failed, which means something
+  imported JAX before the script ran.
 
 Regenerate under the JAX version CI pins where you can — the baseline
 records the version it was taken on, and one matching CI's gets the

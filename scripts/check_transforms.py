@@ -234,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
 
     errors = []
     notes = []
-    n_checked = 0
+    n_in_scope = 0
     n_allowlisted = 0
     n_unconfirmed = 0
     scanned_roots = []
@@ -259,7 +259,11 @@ def main(argv: list[str] | None = None) -> int:
                 if (rel, name) in _ALLOWED_UNRESOLVABLE:
                     n_allowlisted += 1
                     continue
-                n_checked += 1
+                # References the gate takes responsibility for.  Not the
+                # same number as the ones it ends up verifying: the
+                # live-registry loop below can leave some unconfirmed,
+                # and `n_verified` subtracts those back out.
+                n_in_scope += 1
                 if name in builtin_names:
                     continue
                 if name in local:
@@ -311,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if n_checked == 0:
+    if n_in_scope == 0:
         print(
             f"FAIL: 0 string transform reference(s) found in {scanned_roots}.\n"
             "A gate that verifies nothing cannot fail.  Either the scan roots "
@@ -324,13 +328,24 @@ def main(argv: list[str] | None = None) -> int:
     # Verified, declined and unconfirmed are three numbers, not one.  A
     # single headline that folds in what the gate skipped is how "50
     # citations verified" came to mean 45.
+    #
+    # The unconfirmed are subtracted here rather than never counted,
+    # because which references they are is only known after the
+    # live-registry loop above.  The allowlisted ones `continue` before
+    # they are ever counted, and the two used to be handled differently:
+    # a scope with two references, one credited to a local
+    # `@register_transform` in a module this environment cannot import,
+    # printed "2 ... verified, 1 not confirmed" (audit_040_r3).  One was
+    # verified, not two -- and the counter was introduced by 44250c3,
+    # the fix for this very defect class.
+    n_verified = n_in_scope - n_unconfirmed
     extra = ""
     if n_allowlisted:
         extra += f", {n_allowlisted} allowlisted and not checked"
     if n_unconfirmed:
         extra += f", {n_unconfirmed} not confirmed against the live registry"
     print(
-        f"OK: {n_checked} string transform reference(s) verified{extra} "
+        f"OK: {n_verified} string transform reference(s) verified{extra} "
         f"({len(builtin_names)} transforms in registry)"
     )
     return 0

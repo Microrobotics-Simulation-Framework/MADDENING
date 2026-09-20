@@ -608,3 +608,179 @@ def test_a_negative_eigenvalue_does_not_mask_a_ratio_that_is_on_the_cutoff():
     assert limited is not None, "the in-band ratio was masked"
     ratio, _ = limited
     assert abs(ratio / (1.3 * cutoff) - 1.0) < 1e-3, ratio
+
+
+# ---------------------------------------------------------------------------
+# The rank cutoff has to see the residual length
+# ---------------------------------------------------------------------------
+
+
+_EPS32 = float(np.finfo(np.float32).eps)
+
+
+def _exactly_rank_deficient(n, m, seed):
+    """An ``m x n`` Jacobian with an **exact** null direction.
+
+    Built in float64 from a spectrum whose smallest eigenvalue is
+    literally ``0.0``, so float64 answers ``rank = n - 1`` and
+    ``crb = inf`` by construction and there is nothing to argue about:
+    whatever float32 reports above zero for that direction is its own
+    rounding, and the cutoff either covers it or does not.
+    """
+    rng = np.random.default_rng(seed)
+    lam = np.geomspace(1e-2, 1.0, max(n - 1, 1)).copy()
+    lam[-1] = 1.0
+    lam = np.concatenate([[0.0], lam])[:n]
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    return (U * np.sqrt(lam)) @ V.T
+
+
+def _fim_of_matrix(J64, **kw):
+    n = J64.shape[1]
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PrecisionLimitWarning)
+        return fim(lambda p: A @ jnp.stack([p[k] for k in keys]), params,
+                   scale=None, **kw)
+
+
+def test_a_long_residual_does_not_make_a_missing_direction_identifiable():
+    """The defect the ``sqrt(m)`` term fixes, in the form a user meets it.
+
+    ``F = J.T @ J`` is summed over ``m`` residual rows and its error
+    grows with ``m``; ``F`` cannot show that, and a cutoff of
+    ``n * eps`` does not ask.  At ``n = 2, m = 4000`` the cutoff is
+    ``2 eps`` while the measured float32 floor reaches ``9 eps``, so the
+    null direction's eigenvalue can come back *above* the cutoff -- and
+    then ``rank`` counts a direction that is not in the data at all and
+    ``crb`` reports a finite variance bound for parameters no estimator
+    can determine.  A false "identifiable", which is the direction
+    :class:`~maddening.sysid.FIMReport` fails safe against everywhere
+    else.
+
+    Sixty-four fixed seeds; float64 says ``rank = 1`` for every one.
+    """
+    n, m = 2, 4000
+    old_cutoff = n * _EPS32
+    new_cutoff = max(n, np.sqrt(m)) * _EPS32
+    over_old = wrong_rank = finite_crb = 0
+    for seed in range(64):
+        J64 = _exactly_rank_deficient(n, m, seed)
+        report = _fim_of_matrix(J64)
+        ev = np.asarray(report.eigvals, dtype=np.float64)
+        ratio = float(ev[0]) / float(ev[-1])
+        over_old += ratio > old_cutoff
+        # what the old cutoff would have said, asked of this very report
+        if ratio > old_cutoff:
+            wrong_rank += 1
+            finite_crb += bool(
+                np.isfinite(np.asarray(_fim_of_matrix(
+                    J64, rank_rtol=old_cutoff).crb)).all())
+        assert report.rank == n - 1, (
+            f"seed={seed}: rank={report.rank} for a Jacobian that is "
+            f"exactly rank {n - 1} in float64; lam0/lamMax = "
+            f"{ratio / _EPS32:.2f} eps against a cutoff of "
+            f"{new_cutoff / _EPS32:.2f} eps"
+        )
+        assert not np.isfinite(np.asarray(report.crb)).any(), report.crb
+
+    # Non-vacuity, and the only thing that stops this test passing for the
+    # wrong reason.  If a future XLA rounds the 4000-row sum more tightly
+    # the population stops exercising the defect, and then the assertions
+    # above hold under the old cutoff too and pin nothing.  Fail loudly
+    # instead of quietly becoming a tautology.
+    assert over_old > 0, (
+        "the population no longer straddles the old n*eps cutoff, so this "
+        "test can no longer distinguish the two cutoffs; re-measure the "
+        "float32 floor and raise m"
+    )
+    assert wrong_rank == over_old and finite_crb == over_old
+
+
+def test_the_default_cutoff_is_max_of_n_and_sqrt_m():
+    """The cutoff's two terms, and which one wins where.
+
+    ``eigh``'s error is ``~ n * eps * max(eigvals)`` and forming
+    ``F = J.T @ J`` over ``m`` rows costs ``~ sqrt(m) * eps`` more; the
+    cutoff is the larger, so it reduces *exactly* to the old ``n * eps``
+    whenever ``m <= n**2`` and can never fall below it.  That is what
+    makes this change a widening and not a reweighting.
+    """
+    from maddening.sysid import _resolve_rank_rtol
+
+    for n, m, expected in (
+        (2, 3, 2.0),            # short residual: unchanged
+        (5, 25, 5.0),           # m == n**2: the crossover, still unchanged
+        (5, 24, 5.0),
+        (2, 20, np.sqrt(20)),   # sqrt(m) takes over
+        (2, 4000, np.sqrt(4000)),
+        (25, 4000, np.sqrt(4000)),
+        (25, 100, 25.0),
+    ):
+        got = _resolve_rank_rtol(np.float32, n, None, n_residual=m)
+        assert abs(got / (expected * _EPS32) - 1.0) < 1e-12, (n, m, got)
+        # never below the n-only form: a pure widening
+        assert got >= n * _EPS32 * (1.0 - 1e-12), (n, m, got)
+        # never the worst-case ``max(n, m) * eps``, the same shape taken
+        # literally, which measures 1315x the float32 floor at its loosest
+        assert got <= max(n, m) * _EPS32 * (1.0 + 1e-12), (n, m, got)
+        if m > n * n:
+            assert got < max(n, m) * _EPS32, (n, m, got)
+
+    # monotone non-decreasing in m, for fixed n
+    seq = [_resolve_rank_rtol(np.float32, 3, None, n_residual=m)
+           for m in (1, 4, 9, 16, 64, 256, 1024, 4096)]
+    assert all(b >= a for a, b in zip(seq, seq[1:])), seq
+    # an explicit rank_rtol is still honoured verbatim: the residual
+    # length informs the *default*, it does not override a caller
+    assert _resolve_rank_rtol(np.float32, 2, 1e-3, n_residual=4000) == 1e-3
+    # and with no residual length in hand the n-only form is what is left
+    assert _resolve_rank_rtol(np.float32, 7, None, n_residual=None) \
+        == 7 * _EPS32
+
+
+def test_a_short_residual_verdict_is_bit_for_bit_what_it_was():
+    """The other half of "a widening": everything with ``m <= n**2`` has
+    to be untouched, not merely close.  Most real fits are here -- the
+    spring-damper examples in the user guide fit two or three constants
+    to a few dozen samples only because the samples are cheap; the
+    ratio that matters is ``m`` against ``n**2``.
+    """
+    for n, m in ((3, 9), (4, 16), (5, 20), (6, 30)):
+        J64 = _exactly_rank_deficient(n, m, seed=7)
+        new = _fim_of_matrix(J64)
+        old = _fim_of_matrix(J64, rank_rtol=n * _EPS32)
+        assert new.rank == old.rank, (n, m, new.rank, old.rank)
+        assert np.array_equal(np.asarray(new.crb), np.asarray(old.crb))
+
+
+def test_the_warning_band_is_anchored_to_the_cutoff_that_saw_m():
+    """The warning's second anchor is the *default* cutoff, and it had to
+    move with it.
+
+    :func:`_precision_limited` fires only when the deciding ratio is both
+    near the cutoff and at the precision floor.  Leaving that floor at
+    ``n * eps`` while the cutoff grew would have kept the old blind spot
+    alive inside the warning: at ``n = 2, m = 4000`` the cutoff is 63
+    eps, and a ratio sitting on it would have been rejected for being
+    more than ``factor * 2 eps``.  Silence on precisely the verdicts
+    this branch exists to describe.
+    """
+    n, m = 2, 4000
+    cutoff = max(n, np.sqrt(m)) * _EPS32
+    # a residual whose null direction sits right on the new cutoff
+    rng = np.random.default_rng(11)
+    lam = np.array([cutoff, 1.0])
+    q, r = np.linalg.qr(rng.standard_normal((n, n)))
+    V = q * np.sign(np.diag(r))
+    U = np.linalg.qr(rng.standard_normal((m, n)))[0]
+    J64 = (U * np.sqrt(lam)) @ V.T
+    A = jnp.asarray(J64, dtype=jnp.float32)
+    params = {f"p{i}": jnp.float32(1.0) for i in range(n)}
+    keys = tuple(params)
+    with pytest.warns(PrecisionLimitWarning, match="4000 residual rows"):
+        fim(lambda p: A @ jnp.stack([p[k] for k in keys]), params, scale=None)

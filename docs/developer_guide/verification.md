@@ -224,6 +224,147 @@ Every other node is undeclared and skips.  `LBMNode` declares no *temporal*
 order on purpose: the lattice fixes `dx = dt = 1` and `update` ignores its
 `dt`, so there is no timestep to refine.
 
+## Grid convergence: the fallback where MMS cannot reach
+
+MMS needs somewhere to inject `S`.  That is a real restriction, not a
+formality: `LBMPipeNode` declares no boundary inputs at all, a generic source
+term is not even well defined for a lattice Boltzmann collision operator (the
+forcing scheme changes the order of accuracy, so the study would measure the
+scheme rather than the operator), and a node a *user* writes will usually have
+no forcing input either.  Adding a manufactured-source hook to
+`SimulationNode` was proposed and rejected; `TODO.md`, "DECIDED AGAINST: a
+manufactured-source convention on `SimulationNode`", records the argument.
+
+**The node-authoring contract, in one line: a node with a natural forcing
+input can be MMS-tested; everything else falls back to GCI.**
+
+`maddening.testing.mms` therefore carries a second mode over the same
+refinement ladder.  A Richardson / Grid Convergence Index study compares three
+successively refined solutions to **each other** — no exact field, no source
+term, no reference run — and yields the observed order of convergence, the
+extrapolated limit, and an error band on the finest solution
+[@Richardson1911; @Roache1994; @Celik2008; @ASMEVV20].
+
+```python
+from maddening.testing.mms import RefinementAxis, assert_node_gci_verified
+
+def flow_shape_at(n_cells):
+    """Build the node at this resolution, run it, return ONE scalar."""
+    ...
+    return u_max / u_mean
+
+assert_node_gci_verified(
+    node, axis=RefinementAxis.SPACE, solution_at=flow_shape_at,
+    levels=(16, 24, 32),        # coarsest first, at least three
+    max_gci=0.25,               # widest acceptable band, as a fraction
+)
+```
+
+The callback returns the **solution**, not the error, and it must be one
+scalar functional — a peak value, a flux, a drag coefficient, a norm of the
+state — computed identically at every level.
+
+### What it reports, and what it refuses
+
+Every quantity comes off the convergence ratio `R = eps_fine / eps_coarse`,
+the change over the finest pair divided by the change over the pair before it
+[@Stern2001].  Only `0 < R < 1` admits an extrapolation:
+
+| `R` | Regime | Outcome |
+|---|---|---|
+| `0 < R < 1` | monotone convergence | order, limit and GCI reported |
+| `-1 < R < 0` | oscillatory convergence | **FAIL**, named — the solutions straddle their limit, and no single power law describes the approach |
+| `R >= 1` | monotone divergence | **FAIL**, named |
+| `R <= -1` | oscillatory divergence | **FAIL**, named |
+| a difference vanishes | stagnant | **FAIL** — *the node did not respond to refinement* |
+| a solution is not finite | invalid | **FAIL** |
+
+The stagnant case is the one to know about.  A node that ignores its
+refinement parameter returns the same number three times; every formula in a
+GCI divides by the difference between them, so the naive implementation
+returns `nan` or, worse, a plausible order read off round-off.  Solutions
+identical to within `DEFAULT_STAGNATION_RTOL` (`1e-12`, double-precision
+round-off — raise it for a float32 study) are refused by name.  This is
+checked **before** the node's declared order is looked at, so a node that both
+declares nothing and ignores refinement cannot skip its way to a pass.
+
+### Non-constant and non-integer refinement ratios
+
+With a constant ratio the observed order is the textbook
+`log(eps_32 / eps_21) / log(r)`.  With a ladder of 10, 17 and 40 cells it is
+not, and using that formula anyway is the classic way to get a GCI wrong: on a
+second-order rule it reads **0.98**, which looks like a perfectly plausible
+first-order scheme and would be believed.
+
+The harness never assumes a constant ratio.  It solves the implicit equation
+of the ASME V&V 20 procedure [@Celik2008],
+
+```
+p = |ln|eps_32/eps_21| + q(p)| / ln(r_21),
+q(p) = ln((r_21^p - s) / (r_32^p - s)),   s = sgn(eps_32/eps_21)
+```
+
+by Celik et al.'s fixed-point iteration, falling back to a bracketed bisection
+on the signed residual when that diverges — which it does for ratio pairs far
+apart, `r_21 = 1.4` against `r_32 = 2.7` overflowing within twenty steps.  A
+pair for which the equation has no root in `[1e-3, 40]` is reported as an
+inconclusive study, never clipped to the nearest endpoint.
+
+### The safety factor
+
+`Fs = 1.25` where the asymptotic range has been demonstrated, `Fs = 3.0`
+everywhere else [@Roache1994; @Roache1998].  Roache ties the narrow band to an
+order *measured* from three or more grids that agrees with the formal one;
+where that agreement cannot be shown, this harness takes the conservative
+factor rather than quoting the narrower band on trust.  A node that declares
+no order therefore gets a wider, honest band instead of a confident,
+unsupported one.
+
+### The asymptotic range
+
+A GCI is an error band only inside the asymptotic range, where the leading
+truncation term dominates.  Outside it the number is not conservative — it is
+*wrong in the confident direction*.  On the `LBMPipeNode` ladder below, the
+16/24/32 triple quotes a band of 1.2% around a solution that is 3.6% from the
+answer.  A study **positively shown** to be outside the range therefore fails
+rather than reporting.
+
+Roache's published check, `GCI_coarse / (r^p * GCI_fine) ~ 1`, is reported but
+is **not** what the verdict is taken from.  For a three-grid study at a
+constant ratio it collapses algebraically to `|phi_fine| / |phi_medium|`, so it
+is within a per cent of 1 for any ladder whose solutions are close together,
+converging or not — it reads 1.006 on the LBM pipe study that is emphatically
+not asymptotic.  What carries information is:
+
+1. **the observed order against the declared one** — the criterion ASME V&V 20
+   uses, and the reason declaring `DiscretizationOrder` pays off twice; and
+2. **agreement between independent triples**, when the ladder has four or more
+   levels — which needs nothing declared.
+
+With three levels and no declared order, neither is available and the harness
+answers `None`, not `True`.  Adding a fourth level can therefore turn a pass
+into a failure, and that is the intended direction: more evidence, more that
+can be falsified.
+
+### What it covers, and what it cannot
+
+| Node | Axis | Levels | `R` | Observed order | GCI (`Fs`) | Benchmark |
+|------|------|--------|-----|----------------|------------|-----------|
+| `LBMPipeNode` (D3Q19, uniform axial force, `u_max/u_mean`) | space | 12/16/24 | 0.846 | 1.49 | 10.7% (3.0) | MADD-VER-013 |
+| `LBMPipeNode`, same ladder plus 32 | space | 12/16/24/32 | 0.214 | 1.49 and 3.35 | — | not asymptotic; fails |
+
+`LBMPipeNode` is the node the mode was built for, and the four-level result is
+the honest finding: the pipe wall is a circle staircased onto a Cartesian
+lattice with bounce-back [@Kruger2017], the effective wall position jumps about
+as the resolution changes, and the two independent triples disagree by nearly
+two orders of accuracy.  The study converges, but it is not in the asymptotic
+range, and the harness says so instead of quoting a band it cannot support.
+
+**GCI never sees the true answer, so it cannot catch a scheme that converges
+cleanly to the wrong limit.**  MMS can.  Where a node has a natural forcing
+input, MMS is the stronger test and GCI is the uncertainty statement on top of
+it — not a substitute for it.
+
 ## Running the suite
 
 ```bash
@@ -249,6 +390,9 @@ globally because the first example of every test pays JIT compilation.
 - [ ] `assert_node_verified(node, bounds=...)` with a physically meaningful envelope
 - [ ] `NodeMeta(discretization_order=DiscretizationOrder(...))`, and an MMS
       study measuring it — an order nobody measured is a claim, not evidence
+- [ ] A node with a natural forcing input can be MMS-tested; everything else
+      falls back to GCI — `assert_node_gci_verified(node, solution_at=...)`,
+      which needs nothing from the node but the ability to refine
 - [ ] `update(state, bi, dt=0)` is identity (zero-step) — add as an `invariants` entry
 - [ ] If dissipative: `energy_fn=`
 - [ ] If a conservation law applies: `invariants=` for the conserved quantity

@@ -382,11 +382,22 @@ class TestFIM:
     workaround: position-only data cannot separate a common scaling of
     ``(k, c, m)``, so for a good share of the generated parameter draws
     the weakest eigenvalue genuinely sits at the float32 noise floor and
-    ``fim`` correctly says so.  Observed here at 1.14x, 1.18x, 1.4x,
-    1.67x and 1.97x the cutoff on different draws -- which is also the
-    honest headline about doing identifiability analysis in float32:
-    for this project's canonical problem the rank verdict routinely sits
-    within a small multiple of the floor.
+    ``fim`` correctly says so -- which is also the honest headline about
+    doing identifiability analysis in float32: for this project's
+    canonical problem the rank verdict routinely sits within a small
+    multiple of the floor.
+
+    The multiples first recorded here -- 1.14x, 1.18x, 1.4x, 1.67x and
+    1.97x the cutoff -- were measured against the ``n * eps`` cutoff,
+    which no longer exists; ``rank_rtol`` now carries a ``sqrt(m)`` term
+    and every one of them is quoted against a cutoff that has moved.
+    Re-checked with the filter lifted under the ``ci`` profile, the
+    warning still fires here, at 1.97x on a ``k=9, c=0.125, m=2`` draw
+    over 40 samples (cutoff ``sqrt(40) * eps``), so the filter is still
+    load-bearing and not a leftover.  Fewer draws cross the band than
+    before -- one of the seven tests fired in that run rather than five
+    -- but *which* draw crosses is exactly what is not stable between
+    runs, which is why this stays on the class.
 
     What these tests assert -- symmetry, PSD-ness, eigenvector
     directions, the congruence identity, where ``crb`` is finite -- are
@@ -738,9 +749,17 @@ def _fisher_with_known_ratio(n, m, ratio_x_cutoff, seed):
     Built in float64 and handed to ``fim`` as float32, so the float64
     reference below is the same matrix at the other precision rather
     than a different matrix.
+
+    The cutoff is ``max(n, sqrt(m)) * eps``, which is ``fim``'s own
+    default and not merely a number of the same shape.  It has to be:
+    every property here is stated in units of the cutoff, and a
+    reference applying a *different* cutoff from the one under test
+    disagrees for structural reasons that have nothing to do with
+    precision.  Before ``rank_rtol`` gained its ``sqrt(m)`` term this
+    read ``n * _EPS32``, and it was the same expression then.
     """
     rng = np.random.default_rng(seed)
-    cutoff = n * _EPS32
+    cutoff = max(n, np.sqrt(m)) * _EPS32
     mid = np.geomspace(1e-3, 1.0, max(n - 1, 1))
     mid[-1] = 1.0                       # geomspace(a, b, 1) is [a], not [b]
     lam = np.sort(np.concatenate([[ratio_x_cutoff * cutoff], mid]))[:n]
@@ -777,24 +796,30 @@ class TestPrecisionLimitedRank:
     decomposition resolves.  The contract is that such a verdict
     announces itself and an ordinary one stays quiet.
 
-    Every generator here keeps ``m`` small.  That is not convenience:
-    the error in forming ``F = J.T @ J`` in float32 grows with the
-    number of residual rows while the ``n * eps`` cutoff does not see
-    ``m`` at all, so at long residuals a precision-limited verdict can
-    land arbitrarily far from the cutoff and no factor catches it.  The
-    measured miss rate over the full sweep is ~14%, essentially all of
-    it there.  The cap is itself measured: over 120,000 draws of this
-    generator the misses were 0 at ``m <= 32`` and 1 at ``m <= 48``, and
-    at ``m <= 64`` they were 4 in 200,000 -- small, but a property
-    asserted absolutely must not be a 1-in-50,000 flake.  Claiming it
-    over long residuals would be claiming something measured to be
-    false.
+    The generators here sweep ``m`` up to 1024, and that is the point.
+    They used to cap it at 32, because the error in forming
+    ``F = J.T @ J`` in float32 grows with the number of residual rows
+    while the then-current ``n * eps`` cutoff could not see ``m`` at
+    all: at long residuals a precision-limited verdict landed
+    arbitrarily far from the cutoff and no symmetric factor reached it.
+    The measured miss rate over the full sweep was ~8%, essentially all
+    of it there, so asserting these properties over long residuals
+    would have been asserting something measured to be false.
+
+    ``rank_rtol`` now carries a ``sqrt(m)`` term, the cutoff tracks the
+    floor, and the misses are gone: over 228,000 synthetic matrices
+    (n = 2..25, m = 20..2000) recall is 1.000 at the current factor, by
+    every ``m`` bucket separately -- ``m`` in [20, 50], [50, 200],
+    [200, 800] and [800, 2000] all measure 1.000, against 0.912-0.916
+    overall under the old cutoff.  The cap coming off is the property getting
+    its teeth back, and a regression in the cutoff shows up here as a
+    failure rather than as a region nobody asserts anything about.
     """
 
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
-        m=st.integers(min_value=2, max_value=32),
+        m=st.integers(min_value=2, max_value=1024),
         # log-uniform across the cutoff: both verdicts occur, and
         # disagreements are common enough for the property to bite
         log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
@@ -835,10 +860,14 @@ class TestPrecisionLimitedRank:
     # -- at the same number of draws the ``assume`` form already cost, with
     # none of them thrown away.  See
     # docs/developer_guide/testing_standards.md on rejection budgets.
+    # Re-measured at 57.5% (92 warned of 160 draws) after the cutoff gained
+    # its ``sqrt(m)`` term and this generator's ``m`` cap came off, which
+    # changed both inputs to that 51.5%: still about half, so the doubling
+    # still buys the ~80 warned cases it was sized for.
     @settings(max_examples=2 * EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
-        m=st.integers(min_value=2, max_value=32),
+        m=st.integers(min_value=2, max_value=1024),
         log_ratio=st.floats(min_value=np.log(0.05), max_value=np.log(20.0)),
         seed=st.integers(min_value=0, max_value=2**31 - 1),
     )
@@ -879,7 +908,7 @@ class TestPrecisionLimitedRank:
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=8),
-        m=st.integers(min_value=2, max_value=32),
+        m=st.integers(min_value=2, max_value=1024),
         # 1e2 .. 1e6 times the cutoff: ordinary, well-conditioned work
         log_ratio=st.floats(min_value=np.log(1e2), max_value=np.log(1e6)),
         seed=st.integers(min_value=0, max_value=2**31 - 1),
@@ -911,14 +940,20 @@ class TestPrecisionLimitedRank:
         narrows it and it stops catching anything.  Neither shows up in
         a test that only asks whether a particular matrix warns.  So
         this one measures both rates over a fixed population and holds
-        them to floors well inside the measured values (recall 1.00 and
-        far-field fire rate 0.0000 over six seeds at calibration).
+        them to floors well inside the measured values.
+
+        The population spans short and long residuals, which it could
+        not before: ``m = 400`` puts the cutoff at ``sqrt(m) * eps``
+        rather than ``n * eps`` for every ``n`` here, so a cutoff that
+        stopped seeing the residual length would show up as a collapse
+        in recall on the ``m = 400`` cells rather than as nothing at
+        all.
         """
         rng = np.random.default_rng(20260919)
-        dis = caught = far = fired = 0
+        dis = caught = far = fired = long_dis = 0
         for n in (2, 3, 5):
-            cutoff = n * _EPS32
-            for m in (12, 40):
+            for m in (12, 40, 400):
+                cutoff = max(n, np.sqrt(m)) * _EPS32
                 for _ in range(150):
                     rc = float(np.exp(rng.uniform(np.log(0.2), np.log(50.0))))
                     J64, _ = _fisher_with_known_ratio(
@@ -928,11 +963,21 @@ class TestPrecisionLimitedRank:
                     if report.rank != rank64:
                         dis += 1
                         caught += warned
+                        long_dis += m > n * n
                     elif rc >= 5.0:
                         far += 1
                         fired += warned
         where = (f"disagreements={dis} caught={caught} "
-                 f"far={far} fired={fired}")
+                 f"far={far} fired={fired} long_residual={long_dis}")
         assert dis >= 5, f"population produced too few disagreements; {where}"
-        assert caught / dis >= 0.75, where
+        # Measured 1.000 / 0.0000 over six seeds; the floors sit inside
+        # that.  0.90 was 0.75 before the cutoff saw ``m``, when the
+        # long-residual misses made a tighter floor unmeetable.
+        assert caught / dis >= 0.90, where
         assert fired / max(far, 1) <= 0.02, where
+        # Non-vacuity for the regime this gate was widened to cover: the
+        # ``m > n**2`` cells must actually be producing close calls, or
+        # the recall figure above is a statement about short residuals
+        # wearing a longer population's name.  Three to six over six
+        # seeds at calibration.
+        assert long_dis >= 1, where

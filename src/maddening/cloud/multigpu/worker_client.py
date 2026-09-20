@@ -57,6 +57,14 @@ class WorkerClient:
         This worker's public ``"ip:port"`` for peer connections.
     zmq_ports : dict[str, int]
         ZMQ ports this worker exposes: ``{service_name: port}``.
+    secure : bool, optional
+        Whether to talk to the coordinator over ZMQ CURVE.  ``None``
+        (default) decides from *coordinator_addr*: a loopback
+        coordinator is contacted in cleartext, a remote one is
+        encrypted and authenticated.  ``True`` forces it on.
+    token : str, optional
+        Shared secret the CURVE keys are derived from; ``None`` reads
+        ``MADDENING_API_TOKEN``.  Must match the coordinator's.
     """
 
     def __init__(
@@ -65,7 +73,17 @@ class WorkerClient:
         subgraph_id: str,
         address: str,
         zmq_ports: Optional[dict[str, int]] = None,
+        secure: Optional[bool] = None,
+        token: Optional[str] = None,
     ) -> None:
+        from maddening.transport_auth import resolve_security
+
+        self._secure = resolve_security(f"tcp://{coordinator_addr}", secure)
+        self._token = token
+        if self._secure:
+            from maddening.transport_auth import TransportAuth
+
+            TransportAuth(token=token)  # raises now if the token is missing
         self._coordinator_addr = coordinator_addr
         self._subgraph_id = subgraph_id
         self._address = address
@@ -75,6 +93,19 @@ class WorkerClient:
         self._stop_event = threading.Event()
         self._on_shutdown: Optional[Callable[[], None]] = None
         self._on_peer_dead: Optional[Callable[[str], None]] = None
+
+    def _secure_socket(self, sock) -> None:
+        """Apply CURVE client keys to *sock* before it connects."""
+        if not self._secure:
+            return
+        from maddening.transport_auth import TransportAuth
+
+        TransportAuth(token=self._token).secure_client(sock)
+
+    @property
+    def secure(self) -> bool:
+        """Whether this client talks to the coordinator over CURVE."""
+        return self._secure
 
     @property
     def topology(self) -> Optional[list[PeerConnection]]:
@@ -110,6 +141,7 @@ class WorkerClient:
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5s recv timeout
+        self._secure_socket(sock)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         # Send registration
@@ -233,6 +265,7 @@ class WorkerClient:
         sock = ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, 2000)
+        self._secure_socket(sock)
         sock.connect(f"tcp://{self._coordinator_addr}")
 
         while not self._stop_event.is_set():

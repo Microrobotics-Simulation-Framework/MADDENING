@@ -14,6 +14,16 @@ Command input (controller -> simulation)
 Both directions use the same single-slot-latest-value pattern
 with ``ZMQ.CONFLATE`` so only the most recent data matters.
 
+Security
+~~~~~~~~
+Every socket here defaults to a **loopback** address, so the local
+development flow needs no configuration.  Giving any of them an address
+another host can reach turns on ZMQ CURVE encryption and
+authentication, keyed by the shared ``MADDENING_API_TOKEN``; see
+:mod:`maddening.transport_auth`.  The recommended way to reach a remote
+simulation remains an SSH tunnel to the loopback port, which needs no
+token at all.
+
 Typical SSH-tunnel topology::
 
     Cloud / HPC                         Local / Robot
@@ -36,6 +46,8 @@ Typical SSH-tunnel topology::
 import json
 import threading
 from typing import Any, Optional
+
+from maddening.transport_auth import TransportAuth, resolve_security
 
 try:
     import zmq
@@ -60,7 +72,14 @@ class NetworkRelay:
     Parameters
     ----------
     address : str
-        ZMQ bind address (default ``"tcp://*:5555"``).
+        ZMQ bind address (default ``"tcp://127.0.0.1:5555"``).
+
+        .. versionchanged:: 0.4.0
+           The default was ``"tcp://*:5555"``, which published the full
+           simulation state on every interface with no authentication.
+           It is now loopback-only.  To stream off-box, forward the port
+           over SSH (``ssh -L 5555:127.0.0.1:5555 <host>``), or pass an
+           explicit non-loopback address, which requires a token.
     fields : dict, optional
         ``{node_name: [field1, field2, ...]}`` — publish only these
         node/field combinations.  If ``None`` (default) the full state
@@ -73,16 +92,29 @@ class NetworkRelay:
 
     def __init__(
         self,
-        address: str = "tcp://*:5555",
+        address: str = "tcp://127.0.0.1:5555",
         fields: dict[str, list[str]] | None = None,
+        secure: bool | None = None,
+        token: str | None = None,
     ):
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
+        self._secure = resolve_security(address, secure)
+        self._authenticator = None
+        if self._secure:
+            auth = TransportAuth(token=token)
+            self._authenticator = auth.start_authenticator(self._context)
+            auth.secure_server(self._socket)
         self._socket.bind(address)
         self._step_count = 0
         self._timestep = 0.0
         self._fields = fields
+
+    @property
+    def secure(self) -> bool:
+        """Whether this socket is encrypted and authenticated with CURVE."""
+        return self._secure
 
     @property
     def subscription(self) -> dict[str, list[str]] | None:
@@ -128,6 +160,9 @@ class NetworkRelay:
     def close(self) -> None:
         """Shut down the socket and context."""
         self._socket.close()
+        if self._authenticator is not None:
+            self._authenticator.stop()
+            self._authenticator = None
         self._context.term()
 
 
@@ -150,12 +185,31 @@ class NetworkReceiver:
     ----------
     address : str
         ZMQ connect address (default ``"tcp://localhost:5555"``).
+    secure : bool, optional
+        Whether to encrypt and authenticate the socket with ZMQ CURVE.
+        ``None`` (default) decides from *address*: a loopback endpoint
+        is left in cleartext, anything reachable from another host is
+        secured.  ``True`` forces CURVE on even for loopback.  ``False``
+        is rejected for a non-loopback address -- see
+        :mod:`maddening.transport_auth`.
+    token : str, optional
+        The shared secret both ends derive their CURVE keys from.
+        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
+        HTTP API uses.  Only consulted when the socket is secured.
     """
 
-    def __init__(self, address: str = "tcp://localhost:5555"):
+    def __init__(
+        self,
+        address: str = "tcp://localhost:5555",
+        secure: bool | None = None,
+        token: str | None = None,
+    ):
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
+        self._secure = resolve_security(address, secure)
+        if self._secure:
+            TransportAuth(token=token).secure_client(self._socket)
         self._socket.connect(address)
         self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
         self._socket.setsockopt(zmq.CONFLATE, 1)
@@ -210,20 +264,58 @@ class CommandPublisher:
     Parameters
     ----------
     address : str
-        ZMQ bind address (default ``"tcp://*:5556"``).
+        ZMQ bind address (default ``"tcp://127.0.0.1:5556"``).
+
+        .. versionchanged:: 0.4.0
+           The default was ``"tcp://*:5556"``.  This socket carries
+           control commands that are passed straight to
+           ``GraphManager.step(external_inputs=...)``, so publishing it
+           on every interface let anyone who could reach the port both
+           read and drive the simulation.  It is now loopback-only.
+    secure : bool, optional
+        Whether to encrypt and authenticate the socket with ZMQ CURVE.
+        ``None`` (default) decides from *address*: a loopback endpoint
+        is left in cleartext, anything reachable from another host is
+        secured.  ``True`` forces CURVE on even for loopback.  ``False``
+        is rejected for a non-loopback address -- see
+        :mod:`maddening.transport_auth`.
+    token : str, optional
+        The shared secret both ends derive their CURVE keys from.
+        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
+        HTTP API uses.  Only consulted when the socket is secured.
 
     Example
     -------
     ::
 
-        pub = CommandPublisher("tcp://*:5556")
+        pub = CommandPublisher()          # loopback, no token needed
         pub.send({"robot": {"joint_torques": [0.1, -0.2, 0.0, ...]}})
+
+        # Off-box, with MADDENING_API_TOKEN set on both sides:
+        pub = CommandPublisher("tcp://0.0.0.0:5556")
     """
 
-    def __init__(self, address: str = "tcp://*:5556"):
+    def __init__(
+        self,
+        address: str = "tcp://127.0.0.1:5556",
+        secure: bool | None = None,
+        token: str | None = None,
+    ):
+        self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
+        self._secure = resolve_security(address, secure)
+        self._authenticator = None
+        if self._secure:
+            auth = TransportAuth(token=token)
+            self._authenticator = auth.start_authenticator(self._context)
+            auth.secure_server(self._socket)
         self._socket.bind(address)
+
+    @property
+    def secure(self) -> bool:
+        """Whether this socket is encrypted and authenticated with CURVE."""
+        return self._secure
 
     def send(self, external_inputs: dict[str, dict]) -> None:
         """Publish a command dict.
@@ -240,6 +332,9 @@ class CommandPublisher:
 
     def close(self) -> None:
         self._socket.close()
+        if self._authenticator is not None:
+            self._authenticator.stop()
+            self._authenticator = None
         self._context.term()
 
 
@@ -254,11 +349,31 @@ class CommandReceiver:
     ----------
     address : str
         ZMQ connect address (default ``"tcp://localhost:5556"``).
+    secure : bool, optional
+        Whether to encrypt and authenticate the socket with ZMQ CURVE.
+        ``None`` (default) decides from *address*: a loopback endpoint
+        is left in cleartext, anything reachable from another host is
+        secured.  ``True`` forces CURVE on even for loopback.  ``False``
+        is rejected for a non-loopback address -- see
+        :mod:`maddening.transport_auth`.
+    token : str, optional
+        The shared secret both ends derive their CURVE keys from.
+        ``None`` reads ``MADDENING_API_TOKEN``; it is the same token the
+        HTTP API uses.  Only consulted when the socket is secured.
     """
 
-    def __init__(self, address: str = "tcp://localhost:5556"):
+    def __init__(
+        self,
+        address: str = "tcp://localhost:5556",
+        secure: bool | None = None,
+        token: str | None = None,
+    ):
+        self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
+        self._secure = resolve_security(address, secure)
+        if self._secure:
+            TransportAuth(token=token).secure_client(self._socket)
         self._socket.connect(address)
         self._socket.setsockopt_string(zmq.SUBSCRIBE, "")
         self._socket.setsockopt(zmq.CONFLATE, 1)

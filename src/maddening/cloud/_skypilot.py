@@ -17,9 +17,16 @@ CloudSession   — Server-side orchestration path.  Credentials assumed
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
+
+#: An environment variable name we are willing to interpolate into a
+#: ``docker run`` command line.  Only the *name* is interpolated -- the
+#: value travels in SkyPilot's task environment -- so this is the whole
+#: of the injection surface, and it fails closed on anything else.
+_ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +79,63 @@ def _port_flags(ports) -> str:
     return " ".join(flags) + " " if flags else ""
 
 
-def launch_vm(config) -> tuple[str, str]:
+def _env_flags(envs: Optional[Mapping[str, str]]) -> str:
+    """Render pass-through ``-e NAME`` flags for *envs*.
+
+    Parameters
+    ----------
+    envs : mapping of str to str, or None
+        Environment variables to hand to the container.
+
+    Returns
+    -------
+    str
+        The flags, with a trailing space, or ``""``.
+
+    Raises
+    ------
+    ValueError
+        If a name is not a plain environment-variable identifier.
+
+    Notes
+    -----
+    The flag is ``-e NAME``, not ``-e NAME=value``.  Docker reads an
+    unassigned ``-e NAME`` from the environment of the process that runs
+    it, so the **value never reaches a command line**: the VM's
+    ``/proc/<pid>/cmdline`` is world-readable, and these values are
+    credentials.  The values travel in SkyPilot's task environment
+    instead.
+    """
+    flags = []
+    for name in sorted(envs or {}):
+        if not _ENV_NAME.match(name):
+            raise ValueError(
+                f"{name!r} is not a valid environment variable name. These "
+                f"names are interpolated into a shell command line, so "
+                f"anything that is not an identifier is refused rather "
+                f"than quoted."
+            )
+        flags.append(f"-e {name}")
+    return " ".join(flags) + " " if flags else ""
+
+
+def launch_vm(config, envs: Optional[Mapping[str, str]] = None) -> tuple[str, str]:
     """Provision a VM via SkyPilot.
 
     Only the ports in ``config.ports`` are published from the container
     to the VM's interfaces.  That list is empty by default, so a
     launched job exposes nothing and is reached over an SSH tunnel.
+
+    Parameters
+    ----------
+    config : object
+        Anything carrying ``ports``, ``container_image``, ``cloud``,
+        ``instance_type``, ``accelerator``, ``spot`` and ``region``.
+    envs : mapping of str to str, optional
+        Environment variables for the container -- in practice the
+        credentials from :meth:`maddening.cloud.session.CloudSession.container_env`.
+        Their *values* are passed through SkyPilot's task environment
+        and never appear on a command line; see :func:`_env_flags`.
 
     .. versionchanged:: 0.4.0
        This function published ``8000``, ``8080``, ``5555`` and ``5556``
@@ -86,6 +144,10 @@ def launch_vm(config) -> tuple[str, str]:
        command channel were all on the VM's public interface on every
        launch.  ``8080`` was published for a health endpoint that no
        component in this package ever served, and is simply dropped.
+       It also passed no credentials into the container, so the
+       container generated a bearer token that nothing outside its own
+       log could present, and ``CloudSession``'s health probes could not
+       authenticate against it.
 
     Returns ``(vm_ip, job_id)``.
     """
@@ -93,9 +155,10 @@ def launch_vm(config) -> tuple[str, str]:
 
     ports = list(getattr(config, "ports", None) or ())
     task = sky.Task(
-        run=f"docker run --gpus all {_port_flags(ports)}"
+        run=f"docker run --gpus all {_port_flags(ports)}{_env_flags(envs)}"
             f"-e MADDENING_CLOUD_CONFIG='{{}}' "
             f"{config.container_image}",
+        envs=dict(envs) if envs else None,
     )
     resources = sky.Resources(
         cloud=getattr(sky, config.cloud.upper(), None) or sky.GCP(),

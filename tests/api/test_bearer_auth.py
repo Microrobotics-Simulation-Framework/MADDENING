@@ -10,9 +10,14 @@ the simulation graph, and every shipped container path binds it to
 * anything else demands ``Authorization: Bearer <token>`` on *every*
   route but the handful that are exempt on purpose.
 
-``test_every_route_refuses_an_anonymous_caller`` enumerates the app's
-routes rather than listing them, so a route added later is covered
-without anybody remembering to add it here.
+``test_every_route_refuses_an_anonymous_caller`` and
+``test_every_websocket_route_refuses_an_anonymous_caller`` enumerate the
+app's routes rather than listing them, so a route added later is covered
+without anybody remembering to add it here.  That claim used to be true
+of HTTP only: the enumeration walked ``starlette.routing.Route`` and saw
+no ``WebSocketRoute`` at all, so a ``@app.websocket`` route added with no
+``_authorise_ws`` call passed all 75 tests and accepted an anonymous
+connection on a ``0.0.0.0`` bind.  Both halves are enumerated now.
 """
 
 import logging
@@ -21,8 +26,9 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 
 from maddening.api.auth import (
     TOKEN_ENV,
@@ -143,6 +149,83 @@ def test_every_route_refuses_an_anonymous_caller(public_client):
         "these routes answered an anonymous caller on a non-loopback bind: "
         f"{served}"
     )
+
+
+def _websocket_routes(app):
+    """Concrete path of every WebSocket route the app serves."""
+    out = []
+    for route in app.routes:
+        if not isinstance(route, WebSocketRoute):
+            continue
+        path = route.path
+        for name in getattr(route, "param_convertors", {}) or {}:
+            path = path.replace("{" + name + "}", "probe")
+        out.append((path, route.path))
+    return out
+
+
+def test_every_websocket_route_refuses_an_anonymous_caller(public_client):
+    """The other half of the gate, which did not exist.
+
+    ``@app.middleware("http")`` is a ``BaseHTTPMiddleware`` and never runs
+    for a WebSocket scope, so a handler that forgets ``_authorise_ws``
+    used to serve the world.  This enumerates ``WebSocketRoute`` the way
+    the HTTP test enumerates ``Route``, so the next WebSocket route is
+    covered whether or not its author remembers.
+    """
+    routes = _websocket_routes(public_client.app)
+    assert len(routes) >= 3, f"WebSocket enumeration found only {len(routes)}"
+    served = []
+    for path, template in routes:
+        if template in UNAUTHENTICATED_PATHS:
+            continue
+        try:
+            with public_client.websocket_connect(path):
+                served.append(template)
+        except Exception:
+            pass  # refused, which is the point
+    assert not served, (
+        "these WebSocket routes accepted an anonymous caller on a "
+        f"non-loopback bind: {served}"
+    )
+
+
+def test_the_websocket_enumeration_sees_the_routes_that_exist(public_client):
+    """The enumeration is worthless if it silently finds nothing.
+
+    ``test_every_websocket_route_refuses_an_anonymous_caller`` passes
+    trivially against an empty list, which is exactly how the HTTP-only
+    version of this gate missed three WebSocket routes.
+    """
+    found = {template for _, template in _websocket_routes(public_client.app)}
+
+    assert {"/ws/state", "/ws/state/binary", "/ws/render"} <= found
+
+
+def test_a_websocket_route_that_forgets_to_authorise_is_still_refused():
+    """Default-deny, not a convention every handler has to remember.
+
+    The seeded mutation this pins is a new ``@app.websocket`` handler
+    that calls ``accept()`` without ``_authorise_ws``; before the ASGI
+    middleware existed it accepted anonymous connections and leaked
+    whatever it sent.
+    """
+    server = _server("0.0.0.0")
+    app = server.create_app()
+
+    @app.websocket("/ws/forgotten")
+    async def ws_forgotten(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_json({"leaked": True})
+
+    client = TestClient(app)
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/forgotten"):
+            pass
+    # And the token still opens it, so the refusal is authentication and
+    # not the route being broken.
+    with client.websocket_connect("/ws/forgotten", headers=_bearer()) as ws:
+        assert ws.receive_json() == {"leaked": True}
 
 
 def test_the_exempt_paths_are_exactly_these(public_client):
@@ -370,6 +453,37 @@ def test_a_generated_token_is_logged_once_and_only_when_it_is_needed(caplog):
     with caplog.at_level(logging.WARNING, logger="maddening.api.auth"):
         assert local.announce(8000) is False
     assert local.token not in caplog.text
+
+
+def test_a_generated_token_says_it_exists_even_on_a_loopback_bind(caplog):
+    """``uvicorn.run(app, host="0.0.0.0")`` without telling the app.
+
+    That is exactly the case the peer backstop exists for: a remote
+    caller is correctly refused with a token that was never logged and
+    never written to MADDENING_API_TOKEN_FILE, because both live behind
+    the ``enforced`` check.  Fail-closed, and recoverable -- the 401 body
+    says what to do -- but the operator should not have to discover it
+    from a 401.  One INFO line, once, and never the value: this fires on
+    every loopback start-up, and a live credential in a developer's log
+    is not a fix.
+    """
+    auth = APIAuth(bind_host="127.0.0.1", environ={})
+    with caplog.at_level(logging.INFO, logger="maddening.api.auth"):
+        assert auth.announce(8000) is False
+        assert auth.announce(8000) is False
+
+    assert auth.token not in caplog.text
+    assert "bind_host" in caplog.text
+    assert caplog.text.count("generated at start-up") == 1
+
+
+def test_a_configured_token_is_not_announced_on_a_loopback_bind(caplog):
+    """Nothing to say: the operator chose it and no token is demanded."""
+    auth = APIAuth(bind_host="127.0.0.1", environ={TOKEN_ENV: "chosen"})
+    with caplog.at_level(logging.INFO, logger="maddening.api.auth"):
+        assert auth.announce(8000) is False
+
+    assert caplog.text == ""
 
 
 def test_a_configured_token_is_not_echoed_into_the_log(caplog):

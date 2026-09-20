@@ -442,6 +442,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **Cloud launches reach ready again, and cross-origin browser requests are
+  refused**: set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
+  cleartext API bearer token; pass `allowed_origins=` to embed the UI elsewhere
 - **The ZeroMQ transports bind loopback and encrypt any other bind** (CRITICAL):
   5555/5556/5580 published state, commands and worker rendezvous to anyone who
   could reach them; set `MADDENING_API_TOKEN` on both sides to stream off-box

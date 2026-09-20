@@ -13,6 +13,18 @@ The rest pin the things that would let those two pass while the
 transport was still open: a wrong token, a self-generated keypair, a
 missing ZAP allowlist, and the defaults that decide whether any of it
 is switched on at all.
+
+The **own-keypair attacker** -- a peer that holds the server's public
+key (assume it leaked; CURVE does not put it on the wire, but nothing
+here relies on that) and brings a keypair of its own -- is run against
+all three CURVE servers: ``NetworkRelay``, ``CommandPublisher`` and
+``Coordinator``.  It is the only attacker the ZAP allowlist stops, so a
+server it is not run against has an untested allowlist.  Measured:
+deleting ``start_authenticator`` from ``CommandPublisher`` or from
+``Coordinator`` left all 36 tests in the earlier version of this file
+green while the attacker read command frames and registered
+``{'flow': 'attacker.example:5555'}`` with the coordinator -- the
+data-plane redirection MADD-ANO-015 calls its worst case.
 """
 
 from __future__ import annotations
@@ -27,6 +39,8 @@ zmq = pytest.importorskip("zmq", reason="ZMQ transport security needs pyzmq")
 
 from maddening.cloud.multigpu.coordinator import Coordinator  # noqa: E402
 from maddening.transport_auth import (  # noqa: E402
+    TOKEN_ENV,
+    TRANSPORT_TOKEN_ENV,
     TransportAuth,
     TransportAuthError,
     address_is_loopback,
@@ -291,6 +305,43 @@ class TestCommandChannelConfidentiality:
         assert counts["authorised"] > 0
         assert counts["no-credential"] == 0
 
+    def test_a_subscriber_with_its_own_keypair_cannot_read_the_command_stream(
+        self,
+    ):
+        """``CommandPublisher``'s ZAP allowlist, which nothing tested.
+
+        The command channel is fed straight into
+        ``GraphManager.step(external_inputs=...)``, so reading it
+        discloses the control input and -- for a PUB socket whose
+        subscribers cannot tell publishers apart -- knowing the server
+        key is the whole of what a forger needs.  CURVE without a ZAP
+        handler admits any client key, so the allowlist is the gate.
+        Measured with ``start_authenticator`` deleted from this class:
+        the attacker read command frames and every test still passed.
+        """
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        publisher = CommandPublisher(address=address, secure=True, token=TOKEN)
+        context = zmq.Context()
+        subs = {
+            "authorised": _sub(context, address, token=TOKEN),
+            "own-keypair": _sub(context, address, token=TOKEN, own_keypair=True),
+        }
+        command = {"robot": {"joint_torques": [0.1, -0.2, 0.0]}}
+        try:
+            counts = _exchange(lambda: publisher.send(command), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            publisher.close()
+
+        assert counts["authorised"] > 0, (
+            "the authorised subscriber received nothing, so this test "
+            "proves nothing about the attacker"
+        )
+        assert counts["own-keypair"] == 0
+
     def test_the_paired_receiver_reads_the_command_with_the_same_token(self):
         """The happy path: two MADDENING objects, one shared token."""
         port = _free_port()
@@ -343,8 +394,13 @@ class TestSecuredRelayRoundTrip:
 # ---------------------------------------------------------------------
 
 def _register(context, address: str, subgraph_id: str, *, token: str | None,
-              peer_address: str) -> None:
-    """Send one ``register`` frame to the coordinator's ROUTER."""
+              peer_address: str, own_keypair: bool = False) -> None:
+    """Send one ``register`` frame to the coordinator's ROUTER.
+
+    *own_keypair* is the attacker the ZAP allowlist exists to stop: it
+    knows the server's public key and brings a keypair of its own, which
+    plain CURVE would admit.
+    """
     sock = context.socket(zmq.DEALER)
     sock.setsockopt(zmq.LINGER, 0)
     # A DEALER whose peer refuses the handshake goes mute, and an unbounded
@@ -352,7 +408,15 @@ def _register(context, address: str, subgraph_id: str, *, token: str | None,
     # case hangs the test run instead of failing it.
     sock.setsockopt(zmq.SNDTIMEO, 500)
     if token is not None:
-        TransportAuth(token=token).secure_client(sock)
+        auth = TransportAuth(token=token)
+        if own_keypair:
+            server_public, _ = auth.server_keypair()
+            public, secret = zmq.curve_keypair()
+            sock.curve_secretkey = secret
+            sock.curve_publickey = public
+            sock.curve_serverkey = server_public
+        else:
+            auth.secure_client(sock)
     sock.connect(address)
     try:
         deadline = time.monotonic() + 2.0
@@ -427,6 +491,31 @@ class TestCoordinatorAuthentication:
 
         assert coord.registered_workers == {}
 
+    def test_the_coordinator_ignores_a_registration_from_an_own_keypair_peer(
+        self, coordinator,
+    ):
+        """``Coordinator``'s ZAP allowlist, which nothing tested.
+
+        This is the worst case in MADD-ANO-015: the coordinator stores
+        the ``address`` a registration carries and later hands it to the
+        *other* workers as the peer to SUB-connect to, so an accepted
+        registration redirects a victim's data plane at a publisher the
+        attacker owns.  Plain CURVE admits any client key that knows the
+        server's public key; only the allowlist refuses this peer.
+        Measured with ``start_authenticator`` deleted from ``Coordinator``:
+        the attacker registered ``{'flow': 'attacker.example:5555'}`` and
+        every test still passed.
+        """
+        coord, address = coordinator
+        context = zmq.Context()
+        try:
+            _register(context, address, "flow", token=TOKEN,
+                      peer_address="attacker.example:5555", own_keypair=True)
+        finally:
+            context.term()
+
+        assert coord.registered_workers == {}
+
     def test_the_coordinator_accepts_a_registration_holding_the_token(
         self, coordinator,
     ):
@@ -470,13 +559,24 @@ class TestWorkerClientFailsFastOnAMismatch:
         )
         started = time.monotonic()
         try:
-            with pytest.raises((ConnectionError, TimeoutError)):
+            with pytest.raises((ConnectionError, TimeoutError)) as excinfo:
                 client.register_and_wait(timeout=3)
             # Measured before the teardown below, which sleeps.
             elapsed = time.monotonic() - started
         finally:
             coord.shutdown()
             time.sleep(1.2)
+        # The *text*, not just the type.  Accepting either exception is
+        # why this test could not see that the CURVE explanation lived
+        # only on the ConnectionError branch -- which is unreachable,
+        # because a connected DEALER accepts ZMQ_SNDHWM (1000) sends
+        # whatever the handshake did, so every realistic call lands on
+        # the TimeoutError.  A user who hits this must be told about
+        # CURVE whichever branch they reach.
+        message = str(excinfo.value)
+        assert "CURVE off" in message
+        assert "secure=True" in message
+        assert "MADDENING_TRANSPORT_TOKEN" in message
         # Not merely "it finished": it must honour the deadline it was
         # given.  The recv timeout is the loop's poll interval, so a recv
         # timeout longer than `timeout` silently overshoots it -- which is
@@ -488,6 +588,120 @@ class TestWorkerClientFailsFastOnAMismatch:
         )
 
 
+class TestTheCurveAsymmetryIsNotSilent:
+    """A refused handshake must not look like an idle simulation.
+
+    A relay inside a container binds ``tcp://0.0.0.0:P``, which turns
+    CURVE on.  A client on the host reaching the published port over
+    ``tcp://127.0.0.1:P`` sees loopback and turns CURVE off.  Neither end
+    is misconfigured on its own, libzmq treats the refused handshake as
+    an ordinary connection that carries nothing, and before this the SUB
+    side raised nothing, logged nothing and exposed no flag:
+    ``latest_snapshot()`` returned ``(0.0, None)`` for ever.  For
+    ``CommandReceiver`` that is a silently dead actuation path.
+    """
+
+    @staticmethod
+    def _wait_for_error(receiver, emit, seconds: float = 6.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            emit()
+            if receiver.handshake_error is not None:
+                return receiver.handshake_error
+            time.sleep(0.05)
+        return receiver.handshake_error
+
+    def test_a_state_receiver_says_why_no_state_arrives(self):
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=False)
+        receiver.start()
+        try:
+            error = self._wait_for_error(receiver, lambda: graph.emit(STATE))
+            snapshot = receiver.latest_snapshot()
+        finally:
+            receiver.stop()
+            relay.close()
+
+        assert snapshot == (0.0, None), (
+            "state arrived despite the mismatch, so this test is not "
+            "measuring the silent case"
+        )
+        assert error is not None, (
+            "the receiver returned (0.0, None) for ever with no explanation, "
+            "which is indistinguishable from an idle simulation"
+        )
+        assert "CURVE" in error and "secure=True" in error
+
+    def test_a_command_receiver_says_why_the_actuation_path_is_dead(self):
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        publisher = CommandPublisher(address=address, secure=True, token=TOKEN)
+        receiver = CommandReceiver(address=address, secure=False)
+        receiver.start()
+        command = {"robot": {"joint_torques": [0.1, -0.2, 0.0]}}
+        try:
+            error = self._wait_for_error(
+                receiver, lambda: publisher.send(command),
+            )
+            commands = receiver.latest_commands()
+        finally:
+            receiver.stop()
+            publisher.close()
+
+        assert commands is None
+        assert error is not None
+        assert "CURVE" in error
+
+    def test_a_matched_pair_reports_no_handshake_error(self):
+        """The control.  A flag that is always set says nothing."""
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=True, token=TOKEN)
+        receiver.start()
+        try:
+            deadline = time.monotonic() + _SETTLE
+            while time.monotonic() < deadline:
+                graph.emit(STATE)
+                if receiver.latest_snapshot()[1] is not None:
+                    break
+                time.sleep(0.02)
+            snapshot = receiver.latest_snapshot()
+            error = receiver.handshake_error
+        finally:
+            receiver.stop()
+            relay.close()
+
+        assert snapshot[1] is not None
+        assert error is None
+
+    def test_the_mismatch_is_logged_and_not_only_exposed(self, caplog):
+        """An operator reading a log has to be told, not asked to poll."""
+        import logging
+
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        receiver = NetworkReceiver(address=address, secure=False)
+        with caplog.at_level(logging.WARNING, logger="maddening.viz.network"):
+            receiver.start()
+            try:
+                self._wait_for_error(receiver, lambda: graph.emit(STATE))
+            finally:
+                receiver.stop()
+                relay.close()
+
+        assert "No ZeroMQ handshake" in caplog.text
+
+
 # ---------------------------------------------------------------------
 # Local development must stay frictionless
 # ---------------------------------------------------------------------
@@ -497,6 +711,7 @@ class TestLoopbackStaysFrictionless:
 
     def test_the_shipped_defaults_bind_loopback(self, monkeypatch):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         relay = NetworkRelay()
         publisher = CommandPublisher()
         try:
@@ -511,6 +726,7 @@ class TestLoopbackStaysFrictionless:
     ):
         """The whole local viz flow, with MADDENING_API_TOKEN unset."""
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         port = _free_port()
         address = f"tcp://127.0.0.1:{port}"
         relay = NetworkRelay(address=address)
@@ -533,6 +749,7 @@ class TestLoopbackStaysFrictionless:
 
     def test_a_loopback_coordinator_needs_no_token(self, monkeypatch):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         coord = Coordinator(expected_workers=["a"], edges=[], port=_free_port())
         assert coord.secure is False
         assert coord.bind_address.startswith("tcp://127.0.0.1:")
@@ -575,6 +792,7 @@ class TestReachableAddressesFailClosed:
         self, monkeypatch,
     ):
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         with pytest.raises(TransportAuthError, match="MADDENING_API_TOKEN"):
             NetworkRelay(address=f"tcp://0.0.0.0:{_free_port()}")
 
@@ -589,6 +807,7 @@ class TestReachableAddressesFailClosed:
         from one that succeeded.
         """
         monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         with pytest.raises(TransportAuthError, match="MADDENING_API_TOKEN"):
             Coordinator(expected_workers=["a"], edges=[],
                         port=_free_port(), bind_host="0.0.0.0")
@@ -598,6 +817,7 @@ class TestReachableAddressesFailClosed:
             resolve_security("tcp://0.0.0.0:5555", False)
 
     def test_a_blank_token_is_a_configuration_error(self, monkeypatch):
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", "   ")
         with pytest.raises(TransportAuthError, match="blank"):
             TransportAuth()
@@ -609,6 +829,7 @@ class TestReachableAddressesFailClosed:
         loopback.  This one proves the *automatic* path -- the one a
         user actually hits -- reaches the same place.
         """
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", TOKEN)
         port = _free_port()
         relay = NetworkRelay(address=f"tcp://0.0.0.0:{port}")
@@ -662,6 +883,164 @@ class TestKeyDerivation:
         assert zmq.curve_public(secret) == public
 
     def test_the_token_is_read_from_the_environment(self, monkeypatch):
+        monkeypatch.delenv("MADDENING_TRANSPORT_TOKEN", raising=False)
         monkeypatch.setenv("MADDENING_API_TOKEN", TOKEN)
         assert TransportAuth().server_keypair() == (
             TransportAuth(token=TOKEN).server_keypair())
+
+    def test_the_derivation_matches_a_pinned_vector(self):
+        """A golden vector, so the derivation cannot drift between versions.
+
+        Everything else here checks *self-consistency*, which is
+        automatic when both ends run the same code and therefore cannot
+        see a change to the personalisation string, the role literals,
+        the separator or the hash.  Measured: changing ``_CURVE_PERSON``
+        from ``b"maddening-curve"`` to ``b"maddening-CURVE"`` left all 36
+        tests in this file green, while making 0.4.x and 0.5.x unable to
+        talk to each other -- and the failure mode of that is the silent
+        one in ``NetworkReceiver``, not an exception.
+
+        These are the keys ``TransportAuth(token="the-shared-token")``
+        must produce for ever.  If this fails, the derivation changed and
+        that is a wire-compatibility break, not a test to update.
+        """
+        auth = TransportAuth(token="the-shared-token")
+
+        assert auth.server_keypair() == (
+            b"wG#*&<Nt]&7xpdy={R1&}&A#?Hoq3SygSb?=B=Ru",
+            b"ULh/<s#hK!!wx<$/U9(0ek11I?)Ug:G:])]J]Q&h",
+        )
+        assert auth.client_keypair() == (
+            b"i%y(@xeWQ{xK$.wl?oOZw)<VO-.8@>wSR3!0Zioc",
+            b"9]+A6Y2q:E2w#NO{U6nI9iCJpqe/i:gqxs<V?G5H",
+        )
+
+
+# ---------------------------------------------------------------------
+# The transport secret is separable from the HTTP bearer credential
+# ---------------------------------------------------------------------
+
+class TestTransportSecretIsSeparableFromTheApiToken:
+    """The CURVE seed must not have to be the cleartext HTTP credential.
+
+    There is no TLS in front of the HTTP API, so ``MADDENING_API_TOKEN``
+    is visible in an ``Authorization`` header on every request.  While
+    that token was also the CURVE seed, one sniffed request yielded both
+    keypairs and the "encrypted" state stream was readable -- measured
+    over a real socket, not inferred.  ``MADDENING_TRANSPORT_TOKEN``
+    exists so the streams need not inherit that exposure;
+    ``MADDENING_API_TOKEN`` remains the fallback so a single-variable
+    deployment keeps working.
+    """
+
+    def test_the_transport_variable_is_preferred(self, monkeypatch):
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+
+        auth = TransportAuth()
+
+        assert auth.token == "the-transport-secret"
+        assert auth.token_env == TRANSPORT_TOKEN_ENV
+
+    def test_the_api_token_is_the_documented_fallback(self, monkeypatch):
+        """A single-variable setup keeps working, exactly as before."""
+        monkeypatch.delenv(TRANSPORT_TOKEN_ENV, raising=False)
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+
+        auth = TransportAuth()
+
+        assert auth.token == "the-http-credential"
+        assert auth.token_env == TOKEN_ENV
+
+    def test_the_explicit_argument_still_wins_over_both(self, monkeypatch):
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+
+        auth = TransportAuth(token="explicit")
+
+        assert auth.token == "explicit"
+        assert auth.token_env is None
+
+    def test_a_blank_transport_token_does_not_fall_back(self, monkeypatch):
+        """A variable that is set is the operator's answer.
+
+        Falling through to a *different* secret because this one is
+        blank would leave two ends deriving different keys, which fails
+        as a handshake timeout and reads as a network problem.
+        """
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "  ")
+
+        with pytest.raises(TransportAuthError, match=TRANSPORT_TOKEN_ENV):
+            TransportAuth()
+
+    def test_with_both_set_the_http_credential_does_not_open_the_stream(
+        self, monkeypatch,
+    ):
+        """The gate, over a real socket.
+
+        An attacker who sniffed one ``Authorization`` header holds
+        ``MADDENING_API_TOKEN``.  With the transport variable set that is
+        no longer the CURVE seed, so the attacker derives the wrong
+        keypair and reads nothing -- while the peer holding the transport
+        secret reads the stream, which is what stops this passing
+        vacuously.
+        """
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        monkeypatch.setenv(TRANSPORT_TOKEN_ENV, "the-transport-secret")
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        context = zmq.Context()
+        subs = {
+            "authorised": _sub(context, address, token="the-transport-secret"),
+            "holds-the-http-token": _sub(
+                context, address, token="the-http-credential",
+            ),
+        }
+        try:
+            counts = _exchange(lambda: graph.emit(STATE), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            relay.close()
+
+        assert counts["authorised"] > 0, (
+            "the peer holding the transport secret read nothing, so this "
+            "test proves nothing about the peer that holds only the HTTP "
+            "credential"
+        )
+        assert counts["holds-the-http-token"] == 0
+
+    def test_the_fallback_is_what_makes_a_sniffed_api_token_sufficient(
+        self, monkeypatch,
+    ):
+        """The control run for the test above: remove the separation.
+
+        With only ``MADDENING_API_TOKEN`` set, the sniffed HTTP
+        credential *is* the CURVE seed and does open the stream.  That is
+        the documented cost of the single-variable setup, and asserting
+        it is what makes the test above a measurement rather than a
+        restatement of the code.
+        """
+        monkeypatch.delenv(TRANSPORT_TOKEN_ENV, raising=False)
+        monkeypatch.setenv(TOKEN_ENV, "the-http-credential")
+        port = _free_port()
+        address = f"tcp://127.0.0.1:{port}"
+        relay = NetworkRelay(address=address, secure=True)
+        graph = _FakeGraphManager()
+        relay.attach(graph)
+        context = zmq.Context()
+        subs = {"authorised": _sub(context, address, token="the-http-credential")}
+        try:
+            counts = _exchange(lambda: graph.emit(STATE), subs)
+        finally:
+            for sock in subs.values():
+                sock.close()
+            context.term()
+            relay.close()
+
+        assert counts["authorised"] > 0

@@ -64,8 +64,8 @@ PACKAGE = Path("src/maddening")
 EXCLUDED = (PACKAGE / "examples",)
 
 #: The floor.  Raise it when examples are added; never lower it to make a
-#: run pass -- a shrinking collection is the failure this number exists to
-#: catch.  Measured at 15 on release/0.4.0 (8 files).
+#: run pass -- a shrinking set of examples is the failure this number
+#: exists to catch.  Measured at 15 on release/0.4.0 (8 files).
 MIN_DOCTESTS = 15
 
 
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         "--min",
         type=int,
         default=MIN_DOCTESTS,
-        help=f"minimum number of doctests that must be collected (default {MIN_DOCTESTS})",
+        help=f"minimum number of doctests that must pass (default {MIN_DOCTESTS})",
     )
     args, extra = ap.parse_known_args(argv)
     if extra and extra[0] == "--":
@@ -234,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     if total < args.min:
         failures.append(
             f"{total} doctests passed, floor is {args.min}.  A gate that "
-            f"collects less than it used to has stopped checking something; "
+            f"runs fewer examples than it used to has stopped checking "
+            f"something; "
             f"find out what, and only then raise or lower MIN_DOCTESTS in "
             f"{Path(__file__).name}."
         )

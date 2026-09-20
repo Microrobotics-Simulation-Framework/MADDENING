@@ -1800,6 +1800,102 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
     _check_count("notify_every", notify_every)
 
 
+#: Largest trainable-parameter count for which :func:`fit` accumulates the
+#: gradient Gram matrix that :class:`_ExcitationTracker` uses.
+#:
+#: The tracker holds one ``n x n`` float64 matrix and costs one ``n x n``
+#: outer product per iteration plus one ``eigh`` at the end -- ``n**2``
+#: fused multiply-adds per iteration and ``O(n**3)`` once, against the full
+#: rollout and reverse pass the gradient itself costs, and it only runs at
+#: all once there are ``n`` gradients to pool.  At the cap that is 2.1 MB,
+#: 0.26 MFLOP per iteration and ~0.13 GFLOP for the decomposition.  Wall
+#: clock is not quoted: measured on this box the same 512-wide ``eigh``
+#: ranged over 52-892 ms across five back-to-back runs, which is contention
+#: from the other work sharing it and not a property of the code.  A caller
+#: who does not want the cost at all passes ``hold_undetermined=False``.
+#:
+#: Above the cap the tracker is not built and
+#: :attr:`FitResult.excited_rank` is ``None`` -- "not measured", never
+#: "full rank", because a silent full-rank verdict would read as "no
+#: undetermined direction was found" when nothing looked.
+_EXCITATION_MAX_PARAMS = 512
+
+
+class _ExcitationTracker:
+    """Accumulated gradient second moment ``G = sum_t g_t g_t^T`` of a fit.
+
+    Every gradient of a least-squares loss is ``J^T r``, so it lies in the
+    row space of ``J``: a direction ``v`` with ``J v = 0`` has ``g . v = 0``
+    at *every* iterate, and the whole run's gradients stay inside the
+    subspace the data can see.  ``G``'s near-null eigenvectors therefore
+    name the directions no gradient ever pointed along -- the ones the
+    optimiser had no information about and must not have moved in.
+
+    Pooling over the run rather than testing one gradient at a time is what
+    makes the verdict robust: near convergence a single gradient is mostly
+    rounding noise, but its *accumulated* energy along an exactly-null
+    direction stays at the arithmetic's floor while every direction the data
+    resolves keeps the energy it collected during the descent.  Measured on
+    the spring's ``(k, c, m)`` common-scale degeneracy, the null eigenvalue
+    sits at ``1e-15`` of the largest over 200 to 10,000 iterations and
+    learning rates 0.01 to 0.2, against ``8e-3`` for the weakest direction
+    the data does resolve -- twelve decades of separation.
+
+    ``G`` is accumulated in float64 whatever the gradients' own precision:
+    the quantity being resolved is twelve decades below the top eigenvalue,
+    which float32 accumulation cannot represent at all.
+    """
+
+    def __init__(self, n: int, dtype) -> None:
+        self.n = int(n)
+        self.eps = float(np.finfo(dtype).eps)
+        self.count = 0
+        self._gram = np.zeros((self.n, self.n), dtype=np.float64)
+
+    def observe(self, g) -> None:
+        """Fold one gradient into the accumulated second moment."""
+        gv = np.asarray(g, dtype=np.float64).reshape(-1)
+        self._gram += np.outer(gv, gv)
+        self.count += 1
+
+    def projector(self) -> tuple[Optional[int], Optional[np.ndarray]]:
+        """``(excited_rank, P)`` for the excited subspace, or ``(None, None)``.
+
+        ``P`` is the orthogonal projector onto the span of the directions
+        the gradients excited, and is ``None`` when the rank is full (there
+        is nothing to remove, and returning the iterate untouched keeps it
+        bit for bit).  ``(None, None)`` means the question was not answered:
+        fewer gradients than parameters, so a direction can be unobserved
+        merely for want of iterations, or a degenerate spectrum.
+
+        The cutoff is ``(max(n, sqrt(T)) * eps)**2`` of the largest
+        eigenvalue, for ``n`` parameters and ``T`` gradients -- the same rule
+        and the same reasoning as :func:`_resolve_rank_rtol`'s default, moved
+        one level out: ``max(n, sqrt(T)) * eps`` is the relative floor of a
+        gradient *component* under an ``eigh`` of an ``n x n`` matrix summed
+        over ``T`` terms, and ``G``'s eigenvalues are those components
+        squared.  It is a numerical floor, not a statistical one: it removes
+        only directions the arithmetic says carry no gradient at all, and
+        leaves every merely weakly-identified direction in place.  The
+        statistical question -- "is this parameter determined *well enough*"
+        -- is :attr:`FIMReport.crb`'s, and answering it here would silently
+        discard real, if weak, information.
+        """
+        if self.count < self.n:
+            return None, None
+        evals, evecs = np.linalg.eigh(self._gram)
+        top = float(evals[-1])
+        if not np.isfinite(top) or top <= 0.0:
+            return None, None
+        cutoff = (max(self.n, math.sqrt(self.count)) * self.eps) ** 2 * top
+        keep = np.asarray(evals > cutoff)
+        rank = int(np.count_nonzero(keep))
+        if rank == self.n:
+            return rank, None
+        basis = evecs[:, keep]
+        return rank, basis @ basis.T
+
+
 def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
     """Observer notification every ``notify_every`` iterations (or None)."""
     if notify_every <= 0 or not getattr(gm, "_observers", None):
@@ -1841,11 +1937,38 @@ class FitResult:
     run that stopped before its first update never stepped: neither is
     round-tripped through ``constrain(unconstrain(p))``, which for a
     ``log`` leaf is ``exp(log(p))`` and lands one ulp away.
+
+    ``excited_rank`` and ``undetermined_drift`` report :func:`fit`'s
+    identifiability guard (``hold_undetermined``); both are ``None`` from
+    :func:`fit_lm` and :func:`fit_multiple_shooting`, which do not run it,
+    and from a :func:`fit` that could not answer the question.
+
+    ``excited_rank``
+        How many independent directions the run's gradients spanned, out
+        of the trainable coordinate count.  Less than that count means the
+        data left the rest undetermined and ``params`` holds the value they
+        started at.  ``None`` is **not** "full rank": it is "not measured"
+        -- ``hold_undetermined=False``, more trainable parameters than
+        :data:`_EXCITATION_MAX_PARAMS`, or fewer iterations than parameters,
+        where an unobserved direction cannot be told from an unobservable
+        one.
+    ``undetermined_drift``
+        How far the raw Adam iterate had wandered along those undetermined
+        directions before the guard removed it, as a Euclidean norm in the
+        **unconstrained** coordinates (``log`` for a positive parameter, so
+        a drift of 0.04 there is a 4% drift in the parameter itself).
+        ``0.0`` when the rank was full and nothing was removed; ``None``
+        when ``excited_rank`` is.  It is a diagnostic, not a residual
+        error: the value it reports has already been taken out of
+        ``params``.  A number far above the fit's own step scale says the
+        loss surface has a flat direction worth naming with :func:`fim`.
     """
     params: dict
     losses: np.ndarray
     converged: bool
     n_iter: int
+    excited_rank: Optional[int] = None
+    undetermined_drift: Optional[float] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -1862,6 +1985,7 @@ def fit(
     eps: float = 1e-8,
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
+    hold_undetermined: bool = True,
 ) -> FitResult:
     """Adam on ``loss_fn(params)`` respecting the graph's :class:`ParamSpec`.
 
@@ -1871,11 +1995,15 @@ def fit(
     one cannot leave its interval, and it only moves the leaves the
     ``mask`` marks trainable (default ``gm.trainable_mask()``: the
     nodes' declarations plus ``gm.set_param_spec`` overrides; a ``mask``
-    may narrow that set but not widen it).  This is
-    what stops a fit from wandering along an unidentifiable direction
-    through a parameter the data cannot see — freeze it with
+    may narrow that set but not widen it).  Freezing a leaf with
     ``gm.set_param_spec(node, key, ParamSpec(trainable=False))`` after
-    :func:`fim` has named it.
+    :func:`fim` has named it keeps a fit out of a parameter the data
+    cannot see at all.
+
+    A degeneracy is rarely one parameter, though — the spring's data
+    determines ``k/m`` and ``c/m`` but not the scale of ``(k, c, m)``,
+    and no single leaf is the culprit.  ``hold_undetermined`` (default
+    ``True``) holds those *directions* instead: see below.
 
     Parameters
     ----------
@@ -1907,8 +2035,57 @@ def fit(
         ``{"method", "iteration", "n_iter", "loss", "params"}`` — the REST
         relay / live stage can show a calibration as it runs.  ``0``
         disables it.
+    hold_undetermined : bool
+        Keep the fitted parameters out of the directions the data does not
+        determine, holding them at the values they started at.  **New in
+        0.4.0, and on by default**; ``False`` restores the pre-0.4.0
+        iterate exactly.
+
+        Every gradient of a least-squares loss is ``Jᵀr``, so a direction
+        ``v`` with ``Jv = 0`` has ``g·v = 0`` at every iterate: the data
+        never says anything about it, and the loss is flat along it.  Adam
+        moves along it anyway — the diagonal preconditioner makes
+        ``Δ·v = gᵀDv`` nonzero even where ``g·v`` is zero — so the returned
+        value of a degenerate combination is set by the iteration count and
+        the learning rate rather than by the data.  Measured on the spring's
+        ``(k, c, m)`` scale degeneracy at ``lr=0.2``: the geometric mean of
+        the three drifts 3.4% by iteration 200 and **46% by iteration
+        10,000**, with the loss unchanged in its first six digits, and
+        ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
+        budget.  :func:`fit_lm` drifts too — ``λ·diag(A)`` damping is not
+        orthogonal to the null space either — but by 0.5% and it stops once
+        converged.
+
+        With the guard on, :func:`fit` accumulates ``Σ_t g_t g_tᵀ`` over the
+        run and removes the net displacement's component along that matrix's
+        numerically-null eigenvectors.  The **loss is unaffected** (it is
+        flat in exactly those directions), the iterates, ``losses``,
+        ``callback`` and observer events are unchanged, and a fit whose
+        gradients spanned everything gets its iterate back bit for bit — so
+        a well-posed fit sees no difference at all.
+        :attr:`FitResult.excited_rank` and
+        :attr:`FitResult.undetermined_drift` say what the guard found.
+
+        Two limits, both fail-open.  The cutoff is *numerical*, so a merely
+        weakly-identified direction is kept, not held — ask :func:`fim` for
+        ``crb`` to decide whether a direction is determined *well enough*.
+        And the degeneracy must be one the whole run saw: a null direction
+        that rotates in the unconstrained coordinates as the fit moves
+        (mixed ``log`` and identity transforms on the parameters it mixes,
+        say) leaves no null direction in the accumulated matrix, and the
+        guard correctly reports full ``excited_rank`` and does nothing.
+        Declaring ``transform="log"`` on every parameter of a scale
+        degeneracy is what makes it constant, and it is what
+        ``fim(scale="relative")`` already assumes.
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
+    if not isinstance(hold_undetermined, bool):
+        # A truthy non-bool ("no", 0.0, an array) would silently pick a
+        # branch the caller did not mean, and the branch it picks decides
+        # whether the returned parameters are reproducible.
+        raise ValueError(
+            f"hold_undetermined must be a bool, got {hold_undetermined!r}"
+        )
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -1940,6 +2117,11 @@ def fit(
     theta = theta0
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
+    tracker: Optional[_ExcitationTracker] = None
+    if (hold_undetermined
+            and 0 < theta0.size <= _EXCITATION_MAX_PARAMS
+            and jnp.issubdtype(theta0.dtype, jnp.floating)):
+        tracker = _ExcitationTracker(int(theta0.size), theta0.dtype)
     losses: list[float] = []
     converged = False
     i = 0
@@ -1951,6 +2133,11 @@ def fit(
             raise FloatingPointError(
                 f"non-finite loss or gradient at iteration {i} (loss={loss_f})"
             )
+        if tracker is not None:
+            # Before the ``tol`` break, not after the step: this gradient is
+            # information about the loss surface whether or not it moved
+            # anything, and a run that stops on ``tol`` has still seen it.
+            tracker.observe(g)
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
@@ -1962,9 +2149,26 @@ def fit(
             break
         theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
 
+    excited_rank: Optional[int] = None
+    undetermined_drift: Optional[float] = None
+    if tracker is not None:
+        excited_rank, projector = tracker.projector()
+        if projector is not None:
+            moved = (np.asarray(theta, dtype=np.float64)
+                     - np.asarray(theta0, dtype=np.float64))
+            kept = projector @ moved
+            undetermined_drift = float(np.linalg.norm(moved - kept))
+            # ``theta0 + kept``, not ``kept`` alone: the guard holds the
+            # undetermined directions at the values they *started* at, which
+            # is the one thing about them the data has not contradicted.
+            theta = theta0 + jnp.asarray(kept, dtype=theta0.dtype)
+        elif excited_rank is not None:
+            undetermined_drift = 0.0
+
     final = to_params(theta)
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
+        excited_rank=excited_rank, undetermined_drift=undetermined_drift,
     )
 
 

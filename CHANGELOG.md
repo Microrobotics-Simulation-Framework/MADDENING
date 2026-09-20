@@ -148,6 +148,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`fit` holds the directions the data cannot determine at the values it was
+  given**, so a degenerate combination no longer lands wherever `n_iter` and
+  `lr` leave it; `FitResult.excited_rank`, or `hold_undetermined=False`
 - **`soup_package.md` §3 counts *reachable* defects, not `open` tickets**: it
   said "6 open" where 8 entries have a live defect; a `partially_resolved` entry
   with a live residual risk now counts, by the version-range gate's own predicate

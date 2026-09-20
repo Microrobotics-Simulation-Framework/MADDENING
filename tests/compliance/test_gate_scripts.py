@@ -322,6 +322,36 @@ class TestTransformLiveRegistration:
                 "confirmed against the live registry") in out, out
         assert "2 string transform reference(s) verified" not in out
 
+    def test_an_allowlisted_reference_is_not_counted_in_the_verified_total(
+        self, transforms_gate, tmp_path, capsys, monkeypatch
+    ):
+        """The other counter the headline must not absorb.
+
+        ``n_allowlisted`` is the one that was already right, and nothing
+        pinned it: adding the allowlisted reference to the in-scope total
+        as well makes the repository report "33 verified, 2 allowlisted
+        and not checked" for 31 verified references, and every other test
+        in this file still passes.  Written because the consequence -- a
+        gate overstating its own coverage in IEC 62304 evidence -- is the
+        defect class this whole module exists for.
+        """
+        probe = tmp_path / "allowlisted_and_not.py"
+        probe.write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+            'gm.add_edge("a", "b", "x", "y", transform="deliberately_absent")\n'
+        )
+        # A scan root outside the repository keeps its absolute path as
+        # the allowlist key (`relative_to` raises and `rel` falls back).
+        monkeypatch.setitem(
+            transforms_gate._ALLOWED_UNRESOLVABLE,
+            (str(probe), "deliberately_absent"),
+            "the fixture for this test",
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert ("OK: 1 string transform reference(s) verified, 1 "
+                "allowlisted and not checked") in out, out
+
     #: Test packages whose modules need an optional extra to import.  A
     #: registration in one of these is legitimately unconfirmable in a CI
     #: that installs only ``[ci]`` -- the compliance job installs

@@ -675,8 +675,17 @@ def describe_drift(rel, current: str, generated: str) -> str:
     ]
 
     if removed or lost_ids:
-        # `lost_ids` alone would miss a row with no ID; `removed` alone
-        # would miss an ID that only ever appears in a prose summary.
+        # `or lost_ids` is a backstop and is currently unreachable on its
+        # own: every old line outside an `equal` block lands in `delete`
+        # or `replace`, and both now route a line carrying a lost ID into
+        # `removed`.  It is kept because it holds the invariant directly
+        # -- an ID the committed document has and the generated one does
+        # not is a lost row -- so a future change to the opcode loop
+        # cannot quietly reintroduce the defect.  A mutation that removes
+        # this clause alone is therefore NOT caught by the test suite;
+        # one that breaks the opcode loop is (see
+        # TestDriftIsClassified).  `removed` still contributes the names,
+        # so a lost row that carries no MADD-* ID at all is reported too.
         lost = sorted(lost_ids
                       | {m.group(0) for line in removed
                          for m in _EVIDENCE_ID.finditer(line)})

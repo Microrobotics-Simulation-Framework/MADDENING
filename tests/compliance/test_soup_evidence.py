@@ -392,6 +392,26 @@ class TestDriftIsClassified:
         assert "1 line(s) changed in place" in message
         assert "MADD-ANO-003" not in message
 
+    def test_an_id_lost_from_a_prose_line_is_named_too(self):
+        """Not only table rows.
+
+        The generated section ends with a sentence that counts the
+        registered anomalies, and an ID can be mentioned in prose.  The
+        classifier reads evidence IDs, not table syntax, so assert that
+        directly rather than leaving it to the row tests -- the naming is
+        what a maintainer acts on.
+        """
+        committed = (
+            "| MADD-ANO-001 | a |\n"
+            "*2 anomalies registered; MADD-ANO-002 is the open one.*\n"
+        )
+        generated = "| MADD-ANO-001 | a |\n*1 anomaly registered.*\n"
+        message = self._explanation(
+            gen.describe_drift("doc.md", committed, generated)
+        )
+        assert "DO NOT regenerate yet" in message
+        assert "MADD-ANO-002" in message
+
     def test_an_edit_that_loses_no_row_is_still_a_plain_regenerate(self):
         """The fix must not turn every `replace` into a refusal.
 

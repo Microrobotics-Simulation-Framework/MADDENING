@@ -156,6 +156,30 @@ _MAX_CONNECTIONS = 16
 The bridge serves one FMU instance, so every connection beyond the first
 is refused anyway; the cap exists so that refusing them costs a bounded
 number of threads."""
+_HANDOVER_GRACE = 2.0
+"""Seconds a new connection waits for the instance slot before it is refused.
+
+The slot is released by the *departing* connection's own worker thread,
+in the ``finally`` that runs once its socket has reached EOF.  An
+importer that frees one instance and immediately instantiates another --
+which is exactly ``fmi3FreeInstance`` followed by
+``fmi3InstantiateCoSimulation`` -- therefore races that thread, and is
+refused a slot nobody holds whenever the scheduler reaches the new
+worker first.  Nothing on the server side can close that gap: the new
+connection can always arrive before the old worker is scheduled, so the
+wait has to be on the acquiring side.
+
+Measured with the two workers contending for one CPU, which is the
+shape of a CI runner: 21-28% of immediate reconnects were refused, and
+the gap between hang-up and a slot that could be claimed had a median of
+0.18s and a maximum of 0.97s.  Those numbers are an upper bound taken on
+a deliberately saturated box and should be read as one.  Two seconds is
+about four times the measured p95, well under the five-second worker
+join in :meth:`FmuTcpBridge.stop`, and still "refused, not blocked": a
+peer that really is a second instance gets its error reply, two seconds
+later, instead of hanging on a lock for ever."""
+_HANDOVER_POLL = 0.05
+"""Granularity of that wait, so ``stop()`` is not held up by the grace."""
 
 
 def _json_object(body: bytes, what: str) -> Any:
@@ -530,6 +554,23 @@ class FmuTcpBridge:
                 self._live_conns.discard(conn)
                 self._live_workers.discard(threading.current_thread())
 
+    def _claim_instance(self) -> bool:
+        """Claim the single instance slot, waiting out a hand-over.
+
+        Returns ``True`` if this connection now holds the slot.  The wait
+        is bounded by :data:`_HANDOVER_GRACE` and abandoned early if the
+        bridge is stopping, so a refusal stays a refusal rather than
+        becoming a hang -- the distinction the "refused, not blocked"
+        contract is about.  See :data:`_HANDOVER_GRACE` for why waiting
+        at all is necessary.
+        """
+        deadline = time.monotonic() + _HANDOVER_GRACE
+        while True:
+            if self._busy.acquire(timeout=_HANDOVER_POLL):
+                return True
+            if self._stop.is_set() or time.monotonic() >= deadline:
+                return False
+
     def _serve_conn_inner(self, conn: socket.socket) -> None:
         with conn:
             if self._stop.is_set():
@@ -558,8 +599,10 @@ class FmuTcpBridge:
                         # A bridge holds ONE sidecar state; a second instance
                         # would silently share it.  Refuse instead of
                         # blocking -- but only now that this peer has proved
-                        # it has something to say.
-                        if not self._busy.acquire(blocking=False):
+                        # it has something to say, and only once a departing
+                        # connection has had ``_HANDOVER_GRACE`` to release
+                        # the slot it no longer holds.
+                        if not self._claim_instance():
                             try:
                                 send_message(conn, {"ok": False, "error":
                                                     "bridge already serves an FMU instance; "

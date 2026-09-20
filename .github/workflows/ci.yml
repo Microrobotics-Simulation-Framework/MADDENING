@@ -277,6 +277,27 @@ jobs:
           JAX_PLATFORMS: cpu
         run: python scripts/check_stable_signatures.py
 
+      - name: Run the docstring examples
+        # Every `>>>` in src/maddening, executed.  This is a documentation
+        # gate -- an example that no longer works is a false claim in the
+        # API reference -- so it belongs in this job rather than in `test`:
+        # feedback in ~2 minutes instead of ~40, which is what makes it
+        # useful to a change that is rewriting the shapes those examples
+        # use.  The script also fails if the collection shrinks; see its
+        # module docstring.
+        #
+        # This job installs .[ci,usd], a superset of the .[ci] the test
+        # matrix installs, so the two would disagree about an example that
+        # needs an optional extra.  `usd` is the only difference, and the
+        # only modules that need it (maddening.usd.*) already refuse to
+        # import without it -- so an example there is gated by the module,
+        # not by this job's choice of extras.  Adding a further extra here
+        # would reopen that gap: keep new examples inside .[ci].
+        env:
+          JAX_PLATFORMS: cpu
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python scripts/check_doctests.py -v --tb=short
+
       - name: Run compliance tests
         env:
           JAX_PLATFORMS: cpu

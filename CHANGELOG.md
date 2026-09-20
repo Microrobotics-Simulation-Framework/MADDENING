@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
+  every `>>>` in `src/maddening` now runs, and the gate fails if the
+  collection shrinks — an example that stops working is a failing build
 - **The 0.4.0 stability freeze round** (`docs/developer_guide/api_freeze_proposal.md`)
   plus a guard that a `stable` signature cannot change unannounced
   (`scripts/check_stable_signatures.py`): 141 surfaces tagged, none promoted

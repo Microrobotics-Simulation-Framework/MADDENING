@@ -30,6 +30,7 @@ import time.  Levels:
 | `maddening.cloud.multigpu.halo_unstructured.exchange_unstructured` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.gather_value` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.partition_value` | evolving |
+| `maddening.cloud.multigpu.iterative_solver.SharedSolveResult` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.block_jacobi_preconditioner` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.jacobi_preconditioner` | evolving |
 | `maddening.cloud.multigpu.iterative_solver.sharded_cg` | stable |
@@ -41,6 +42,8 @@ import time.  Levels:
 | `maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode.invalidate_static_cache` | stable |
 | `maddening.cloud.providers.CloudProvider` | evolving |
 | `maddening.cloud.resume.download_and_load_state` | evolving |
+| `maddening.core.compliance.uq.UncertaintySpec` | evolving |
+| `maddening.core.coupling.group.CouplingGroup` | evolving |
 | `maddening.core.coupling.mapping.StaticLinearMapping` | evolving |
 | `maddening.core.coupling.mapping.matrix_mapping` | evolving |
 | `maddening.core.coupling.mapping.nearest_neighbor_mapping` | evolving |
@@ -53,6 +56,9 @@ import time.  Levels:
 | `maddening.core.coupling.mapping_spec.point_array_digest` | evolving |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
+| `maddening.core.graph_manager.ShardingIssue` | evolving |
+| `maddening.core.node.BoundaryFluxSpec` | evolving |
+| `maddening.core.node.BoundaryInputSpec` | evolving |
 | `maddening.core.node.SimulationNode` | stable |
 | `maddening.core.node.SimulationNode.invalidate_static_cache` | stable |
 | `maddening.core.node.SimulationNode.static_data_deps` | stable |
@@ -119,6 +125,34 @@ import time.  Levels:
 | `maddening.sysid.init_window_states` | evolving |
 | `maddening.sysid.observations_from_history` | evolving |
 | `maddening.sysid.windowed_loss` | evolving |
+| `maddening.testing.mms.ApparentOrder` | experimental |
+| `maddening.testing.mms.ConvergenceRegime` | experimental |
+| `maddening.testing.mms.GridConvergenceStudy` | experimental |
+| `maddening.testing.mms.InconclusiveStudyError` | experimental |
+| `maddening.testing.mms.ManufacturedSolution` | experimental |
+| `maddening.testing.mms.OrderMeasurement` | experimental |
+| `maddening.testing.mms.RefinementAxis` | experimental |
+| `maddening.testing.mms.UndeclaredOrderError` | experimental |
+| `maddening.testing.mms.apparent_order` | experimental |
+| `maddening.testing.mms.assert_node_gci_verified` | experimental |
+| `maddening.testing.mms.assert_node_order_verified` | experimental |
+| `maddening.testing.mms.check_gci` | experimental |
+| `maddening.testing.mms.check_order` | experimental |
+| `maddening.testing.mms.declared_order` | experimental |
+| `maddening.testing.mms.diffusion_operator` | experimental |
+| `maddening.testing.mms.manufactured_acceleration` | experimental |
+| `maddening.testing.mms.measure_gci` | experimental |
+| `maddening.testing.mms.measure_order` | experimental |
+| `maddening.testing.mms.richardson_study` | experimental |
+| `maddening.testing.mms.verify_node_gci` | experimental |
+| `maddening.testing.mms.verify_node_order` | experimental |
+| `maddening.testing.strategies.boundary_inputs_for` | experimental |
+| `maddening.testing.strategies.bounded_dt` | experimental |
+| `maddening.testing.strategies.node_states` | experimental |
+| `maddening.testing.verification.VerificationResult` | experimental |
+| `maddening.testing.verification.assert_node_verified` | experimental |
+| `maddening.testing.verification.make_inputs` | experimental |
+| `maddening.testing.verification.verify_node` | experimental |
 | `maddening.transport_auth.TransportAuth` | evolving |
 | `maddening.transport_auth.TransportAuthError` | evolving |
 | `maddening.transport_auth.address_is_loopback` | evolving |
@@ -126,4 +160,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*107 API surfaces registered.*
+*141 API surfaces registered.*

@@ -329,7 +329,19 @@ class CloudSession:
                 from maddening.cloud._skypilot import teardown_vm
                 teardown_vm(job_id)
             except Exception:
-                logger.exception("Failed to tear down VM")
+                # ``teardown_vm`` now raises rather than logging and
+                # returning, so this is the one place that decides what a
+                # failed release means.  It is not re-raised -- teardown runs
+                # on error paths and from ``__exit__``, where raising would
+                # mask the original failure -- but it must not read like a
+                # tidy-up nicety either: the instance is still provisioned
+                # and still billing.  ``skypilot_job_id`` is deliberately
+                # left on ``self._info`` so the release can be retried.
+                logger.exception(
+                    "Cloud teardown of %s did NOT complete: the VM may still "
+                    "be running and still be billing. Check `sky status` and "
+                    "release it with `sky down %s`.", job_id, job_id,
+                )
 
         self._ready_event.set()
 

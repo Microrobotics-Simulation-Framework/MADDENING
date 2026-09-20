@@ -1261,3 +1261,107 @@ anomalies:
     verification:
       - "tests/verification/test_integrator_order.py"
     github_issue: null
+  - anomaly_id: "MADD-ANO-016"
+    title: "cloud/_skypilot.py was written against a SkyPilot API older than the supported floor"
+    description: >
+      From v0.1.0 to v0.4.0, `src/maddening/cloud/_skypilot.py` was
+      byte-identical and written against SkyPilot's pre-0.7, pre-client-server
+      API, while every release declared `skypilot>=0.11`.  Every call in the
+      module was therefore wrong against every version the package claims to
+      support.  Verified against the installed sky 0.12.2:
+
+        * `sky.launch(task, cluster_name=..., detach_run=True)` -- `detach_run`
+          was removed with the client-server split, so the call raises
+          `TypeError` before anything is provisioned;
+        * `sky.launch`, `sky.status` and `sky.down` return a `RequestId`, which
+          is a `str` subclass.  `sky.status(cluster_names=[name])[0]` therefore
+          indexed a *character* rather than a cluster record, and
+          `.get("handle", {})` on it raised
+          `AttributeError: 'str' object has no attribute 'get'`.  Because a
+          `RequestId` is a string, nothing failed at the indexing step: the
+          error surfaced one call later, and inside a background thread;
+        * `getattr(sky, config.cloud.upper(), None) or sky.GCP()` never matched
+          for the two providers MADDENING's `[cloud]` extra installs -- the
+          classes are `sky.RunPod` and `sky.Lambda`, not `sky.RUNPOD` -- so
+          every `CloudSession` launch fell through to GCP, whatever the config
+          said.  For `aws`/`gcp` the lookup hit but returned the class where
+          the other branch returned an instance.
+
+      Two `except Exception` handlers kept the breakage quiet.  `teardown_vm`
+      logged `sky.down`'s failure and returned normally, which is
+      indistinguishable from a successful release to every caller, so a
+      `CloudSession.teardown()` reported a freed VM while the instance kept
+      running and kept billing.  `monitor_preemption` polled `check_status`
+      inside `except Exception: logger.debug` in a `while True` loop, so a
+      status check that could never succeed produced an infinite silent loop
+      and the preemption callback could never fire.
+
+      The defect survived because there are two independent SkyPilot paths and
+      only one was broken.  `CloudLauncher` -- the user-facing script/CLI path
+      -- has used the client-server API since v0.2.0 across fourteen call
+      sites and works.  `CloudSession` is the only importer of `_skypilot.py`
+      (`cloud/session.py:329, 408-410`), and that path was plausibly never
+      exercised against a real provider.  The test suite could not see it
+      either: `tests/cloud/test_skypilot_ports.py` substituted a fake `sky`
+      whose `launch(self, task, cluster_name, detach_run=True)` mirrored the
+      stale signature and whose `status` returned a list of dicts, so the
+      suite proved the module consistent with itself.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No simulation result depends on this code: `_skypilot.py` provisions and
+      releases cloud infrastructure and computes no physics.  A failed launch
+      is loud at the call site once the API mismatch raises, and a failed
+      teardown leaks an instance and its cost rather than producing a wrong
+      number.  It is recorded as `major` rather than `minor` because a silent
+      teardown failure is an unbounded, unattended financial exposure and
+      because a launch silently redirected to a different cloud provider
+      moves customer data to a jurisdiction the operator did not choose --
+      neither is a safety property under IEC 62304, but both are the kind of
+      defect a reviewer expects the registry to carry.
+    affected_components:
+      - "maddening.cloud._skypilot.launch_vm"
+      - "maddening.cloud._skypilot.check_status"
+      - "maddening.cloud._skypilot.teardown_vm"
+      - "maddening.cloud._skypilot.monitor_preemption"
+      - "maddening.cloud.session.CloudSession"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Use `maddening.cloud.launcher.CloudLauncher`, which speaks the current
+      SkyPilot API and is the path the shipped cloud examples use.  Do not
+      rely on `CloudSession.teardown()` to have released anything on
+      v0.3.1 or earlier: confirm with `sky status` and release by hand with
+      `sky down <cluster>`.  Do not rely on `PreemptionPolicy` for a spot
+      instance on those versions; the monitor could not detect a preemption.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      What is resolved in 0.4.0 is that the calls now match the library.  The
+      four functions were ported to the client-server API following
+      `cloud/launcher.py`'s existing call sites, and
+      `tests/cloud/test_skypilot_api_contract.py` binds every `sky.*` call in
+      the module against `inspect.signature` of the *installed* SkyPilot, so
+      the next upstream API break fails in CI rather than on a provider.  The
+      fake that hid the defect is rebuilt from the real signatures and held to
+      them by the same test, so it cannot drift again.
+
+      What is NOT resolved is the behaviour.  A signature-correct port is not
+      a verified port: that `teardown_vm` actually releases an instance, that
+      `check_status` reports what a real cluster is doing, and that
+      `monitor_preemption` fires on a real spot preemption all need a live
+      provider, and none of them has been observed.  The tests above establish
+      only that the calls are well formed.  This entry stays
+      `partially_resolved` until the Phase 4 RunPod session exercises a real
+      launch, a real status poll, a real preemption and a real teardown; it
+      must not be closed on a signature match.  Until then, an operator
+      running `CloudSession` against a provider should confirm teardown with
+      `sky status` as on earlier versions.
+    verification:
+      - "tests/cloud/test_skypilot_api_contract.py::TestTheModuleMatchesTheInstalledSkyPilot::test_every_call_binds_against_the_installed_signature"
+      - "tests/cloud/test_skypilot_api_contract.py::TestTheModuleMatchesTheInstalledSkyPilot::test_sky_launch_no_longer_takes_detach_run"
+      - "tests/cloud/test_skypilot_api_contract.py::TestEveryRequestIdIsResolved::test_no_request_returning_call_is_used_without_being_resolved"
+      - "tests/cloud/test_skypilot_api_contract.py::TestTheFakeCannotDrift::test_the_fake_declares_no_parameter_the_real_sky_lacks"
+      - "tests/cloud/test_skypilot_client_server_calls.py::TestTeardownVm::test_a_failing_teardown_raises_rather_than_logging_and_returning"
+      - "tests/cloud/test_skypilot_client_server_calls.py::TestMonitorPreemption::test_a_permanently_raising_status_check_gives_up_loudly"
+      - "tests/cloud/test_skypilot_client_server_calls.py::TestLaunchVm::test_the_cloud_the_config_names_is_the_cloud_that_is_used"
+    github_issue: null

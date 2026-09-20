@@ -37,7 +37,11 @@ from typing import (
     get_type_hints,
 )
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
+
+@stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class CouplingGroup:
     """Configuration for an iteratively-coupled group of nodes.

@@ -827,7 +827,15 @@ class TestPrecisionLimitedRank:
                 f"eigvals={np.asarray(report.eigvals)}"
             )
 
-    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    # Twice the profile's count, because the assertion below is guarded by
+    # ``if warned`` rather than reached through ``assume(warned)`` and only
+    # about half of this generator's draws warn (measured: 51.5% of draws
+    # were discarded when this was an ``assume``).  Doubling restores the
+    # number of *warned* cases the property is checked on -- ~80, as before
+    # -- at the same number of draws the ``assume`` form already cost, with
+    # none of them thrown away.  See
+    # docs/developer_guide/testing_standards.md on rejection budgets.
+    @settings(max_examples=2 * EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),
         m=st.integers(min_value=2, max_value=32),
@@ -841,11 +849,21 @@ class TestPrecisionLimitedRank:
         within the measured factor of the cutoff -- and the number the
         message quotes is that ratio, not ``eigvals[0]``, which can be
         decades away from the comparison being made.
+
+        The implication is tested as an implication, the way
+        :meth:`test_a_verdict_the_two_precisions_disagree_about_warns`
+        does one line above.  It used to be ``assume(warned)``, which
+        threw away every draw that did not warn -- half of them, the
+        highest rejection rate in either property suite -- and narrowing
+        ``log_ratio`` towards the band to raise that rate would have
+        deleted exactly the draws a spuriously-fired warning would show
+        up in, which is the bug this property hunts.
         """
         J64, cutoff = _fisher_with_known_ratio(n, max(m, n),
                                                float(np.exp(log_ratio)), seed)
         report, warned = _fim_of(J64)
-        assume(warned)
+        if not warned:
+            return
         ev = np.asarray(report.eigvals, dtype=np.float64)
         assert float(ev[-1]) > 0.0
         ratios = ev / float(ev[-1])

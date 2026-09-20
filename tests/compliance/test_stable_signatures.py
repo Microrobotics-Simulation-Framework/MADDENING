@@ -536,6 +536,18 @@ def _names_in_annotation(text: str) -> tuple[set[str], set[tuple[str, ...]]]:
     return bare, dotted
 
 
+@pytest.fixture(scope="module")
+def survey(guard):
+    """The annotation survey, computed once for the module.
+
+    Module scope, and defined here rather than inside the class: a
+    class-scoped fixture written as an instance method is deprecated
+    (``PytestRemovedIn10Warning``), and ``filterwarnings = ["error"]`` turns
+    that into a collection error rather than a warning.
+    """
+    return _survey_stable_annotations(guard)
+
+
 def _survey_stable_annotations(guard) -> dict:
     """Which MADDENING types the ``STABLE`` surface's signatures name."""
     from maddening.core.compliance.metadata import StabilityLevel
@@ -673,10 +685,6 @@ class TestAStableSignatureNamesNoUntaggedType:
     is a string constant in the parse tree and was invisible to a first
     attempt that only looked at ``ast.Name``.
     """
-
-    @pytest.fixture(scope="class")
-    def survey(self, guard):
-        return _survey_stable_annotations(guard)
 
     def test_the_survey_actually_inspected_the_stable_surface(self, survey, guard):
         """A survey that inspected nothing would report no findings.

@@ -16,9 +16,9 @@ at a true 60% filter rate trips it about once in 28,000 runs, one at 70% about
 once in 140, and one at 85% three runs in five.  Which is how a test can sit
 green for months and then go red for whoever next narrows a strategy.
 
-What a high rejection rate does NOT do, on Hypothesis 6.165-6.168, is reduce the
-number of examples actually checked.  The engine keeps drawing until it has
-``max_examples`` *valid* ones and only gives up below ~1% valid
+What a high rejection rate does NOT do, on Hypothesis 6.165-6.168, is
+reduce the number of examples actually checked.  The engine keeps drawing
+until it has ``max_examples`` *valid* ones and only gives up below ~1% valid
 (``INVALID_THRESHOLD_BASE`` / ``INVALID_PER_VALID``, derived for r=0.01).
 Measured here against a synthetic gate: at 98% rejection the test still ran
 its full 200 examples, using 9068 draws to do it.  So the cost of rejection is

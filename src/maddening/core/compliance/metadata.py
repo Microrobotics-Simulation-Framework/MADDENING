@@ -65,6 +65,59 @@ class ValidatedRegime:
 
 
 @dataclass(frozen=True)
+class DiscretizationOrder:
+    """The order of accuracy a node's scheme is *claimed* to achieve.
+
+    This is the theoretical order the discretisation was designed for,
+    not a measured one.  Declaring it is what lets
+    :func:`maddening.testing.mms.verify_node_order` turn a per-node
+    convergence study into a parametrised test: the harness refines the
+    grid (or the timestep), measures the rate at which the error falls,
+    and fails when the measurement falls short of what is declared
+    here.  A node that declares nothing is *skipped* explicitly by that
+    harness rather than silently passing it.
+
+    Order is the claim a verification measurement can actually falsify.
+    An absolute error tolerance cannot: a wrong stencil weight, a
+    mishandled boundary or an off-by-one in a flux usually leaves the
+    error looking perfectly acceptable on the one grid a threshold test
+    runs on, and shows up only as order 1 where order 2 was claimed.
+
+    Attributes
+    ----------
+    spatial : float or None
+        Order in the grid spacing ``h``: the error should fall like
+        ``O(h**spatial)`` under spatial refinement at fixed timestep.
+        ``None`` for a node with no spatial discretisation (an ODE node
+        such as :class:`~maddening.nodes.ball.BallNode`).
+    temporal : float or None
+        Order in the timestep ``dt``.  ``None`` if the node does not
+        integrate in time.
+    notes : str
+        Where the claim comes from, and any caveat that bounds it: a
+        boundary closure of lower order than the interior stencil, a
+        regime in which the order degrades, the reference the scheme is
+        taken from.
+
+    Examples
+    --------
+    >>> DiscretizationOrder(spatial=2.0, temporal=1.0, notes="central FD, forward Euler")
+    DiscretizationOrder(spatial=2.0, temporal=1.0, notes='central FD, forward Euler')
+
+    A node whose order depends on how it was constructed declares the
+    default here and overrides the instance hook the harness prefers::
+
+        def discretization_order(self):
+            return DiscretizationOrder(
+                spatial=float(self.params["stencil_order"]), temporal=1.0,
+            )
+    """
+    spatial: Optional[float] = None
+    temporal: Optional[float] = None
+    notes: str = ""
+
+
+@dataclass(frozen=True)
 class EdgeMeta:
     """Metadata for an edge (data coupling between nodes)."""
     description: str = ""
@@ -89,6 +142,13 @@ class NodeMeta:
     description: str = ""
     governing_equations: str = ""
     discretization: str = ""
+
+    # Order of accuracy the scheme claims (prose lives in
+    # ``discretization``; this is the machine-readable claim the MMS
+    # harness measures against).  ``None`` means the node has not
+    # declared one, and ``maddening.testing.mms`` skips it explicitly
+    # rather than passing it silently.
+    discretization_order: Optional[DiscretizationOrder] = None
 
     # Assumptions and limitations
     assumptions: tuple[str, ...] = ()

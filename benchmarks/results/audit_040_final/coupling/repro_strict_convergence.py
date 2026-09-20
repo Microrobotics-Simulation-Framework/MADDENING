@@ -11,7 +11,7 @@ try:
 except Exception as e:
     print("   raised", type(e).__name__, "-> guard works")
 
-print("bound_valid at max_iterations=1 (docstring says False):")
+print("ratio_usable at max_iterations=1 (docstring says False):")
 gm = graph("ift", b=0.5, max_iterations=1, tolerance=1e-12)
 gm.step(); print("  ", gm.coupling_diagnostics()["flow+struct"])
 

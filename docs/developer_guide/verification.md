@@ -5,6 +5,12 @@ MADDENING ships a property-based testing layer (built on
 inputs from a declared envelope, check universal invariants, and shrink any
 failure to a minimal counterexample.
 
+Those checks compare the code to itself.  They cannot see a wrong
+discretisation, because a stencil with the wrong weight is finite,
+deterministic, JIT-consistent and differentiable.  [Order of
+accuracy](#order-of-accuracy-the-method-of-manufactured-solutions) is the
+other half of the battery: it compares the code to the mathematics.
+
 Install via:
 
 ```bash
@@ -108,6 +114,114 @@ def test_my_node_cools(state, bi, dt):
 Sampling defaults to `float32` — the dtype most nodes execute in — so
 overflow shows up where it actually happens.
 
+## Order of accuracy: the Method of Manufactured Solutions
+
+`maddening.testing.mms` measures the **observed order of convergence** of a
+node's discretisation and fails when it falls short of what the node claims
+[@Roache2002; @LeVeque2007].
+
+Order, not error.  A wrong stencil weight, a mishandled boundary or an
+off-by-one in a flux normally leaves the absolute error looking perfectly
+acceptable on the one grid a threshold test runs on, and shows up only as
+order 1 where order 2 was claimed.  Both defects this harness found in
+MADDENING's own nodes (MADD-ANO-007 and MADD-ANO-008) sat inside the
+thresholds of the tests that already covered them.
+
+### Declare the order
+
+```python
+from maddening.core.compliance.metadata import DiscretizationOrder, NodeMeta
+
+class MyNode(SimulationNode):
+    meta = NodeMeta(
+        discretization="2nd-order central differences, forward Euler",
+        discretization_order=DiscretizationOrder(
+            spatial=2.0, temporal=1.0, notes="where the claim comes from",
+        ),
+        ...
+    )
+```
+
+If the order depends on how the node was constructed — a selectable stencil,
+say — override `discretization_order()` on the instance; the harness prefers
+the hook over the class declaration.  A node that declares nothing is
+**skipped explicitly**: `verify_node_order` returns `SKIP` and
+`assert_node_order_verified` raises `UndeclaredOrderError`, so an undeclared
+node can never look verified.
+
+### Measure it
+
+```python
+from maddening.testing.mms import (
+    ManufacturedSolution, RefinementAxis, assert_node_order_verified,
+    diffusion_operator,
+)
+
+sol = ManufacturedSolution(
+    exact=lambda x, t: jnp.sin(2 * jnp.pi * x) + 0.5 * x + 1.0,
+    operator=diffusion_operator(alpha),          # du/dt = L[u] + S
+)
+# sol.source(x, t) = d(exact)/dt - L[exact](x, t), derived by AD rather
+# than by hand: the derivation is the step MMS is most often got wrong on.
+
+def error_at(n_cells):
+    """Build the node at this resolution, drive it with sol, return one error."""
+    ...
+
+assert_node_order_verified(
+    node, axis=RefinementAxis.SPACE, error_at=error_at,
+    levels=(10, 20, 40, 80, 160),          # coarsest first
+)
+```
+
+### Four things to get right
+
+1. **Refine one axis at a time.**  Refining space and time together measures
+   the *minimum* of the two orders, so a first-order integrator hides a
+   second-order stencil.  Hold the other axis fixed, or make its error vanish
+   identically: a manufactured solution with no time dependence, run to
+   steady state, leaves only the spatial error (forward Euler's temporal
+   truncation error is proportional to `d2u/dt2`); a solution quadratic in
+   `x` is reproduced exactly by a second-order central difference and leaves
+   only the temporal error.
+2. **Check the node takes a source at all.**  MMS has to inject `S`.
+   `HeatNode` has `heat_source`, `LBMNode` has `body_force`, `RigidBodyNode`
+   has `force`/`torque`.  A node with no forcing input cannot be verified
+   this way, and the honest finding is that MMS needs a hook the node does
+   not expose — not a substitute study that does not test the discretisation.
+3. **Stay above the arithmetic noise floor.**  The observed order is a ratio
+   of small numbers.  In float32 these ladders measure a clean order to about
+   80 cells and then turn over; the studies in
+   `tests/verification/test_mms_order.py` run under `jax_enable_x64` for that
+   reason.  `OrderMeasurement.monotone` is the guard: an error that stops
+   falling fails as an inconclusive study, not as a wrong order.
+4. **Read the band.**  `check_order` gates on the order over the *finest*
+   pair, accepting `[declared - 0.25, declared + 1.0]`.  The lower half comes
+   from measurement: across the three nodes covered, the finest pair lands
+   within 0.02 of theory while the coarsest pair of the same ladder sits up
+   to 0.16 low, and both defects found fall a full order or more short.  The
+   upper half catches a study that is not exercising the scheme at all — a
+   manufactured solution the discretisation represents exactly measures
+   nothing.
+
+### What is covered
+
+| Node | Axis | Declared | Observed | Benchmark |
+|------|------|----------|----------|-----------|
+| `HeatNode` (`stencil_order=2`) | space | 2 | 1.982 | MADD-VER-005 |
+| `HeatNode` | time | 1 | 0.998 | MADD-VER-006 |
+| `LBMNode` (D2Q9, periodic, Guo forcing [@Guo2002]) | space | 2 | 1.998 | MADD-VER-007 |
+| `RigidBodyNode` (symplectic Euler [@Hairer2006]) | time | 1 | 0.999 | MADD-VER-008 |
+| `HeatNode` (`stencil_order=4`) | space | 4 | **0.954** | MADD-ANO-008 |
+| `HeatNode`, boundary data at the rod ends | space | 2 | **1.001** | MADD-ANO-007 |
+
+The last two are recorded as strict xfails, so correcting either node turns
+the test into an XPASS that has to be dealt with rather than a silent pass.
+
+Every other node is undeclared and skips.  `LBMNode` declares no *temporal*
+order on purpose: the lattice fixes `dx = dt = 1` and `update` ignores its
+`dt`, so there is no timestep to refine.
+
 ## Running the suite
 
 ```bash
@@ -131,6 +245,8 @@ globally because the first example of every test pays JIT compilation.
 ## Checklist for new nodes
 
 - [ ] `assert_node_verified(node, bounds=...)` with a physically meaningful envelope
+- [ ] `NodeMeta(discretization_order=DiscretizationOrder(...))`, and an MMS
+      study measuring it — an order nobody measured is a claim, not evidence
 - [ ] `update(state, bi, dt=0)` is identity (zero-step) — add as an `invariants` entry
 - [ ] If dissipative: `energy_fn=`
 - [ ] If a conservation law applies: `invariants=` for the conserved quantity

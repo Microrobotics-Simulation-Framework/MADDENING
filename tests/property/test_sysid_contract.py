@@ -823,7 +823,23 @@ def analytic_residual(draw):
     return residual, keys, tuple(theta)
 
 
+@pytest.mark.filterwarnings(
+    "ignore::maddening.warnings.PrecisionLimitWarning")
 class TestFIMAgainstFiniteDifference:
+    """``fim``'s matrix against a finite difference of the same residual.
+
+    The class carries a ``PrecisionLimitWarning`` filter.  These sweep
+    spring parameters across regimes that include genuinely floor-level
+    conditioning -- position-only data cannot separate a common scaling
+    of ``(k, c, m)``, so the weakest eigenvalue sits at the noise floor
+    by construction for some draws -- and ``fim`` now says so.  The
+    warning is a true statement about those matrices and is beside the
+    point of what is asserted here, which is the *matrix*, not the rank
+    verdict read off it.  Filtered rather than asserted because it fires
+    on some generated draws and not others, and marked on the class
+    rather than the methods for the same reason: which draw crosses the
+    band is not stable between runs.
+    """
 
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)

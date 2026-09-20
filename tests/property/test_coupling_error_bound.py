@@ -273,7 +273,7 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
         note(f"{key}: distance={distance:.3e} threshold={threshold:.3e} "
              f"residual={d['residual']:.3e} "
              f"estimate={d['error_estimate']:.3e} "
-             f"amp={d['amplification']} valid={d['bound_valid']} "
+             f"amp={d['amplification']} valid={d['ratio_usable']} "
              f"norm={group.convergence_norm} accel={group.acceleration}")
         if not jnp.isfinite(distance):
             continue                 # a diverged reference measures nothing
@@ -317,7 +317,7 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
     for key, d in diagnostics.items():
         threshold = _threshold(groups[key])
         note(f"{key}: {d}")
-        if d["bound_valid"]:
+        if d["ratio_usable"]:
             assert d["amplification"] >= 1.0
             scale = relaxation_step_scale(
                 groups[key].acceleration, groups[key].relaxation,
@@ -326,12 +326,12 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
                 d["residual"] * max(scale * d["amplification"], 1.0),
                 rel=1e-5,
             )
-            assert d["gradient_error_bound"] == pytest.approx(
+            assert d["gradient_error_estimate"] == pytest.approx(
                 d["error_estimate"],
             )
         else:
             assert d["error_estimate"] == pytest.approx(d["residual"])
-            assert d["gradient_error_bound"] == float("inf")
+            assert d["gradient_error_estimate"] == float("inf")
         if d["converged"]:
             assert d["residual"] <= threshold, (
                 "the new criterion let through a state the residual test "
@@ -416,13 +416,13 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
         )
         assert a["residual"] == pytest.approx(b["residual"], rel=1e-4,
                                               abs=floor, nan_ok=True)
-        # ``bound_valid`` is a statement about the *ratio* of the last
+        # ``ratio_usable`` is a statement about the *ratio* of the last
         # two residuals.  Where both are at the noise floor that ratio
         # is a ratio of rounding, and one solver rejecting it while the
         # other accepts it says nothing about either.  Above the floor
         # the two must agree.
         if min(a["residual"], b["residual"]) > floor:
-            assert a["bound_valid"] == b["bound_valid"]
+            assert a["ratio_usable"] == b["ratio_usable"]
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +540,7 @@ def test_the_estimate_is_invariant_to_the_relaxation_factor(gain, omega):
     )
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    assume(d["converged"] and d["bound_valid"])
+    assume(d["converged"] and d["ratio_usable"])
     distance = _exact_distance(gm, gain, bias)
     assume(distance > 0.0)
 
@@ -566,7 +566,7 @@ def test_the_estimate_is_invariant_to_the_relaxation_factor(gain, omega):
     "sqrt guard, can tell that the remaining error already belongs to a "
     "much slower mode.  The pinned example is the audit's: (0.999, 0.2) "
     "reports 9.19e-05 against a true distance of 1.12e-02, 122x, with "
-    "bound_valid=True.  A real fix needs the spectrum rather than the "
+    "ratio_usable=True.  A real fix needs the spectrum rather than the "
     "residual sequence and is post-0.4.0 work.  Flipping this to a pass "
     "means the estimate became a bound: update "
     "benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md, the "
@@ -596,7 +596,7 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
                        tolerance=_ANALYTIC_TOLERANCE)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    assume(d["converged"] and d["bound_valid"])
+    assume(d["converged"] and d["ratio_usable"])
     distance = _exact_distance(gm, gain, bias)
     assume(distance > 0.0)
     note(f"rho={gain} c={bias} distance={distance} {d}")

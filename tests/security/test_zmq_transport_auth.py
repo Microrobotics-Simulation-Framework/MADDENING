@@ -214,40 +214,57 @@ class TestStateStreamConfidentiality:
         assert counts["authorised"] > 0
         assert counts["own-keypair"] == 0
 
-    def test_the_published_frames_are_not_the_plaintext_state(self):
-        """A passive observer of the wire sees no field name from the state.
+    def test_the_state_is_readable_without_curve_and_unreadable_with_it(self):
+        """Differential: same observer, same payload, encryption the only change.
 
-        The subscriber tests above prove libzmq refuses the handshake.
-        This one proves the bytes on the wire are encrypted too, so a
-        tap that never completes a handshake learns nothing either.
+        The "nothing leaked" half is not evidence on its own.  This
+        started life as a raw ``socket.create_connection`` tap asserting
+        no field name appeared in the captured bytes -- and it **passed
+        with encryption switched off**, because a socket that never
+        completes a ZMTP handshake receives no published frame from
+        either relay.  Measured, then replaced.
+
+        So the readable case is asserted first: if a plain subscriber
+        cannot read even the unencrypted relay, the second assertion
+        proves nothing and this test says so instead of passing.
         """
-        port = _free_port()
-        address = f"tcp://127.0.0.1:{port}"
-        relay = NetworkRelay(address=address, secure=True, token=TOKEN)
-        graph = _FakeGraphManager()
-        relay.attach(graph)
-        try:
-            tap = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+        field = "secret_position"
+
+        def capture(secure: bool) -> str:
+            port = _free_port()
+            address = f"tcp://127.0.0.1:{port}"
+            relay = NetworkRelay(address=address, secure=secure, token=TOKEN)
+            graph = _FakeGraphManager()
+            relay.attach(graph)
+            context = zmq.Context()
+            sub = _sub(context, address, token=None)  # no credential at all
+            seen = b""
             try:
-                tap.settimeout(0.5)
-                deadline = time.monotonic() + 2.0
-                captured = b""
+                deadline = time.monotonic() + 2.5
                 while time.monotonic() < deadline:
                     graph.emit(STATE)
-                    try:
-                        chunk = tap.recv(65536)
-                    except (TimeoutError, socket.timeout):
-                        continue
-                    if not chunk:
+                    while True:
+                        try:
+                            seen += sub.recv(zmq.NOBLOCK)
+                        except zmq.Again:
+                            break
+                    if seen:
                         break
-                    captured += chunk
+                    time.sleep(0.02)
             finally:
-                tap.close()
-        finally:
-            relay.close()
+                sub.close()
+                context.term()
+                relay.close()
+            return seen.decode("utf-8", "replace")
 
-        assert b"secret_position" not in captured
-        assert b"joint_angle" not in captured
+        cleartext = capture(secure=False)
+        encrypted = capture(secure=True)
+
+        assert field in cleartext, (
+            "a plain subscriber could not read the UNENCRYPTED relay, so "
+            "the encrypted result below would prove nothing"
+        )
+        assert field not in encrypted
 
 
 class TestCommandChannelConfidentiality:

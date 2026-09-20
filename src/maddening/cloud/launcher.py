@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -222,6 +223,12 @@ def _credential_context(provider: CloudProvider, creds: dict):
 # CloudJob
 # ------------------------------------------------------------------
 
+#: An environment-variable name we will interpolate into a remote shell
+#: command.  Only names are interpolated -- values go over stdin -- so
+#: this is the whole of the injection surface, and it fails closed.
+_ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
 class CloudJob:
     """Handle to a single running cloud job.
 
@@ -299,6 +306,7 @@ class CloudJob:
         timeout: Optional[int] = None,
         check: bool = True,
         capture: bool = False,
+        env: Optional[dict] = None,
     ) -> "subprocess.CompletedProcess":
         """Run a shell command on the remote VM via SSH.
 
@@ -315,11 +323,50 @@ class CloudJob:
             If True, raise ``subprocess.CalledProcessError`` on non-zero exit.
         capture : bool
             If True, capture stdout/stderr instead of printing to terminal.
+        env : dict, optional
+            Environment variables to export for *command*.  Their values
+            are written to ssh's **stdin** and read by the remote shell,
+            so they appear in no argv on either machine.  Writing
+            ``VAR=value cmd`` into *command* instead puts the value in
+            the local ``ssh`` process's command line and in the remote
+            shell's: ``/proc/<pid>/cmdline`` is mode 0444, so any user on
+            either box can read it for as long as the process lives.
+            ``shlex.quote`` prevents word splitting and does nothing
+            about visibility.
+
+        Raises
+        ------
+        ValueError
+            If an *env* name is not a plain identifier, or a value
+            contains a newline — the delivery is line-based, and a value
+            that spans lines would be silently truncated or, worse,
+            shift every later variable.
         """
         import subprocess
 
         if not self._vm_ip:
             raise LaunchError("No VM IP available — cluster may not be UP yet")
+
+        remote_command = command
+        stdin_payload: Optional[str] = None
+        if env:
+            lines = []
+            values = []
+            for name, value in env.items():
+                if not _ENV_NAME.match(name):
+                    raise ValueError(
+                        f"{name!r} is not a valid environment variable name."
+                    )
+                text = str(value)
+                if "\n" in text or "\r" in text:
+                    raise ValueError(
+                        f"The value of {name} contains a newline; this "
+                        f"delivery is line-based and cannot carry one."
+                    )
+                lines.append(f"IFS= read -r {name}; export {name}")
+                values.append(text)
+            remote_command = "; ".join(lines) + "; " + command
+            stdin_payload = "".join(v + "\n" for v in values)
 
         ssh_cmd = [
             "ssh",
@@ -328,24 +375,29 @@ class CloudJob:
             "-o", "LogLevel=ERROR",
             "-p", str(self._ssh_port),
             f"root@{self._vm_ip}",
-            command,
+            remote_command,
         ]
 
         kwargs: dict[str, Any] = {"timeout": timeout, "check": check}
         if capture:
             kwargs["capture_output"] = True
             kwargs["text"] = True
+        if stdin_payload is not None:
+            kwargs["input"] = stdin_payload if capture else stdin_payload.encode()
 
         return subprocess.run(ssh_cmd, **kwargs)
 
-    def ssh_run_background(self, command: str) -> None:
+    def ssh_run_background(self, command: str, env: Optional[dict] = None) -> None:
         """Start a command on the remote VM in the background via SSH.
 
         Uses ``nohup ... &`` so the process survives after SSH disconnects.
+        *env* is delivered as in :meth:`ssh_run`; the exports run in the
+        outer shell, so the backgrounded process inherits them without
+        any value reaching a command line.
         """
         # Wrap in nohup and redirect output
         bg_cmd = f"nohup bash -c {_shell_quote(command)} > /tmp/bg_cmd.log 2>&1 &"
-        self.ssh_run(bg_cmd, check=False)
+        self.ssh_run(bg_cmd, check=False, env=env)
 
     def get_runpod_endpoint(self, private_port: int = 8000) -> Optional[str]:
         """Query RunPod API for the public endpoint of a private port.

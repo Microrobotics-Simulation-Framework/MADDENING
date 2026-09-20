@@ -228,8 +228,10 @@ def main():
 
     print("Starting server with continuous runner...")
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/maddening_server.py", check=True)
+    # Over ssh's stdin, not in the command string: see 04_server_test.py.
     job.ssh_run_background(
-        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} python3.12 /tmp/maddening_server.py"
+        "python3.12 /tmp/maddening_server.py",
+        env={"MADDENING_API_TOKEN": API_TOKEN},
     )
 
     # --- Wait for server ---

@@ -185,12 +185,23 @@ class SelkiesSession(StreamingSession):
         with the client.
     signaling_port : int
         Port for the embedded WebSocket signaling server.
+    bind_host : str, optional
+        Address the signaling server binds.  The default stays
+        ``"0.0.0.0"`` because this session normally runs inside a
+        container, where a loopback bind is unreachable even with a
+        published port -- but it was **hardcoded**, so the socket could
+        not be made loopback-only even deliberately.  Pass
+        ``"127.0.0.1"`` when the viewer reaches it through an SSH
+        tunnel.  The signaling protocol is HMAC-authenticated either
+        way and fails closed when ``MADDENING_STREAM_SECRET`` is unset,
+        so this is exposure, not authentication.
     """
 
     def __init__(
         self,
         secret: str = "",
         signaling_port: int = 8443,
+        bind_host: str = "0.0.0.0",
     ) -> None:
         if not _check_gstreamer():
             raise ImportError(
@@ -211,6 +222,7 @@ class SelkiesSession(StreamingSession):
                 "in.",
             )
         self._signaling_port = signaling_port
+        self._bind_host = bind_host
         self._alive = False
         self._config: Optional[StreamConfig] = None
         self._info: Optional[StreamInfo] = None
@@ -387,7 +399,13 @@ class SelkiesSession(StreamingSession):
                 logger.warning("websockets not installed; signaling server disabled")
                 return
 
-            server = await websockets.serve(handler, "0.0.0.0", self._signaling_port)
+            server = await websockets.serve(
+                handler, self._bind_host, self._signaling_port,
+            )
+            logger.info(
+                "WebRTC signaling server listening on %s:%s",
+                self._bind_host, self._signaling_port,
+            )
             await server.wait_closed()
 
         def _thread_target():

@@ -250,8 +250,13 @@ def main():
     # Write the server script to the VM, then run it in background
     escaped = shlex.quote(SERVER_SCRIPT)
     job.ssh_run(f"echo {escaped} > /tmp/maddening_server.py", check=True)
+    # The token goes over ssh's stdin, not in the command string: a
+    # remote `VAR=value cmd` puts the secret in /proc/<pid>/cmdline,
+    # which is mode 0444 for as long as the shell lives.  shlex.quote
+    # stops word splitting and does nothing about who can read it.
     job.ssh_run_background(
-        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} {PYTHON} /tmp/maddening_server.py"
+        f"{PYTHON} /tmp/maddening_server.py",
+        env={"MADDENING_API_TOKEN": API_TOKEN},
     )
     print("  Server started in background")
 

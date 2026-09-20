@@ -42,7 +42,7 @@ Install only what you need. Each extra adds one capability:
 |-------|-------------|-----------------|
 | `viz` | Matplotlib 2D renderers | `pip install maddening[viz]` |
 | `terminal` | Rich terminal renderer (works over SSH) | `pip install maddening[terminal]` |
-| `network` | ZeroMQ remote transport | `pip install maddening[network]` |
+| `network` | ZeroMQ remote transport (a non-loopback bind encrypts with ZMQ CURVE and requires `MADDENING_TRANSPORT_TOKEN`, falling back to `MADDENING_API_TOKEN`) | `pip install maddening[network]` |
 | `api` | FastAPI HTTP/WebSocket server (a non-loopback bind requires `MADDENING_API_TOKEN`; no TLS either way) | `pip install maddening[api]` |
 | `surrogates` | Neural surrogate training (equinox + optax) | `pip install maddening[surrogates]` |
 | `viz3d` | PyVista 3D server-side rendering | `pip install maddening[viz3d]` |

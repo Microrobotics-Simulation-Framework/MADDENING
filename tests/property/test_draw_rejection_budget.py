@@ -20,8 +20,9 @@ So this file tests the auditor, not the audited:
 * the gate can fail (a synthetic over-budget test is caught, end to end,
   through the real CLI);
 * the accounting is right, including the statuses that are *not* rejections;
-* the health-check risk model matches both an independent computation and the
-  constants in the installed Hypothesis, so it cannot go stale silently.
+* the health-check risk model matches both an independent computation and
+  the installed Hypothesis *driven until its health checks fire*, so it
+  cannot go stale silently.
 
 Where the gate itself runs is ``.github/workflows/ci.yml``
 (``verify-hypothesis``), which audits while it runs the suite it already ran.
@@ -30,14 +31,21 @@ Where the gate itself runs is ``.github/workflows/ci.yml``
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import math
 import os
+import re
 import subprocess
 import sys
 import textwrap
+from collections import Counter
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, Phase, assume, given, settings
+from hypothesis import strategies as st
+from hypothesis.errors import FailedHealthCheck, Unsatisfiable
+from hypothesis.statistics import collector
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "audit_property_rejection.py"
@@ -192,34 +200,178 @@ def test_the_overrun_gate_is_separate_and_can_fire_on_its_own(audit):
 # ---------------------------------------------------------------------------
 # The risk model
 # ---------------------------------------------------------------------------
-def test_the_health_check_constants_match_the_installed_hypothesis():
-    """The risk model is only meaningful against the real thresholds.
+# The probes below drive the installed Hypothesis until its health checks
+# actually fire, and read the budgets off the failure messages.  An earlier
+# version of this file asserted the same facts by grepping
+# ``hypothesis/internal/conjecture/engine.py`` for
+# ``state.invalid_examples == max_invalid_draws``.  That is not a test of
+# behaviour, and it did not survive contact with a floating dependency:
+# 6.168.0 renamed the three counters ``*_examples`` -> ``*_test_cases``
+# without changing a single threshold or branch, and CI went red claiming
+# "filter_too_much no longer counts only INVALID draws" -- which was false.
+# Pinning a library's source text cannot work against ``hypothesis>=6.165,<7``.
+# Driving the library can.
+#
+# These probes use ``suppress_health_check``, which the rest of this
+# repository must not (see ``docs/developer_guide/testing_standards.md``).
+# They are probes OF the library, not property tests of MADDENING: the whole
+# point is to isolate one health check by silencing the others so that which
+# check fires, and at what count, is unambiguous.  That is not a precedent
+# for silencing one over a test that filters too much.
 
-    ``scripts/audit_property_rejection.py`` mirrors them rather than importing
-    them, so that the gate does not break on a Hypothesis refactor -- which
-    means something has to notice when the mirror goes stale.  That is this.
+#: A strategy whose every draw exceeds Hypothesis's generation buffer.  The
+#: minimum size alone is over the limit, so the overrun rate is 100% and the
+#: probe is deterministic rather than a sampling argument.
+_ALWAYS_OVERRUNS = st.lists(
+    st.binary(min_size=500, max_size=500), min_size=20, max_size=100)
+
+#: ``large_base_example`` fires on ``_ALWAYS_OVERRUNS`` before anything else
+#: can, and is not what these probes are about.
+_LARGE_BASE = getattr(HealthCheck, "large_base_example", None)
+
+_FILTERED_RE = re.compile(
+    r"(\d+) inputs were generated successfully, "
+    r"while (\d+) inputs were filtered out")
+_OVERRAN_RE = re.compile(
+    r"(\d+) inputs were generated successfully, "
+    r"while (\d+) inputs exceeded the maximum allowed entropy")
+
+
+def _drive(strategy, body, suppress=(), max_examples=200):
+    """Run a planted test to completion or to its first failed health check.
+
+    Returns ``(health_check_name_or_None, message, status_counts)``.
     """
-    audit_module = _load_audit()
-    source = Path(
-        importlib.util.find_spec(
-            "hypothesis.internal.conjecture.engine"
-        ).origin
-    ).read_text()
-    assert f"max_valid_draws = {audit_module.HEALTH_CHECK_MAX_VALID}" in source, (
-        "hypothesis changed HealthCheck.filter_too_much's valid-draw budget; "
-        "update HEALTH_CHECK_MAX_VALID and re-derive MAX_REJECTION"
+    seen: list[dict] = []
+
+    @settings(max_examples=max_examples, deadline=None, database=None,
+              phases=[Phase.generate], suppress_health_check=list(suppress))
+    @given(strategy)
+    def planted(value):
+        body(value)
+
+    name = message = None
+    try:
+        with collector.with_value(seen.append):
+            planted()
+    except FailedHealthCheck as exc:
+        message = " ".join(str(exc).split())
+        name = next((h.name for h in HealthCheck if f"HealthCheck.{h.name}" in message),
+                    "unknown")
+    except Unsatisfiable as exc:
+        message = " ".join(str(exc).split())
+    counts: Counter[str] = Counter()
+    if seen:
+        for case in seen[0].get("generate-phase", {}).get("test-cases", []):
+            counts[case["status"] if isinstance(case, dict) else case.split(",")[0]] += 1
+    return name, message, counts
+
+
+def test_filter_too_much_still_counts_only_invalid_draws(audit):
+    """The semantic claim the whole audit rests on, driven rather than read.
+
+    ``scripts/audit_property_rejection.py`` reports filtered draws and
+    overrun draws in separate columns, gates them against separate budgets,
+    and prices them with separate risk curves.  All of that is wrong if
+    Hypothesis lumps them together.
+
+    Two halves, because either alone is ambiguous:
+
+    * an always-``assume(False)`` test must trip ``filter_too_much`` at
+      exactly ``HEALTH_CHECK_MAX_INVALID`` filtered draws with no overruns
+      anywhere -- which pins the budget and the counter;
+    * a test whose every draw *overruns* must NOT trip ``filter_too_much``,
+      even after far more than ``HEALTH_CHECK_MAX_INVALID`` of them.
+      ``data_too_large`` is suppressed for this half precisely so that
+      ``filter_too_much`` gets the chance it would take if overruns counted.
+    """
+    name, message, counts = _drive(st.integers(), lambda _: assume(False))
+    assert name == "filter_too_much", (name, message)
+    found = _FILTERED_RE.search(message or "")
+    assert found, message
+    assert int(found.group(2)) == audit.HEALTH_CHECK_MAX_INVALID, message
+    assert int(found.group(1)) < audit.HEALTH_CHECK_MAX_VALID, message
+
+    if _LARGE_BASE is None:
+        pytest.skip("HealthCheck.large_base_example is gone; the overrun "
+                    "probe cannot isolate data_too_large any more")
+    name, message, counts = _drive(
+        _ALWAYS_OVERRUNS, lambda _: None,
+        suppress=[_LARGE_BASE, HealthCheck.data_too_large])
+    # Order matters here.  A failed health check aborts the run before
+    # Hypothesis emits statistics, so ``counts`` is empty whenever one fires
+    # -- which means a ``counts``-based skip written first would turn the one
+    # result this probe exists to catch into a silent skip.  The verdict is
+    # read from ``name`` before anything is allowed to skip.
+    assert name != "filter_too_much", (
+        f"a test whose every draw overruns tripped filter_too_much: overruns "
+        f"are being counted as filtered draws, and the audit's two-column "
+        f"split, its two gates and its two risk curves all need re-deriving. "
+        f"{message}"
     )
-    assert f"max_invalid_draws = {audit_module.HEALTH_CHECK_MAX_INVALID}" in source, (
-        "hypothesis changed HealthCheck.filter_too_much's invalid-draw budget; "
-        "update HEALTH_CHECK_MAX_INVALID and re-derive MAX_REJECTION"
-    )
-    assert f"max_overrun_draws = {audit_module.HEALTH_CHECK_MAX_OVERRUN}" in source, (
-        "hypothesis changed HealthCheck.data_too_large's overrun budget; "
-        "update HEALTH_CHECK_MAX_OVERRUN and re-derive MAX_OVERRUN"
-    )
-    assert "state.invalid_examples == max_invalid_draws" in source, (
-        "filter_too_much no longer counts only INVALID draws; the audit's "
-        "split between filtered and overrun draws needs re-deriving"
+    if name is not None:
+        pytest.skip(
+            f"the overrun probe tripped {name} instead of running to "
+            f"completion, so it could not give filter_too_much the chance "
+            f"it needed; filter_too_much itself did not fire. {message}")
+    if counts["overrun"] < audit.HEALTH_CHECK_MAX_INVALID:
+        pytest.skip(
+            f"the planted strategy only overran {counts['overrun']} times; "
+            f"it can no longer outrun HealthCheck.filter_too_much's budget "
+            f"of {audit.HEALTH_CHECK_MAX_INVALID}, so this probe proves "
+            f"nothing -- make the draw bigger")
+    assert counts["invalid"] == 0, counts
+
+
+def test_the_overrun_budget_is_the_one_the_risk_model_prices(audit):
+    """``HEALTH_CHECK_MAX_OVERRUN`` read off ``data_too_large`` itself.
+
+    ``MAX_OVERRUN`` is set from this curve rather than from the measured
+    distribution (the tree runs up to 37.6%), so the budget underneath it is
+    load-bearing in a way ``MAX_REJECTION``'s is not.
+    """
+    if _LARGE_BASE is None:
+        pytest.skip("HealthCheck.large_base_example is gone; this probe "
+                    "cannot isolate data_too_large any more")
+    name, message, _ = _drive(_ALWAYS_OVERRUNS, lambda _: None,
+                              suppress=[_LARGE_BASE])
+    assert name == "data_too_large", (name, message)
+    found = _OVERRAN_RE.search(message or "")
+    assert found, message
+    assert int(found.group(2)) == audit.HEALTH_CHECK_MAX_OVERRUN, message
+
+
+def test_the_valid_draw_budget_switches_the_health_check_off(audit):
+    """``HEALTH_CHECK_MAX_VALID`` as the staircase it actually is.
+
+    The risk model says "fewer than ``HEALTH_CHECK_MAX_VALID`` successes in
+    the first ``HEALTH_CHECK_MAX_INVALID + HEALTH_CHECK_MAX_VALID - 1``
+    trials".  The observable form of that is a step: plant a test whose first
+    ``k`` draws are valid and whose every later draw is filtered, and there is
+    a ``k`` above which ``filter_too_much`` can no longer fire at all.
+
+    Asserted as a window rather than a point.  Whether the very first test
+    case is counted by the health-check state is an implementation detail
+    that has moved before and says nothing about the budget; *where the step
+    is* is the budget.
+    """
+    def step(k):
+        counter = itertools.count()
+        name, message, _ = _drive(
+            st.integers(), lambda _: assume(next(counter) < k))
+        return name, message
+
+    below, message = step(audit.HEALTH_CHECK_MAX_VALID - 1)
+    assert below == "filter_too_much", (below, message)
+    found = _FILTERED_RE.search(message or "")
+    assert found and int(found.group(1)) < audit.HEALTH_CHECK_MAX_VALID, message
+
+    above, message = step(audit.HEALTH_CHECK_MAX_VALID + 1)
+    assert above is None, (
+        f"a test whose first {audit.HEALTH_CHECK_MAX_VALID + 1} draws are "
+        f"valid still tripped {above}; HEALTH_CHECK_MAX_VALID is not "
+        f"{audit.HEALTH_CHECK_MAX_VALID} any more and the risk model's "
+        f"success budget needs re-deriving"
     )
 
 

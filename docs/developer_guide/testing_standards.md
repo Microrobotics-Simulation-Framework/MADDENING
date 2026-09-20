@@ -271,8 +271,10 @@ tick and the same `max_examples`.
 
 The one thing that ever says otherwise is `HealthCheck.filter_too_much`, and
 it is a sampling test on the first few dozen draws, so its edge is very
-soft. Measured against the constants in Hypothesis 6.165 (50 rejected draws
-before 10 accepted ones), the chance that *one run* of a test trips it is:
+soft. Measured against the constants in Hypothesis (50 rejected draws before
+10 accepted ones — unchanged across 6.165-6.168, and checked behaviourally on
+whatever version is installed), the chance that *one run* of a test trips it
+is:
 
 | filter rate | 40% | 55% | 64% | 70% | 80% | 85% | 90% |
 |---|---|---|---|---|---|---|---|

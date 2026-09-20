@@ -16,7 +16,7 @@ at a true 60% filter rate trips it about once in 28,000 runs, one at 70% about
 once in 140, and one at 85% three runs in five.  Which is how a test can sit
 green for months and then go red for whoever next narrows a strategy.
 
-What a high rejection rate does NOT do, on Hypothesis 6.165.x, is reduce the
+What a high rejection rate does NOT do, on Hypothesis 6.165-6.168, is reduce the
 number of examples actually checked.  The engine keeps drawing until it has
 ``max_examples`` *valid* ones and only gives up below ~1% valid
 (``INVALID_THRESHOLD_BASE`` / ``INVALID_PER_VALID``, derived for r=0.01).
@@ -109,6 +109,12 @@ MAX_OVERRUN = 0.50
 #: so the risk estimates below do not depend on Hypothesis internals staying
 #: importable.  ``test_draw_rejection_budget.py`` pins them against the
 #: installed Hypothesis.
+# Mirrored rather than imported, so a Hypothesis refactor cannot break the
+# gate -- and verified against the installed Hypothesis *behaviourally*, by
+# driving it until each health check fires, in
+# ``tests/property/test_draw_rejection_budget.py``.  Unchanged across
+# 6.165-6.168; 6.168.0 renamed the counters behind them
+# (``*_examples`` -> ``*_test_cases``) without moving a threshold.
 HEALTH_CHECK_MAX_INVALID = 50
 HEALTH_CHECK_MAX_VALID = 10
 HEALTH_CHECK_MAX_OVERRUN = 20

@@ -235,6 +235,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
+  every stage holds the one value you pass. The arithmetic is unchanged; carry time
+  as a state field with derivative 1 to get 4.00 back — see the new solvers guide
 - **`HeatNode` imposes its Dirichlet data at the rod ends, not half a cell in**,
   and its 4th-order ghosts sit where the stencil reads them: measured spatial
   order 1.001 -> 2.000 and 0.954 -> 3.957. `T[0]` no longer equals the datum

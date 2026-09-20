@@ -929,3 +929,89 @@ anomalies:
       - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_resolves_a_backpressure_difference_below_float32"
       - "tests/verification/test_mms_order_ode_nodes.py::test_heart_pump_does_not_demote_the_dtype_of_the_pressure_it_is_given"
     github_issue: null
+  - anomaly_id: "MADD-ANO-014"
+    title: "Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order"
+    description: >
+      `maddening.core.simulation.integrators` names its steppers after
+      their classical orders, and `integrate_node` defaults to
+      `method="rk4"`, documented as "Classical 4th-order Runge-Kutta".
+      None of the four functions takes a time.  Every Runge-Kutta stage is
+      therefore given the same `boundary_inputs` object the caller passed
+      for the whole step, which is a zero-order hold on the input.  For an
+      autonomous problem, or inputs constant over the step, that is exact
+      and the classical orders are delivered.  For a genuinely
+      time-varying input re-evaluated once per step -- the obvious way to
+      drive a waveform through this API -- the hold contributes an
+      O(dt^2) local error whatever the stages do with it, so the global
+      order is 1 for all three methods.
+      Measured at 0.4.0.dev0 on dx/dt = -x + u(t) with u(t) manufactured
+      so that x*(t) = sin(2*pi*t) is exact, float64, over a
+      10/20/40/80/160 step ladder to t = 0.75.  Observed temporal orders
+      with the input frozen per step: euler 1.022, heun 1.017, rk4 1.016.
+      The same ladder with the input constant instead gives 1.003, 2.005
+      and 4.006, which locates the loss in the input handling and not in
+      the stage arithmetic.
+      A second, counter-intuitive consequence: under the frozen input rk4
+      is not merely reduced to 1st order, it is also *less accurate* than
+      euler at the same dt -- 7.03e-3 against 4.57e-3 relative at
+      dt = 0.0047, a factor of 1.5 -- because the extra stages refine a
+      term that is no longer dominant.  Choosing the higher-order method
+      is not a conservative choice here.
+      Related but distinct: MADD-ANO-012 records `HeartPumpNode.update`
+      and its own `derivatives()` sampling the inflow waveform a timestep
+      apart.  That is one node disagreeing with itself about when an input
+      is read; this entry is about every stage of every method in this
+      module reading it at the same time.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent, and silent in the direction that flatters the caller.
+      Nothing fails, warns or looks wrong: the integration runs, the
+      trajectory is smooth, and the state stays finite.  A method's name
+      is the only statement of its order that most callers will read, and
+      a downstream product that sized its timestep from "4th order" --
+      expecting a 16x error reduction per halving and getting 2x -- would
+      be running with roughly the error of a step 1000x larger than it
+      budgeted for at dt = 0.005.  The relevance depends on whether the
+      product drives any node with a time-varying boundary input, which
+      `boundary_input_spec` shows is available on 7 of 11 nodes.
+    affected_components:
+      - "maddening.core.simulation.integrators.rk4_step"
+      - "maddening.core.simulation.integrators.heun_step"
+      - "maddening.core.simulation.integrators.integrate_node"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Carry time as a state field with derivative 1 and read the forcing
+      from it.  Each stepper builds its stage states as
+      state + a_ij*dt*k_j, so such a field arrives at stage i holding
+      exactly the Butcher node t + c_i*dt; the forcing is then read at the
+      stage time and the full order returns -- measured 1.022 / 1.999 /
+      4.002 on the same ladder.  This is exact rather than an
+      interpolation and needs no API that does not already exist; the
+      recipe is in the module docstring and in
+      docs/algorithm_guide/solvers/explicit_integrators.md.  It requires
+      calling euler_step/heun_step/rk4_step directly, because
+      `integrate_node` passes `node.derivatives` through unaltered and has
+      nowhere to put a stage time.  Two cheaper-looking alternatives were
+      measured and do not reach 4: linear interpolation of the input
+      between step endpoints caps rk4 at 2.000, and evaluating the frozen
+      input at the step midpoint also caps it at 2.000.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      What is resolved in 0.4.0 is the claim, not the behaviour: the
+      docstrings and the algorithm guide now state the condition the order
+      holds under, a full-order path is documented, and both regimes are
+      pinned by measurement so neither can drift unnoticed.  What remains
+      is that the degraded path is still the default and still silent --
+      `integrate_node(node, ..., method="rk4")` with a per-step waveform
+      converges at order 1 and nothing says so at runtime.  It cannot be
+      detected from inside the steppers, which see an opaque dict and have
+      no way to tell a constant from a sample of a waveform, so a warning
+      is not available.  Adding an optional stage-time or callable-input
+      argument would remove the trap at the cost of new public API on four
+      functions with no in-tree callers; deferred rather than taken,
+      because the measured full order is already reachable without it.
+    verification:
+      - "tests/verification/test_integrator_order.py"
+    github_issue: null

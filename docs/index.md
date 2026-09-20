@@ -169,6 +169,7 @@ glossary
 algorithm_guide/nodes/*
 algorithm_guide/coupling/*
 algorithm_guide/uq/*
+algorithm_guide/solvers/*
 ```
 
 ```{toctree}

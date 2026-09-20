@@ -46,11 +46,22 @@ Pinned environment
 ------------------
 The counts depend on the backend and the device count, so this script
 pins both (``JAX_PLATFORMS=cpu``, four virtual host devices) before
-importing JAX, overriding whatever the caller had set.  That is why the
-pytest gate runs it as a *subprocess*: under pytest, ``tests/conftest.py``
-has already imported JAX with a different device count, and the numbers
-would not be comparable.  The JAX version is recorded in the baseline
-and drives how tight the op-count bands are (see ``TOLERANCES``).
+importing JAX, **overriding whatever the caller had set** -- an inherited
+``--xla_force_host_platform_device_count`` is stripped, not respected
+(:func:`pin_device_count`).  That is why the pytest gate runs it as a
+*subprocess*: JAX fixes its device count when its backend initialises, so
+a process that has already imported JAX cannot change it.
+
+Overriding rather than deferring is what makes the baseline reproducible
+on any machine, and it is not hypothetical.  ``tests/cloud/multigpu/
+conftest.py`` appends ``--xla_force_host_platform_device_count=16`` to
+``os.environ`` at *import* time, so in a whole-suite run -- which is what
+CI does -- every later subprocess inherits 16 virtual devices, while
+running this file's tests alone inherits none.  An earlier revision took
+the caller's flag when one was present, which made the gate's device
+count a function of which tests happened to be collected alongside it.
+The JAX version is recorded in the baseline and drives how tight the
+op-count bands are (see ``TOLERANCES``).
 
 Regenerate under the JAX version CI pins (``.github/workflows/ci.yml``)
 when you can.  The committed baseline records the version it was taken
@@ -69,11 +80,51 @@ import sys
 from pathlib import Path
 
 # Must precede any JAX import -- see "Pinned environment" above.
-os.environ["JAX_PLATFORMS"] = "cpu"
 DEVICE_COUNT = 4
-_FLAG = f"--xla_force_host_platform_device_count={DEVICE_COUNT}"
-if "xla_force_host_platform_device_count" not in os.environ.get("XLA_FLAGS", ""):
-    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _FLAG).strip()
+HOST_DEVICE_FLAG = "--xla_force_host_platform_device_count"
+
+
+def pin_device_count(xla_flags: str, count: int = DEVICE_COUNT) -> str:
+    """*xla_flags* with the host-device-count flag forced to *count*.
+
+    Every inherited setting of the flag is dropped -- in both the
+    ``--flag=N`` and ``--flag N`` spellings absl accepts -- and a single
+    ``--flag=count`` is appended.  The caller's other XLA flags are kept,
+    in order: ``--xla_gpu_autotune_level=0`` in CI is none of this
+    script's business, the device count is.
+
+    Kept pure, and separate from the assignment below, so the pinning can
+    be tested against the exact string CI inherits without spawning a
+    process or importing JAX.
+
+    Parameters
+    ----------
+    xla_flags : str
+        The inherited ``XLA_FLAGS`` value; may be empty.
+    count : int, optional
+        Virtual host devices to force.  Defaults to :data:`DEVICE_COUNT`.
+
+    Returns
+    -------
+    str
+        The value to export as ``XLA_FLAGS``.
+    """
+    kept: list[str] = []
+    tokens = xla_flags.split()
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == HOST_DEVICE_FLAG:            # "--flag N"
+            i += 2
+        elif tokens[i].startswith(f"{HOST_DEVICE_FLAG}="):   # "--flag=N"
+            i += 1
+        else:
+            kept.append(tokens[i])
+            i += 1
+    return " ".join([*kept, f"{HOST_DEVICE_FLAG}={count}"])
+
+
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["XLA_FLAGS"] = pin_device_count(os.environ.get("XLA_FLAGS", ""))
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -262,12 +313,20 @@ def _jax_minor(version: str) -> str:
 
 def measure() -> dict:
     """Measure every workload and return the baseline document."""
-    if jax.device_count() != DEVICE_COUNT:
+    devices = jax.device_count()
+    if devices != DEVICE_COUNT:
+        # The pin above should make this unreachable, which is why it is
+        # worth keeping: reaching it means the pin did not take, and the
+        # numbers below would be silently incomparable.  The counts for
+        # sharded_heat depend on the mesh size.
         raise SystemExit(
-            f"expected {DEVICE_COUNT} JAX devices, got {jax.device_count()}: "
-            f"XLA_FLAGS={os.environ.get('XLA_FLAGS')!r}.  The counts for "
-            f"sharded_heat depend on the device count, so a baseline taken "
-            f"on a different one is not comparable."
+            f"expected {DEVICE_COUNT} JAX devices, got {devices}: "
+            f"XLA_FLAGS={os.environ.get('XLA_FLAGS')!r}.  This script pins "
+            f"the device count before importing JAX, so a mismatch means "
+            f"the pin did not take -- JAX was already imported in this "
+            f"process (it fixes the device count when its backend "
+            f"initialises), or the backend ignored the flag.  Run the gate "
+            f"as its own process: `{REGENERATE}`."
         )
     workloads = {}
     for name, (build, scan_steps) in WORKLOADS.items():
@@ -286,7 +345,9 @@ def measure() -> dict:
             "jax": jax.__version__,
             "jaxlib": jaxlib.__version__,
             "platform": "cpu",
-            "device_count": DEVICE_COUNT,
+            # The measurement, not the constant: the file should state
+            # what was actually there, so ``compare`` is checking a fact.
+            "device_count": devices,
         },
         "workloads": workloads,
     }
@@ -303,8 +364,24 @@ def compare(baseline: dict, fresh: dict) -> list[str]:
     An empty list means the gate passes.
     """
     problems: list[str] = []
-    base_jax = str(baseline.get("environment", {}).get("jax", ""))
+    base_env = baseline.get("environment", {})
+    base_jax = str(base_env.get("jax", ""))
     same_version = _jax_minor(base_jax) == _jax_minor(fresh["environment"]["jax"])
+
+    # Topology is not banded and never widens: sharded_heat's counts are a
+    # function of the mesh size, so counts taken on a different device
+    # count are not comparable at any tolerance.  Fails closed -- a
+    # baseline predating this field has no device_count and is rejected
+    # rather than assumed to match.
+    base_devices = base_env.get("device_count")
+    fresh_devices = fresh["environment"]["device_count"]
+    if base_devices != fresh_devices:
+        problems.append(
+            f"device count: baseline {base_devices!r} -> this run "
+            f"{fresh_devices!r}.  sharded_heat's counts depend on the mesh "
+            f"size, so the two sets of numbers are not comparable; "
+            f"regenerate with `{REGENERATE}`"
+        )
 
     base_wl = baseline.get("workloads", {})
     fresh_wl = fresh["workloads"]

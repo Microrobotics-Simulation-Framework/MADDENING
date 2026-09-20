@@ -476,7 +476,7 @@ anomalies:
     affected_components:
       - "maddening.nodes.heat.HeatNode.update"
       - "maddening.nodes.heat.HeatNode.boundary_input_spec"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Supply the Dirichlet data at the first and last cell centre rather than
       at the rod ends: evaluate the boundary condition at x = dx/2 and
@@ -557,7 +557,7 @@ anomalies:
     affected_components:
       - "maddening.nodes.heat.HeatNode.update"
       - "maddening.nodes.heat._laplacian_4th_order_uniform"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Use the default `stencil_order=2`, which meets its declared 2nd order
       and is more accurate at every resolution measured.  The sharded path
@@ -625,7 +625,7 @@ anomalies:
       is minor rather than major.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       No longer needed: the constructor refuses a configuration above its
       stencil's limit.  On 0.3.x and earlier, with `stencil_order=4`, keep

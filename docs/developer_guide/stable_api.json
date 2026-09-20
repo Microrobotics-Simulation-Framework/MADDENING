@@ -285,15 +285,26 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
-          "returns": "dict[str, maddening.core.params.ParamSpec]"
+          "returns": "dict"
         },
         "params_pytree": {
           "kind": "method",
           "parameters": [],
           "returns": "dict"
+        },
+        "sharding": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "NamedSharding",
+          "settable": false
         },
         "state_fields": {
           "kind": "method",
@@ -305,6 +316,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -338,6 +354,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict"
@@ -533,6 +554,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -553,6 +579,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -645,6 +676,17 @@
           "default": "'edge'",
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "boundary"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.cloud.multigpu.sharded_node.ShardedStencilNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.sharded_node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
         }
       ],
       "returns": "None"
@@ -796,6 +838,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "layout": {
           "kind": "property",
           "parameters": [],
@@ -822,6 +869,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -930,9 +982,25 @@
       ],
       "returns": "None"
     },
+    "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.cloud.multigpu.sharded_unstructured",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "None"
+    },
     "maddening.core.edge.EdgeSpec": {
       "kind": "class",
       "members": {
+        "add_edge_kwargs": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict"
+        },
         "key": {
           "kind": "property",
           "parameters": [],
@@ -1506,6 +1574,12 @@
               "default": "None",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "callback"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "tuple[dict[str, dict], dict]"
@@ -1559,6 +1633,12 @@
               "default": "None",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "external_inputs"
+            },
+            {
+              "annotation": "Optional[dict]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "tuple[dict[str, dict], dict[str, dict], dict]"
@@ -1651,6 +1731,12 @@
             }
           ],
           "returns": "Path"
+        },
+        "scan_trace_count": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "int",
+          "settable": false
         },
         "schedule": {
           "kind": "property",
@@ -1913,6 +1999,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -1933,6 +2024,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -2021,6 +2117,28 @@
           "name": "params"
         }
       ]
+    },
+    "maddening.core.node.SimulationNode.invalidate_static_cache": {
+      "kind": "function",
+      "module": "maddening.core.node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "None"
+    },
+    "maddening.core.node.SimulationNode.static_data_deps": {
+      "kind": "function",
+      "module": "maddening.core.node",
+      "parameters": [
+        {
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "self"
+        }
+      ],
+      "returns": "dict[str, tuple[str, ...]]"
     },
     "maddening.core.static_data.StaticArray": {
       "kind": "class",
@@ -2199,6 +2317,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -2219,6 +2342,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -2406,6 +2534,11 @@
             }
           ]
         },
+        "discretization_order": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "DiscretizationOrder"
+        },
         "domain_integral_axes": {
           "kind": "method",
           "parameters": [],
@@ -2451,6 +2584,11 @@
           "kind": "method",
           "parameters": []
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -2471,6 +2609,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -2600,7 +2743,7 @@
           "name": "grid_points"
         },
         {
-          "annotation": "str",
+          "annotation": "Optional[str]",
           "default": "None",
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "geometry_source"
@@ -2730,6 +2873,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -2750,6 +2898,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",
@@ -3013,6 +3166,11 @@
           "parameters": [],
           "returns": "dict[str, tuple[str, int]]"
         },
+        "invalidate_static_cache": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "None"
+        },
         "param_specs": {
           "kind": "method",
           "parameters": [],
@@ -3033,6 +3191,11 @@
           "parameters": [],
           "returns": "dict",
           "settable": false
+        },
+        "static_data_deps": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "dict[str, tuple[str, ...]]"
         },
         "static_data_hash": {
           "kind": "method",

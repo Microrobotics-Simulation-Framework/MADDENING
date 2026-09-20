@@ -483,9 +483,11 @@ def _leaf_size(leaf) -> int:
     ``int(np.asarray(leaf).size)`` -- what this used to be, in three
     places -- pulls the whole leaf across the device boundary to read a
     number that is part of its shape and therefore already known on the
-    host.  On a jax array ``np.asarray`` goes through the buffer
-    protocol, so it does not even show up as an ``__array__`` call; it
-    is a device-to-host transfer all the same, and it blocks on whatever
+    host.  On a jax array ``np.asarray`` goes through the C buffer
+    protocol, so it does not show up as an ``__array__`` call, and
+    before Python 3.12 gave that protocol the PEP 688 ``__buffer__``
+    dunder it does not show up as *any* attribute access; it is a
+    device-to-host transfer all the same, and it blocks on whatever
     computation produced the leaf.  ``np.shape`` reads ``.shape`` and
     transfers nothing, and falls back to ``np.asarray`` only for a leaf
     that has no shape of its own (a Python float), where there is

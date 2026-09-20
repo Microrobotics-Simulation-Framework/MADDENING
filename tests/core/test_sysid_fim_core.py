@@ -13,7 +13,9 @@ most likely to rot:
    device-to-host transfers and ``fim`` performs four.  Counted, and
    asserted as an exact number: a stray ``float(x)`` on a device array
    costs a pipeline stall, is invisible in every other test, and is the
-   single easiest thing to reintroduce.
+   single easiest thing to reintroduce.  The counter that does the
+   counting is itself tested, in :class:`TestTheCounterItself`, for the
+   reason recorded there.
 3. **The rollout is traced once, not once per call.**  ``fim`` used to
    invoke ``residual_fn`` twice per call and re-trace an N-step
    ``lax.scan`` every time.
@@ -117,18 +119,114 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
 
 
 _ArrayImpl = type(jnp.zeros(1))
-#: Every route a jax array's contents take to the host.  ``np.asarray``
-#: on a jax array goes through the *buffer protocol*, not ``__array__``,
-#: so a counter that watches only ``__array__`` reports 3 where the
-#: truth is 11 -- which is how this was first mis-measured.
-#: ``jax.transfer_guard`` is no substitute: on the CPU backend it treats
-#: every transfer as free and blocks nothing.
-_TRANSFER_HOOKS = ("__array__", "__buffer__", "__float__", "__int__",
-                   "__bool__", "__index__")
+
+#: Dunders through which a jax array's contents reach the host.  These
+#: exist on every Python this project supports: ``__array__`` is what
+#: ``jax.device_get`` calls, the rest are ``float()`` / ``int()`` /
+#: ``bool()`` / ``operator.index()``.
+_ARRAY_DUNDERS = ("__array__", "__float__", "__int__", "__bool__",
+                  "__index__")
+
+#: ``numpy`` entry points that take a jax array to the host through the
+#: **C buffer protocol**, which is the route ``np.asarray`` actually
+#: uses -- not ``__array__``.  Watching only ``__array__`` reports 3
+#: transfers for a call that makes 11, which is how this was first
+#: mis-measured.
+#:
+#: They are hooked *here*, on the numpy side, and not as
+#: ``ArrayImpl.__buffer__``, because **that attribute only exists on
+#: Python 3.12+**.  PEP 688 gave the buffer protocol a Python-level
+#: ``__buffer__`` dunder in 3.12; on 3.11 a C type filling ``tp_as_buffer``
+#: exposes nothing at all, so ``np.asarray(device_array)`` is invisible
+#: to any patch of the array type -- measured, on CPython 3.11.15 with
+#: the pinned jaxlib 0.10.2 CI installs.  A ``hasattr`` guard would
+#: therefore not have fixed this: it would have stopped the
+#: ``AttributeError`` and left the counter silently **undercounting by
+#: one** on the very version CI runs.  The numpy-side hook is the same
+#: on both, and measured to give the same totals on both.
+#:
+#: ``jax.transfer_guard`` is no substitute for any of this: on the CPU
+#: backend it treats every transfer as free and blocks nothing.
+_NUMPY_ROUTES = ("asarray", "array", "asanyarray")
+
+#: ``np.asarray(a, ...)`` / ``np.array(object, ...)`` -- the first
+#: parameter is positional in practice and differently named in the two
+#: signatures, so a keyword call is looked up under both spellings
+#: rather than assumed away.
+_FIRST_ARG_KEYWORDS = ("a", "object")
 
 
 class _CountTransfers:
-    """Count device-to-host reads of jax arrays inside the block."""
+    """Count device-to-host reads of jax arrays inside the block.
+
+    Portable by construction: everything hooked is a Python-level name
+    that exists on every supported interpreter and jaxlib.  See
+    ``TestTheCounterItself`` for the two tests that keep it honest --
+    that it can see a transfer at all, and, where the interpreter makes
+    the comparison possible, that it sees everything a ``__buffer__``
+    hook would.
+    """
+
+    def __init__(self):
+        self.count = 0
+        self.by_kind: dict[str, int] = {}
+        self._saved: list[tuple[object, str, object]] = []
+
+    def _bump(self, key: str) -> None:
+        self.count += 1
+        self.by_kind[key] = self.by_kind.get(key, 0) + 1
+
+    def __enter__(self):
+        for name in _ARRAY_DUNDERS:
+            original = getattr(_ArrayImpl, name)
+            self._saved.append((_ArrayImpl, name, original))
+
+            def make_dunder(name=name, original=original):
+                def hook(inner_self, *a, **kw):
+                    self._bump(name)
+                    return original(inner_self, *a, **kw)
+                return hook
+
+            setattr(_ArrayImpl, name, make_dunder())
+
+        for name in _NUMPY_ROUTES:
+            original = getattr(np, name)
+            self._saved.append((np, name, original))
+
+            def make_numpy(name=name, original=original):
+                @functools.wraps(original)
+                def hook(*a, **kw):
+                    first = a[0] if a else next(
+                        (kw[k] for k in _FIRST_ARG_KEYWORDS if k in kw), None)
+                    # Only a *jax* array is a transfer.  This module hands
+                    # numpy arrays to ``_rank_and_crb`` and
+                    # ``_precision_limited`` on purpose, and re-wrapping one
+                    # of those costs nothing and must not be counted.
+                    if isinstance(first, jax.Array):
+                        self._bump("np." + name)
+                    return original(*a, **kw)
+                return hook
+
+            setattr(np, name, make_numpy())
+        return self
+
+    def __exit__(self, *exc):
+        for owner, name, original in self._saved:
+            setattr(owner, name, original)
+        self._saved.clear()
+        return False
+
+
+class _CountBufferProtocol:
+    """A second counter that hooks ``ArrayImpl.__buffer__`` directly.
+
+    Complete, and only constructible on Python 3.12+.  Used by one test,
+    to prove that :class:`_CountTransfers` -- which is portable but
+    indirect -- misses nothing.
+    """
+
+    available = hasattr(_ArrayImpl, "__buffer__")
+    NAMES = _ARRAY_DUNDERS + ("__buffer__",)
 
     def __init__(self):
         self.count = 0
@@ -136,7 +234,7 @@ class _CountTransfers:
         self._saved: dict[str, object] = {}
 
     def __enter__(self):
-        for name in _TRANSFER_HOOKS:
+        for name in self.NAMES:
             original = getattr(_ArrayImpl, name)
             self._saved[name] = original
 
@@ -462,6 +560,18 @@ class TestNoHostSyncs:
     property that rots silently: a ``float(x)`` on a device array is a
     pipeline stall on a GPU and costs nothing measurable on the CPU this
     runs on, so no other test in the suite would notice.
+
+    An exact number is only safe because these four are **invariant
+    across the interpreters and jaxlibs this project is tested on**, and
+    that was measured rather than hoped: 4 / 4 / 5 / 0 on CPython 3.12.3
+    with jaxlib 0.11.0, and 4 / 4 / 5 / 0 on CPython 3.11.15 with the
+    jaxlib 0.10.2 that CI pins.  They are counts of *this module's* host
+    reads, which are ordinary Python calls, so there is no reason for a
+    backend version to move them -- but the reason this docstring says
+    so is that the first version of the counter did move, by one, on
+    3.11 (see :class:`TestTheCounterItself`), and a number that moves
+    with the environment has to be either fixed or stopped being
+    asserted.
     """
 
     def test_fim_core_reads_nothing_back(self, problems):
@@ -517,19 +627,100 @@ class TestNoHostSyncs:
             _quiet(fim, fn, params, noise_std=sigma)
         assert counter.count == 5, counter.by_kind
 
-    def test_the_counter_can_see_a_transfer(self, problems):
-        """The counter counts ``np.asarray``, which on a jax array goes
-        through the buffer protocol and *not* ``__array__``.  A counter
-        blind to that reports 3 for a call that makes 11 transfers, so
-        the assertions above would pass however many were added."""
+
+class TestTheCounterItself:
+    """The instrument, not the thing measured.
+
+    An exact sync count is only worth what the counter is worth, and
+    this one has already been wrong twice -- first blind to
+    ``np.asarray`` entirely, then blind to it on Python 3.11 in a way
+    that showed up as an ``AttributeError`` in CI and would have shown
+    up as a silently low number had it been "fixed" with a ``hasattr``
+    guard.  Both failure modes are pinned here.
+    """
+
+    def test_it_sees_every_route_to_the_host(self):
+        """Including ``np.asarray``, which does **not** call
+        ``__array__``: it takes the C buffer protocol.  A counter blind
+        to that reports 3 for a call that makes 11 transfers, so every
+        assertion in :class:`TestNoHostSyncs` would pass however many
+        were added."""
         x = jnp.arange(4, dtype=jnp.float32)
         with _CountTransfers() as counter:
             np.asarray(x)
+            np.array(x)
             float(x[0])
             bool(x[0] > 0)
+            int(x[0])
             jax.device_get(x)
-        assert counter.count == 4, counter.by_kind
-        assert counter.by_kind.get("__buffer__") == 1
+        assert counter.count == 6, counter.by_kind
+        assert counter.by_kind.get("np.asarray") == 1, counter.by_kind
+        assert counter.by_kind.get("np.array") == 1, counter.by_kind
+        assert counter.by_kind.get("__array__") == 1, counter.by_kind
+
+    def test_it_does_not_count_numpy_on_numpy(self):
+        """``fim``'s host verdict layer re-wraps its own numpy arrays
+        several times.  Counting those would make the exact numbers
+        below meaningless."""
+        y = np.arange(4, dtype=np.float32)
+        with _CountTransfers() as counter:
+            np.asarray(y)
+            np.asarray(y, dtype=np.float64)
+            float(y[0])
+        assert counter.count == 0, counter.by_kind
+
+    def test_it_restores_everything_it_patched(self):
+        before = (np.asarray, np.array, np.asanyarray,
+                  _ArrayImpl.__array__, _ArrayImpl.__float__)
+        with _CountTransfers():
+            pass
+        after = (np.asarray, np.array, np.asanyarray,
+                 _ArrayImpl.__array__, _ArrayImpl.__float__)
+        assert before == after
+
+    @pytest.mark.skipif(
+        not _CountBufferProtocol.available,
+        reason="ArrayImpl.__buffer__ is the PEP 688 dunder, which exists "
+               "only on Python 3.12+; on 3.11 a C type filling "
+               "tp_as_buffer exposes no Python attribute, so the complete "
+               "counter this cross-check compares against cannot be "
+               "built. The portable counter and every sync assertion "
+               "still run on 3.11 -- only this redundancy check, which "
+               "needs two independent instruments, does not.")
+    def test_the_portable_counter_misses_nothing(self, problems):
+        """Where the interpreter lets both instruments exist, they must
+        agree.
+
+        :class:`_CountTransfers` hooks ``numpy``'s entry points;
+        :class:`_CountBufferProtocol` hooks the buffer protocol itself
+        and so sees *any* consumer of it, including a bare
+        ``np.isfinite(device_array)`` that no numpy-entry-point hook
+        would catch.  Running both over the paths that matter is what
+        licenses trusting the portable one on Python 3.11, where the
+        complete one cannot be built.
+        """
+        fn, params, kw = problems["identifiable_pair"]
+        sigma = jnp.full((200,), 0.5)
+        core_fn = jax.jit(functools.partial(fim_core, fn, **kw))
+        calls = [
+            lambda: _quiet(fim, fn, params, **kw),
+            lambda: _quiet(fim, fn, params, noise_std=2.0),
+            lambda: _quiet(fim, fn, params, noise_std=sigma),
+            lambda: jax.block_until_ready(core_fn(params)),
+        ]
+        for call in calls:                      # warm every jit cache first
+            call()
+        for i, call in enumerate(calls):
+            with _CountTransfers() as portable:
+                call()
+            with _CountBufferProtocol() as complete:
+                call()
+            assert portable.count == complete.count, (
+                f"call {i}: portable counter saw {portable.count} "
+                f"({portable.by_kind}), buffer-protocol counter saw "
+                f"{complete.count} ({complete.by_kind}) -- the portable "
+                "counter has a blind spot, and on Python 3.11 nothing "
+                "would report it")
 
 
 class TestTracedOnce:

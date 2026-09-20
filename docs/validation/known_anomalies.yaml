@@ -62,12 +62,29 @@ anomalies:
       the explicit finite-difference scheme becomes unstable and produces silently
       incorrect results (temperature values that grow without bound).  There is no
       warning or error — the simulation runs but the output is wrong.
-      Re-verified at 0.4.0.dev0 and still live: on a 20-cell rod of length 1.0
-      with thermal_diffusivity=0.01 and a half-sine initial profile, a Fourier
-      number Fo = dt*alpha/dx^2 of 5.0 gives max|T| = nan after 60 steps and
-      emits no warning of any kind, while Fo = 0.4 and Fo = 0.5 decay normally
-      (0.516 and 0.437).  The constructor accepts the unstable timestep without
-      comment.
+      Narrowed but not closed at 0.4.0.  The constructor now refuses a
+      configuration above its stencil's Fourier limit, naming the number: the
+      20-cell rod of length 1.0 with thermal_diffusivity=0.01 at Fo = 5.0
+      raises ValueError ("the Fourier number dt*alpha/dx^2 is 5, above the 0.5
+      limit of the order-2 stencil").  That check is MADD-ANO-009's and it sees
+      the constructor's own timestep, thermal_diffusivity and length only.
+      What is still live is every route around it, re-measured on that same rod
+      at 0.4.0.dev0 with a half-sine initial profile and a node constructed at a
+      stable Fo = 0.4:
+        - a dt handed to update() -- update(state, {}, 5.0*dx**2/alpha) gives
+          max|T| = nan after 60 steps and emits no warning of any kind, with or
+          without Dirichlet data;
+        - a thermal_diffusivity injected through params -- update(state, {},
+          dt, params={"thermal_diffusivity": 0.125}) is the same Fo = 5.0 and
+          gives the same nan and the same silence.  length is trainable on the
+          same terms.
+      Both bypass the constructor and neither can be checked inside a traced
+      step without a host callback, which is why this entry stays open.  For
+      reference, the stable end of that rod decays rather than diverging: Fo =
+      0.4 and Fo = 0.5 give max|T| = 0.675313 and 0.657864 after 60 steps with
+      no boundary data, 0.550473 and 0.474083 under Dirichlet zeros.  (An
+      earlier revision of this entry quoted 0.516 and 0.437 for those two; the
+      figures reproduce under no reading and are withdrawn.)
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -83,11 +100,20 @@ anomalies:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0"
     workaround: >
-      Check the stability condition before constructing the node:
-      timestep * thermal_diffusivity / dx**2 < 0.5, with
+      The constructor checks this for you from 0.4.0; below 0.4.0, check it
+      yourself: timestep * thermal_diffusivity / dx**2 < 0.5 for
+      stencil_order=2 and < 0.3125 for stencil_order=4, with
       dx = length / n_cells.  The constructor parameter is
       `thermal_diffusivity` (there is no `alpha=` keyword — passing one is a
       TypeError), and `timestep` is the value the check applies to.
+      What no version checks, and what the workaround is for at 0.4.0: apply
+      the same inequality to any `dt` you pass to `update()` rather than
+      relying on the constructor's, and to any `thermal_diffusivity` or
+      `length` a calibration or sysid run may move -- both are trainable, and
+      an optimiser walking alpha upward crosses the limit with no signal.
+      Bound the parameter (ParamSpec bounds on `thermal_diffusivity`) so the
+      fit cannot reach an unstable configuration, and check the field for
+      non-finite values after the step if it can.
     resolution_status: "open"
     github_issue: null
 
@@ -166,6 +192,16 @@ anomalies:
       checkpointed calibrated constants all skipped it.  The sibling wrappers
       ShardedStencilNode and ShardedUnstructuredNode proxied the contract
       correctly and were not affected, though they too copied the params dict.
+      The version range was re-derived for the 0.4.0 release rather than
+      carried forward.  ShardedPointwiseNode first appears at v0.2.0 (v0.1.0
+      has only ShardedNode, and no ShardedPointwiseNode to import), and
+      PUT /graph/params/{node_name} exists from v0.2.0 too, so every tag that
+      has the class has the defect.  Driving the entry's own mechanism against
+      `git archive` of each tag gives the same wrapper position 0.014767 after
+      five 0.01 s steps at v0.2.0, v0.2.1, v0.3.0 and v0.3.1, both before and
+      after writing stiffness=1000 into the wrapper's params, against 1.161203
+      for a genuinely k=1000 node.  The 0.3.0 entry in the changelog is the
+      @stability decorator, which sets stable_since and not affected_versions.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -183,10 +219,10 @@ anomalies:
     affected_components:
       - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
       - "maddening.api.server.SimulationServer"
-    affected_versions: "0.3.0, 0.3.1"
+    affected_versions: "0.2.0, 0.2.1, 0.3.0, 0.3.1"
     workaround: >
-      On 0.3.x, set the parameter on the inner node before wrapping it
-      (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh)), or
+      On 0.2.x and 0.3.x, set the parameter on the inner node before wrapping
+      it (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh)), or
       write to the inner node's params dict and recompile; do not rely on
       PUT /graph/params, gm.params or sysid for a pointwise-sharded node.
     resolution_status: "resolved"
@@ -239,9 +275,15 @@ anomalies:
       means the same thing in any units (atol is now a dead band -- what
       counts as zero -- rather than a floor under the scale, which made
       every criterion absolute below atol/rtol).  coupling_diagnostics()
-      reports error_estimate, amplification, bound_valid and
-      gradient_error_bound beside the residual.  That estimate is not a
-      bound; see the residual risk.
+      reports error_estimate, amplification, ratio_usable and
+      gradient_error_estimate beside the residual.  0.4.0 renamed the last
+      two from bound_valid and gradient_error_bound, because neither is a
+      bound: the old spellings still read through with a DeprecationWarning
+      and are removed in 0.5.0, and they are deliberately absent from
+      keys(), iteration and len().  The reported keys are exactly
+      ['amplification', 'converged', 'error_estimate',
+      'gradient_error_estimate', 'iterations', 'ratio_usable', 'residual'].
+      That estimate is not a bound; see the residual risk.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -253,7 +295,7 @@ anomalies:
       training run on this same flag, so a stiff group whose slowest
       mode has lambda near 1 can hand an optimiser a gradient off by
       roughly residual * cond(I - dF/dx).  That quantity is now reported
-      as gradient_error_bound, and the flag itself accounts for the
+      as gradient_error_estimate, and the flag itself accounts for the
       amplification, so the failure mode is diagnosable rather than
       silent.  What remains is the residual part below.
     affected_components:
@@ -266,8 +308,11 @@ anomalies:
       instead of trusting it: solve the same step at tolerance t and at
       t/100 and take the difference between the two answers as the error
       at t.  On 0.4.0 the flag carries the amplification itself; read
-      coupling_diagnostics()['bound_valid'] to see whether it did, and
-      treat bound_valid=False as the old behaviour.
+      coupling_diagnostics()['ratio_usable'] to see whether it did, and
+      treat ratio_usable=False as the old behaviour.  That key was spelled
+      'bound_valid' before 0.4.0 and still resolves under the old spelling,
+      with a DeprecationWarning, until 0.5.0 removes it -- but it is not in
+      keys(), so do not look for it by enumerating the report.
     resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
@@ -281,8 +326,8 @@ anomalies:
       so has no ratio at all -- the criterion falls back to the raw
       residual test that shipped before 0.4.0, i.e. to this anomaly
       exactly.  That fallback is reported, not silent:
-      coupling_diagnostics()['bound_valid'] is False and
-      gradient_error_bound is +inf.
+      coupling_diagnostics()['ratio_usable'] is False and
+      gradient_error_estimate is +inf.
       A second gap is about which state the bound is over rather than
       how tight it is, and it is not reported at all.
       convergence_norm="interface" takes the residual over the edge
@@ -312,7 +357,7 @@ anomalies:
       *step*, which need not be the mode that dominates the remaining
       error: on modes (0.999, 0.2) at tolerance 1e-4 the reported
       error_estimate is 9.19e-05 against a true distance of 1.12e-02 --
-      122x -- with bound_valid=True and converged=True.  This one is a
+      122x -- with ratio_usable=True and converged=True.  This one is a
       characterised limitation rather than an unfinished fix.  Over the
       passes that matter the failing sequence and a genuine single-mode
       decay at 0.2 are the same sequence, with consecutive ratios of
@@ -332,8 +377,8 @@ anomalies:
       quasi-Newton step is not a multiple of F(x) - x at all; its
       measured 4.5x shortfall is the first mechanism rather than this
       one, because a superlinear sequence reads rho -> 0.  Neither is
-      corrected in 0.4.0.  bound_valid reports a usable *ratio*, not a
-      valid *bound*.
+      corrected in 0.4.0.  ratio_usable reports a usable *ratio*, not a
+      valid *bound* -- which is what the 0.4.0 rename is for.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"
@@ -623,12 +668,19 @@ anomalies:
       Fourier number of 0.5, without qualification.  That is the bound for the
       3-point stencil.  The 5-point 4th-order stencil is stable only up to a
       Fourier number of 3/8.
-      Measured at 0.4.0.dev0 on a 20-cell rod, alpha = 1.0, length 1.0, with
-      `stencil_order=4`: Fo = 0.37 converges normally, Fo = 0.40 -- inside the
-      documented limit -- diverges to a non-finite field with no warning.  The
-      failure mode is the one MADD-ANO-002 already describes; this entry
-      records that the stated bound is wrong for one of the two stencils, so
-      following the documentation is not sufficient to avoid it.
+      Measured before the fix, on a 20-cell rod, alpha = 1.0, length 1.0, with
+      `stencil_order=4`: Fo = 0.37 converged normally and Fo = 0.40 -- inside
+      the documented limit of 0.5 -- diverged to a non-finite field with no
+      warning.  The failure mode is the one MADD-ANO-002 already describes;
+      what this entry records is that the stated bound was wrong for one of
+      the two stencils, so following the documentation was not sufficient to
+      avoid it.
+      Neither of those two constructions exists at 0.4.0: the constructor
+      refuses both, because both are above `MAX_FOURIER_NUMBER[4]` = 5/16 =
+      0.3125, each raising ValueError naming its Fourier number (0.37, 0.4)
+      and the limit.  Re-running the measurement against this version
+      therefore shows the refusal rather than the divergence, which is the
+      fix; the figures above are a record of the defect, not a reproducer.
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -821,7 +873,7 @@ anomalies:
       - "maddening.cloud.multigpu.coordinator.Coordinator"
       - "maddening.cloud.multigpu.worker_client.WorkerClient"
       - "maddening.cloud._skypilot.launch_vm"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       On v0.3.1 and earlier: never pass a wildcard address.  Construct
       NetworkRelay and CommandPublisher with "tcp://127.0.0.1:<port>"
@@ -848,10 +900,17 @@ anomalies:
       secret into the container -- so an operator who publishes 5555
       without arranging the token gets a refusal to start rather than a
       working exposed socket, which is the intended failure but is still
-      a configuration burden.  Separately, maddening.fmi.tcp_bridge
-      listens on TCP 5555 by default with its own unauthenticated
-      protocol; it is a different component, is not covered by this
-      entry, and is documented as trusted-clients-only.
+      a configuration burden.  Separately, maddening.fmi.tcp_bridge is
+      an unauthenticated listening socket with its own protocol; it is a
+      different component, is not covered by this entry, and is
+      documented as trusted-clients-only.  It is not on 5555: the
+      measured constructor defaults at 0.4.0 are host="127.0.0.1",
+      port=0, i.e. loopback on an ephemeral port, which is why it is a
+      much narrower exposure than the ones above and why "the last
+      unauthenticated listening sockets in MADDENING were the ZeroMQ
+      ones" is not true.  An earlier revision of this paragraph said
+      "listens on TCP 5555 by default"; that was wrong in both the port
+      and the interface and is withdrawn.
     verification:
       - "tests/security/test_zmq_transport_auth.py::TestStateStreamConfidentiality::test_an_unauthenticated_subscriber_cannot_read_the_state_stream"
       - "tests/security/test_zmq_transport_auth.py::TestStateStreamConfidentiality::test_a_subscriber_with_its_own_keypair_cannot_read_the_state_stream"

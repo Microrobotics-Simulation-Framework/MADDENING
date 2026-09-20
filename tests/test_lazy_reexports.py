@@ -54,11 +54,19 @@ def _dunder_all(tree: ast.Module) -> list[str]:
     return []
 
 
-def _bound_names(tree: ast.Module) -> set[str]:
+def _is_type_checking(test: ast.expr) -> bool:
+    """``if TYPE_CHECKING:`` / ``if typing.TYPE_CHECKING:``."""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+
+
+def _bound_names(tree: ast.Module, *, type_checking: bool = True) -> set[str]:
     """Names a checker can see: real imports, defs, classes, assignments.
 
     Includes the contents of ``if TYPE_CHECKING:`` blocks, which is the
     whole point -- they are invisible at runtime and visible to a checker.
+    With ``type_checking=False`` those blocks are skipped, which gives the
+    opposite view: the names that exist when the module is *executed*.
     """
     names: set[str] = set()
 
@@ -73,7 +81,8 @@ def _bound_names(tree: ast.Module) -> set[str]:
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 names.add(node.target.id)
             elif isinstance(node, ast.If):
-                walk(node.body)
+                if type_checking or not _is_type_checking(node.test):
+                    walk(node.body)
                 walk(node.orelse)
             elif isinstance(node, ast.Try):
                 walk(node.body)
@@ -84,6 +93,34 @@ def _bound_names(tree: ast.Module) -> set[str]:
 
     walk(tree.body)
     return names
+
+
+def _lazy_table_keys(tree: ast.Module) -> set[str]:
+    """The string keys of the module's PEP 562 lazy table.
+
+    Spelled differently across the seven packages -- a module-level
+    ``_LAZY`` (annotated or not) in some, a ``_lazy`` local inside
+    ``__getattr__`` in others, values that are a module path in some and a
+    ``(module, attribute)`` pair in ``viz`` -- so this matches on the name
+    and reads only the keys, anywhere in the module.
+    """
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id.lower() == "_lazy"
+                   for t in targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        keys.update(k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str))
+    return keys
 
 
 @pytest.mark.parametrize("rel", LAZY_PACKAGES)
@@ -120,4 +157,74 @@ def test_training_dunder_all_matches_its_lazy_table() -> None:
         "maddening/surrogates/training/__init__.py: __all__ and _LAZY have "
         "drifted; they were one expression until __all__ was spelled out "
         "for the type checker"
+    )
+
+
+@pytest.mark.parametrize("rel", LAZY_PACKAGES)
+def test_every_exported_name_also_resolves_at_runtime(rel: str) -> None:
+    """The direction that hurts a ``py.typed`` consumer.
+
+    ``test_every_exported_name_is_visible_to_a_checker`` checks
+    ``__all__`` minus what a checker can see.  This is the opposite
+    subtraction: a name in ``__all__`` and in the ``if TYPE_CHECKING:``
+    block but absent from the runtime lazy table type-checks perfectly
+    and raises ``AttributeError`` on access -- and with the marker
+    shipped, the checker's word is what a consumer acts on, so the
+    mistake surfaces as a crash in their code rather than an error in
+    ours.  Both subtractions are needed; neither implies the other
+    (audit_040_r3, L2: all 16 tests passed on a seeded instance).
+
+    Static for the same reason as its counterpart: importing the lazy
+    names would install-gate this on pygfx / skypilot / equinox.
+    """
+    tree = _module(rel)
+    reachable = (_bound_names(tree, type_checking=False)
+                 | _lazy_table_keys(tree))
+    unresolvable = sorted(set(_dunder_all(tree)) - reachable)
+    assert not unresolvable, (
+        f"{rel}: {unresolvable} are in __all__ and visible to a type "
+        "checker, but are neither imported eagerly nor keys of the lazy "
+        "table, so `from ... import X` type-checks and raises "
+        "AttributeError at runtime.  Add them to the lazy table."
+    )
+
+
+def test_the_lazy_table_reader_reads_the_table_and_not_dunder_all() -> None:
+    """The check above is only as good as this helper.
+
+    A helper that quietly returned ``__all__`` would make every package
+    look consistent -- the failure mode mutation testing cannot reach
+    from outside, because it is in the test's own machinery.
+    ``maddening.viz`` is the one package where the two sets differ in
+    both directions: four names are imported eagerly and are in
+    ``__all__`` but not in the table, and three USD helpers are in the
+    table but not in ``__all__``.  Asserting the exact set therefore
+    pins that the reader read the dict.
+    """
+    tree = _module("viz/__init__.py")
+    assert _lazy_table_keys(tree) == {
+        "HistoryViewer3D", "GPUHistoryViewer", "PyVistaLiveRenderer",
+        "viewer_from_usd", "viewer_from_usd_with_geometry",
+        "render_usd_frame",
+    }
+    assert "Renderer" in _dunder_all(tree)          # eager, not in the table
+    assert "Renderer" not in _lazy_table_keys(tree)
+    assert "render_usd_frame" not in _dunder_all(tree)  # table, not exported
+
+
+@pytest.mark.parametrize("rel", LAZY_PACKAGES)
+def test_the_lazy_table_is_found_where_each_package_spells_it(rel: str) -> None:
+    """The check above passes vacuously if the table cannot be located.
+
+    ``_lazy_table_keys`` matches on a name, so a package that renamed its
+    table would silently contribute nothing and every lazy export would
+    look eager-or-missing.  It fails closed in that direction -- the names
+    would be reported as unresolvable -- but only as long as some name is
+    actually lazy, which is what this pins.
+    """
+    assert _lazy_table_keys(_module(rel)), (
+        f"{rel}: no lazy table found.  It is matched by the name `_LAZY` / "
+        "`_lazy` bound to a dict literal; if this package spells it "
+        "differently, teach _lazy_table_keys about it rather than leaving "
+        "the runtime check with nothing to compare against."
     )

@@ -244,6 +244,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Three more gates that could not fail**: the pyright tiers now cover
+  `maddening/__init__.py`, the SOUP drift classifier no longer calls a lost evidence
+  row a safe regenerate, and `check_transforms` counts only confirmed references
 - **`cloud/_skypilot.py` ported to SkyPilot's client-server API** (`MADD-ANO-016`):
   every call in it was written against the pre-0.7 API and could not work on the
   `>=0.11` floor, and a failed teardown or preemption check is now loud

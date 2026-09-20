@@ -282,6 +282,75 @@ class TestTransformLiveRegistration:
         out = capsys.readouterr().out
         assert "NOT confirmed against the live registry" in out
         assert "not confirmed against the live registry" in out
+        # The one reference in scope was not verified, so the headline
+        # must not claim it was.
+        assert "OK: 0 string transform reference(s) verified" in out
+
+    def test_an_unconfirmed_reference_is_not_counted_in_the_verified_total(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """Two references, one verifiable: the headline says one, not two.
+
+        ``n_allowlisted`` ``continue``s before the in-scope counter, but
+        the unconfirmed were counted *before* the live-registry loop had
+        decided which references they were -- two neighbouring counters
+        computed differently, so the degradation path inflated the very
+        number it printed a caveat next to (audit_040_r3).  The counter it
+        inflated arrived in 44250c3, the fix for this same defect class.
+        """
+        (tmp_path / "uses_transforms.py").write_text(
+            "import a_module_that_does_not_exist_anywhere  # noqa: F401\n"
+            "from maddening.core.transforms import register_transform\n"
+            "\n"
+            "\n"
+            '@register_transform("only_lexically_registered")\n'
+            "def _t(x):\n"
+            "    return x\n"
+            "\n"
+            "\n"
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", '
+            'transform="only_lexically_registered")\n'
+            '    gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        # Not just the exit code, and not just a substring of the caveat:
+        # the number in the headline is what a reader takes away as
+        # coverage, so assert the whole clause.
+        assert ("OK: 1 string transform reference(s) verified, 1 not "
+                "confirmed against the live registry") in out, out
+        assert "2 string transform reference(s) verified" not in out
+
+    def test_an_allowlisted_reference_is_not_counted_in_the_verified_total(
+        self, transforms_gate, tmp_path, capsys, monkeypatch
+    ):
+        """The other counter the headline must not absorb.
+
+        ``n_allowlisted`` is the one that was already right, and nothing
+        pinned it: adding the allowlisted reference to the in-scope total
+        as well makes the repository report "33 verified, 2 allowlisted
+        and not checked" for 31 verified references, and every other test
+        in this file still passes.  Written because the consequence -- a
+        gate overstating its own coverage in IEC 62304 evidence -- is the
+        defect class this whole module exists for.
+        """
+        probe = tmp_path / "allowlisted_and_not.py"
+        probe.write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+            'gm.add_edge("a", "b", "x", "y", transform="deliberately_absent")\n'
+        )
+        # A scan root outside the repository keeps its absolute path as
+        # the allowlist key (`relative_to` raises and `rel` falls back).
+        monkeypatch.setitem(
+            transforms_gate._ALLOWED_UNRESOLVABLE,
+            (str(probe), "deliberately_absent"),
+            "the fixture for this test",
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert ("OK: 1 string transform reference(s) verified, 1 "
+                "allowlisted and not checked") in out, out
 
     #: Test packages whose modules need an optional extra to import.  A
     #: registration in one of these is legitimately unconfirmable in a CI

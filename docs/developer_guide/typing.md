@@ -8,7 +8,7 @@ whole-tree cleanliness.
 | Phase | When | What |
 |---|---|---|
 | **1** (done) | v0.4.0 development | `pyrightconfig.json` in *basic* mode over `src/maddening`; a `typecheck` CI job that is **visible but non-blocking**; the baseline below.  No source annotations are changed in this phase. |
-| **2 (current)** | v0.4.0, after the STABLE list settled | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (the [stability report](stability_report.md) is the authoritative list, regenerated and equality-checked in CI; 17 STABLE-tagged surfaces in 11 modules at v0.4.0) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) gets every public signature annotated, so a `py.typed` package never exposes an `Any`-returning public call, while its module bodies are only ratcheted: the error count may not rise above the recorded baseline. |
+| **2 (current)** | v0.4.0, after the STABLE list settled | Annotate the surfaces tagged `@stability(StabilityLevel.STABLE)` (the [stability report](stability_report.md) is the authoritative list, regenerated and equality-checked in CI; 17 STABLE-tagged surfaces in 11 modules at v0.4.0) *and* the internal packages that refactors touch, replace bare `dict` parameters with `TypedDict`/`Mapping` types, ship a `py.typed` marker ([PEP 561](https://peps.python.org/pep-0561/)), and make the pyright check **blocking in two tiers**: tier 1 (`__init__.py`, `core`, `nodes`, `fmi`, `cloud`, `sysid`, `serialization`, `testing`, `compliance`) must be at zero errors; tier 2 (`viz`, `usd`, `api`, `surrogates`, which sit on untyped or optional third-party libraries) gets every public signature annotated, so a `py.typed` package never exposes an `Any`-returning public call, while its module bodies are only ratcheted: the error count may not rise above the recorded baseline. |
 
 Whole-tree cleanliness is explicitly *not* a goal of either phase.
 
@@ -71,6 +71,19 @@ ratchet can be tightened when it becomes free.
 Ceilings are **per package** on purpose: a single total would let a
 regression in `viz` hide behind an improvement in `api`.
 
+The package root module is a tier of one.  `_package_of` gives a module
+directly under `src/maddening` its own key, so `src/maddening/__init__.py`
+is the ceiling key `__init__.py` -- and until 2026-09-20 that key was in
+neither tier.  Because `--tier` filters the diagnostics to the tier's
+packages *before* comparing, a key in no tier is not reported as
+uncovered; it simply vanishes, and all three typing steps pass on any
+number of errors in that file (measured: 500 synthetic errors, three
+green steps).  That file is where the `if TYPE_CHECKING:` re-exports live
+and is what every `from maddening import X` resolves through for a
+`py.typed` consumer, and `tests/test_lazy_reexports.py` is `ast`-based by
+design -- so pyright is the only thing that can see a stale name in it.
+It is committed at **0**, which is its measured count (pyright 1.1.414).
+
 The file also records `pyright_version` and `environment`, and a run
 under a different pyright release is an *infrastructure* failure (exit
 2), not a gate failure: every release changes diagnostics, so the
@@ -110,7 +123,7 @@ are the numbers they were taken from.
 |---|---|---|
 | **before this phase** | 270 | 100 |
 | **after** | **165** | **23** |
-| tier 1 (`core`, `nodes`, `fmi`, `cloud`, `sysid.py`, `serialization`, `testing`, `compliance`, `transport_auth.py`, `warnings.py`) | 103 -> **0** | |
+| tier 1 (`__init__.py`, `core`, `nodes`, `fmi`, `cloud`, `sysid.py`, `serialization`, `testing`, `compliance`, `transport_auth.py`, `warnings.py`) | 103 -> **0** | |
 | tier 2 (`api`, `surrogates`, `viz`, `usd`) | 167 -> **165** | |
 
 The 77 `reportUnsupportedDunderAll` warnings are gone: every name behind a
@@ -307,7 +320,15 @@ Delivered on `feat/pep561-phase2` (2026-09-20) except where noted.
    notes.
 3. **`if TYPE_CHECKING:` re-exports for the lazy `__getattr__` tables** --
    done, for all seven packages; `tests/test_lazy_reexports.py` pins it
-   statically so it cannot rot between pyright runs.
+   statically so it cannot rot between pyright runs, in **both**
+   directions: a name in `__all__` that no checker can see, and a name a
+   checker can see that the runtime lazy table has no entry for.  The
+   second one type-checks perfectly and raises `AttributeError`, which
+   with the marker shipped is the direction that reaches a consumer.  A
+   `TYPE_CHECKING` import of a symbol that does not exist is not
+   reachable by an `ast`-based check at all; pyright is the backstop for
+   that, which is why every one of the seven packages -- including the
+   package root module -- has to be inside a tier.
 4. **`src/maddening/py.typed` and the hatch `force-include`** -- done, and
    asserted against a built wheel rather than against the configuration
    (see *PEP 561: shipping the marker*).

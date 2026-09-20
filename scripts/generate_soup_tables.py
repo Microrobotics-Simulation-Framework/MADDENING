@@ -625,9 +625,29 @@ def describe_drift(rel, current: str, generated: str) -> str:
     So: count lines only in the committed file (the source dropped them),
     lines only in the generated file (the document is behind), and lines
     changed in place, and lead with the dangerous one when it is present.
+
+    The classification cannot be read off the ``difflib`` opcodes alone.
+    ``SequenceMatcher`` emits ``delete`` only when a surviving line
+    anchors the deletion on both sides; a row deleted next to a row whose
+    text also changed comes back as one ``replace``, whose old lines this
+    function used to file entirely under "changed in place".  Deleting
+    ``MADD-ANO-012`` and rewording the anomaly after it therefore printed
+    *"no committed row would be lost.  Run generate_soup_tables.py"* with
+    the ``-| MADD-ANO-012 | ... | open |`` row in the diff below it
+    (audit_040_r3, the residual half of G5) -- and a deletion adjacent to
+    an edit is the shape of every "re-derive the registry" commit in this
+    release.  So the decision is made on the *evidence IDs*: an ID the
+    committed document carries and a fresh generation does not is a lost
+    row whatever opcode it arrives in.
     """
     old_lines = current.splitlines(keepends=True)
     new_lines = generated.splitlines(keepends=True)
+
+    def _ids(text: str) -> set[str]:
+        return {m.group(0) for m in _EVIDENCE_ID.finditer(text)}
+
+    #: IDs the committed document has and the regenerated one would not.
+    lost_ids = _ids(current) - _ids(generated)
 
     removed: list[str] = []
     added: list[str] = []
@@ -639,7 +659,10 @@ def describe_drift(rel, current: str, generated: str) -> str:
         elif tag == "insert":
             added.extend(new_lines[j1:j2])
         elif tag == "replace":
-            changed.extend(old_lines[i1:i2])
+            # An old line inside a `replace` is only "changed in place" if
+            # nothing it identifies is disappearing from the document.
+            for line in old_lines[i1:i2]:
+                (removed if _ids(line) & lost_ids else changed).append(line)
 
     lines = [
         f"{rel} does not match a fresh generation from its sources:",
@@ -651,9 +674,21 @@ def describe_drift(rel, current: str, generated: str) -> str:
         "",
     ]
 
-    if removed:
-        lost = sorted({m.group(0) for line in removed
-                       for m in _EVIDENCE_ID.finditer(line)})
+    if removed or lost_ids:
+        # `or lost_ids` is a backstop and is currently unreachable on its
+        # own: every old line outside an `equal` block lands in `delete`
+        # or `replace`, and both now route a line carrying a lost ID into
+        # `removed`.  It is kept because it holds the invariant directly
+        # -- an ID the committed document has and the generated one does
+        # not is a lost row -- so a future change to the opcode loop
+        # cannot quietly reintroduce the defect.  A mutation that removes
+        # this clause alone is therefore NOT caught by the test suite;
+        # one that breaks the opcode loop is (see
+        # TestDriftIsClassified).  `removed` still contributes the names,
+        # so a lost row that carries no MADD-* ID at all is reported too.
+        lost = sorted(lost_ids
+                      | {m.group(0) for line in removed
+                         for m in _EVIDENCE_ID.finditer(line)})
         named = f" ({', '.join(lost)})" if lost else ""
         lines += [
             f"DO NOT regenerate yet.  Regenerating would DELETE those "

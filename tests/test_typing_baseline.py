@@ -482,7 +482,16 @@ def test_main_exits_2_not_1_when_the_pyright_release_does_not_match(
 
 def test_the_committed_tier_file_is_loadable_and_covers_every_package(tb):
     """The real typing_tiers.json must name every package under
-    ``src/maddening``, or a package could drift with no ceiling at all."""
+    ``src/maddening``, or a package could drift with no ceiling at all.
+
+    ``src/maddening/__init__.py`` is included, and used to be excluded
+    here.  It is the one module the exclusion left with no ceiling, and
+    it is the module every ``from maddening import X`` resolves through
+    now that the wheel ships ``py.typed``: its ``if TYPE_CHECKING:``
+    re-export block is what a downstream checker reads, and
+    ``tests/test_lazy_reexports.py`` is deliberately ``ast``-based, so
+    pyright is the only thing that can see a stale name in it.
+    """
     tier1 = tb.load_tier("tier1")
     tier2 = tb.load_tier("tier2")
     covered = set(tier1.packages) | set(tier2.packages)
@@ -491,7 +500,7 @@ def test_the_committed_tier_file_is_loadable_and_covers_every_package(tb):
         p.name for p in root.iterdir()
         if (p.is_dir() and (p / "__init__.py").exists()
             and p.name not in ("examples", "__pycache__"))
-        or (p.is_file() and p.suffix == ".py" and p.name != "__init__.py")
+        or (p.is_file() and p.suffix == ".py")
     }
     assert not on_disk - covered, (
         f"{sorted(on_disk - covered)} are under src/maddening but in no "
@@ -506,3 +515,38 @@ def test_the_committed_tier_file_is_loadable_and_covers_every_package(tb):
 def test_tier1_is_committed_at_zero(tb):
     """The policy's own claim, as a test: tier 1 is not merely small."""
     assert set(tb.load_tier("tier1").max_errors.values()) == {0}
+
+
+def test_the_package_root_module_maps_to_a_key_the_tiers_actually_name(tb):
+    """``src/maddening/__init__.py`` is gated, not silently out of scope.
+
+    ``_package_of`` gives a module directly under the package its own
+    key, so the package root module is ``"__init__.py"``.  With
+    ``--tier``, ``summarise`` filters the diagnostics to the tier's
+    packages *before* ``gate`` runs, so a key in neither tier is not
+    reported as uncovered -- it simply disappears, and every CI typing
+    step passes however many errors the file has.  The pairing of this
+    assertion with the coverage test above is what closes that.
+    """
+    key = tb._package_of("src/maddening/__init__.py")
+    assert key == "__init__.py"
+    assert key in tb.load_tier("tier1").max_errors
+
+
+def test_an_error_in_the_package_root_module_fails_the_real_tier1_gate(
+        tb, tmp_path, capsys):
+    """End to end against the committed typing_tiers.json, as CI runs it.
+
+    Measured 2026-09-20 with pyright 1.1.414: the file has **zero**
+    errors, so the ceiling is a ratchet at its floor rather than an
+    accommodation of an existing count.
+    """
+    run = tmp_path / "run.json"
+    run.write_text(json.dumps(_pkg_report(tb, {"__init__.py": 1})))
+    rc = tb.main(["--json", str(run), "--tier", "tier1"])
+    err = capsys.readouterr().err
+    assert rc == tb.EXIT_ERRORS
+    # Not just the exit code: the verdict has to name the file, or a
+    # maintainer cannot act on it and an unrelated guard could be what
+    # turned the run red.
+    assert "FAIL  __init__.py: 1 errors, ceiling 0" in err

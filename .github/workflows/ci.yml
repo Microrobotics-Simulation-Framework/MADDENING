@@ -141,8 +141,9 @@ jobs:
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the
     # pyright run is BLOCKING, in two tiers defined by typing_tiers.json.
-    # Tier 1 (core, nodes, fmi, cloud, sysid, serialization, testing,
-    # compliance) is at zero errors and must stay there.  Tier 2 (viz,
+    # Tier 1 (the package root module __init__.py, core, nodes, fmi,
+    # cloud, sysid, serialization, testing, compliance) is at zero errors
+    # and must stay there.  Tier 2 (viz,
     # usd, api, surrogates -- all sitting on untyped or optional
     # third-party libraries) has every public signature annotated but its
     # bodies only ratcheted: each package has a committed ceiling that

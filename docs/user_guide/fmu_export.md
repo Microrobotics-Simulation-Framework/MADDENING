@@ -52,7 +52,13 @@ drive the graph with a constant it declares invalid.  A node name may
 itself contain a `.` (`tank.1`, `hx.hot`): the variable carries its
 `(node, field)` pair, so the bridge never has to guess where the name
 splits, and an export in which two nodes would spell the same variable
-name is refused naming both.
+name is refused naming both.  A `model_name` of exactly `NaN`,
+`Infinity` or `-Infinity` is refused by `build_model_description`: the
+bridge's `hello` reply carries the model name, and those three strings
+are how the wire spells a non-finite number (`MADD-ANO-010`), so such a
+reply could not be written as unambiguous JSON.  Any other spelling
+(`nan`, `Infinity_2`) is fine, as is any node name — `add_node` applies
+the same three-token rule.
 
 **Transport.**  Each message is a 4-byte big-endian length prefix followed
 by one frame: a JSON object (`{"op": "set"|"get"|"step"|"get_state"|

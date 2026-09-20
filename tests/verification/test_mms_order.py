@@ -116,11 +116,29 @@ def float64():
 _L = 1.0
 _ALPHA = 1.0
 
-#: Steady manufactured profile.  Non-symmetric (the linear term) and
-#: with a non-vanishing fourth derivative (the sine), so neither the
-#: second- nor the fourth-order stencil is accidentally exact on it.
+#: Steady manufactured profile.  Three properties, each load-bearing and
+#: each pinned by :class:`TestTheSteadyProfileCanSeeABrokenScheme`:
+#:
+#: * non-symmetric (the linear term), so a symmetric error cannot cancel;
+#: * non-vanishing fourth derivative (the sine), so neither stencil is
+#:   accidentally exact on it in the interior;
+#: * **non-vanishing second derivative at both rod ends** (the quadratic
+#:   term).  This one was missing until 0.4.0 and the omission mattered.
+#:
+#: The boundary rows' leading error term is proportional to ``u''`` at
+#: the rod end, so a profile flat there cannot see a wrong boundary
+#: closure at all.  ``sin(2 pi x) + 0.5x + 1`` has ``u'' = 0`` at both
+#: ends exactly, and on it a linear ghost extrapolation -- which is a
+#: genuinely 2nd-order closure -- measures 4.357, 4.257, 4.150, 4.080
+#: and sails through a band centred on 4.  Adding ``0.4 x^2`` makes the
+#: same wrong closure measure 3.206, 2.129, 2.006, 2.000, caught by two
+#: whole orders, and moves the correct closure not at all (3.957 either
+#: way).  A manufactured solution that cannot fail is the same defect as
+#: an acceptance band that cannot fail, one layer down.
 _STEADY = ManufacturedSolution(
-    exact=lambda x, t: jnp.sin(2.0 * jnp.pi * x / _L) + 0.5 * x + 1.0,
+    exact=lambda x, t: (
+        jnp.sin(2.0 * jnp.pi * x / _L) + 0.5 * x + 1.0 + 0.4 * x * x
+    ),
     operator=diffusion_operator(_ALPHA),
 )
 
@@ -274,6 +292,63 @@ def test_the_fourth_order_stencil_beats_the_second_order_one(float64):
             f"at n={n_cells} the 4th-order stencil is less accurate than the "
             f"default: {fourth:.3e} against {second:.3e}"
         )
+
+
+class TestTheSteadyProfileCanSeeABrokenScheme:
+    """The manufactured solution must be able to fail the node.
+
+    An order study is only as good as the field it refines.  These
+    check the three properties ``_STEADY`` is chosen for, so that a
+    later edit to it cannot quietly disarm every ladder above.
+    """
+
+    def test_the_curvature_does_not_vanish_at_either_rod_end(self):
+        """Where the boundary closure's error term lives.
+
+        The first and last rows of the discrete operator have a leading
+        truncation error proportional to ``u''`` at the rod end.  A
+        manufactured solution with ``u'' = 0`` there cannot distinguish
+        a correct boundary closure from a wrong one: measured on the
+        profile this module used before 0.4.0, a linear ghost
+        extrapolation (genuinely 2nd order) read 4.080 on a 4th-order
+        ladder.  With this term present the same closure reads 2.000.
+        """
+        d2 = jax.grad(jax.grad(lambda x: _STEADY.exact(x, 0.0)))
+        for end, x in (("left", 0.0), ("right", _L)):
+            curvature = float(d2(jnp.asarray(x)))
+            assert abs(curvature) > 0.1, (
+                f"the manufactured solution is flat at the {end} rod end "
+                f"(u'' = {curvature:.3g}), so the boundary closure's error "
+                f"term vanishes there and no ladder built on it can see a "
+                f"wrong closure"
+            )
+
+    def test_the_fourth_derivative_does_not_vanish(self):
+        """Otherwise the 5-point stencil is exact and measures nothing.
+
+        Sampled across the rod rather than at a point: the sine's
+        fourth derivative has zeros (at x = 0, L/2 and L for this
+        profile), and a zero at one point says nothing about the
+        truncation error of a ladder that integrates over all of them.
+        """
+        d4 = jax.grad(jax.grad(jax.grad(jax.grad(
+            lambda x: _STEADY.exact(x, 0.0)
+        ))))
+        sampled = [
+            abs(float(d4(jnp.asarray(x))))
+            for x in np.linspace(0.0, _L, 21)
+        ]
+        assert max(sampled) > 1.0, (
+            "the manufactured solution has no fourth derivative anywhere on "
+            "the rod, so the 5-point stencil is exact on it and the "
+            "4th-order ladder measures nothing"
+        )
+
+    def test_the_profile_is_not_symmetric_about_the_rod_centre(self):
+        """A symmetric profile lets the two ends' errors cancel in L2."""
+        left = float(_STEADY.exact(jnp.asarray(0.25 * _L), jnp.asarray(0.0)))
+        right = float(_STEADY.exact(jnp.asarray(0.75 * _L), jnp.asarray(0.0)))
+        assert abs(left - right) > 0.1
 
 
 class TestHeatBoundaryPlacement:

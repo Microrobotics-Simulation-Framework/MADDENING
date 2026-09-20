@@ -121,11 +121,22 @@ def _dirichlet_ghosts_4th_order(T, T_boundary):
 
     A cubic is the lowest degree that works.  Its ghost error is
     O(dx^4); the 5-point stencil divides ghost errors by ``12 dx^2``,
-    so a linear or quadratic extrapolation leaves an O(1) or O(dx)
-    truncation error at the first interior cells and caps the scheme
-    at order 1 or 3 respectively (measured: 0.95 and 2.97).  A quartic
-    is accurate enough but spectrally unstable (its Fourier bound is
-    0.273 and it diverges on the same ladder).
+    so a lower-degree extrapolation leaves a truncation error at the
+    first interior cells that the conservative form can only partly
+    absorb.  Measured on three manufactured solutions, linear
+    extrapolation caps the scheme at 2.00 and quadratic at 2.99, while
+    this cubic reaches 3.95-3.98.  A quartic is accurate enough but
+    spectrally unstable -- its Fourier bound is 0.273 and it diverges
+    on the same ladder.
+
+    The linear case is worth a sentence of its own, because it is how
+    this docstring was wrong on its first draft.  On a manufactured
+    solution whose curvature vanishes at the rod ends -- which the one
+    in ``tests/verification/test_mms_order.py`` did until 0.4.0 --
+    linear extrapolation measures 4.08 and looks correct.  The
+    boundary rows' error term is proportional to ``u''`` at the end,
+    so a flat-ended profile cannot see it.  Any re-derivation of this
+    choice has to use a profile curved at both ends.
 
     One consequence worth recording: under this closure the 5-point
     and 3-point forms are *algebraically identical* at cells 0 and

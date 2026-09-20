@@ -382,11 +382,22 @@ class TestFIM:
     workaround: position-only data cannot separate a common scaling of
     ``(k, c, m)``, so for a good share of the generated parameter draws
     the weakest eigenvalue genuinely sits at the float32 noise floor and
-    ``fim`` correctly says so.  Observed here at 1.14x, 1.18x, 1.4x,
-    1.67x and 1.97x the cutoff on different draws -- which is also the
-    honest headline about doing identifiability analysis in float32:
-    for this project's canonical problem the rank verdict routinely sits
-    within a small multiple of the floor.
+    ``fim`` correctly says so -- which is also the honest headline about
+    doing identifiability analysis in float32: for this project's
+    canonical problem the rank verdict routinely sits within a small
+    multiple of the floor.
+
+    The multiples first recorded here -- 1.14x, 1.18x, 1.4x, 1.67x and
+    1.97x the cutoff -- were measured against the ``n * eps`` cutoff,
+    which no longer exists; ``rank_rtol`` now carries a ``sqrt(m)`` term
+    and every one of them is quoted against a cutoff that has moved.
+    Re-checked with the filter lifted under the ``ci`` profile, the
+    warning still fires here, at 1.97x on a ``k=9, c=0.125, m=2`` draw
+    over 40 samples (cutoff ``sqrt(40) * eps``), so the filter is still
+    load-bearing and not a leftover.  Fewer draws cross the band than
+    before -- one of the seven tests fired in that run rather than five
+    -- but *which* draw crosses is exactly what is not stable between
+    runs, which is why this stays on the class.
 
     What these tests assert -- symmetry, PSD-ness, eigenvector
     directions, the congruence identity, where ``crb`` is finite -- are

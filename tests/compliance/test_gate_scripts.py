@@ -11,6 +11,7 @@ Each test names the mutation it replays.
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -128,6 +129,223 @@ class TestTransformGate:
         assert " 0 string transform reference(s) verified" not in result.stdout
 
 
+class TestTransformPositionalForm:
+    """``transform`` is a positional parameter, and a string there resolves.
+
+    The gate read ``node.keywords`` only, so the identical call written
+    positionally was invisible -- and nothing in the tree uses that form
+    today, which is what makes it a trap rather than a live bug.
+    """
+
+    def test_a_positional_unregistered_transform_fails_the_gate(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "positional_ghost.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", "no_such_transform")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_positional_registered_transform_passes(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "positional_ok.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", "extract_last")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_a_positional_edge_spec_transform_is_seen(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "spec_positional.py").write_text(
+            'EdgeSpec("a", "b", "x", "y", "no_such_transform")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_fifth_positional_that_is_not_a_string_is_not_a_reference(
+        self, transforms_gate, tmp_path
+    ):
+        """``add_edge(..., my_fn)`` passes a callable, not a registry key."""
+        (tmp_path / "callable_positional.py").write_text(
+            "def my_fn(x):\n    return x\n"
+            'gm.add_edge("a", "b", "x", "y", my_fn)\n'
+        )
+        # Nothing in scope -> the empty-scope guard, not a false positive.
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_the_positional_index_is_the_one_both_signatures_have(
+        self, transforms_gate
+    ):
+        """A hand-written index is what a parameter reorder would break."""
+        import dataclasses
+        import inspect
+
+        from maddening.core.edge import EdgeSpec
+        from maddening.core.graph_manager import GraphManager
+
+        index = transforms_gate._TRANSFORM_POSITION
+        params = [
+            name for name, param
+            in inspect.signature(GraphManager.add_edge).parameters.items()
+            if name != "self"
+            and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        assert params[index] == "transform"
+        fields = [f.name for f in dataclasses.fields(EdgeSpec)]
+        assert fields[index] == "transform"
+
+
+class TestTransformLiveRegistration:
+    """A lexical ``@register_transform`` is a claim; the registry is the fact.
+
+    ``find_local_registrations`` walks the whole AST for the call
+    expression, so a registration inside a function nobody calls satisfied
+    the gate while the name was absent from the registry after import and
+    ``add_edge`` would raise ``KeyError``.
+    """
+
+    _DEAD = (
+        "from maddening.core.transforms import register_transform\n"
+        "\n"
+        "\n"
+        "def _install_later():\n"
+        '    """Never called -- e.g. a helper a fixture forgot to invoke."""\n'
+        '    @register_transform("phantom_transform")\n'
+        "    def _phantom(x):\n"
+        "        return x\n"
+        "\n"
+        "\n"
+        "\n"
+        "def wire(gm):\n"
+        '    gm.add_edge("a", "b", "x", "y", transform="phantom_transform")\n'
+    )
+
+    _LIVE = (
+        "from maddening.core.transforms import register_transform\n"
+        "\n"
+        "\n"
+        '@register_transform("really_registered_transform")\n'
+        "def _t(x):\n"
+        "    return x\n"
+        "\n"
+        "\n"
+        "\n"
+        "def wire(gm):\n"
+        '    gm.add_edge("a", "b", "x", "y", '
+        'transform="really_registered_transform")\n'
+    )
+
+    def test_a_registration_that_never_executes_fails_the_gate(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "dead_registration.py").write_text(self._DEAD)
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_the_error_says_the_registration_never_executes(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        (tmp_path / "dead_registration.py").write_text(self._DEAD)
+        transforms_gate.main([str(tmp_path)])
+        assert "never executes" in capsys.readouterr().out
+
+    def test_a_module_level_registration_passes(
+        self, transforms_gate, tmp_path
+    ):
+        """The other direction: a real registration is confirmed, not merely
+        tolerated."""
+        (tmp_path / "live_registration.py").write_text(self._LIVE)
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_a_module_that_cannot_be_imported_degrades_to_unchecked(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """An optional extra this environment lacks is unchecked, not broken.
+
+        ``resolve_dotted_name``'s ``unavailable`` handling is the precedent:
+        failing a USD-serialisation gate because ``pxr`` is missing would
+        make the gate unusable in a CI that installs only ``[ci]``.
+        """
+        (tmp_path / "needs_an_extra.py").write_text(
+            "import a_module_that_does_not_exist_anywhere  # noqa: F401\n"
+            "from maddening.core.transforms import register_transform\n"
+            "\n"
+            "\n"
+            '@register_transform("transform_behind_an_extra")\n'
+            "def _t(x):\n"
+            "    return x\n"
+            "\n"
+            "\n"
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", '
+            'transform="transform_behind_an_extra")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "NOT confirmed against the live registry" in out
+        assert "not confirmed against the live registry" in out
+
+    #: Test packages whose modules need an optional extra to import.  A
+    #: registration in one of these is legitimately unconfirmable in a CI
+    #: that installs only ``[ci]`` -- the compliance job installs
+    #: ``[ci,usd]`` precisely so the gates can see what they verify, but the
+    #: matrix job that runs the whole suite does not.
+    _OPTIONAL_EXTRA_PACKAGES = ("tests/usd/", "tests/viz/", "tests/cloud/")
+
+    def test_every_local_registration_outside_an_optional_extra_is_confirmed(
+        self
+    ):
+        """A NOTE is acceptable only where an extra explains it.
+
+        Anywhere else it means the gate degraded on a module it should have
+        been able to import, which is indistinguishable from the dead
+        registration this check exists to catch.
+        """
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        unexplained = [
+            line for line in result.stdout.splitlines()
+            if "NOT confirmed against the live registry" in line
+            and not any(pkg in line for pkg in self._OPTIONAL_EXTRA_PACKAGES)
+        ]
+        assert not unexplained, (
+            "a local @register_transform could not be confirmed in a module "
+            "that needs no optional extra; the gate degraded rather than "
+            "verified:\n" + "\n".join(unexplained)
+        )
+
+    def test_the_reported_registry_size_excludes_what_the_gate_imported(self):
+        """The live check imports modules that register transforms.
+
+        Those registrations are global, so the registry must be snapshotted
+        before any of them run -- otherwise a name one module registers
+        starts satisfying another module's reference, which is exactly what
+        "registered in another file does not count" forbids.  The headline
+        count is the visible half of that snapshot.
+        """
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        reported = int(
+            result.stdout.rsplit("(", 1)[1].split(" transforms")[0]
+        )
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from maddening.core.transforms import _TRANSFORM_REGISTRY;"
+             "print(len(_TRANSFORM_REGISTRY))"],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"),
+                 "JAX_PLATFORMS": "cpu"},
+        )
+        assert reported == int(probe.stdout.strip()), (
+            f"the gate reported {reported} transforms in the registry; a "
+            f"bare import registers {probe.stdout.strip()}.  The gate is "
+            f"counting names its own imports added."
+        )
+
+    def test_the_summary_separates_allowlisted_from_verified(self):
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "allowlisted and not checked" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # check_impl_mapping.py
 # ---------------------------------------------------------------------------
@@ -213,6 +431,80 @@ class TestImplementationMappingGate:
         result = _run("check_impl_mapping")
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_a_scanned_scope_with_no_mappings_fails(self, mapping_gate, tmp_path):
+        """It printed "OK: 0 implementation mapping(s) verified" and exited 0.
+
+        The pinned minimums do still run against the repository, so the gate
+        was not blind -- but the line it printed named a scope it had
+        verified nothing in, and that line is what gets quoted as coverage.
+        """
+        (tmp_path / "not_a_guide.md").write_text("# No table here\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+
+class TestMinMappingsRatchet:
+    """``MIN_MAPPINGS`` must not be lowerable from inside one file.
+
+    It is the only protection the Implementation Mapping tables have, and it
+    lives in the file an author editing a guide is already editing: dropping
+    ``heat_node.md`` from 9 to 1 and deleting 8 of its 9 rows left the gate
+    green and every mapping test green with it, because
+    ``test_every_pinned_guide_is_satisfied_by_the_repository`` reads the
+    *current* ``MIN_MAPPINGS`` and moves with the mutation.
+
+    The floor beside this file is the second half of the ratchet: lowering a
+    pin now takes an edit to two files in opposite directions.
+    """
+
+    @staticmethod
+    def _floor():
+        with open(Path(__file__).parent / "min_mappings_floor.json") as fh:
+            return {
+                os.path.normpath(path): value
+                for path, value in json.load(fh)["floor"].items()
+            }
+
+    @staticmethod
+    def _pins(mapping_gate):
+        return {
+            os.path.normpath(path): value
+            for path, value in mapping_gate.MIN_MAPPINGS.items()
+        }
+
+    def test_no_pin_is_below_its_committed_floor(self, mapping_gate):
+        pins, floor = self._pins(mapping_gate), self._floor()
+        lowered = {
+            path: (pins[path], minimum)
+            for path, minimum in floor.items()
+            if path in pins and pins[path] < minimum
+        }
+        assert not lowered, (
+            f"MIN_MAPPINGS has been lowered below its committed floor: "
+            f"{lowered} (pin, floor).  A guide that legitimately shrank needs "
+            f"both numbers lowered, in one commit, with the reason."
+        )
+
+    def test_every_pin_has_a_floor(self, mapping_gate):
+        """Otherwise a new guide could be pinned at 1 and never ratchet."""
+        missing = set(self._pins(mapping_gate)) - set(self._floor())
+        assert not missing, (
+            f"pinned in MIN_MAPPINGS with no entry in "
+            f"min_mappings_floor.json: {sorted(missing)}"
+        )
+
+    def test_every_floor_has_a_pin(self, mapping_gate):
+        """Deleting the pin must not be a way round the floor."""
+        missing = set(self._floor()) - set(self._pins(mapping_gate))
+        assert not missing, (
+            f"floored in min_mappings_floor.json but no longer pinned in "
+            f"MIN_MAPPINGS: {sorted(missing)}.  Removing a pin removes the "
+            f"only check on that guide's table."
+        )
+
+    def test_the_floor_itself_is_satisfied_by_the_repository(self, mapping_gate):
+        """The floor is a claim about the tree, not a number in a file."""
+        assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
+
 
 # ---------------------------------------------------------------------------
 # check_citations.py
@@ -290,11 +582,91 @@ class TestCitationGate:
         result = _run("check_citations")
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_the_headline_count_excludes_the_citations_it_declined(self):
+        """It reported "50 citation(s) verified" having verified 45.
+
+        The five allowlisted syntax examples are ``continue``d before the
+        existence check and were still in the headline.  Verified and
+        declined are now two numbers, as check_heat_stability.py's summary
+        already did for its unchecked constructions.
+        """
+        result = _run("check_citations")
+        assert result.returncode == 0, result.stdout + result.stderr
+        verified = int(
+            result.stdout.split("OK: ")[1].split(" citation(s)")[0]
+        )
+        declined = result.stdout.count(
+            "is a syntax example and was NOT checked"
+        )
+        assert declined > 0, "nothing was declined; the test proves nothing"
+        assert f"{declined} not checked" in result.stdout
+
+        gate = _load("check_citations")
+        total = len(gate.scan_directory(str(REPO_ROOT / "docs")))
+        assert verified == total - declined
+
+
+class TestCitationTemplateAllowlist:
+    """``_TEMPLATE_CITATIONS`` was the one allowlist with no reason, no cap
+    and no staleness check.  These are the guards its two neighbours have."""
+
+    def test_every_entry_carries_a_reason(self, citations_gate):
+        for key, reason in citations_gate._TEMPLATE_CITATIONS.items():
+            assert isinstance(reason, str) and reason.strip(), key
+
+    def test_the_allowlist_stays_small(self, citations_gate):
+        allowlist = citations_gate._TEMPLATE_CITATIONS
+        cap = citations_gate._MAX_TEMPLATE_CITATIONS
+        assert len(allowlist) <= cap, (
+            f"{len(allowlist)} allowlisted dangling citations (cap {cap}).  "
+            f"Each one is a citation nobody checks; add the key to the "
+            f"bibliography instead of raising the cap."
+        )
+
+    def test_no_entry_is_stale(self, citations_gate):
+        """An entry whose file no longer carries that citation is dead."""
+        for (relpath, key) in citations_gate._TEMPLATE_CITATIONS:
+            path = REPO_ROOT / relpath
+            if not path.is_file():
+                continue
+            cited = {k for _lineno, k in citations_gate.extract_citations(str(path))}
+            assert key in cited, (
+                f"{relpath} no longer cites [@{key}]; remove the "
+                f"_TEMPLATE_CITATIONS entry"
+            )
+
+    def test_an_allowlisted_pair_does_not_exempt_the_same_key_elsewhere(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        bib, docs = _bib_and_doc(
+            tmp_path, "@book{Crank1975,\n}\n",
+            "See [@Crank1975] and [@Key].\n",
+        )
+        monkeypatch.setenv("BIB_PATH", str(bib))
+        assert citations_gate.main([str(docs)]) == 1
+
+    def test_a_scope_of_nothing_but_allowlisted_citations_fails(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        """Verified zero is not a pass, whatever the headline would say."""
+        bib = tmp_path / "bibliography.bib"
+        bib.write_text("@book{Crank1975,\n}\n")
+        docs = tmp_path / "docs" / "developer_guide"
+        docs.mkdir(parents=True)
+        (docs / "node_authoring.md").write_text("Cite as [@Key].\n")
+        monkeypatch.setenv("BIB_PATH", str(bib))
+        monkeypatch.setattr(citations_gate, "_REPO_ROOT", str(tmp_path))
+        assert citations_gate.main([str(tmp_path / "docs")]) == 1
+
 
 # ---------------------------------------------------------------------------
 # check_anomalies.py
 # ---------------------------------------------------------------------------
 
+# One anomaly carrying one resolvable reference.  The reference is not
+# decoration: the gate now refuses a registry whose anomalies declare no
+# references at all, because that registry resolves nothing and proves
+# nothing, so a fixture without one is no longer a *valid* registry.
 _MINIMAL_ANOMALY = """\
 schema_version: "1.0"
 generated_date: "2026-03-12"
@@ -306,6 +678,27 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+"""
+
+_ANOMALY_WITHOUT_REFERENCES = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "open"
+"""
+
+_EMPTY_REGISTRY = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies: []
 """
 
 
@@ -326,6 +719,107 @@ class TestAnomalyGate:
     def test_the_repository_registry_passes_with_the_prefix_ci_uses(self):
         result = _run("check_anomalies", "--prefix", "MADD-ANO-")
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestAnomalyGateVerifiesSomething:
+    """The two guards check_heat_stability.py has and this gate claimed to.
+
+    Its zero-scope guard sat inside ``if notes:``, and ``notes`` holds only
+    references *skipped as unavailable* -- so it was empty in exactly the
+    case it was meant to catch.  Both shapes below printed
+    ``OK: ... is valid`` and exited 0.
+    """
+
+    def test_an_empty_registry_fails(self, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_EMPTY_REGISTRY)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "no anomalies" in result.stderr
+
+    def test_a_registry_whose_anomalies_declare_no_references_fails(
+        self, tmp_path
+    ):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_ANOMALY_WITHOUT_REFERENCES)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "no affected_components and no verification" in result.stderr
+
+    def test_the_empty_registry_guard_survives_no_resolve(self, tmp_path):
+        """``--no-resolve`` turns resolution off, not counting."""
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_EMPTY_REGISTRY)
+        result = _run("check_anomalies", str(path), "--repo-root",
+                      str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+
+    def test_a_registry_whose_every_reference_is_unavailable_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """The case the old guard was written for, and could not reach.
+
+        Every optional extra is installed in most environments, so no real
+        symbol produces an ``unavailable`` note here.  The note is injected
+        instead: one declared reference, one note, zero verified.
+        """
+        gate = _load("check_anomalies")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+
+        def every_reference_unavailable(
+            _path, *, prefix="", repo_root=None,
+            resolve_references=True, notes=None,
+        ):
+            if notes is not None:
+                notes.append(
+                    "MADD-ANO-001: affected_components entry "
+                    "'maddening.nodes.heat.HeatNode' was NOT checked -- "
+                    "simulated missing optional extra"
+                )
+            return []
+
+        monkeypatch.setattr(
+            gate, "validate_anomaly_registry", every_reference_unavailable
+        )
+        assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 1
+
+    def test_one_available_reference_is_enough_to_pass(
+        self, tmp_path, monkeypatch
+    ):
+        """The other direction: the guard fires on zero, not on any."""
+        gate = _load("check_anomalies")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="open").replace(
+            '      - "maddening.nodes.heat.HeatNode"\n',
+            '      - "maddening.nodes.heat.HeatNode"\n'
+            '      - "maddening.core.graph_manager.GraphManager"\n',
+        ))
+
+        def one_unavailable(
+            _path, *, prefix="", repo_root=None,
+            resolve_references=True, notes=None,
+        ):
+            if notes is not None:
+                notes.append("MADD-ANO-001: one entry was NOT checked")
+            return []
+
+        monkeypatch.setattr(gate, "validate_anomaly_registry", one_unavailable)
+        assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 0
+
+    def test_the_summary_separates_verified_from_not_checked(self):
+        """One headline count that folds in declined references is how
+        "50 citations verified" came to mean 45."""
+        result = _run("check_anomalies", "--prefix", "MADD-ANO-")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "reference(s) verified" in result.stdout
+        assert "not checked" in result.stdout
+
+    def test_no_resolve_does_not_claim_anything_was_verified(self):
+        result = _run("check_anomalies", "--prefix", "MADD-ANO-", "--no-resolve")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "NOT resolved" in result.stdout
+        assert "verified" not in result.stdout
 
 
 class TestTransformGateConstantBinding:
@@ -546,3 +1040,179 @@ class TestHeatStabilityGate:
         defaults = heat_stability_gate._defaults()
         for key, value in defaults.items():
             assert value == sig.parameters[key].default
+
+
+class TestHeatStabilityCallForms:
+    """A construction the constructor accepts must be a construction the
+    gate can see, however it is spelled.
+
+    Three spellings were invisible.  Each is replayed here against a rod
+    ``HeatNode.__init__`` genuinely refuses, so a regression is a gate that
+    passes a build that cannot run.
+    """
+
+    def test_a_positional_stencil_order_is_judged_against_that_order(
+        self, heat_stability_gate, tmp_path
+    ):
+        """``stencil_order`` is the 7th parameter; the list stopped at the 5th.
+
+        Fourier 0.4 is stable at order 2 (limit 0.5) and unstable at order 4
+        (limit 0.3125).  With the order invisible it defaulted to 2 and the
+        gate passed a rod the constructor refuses.
+        """
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 4)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+        # ...and for the right reason: the order-4 limit, not an empty scope.
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 4)',
+             name="probe.py")
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_same_rod_at_order_two_still_passes(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The failure above is the order, not the widened parameter list."""
+        _rod(tmp_path, 'HeatNode("d", 0.004, 10, 1.0, 1.0, 0.0, 2)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 0
+
+    @staticmethod
+    def _with_a_recognised_rod(tmp_path, name, body):
+        """Write the probe beside a plainly-spelled *stable* rod.
+
+        Without it, a gate that cannot see the probe at all fails anyway --
+        on the empty-scope guard -- and the test passes for the wrong
+        reason.  A mutation removing the attribute match was missed exactly
+        this way.
+        """
+        _rod(tmp_path, 'HeatNode("stable", 1e-5, n_cells=10, length=1.0,'
+                       " thermal_diffusivity=0.01)", name="baseline_rod.py")
+        (tmp_path / name).write_text(body)
+
+    def _fails_naming_the_rod(self, gate, tmp_path, capsys):
+        rc = gate.main([str(tmp_path)])
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        assert "Fourier number" in out, out
+        return out
+
+    def test_an_attribute_spelled_construction_is_seen(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        """``ast.Attribute`` carries ``.attr``, not ``.id``."""
+        self._with_a_recognised_rod(
+            tmp_path, "attr_form.py",
+            "import maddening.nodes.heat as heat\n"
+            'n = heat.HeatNode("e", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "                  thermal_diffusivity=0.1, stencil_order=4)\n",
+        )
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "attr_form.py" in out
+
+    def test_an_aliased_import_is_seen(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        self._with_a_recognised_rod(
+            tmp_path, "alias_form.py",
+            "from maddening.nodes.heat import HeatNode as Rod\n"
+            'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "        thermal_diffusivity=0.1)\n",
+        )
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "alias_form.py" in out
+
+    def test_a_rebound_name_is_seen(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        """``Rod = HeatNode`` is the rebinding an import alias avoids."""
+        self._with_a_recognised_rod(
+            tmp_path, "rebound.py",
+            "from maddening.nodes.heat import HeatNode\n"
+            "Rod = HeatNode\n"
+            'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+            "        thermal_diffusivity=0.1)\n",
+        )
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "rebound.py" in out
+
+    def test_the_positional_order_is_the_constructor_signature_order(
+        self, heat_stability_gate
+    ):
+        """A hand-maintained list is what went short by two parameters."""
+        import inspect
+
+        from maddening.nodes.heat import HeatNode
+
+        expected = [
+            name for name, param
+            in inspect.signature(HeatNode.__init__).parameters.items()
+            if name != "self"
+            and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        assert heat_stability_gate._POSITIONAL == expected
+        assert "stencil_order" in heat_stability_gate._POSITIONAL
+
+
+class TestHeatStabilityCounts:
+    """``seen`` is the number the summary calls "verified", so nothing may
+    reach it without having been evaluated.
+
+    ``seen.append`` ran before both ``continue``s, so a rod with a
+    non-positive argument and one with an unknown stencil order were counted
+    as verified having had no Fourier number computed: 132 reported against
+    131 evaluated.
+    """
+
+    def _scan(self, gate, source):
+        unstable, unchecked, seen = [], [], []
+        gate.scan_source(source, "probe.py", gate._defaults(),
+                         unstable, unchecked, seen)
+        return unstable, unchecked, seen
+
+    def test_a_non_positive_argument_is_not_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("a", timestep=1.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.0)\n",
+        )
+        assert seen == []
+        assert len(unchecked) == 1
+        assert "non-positive" in unchecked[0][2]
+
+    def test_an_unknown_stencil_order_is_not_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("c", timestep=1.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=100.0, stencil_order=3)\n",
+        )
+        assert seen == []
+        assert len(unchecked) == 1
+        assert "MAX_FOURIER_NUMBER" in unchecked[0][2]
+
+    def test_an_evaluated_rod_is_counted_as_verified(
+        self, heat_stability_gate
+    ):
+        """The other direction: the counter still counts what it should."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("ok", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert len(seen) == 1 and unchecked == [] and unstable == []
+
+
+class TestHeatStabilityAllowlist:
+    def test_every_entry_carries_a_reason(self, heat_stability_gate):
+        for path, reason in heat_stability_gate._ALLOWED_UNSTABLE.items():
+            assert isinstance(reason, str) and reason.strip(), path
+
+    def test_the_allowlist_stays_small(self, heat_stability_gate):
+        allowlist = heat_stability_gate._ALLOWED_UNSTABLE
+        cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
+        assert len(allowlist) <= cap, (
+            f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
+            f"whole file this gate stops reading; fix the rod instead of "
+            f"raising the cap."
+        )

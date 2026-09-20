@@ -23,22 +23,31 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 from maddening.compliance._validate import validate_anomaly_registry
 
 
-def _components_checked(path):
-    """How many affected_components entries this environment could resolve."""
+#: Reference fields whose entries this gate resolves.  Both count towards
+#: the scope: a registry that declares neither verifies nothing.
+_REFERENCE_FIELDS = ("affected_components", "verification")
+
+
+def _census(path):
+    """``(anomalies, declared references)`` in the registry, without resolving.
+
+    Counting is separate from resolving so that the zero-scope guards below
+    can run unconditionally -- including under ``--no-resolve``, where
+    nothing is resolved but an empty registry is still an empty registry.
+    """
     import yaml
-    from maddening.compliance._validate import resolve_dotted_name
 
     with open(path) as f:
         data = yaml.safe_load(f) or {}
-    n = 0
-    for a in data.get("anomalies") or []:
-        if not isinstance(a, dict):
-            continue
-        components = a.get("affected_components") or []
-        if isinstance(components, str):
-            components = [components]
-        n += sum(1 for c in components if resolve_dotted_name(str(c)).ok)
-    return n
+    anomalies = [a for a in (data.get("anomalies") or []) if isinstance(a, dict)]
+    declared = 0
+    for a in anomalies:
+        for field in _REFERENCE_FIELDS:
+            entries = a.get(field) or []
+            if isinstance(entries, str):
+                entries = [entries]
+            declared += len(entries)
+    return len(anomalies), declared
 
 
 def main(argv=None):
@@ -92,23 +101,61 @@ def main(argv=None):
             print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    # ...and if *nothing* could be checked, the run proves nothing.  Same
-    # guard as check_transforms.py's: a gate that verified zero references
-    # must not report OK.
-    if notes and not args.no_resolve:
-        checked = _components_checked(args.path)
-        if checked == 0:
+    # ...and if *nothing* could be checked, the run proves nothing.  These
+    # are check_heat_stability.py's two guards -- an empty scope, and a scope
+    # where nothing was evaluable -- which this gate claimed in a comment to
+    # already have and did not: the only guard here was inside ``if notes``,
+    # and ``notes`` is populated solely by references skipped as unavailable,
+    # so it is empty exactly when nothing was skipped.  A registry with no
+    # anomalies, or with every reference stripped, entered no guard at all
+    # and printed OK (audit_040_r2/gates, finding G7).
+    n_anomalies, declared = _census(args.path)
+
+    if n_anomalies == 0:
+        print(
+            f"FAIL: {args.path} declares no anomalies at all.\n"
+            "A gate that verifies nothing cannot fail.  An empty registry is "
+            "a truncated file or a wrong path far more often than it is a "
+            "product with no known anomalies; if it really is empty, say so "
+            "by pointing this gate somewhere else.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if declared == 0:
+        print(
+            f"FAIL: the {n_anomalies} anomal(ies) in {args.path} declare no "
+            f"affected_components and no verification entries between them.\n"
+            "A gate that verifies nothing cannot fail.  The schema permits an "
+            "anomaly with neither, but a whole registry with neither is not "
+            "evidence of anything -- this run resolved zero references.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not args.no_resolve:
+        # Every declared reference either resolved or was noted as
+        # unavailable, because anything else is already an error above.
+        verified = declared - len(notes)
+        if verified == 0:
             print(
-                f"FAIL: every affected_components entry in {args.path} was "
+                f"FAIL: all {declared} reference(s) in {args.path} were "
                 f"skipped as unavailable; this environment can verify none of "
                 f"them.  Install the extras named above before trusting the "
                 f"result.",
                 file=sys.stderr,
             )
             return 1
+        scope = (f"{n_anomalies} anomal(ies), {verified} reference(s) "
+                 f"verified, {len(notes)} not checked")
+    else:
+        scope = (f"{n_anomalies} anomal(ies), {declared} reference(s) "
+                 f"declared and NOT resolved (--no-resolve)")
 
-    suffix = f" ({len(notes)} reference(s) not checked)" if notes else ""
-    print(f"OK: anomaly registry at {args.path} is valid{suffix}")
+    # Verified and declined are reported separately: a single headline count
+    # that folds in the references the gate declined to check is how "50
+    # citations verified" came to mean 45.
+    print(f"OK: anomaly registry at {args.path} is valid ({scope})")
     return 0
 
 

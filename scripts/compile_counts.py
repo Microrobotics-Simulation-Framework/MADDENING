@@ -514,7 +514,12 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"{shown_path}: counts match.")
+        # Name the scope: "counts match" over an empty baseline would read
+        # the same as "counts match" over the whole workload set.  compare()
+        # already fails on a workload present on only one side, so this is a
+        # statement of what was compared, not a new guard.
+        print(f"{shown_path}: counts match "
+              f"({len(fresh['workloads'])} workload(s) compared).")
         return 0
 
     baseline_path.parent.mkdir(parents=True, exist_ok=True)

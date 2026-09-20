@@ -23,6 +23,7 @@ Usage:
 import argparse
 import json
 import os
+import secrets
 import shlex
 import sys
 import time
@@ -72,11 +73,17 @@ except Exception as e:
     print(f"ZMQ IMPORT FAILED: {{e}}", flush=True)
     sys.exit(1)
 
+# bind_host="0.0.0.0" is required here: the structure worker reaches this
+# coordinator across the internet. That turns on ZMQ CURVE, which needs
+# MADDENING_API_TOKEN set to the same value in both jobs' envs -- the
+# coordinator refuses to start without it rather than listening in the
+# clear. See maddening.transport_auth.
 coord = Coordinator(
     expected_workers=expected,
     edges=edges,
     port=port,
     heartbeat_timeout=60.0,
+    bind_host="0.0.0.0",
 )
 coord.start()
 print("Coordinator thread started, waiting for workers...", flush=True)
@@ -118,11 +125,17 @@ my_ip = socket.gethostbyname(socket.gethostname())
 print(f"Worker {{subgraph_id}} connecting to coordinator at {{coordinator_addr}}", flush=True)
 print(f"My IP: {{my_ip}}", flush=True)
 
+# secure=True is explicit because rank 0's own worker reaches the
+# coordinator over 127.0.0.1, and a loopback address would otherwise turn
+# CURVE off while the coordinator (bound 0.0.0.0) has it on. The
+# coordinator's posture is set by its bind address, which this side
+# cannot see.
 client = WorkerClient(
     coordinator_addr=coordinator_addr,
     subgraph_id=subgraph_id,
     address=f"{{my_ip}}:5555",
     zmq_ports={{"state": 5555}},
+    secure=True,
 )
 
 try:
@@ -158,6 +171,12 @@ def main():
     parser.add_argument("--keep", action="store_true", help="Don't teardown")
     args = parser.parse_args()
 
+    # One shared secret for both VMs. The coordinator's ROUTER and both
+    # workers derive their ZMQ CURVE keypairs from it, so there are no key
+    # files to ship; it is the same variable the HTTP API uses. Generated
+    # per run here -- in production, set it yourself and keep it.
+    api_token = os.environ.get("MADDENING_API_TOKEN") or secrets.token_urlsafe(32)
+
     project_root = os.path.dirname(os.path.abspath(__file__))
     while project_root != "/" and not os.path.exists(
         os.path.join(project_root, "pyproject.toml")
@@ -179,6 +198,7 @@ def main():
         run="echo 'VM ready'; sleep 7200",
         workdir=project_root,
         ports=[8000, 5580, 5555, 5556],  # API, coordinator, ZMQ data
+        envs={"MADDENING_API_TOKEN": api_token},
     )
 
     launcher = CloudLauncher()

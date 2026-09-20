@@ -101,6 +101,21 @@ RUN python3 -c "import jax; print(f'JAX: {jax.__version__}')" && \
 #   (signaling) authenticates clients with HMAC tokens, but only once
 #   MADDENING_STREAM_SECRET is set -- without it no client can connect
 #   at all.
+#
+#   The ZMQ ports (5555 state, 5556 commands, 5580 coordinator) are
+#   listed above because the image CAN serve them, not because anything
+#   binds them by default.  Since v0.4.0 those sockets default to a
+#   loopback bind, so a process inside this container that takes the
+#   defaults is unreachable through a published port -- deliberately.
+#   To serve them off-box, bind a non-loopback address: that turns on
+#   ZMQ CURVE encryption and requires the same MADDENING_API_TOKEN on
+#   the client.  There are no key files to distribute; both CURVE
+#   keypairs are derived from that one token.
+#
+#   5556 in particular is an actuation path -- CommandReceiver's payload
+#   reaches GraphManager.step(external_inputs=...) unchecked -- so
+#   publish it only deliberately.  Before v0.4.0 all three bound every
+#   interface with no authentication at all; see MADD-ANO-015.
 EXPOSE 8000 8443 5555 5556 5580
 
 # ── Entrypoint ───────────────────────────────────────────────────────

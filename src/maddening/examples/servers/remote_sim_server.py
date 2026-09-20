@@ -11,8 +11,11 @@ Usage
     # On the simulation machine:
     python -m maddening.examples.servers.remote_sim_server
 
-    # To allow remote connections, specify the bind address:
-    python -m maddening.examples.servers.remote_sim_server --bind tcp://*:5555
+    # To allow remote connections, specify the bind address.  A non-loopback
+    # bind encrypts the stream with ZMQ CURVE and needs the shared token on
+    # both sides -- the same MADDENING_API_TOKEN the HTTP API uses:
+    MADDENING_API_TOKEN=<secret> \
+      python -m maddening.examples.servers.remote_sim_server --bind 'tcp://*:5555'
 
     # For SSH tunnel usage (most common in HPC):
     #   1. On your local machine:  ssh -L 5555:localhost:5555 user@hpc-node
@@ -31,7 +34,16 @@ from maddening.viz.network import NetworkRelay
 
 def main():
     parser = argparse.ArgumentParser(description="MADDENING remote simulation server")
-    parser.add_argument("--bind", default="tcp://*:5555", help="ZMQ bind address (default: tcp://*:5555)")
+    parser.add_argument(
+        "--bind",
+        default="tcp://127.0.0.1:5555",
+        help=(
+            "ZMQ bind address (default: tcp://127.0.0.1:5555). A loopback "
+            "bind needs no credential and is what the SSH-tunnel recipe "
+            "above expects. Any other address turns on CURVE encryption "
+            "and requires MADDENING_API_TOKEN on both sides."
+        ),
+    )
     parser.add_argument("--time-scale", type=float, default=1.0, help="Simulation speed multiplier (default: 1.0)")
     args = parser.parse_args()
 

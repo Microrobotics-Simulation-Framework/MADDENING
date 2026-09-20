@@ -436,6 +436,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **The ZeroMQ transports bind loopback and encrypt any other bind** (CRITICAL):
+  5555/5556/5580 published state, commands and worker rendezvous to anyone who
+  could reach them; set `MADDENING_API_TOKEN` on both sides to stream off-box
 - **The API requires a bearer token unless it is bound to loopback** (CRITICAL):
   set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
   no longer defaults to `[8000]`, so a cloud launch stops opening the API port
@@ -460,6 +463,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- **MADD-ANO-015**: the ZeroMQ transports bound every interface unauthenticated
+  and in cleartext from 0.1.0, and `launch_vm` published them whatever the job
+  config said -- resolved in 0.4.0 (critical, safety_relevant)
 - **MADD-ANO-007/008/009 (HeatNode) are resolved in this release.** ANO-008's
   recorded diagnosis was corrected on re-derivation: the ghosts sit at
   -dx/2 and -3dx/2, and the oracle restores 3.76/3.90/3.95, not 3.78/5.02/4.79

@@ -208,6 +208,39 @@ prefer the tunnel, or a TLS-terminating reverse proxy, to a public port.
 a bearer header when it fetches its own schema).  WebRTC signaling on
 8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
 share it with the viewer.
+
+**The ZeroMQ transports follow the same rule with the same token.**
+`NetworkRelay` (state, 5555), `CommandPublisher` (commands, 5556) and the
+multi-job `Coordinator` (5580) bind **loopback** by default, so local work
+needs no configuration at all:
+
+    relay = NetworkRelay()            # tcp://127.0.0.1:5555, no token
+    receiver = NetworkReceiver()      # tcp://localhost:5555
+
+To watch a remote simulation, tunnel to its loopback port — still no
+token, because both ends are loopback:
+
+    ssh -L 5555:127.0.0.1:5555 root@<vm-ip> -p <ssh-port>
+
+To publish the port instead, bind a non-loopback address. That turns on
+**ZMQ CURVE encryption**, and the socket refuses to open without
+`MADDENING_API_TOKEN`:
+
+    # both machines
+    export MADDENING_API_TOKEN=<the same secret>
+    relay = NetworkRelay("tcp://0.0.0.0:5555")
+    receiver = NetworkReceiver("tcp://<vm-ip>:5555")
+
+There are **no key files**: both CURVE keypairs are derived from that one
+token. Unlike the API, ZMQ traffic *is* encrypted once it leaves
+loopback. Port 5556 is an actuation path — its payload reaches
+`GraphManager.step(external_inputs=...)` — so publish it deliberately.
+
+One asymmetry to know: a client decides whether to use CURVE from the
+address *it* connects to, but the server's posture comes from the address
+*it* bound. If you reach a coordinator bound to `0.0.0.0` over
+`127.0.0.1` (rank 0's own worker, or a tunnel), pass `secure=True`
+explicitly.
 ```
 
 ## Next Steps

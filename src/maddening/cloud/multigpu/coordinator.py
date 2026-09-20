@@ -71,6 +71,24 @@ class Coordinator:
         target_field: str}``.  Source/target are subgraph IDs.
     port : int
         Port to bind the ROUTER socket on.
+    bind_host : str
+        Interface to bind the ROUTER socket on (default ``"127.0.0.1"``).
+
+        .. versionchanged:: 0.4.0
+           The coordinator bound ``0.0.0.0`` unconditionally and accepted
+           unauthenticated messages.  A ``register`` frame carries the
+           ``address`` this coordinator later hands to *other* workers as
+           the peer to subscribe to, so an unauthenticated registration
+           could redirect a peer's data plane at an attacker-controlled
+           publisher.  The default is now loopback; binding anything else
+           requires a token (see *secure*).
+    secure : bool, optional
+        Whether to encrypt and authenticate the ROUTER with ZMQ CURVE.
+        ``None`` (default) decides from *bind_host*: loopback is left in
+        cleartext, anything else is secured.  ``True`` forces it on.
+    token : str, optional
+        Shared secret the CURVE keys are derived from; ``None`` reads
+        ``MADDENING_API_TOKEN``.  Workers must present the same one.
     heartbeat_interval : float
         Seconds between expected heartbeats.
     heartbeat_timeout : float
@@ -84,10 +102,27 @@ class Coordinator:
         port: int = 5580,
         heartbeat_interval: float = 10.0,
         heartbeat_timeout: float = 30.0,
+        bind_host: str = "127.0.0.1",
+        secure: Optional[bool] = None,
+        token: Optional[str] = None,
     ) -> None:
+        from maddening.transport_auth import resolve_security
+
         self._expected = set(expected_workers)
         self._edges = edges
         self._port = port
+        self._bind_host = bind_host
+        self._bind_address = f"tcp://{bind_host}:{port}"
+        # Resolve (and validate the token) in the constructor, not in the
+        # background thread: an exception in _run is invisible to the
+        # caller, and a coordinator that quietly failed to encrypt would
+        # look exactly like one that succeeded.
+        self._secure = resolve_security(self._bind_address, secure)
+        self._token = token
+        if self._secure:
+            from maddening.transport_auth import TransportAuth
+
+            TransportAuth(token=token)  # raises now if the token is missing
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat_timeout = heartbeat_timeout
         self._workers: dict[str, WorkerInfo] = {}
@@ -100,6 +135,16 @@ class Coordinator:
     @property
     def state(self) -> CoordinatorState:
         return self._state
+
+    @property
+    def secure(self) -> bool:
+        """Whether the ROUTER is encrypted and authenticated with CURVE."""
+        return self._secure
+
+    @property
+    def bind_address(self) -> str:
+        """The endpoint the ROUTER socket binds."""
+        return self._bind_address
 
     @property
     def registered_workers(self) -> dict[str, WorkerInfo]:
@@ -191,10 +236,21 @@ class Coordinator:
 
         ctx = zmq.Context()
         sock = ctx.socket(zmq.ROUTER)
-        sock.bind(f"tcp://0.0.0.0:{self._port}")
+        authenticator = None
+        if self._secure:
+            from maddening.transport_auth import TransportAuth
+
+            auth = TransportAuth(token=self._token)
+            authenticator = auth.start_authenticator(ctx)
+            auth.secure_server(sock)
+        sock.bind(self._bind_address)
         sock.setsockopt(zmq.RCVTIMEO, 1000)  # 1s poll timeout
-        logger.info("Coordinator listening on port %d, expecting %s",
-                     self._port, sorted(self._expected))
+        # Without this, ctx.term() below waits forever to flush replies to
+        # a CURVE peer that never completed its handshake.
+        sock.setsockopt(zmq.LINGER, 0)
+        logger.info("Coordinator listening on %s (CURVE %s), expecting %s",
+                     self._bind_address, "on" if self._secure else "off",
+                     sorted(self._expected))
 
         last_heartbeat: dict[str, float] = {}
 
@@ -291,6 +347,8 @@ class Coordinator:
         logger.info("Coordinator shutting down")
         self._state = CoordinatorState.DONE
         sock.close()
+        if authenticator is not None:
+            authenticator.stop()
         ctx.term()
 
     def _broadcast_topology(self, sock) -> None:

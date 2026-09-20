@@ -756,6 +756,109 @@ anomalies:
       - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused"
       - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_that_only_looks_like_a_token_stays_a_string"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-015"
+    title: "The ZeroMQ transports bound every interface with no authentication or encryption"
+    description: >
+      From v0.1.0 to v0.3.1 every ZeroMQ endpoint in MADDENING was bound
+      to a wildcard address and spoke cleartext to anyone who connected.
+      NetworkRelay defaulted to "tcp://*:5555" and published the full
+      simulation state dict as JSON; CommandPublisher defaulted to
+      "tcp://*:5556" and published external_inputs, which the paired
+      CommandReceiver hands straight to GraphManager.step(external_inputs=)
+      -- the documented example payload is joint torques.  Both receivers
+      subscribe with SUBSCRIBE "", so any peer that could reach the port
+      received everything.  Coordinator bound "tcp://0.0.0.0:{port}"
+      unconditionally and acted on any well-formed JSON frame.
+
+      The exposure was not theoretical.  cloud/_skypilot.py's launch_vm
+      ran "docker run --gpus all -p 8000:8000 -p 8080:8080 -p 5555:5555
+      -p 5556:5556" with those four ports hard-coded, ignoring
+      JobConfig.ports entirely, so every CloudSession launch published
+      the state stream and the command channel on the VM's public
+      interface -- and the v0.4.0 change that emptied JobConfig.ports
+      did not reach this path.  For the coordinator, cloud/group.py
+      forces coordinator_port into config.ports, and the shipped
+      multi-VM example passes ports=[8000, 5580, 5555, 5556] and then
+      resolves the provider's public mapping for 5580, so the ROUTER
+      was reachable across the internet by design.
+
+      The coordinator case is worse than message injection.  An accepted
+      "register" frame is stored verbatim and its "address" and
+      "zmq_ports" fields are used by build_topology to compute the peer
+      endpoint that *other* workers are told to SUB-connect to, so one
+      unauthenticated frame could redirect a victim worker's data plane
+      at a publisher the attacker controls, feeding fabricated tensor
+      data into the coupled simulation.  Registrations also overwrite by
+      subgraph_id and count toward the readiness quorum, so a spoofed
+      one can make the coordinator declare READY before the real worker
+      exists.
+
+      A signed envelope would not have fixed the two PUB sockets.  A
+      signature establishes who sent a frame; the exposure there is
+      disclosure, and only encryption addresses that.
+    severity: "critical"
+    safety_relevance: "safety_relevant"
+    safety_relevance_rationale: >
+      The command channel is an actuation path.  CommandReceiver's output
+      goes to GraphManager.step(external_inputs=) without further
+      checking, and the interface is documented with joint torques, so a
+      product that drives hardware from a MADDENING graph over this
+      transport had an unauthenticated remote write to its control
+      inputs: anyone who could reach port 5556 could command the
+      mechanism, and anyone who could reach 5555 could read its full
+      state to aim that command.  The coordinator path reaches the same
+      place by a longer route, substituting attacker-chosen values for a
+      coupled subgraph's inputs.  This is a loss of both integrity and
+      confidentiality on a control surface, which is the combination
+      IEC 62304 5.7 and MDCG 2019-16 treat as safety relevant regardless
+      of whether a specific deployment was reached.
+    affected_components:
+      - "maddening.viz.network.NetworkRelay"
+      - "maddening.viz.network.NetworkReceiver"
+      - "maddening.viz.network.CommandPublisher"
+      - "maddening.viz.network.CommandReceiver"
+      - "maddening.cloud.multigpu.coordinator.Coordinator"
+      - "maddening.cloud.multigpu.worker_client.WorkerClient"
+      - "maddening.cloud._skypilot.launch_vm"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      On v0.3.1 and earlier: never pass a wildcard address.  Construct
+      NetworkRelay and CommandPublisher with "tcp://127.0.0.1:<port>"
+      and reach them over an SSH tunnel
+      ("ssh -L 5555:127.0.0.1:5555 <host>"), which is what the shipped
+      examples' own tunnel recipe assumes.  The coordinator has no such
+      option before v0.4.0 -- its bind is hard-coded -- so keep its port
+      out of JobConfig.ports and out of the provider firewall, and run
+      multi-job rendezvous only across a private network.  Do not rely
+      on the container's port list: launch_vm published 5555 and 5556
+      whatever JobConfig.ports said.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The fix keys CURVE off a single shared token, so every holder can
+      derive both keypairs: an authorised subscriber could also publish,
+      and the transport does not distinguish among token holders.  That
+      matches the trust model of the bearer token it reuses, but a
+      deployment that needs mutually distrusting clients needs per-peer
+      keys, which this does not provide.  There is no forward secrecy:
+      a recorded session is readable if the token later leaks.  The
+      token itself still reaches a cloud VM only through JobConfig envs
+      or the operator's own provisioning -- _skypilot.py passes no
+      secret into the container -- so an operator who publishes 5555
+      without arranging the token gets a refusal to start rather than a
+      working exposed socket, which is the intended failure but is still
+      a configuration burden.  Separately, maddening.fmi.tcp_bridge
+      listens on TCP 5555 by default with its own unauthenticated
+      protocol; it is a different component, is not covered by this
+      entry, and is documented as trusted-clients-only.
+    verification:
+      - "tests/security/test_zmq_transport_auth.py::TestStateStreamConfidentiality::test_an_unauthenticated_subscriber_cannot_read_the_state_stream"
+      - "tests/security/test_zmq_transport_auth.py::TestStateStreamConfidentiality::test_a_subscriber_with_its_own_keypair_cannot_read_the_state_stream"
+      - "tests/security/test_zmq_transport_auth.py::TestCommandChannelConfidentiality::test_an_unauthenticated_subscriber_cannot_read_the_command_stream"
+      - "tests/security/test_zmq_transport_auth.py::TestCoordinatorAuthentication::test_the_coordinator_ignores_an_unauthenticated_registration"
+      - "tests/security/test_zmq_transport_auth.py::TestReachableAddressesFailClosed::test_a_wildcard_bind_turns_encryption_on_by_itself"
+      - "tests/cloud/test_skypilot_ports.py::test_launch_vm_publishes_only_the_ports_the_job_config_asks_for"
   - anomaly_id: "MADD-ANO-011"
     title: "BallNode's declared discretisation is forward Euler; the implementation is semi-implicit Euler"
     description: >

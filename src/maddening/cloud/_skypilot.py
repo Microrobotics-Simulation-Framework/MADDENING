@@ -40,15 +40,60 @@ def _import_sky():
         raise ImportError(_SKY_INSTALL_MSG) from exc
 
 
+def _port_flags(ports) -> str:
+    """Render ``-p HOST:CONTAINER`` flags for *ports*.
+
+    Parameters
+    ----------
+    ports : iterable of int, or None
+        The ports to publish from the container to the VM's interfaces.
+
+    Returns
+    -------
+    str
+        The flags, with a trailing space, or ``""`` for no ports.
+
+    Raises
+    ------
+    ValueError
+        If a port is not an integer in 1-65535.  These values are
+        interpolated into a shell command line, so anything that is not
+        a plain port number is refused rather than quoted.
+    """
+    flags = []
+    for port in ports or ():
+        number = int(port)
+        if not 1 <= number <= 65535:
+            raise ValueError(
+                f"JobConfig.ports contains {port!r}, which is not a port "
+                f"number in 1-65535."
+            )
+        flags.append(f"-p {number}:{number}")
+    return " ".join(flags) + " " if flags else ""
+
+
 def launch_vm(config) -> tuple[str, str]:
     """Provision a VM via SkyPilot.
+
+    Only the ports in ``config.ports`` are published from the container
+    to the VM's interfaces.  That list is empty by default, so a
+    launched job exposes nothing and is reached over an SSH tunnel.
+
+    .. versionchanged:: 0.4.0
+       This function published ``8000``, ``8080``, ``5555`` and ``5556``
+       unconditionally, ignoring ``JobConfig.ports`` entirely -- so the
+       API, the unauthenticated state stream and the unauthenticated
+       command channel were all on the VM's public interface on every
+       launch.  ``8080`` was published for a health endpoint that no
+       component in this package ever served, and is simply dropped.
 
     Returns ``(vm_ip, job_id)``.
     """
     sky = _import_sky()
 
+    ports = list(getattr(config, "ports", None) or ())
     task = sky.Task(
-        run=f"docker run --gpus all -p 8000:8000 -p 8080:8080 -p 5555:5555 -p 5556:5556 "
+        run=f"docker run --gpus all {_port_flags(ports)}"
             f"-e MADDENING_CLOUD_CONFIG='{{}}' "
             f"{config.container_image}",
     )
@@ -58,6 +103,7 @@ def launch_vm(config) -> tuple[str, str]:
         accelerators=config.accelerator if config.accelerator else None,
         use_spot=config.spot,
         region=config.region if config.region else None,
+        ports=ports or None,
     )
     task.set_resources(resources)
 

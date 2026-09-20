@@ -209,7 +209,7 @@ a bearer header when it fetches its own schema).  WebRTC signaling on
 8443 authenticates separately, once you set `MADDENING_STREAM_SECRET` and
 share it with the viewer.
 
-**The ZeroMQ transports follow the same rule with the same token.**
+**The ZeroMQ transports follow the same rule.**
 `NetworkRelay` (state, 5555), `CommandPublisher` (commands, 5556) and the
 multi-job `Coordinator` (5580) bind **loopback** by default, so local work
 needs no configuration at all:
@@ -223,24 +223,42 @@ token, because both ends are loopback:
     ssh -L 5555:127.0.0.1:5555 root@<vm-ip> -p <ssh-port>
 
 To publish the port instead, bind a non-loopback address. That turns on
-**ZMQ CURVE encryption**, and the socket refuses to open without
-`MADDENING_API_TOKEN`:
+**ZMQ CURVE encryption**, and the socket refuses to open without a shared
+secret:
 
     # both machines
-    export MADDENING_API_TOKEN=<the same secret>
+    export MADDENING_TRANSPORT_TOKEN=<the same secret>
     relay = NetworkRelay("tcp://0.0.0.0:5555")
     receiver = NetworkReceiver("tcp://<vm-ip>:5555")
 
 There are **no key files**: both CURVE keypairs are derived from that one
-token. Unlike the API, ZMQ traffic *is* encrypted once it leaves
+secret. Unlike the API, ZMQ traffic *is* encrypted once it leaves
 loopback. Port 5556 is an actuation path — its payload reaches
 `GraphManager.step(external_inputs=...)` — so publish it deliberately.
+
+**Use a different secret from `MADDENING_API_TOKEN`.** If
+`MADDENING_TRANSPORT_TOKEN` is unset, the transports fall back to
+`MADDENING_API_TOKEN`, which keeps a single-variable setup working — and
+means the CURVE seed is the same string the API sends in an
+`Authorization` header, in cleartext, on every request. Anyone who can
+see one such request can then derive both CURVE keypairs and read the
+"encrypted" state and command streams; that is measured over a real
+socket, not a theoretical worry. It only bites where both an API port
+and a ZMQ port are published on an untrusted network — an SSH tunnel to
+loopback ports is unaffected, since nothing is encrypted or published
+there — but two variables cost nothing:
+
+    export MADDENING_API_TOKEN=<one secret>        # HTTP bearer, cleartext
+    export MADDENING_TRANSPORT_TOKEN=<another>     # CURVE seed, never sent
 
 One asymmetry to know: a client decides whether to use CURVE from the
 address *it* connects to, but the server's posture comes from the address
 *it* bound. If you reach a coordinator bound to `0.0.0.0` over
 `127.0.0.1` (rank 0's own worker, or a tunnel), pass `secure=True`
-explicitly.
+explicitly. When the two disagree, the handshake is refused and **no data
+arrives at all**: a `NetworkReceiver` or `CommandReceiver` in that state
+logs the cause once and exposes it as `receiver.handshake_error`, which
+is worth checking before concluding that the simulation is idle.
 ```
 
 ## Next Steps

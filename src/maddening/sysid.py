@@ -1084,7 +1084,10 @@ class FIMCore:
         0-d ``int32``: directions resolved above ``rank_rtol``.
     cond : jnp.ndarray
         0-d float: ``eigvals[-1] / eigvals[0]``, ``+inf`` when the
-        smallest eigenvalue is not positive.
+        smallest eigenvalue is not positive -- including when it is
+        ``NaN``, where :attr:`FIMReport.cond` reports ``NaN``.  ``inf``
+        is the fail-closed reading and this is the gating path; the
+        reporting path keeps the number it has always published.
     crb : jnp.ndarray
         Cramér–Rao bound per parameter, ``(n,)``.
     finite : jnp.ndarray
@@ -1103,8 +1106,11 @@ class FIMCore:
         rather than as a refusal.
     deciding_ratio : jnp.ndarray
         0-d float: the eigenvalue ratio nearest the cutoff in log
-        distance -- the number the warning quotes -- or ``NaN`` when
-        ``precision_limited`` is False.
+        distance -- the number :func:`fim`'s warning quotes -- or
+        ``0.0`` when ``precision_limited`` is False.  Zero and not
+        ``NaN``: a reported ratio is always strictly positive, so zero
+        is unambiguous, and nothing in the core produces a ``NaN`` that
+        would stop a ``jax_debug_nans`` run on a value it discarded.
     param_names : tuple of str
         Static.  Names in the order the matrix is indexed.
     n_residual : int
@@ -1149,13 +1155,21 @@ def _device_rank_crb(eigvals, eigvecs, rank_rtol: float, n: int):
       ``jax_enable_x64``, so this runs at ``eigvals``'s own precision.
     * **No boolean indexing.**  ``vecs[:, resolved]`` needs a shape
       known at trace time and ``resolved`` is traced, so the sums are
-      written as masked sums over all ``n`` columns.  ``jnp.where``
-      selects the value after the division, and the division is fed a
-      1.0 in the unresolved columns so that an exactly-zero or negative
-      eigenvalue cannot put an ``inf`` into a term that is then
-      multiplied by zero -- ``0 * inf`` is ``NaN``, and a ``NaN`` here
-      would defeat the fail-closed test below by the same route the
-      comment in :func:`_rank_and_crb` describes.
+      written as masked sums over all ``n`` columns.
+
+    The unresolved columns are divided by a substituted ``1.0`` rather
+    than by their own eigenvalue, which is the standard JAX
+    double-``where``.  It does not change a single returned value --
+    ``jnp.where`` *selects*, it does not multiply, so an ``inf`` in the
+    rejected branch is discarded rather than turned into ``0 * inf`` --
+    and it is not defensive padding either: an unresolved eigenvalue is
+    routinely exactly ``0.0`` or negative (the spring's ``(k, c, m)``
+    scale direction, any ``zero_scaled`` parameter), so without it the
+    division really does produce ``inf``/``NaN`` on every rank-deficient
+    problem.  That trips ``jax_debug_nans`` for a user who has turned it
+    on to find a real ``NaN``, and it is the term ``jax.grad`` of this
+    would carry.  ``TestCoreFailsClosed`` runs the whole core under
+    ``jax.debug_nans`` for exactly that reason.
     """
     eps = float(np.finfo(eigvals.dtype).eps)
     resolved = eigvals > jnp.maximum(eigvals[-1], 0.0) * rank_rtol
@@ -1186,24 +1200,35 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
     ``argmin`` over the log distance replaces the host version's
     ``argmin`` over a filtered array: the non-positive ratios are
     pushed to ``+inf`` distance rather than removed, which selects the
-    same entry.  The ratio fed to ``log`` is masked to 1.0 first, so no
-    ``log`` of a negative number is evaluated even speculatively.
+    same entry.
+
+    **Nothing here produces a ``NaN``, deliberately.**  Every divisor
+    and every ``log`` argument is masked to a safe value first, and the
+    "no verdict" answer is the ratio ``0.0`` rather than ``NaN`` -- a
+    reported ratio is a ratio of a positive eigenvalue to the largest,
+    so zero is unambiguous.  A ``NaN`` computed and then discarded stops
+    a user who has switched on ``jax_debug_nans`` to find their own, on
+    a value this function never used; and a control loop that logs
+    ``deciding_ratio`` every tick should not be logging ``NaN`` as its
+    normal output.
     """
     hi = eigvals[-1]
+    zero = jnp.zeros((), dtype=eigvals.dtype)
     if rank_rtol <= 0.0:
-        false = jnp.zeros((), dtype=bool)
-        return false, jnp.full((), jnp.nan, dtype=eigvals.dtype)
-    ratios = eigvals / hi
+        return jnp.zeros((), dtype=bool), zero
+    usable = jnp.isfinite(hi) & (hi > 0.0)
+    ratios = eigvals / jnp.where(usable, hi, jnp.ones_like(hi))
     pos = jnp.isfinite(ratios) & (ratios > 0.0)
     distance = jnp.where(
-        pos, jnp.abs(jnp.log(jnp.where(pos, ratios, 1.0) / rank_rtol)),
+        pos, jnp.abs(jnp.log(jnp.where(pos, ratios, jnp.ones_like(ratios)))
+                     - math.log(rank_rtol)),
         jnp.inf)
     deciding = ratios[jnp.argmin(distance)]
-    limited = (jnp.isfinite(hi) & (hi > 0.0) & jnp.any(pos)
+    limited = (usable & jnp.any(pos)
                & (rank_rtol / factor <= deciding)
                & (deciding <= rank_rtol * factor)
                & (deciding <= factor * eps_floor))
-    return limited, jnp.where(limited, deciding, jnp.nan)
+    return limited, jnp.where(limited, deciding, zero)
 
 
 def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma):
@@ -1279,7 +1304,14 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
                                    inv_sigma=inv_sigma)
     F, finite, eigvals, eigvecs = _fim_spectrum(J)
     lo, hi = eigvals[0], eigvals[-1]
-    cond = jnp.where(lo <= 0.0, jnp.inf, hi / lo)
+    # ``lo > 0`` rather than ``not (lo <= 0)``, so a ``NaN`` smallest
+    # eigenvalue reads ``inf`` -- singular -- and not ``NaN``, and the
+    # division never sees a zero.  :func:`fim` computes ``cond`` on the
+    # host from float64 copies and keeps the ``NaN`` there, because that
+    # is the number it has always published.
+    positive = lo > 0.0
+    cond = jnp.where(positive, hi / jnp.where(positive, lo, jnp.ones_like(lo)),
+                     jnp.inf)
     names = _param_names(params)
     if idx is not None:
         names = tuple(names[i] for i in idx)

@@ -427,9 +427,10 @@ class TestCoreAgreesWithReport:
         core, _ = _quiet(fim_core, fn, params, **kw)
         assert bool(core.precision_limited) == bool(warned), name
         if warned:
-            assert np.isfinite(float(core.deciding_ratio))
+            ratio = float(core.deciding_ratio)
+            assert np.isfinite(ratio) and ratio > 0.0
         else:
-            assert np.isnan(float(core.deciding_ratio))
+            assert float(core.deciding_ratio) == 0.0
 
     def test_jitting_the_core_does_not_change_it(self, problems):
         """Eager and jitted ``fim_core`` must agree on every verdict.
@@ -650,13 +651,25 @@ class TestCoreFailsClosed:
     fails that comparison and the rescue never fires.
     """
 
-    def _nan_problem(self):
-        def residual(p):
-            return jnp.array([p["a"] * jnp.nan, p["a"]], dtype=jnp.float32)
-        return residual, {"a": jnp.float32(1.0)}
+    def _nan_problem(self, n=2):
+        """``n >= 2`` on purpose.  ``eigh`` of a 1x1 ``NaN`` matrix
+        returns the eigenvector ``[1.0]``, so ``diag(P)`` is 1 and even
+        a fail-*open* ``where(support > n * eps, inf, crb)`` happens to
+        answer ``+inf``.  From 2x2 up the eigenvectors come back ``NaN``
+        too, ``NaN > n * eps`` is False, and the rescue never fires --
+        which is precisely the inversion :func:`_rank_and_crb`'s comment
+        describes, and the only size at which this test can see it."""
+        keys = tuple(f"p{i}" for i in range(n))
 
-    def test_a_nan_matrix_gives_infinite_bounds_not_nan(self):
-        fn, params = self._nan_problem()
+        def residual(p):
+            v = jnp.stack([p[k] for k in keys])
+            return jnp.concatenate([v * jnp.nan, v])
+
+        return residual, {k: jnp.float32(1.0) for k in keys}
+
+    @pytest.mark.parametrize("n", [1, 2, 4])
+    def test_a_nan_matrix_gives_infinite_bounds_not_nan(self, n):
+        fn, params = self._nan_problem(n)
         core = fim_core(fn, params)
         assert not bool(core.finite)
         assert int(core.rank) == 0
@@ -664,6 +677,55 @@ class TestCoreFailsClosed:
         assert np.all(np.isinf(crb)), crb
         assert not np.any(np.isnan(crb))
         assert not bool(np.any(crb < 1e30)), "crb < tol must read False"
+
+    def test_the_core_makes_no_nan_on_a_rank_deficient_problem(
+            self, problems):
+        """Under ``jax_debug_nans`` a user is asking JAX to stop at the
+        first ``NaN`` so they can find their own.  A rank-deficient
+        Fisher matrix has eigenvalues at or below zero by construction,
+        so dividing the eigenvector squares by them -- instead of by a
+        substituted 1.0 in the columns the mask throws away -- produces
+        a ``NaN`` this function then discards, and stops that user's
+        debugger on a value that was never used.
+
+        Run **eagerly**, and that is load-bearing: under ``jax.jit``
+        ``jax_debug_nans`` inspects only the outputs of the compiled
+        function, and every ``NaN`` here is discarded before it reaches
+        one.  Eager dispatch checks each operation, which is the only
+        way to see an intermediate.  The spring problems are left out
+        for the same reason -- op-by-op over a 200-step rollout is
+        minutes, and these linear residuals reach the same code."""
+        for name in ("exactly_singular", "duplicate_column", "zero_scaled"):
+            fn, params, kw = problems[name]
+            with jax.debug_nans(True):
+                core = fim_core(fn, params, **kw)
+                jax.block_until_ready(core)
+            assert bool(core.finite), name
+
+    def test_the_core_makes_no_nan_on_a_zero_fisher_matrix(self):
+        """The hardest case for the masked divisions, and the one that
+        turns them from defensive into load-bearing.
+
+        A residual that does not depend on the parameters at all gives
+        ``F = 0``: ``eigh`` returns zero eigenvalues and the *identity*
+        as eigenvectors, so the squares being divided include exact
+        zeros and the divisor is an exact zero.  Unmasked that is
+        ``0 / 0``, and ``cond`` is ``0 / 0`` as well -- two ``NaN``s
+        computed and immediately thrown away, which is exactly what a
+        ``jax_debug_nans`` user does not want to stop on.  The verdict
+        itself is unaffected either way, so nothing but this notices."""
+        def residual(p):
+            del p
+            return jnp.arange(8, dtype=jnp.float32)
+
+        params = {f"p{i}": jnp.float32(1.0 + i) for i in range(3)}
+        with jax.debug_nans(True):
+            core = fim_core(residual, params)   # eager: see above
+            jax.block_until_ready(core)
+        assert int(core.rank) == 0
+        assert bool(jnp.all(jnp.isinf(core.crb)))
+        assert bool(jnp.isinf(core.cond))
+        assert bool(core.finite)
 
     def test_fim_still_raises_on_the_same_matrix(self):
         """The core reports it, ``fim`` refuses it.  Both, not either:

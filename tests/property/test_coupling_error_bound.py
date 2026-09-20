@@ -179,8 +179,45 @@ _RECIPES = graph_recipes(
 )
 
 
+@st.composite
+def _measurable_norm_recipes(draw):
+    """``_RECIPES`` with no group left on the ``"interface"`` norm.
+
+    The distance this property measures is a distance *in the norm the
+    group's threshold is quoted in*, and ``"interface"`` measures only the
+    fields that cross an edge -- so a group on it reports ``converged``
+    about a subset of the state and the comparison below is not the one the
+    threshold promises.  The property therefore does not cover that norm.
+
+    It used to say so with ``assume``: ``convergence_norm`` is drawn
+    uniformly from three values, so a third of every draw built a graph,
+    stepped it, and threw the result away.  Measured at 42.9% rejection over
+    all three of this test's gates -- the worst in ``tests/property/``.
+    Remapping the norm at draw time costs nothing and rejects nothing, and
+    the remapped draw gets a freshly drawn tolerance for the knob its new
+    norm actually reads, so the search is no narrower than it was.
+
+    ``without_inert_knobs`` closes the question the flip re-opens: the knob
+    the old norm made live keeps its drawn value otherwise, and
+    ``CouplingGroup`` warns about a knob its configuration never reads --
+    fatally, under ``filterwarnings = ["error"]``.
+    """
+    recipe = draw(_RECIPES)
+    groups = []
+    for g in recipe.coupling_groups:
+        if g.convergence_norm == "interface":
+            norm = draw(st.sampled_from(("l2", "mixed")))
+            live = ({"tolerance": draw(st.sampled_from([1e-8, 1e-6, 1e-3]))}
+                    if norm == "l2"
+                    else {"rtol": draw(st.sampled_from([1e-6, 1e-3]))})
+            g = without_inert_knobs(
+                dataclasses.replace(g, convergence_norm=norm, **live))
+        groups.append(g)
+    return dataclasses.replace(recipe, coupling_groups=tuple(groups))
+
+
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-@given(recipe=_RECIPES)
+@given(recipe=_measurable_norm_recipes())
 def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
     recipe,
 ):
@@ -192,6 +229,16 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
     ``rho`` near 1 could therefore report success arbitrarily far from
     the answer, and nothing in the library said so.  That is
     ``MADD-ANO-005``, and this is the assertion that retires it.
+
+    Rejected draws
+    --------------
+    2.4% under the ``ci`` profile, measured, down from 42.9%.  The
+    ``"interface"`` norm is excluded by the strategy rather than assumed
+    away (see :func:`_measurable_norm_recipes`); what is left cannot be
+    generated, because whether a *drawn* group reaches its threshold in the
+    steps it was given, and whether the 20x-tighter reference reaches its
+    own, are outcomes of the solve rather than shapes of the input.  At 2.4%
+    that residual costs a fortieth of the search and nothing else.
     """
     recipe = _diagnostics_recipe(recipe)
     gm = recipe.build()
@@ -200,10 +247,11 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
     assume(diagnostics)
 
     groups = {"+".join(sorted(g.nodes)): g for g in gm._coupling_groups}  # noqa: SLF001
-    converged = {
-        key: groups[key] for key, d in diagnostics.items()
-        if d["converged"] and groups[key].convergence_norm != "interface"
-    }
+    assert all(g.convergence_norm != "interface" for g in groups.values()), (
+        "_measurable_norm_recipes must leave no group on the interface norm"
+    )
+    converged = {key: groups[key] for key, d in diagnostics.items()
+                 if d["converged"]}
     assume(converged)
 
     reference = _tightened(recipe).build()

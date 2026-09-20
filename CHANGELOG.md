@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Draw-rejection audit** (`scripts/audit_property_rejection.py`): measures what
+  fraction of each property test's Hypothesis draws `assume`/`.filter` throws
+  away, and fails CI over the gate — run it before narrowing a strategy
 - **`fim` says when `rank` was decided at the float32 noise floor**: a
   `PrecisionLimitWarning` naming the eigenvalue ratio, the cutoff and the
   `jax_enable_x64` re-run that settles it.  Quiet on well-conditioned problems

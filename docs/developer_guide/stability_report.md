@@ -22,6 +22,7 @@ import time.  Levels:
 | `maddening.api.auth.is_loopback` | evolving |
 | `maddening.api.auth.is_routable_peer` | evolving |
 | `maddening.api.binary_encoder.BinaryStateEncoder` | evolving |
+| `maddening.api.server.origin_is_same_site` | evolving |
 | `maddening.api.server.warn_if_publicly_bound` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.UnstructuredPartitionLayout` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.build_unstructured_partition` | evolving |
@@ -124,4 +125,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*105 API surfaces registered.*
+*106 API surfaces registered.*

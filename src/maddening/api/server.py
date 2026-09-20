@@ -474,8 +474,7 @@ class _WebSocketAuthMiddleware:
                 "Refused WebSocket %s from origin %r: not this server's origin",
                 scope.get("path", "?"), headers.get("origin"),
             )
-            await receive()
-            await send({"type": "websocket.close", "code": 1008})
+            await self._refuse(receive, send)
             return
         if self._auth.required_for_peer(peer):
             offered = list(scope.get("subprotocols") or [])
@@ -489,12 +488,24 @@ class _WebSocketAuthMiddleware:
                     scope.get("path", "?"), peer or "?",
                     "invalid" if presented else "missing",
                 )
-                # The connect message must be consumed before the close
-                # is sent, or the server has nothing to answer.
-                await receive()
-                await send({"type": "websocket.close", "code": 1008})
+                await self._refuse(receive, send)
                 return
         await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _refuse(receive, send) -> None:
+        """Close an unaccepted handshake with 1008.
+
+        The ``websocket.connect`` message has to be consumed first, or
+        the server is answering nothing.  A client that hung up before
+        sending it delivers ``websocket.disconnect`` instead, and
+        answering *that* with a close is a protocol error -- so the
+        refusal is simply already complete.
+        """
+        message = await receive()
+        if message.get("type") == "websocket.disconnect":
+            return
+        await send({"type": "websocket.close", "code": 1008})
 
 
 @stability(StabilityLevel.EVOLVING)

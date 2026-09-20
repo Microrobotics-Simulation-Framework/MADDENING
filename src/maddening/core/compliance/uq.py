@@ -55,8 +55,8 @@ class UncertainParameter:
     description: str = ""
 
 
-@dataclass(frozen=True)
 @stability(StabilityLevel.EVOLVING)
+@dataclass(frozen=True)
 class UncertaintySpec:
     """UQ specification for a node, returned by ``node.uncertainty_spec()``.
 

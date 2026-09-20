@@ -39,6 +39,8 @@ except ImportError as e:
     ) from e
 
 import jax.numpy as jnp
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 
 
 def _representable(lo: float, hi: float, dtype: np.dtype) -> tuple[float, float]:
@@ -58,6 +60,7 @@ def _representable(lo: float, hi: float, dtype: np.dtype) -> tuple[float, float]
     return float(lo_r), float(hi_r)
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def node_states(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,
@@ -131,6 +134,7 @@ def node_states(
     return strategy()
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def bounded_dt(
     min_value: float = 1e-6,
     max_value: float = 0.1,
@@ -150,6 +154,7 @@ def bounded_dt(
     )
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 def boundary_inputs_for(
     node,
     bounds: dict[str, tuple[float, float]] | None = None,

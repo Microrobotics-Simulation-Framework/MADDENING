@@ -125,6 +125,34 @@ import time.  Levels:
 | `maddening.sysid.init_window_states` | evolving |
 | `maddening.sysid.observations_from_history` | evolving |
 | `maddening.sysid.windowed_loss` | evolving |
+| `maddening.testing.mms.ApparentOrder` | experimental |
+| `maddening.testing.mms.ConvergenceRegime` | experimental |
+| `maddening.testing.mms.GridConvergenceStudy` | experimental |
+| `maddening.testing.mms.InconclusiveStudyError` | experimental |
+| `maddening.testing.mms.ManufacturedSolution` | experimental |
+| `maddening.testing.mms.OrderMeasurement` | experimental |
+| `maddening.testing.mms.RefinementAxis` | experimental |
+| `maddening.testing.mms.UndeclaredOrderError` | experimental |
+| `maddening.testing.mms.apparent_order` | experimental |
+| `maddening.testing.mms.assert_node_gci_verified` | experimental |
+| `maddening.testing.mms.assert_node_order_verified` | experimental |
+| `maddening.testing.mms.check_gci` | experimental |
+| `maddening.testing.mms.check_order` | experimental |
+| `maddening.testing.mms.declared_order` | experimental |
+| `maddening.testing.mms.diffusion_operator` | experimental |
+| `maddening.testing.mms.manufactured_acceleration` | experimental |
+| `maddening.testing.mms.measure_gci` | experimental |
+| `maddening.testing.mms.measure_order` | experimental |
+| `maddening.testing.mms.richardson_study` | experimental |
+| `maddening.testing.mms.verify_node_gci` | experimental |
+| `maddening.testing.mms.verify_node_order` | experimental |
+| `maddening.testing.strategies.boundary_inputs_for` | experimental |
+| `maddening.testing.strategies.bounded_dt` | experimental |
+| `maddening.testing.strategies.node_states` | experimental |
+| `maddening.testing.verification.VerificationResult` | experimental |
+| `maddening.testing.verification.assert_node_verified` | experimental |
+| `maddening.testing.verification.make_inputs` | experimental |
+| `maddening.testing.verification.verify_node` | experimental |
 | `maddening.transport_auth.TransportAuth` | evolving |
 | `maddening.transport_auth.TransportAuthError` | evolving |
 | `maddening.transport_auth.address_is_loopback` | evolving |
@@ -132,4 +160,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*113 API surfaces registered.*
+*141 API surfaces registered.*

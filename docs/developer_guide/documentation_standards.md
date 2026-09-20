@@ -26,6 +26,47 @@ def update(self, state, boundary_inputs, dt):
     """
 ```
 
+## Docstring Examples Are Tests
+
+Every `>>>` under `src/maddening/` is executed in CI, by the `compliance`
+job:
+
+```bash
+python scripts/check_doctests.py          # add -v to see each example
+```
+
+An example is an API claim. Before this gate existed nothing ran them, and
+one of the fifteen in the tree was materially wrong: `calibrate()` showed a
+free-fall problem annotated `true g=-9.81`, ran with the default budget, and
+asserted nothing — it actually stops at `g = -8.04` with `converged=False`.
+Write examples so that a wrong one fails:
+
+- **Assert something.** A snippet that only constructs objects proves they
+  import. Print a value, or wrap a comparison in `bool(...)` /
+  `round(..., n)` so the expected output is exact and stable.
+- **No arrays, addresses or raw floats in expected output.** `repr` of a JAX
+  array carries dtype and formatting that change between releases; object
+  addresses change every run. Compare instead:
+  `>>> bool(jnp.allclose(x, 0.5 * jnp.ones(8)))`.
+- **Round to a margin you can derive.** `round(float(g), 2)` is safe in the
+  `calibrate` example because the tolerance bounds the answer to
+  `|g + 9.81| < 2e-3`, well inside the rounding boundary. Rounding until the
+  digits happen to match on your machine is not the same thing.
+- **`filterwarnings = ["error"]` applies.** An example that emits a warning
+  fails unless `pyproject.toml` already filters it.
+- **Prefer rewriting to `# doctest: +SKIP`.** A skipped example is back to
+  being prose. There are currently none, and the gate is more useful if it
+  stays that way.
+- **Stay inside the `ci` extra.** The `compliance` job installs `[ci,usd]`,
+  a superset of what the test matrix installs; an example that needs
+  anything further would pass there and fail everyone else.
+
+The gate also fails if the collection *shrinks* — it scans the source for
+docstrings containing examples and requires pytest to have collected a test
+from each such file, on top of a floor on the total. A doctest job that
+silently collects nothing exits 0 and gets counted as coverage. Raise
+`MIN_DOCTESTS` in the script when you add examples.
+
 ## Math in Code
 
 - **Docstrings**: ASCII-art equations (e.g., `dT/dt = alpha * d^2T/dx^2`)

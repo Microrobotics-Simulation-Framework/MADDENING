@@ -292,8 +292,8 @@ def calibrate(
     CalibrateResult
         Calibrated parameters, loss history, and convergence flag.
 
-    Example
-    -------
+    Examples
+    --------
     >>> import jax.numpy as jnp
     >>> def forward(params):
     ...     g = params["gravity"]
@@ -302,7 +302,34 @@ def calibrate(
     ...     forward_fn=forward,
     ...     initial_params={"gravity": jnp.array(-5.0)},
     ...     reference_trajectory=jnp.array(-4.905),  # true g=-9.81
+    ...     n_iters=400,
+    ...     learning_rate=0.1,
     ... )
+    >>> result.converged
+    True
+    >>> round(float(result.params["gravity"]), 2)
+    -9.81
+
+    The two non-default arguments are the point.  This is plain gradient
+    descent with a fixed step and no line search, and exhausting
+    ``n_iters`` is not an error: it returns the last iterate with
+    ``converged=False``.  On this problem the defaults
+    (``n_iters=200``, ``learning_rate=0.01``) stop well short of the
+    true value, and nothing but the flag says so.
+
+    >>> default_budget = calibrate(
+    ...     forward_fn=forward,
+    ...     initial_params={"gravity": jnp.array(-5.0)},
+    ...     reference_trajectory=jnp.array(-4.905),
+    ... )
+    >>> default_budget.converged
+    False
+    >>> round(float(default_budget.params["gravity"]), 1)
+    -8.0
+
+    So branch on ``converged`` rather than reading ``params`` straight
+    out.  :func:`maddening.sysid.fit`, the replacement, draws the same
+    distinction without a hand-tuned step size.
     """
     warnings.warn(
         "maddening.core.simulation.calibration.calibrate is deprecated; "

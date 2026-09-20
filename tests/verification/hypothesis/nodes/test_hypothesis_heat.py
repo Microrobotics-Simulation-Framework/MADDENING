@@ -24,14 +24,16 @@ class TestHeatConservation:
     )
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_flux_conserves_total_heat(self, n_cells, diffusivity):
+        # CFL-safe dt: dt < dx^2 / (2 * alpha).  The node is built with
+        # the dt it is actually stepped with, so its own stability check
+        # sees the real configuration.
+        dx = 1.0 / n_cells
+        dt_safe = 0.4 * dx ** 2 / (2.0 * diffusivity)
         node = HeatNode(
-            name="h", timestep=0.01, n_cells=n_cells,
+            name="h", timestep=dt_safe, n_cells=n_cells,
             thermal_diffusivity=diffusivity,
             initial_temperature=0.0,
         )
-        # CFL-safe dt: dt < dx^2 / (2 * alpha)
-        dx = 1.0 / n_cells
-        dt_safe = 0.4 * dx ** 2 / (2.0 * diffusivity)
 
         # Random initial temperature profile
         rng = np.random.default_rng(42)
@@ -43,10 +45,13 @@ class TestHeatConservation:
         total_before = float(jnp.sum(state["temperature"]))
         total_after = float(jnp.sum(out["temperature"]))
 
-        # Ghost-cell extrapolation at boundaries introduces O(dt*alpha/dx)
-        # leakage per step. For a single step this is bounded but non-zero.
+        # With no boundary data supplied the mirror ghost equals T[0], so
+        # the end faces carry zero gradient and the scheme is exactly
+        # conservative -- round-off only.  Until 0.4.0 the end cells were
+        # instead frozen at their previous values, which leaked O(dt*alpha/dx)
+        # per step and is why this bound used to be 5% (MADD-ANO-007).
         rel_err = abs(total_after - total_before) / max(abs(total_before), 1e-10)
-        assert rel_err < 0.05, (
+        assert rel_err < 1e-5, (
             f"Heat not conserved: before={total_before}, after={total_after}, "
             f"rel_err={rel_err}"
         )
@@ -58,11 +63,15 @@ class TestHeatCFLInstability:
     def test_above_cfl_produces_negative_temperature(self):
         """This is a KNOWN LIMITATION, not a bug. Explicit methods
         require dt <= dx^2 / (2*alpha) for stability."""
+        # dx=0.125, alpha=1.0 → the Fourier limit is dt = 0.0078.  The
+        # node is declared at a stable timestep, because since 0.4.0 the
+        # constructor refuses an unstable one; the instability is then
+        # driven by handing update() a dt it never saw, which is exactly
+        # the gap the constructor check cannot close (MADD-ANO-002).
         node = HeatNode(
-            name="h", timestep=0.01, n_cells=8,
+            name="h", timestep=0.001, n_cells=8,
             thermal_diffusivity=1.0,
         )
-        # CFL limit: dx=0.125, alpha=1.0 → dt_cfl = 0.0078
         # Use dt well above CFL with a spike
         state = {"temperature": jnp.array(
             [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0],
@@ -84,12 +93,12 @@ class TestHeatFiniteOutput:
     )
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_cfl_safe_produces_finite(self, n_cells, diffusivity):
-        node = HeatNode(
-            name="h", timestep=0.01, n_cells=n_cells,
-            thermal_diffusivity=diffusivity,
-        )
         dx = 1.0 / n_cells
         dt_safe = 0.3 * dx ** 2 / (2.0 * diffusivity)
+        node = HeatNode(
+            name="h", timestep=dt_safe, n_cells=n_cells,
+            thermal_diffusivity=diffusivity,
+        )
 
         rng = np.random.default_rng(123)
         T_init = rng.uniform(0.0, 500.0, n_cells).astype(np.float32)

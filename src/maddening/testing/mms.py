@@ -1714,9 +1714,17 @@ def check_gci(
        must never look like a pass, and it is checked first so that a
        node which silently ignores refinement cannot slip past by
        having no declared order to compare against.
-    2. **The observed order against ``expected``**, if given, on the
+    2. **A study positively shown to be outside the asymptotic range
+       fails**, because outside it the GCI is not an error band.  This
+       is not a formality: on the LBM pipe ladder in
+       ``tests/verification/test_gci_order.py`` a study outside the
+       asymptotic range quotes 1.2% around a solution that is 3.6%
+       from the answer.  A study whose asymptotic range could not be
+       *decided* — three levels and no declared order — is not failed,
+       but it is given the cautious safety factor and says so.
+    3. **The observed order against ``expected``**, if given, on the
        same band :func:`check_order` uses.
-    3. **The GCI against ``max_gci``**, if given: the error band on the
+    4. **The GCI against ``max_gci``**, if given: the error band on the
        finest solution, as a fraction (``0.05`` is 5%).
 
     Parameters
@@ -1758,6 +1766,22 @@ def check_gci(
                 f"the observed {study.axis.order_attribute} order could not be "
                 f"determined from this ladder, so there is no Grid "
                 f"Convergence Index.  {study.detail}\n{table}"
+            ),
+        )
+
+    if study.in_asymptotic_range is False:
+        return VerificationResult(
+            name, "FAIL", n_examples=n,
+            detail=(
+                f"the solutions are not in the asymptotic range, so the Grid "
+                f"Convergence Index on the finest one is not an error band "
+                f"and is not reported as one.  This is an inconclusive study, "
+                f"not a wrong node, and the two must not be confused.  "
+                f"{study.asymptotic_detail}.  Measured on the LBM pipe ladder "
+                f"in tests/verification/test_gci_order.py, a study outside "
+                f"the asymptotic range quoted a band of 1.2% around a "
+                f"solution that was 3.6% from the answer — three times too "
+                f"narrow, in the confident direction.\n{table}"
             ),
         )
 
@@ -1879,9 +1903,10 @@ def verify_node_gci(
     Returns
     -------
     VerificationResult
-        ``FAIL`` when the ladder did not converge, whatever the node
-        declares.  ``SKIP`` — explicitly, never a silent pass — when
-        the ladder *did* converge but the node declares no order and no
+        ``FAIL`` when the ladder did not converge or was shown to be
+        outside the asymptotic range, whatever the node declares.
+        ``SKIP`` — explicitly, never a silent pass — when the ladder
+        *did* converge but the node declares no order and no
         ``expected`` or ``max_gci`` was given, so there is no criterion
         to judge it by.  ``PASS`` otherwise.
     """

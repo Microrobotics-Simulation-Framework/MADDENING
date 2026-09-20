@@ -12,13 +12,16 @@ implementation claim, which is why this lives beside the other
 Two things are checked, because the count alone is not enough:
 
 1. **pytest must pass** every doctest it collects.
-2. **The collection must not silently shrink.**  A doctest job that
-   collects nothing exits 0 and reports success, which is worse than no
-   gate: it is cited as coverage.  So the script independently scans the
-   package source with :mod:`ast` + :mod:`doctest`, finds every file that
-   *contains* an example, and fails if pytest did not collect a test from
-   each of them.  On top of that a committed floor (``MIN_DOCTESTS``)
-   guards the absolute count.
+2. **The set of examples that ran must not silently shrink.**  A
+   doctest job that runs nothing exits 0 and reports success, which is
+   worse than no gate: it is cited as coverage.  So the script
+   independently scans the package source with :mod:`ast` +
+   :mod:`doctest`, finds every file that *contains* an example, and fails
+   unless a doctest in each of them actually passed.  On top of that a
+   committed floor (``MIN_DOCTESTS``) guards the absolute count.  Both
+   are counted from passing test reports, so deselection, a skip and an
+   import error are all failures of this gate -- a doctest that does not
+   run is prose again, which is the thing the gate exists to prevent.
 
 The static scan mirrors :class:`doctest.DocTestFinder`'s own traversal --
 module docstring, top-level functions and classes, and class members,
@@ -36,9 +39,9 @@ Usage:
     python scripts/check_doctests.py [--min N] [-- PYTEST_ARG ...]
 
 Exit codes:
-    0 -- every example ran and the collection is the expected size
-    1 -- a doctest failed, a file with examples was not collected, or
-         fewer than the floor were collected
+    0 -- every example ran, passed, and the set that ran is the expected size
+    1 -- a doctest failed, a file with examples produced no passing doctest,
+         or fewer than the floor passed
     2 -- the run could not be trusted (pytest could not be run at all)
 """
 
@@ -108,27 +111,38 @@ def files_with_examples() -> dict[str, int]:
 
 
 class _Recorder:
-    """Records the file of every item pytest ends up with.
+    """Counts the doctests that actually *passed*, per file.
 
-    ``pytest_collection_modifyitems`` is called once, after collection and
-    after deselection, so what it sees is exactly what will run.  Reading
-    it from the pytest run itself -- rather than from a JUnit report or
-    from parsing ``--collect-only`` output -- means the gate measures the
-    same objects pytest measures, with no format to drift between
-    releases.
+    Reading this from the pytest run itself -- rather than from a JUnit
+    report or by parsing ``--collect-only`` output -- means the gate
+    measures the same objects pytest measures, with no report format to
+    drift between releases.
+
+    It counts passes, not collected items, and the difference is the
+    whole point.  An earlier version of this recorder hooked
+    ``pytest_collection_modifyitems``, which runs *before* ``-k`` / ``-m``
+    deselection: mutation-testing it with ``-k no_such_doctest`` showed
+    it happily reporting 15 doctests when none had run.  A deselection
+    that removed only some of them would have left the gate green over a
+    suite that executed nothing.  ``pytest_runtest_logreport`` cannot say
+    that: a doctest that was deselected, skipped, errored in setup or
+    failed never produces a passing call report, so it is simply not
+    counted and the file it lives in goes missing.
     """
 
     def __init__(self) -> None:
-        self.per_file: dict[str, int] = {}
+        self.passed: dict[str, int] = {}
+        self.collected = 0
 
-    def pytest_collection_modifyitems(self, items):  # noqa: D102 (pytest hook)
-        for item in items:
-            try:
-                rel = Path(item.path).resolve().relative_to(REPO_ROOT)
-            except (AttributeError, ValueError):
-                continue
-            key = str(rel)
-            self.per_file[key] = self.per_file.get(key, 0) + 1
+    def pytest_collection_finish(self, session):  # noqa: D102 (pytest hook)
+        # After every modifyitems hook, so session.items is final.
+        self.collected = len(session.items)
+
+    def pytest_runtest_logreport(self, report):  # noqa: D102 (pytest hook)
+        if report.when != "call" or not report.passed:
+            return
+        path = report.nodeid.split("::", 1)[0]
+        self.passed[path] = self.passed.get(path, 0) + 1
 
 
 def pytest_args(extra: list[str]) -> list[str]:
@@ -142,7 +156,7 @@ def pytest_args(extra: list[str]) -> list[str]:
     ]
 
 
-def run_pytest(extra: list[str]) -> tuple[int, dict[str, int]]:
+def run_pytest(extra: list[str]) -> tuple[int, "_Recorder"]:
     # Record, rather than assume, the configuration the examples run in:
     # CPU JAX and no plugin autoload, matching every other pytest
     # invocation in this repository.  Set only if the caller left them
@@ -165,7 +179,7 @@ def run_pytest(extra: list[str]) -> tuple[int, dict[str, int]]:
 
     recorder = _Recorder()
     rc = int(pytest.main(args, plugins=[recorder]))
-    return rc, recorder.per_file
+    return rc, recorder
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        rc, per_file = run_pytest(extra)
+        rc, recorder = run_pytest(extra)
     except ImportError as exc:
         print(
             f"ERROR: could not run pytest ({exc}); the gate reports nothing "
@@ -196,8 +210,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    per_file = recorder.passed
     total = sum(per_file.values())
-    print(f"\ncollected {total} doctest(s) from {len(per_file)} file(s):")
+    print(
+        f"\n{recorder.collected} doctest(s) selected, {total} passed, "
+        f"from {len(per_file)} file(s):"
+    )
     for name in sorted(per_file):
         print(f"  {per_file[name]:3d}  {name}")
 
@@ -205,14 +223,14 @@ def main(argv: list[str] | None = None) -> int:
     missing = sorted(set(expected) - set(per_file))
     if missing:
         failures.append(
-            "these files contain docstring examples that pytest did not "
-            "collect (an ignore rule, an import error, or a config change "
-            "that turned doctest collection off for them):\n"
+            "these files contain docstring examples, and no doctest in them "
+            "passed -- they were not collected, were deselected, were "
+            "skipped, or they failed:\n"
             + "\n".join(f"    {m}  ({expected[m]} example docstring(s))" for m in missing)
         )
     if total < args.min:
         failures.append(
-            f"collected {total} doctests, floor is {args.min}.  A gate that "
+            f"{total} doctests passed, floor is {args.min}.  A gate that "
             f"collects less than it used to has stopped checking something; "
             f"find out what, and only then raise or lower MIN_DOCTESTS in "
             f"{Path(__file__).name}."
@@ -226,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {f}")
         return 1
 
-    print(f"\nOK: {total} docstring examples ran, floor {args.min}")
+    print(f"\nOK: {total} docstring examples ran and passed, floor {args.min}")
     return 0
 
 

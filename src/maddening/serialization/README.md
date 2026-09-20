@@ -62,8 +62,22 @@ default `allow_nan=True`, which only Python reads (`MADD-ANO-006`).  Those are
 still accepted on load, so an older config needs no migration.
 
 Because a decoder cannot tell the float `NaN` from a string that reads
-`"NaN"`, `to_dict` **raises** on a string parameter equal to one of the three
-tokens, naming its path.  Spell such a value differently.
+`"NaN"`, `to_dict` **raises** on a string leaf equal to one of the three
+tokens, naming its path.  Spell such a value differently.  This is a real
+limitation on a wire format and is registered as **`MADD-ANO-007`**; the
+registry entry has the reasoning, the workaround and why a tagged object
+such as `{"__nonfinite__": "Infinity"}` was not used instead (it relocates
+the ambiguity to a rarer shape and makes it silent on read rather than
+loud on write, and it costs the FMU's C wrapper a JSON parser it does not
+otherwise have).
+
+The rule applies to a node *name* as well as a parameter value, and to a
+header a client puts on the FMI wire, but not to dict **keys** — nothing
+decodes a key.  Both the refusal and the decode are exact string matches,
+so `"nan"`, `"inf"`, `"+Infinity"` and `"NaN "` are all stored and read
+back as the strings they are.  Do not make them case-insensitive to match
+the C wrapper's `strtod`: that would turn every one of those into a float
+with nothing left to notice.
 
 The same encoding is used by the USD stage (`maddening:paramsJson` and the
 other JSON attributes) and the FMI sidecar wire; the shared implementation is

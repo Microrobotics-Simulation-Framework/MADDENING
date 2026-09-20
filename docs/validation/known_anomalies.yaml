@@ -437,3 +437,79 @@ anomalies:
       - "tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json"
       - "tests/fmi/test_non_finite_json_tokens.py::test_the_binary_frames_carry_the_same_values_exactly"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-007"
+    title: "A string spelling a non-finite token is refused by the JSON serialisers"
+    description: >
+      Since 0.4.0 a non-finite float is written as the quoted token
+      "NaN", "Infinity" or "-Infinity" (MADD-ANO-006), and the decoder
+      turns those three strings back into floats wherever it meets them,
+      because GraphManager.to_dict has no schema for node params to
+      decode against.  A *string* leaf that happens to spell one of the
+      three is therefore ambiguous, and encode_non_finite refuses to
+      write it: saving a graph with a node named "NaN", or a string
+      parameter whose value is exactly "Infinity", raises ValueError
+      naming the path instead of producing a document that would read
+      back as a float.
+
+      The refusal is on every surface that shares the codec:
+      GraphManager.to_dict, the USD JSON attributes written by
+      save_graph_to_usd, and the FMI JSON wire helpers send_message and
+      encode_binary.  On the wire the protocol has no free-text field --
+      op, dtype, vr, values, t, dt and the base64 state are all
+      constrained -- so no request or reply FmuTcpBridge itself builds
+      can reach it; a third-party client that puts its own strings in a
+      binary header can, and a property test drawing arbitrary headers
+      does.
+
+      The alternative encoding, a tagged object such as
+      {"__nonfinite__": "Infinity"}, does not remove the ambiguity.  A
+      user dict of exactly that shape decodes to a float in the same
+      way; it just does so silently on read instead of loudly on write,
+      and it costs the FMU's C wrapper a nested-object parser where the
+      quoted token costs eight lines (the wrapper has no JSON parser at
+      all -- it is strstr and strtod).  The loud narrow failure was
+      chosen over the quiet rarer one.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The refusal is a fail-stop at write time that names the path to
+      the offending value, so no wrong number reaches a document and
+      nothing is lost silently; what it carries is an availability risk,
+      not a correctness one.  It is context-dependent because the write
+      it can stop is the one a diverged run most wants to make: a
+      product that serialises a graph on a fault path, and whose node
+      names or string parameters come from field or operator data rather
+      than being fixed in code, can have that save fail at exactly the
+      moment the state was worth recording.  Such a product should
+      validate names and string parameters against the three tokens
+      where they are accepted, not where they are saved, so the refusal
+      lands on data entry rather than on the fault path.
+    affected_components:
+      - "maddening.serialization.json_codec.encode_non_finite"
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+      - "maddening.usd.serialization.save_graph_to_usd"
+      - "maddening.fmi.tcp_bridge.encode_binary"
+    affected_versions: ">=0.4.0"
+    workaround: >
+      Spell the value differently.  The refusal names the path, and
+      every other spelling -- "nan", "inf", "+Infinity", "NaN " -- is
+      stored and read back as the string it is, because both the
+      refusal and the decode are exact matches.  A node name is under
+      the same rule.  A client that needs to put arbitrary text on the
+      FMI wire should send it base64-encoded, as set_state already does.
+    resolution_status: "open"
+    residual_risk: >
+      Reading carries the mirror of the same ambiguity with no refusal
+      available to it: a document written before 0.4.0 whose parameter
+      value is the string "NaN" reads back as the float, because the
+      decoder cannot tell it from the token this version writes.  That
+      case belongs to MADD-ANO-006, the change that created it, and is
+      recorded there; it is undetectable rather than merely unfixed.
+      Refusing at write time is what keeps the set of ambiguous
+      documents closed at the documents older MADDENING wrote.
+    verification:
+      - "tests/core/test_non_finite_json_tokens.py::test_a_string_that_collides_with_a_token_is_refused_at_write_time"
+      - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_spelling_a_non_finite_token_is_refused"
+      - "tests/fmi/test_binary_frames_properties.py::test_a_header_string_that_only_looks_like_a_token_stays_a_string"
+    github_issue: null

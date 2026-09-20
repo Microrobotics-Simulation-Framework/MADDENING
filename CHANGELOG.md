@@ -212,9 +212,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Non-finite numbers are written as valid JSON** on all three surfaces (config,
-  USD `paramsJson`, FMI wire): `NaN` / `Infinity` / `-Infinity` are now quoted.
-  Both spellings are read, so an older config, stage or peer still loads
+- **Non-finite numbers are written as valid JSON** (config, USD `paramsJson`, FMI
+  wire): `NaN` / `Infinity` / `-Infinity` are quoted, and both spellings load
+- **An FMU instance may reconnect at once**: the bridge no longer refuses the slot
 - **`coupling_diagnostics()["residual"]` has a float32 noise floor**, documented:
   a converged group's residual is a cancellation, so `solver="ift"` and `"fori"`
   can report `0.0` and `1e-05` for one state.  The state and verdict are exact
@@ -413,6 +413,9 @@ guidance; the itemized changes follow.
   in front of it
 
 ### Known Anomalies
+- **MADD-ANO-007**: a *string* that spells `NaN` / `Infinity` / `-Infinity` is now
+  refused by `to_dict`, the USD JSON attributes and the FMI wire, because it would
+  read back as that float -- spell such a value differently (minor, context_dependent)
 - **MADD-ANO-001 (LBM GPU segfault) is resolved**: it needed jaxlib 0.5.1, which
   0.1.0-0.3.1 permitted and 0.4.0's floor does not; re-verified on GPU at jaxlib
   0.11.2 / CUDA 12.9, `LBMPipeNode` GPU vs CPU agreeing to 2.4e-07

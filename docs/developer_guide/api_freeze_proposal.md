@@ -28,7 +28,14 @@ incompatibly before the next major version. The mechanics are in
 - a `stable` *class* promises every public method and property an instance
   answers to, inherited ones included. `stable_api.json` records 239 members
   behind today's 17 tagged surfaces, and
-  `scripts/check_stable_signatures.py` fails on any change to any of them.
+  `scripts/check_stable_signatures.py` fails on any change to any of them —
+  **distinguishing a break from a compatible widening**. A new parameter with
+  a default, added after the existing ones, is classified `COMPATIBLE` and
+  says so ("the snapshot being out of date, NOT a break of the contract"); a
+  rename, a reordering, a changed default, a changed annotation or a removal
+  is `BREAKING` and asks for a major version bump. Both still fail, because
+  the snapshot has to move either way; they fail with different messages, and
+  it is the message that carries the verdict.
 
 One clarification this round adopts explicitly, because the level docstrings
 are ambiguous about it: **between 0.4.0 and 1.0.0 a `stable` tag is announced
@@ -151,6 +158,51 @@ should take the level on the surrounding functions as speaking for them.
 | `cloud.multigpu.halo_unstructured.*` (6) | `evolving` | Five of the six existed before 0.4.0 untagged and were tagged this cycle; `exchange_traffic` is new. Tagging them *was* this release's step. | A cycle at `evolving` with the sharding topology doc stable. |
 | `fmi.tcp_bridge.FmuTcpBridge` | `evolving` | Publicly exported and well tested, but it is an **unauthenticated listening socket** with its own protocol, documented as trusted-clients-only and explicitly out of scope of MADD-ANO-015's fix. Freezing its constructor freezes the shape of that exposure. | A decision on whether it gets the same auth treatment as the ZMQ transports. That decision will change its signature. |
 
+## Three `stable` surfaces whose *behaviour* moved
+
+The round-3 audit diffed all 17 `stable` surfaces against `main`. Every
+**signature** change this release is additive, which is the right answer and is
+now enforced (see below). It also found three **behavioural** changes, which
+the signature guard cannot see at all:
+
+- `HeatNode(timestep=0.01, thermal_diffusivity=1.0)` constructed on `main` and
+  raises on 0.4.0. Reproduced: `ValueError: timestep 0.01 is unstable for this
+  rod: the Fourier number dt*alpha/dx^2 is 1, above the 0.5 limit of the
+  order-2 stencil`.
+- `HeatNode`'s default `initial_state()["temperature"][0]` moved from 100.0 to
+  0.02 — measured 0.0 on the shipped defaults today.
+- The `HeatNode` boundary-flux units changed.
+
+**Judgement: `stable` remains the right level for `HeatNode`, and these are not
+violations to fix.** Three reasons, in order of weight:
+
+1. `StabilityLevel.STABLE`'s own docstring and the report's gloss both say the
+   contract is locked **at v1.0.0**, not now. Between 0.4.0 and 1.0.0 the tag
+   is announced intent — the reading this document adopts explicitly above.
+2. All three are disclosed in the release notes, so the change is deliberate
+   and a reader upgrading is told.
+3. The first is a *refusal replacing silent wrongness*: the configuration it
+   now rejects diverged to NaN. Turning a wrong answer into an error is the
+   direction the deprecation policy prefers, and `scripts/check_heat_stability.py`
+   already gates it (138 constructions verified, 120 not statically evaluable
+   and explicitly **not** checked).
+
+**What this round does record is the gap they expose.** The signature guard
+reports `OK` on all three, because none of them touches a signature. The
+deprecation policy already lists behaviour, exception types, the contents of
+dict-shaped arguments, instance attributes and module constants as outside the
+guard — this is the first release where that exclusion cost something
+concrete, and the audit found the changes by diffing two trees by hand rather
+than by anything committed.
+
+So: before 1.0.0 the `stable` set needs a **behaviour** pin as well as a
+signature pin, or the tag promises a reader more than anything checks. That is
+not built here — a behaviour snapshot needs a decision about what to record
+(constructor acceptance? `initial_state()`? one step of `update()`?) and that
+decision is a round of its own. It is the single largest thing this freeze
+leaves open, and it is named here so the 0.5.0 round starts from it rather
+than rediscovering it.
+
 ## Still public, still untagged
 
 The report covers the modules this release worked on. It does not cover:
@@ -220,4 +272,7 @@ it were current is the specific mistake this round was told to avoid.
 - Whether `build_mapping` and `count_hlo_ops` should be public at all.
 - Module constants, instance attributes, exception types, behaviour, or the
   contents of dict-shaped arguments — none of which the signature guard
-  covers. See [the deprecation policy](deprecation_policy.md).
+  covers. See [the deprecation policy](deprecation_policy.md), and the section
+  above on the three `stable` surfaces whose behaviour moved this release.
+- What a behaviour pin for the `stable` set should record.  That is the
+  largest thing left open, and 0.5.0 should start from it.

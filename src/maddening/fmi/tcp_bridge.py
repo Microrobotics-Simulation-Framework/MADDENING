@@ -23,7 +23,14 @@ Requests (importer -> sidecar) and responses, JSON form::
     any failure                           -> {"ok": false, "error": "..."}
 
 ``values`` are flat numbers in value-reference order; an array variable
-contributes ``prod(shape)`` entries in row-major order.  Inputs are held
+contributes ``prod(shape)`` entries in row-major order.  A **non-finite**
+value is written as the quoted token ``"NaN"``, ``"Infinity"`` or
+``"-Infinity"`` rather than the bare token ``json.dumps`` would write,
+which is not JSON (``MADD-ANO-006``); a ``get`` reply from a diverged
+model is therefore a frame any conforming parser reads.  Both spellings
+are accepted on the way in, and the C wrapper reads either.  A ``set``
+carrying a non-finite value is refused by the sidecar whichever spelling
+it arrives in.  Inputs are held
 until the next ``step``; a communication step ``h`` must be a whole
 multiple of ``master_dt`` (it runs ``h / master_dt`` graph steps; anything
 else is refused, and the FMU advertises a fixed communication step).  A
@@ -102,6 +109,8 @@ from maddening.core.compliance.stability import stability
 from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
 from maddening.fmi.sidecar import FmuSidecar
+from maddening.serialization.json_codec import decode_non_finite
+from maddening.serialization.json_codec import dumps as _json_dumps
 
 _HEADER = struct.Struct(">I")
 _MAX_MESSAGE = 64 * 1024 * 1024
@@ -147,6 +156,30 @@ _MAX_CONNECTIONS = 16
 The bridge serves one FMU instance, so every connection beyond the first
 is refused anyway; the cap exists so that refusing them costs a bounded
 number of threads."""
+_HANDOVER_GRACE = 2.0
+"""Seconds a new connection waits for the instance slot before it is refused.
+
+The slot is released by the *departing* connection's own worker thread,
+in the ``finally`` that runs once its socket has reached EOF.  An
+importer that frees one instance and immediately instantiates another --
+which is exactly ``fmi3FreeInstance`` followed by
+``fmi3InstantiateCoSimulation`` -- therefore races that thread, and is
+refused a slot nobody holds whenever the scheduler reaches the new
+worker first.  Nothing on the server side can close that gap: the new
+connection can always arrive before the old worker is scheduled, so the
+wait has to be on the acquiring side.
+
+Measured with the two workers contending for one CPU, which is the
+shape of a CI runner: 21-28% of immediate reconnects were refused, and
+the gap between hang-up and a slot that could be claimed had a median of
+0.18s and a maximum of 0.97s.  Those numbers are an upper bound taken on
+a deliberately saturated box and should be read as one.  Two seconds is
+about four times the measured p95, well under the five-second worker
+join in :meth:`FmuTcpBridge.stop`, and still "refused, not blocked": a
+peer that really is a second instance gets its error reply, two seconds
+later, instead of hanging on a lock for ever."""
+_HANDOVER_POLL = 0.05
+"""Granularity of that wait, so ``stop()`` is not held up by the grace."""
 
 
 def _json_object(body: bytes, what: str) -> Any:
@@ -159,7 +192,11 @@ def _json_object(body: bytes, what: str) -> Any:
     of dying with a traceback.
     """
     try:
-        return json.loads(body.decode("utf-8"))
+        # ``json.loads`` accepts the bare ``NaN`` / ``Infinity`` tokens as
+        # well as the quoted ones this module writes, so a peer of either
+        # vintage is understood; ``decode_non_finite`` turns the quoted
+        # form into the float the bare form already produced.
+        return decode_non_finite(json.loads(body.decode("utf-8")))
     except RecursionError as exc:
         raise ValueError(f"{what} is nested too deeply") from exc
     except ValueError as exc:                  # JSONDecodeError, UnicodeDecodeError
@@ -226,7 +263,7 @@ def recv_frame(conn: socket.socket, *,
 
 def encode_binary(header: dict, raw: bytes) -> bytes:
     """Payload of a binary frame: ``[u32 BE header_len][header JSON][raw]``."""
-    hdr = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    hdr = _json_dumps(header, separators=(",", ":")).encode("utf-8")
     return _HEADER.pack(len(hdr)) + hdr + raw
 
 
@@ -261,7 +298,14 @@ def recv_message(conn: socket.socket, *,
 
 
 def send_message(conn: socket.socket, payload: dict) -> None:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    """Send one JSON frame.
+
+    A non-finite number in *payload* goes out as its quoted token, so the
+    frame is valid JSON whatever the peer parses it with
+    (``MADD-ANO-006``); :func:`_json_object` decodes it at the far end
+    and the FMU's C wrapper reads it with ``strtod`` past the quote.
+    """
+    body = _json_dumps(payload, separators=(",", ":")).encode("utf-8")
     conn.sendall(_HEADER.pack(len(body)) + body)
 
 
@@ -274,10 +318,16 @@ def send_binary(conn: socket.socket, header: dict, raw: bytes) -> None:
 
 
 def values_of(reply: dict) -> np.ndarray:
-    """The ``values`` of a ``get`` reply as float64, whichever form it took."""
+    """The ``values`` of a ``get`` reply as float64, whichever form it took.
+
+    A JSON reply's non-finite entries may be quoted tokens (what this
+    module writes since 0.4.0) or already floats (a bare token, which
+    ``json.loads`` parses itself); :func:`decode_non_finite` makes both
+    the same float before the array is built.
+    """
     if "raw" in reply:
         return np.frombuffer(reply["raw"], dtype="<f8").astype(np.float64)
-    return np.asarray(reply["values"], dtype=np.float64)
+    return np.asarray(decode_non_finite(reply["values"]), dtype=np.float64)
 
 
 def state_of(reply: dict) -> bytes:
@@ -504,6 +554,23 @@ class FmuTcpBridge:
                 self._live_conns.discard(conn)
                 self._live_workers.discard(threading.current_thread())
 
+    def _claim_instance(self) -> bool:
+        """Claim the single instance slot, waiting out a hand-over.
+
+        Returns ``True`` if this connection now holds the slot.  The wait
+        is bounded by :data:`_HANDOVER_GRACE` and abandoned early if the
+        bridge is stopping, so a refusal stays a refusal rather than
+        becoming a hang -- the distinction the "refused, not blocked"
+        contract is about.  See :data:`_HANDOVER_GRACE` for why waiting
+        at all is necessary.
+        """
+        deadline = time.monotonic() + _HANDOVER_GRACE
+        while True:
+            if self._busy.acquire(timeout=_HANDOVER_POLL):
+                return True
+            if self._stop.is_set() or time.monotonic() >= deadline:
+                return False
+
     def _serve_conn_inner(self, conn: socket.socket) -> None:
         with conn:
             if self._stop.is_set():
@@ -532,8 +599,10 @@ class FmuTcpBridge:
                         # A bridge holds ONE sidecar state; a second instance
                         # would silently share it.  Refuse instead of
                         # blocking -- but only now that this peer has proved
-                        # it has something to say.
-                        if not self._busy.acquire(blocking=False):
+                        # it has something to say, and only once a departing
+                        # connection has had ``_HANDOVER_GRACE`` to release
+                        # the slot it no longer holds.
+                        if not self._claim_instance():
                             try:
                                 send_message(conn, {"ok": False, "error":
                                                     "bridge already serves an FMU instance; "
@@ -595,7 +664,7 @@ class FmuTcpBridge:
                 conn.sendall(_HEADER.pack(_BINARY_FLAG | len(body)) + body)
                 return True
         else:
-            body = json.dumps(self._jsonify(reply), separators=(",", ":")).encode("utf-8")
+            body = _json_dumps(self._jsonify(reply), separators=(",", ":")).encode("utf-8")
             if len(body) <= _MAX_MESSAGE:
                 conn.sendall(_HEADER.pack(len(body)) + body)
                 return False

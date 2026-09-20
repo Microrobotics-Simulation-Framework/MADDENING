@@ -261,6 +261,105 @@ not reach them. Their `max_examples` argument defaults to 200; a call site
 that lowers it is subject to the same floor and the same
 comment-your-reason rule.
 
+### `assume` is a budget, and nothing tells you when you have spent it
+
+**Generate the valid shape instead of rejecting the invalid one.** Every
+`assume()` that fails, and every strategy `.filter()` that rejects, throws
+away a draw the test already paid to build — and says nothing about it. A
+test rejecting 5% of its draws and one rejecting 85% print the same green
+tick and the same `max_examples`.
+
+The one thing that ever says otherwise is `HealthCheck.filter_too_much`, and
+it is a sampling test on the first few dozen draws, so its edge is very
+soft. Measured against the constants in Hypothesis (50 rejected draws before
+10 accepted ones — unchanged across 6.165-6.168, and checked behaviourally on
+whatever version is installed), the chance that *one run* of a test trips it
+is:
+
+| filter rate | 40% | 55% | 64% | 70% | 80% | 85% | 90% |
+|---|---|---|---|---|---|---|---|
+| per-run risk | 2e-12 | 1e-6 | 4e-4 | 7e-3 | 23% | 61% | 93% |
+
+Which is how a test sits green for months and then goes red for whoever next
+narrows an unrelated strategy.
+`test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration`
+did exactly that: its first gate rejected 55% of draws on a clean tree, an
+inert-knob change moved it to 64%, and together with five more `assume`
+calls it failed CI with "9 inputs generated successfully, 50 filtered out".
+
+What a high rejection rate does **not** do on this Hypothesis version is
+silently shallow the search. The engine keeps drawing until it has
+`max_examples` *valid* examples and only gives up below ~1% valid; measured
+against a synthetic gate, a test at 98% rejection still ran its full 200
+examples, using 9068 draws to do it. So the cost is wall-clock and
+health-check fragility, not a number of examples that lies.
+
+**Measure it, do not guess.** `scripts/audit_property_rejection.py` prints
+the rate for every test in a run:
+
+```bash
+MADDENING_HYPOTHESIS_PROFILE=ci PYTHONPATH=src JAX_PLATFORMS=cpu \
+    python scripts/audit_property_rejection.py \
+        tests/property tests/verification/hypothesis
+```
+
+`--check` turns it into a gate: the run fails if any test exceeds
+`MAX_REJECTION`. That is what the `verify-hypothesis` CI job runs, wrapped
+around the suite it was already running, so the measurement costs nothing.
+
+**The pattern.** When a gate rejects anything worth mentioning, the fix is
+almost always a parameter on the strategy, defaulted so no other caller
+changes:
+
+```python
+# before: a third of every draw built a graph and threw it away
+recipe = draw(graph_recipes(require_coupling_group=True))
+assume(not any(g.subcycling for g in recipe.coupling_groups))
+
+# after: 0.0% rejected
+recipe = draw(graph_recipes(require_coupling_group=True,
+                            allow_subcycling=False))
+assert not any(g.subcycling for g in recipe.coupling_groups), (
+    "allow_subcycling=False must not produce a subcycled group")
+```
+
+Note the second half. **Promote the `assume` to an `assert`.** A generator
+that stops holding up its end then fails loudly instead of quietly going
+back to discarding half the search.
+
+Where the condition is an outcome rather than a shape — did the solve
+converge, did the fit find a gradient — it cannot be generated. Say so, and
+**put the measured residual in the test's docstring** so the next reader
+knows what that test's `max_examples` actually buys.
+
+**Never reach for `suppress_health_check=[HealthCheck.filter_too_much]`.**
+It makes the red go away and deletes the only signal anyone gets that the
+gate is getting worse — the test goes on spending most of its wall-clock on
+draws it throws away, and the next person to narrow that strategy has
+nothing to notice. Measure it and fix the generator, or measure it and
+record the residual; suppressing is neither.
+
+**A rejection rate is a property of the checkout path, not just the test.**
+Since the 6.16x line Hypothesis harvests the literal constants out of every
+*local* module and injects them into draws. Whether a module counts as local
+is decided by `is_local_module_file`, which excludes any path containing a
+`test` or `tests` component — so a git worktree under
+`MADDENING-wt/test/<branch>/` has the whole of `src/` classified as test
+files and injection silently **off**, while CI at
+`/home/runner/work/MADDENING/MADDENING` has it **on**. Measured on one
+commit: 0 local constants in such a worktree against 497 without the
+component, and the four `TestFIM` rates came out 3–10 points *lower* with
+injection on. The audit prints which side it ran on with every run; if you
+are comparing two measurements, check that line first.
+
+**Overruns are a different problem.** The audit reports them in their own
+column. An `overrun` is Hypothesis running out of entropy for a large draw,
+not the test rejecting an input; it answers to `HealthCheck.data_too_large`
+(20 overruns before 10 valid, a much tighter window) and it is fixed by
+drawing smaller structures, not by removing a gate. Every
+`hypothesis.extra.numpy.arrays` property in this tree overruns a few percent
+of its draws with no `assume` written anywhere in it.
+
 **Node battery** — finite outputs, structure, determinism, jit/eager
 agreement, finite gradients, in one call:
 

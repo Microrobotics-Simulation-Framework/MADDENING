@@ -10,7 +10,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, settings, assume, note
+from hypothesis import given, settings, note
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -257,11 +257,16 @@ class TestMissingEdgeTargets:
         with pytest.raises(RuntimeError, match="source field"):
             gm.compile()
 
-    @given(ghost_name=node_name_st)
+    # The one name that is not a ghost is the node the test adds.  Mapped
+    # aside rather than assumed away: at 0.0% measured the ``assume`` cost
+    # nothing today, but a gate that only bites on an unlucky draw is a gate
+    # whose cost nobody can see, and ``node_name_st`` can produce "b".
+    @given(ghost_name=node_name_st.map(
+        lambda n: n + "_ghost" if n == "b" else n))
     @settings(max_examples=EXAMPLES_CHEAP, deadline=None)
     def test_missing_target_any_name(self, ghost_name):
         """Any non-existent target should raise."""
-        assume(ghost_name != "b")
+        assert ghost_name != "b", "the drawn name must not be the real node"
         gm = GraphManager()
         gm.add_node(BallNode(name="b", timestep=0.01))
         gm.add_edge("b", ghost_name, "position", "table_position")

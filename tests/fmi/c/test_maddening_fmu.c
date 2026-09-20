@@ -148,6 +148,57 @@ static void test_parse_values(void) {
     free_instance(in);
 }
 
+/* -------------------------------------------- parse_values, non-finite
+ *
+ * MADD-ANO-006: the bridge writes a non-finite value as a *quoted* token,
+ * because the bare tokens json.dumps used to emit are not JSON.  C99
+ * strtod parses the token itself; the quote is what it cannot step over.
+ * Both spellings must read, and a quoted field must be properly closed.
+ */
+
+static void test_parse_values_non_finite(void) {
+    Instance *in = fake_instance(SOCK_INVALID);
+    double out[4];
+
+    /* the quoted form the bridge writes since 0.4.0 */
+    in->resp = strdup("{\"ok\":true,\"values\":[\"NaN\",\"Infinity\",\"-Infinity\",2.5]}");
+    CHECK(parse_values(in, out, 4) == fmi3OK);
+    CHECK(isnan(out[0]));
+    CHECK(isinf(out[1]) && out[1] > 0);
+    CHECK(isinf(out[2]) && out[2] < 0);
+    CHECK(out[3] == 2.5);
+    free(in->resp);
+
+    /* the bare form a pre-0.4.0 bridge writes: still accepted */
+    in->resp = strdup("{\"ok\":true,\"values\":[NaN,Infinity,-Infinity,2.5]}");
+    CHECK(parse_values(in, out, 4) == fmi3OK);
+    CHECK(isnan(out[0]));
+    CHECK(isinf(out[1]) && out[1] > 0);
+    CHECK(isinf(out[2]) && out[2] < 0);
+    CHECK(out[3] == 2.5);
+    free(in->resp);
+
+    /* a quoted ordinary number reads too -- the rule is about quotes,
+     * not about which tokens are inside them */
+    in->resp = strdup("{\"ok\":true,\"values\":[\"1.5\", \"-2e3\"]}");
+    CHECK(parse_values(in, out, 2) == fmi3OK);
+    CHECK(out[0] == 1.5 && out[1] == -2000.0);
+    free(in->resp);
+
+    /* an unterminated quoted field is malformed, not silently truncated:
+     * without the closing-quote check "1e5xyz" would pass as 1e5 */
+    in->resp = strdup("{\"ok\":true,\"values\":[\"1e5xyz\"]}");
+    CHECK(parse_values(in, out, 1) == fmi3Error);
+    free(in->resp);
+
+    /* a bare quote with nothing parseable after it is still malformed */
+    in->resp = strdup("{\"ok\":true,\"values\":[\"\"]}");
+    CHECK(parse_values(in, out, 1) == fmi3Error);
+    free(in->resp); in->resp = NULL;
+
+    free_instance(in);
+}
+
 /* ------------------------------------------------------ read_endpoint */
 
 static void test_read_endpoint(void) {
@@ -864,6 +915,7 @@ static void test_misc_entry_points(void) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     test_parse_values();
+    test_parse_values_non_finite();
     test_read_endpoint();
     test_bridge_call_paths();
     test_get_set_step();

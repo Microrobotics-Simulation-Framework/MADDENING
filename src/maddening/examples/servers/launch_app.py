@@ -106,7 +106,12 @@ def main():
     threading.Thread(target=open_browser, daemon=True).start()
 
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    # Bound to loopback: every line this script prints points at
+    # http://localhost:8000, and a loopback bind is the one the API
+    # serves without a bearer token.  Binding 0.0.0.0 here (as this
+    # used to) published a graph-mutating API on the LAN.  To reach
+    # it from another machine: ssh -L 8000:127.0.0.1:8000 <host>.
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
 
 
 if __name__ == "__main__":

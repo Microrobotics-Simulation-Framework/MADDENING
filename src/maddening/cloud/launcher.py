@@ -127,7 +127,13 @@ class JobConfig:
     setup: str = ""    # Shell commands to run during VM setup (pip install, etc.)
     run: str = ""      # Shell commands to run as the job
     workdir: str = ""  # Local directory to sync to VM (SkyPilot workdir)
-    ports: list[int] = field(default_factory=lambda: [8000])  # Ports to expose via RunPod NAT
+    # Ports to open in the provider's firewall / NAT.  Empty by default:
+    # 8000 is the API, and listing it here is what makes a launched job's
+    # API reachable from the internet.  Reach it over the SSH tunnel
+    # (``ssh -L 8000:127.0.0.1:8000``) that ``CloudJob.ssh_run`` already
+    # implies, or put ``ports: [8000]`` in your own job config and set
+    # MADDENING_API_TOKEN.
+    ports: list[int] = field(default_factory=list)
     envs: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -725,7 +731,10 @@ class CloudLauncher:
                 f"docker:{job_config.container_image}"
                 if job_config.container_image else None
             ),
-            ports=job_config.ports or [8000],
+            # ``or [8000]`` used to live here and silently undid an
+            # empty ``ports``: the default is now empty and must stay
+            # empty all the way to the ingress rule.
+            ports=job_config.ports or None,
         )
         task.set_resources(resources)
 

@@ -14,6 +14,8 @@ Usage:
 import argparse
 import json
 import os
+import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -55,6 +57,14 @@ INSTALL_CMD = (
     ")"
 )
 
+
+# The VM's API binds 0.0.0.0, which is not loopback, so it requires a
+# bearer token on every route.  This script chooses the token, passes it
+# to the remote process in MADDENING_API_TOKEN, and presents it on every
+# request -- there is no TLS, so treat the endpoint as a demo on a
+# throwaway VM rather than a deployment pattern.
+API_TOKEN = secrets.token_urlsafe(32)
+
 SERVER_SCRIPT = r"""
 import jax
 print(f"JAX devices: {jax.devices()}")
@@ -91,22 +101,38 @@ server = SimulationServer(
         "SpringDamperNode": SpringDamperNode,
     },
     graph_manager=gm,
+    # The bind address has to be handed to the server: it turns on the
+    # bearer token, and the app cannot see the socket uvicorn opens.
+    bind_host="0.0.0.0",
 )
 print("Starting server on 0.0.0.0:8000...")
 uvicorn.run(server.create_app(), host="0.0.0.0", port=8000, log_level="info")
 """
 
 
+def _request(base_url: str, path: str, method: str) -> urllib.request.Request:
+    """A request carrying the bearer token the VM's API demands."""
+    return urllib.request.Request(
+        f"{base_url}{path}", method=method,
+        headers={"Authorization": f"Bearer {API_TOKEN}"},
+    )
+
+
 def wait_for_server(base_url: str, timeout: float = 120) -> bool:
     """Poll the server until it responds or timeout."""
-    url = f"{base_url}/graph"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(
+                _request(base_url, "/graph", "GET"), timeout=5,
+            ) as resp:
                 if resp.status == 200:
                     return True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                # A live server refusing the token is not "not up yet".
+                print("  ERROR: server rejected the bearer token (401)")
+                return False
         except (urllib.error.URLError, OSError, TimeoutError):
             pass
         time.sleep(3)
@@ -114,14 +140,12 @@ def wait_for_server(base_url: str, timeout: float = 120) -> bool:
 
 
 def http_get(base_url: str, path: str) -> dict:
-    req = urllib.request.Request(f"{base_url}{path}", method="GET")
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(_request(base_url, path, "GET"), timeout=10) as resp:
         return json.loads(resp.read())
 
 
 def http_post(base_url: str, path: str) -> dict:
-    req = urllib.request.Request(f"{base_url}{path}", method="POST")
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(_request(base_url, path, "POST"), timeout=10) as resp:
         return json.loads(resp.read())
 
 
@@ -154,6 +178,10 @@ def main():
         # We do the real work via SSH to bypass Ray GPU isolation.
         run="echo 'VM ready for SSH'; sleep 7200",
         workdir=project_root,
+        # JobConfig.ports is empty by default so a launch does not open
+        # the API in the provider's firewall.  This demo needs the public
+        # NAT mapping, so it asks for it explicitly.
+        ports=[8000],
     )
 
     launcher = CloudLauncher()
@@ -220,10 +248,11 @@ def main():
     print()
     print("Phase 4: Starting MADDENING server...")
     # Write the server script to the VM, then run it in background
-    import shlex
     escaped = shlex.quote(SERVER_SCRIPT)
     job.ssh_run(f"echo {escaped} > /tmp/maddening_server.py", check=True)
-    job.ssh_run_background(f"{PYTHON} /tmp/maddening_server.py")
+    job.ssh_run_background(
+        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} {PYTHON} /tmp/maddening_server.py"
+    )
     print("  Server started in background")
 
     # --- Phase 5: Discover endpoint and test ---

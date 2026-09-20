@@ -849,6 +849,10 @@ class TestPrecisionLimitedRank:
     # -- at the same number of draws the ``assume`` form already cost, with
     # none of them thrown away.  See
     # docs/developer_guide/testing_standards.md on rejection budgets.
+    # Re-measured at 57.5% (92 warned of 160 draws) after the cutoff gained
+    # its ``sqrt(m)`` term and this generator's ``m`` cap came off, which
+    # changed both inputs to that 51.5%: still about half, so the doubling
+    # still buys the ~80 warned cases it was sized for.
     @settings(max_examples=2 * EXAMPLES_COSTLY, deadline=None)
     @given(
         n=st.integers(min_value=2, max_value=6),

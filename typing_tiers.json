@@ -21,6 +21,7 @@
     "tier1": {
       "description": "Annotated to zero: the packages refactors move through.",
       "max_errors": {
+        "__init__.py": 0,
         "cloud": 0,
         "compliance": 0,
         "core": 0,

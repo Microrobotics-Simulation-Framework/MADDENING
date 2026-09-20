@@ -241,6 +241,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Three more gates that could not fail**: the pyright tiers now cover
+  `maddening/__init__.py`, the SOUP drift classifier no longer calls a lost evidence
+  row a safe regenerate, and `check_transforms` counts only confirmed references
 - **Audit fixes on the serialisation surfaces** (`MADD-ANO-010`): an FMU or node named
   `NaN`/`Infinity` is refused where you set the name, an unencodable FMI reply is an error
   reply rather than a dead worker thread, and `dumps_encoded()` writes `to_dict()` output

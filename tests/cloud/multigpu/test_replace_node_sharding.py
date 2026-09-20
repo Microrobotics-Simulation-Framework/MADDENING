@@ -91,6 +91,7 @@ def test_replace_sharded_with_unsharded():
     for _ in range(5):
         gm.step()
     T_before = float(jnp.mean(gm._state["heat"]["temperature"]))
+    spread_before = float(jnp.ptp(gm._state["heat"]["temperature"]))
 
     # Swap back to plain HeatNode.
     plain = _make_heat("heat")
@@ -101,7 +102,14 @@ def test_replace_sharded_with_unsharded():
 
     T_after = float(jnp.mean(gm._state["heat"]["temperature"]))
     assert jnp.isfinite(T_after)
-    assert T_after < T_before
+    # The unsharded node is running with no boundary inputs at all, which
+    # since 0.4.0 means a zero-flux end face rather than two frozen end
+    # cells, so it conserves total heat exactly -- the mean cannot fall
+    # and this used to assert that it did, on a leak (MADD-ANO-007).
+    # What diffusion does here is flatten the profile, so that is what
+    # the downgrade path has to keep doing.
+    assert T_after == pytest.approx(T_before, rel=1e-3)
+    assert float(jnp.ptp(gm._state["heat"]["temperature"])) < spread_before
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")

@@ -21,7 +21,14 @@ _CHILD = textwrap.dedent("""
     def factory():
         gm = GraphManager()
         for i in range(3):
-            gm.add_node(HeatNode(f"h{i}", 1e-4, n_cells=257, thermal_diffusivity=0.1,
+            # timestep 1e-5, not the 1e-4 this used to pass: at 257 cells
+            # and alpha=0.1 that is a Fourier number of 0.66, which the
+            # 4th-order stencil's 5/16 limit refuses since 0.4.0.  This
+            # test measures compile *time* and never looks at a value, so
+            # only the timestep moves -- cell count, stencil order and
+            # graph shape, which are what set the compile cost, are as
+            # they were.
+            gm.add_node(HeatNode(f"h{i}", 1e-5, n_cells=257, thermal_diffusivity=0.1,
                                  stencil_order=4))
         gm.add_edge("h0", "h1", "temperature", "left_temperature", transform="extract_last")
         gm.add_edge("h1", "h2", "temperature", "left_temperature", transform="extract_last")

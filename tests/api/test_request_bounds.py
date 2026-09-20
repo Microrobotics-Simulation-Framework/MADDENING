@@ -141,10 +141,15 @@ class TestAddNodeIsBounded:
         assert r.status_code == 422
 
     def test_ordinary_integer_and_float_params_still_work(self):
+        # thermal_diffusivity is chosen to keep dt*alpha/dx^2 under the
+        # stencil_order=4 Fourier limit of 5/16; above it HeatNode's own
+        # constructor refuses the node and the server correctly reports a
+        # 400, which would test the stability guard rather than the
+        # request bounds this class is about.
         c = _client()
         r = c.post("/graph/nodes", json={
             "type": "HeatNode", "name": "h", "timestep": DT,
-            "params": {"n_cells": 64, "thermal_diffusivity": 0.01,
+            "params": {"n_cells": 64, "thermal_diffusivity": 0.001,
                        "stencil_order": 4},
         })
         assert r.status_code == 201, r.text
@@ -167,12 +172,29 @@ class TestAddNodeIsBounded:
 
     def test_a_large_float_is_not_treated_as_a_dimension(self):
         # A float is a physical constant; only integers become shapes.
+        # ``length`` rather than ``thermal_diffusivity``, because a huge
+        # diffusivity is a genuinely unstable rod and HeatNode's
+        # constructor now refuses it with a 400 -- a different rejection
+        # from the 422 this class is about, and one that would let the
+        # test pass for the wrong reason if the bound ever went away.
+        c = _client()
+        r = c.post("/graph/nodes", json={
+            "type": "HeatNode", "name": "h", "timestep": DT,
+            "params": {"n_cells": 8, "length": 1e12},
+        })
+        assert r.status_code == 201, r.text
+
+    def test_a_large_float_that_is_physically_unstable_is_a_400(self):
+        # The companion to the above: an oversized *float* is not a
+        # dimension error (422), but a thermal_diffusivity that puts the
+        # rod past its Fourier limit is refused by the node itself (400).
         c = _client()
         r = c.post("/graph/nodes", json={
             "type": "HeatNode", "name": "h", "timestep": DT,
             "params": {"n_cells": 8, "thermal_diffusivity": 1e12},
         })
-        assert r.status_code == 201, r.text
+        assert r.status_code == 400, r.text
+        assert "Fourier number" in r.json()["detail"]
 
     def test_dimensions_that_multiply_are_caught_by_the_state_cap(self, monkeypatch):
         # Each factor is under the per-integer bound; their product is not.

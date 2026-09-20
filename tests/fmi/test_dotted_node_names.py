@@ -79,8 +79,12 @@ def test_a_node_name_containing_a_dot_routes_fmu_inputs_to_that_node(node_name):
     assert set_reply == {"ok": True}
     assert step_reply["ok"] is True
     assert get_reply["ok"] is True, get_reply
-    # The input arrived: the driven cell is at 500, not at its initial zero.
-    assert state[0] == pytest.approx(500.0)
+    # The input arrived: the driven cell has moved off its initial zero
+    # towards the 500 imposed at the rod end.  It does not reach 500 --
+    # the cell centre is half a cell inside the boundary and is advanced
+    # by the stencil, not overwritten (MADD-ANO-007).
+    assert 0.0 < float(state[0]) < 500.0
+    assert float(state[0]) > float(state[1])
     np.testing.assert_allclose(state, reference, rtol=0, atol=0)
     np.testing.assert_allclose(np.asarray(get_reply["values"]), reference,
                                rtol=1e-6, atol=1e-6)

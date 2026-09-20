@@ -7,11 +7,19 @@ order as the unsharded reference, on multiple shard counts including
 the thin-shard regime (8 cells per shard on a 16-device mesh).
 
 For ``T(x,0) = sin(pi x/L)`` with Dirichlet ``T(0,t)=T(L,t)=0`` the
-sharded path uses ``boundary="zero"`` for halo exchange -- the global
-ghost cells are filled with zero, which is exactly the Dirichlet BC the
-stencil expects.  This is *more* accurate than the unsharded path,
-which overwrites the boundary cells (introducing O(dx) error -- see
-MADD-ANO-002 in the analytical test).
+sharded path uses ``boundary="zero"`` for halo exchange: the global
+ghost cells are filled with zero.
+
+That is not quite the closure the unsharded path uses.  Since 0.4.0
+``update`` imposes the datum at the rod *end* through the ghost value
+``2*T_b - T[0]``, which for ``T_b = 0`` is ``-T[0]``, not ``0``
+(MADD-ANO-007 -- the analytical test used to cite MADD-ANO-002 here,
+which is about CFL enforcement).  A zero ghost is instead the datum
+imposed at the ghost cell centre, half a cell outside the rod.  Both
+converge; they are not the same scheme at the global boundary, which
+is what ``test_sharded_close_to_unsharded`` bounds rather than
+asserting equality.  Per-shard Dirichlet data is a coupling-system
+job, as ``update_padded`` documents.
 """
 
 from __future__ import annotations
@@ -136,11 +144,12 @@ def test_sharded_4th_order():
 def test_sharded_close_to_unsharded():
     """Sharded "zero" boundary ≈ unsharded Dirichlet BCs.
 
-    They are not bit-exact because the unsharded path overwrites
-    boundary cells (the MADD-ANO-002 boundary overwrite), whereas the
-    sharded path lets the boundary cell evolve naturally with a zero
-    ghost.  Both converge to the analytic solution; the difference is
-    bounded by the boundary-overwrite error, ~1.5% at n=64.
+    They are not bit-exact because the two paths place the Dirichlet
+    datum differently at the *global* boundary: the unsharded path puts
+    it on the rod end via the ghost ``2*T_b - T[0]``, the sharded path
+    fills the global ghost with ``T_b`` itself.  Both converge to the
+    analytic solution; the difference is half a cell of boundary
+    placement, and stays inside 3% at n=64.
     """
     node, dx, dt, x = _build(n_cells=64)
     mesh = create_device_mesh(shape=(4,))

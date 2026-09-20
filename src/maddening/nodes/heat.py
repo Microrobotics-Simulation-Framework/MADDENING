@@ -14,6 +14,22 @@ Supports:
   (``stencil_order=2`` or ``stencil_order=4``)
 - Non-uniform grids via ``grid_points`` parameter
 - USD geometry source via ``geometry_source`` attribute
+
+Grid and boundary convention
+----------------------------
+The grid is **cell centred**: cell ``i`` sits at ``x_i = (i + 1/2) dx``
+with ``dx = length / n_cells``, so the rod ends ``x = 0`` and ``x = L``
+lie half a cell outside the first and last cell centre.  The Dirichlet
+data ``left_temperature`` / ``right_temperature`` is the temperature
+**at those rod ends**, which is what ``boundary_input_spec`` has always
+documented, and it is imposed through a ghost cell rather than by
+overwriting the end cells.
+
+Before 0.4.0 the node instead wrote the Dirichlet value straight into
+the first and last cell, which placed it half a cell inside the rod and
+cost a full order of accuracy (MADD-ANO-007), and the 4th-order
+stencil's ghosts were built at the wrong positions (MADD-ANO-008).
+Both are fixed here; see ``docs/algorithm_guide/nodes/heat_node.md``.
 """
 
 import jax.numpy as jnp
@@ -29,9 +45,123 @@ from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 
 
+#: Largest Fourier number ``dt * alpha / dx**2`` at which the explicit
+#: update is stable, per ``stencil_order``.
+#:
+#: Both entries are the von Neumann / spectral bound of the *whole*
+#: discrete operator, boundary rows included, not of the interior
+#: symbol alone -- the boundary closure is what sets the 4th-order
+#: figure.
+#:
+#: * ``2`` -> exactly 1/2.  The mirror ghost ``2*T_b - T[0]`` is exact
+#:   on the eigenvectors ``sin(m pi x / L)`` of the cell-centred
+#:   operator, so the closure adds nothing to the interior spectrum and
+#:   the classical bound survives untouched.  Verified numerically for
+#:   n = 5..320.
+#: * ``4`` -> 5/16 = 0.3125, conservative.  The 5-point interior symbol
+#:   alone would allow 3/8, but the cubic ghost closure that makes the
+#:   stencil actually 4th-order accurate pushes the spectral radius up.
+#:   The sharp bound depends on ``n_cells``: 0.3169 at n = 5, rising
+#:   monotonically to 0.3249 as n -> infinity.  5/16 sits below all of
+#:   them, so one number is safe at every resolution the node accepts.
+#:
+#: To re-derive either figure: form the operator matrix column by column
+#: (one ``_compute_laplacian`` call per unit vector, with T_b = 0) and
+#: bisect on ``max|1 + Fo*lambda| <= 1`` over its eigenvalues.
+#: ``tests/verification/test_mms_order.py`` pins both against runs of the
+#: node itself, on either side of the bound.
+MAX_FOURIER_NUMBER = {2: 0.5, 4: 5.0 / 16.0}
+
+
 def _laplacian_2nd_order_uniform(T_padded, dx):
     """2nd-order central difference Laplacian on a uniform grid."""
     return (T_padded[2:] - 2.0 * T_padded[1:-1] + T_padded[:-2]) / (dx * dx)
+
+
+def _dirichlet_ghosts_2nd_order(T, T_boundary):
+    """The single ghost value that puts ``T_boundary`` on the rod end.
+
+    The ghost cell centre is at ``-dx/2`` and the boundary at ``x = 0``
+    is the midpoint between it and the first cell centre, so linear
+    reconstruction gives ``T_ghost = 2*T_b - T[0]``.
+
+    This is the conservative (finite-volume) closure: the resulting
+    first row is ``[(T[1] - T[0])/dx - (T[0] - T_b)/(dx/2)] / dx``, a
+    flux difference across the cell, and the boundary flux is the one
+    evaluated *at the rod end*.  Its local truncation error is O(1) --
+    the face gradient is only 1st-order accurate at ``x = 0`` -- but
+    the conservative form recovers a globally 2nd-order scheme, which
+    is the standard supraconvergence result for cell-centred grids and
+    is what ``tests/verification/test_mms_order.py`` measures (2.000).
+
+    Parameters
+    ----------
+    T : array, shape (n,)
+        Temperature field, ordered from the boundary inwards.
+    T_boundary : scalar
+        Dirichlet datum at the rod end.
+
+    Returns
+    -------
+    scalar
+        The ghost value at ``-dx/2``.
+    """
+    return 2.0 * T_boundary - T[0]
+
+
+def _dirichlet_ghosts_4th_order(T, T_boundary):
+    """The two ghost values the 5-point stencil reads, from the rod end.
+
+    Both are the cubic through ``(0, T_b)`` and the three nearest cell
+    centres ``(dx/2, T[0])``, ``(3dx/2, T[1])``, ``(5dx/2, T[2])``,
+    evaluated at the ghost cell centres ``-dx/2`` and ``-3dx/2``::
+
+        T(-dx/2)  = (16*T_b - 15*T[0] +  5*T[1] -    T[2]) / 5
+        T(-3dx/2) = (64*T_b - 90*T[0] + 40*T[1] -  9*T[2]) / 5
+
+    A cubic is the lowest degree that works.  Its ghost error is
+    O(dx^4); the 5-point stencil divides ghost errors by ``12 dx^2``,
+    so a lower-degree extrapolation leaves a truncation error at the
+    first interior cells that the conservative form can only partly
+    absorb.  Measured on three manufactured solutions, linear
+    extrapolation caps the scheme at 2.00 and quadratic at 2.99, while
+    this cubic reaches 3.95-3.98.  A quartic is accurate enough but
+    spectrally unstable -- its Fourier bound is 0.273 and it diverges
+    on the same ladder.
+
+    The linear case is worth a sentence of its own, because it is how
+    this docstring was wrong on its first draft.  On a manufactured
+    solution whose curvature vanishes at the rod ends -- which the one
+    in ``tests/verification/test_mms_order.py`` did until 0.4.0 --
+    linear extrapolation measures 4.08 and looks correct.  The
+    boundary rows' error term is proportional to ``u''`` at the end,
+    so a flat-ended profile cannot see it.  Any re-derivation of this
+    choice has to use a profile curved at both ends.
+
+    One consequence worth recording: under this closure the 5-point
+    and 3-point forms are *algebraically identical* at cells 0 and
+    n-1, both reducing to ``(16*T_b - 25*T[0] + 10*T[1] - T[2]) / (5
+    dx^2)``.  The 2nd-order fallback in
+    :func:`_laplacian_4th_order_uniform` therefore costs nothing at
+    all any more; it used to cost an order.
+
+    Parameters
+    ----------
+    T : array, shape (n,)
+        Temperature field, ordered from the boundary inwards; at least
+        three cells are read.
+    T_boundary : scalar
+        Dirichlet datum at the rod end.
+
+    Returns
+    -------
+    tuple of scalar
+        ``(ghost at -3dx/2, ghost at -dx/2)`` -- outermost first, so the
+        pair can be concatenated onto the field directly.
+    """
+    near = (16.0 * T_boundary - 15.0 * T[0] + 5.0 * T[1] - T[2]) / 5.0
+    far = (64.0 * T_boundary - 90.0 * T[0] + 40.0 * T[1] - 9.0 * T[2]) / 5.0
+    return far, near
 
 
 def _laplacian_4th_order_pure(T_padded, dx):
@@ -159,38 +289,48 @@ class HeatNode(SimulationNode):
             temporal=1.0,
             notes=(
                 "Central differences of order ``stencil_order`` in space, "
-                "forward Euler in time.  The spatial claim holds for the "
-                "boundary convention the code implements -- Dirichlet data "
-                "sampled at the first and last *cell centre* (x = dx/2 and "
-                "L - dx/2), not at the rod ends; supplying T(0) and T(L) "
-                "instead measures order 1 (MADD-ANO-007)."
+                "forward Euler in time.  Dirichlet data is the temperature "
+                "at the rod ends (x = 0 and x = L) and is imposed through "
+                "the ghost cells, so the claim holds for the boundary "
+                "convention boundary_input_spec documents.  Measured by the "
+                "Method of Manufactured Solutions: 2.000 for stencil_order=2 "
+                "over a 10/20/40/80/160 ladder (MADD-VER-005) and 3.957 for "
+                "stencil_order=4 over the same ladder."
             ),
         ),
         assumptions=(
             "Constant thermal diffusivity (no temperature dependence)",
             "1D geometry (rod)",
-            "Dirichlet boundary conditions at both ends",
+            "Dirichlet boundary conditions at both ends, imposed at the rod ends x=0 and x=L",
         ),
         limitations=(
-            "CFL stability limit: dt < dx^2 / (2*alpha) -- violating this produces silently incorrect results (MADD-ANO-002)",
+            "Stability limit depends on the stencil: Fourier number dt*alpha/dx^2 < 1/2 for stencil_order=2, < 5/16 for stencil_order=4 (MADD-ANO-009).  The constructor rejects a configuration above its limit; a dt or alpha supplied later to update() is not checked (MADD-ANO-002)",
             "1st-order in time -- temporal accuracy is O(dt)",
             "No convection or radiation terms",
-            "4th-order stencil falls back to 2nd-order at boundary cells",
+            "Non-uniform grids are 2nd-order only; stencil_order=4 requires a uniform grid",
         ),
         validated_regimes=(
             ValidatedRegime("thermal_diffusivity", 1e-6, 1.0, "m^2/s"),
             ValidatedRegime("n_cells", 4, 1000, notes="Convergence verified up to 1000 cells"),
-            ValidatedRegime("CFL", 0.0, 0.5, notes="dt * alpha / dx^2 must be < 0.5 for stability"),
+            ValidatedRegime(
+                "CFL", 0.0, 0.5,
+                notes=(
+                    "dt * alpha / dx^2 < 1/2 for the default stencil_order=2 "
+                    "(exact spectral bound).  For stencil_order=4 the limit "
+                    "is 5/16 = 0.3125, not 1/2 -- see MADD-ANO-009 and "
+                    "maddening.nodes.heat.MAX_FOURIER_NUMBER"
+                ),
+            ),
         ),
         hazard_hints=(
-            "CFL stability not enforced at runtime -- unstable timesteps silently produce incorrect results (MADD-ANO-002)",
+            "CFL is checked only against the constructor's timestep, thermal_diffusivity and length; a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
             "No runtime validation of thermal_diffusivity > 0",
         ),
         implementation_map={
-            "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode.update",
+            "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode._compute_laplacian",
             "S (source term)": "maddening.nodes.heat.HeatNode.update",
             "Time integration (dT/dt)": "maddening.nodes.heat.HeatNode.update",
-            "Boundary conditions": "maddening.nodes.heat.HeatNode.update",
+            "Boundary conditions": "maddening.nodes.heat._dirichlet_ghosts_2nd_order",
         },
     )
 
@@ -215,6 +355,52 @@ class HeatNode(SimulationNode):
                 "4th-order stencil requires at least 5 cells, "
                 f"got n_cells={n_cells}"
             )
+
+        # Reject a configuration that is unconditionally unstable.  The
+        # explicit scheme above its Fourier limit does not degrade, it
+        # diverges to NaN in tens of steps with no warning, and the
+        # limit for stencil_order=4 (5/16) is not the one anybody would
+        # guess from the literature's 1/2 -- that combination is
+        # MADD-ANO-009 and it is why this is an error rather than a
+        # documented caveat.  See MAX_FOURIER_NUMBER.
+        #
+        # This covers the constructor's own numbers only.  ``dt`` passed
+        # to ``update()``, and ``thermal_diffusivity`` / ``length``
+        # injected by a calibration run (both are trainable), bypass it,
+        # and cannot be checked without a host callback inside a traced
+        # step.  MADD-ANO-002 stays open for that reason.
+        try:
+            concrete = (
+                float(timestep), float(length), float(thermal_diffusivity),
+            )
+        except (TypeError, ValueError):
+            # A traced or otherwise non-concrete constructor argument.
+            # Skip rather than fail: the check is a convenience, and
+            # refusing to build the node would be worse than not
+            # checking it.
+            concrete = None
+        if (
+            grid_points is None
+            and concrete is not None
+            and n_cells > 0
+            and all(v > 0 for v in concrete)
+        ):
+            timestep_f, length_f, alpha_f = concrete
+            dx = length_f / n_cells
+            fourier = timestep_f * alpha_f / (dx * dx)
+            limit = MAX_FOURIER_NUMBER[stencil_order]
+            if fourier > limit:
+                raise ValueError(
+                    f"timestep {timestep!r} is unstable for this rod: the "
+                    f"Fourier number dt*alpha/dx^2 is {fourier:.4g}, above "
+                    f"the {limit:g} limit of the order-{stencil_order} "
+                    f"stencil (dx = length/n_cells = {dx:.6g}, alpha = "
+                    f"{thermal_diffusivity!r}).  The explicit update "
+                    f"diverges to NaN there rather than losing accuracy "
+                    f"gracefully.  Use timestep <= "
+                    f"{limit * dx * dx / alpha_f:.6g}, or more "
+                    f"cells, or a smaller thermal_diffusivity."
+                )
 
         # Process grid_points: convert to list for serialisation
         gp_list = None
@@ -325,13 +511,14 @@ class HeatNode(SimulationNode):
 
         Notes
         -----
-        The ``stencil_order=4`` claim is **not met**: the Method of
-        Manufactured Solutions measures order 1.0 for it, because the
-        two left/right ghost cells are populated one cell out of
-        position.  The claim is left at 4 deliberately -- it is what
-        the scheme is meant to deliver, and moving it to 1 would hide
-        the defect rather than record it.  See MADD-ANO-008 and the
-        strict xfail in ``tests/verification/test_mms_order.py``.
+        Both claims are met as of 0.4.0, measured by the Method of
+        Manufactured Solutions in
+        ``tests/verification/test_mms_order.py``: 2.000 for
+        ``stencil_order=2`` and 3.957 for ``stencil_order=4``, over a
+        10/20/40/80/160 ladder with the Dirichlet data supplied at the
+        rod ends.  Before 0.4.0 the 4th-order stencil measured 0.954
+        (MADD-ANO-008) and the documented boundary convention measured
+        1.001 (MADD-ANO-007).
         """
         return DiscretizationOrder(
             spatial=float(self.params.get("stencil_order", 2)),
@@ -404,18 +591,25 @@ class HeatNode(SimulationNode):
         if self._is_nonuniform:
             # Non-uniform grid: always use 2nd-order variable-dx stencil
             x = self._grid_x
-            # Ghost coordinates: extrapolate linearly
+            # Ghost coordinates: reflect the first/last cell centre
+            # through the end face.  The face sits midway between the
+            # ghost and the first cell, at x[0] - (x[1] - x[0])/2, which
+            # for the uniform grid is exactly x = 0.
             x_left = 2.0 * x[0] - x[1]
             x_right = 2.0 * x[-1] - x[-2]
             x_padded = jnp.concatenate([
-                jnp.array([x_left], dtype=jnp.float32),
+                jnp.array([x_left], dtype=x.dtype),
                 x,
-                jnp.array([x_right], dtype=jnp.float32),
+                jnp.array([x_right], dtype=x.dtype),
             ])
+            # Same Dirichlet closure as the uniform path: the datum is
+            # the value at the end face, not at the first cell centre.
             T_padded = jnp.concatenate([
-                jnp.array([T_left], dtype=jnp.float32),
+                jnp.array([_dirichlet_ghosts_2nd_order(T, T_left)],
+                          dtype=T.dtype),
                 T,
-                jnp.array([T_right], dtype=jnp.float32),
+                jnp.array([_dirichlet_ghosts_2nd_order(T[::-1], T_right)],
+                          dtype=T.dtype),
             ])
             return _laplacian_nonuniform(T_padded, x_padded)
 
@@ -425,27 +619,35 @@ class HeatNode(SimulationNode):
         stencil_order = self.params.get("stencil_order", 2)
 
         if stencil_order == 4:
-            # Need 2 ghost cells on each side for the 5-point stencil.
-            # Left ghosts: reflect T through the Dirichlet BC
-            # ghost[-2] = 2*T_left - T[1], ghost[-1] = T_left
-            # (linear extrapolation from the BC)
-            ghost_left_2 = 2.0 * T_left - T[1]
-            ghost_left_1 = T_left
-            ghost_right_1 = T_right
-            ghost_right_2 = 2.0 * T_right - T[-2]
+            # Two ghost cells per side, at x = -dx/2 and x = -3dx/2 (and
+            # their mirrors), built by cubic extrapolation through the
+            # rod end.  Before 0.4.0 the outer ghost held
+            # ``2*T_left - T[1]`` and the inner one held ``T_left``
+            # itself -- values for positions one cell further in than
+            # the ones the stencil reads them at -- which is
+            # MADD-ANO-008.
+            ghost_left_2, ghost_left_1 = _dirichlet_ghosts_4th_order(T, T_left)
+            ghost_right_2, ghost_right_1 = _dirichlet_ghosts_4th_order(
+                T[::-1], T_right
+            )
 
             T_padded = jnp.concatenate([
-                jnp.array([ghost_left_2, ghost_left_1], dtype=jnp.float32),
+                jnp.array([ghost_left_2, ghost_left_1], dtype=T.dtype),
                 T,
-                jnp.array([ghost_right_1, ghost_right_2], dtype=jnp.float32),
+                jnp.array([ghost_right_1, ghost_right_2], dtype=T.dtype),
             ])  # shape (n+4,)
             return _laplacian_4th_order_uniform(T_padded, dx)
         else:
-            # 2nd-order
+            # 2nd-order.  The ghost puts the Dirichlet datum on the rod
+            # end; before 0.4.0 it held the datum itself, which placed
+            # the boundary condition half a cell inside the rod
+            # (MADD-ANO-007).
             T_padded = jnp.concatenate([
-                jnp.array([T_left], dtype=jnp.float32),
+                jnp.array([_dirichlet_ghosts_2nd_order(T, T_left)],
+                          dtype=T.dtype),
                 T,
-                jnp.array([T_right], dtype=jnp.float32),
+                jnp.array([_dirichlet_ghosts_2nd_order(T[::-1], T_right)],
+                          dtype=T.dtype),
             ])  # shape (n+2,)
             return _laplacian_2nd_order_uniform(T_padded, dx)
 
@@ -510,9 +712,9 @@ class HeatNode(SimulationNode):
         n_local = T_interior.shape[0]
 
         source = boundary_inputs.get(
-            "heat_source", jnp.zeros(n_local, dtype=jnp.float32)
+            "heat_source", jnp.zeros(n_local, dtype=T_pad.dtype)
         )
-        source = jnp.asarray(source, dtype=jnp.float32)
+        source = jnp.asarray(source, dtype=T_pad.dtype)
         if source.ndim == 1 and source.shape[0] == n_local + 2 * halo:
             # a grid-shaped input arrives halo-padded from ShardedStencilNode
             source = source[halo:-halo]
@@ -529,11 +731,23 @@ class HeatNode(SimulationNode):
     ) -> dict:
         """Explicit finite-difference update for the 1D heat equation.
 
-        Dirichlet BCs are enforced by setting the boundary ghost values
-        before computing the stencil, and overwriting the boundary cells
-        after the update.  ``n_cells`` is structural and always comes
-        from ``self.params``; ``thermal_diffusivity`` comes from the
-        injected ``params`` when the graph supplies them.
+        Dirichlet BCs are enforced entirely through the ghost values the
+        stencil reads, so ``left_temperature`` / ``right_temperature``
+        are the temperatures at the rod ends ``x = 0`` and ``x = L`` --
+        what :meth:`boundary_input_spec` documents.  Every cell,
+        including the first and last, is then advanced by the scheme.
+
+        Until 0.4.0 the end cells were instead *overwritten* with the
+        Dirichlet data after the update.  Cell centres are at ``dx/2``
+        and ``L - dx/2``, so that imposed the boundary value half a cell
+        inside the rod and made the scheme globally 1st-order
+        (MADD-ANO-007).  Callers who were relying on
+        ``T_new[0] == left_temperature`` exactly should read the rod-end
+        value they supplied, not the first cell.
+
+        ``n_cells`` is structural and always comes from ``self.params``;
+        ``thermal_diffusivity`` comes from the injected ``params`` when
+        the graph supplies them.
         """
         n = self.params["n_cells"]
         p = self.params if params is None else {**self.params, **params}
@@ -547,17 +761,13 @@ class HeatNode(SimulationNode):
         T_right = boundary_inputs.get("right_temperature", T[-1])
 
         # --- Heat source ---
-        source = boundary_inputs.get("heat_source", jnp.zeros(n, dtype=jnp.float32))
-        source = jnp.broadcast_to(jnp.asarray(source, dtype=jnp.float32), (n,))
+        source = boundary_inputs.get("heat_source", jnp.zeros(n, dtype=T.dtype))
+        source = jnp.broadcast_to(jnp.asarray(source, dtype=T.dtype), (n,))
 
         # --- Laplacian ---
         laplacian = self._compute_laplacian(T, T_left, T_right, length)
 
         T_new = T + alpha * dt * laplacian + source * dt
-
-        # Enforce Dirichlet BCs on the boundary cells.
-        T_new = T_new.at[0].set(T_left)
-        T_new = T_new.at[-1].set(T_right)
 
         return {"temperature": T_new}
 
@@ -570,10 +780,10 @@ class HeatNode(SimulationNode):
         T_left = boundary_inputs.get("left_temperature", T[0])
         T_right = boundary_inputs.get("right_temperature", T[-1])
         source = boundary_inputs.get(
-            "heat_source", jnp.zeros(n, dtype=jnp.float32)
+            "heat_source", jnp.zeros(n, dtype=T.dtype)
         )
         source = jnp.broadcast_to(
-            jnp.asarray(source, dtype=jnp.float32), (n,)
+            jnp.asarray(source, dtype=T.dtype), (n,)
         )
 
         laplacian = self._compute_laplacian(T, T_left, T_right)
@@ -597,11 +807,15 @@ class HeatNode(SimulationNode):
     def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
         """Recompute boundary-cell temperatures from the FD stencil.
 
-        HeatNode's ``update()`` enforces Dirichlet BCs by overwriting
-        T[0] and T[-1] after the FD update.  When those BCs come from
-        coupling, this overwrites the physically meaningful stencil
-        value.  This method recomputes the stencil value so the
-        coupling system can restore it.  Same constants as ``update``.
+        Since 0.4.0 ``update()`` no longer overwrites T[0] and T[-1]
+        with the Dirichlet data -- the data is imposed through the
+        ghost cells instead (MADD-ANO-007) -- so the value this returns
+        is the one ``update()`` already produced and applying it is an
+        identity.  The override is kept because the coupling system
+        asks every node that declares :meth:`interface_dof_indices` for
+        a correction, and answering with the stencil value keeps that
+        contract true regardless of how the BC is enforced internally.
+        Same constants as ``update``.
         """
         p = self.params if params is None else {**self.params, **params}
         n = self.params["n_cells"]
@@ -611,10 +825,10 @@ class HeatNode(SimulationNode):
         T_left = boundary_inputs.get("left_temperature", T[0])
         T_right = boundary_inputs.get("right_temperature", T[-1])
         source = boundary_inputs.get(
-            "heat_source", jnp.zeros(n, dtype=jnp.float32)
+            "heat_source", jnp.zeros(n, dtype=T.dtype)
         )
         source = jnp.broadcast_to(
-            jnp.asarray(source, dtype=jnp.float32), (n,)
+            jnp.asarray(source, dtype=T.dtype), (n,)
         )
 
         laplacian = self._compute_laplacian(T, T_left, T_right)

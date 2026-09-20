@@ -392,15 +392,12 @@ guidance; the itemized changes follow.
   exactly representable
 
 ### Verification
-<<<<<<< HEAD
 - **MADD-VER-002's acceptance band no longer admits the defect it measured**:
   `[0.7, 2.5]` -> `[1.7, 2.3]` around the theoretical 2.0 (measured 1.900); it
   cited MADD-ANO-002 for a boundary defect. MADD-VER-001: 5% -> 1e-4
-=======
 - **`LBMPipeNode` has a convergence verdict for the first time**
   (MADD-VER-013): the ladder converges, but a fourth level shows it is *not*
   in the asymptotic range, so no error band is quoted for it
->>>>>>> origin/release/0.4.0
 - **Order of accuracy is measured, not asserted** (`maddening.testing.mms`):
   declare `NodeMeta(discretization_order=...)` and the harness refines a
   manufactured solution and fails the node on a shortfall (MADD-VER-005..008)

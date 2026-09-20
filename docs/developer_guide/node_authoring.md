@@ -318,8 +318,10 @@ def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
     # The rod end is at x = 0, half a cell outside T[0].  Anchor the
     # reconstruction there; see "Report the flux where you say you do".
     return {
+        # The quadratic through (0, T_left), (dx/2, T[0]) and (3dx/2, T[1]),
+        # differentiated at the rod end.  2nd order; the right end is its
+        # mirror image.
         "left_heat_flux": -alpha * (9.0 * T[0] - T[1] - 8.0 * T_left) / (3.0 * dx),
-        ...
     }
 ```
 

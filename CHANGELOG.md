@@ -235,6 +235,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The compliance gates can now fail on the defects they exist to catch**: the
+  anomaly and benchmark ID sets are pinned, four gates that reported success
+  having verified nothing now fail closed, and two stopped inflating their counts
 - **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
   every stage holds the one value you pass. The arithmetic is unchanged; carry time
   as a state field with derivative 1 to get 4.00 back — see the new solvers guide

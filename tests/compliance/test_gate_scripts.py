@@ -283,13 +283,33 @@ class TestTransformLiveRegistration:
         assert "NOT confirmed against the live registry" in out
         assert "not confirmed against the live registry" in out
 
-    def test_the_repository_confirms_every_local_registration(self):
-        """No NOTE means every credited registration really executed."""
+    #: Test packages whose modules need an optional extra to import.  A
+    #: registration in one of these is legitimately unconfirmable in a CI
+    #: that installs only ``[ci]`` -- the compliance job installs
+    #: ``[ci,usd]`` precisely so the gates can see what they verify, but the
+    #: matrix job that runs the whole suite does not.
+    _OPTIONAL_EXTRA_PACKAGES = ("tests/usd/", "tests/viz/", "tests/cloud/")
+
+    def test_every_local_registration_outside_an_optional_extra_is_confirmed(
+        self
+    ):
+        """A NOTE is acceptable only where an extra explains it.
+
+        Anywhere else it means the gate degraded on a module it should have
+        been able to import, which is indistinguishable from the dead
+        registration this check exists to catch.
+        """
         result = _run("check_transforms")
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "NOT confirmed" not in result.stdout, (
-            "a local registration could not be confirmed in this "
-            "environment; the gate degraded rather than verified"
+        unexplained = [
+            line for line in result.stdout.splitlines()
+            if "NOT confirmed against the live registry" in line
+            and not any(pkg in line for pkg in self._OPTIONAL_EXTRA_PACKAGES)
+        ]
+        assert not unexplained, (
+            "a local @register_transform could not be confirmed in a module "
+            "that needs no optional extra; the gate degraded rather than "
+            "verified:\n" + "\n".join(unexplained)
         )
 
     def test_the_reported_registry_size_excludes_what_the_gate_imported(self):

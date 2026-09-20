@@ -245,6 +245,9 @@ class Coordinator:
             auth.secure_server(sock)
         sock.bind(self._bind_address)
         sock.setsockopt(zmq.RCVTIMEO, 1000)  # 1s poll timeout
+        # Without this, ctx.term() below waits forever to flush replies to
+        # a CURVE peer that never completed its handshake.
+        sock.setsockopt(zmq.LINGER, 0)
         logger.info("Coordinator listening on %s (CURVE %s), expecting %s",
                      self._bind_address, "on" if self._secure else "off",
                      sorted(self._expected))

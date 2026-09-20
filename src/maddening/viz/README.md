@@ -65,16 +65,37 @@ ZMQ-based remote visualization and command input. All use `CONFLATE` (latest-val
 
 | Class | Role | Default address | Direction |
 |-------|------|-----------------|-----------|
-| `NetworkRelay` | Publish state (sim side) | `tcp://*:5555` | sim -> viz |
+| `NetworkRelay` | Publish state (sim side) | `tcp://127.0.0.1:5555` | sim -> viz |
 | `NetworkReceiver` | Subscribe to state (viz side) | `tcp://localhost:5555` | sim -> viz |
-| `CommandPublisher` | Send commands (controller side) | `tcp://*:5556` | controller -> sim |
+| `CommandPublisher` | Send commands (controller side) | `tcp://127.0.0.1:5556` | controller -> sim |
 | `CommandReceiver` | Receive commands (sim side) | `tcp://localhost:5556` | controller -> sim |
+
+### Security
+
+These sockets carry the full state dict and an actuation path
+(`CommandReceiver`'s output goes straight to
+`GraphManager.step(external_inputs=...)`), so since v0.4.0 they default to
+**loopback** and are unencrypted only there.
+
+* **Local development** needs nothing: the defaults above talk to each
+  other with no token and no keys.
+* **A remote simulation** is best reached by tunnelling to its loopback
+  port -- `ssh -L 5555:127.0.0.1:5555 user@host` -- which also needs no
+  token, because both ends still see loopback.
+* **Publishing the port** (any non-loopback address) turns on ZMQ CURVE.
+  Set `MADDENING_API_TOKEN` to the same value on both sides; the CURVE
+  keypairs are derived from it, so there are no key files to distribute.
+  Without the token the socket refuses to open rather than falling back
+  to cleartext.
+
+Before v0.4.0 these defaults were `tcp://*:5555` and `tcp://*:5556` with no
+authentication of any kind -- see `MADD-ANO-015`.
 
 `NetworkReceiver` exposes `latest_snapshot()` with the same interface as `StateRelay`, so renderers work as drop-in replacements.
 
 ```python
 # Sim side
-relay = NetworkRelay("tcp://*:5555")
+relay = NetworkRelay()                 # tcp://127.0.0.1:5555
 relay.attach(gm)
 
 # Viz side

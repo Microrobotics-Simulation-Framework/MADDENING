@@ -100,6 +100,7 @@ class NetworkRelay:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
         self._secure = resolve_security(address, secure)
         self._authenticator = None
         if self._secure:
@@ -207,6 +208,7 @@ class NetworkReceiver:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
         self._secure = resolve_security(address, secure)
         if self._secure:
             TransportAuth(token=token).secure_client(self._socket)
@@ -304,6 +306,7 @@ class CommandPublisher:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
         self._secure = resolve_security(address, secure)
         self._authenticator = None
         if self._secure:
@@ -371,6 +374,7 @@ class CommandReceiver:
         self._address = address
         self._context = zmq.Context()
         self._socket = self._context.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.LINGER, 0)
         self._secure = resolve_security(address, secure)
         if self._secure:
             TransportAuth(token=token).secure_client(self._socket)

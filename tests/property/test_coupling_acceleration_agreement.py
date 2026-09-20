@@ -26,7 +26,7 @@ Stated under ``convergence_norm="l2"``, which is the half of the
 sentence that generalises.  Trying it under ``"interface"`` as well
 finds a counterexample in a few hundred draws — 5.2e-01 on a
 three-spring Jacobi group under Aitken, both solves reporting
-``converged`` and the accelerated one reporting ``bound_valid=False``
+``converged`` and the accelerated one reporting ``ratio_usable=False``
 with ``residual`` exactly zero — and the counterexample is the same
 defect one layer down.  Widening ``accelerated_fields`` stops the
 accelerator from leaving fields behind, but the *criterion* is still
@@ -226,7 +226,7 @@ def _retune(recipe, *, acceleration, accelerated_fields=None,
 #: rather than the pass, and the two solves interpolate two different
 #: interface histories.  Measured at 3.4e+00 on a three-node graph with
 #: timesteps 0.04 / 0.02 / 0.01, the accelerated exit reporting
-#: ``amplification=nan`` and ``bound_valid=False``.  That is a statement
+#: ``amplification=nan`` and ``ratio_usable=False``.  That is a statement
 #: about waveform relaxation, and this property does not make it.
 #:
 #: It used to be said with ``assume``, which is the expensive way to say

@@ -124,6 +124,70 @@ Three settings that are nearly always right and are not in the table:
   The implicit-function-theorem gradient is only valid at a converged
   fixed point.
 
+## Reading `coupling_diagnostics()`
+
+Each group reports seven fields.  Three of them need reading carefully,
+and one of them was renamed in 0.4.0 because its old name said more than
+it checks.
+
+| field | what it is |
+|---|---|
+| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget |
+| `residual` | `\|F(x) - x\|` in the group's norm, for the state the step returned.  Carries a float32 noise floor |
+| `amplification` | the estimated `1 / (1 - rho)` of the mode the residual sequence reveals.  `nan` when the ratio was rejected |
+| `error_estimate` | `residual · max(ω · amplification, 1)` — **an estimate** of the distance to the fixed point, not of the last step.  Falls back to `residual` when the ratio was rejected |
+| `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
+| `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
+| `converged` | the *error estimate* met the group's threshold |
+
+### What `ratio_usable` checks, and what it does not
+
+`error_estimate` sums a geometric series of remaining step lengths.
+That sum is a bound on the distance to the fixed point only if **four**
+conditions hold, and `ratio_usable` reports **the fourth one alone**:
+
+1. the measure obeys the triangle inequality — **not checked**;
+2. `rho` is at least the asymptotic rate — **not checked**;
+3. the step scale is the one actually applied — checked only for
+   `acceleration="fixed"` and `"none"`, where ω is a constant;
+4. the ratio is monotone and finite — **this, and only this, is what
+   `ratio_usable` reports**.
+
+So `ratio_usable=True` means: `rho < 1`, the predecessor residual was
+non-zero, and every residual in the ratio was finite, therefore the
+criterion used the estimate rather than falling back to the raw residual
+test.  It does **not** mean the estimate bounds the error.  Each of the
+three unchecked conditions is measured broken in this release:
+
+| mechanism | measured understatement | status |
+|---|---|---|
+| a `rho` read from the mode dominating the *step*, not the remaining error | **122x** on a linear two-mode contraction, modes `(0.999, 0.2)` at `tolerance=1e-4`, with `ratio_usable=True` **and** `converged=True` | characterised, not fixable from the residual sequence: over the passes that matter that sequence and a genuine single-mode decay at 0.2 are the *same sequence* (consecutive ratios 0.2000 and 0.2024).  Needs the spectrum |
+| over-relaxation, `acceleration="fixed"` | was 1.97x at ω = 1.95 | **fixed in 0.4.0** — `est/true` now runs 0.992 to 4.53 over an 88-point (gain, ω) grid |
+| a step scale the series does not carry | 2.04x under `aitken` (its per-pass factor saturating at its 2.0 clip), 4.5x under `iqn-*` | measured, uncorrected, documented |
+
+`ratio_usable=False` is the honest case, not the alarming one: the
+criterion degrades to the pre-0.4.0 raw residual test and says so.  It
+is false on a non-monotone sequence, on a zero or non-finite
+predecessor, and at `max_iterations=1`, where there is no pair of
+residuals to take a ratio of.
+
+Read `error_estimate` as a *better* number than the residual — it is
+never smaller than it, and strictly stronger than the pre-0.4.0
+criterion in every measured case — and not as a certificate.  Where you
+need one, the route is the spectrum: under `solver="ift"` a power
+iteration on `dF/dx` gives `rho_spectral` directly, and
+`residual / (1 - rho_spectral)` *is* a bound.  That is post-0.4.0 work.
+The full argument, with reproducers, is in
+`benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md`; the
+standing caveat is `MADD-ANO-005`.
+
+### The old names
+
+`bound_valid` and `gradient_error_bound` still read through 0.4.x and
+emit a `DeprecationWarning` naming their replacement; they are removed
+in 0.5.0.  They are **not** in `keys()`, so `dict(diag)` and anything
+that records the report carry only the new names.
+
 ## How the numbers were produced
 
 `benchmarks/coupling_fixtures.py` defines eight graph shapes, each

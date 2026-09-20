@@ -51,6 +51,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import contextlib  # noqa: E402
+import pathlib  # noqa: E402
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -112,6 +113,9 @@ def float64():
 # --------------------------------------------------------------------------
 # HeatNode — spatial order
 # --------------------------------------------------------------------------
+
+#: Repository root: tests/verification/<this file> -> two levels up.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _L = 1.0
 _ALPHA = 1.0
@@ -1209,6 +1213,174 @@ class TestTheOrderGateCanFail:
 
     def test_the_default_band_is_the_one_the_docstring_claims(self):
         assert (DEFAULT_ORDER_SHORTFALL, DEFAULT_ORDER_EXCESS) == (0.25, 1.0)
+
+
+class TestTheOrderBandIsJustifiedByTheseNumbers:
+    """Every figure the two band constants cite, checked two ways.
+
+    ``DEFAULT_ORDER_SHORTFALL`` and ``DEFAULT_ORDER_EXCESS`` are
+    justified in ``mms.py`` by measured figures.  An earlier revision
+    justified them with figures no ladder in the tree produces -- "the
+    corrected fourth-order stencil measures 5.02", where the largest
+    pairwise order over four manufactured solutions is 4.126, and
+    "as much as 0.16 low (1.847)", where the coarsest pairs measure
+    2.007-2.023, *above* theory.  Worse, 5.02 was cited as the
+    superconvergence the band accommodates while lying outside the
+    band's own upper edge of ``4 + 1.0 = 5.00``, so the figure quoted
+    in its defence would have failed it.
+
+    So each figure is pinned twice: it has to appear in the recorded
+    fixture it is attributed to, and ``check_order`` has to make the
+    decision on it that the docstring claims.  A figure that drifts out
+    of the band it is cited as being inside fails here rather than
+    sitting on the page.
+    """
+
+    _FIXTURES = _REPO_ROOT / "benchmarks" / "results" / "audit_040_r2" / "numerics"
+
+    #: ``(figure, fixture file, what check_order does with it against 4)``.
+    _FOURTH_ORDER_EVIDENCE = (
+        # Correct cubic ghost closure -- the band must admit all of these.
+        ("4.126", "r8_order_band.log", True),   # largest pairwise, tanh_bump
+        ("4.001", "r8_order_band.log", True),   # largest finest-pair
+        ("3.957", "r8_order_band.log", True),   # release profile
+        ("3.760", "r8_order_band.log", True),   # coarsest pair, same study
+        # The disarmed-profile defect.  The band does NOT catch it.
+        ("4.080", "r8_order_band.log", True),
+    )
+
+    _SECOND_ORDER_EVIDENCE = (
+        ("2.0004", "r1_heat_order_independent.log", True),
+        ("2.023", "r1_heat_order_independent.log", True),
+        ("1.998", "r10_lbm_order.log", True),
+    )
+
+    _FIRST_ORDER_EVIDENCE = (
+        ("1.0009", "r6_declared_orders.log", True),
+        ("1.0003", "r6_declared_orders.log", True),
+        ("1.0002", "r6_declared_orders.log", True),
+    )
+
+    @pytest.mark.parametrize(
+        ("figure", "fixture"),
+        [(f, x) for f, x, _ in
+         _FOURTH_ORDER_EVIDENCE + _SECOND_ORDER_EVIDENCE + _FIRST_ORDER_EVIDENCE],
+    )
+    def test_the_figure_is_in_the_fixture_it_is_attributed_to(
+        self, figure, fixture,
+    ):
+        """A cited measurement has to exist where it says it does."""
+        path = self._FIXTURES / fixture
+        assert path.is_file(), f"cited fixture {path} is missing"
+        assert figure in path.read_text(), (
+            f"{figure} is cited against {fixture} but does not appear in it; "
+            f"re-run benchmarks/results/audit_040_r2/numerics/repro/ and "
+            f"quote what it now says"
+        )
+
+    @pytest.mark.parametrize("fixture", [
+        "r8_order_band.log", "r1_heat_order_independent.log",
+        "r6_declared_orders.log", "r10_lbm_order.log",
+    ])
+    def test_every_fixture_mms_names_is_present(self, fixture):
+        """``_ORDER_BAND_FIXTURES`` must not be a list of dead paths."""
+        from maddening.testing.mms import _ORDER_BAND_FIXTURES
+        relative = f"benchmarks/results/audit_040_r2/numerics/{fixture}"
+        assert relative in _ORDER_BAND_FIXTURES
+        assert (_REPO_ROOT / relative).is_file()
+
+    @pytest.mark.parametrize(
+        ("figure", "expected"),
+        [(f, 4.0) for f, _, _ in _FOURTH_ORDER_EVIDENCE]
+        + [(f, 2.0) for f, _, _ in _SECOND_ORDER_EVIDENCE]
+        + [(f, 1.0) for f, _, _ in _FIRST_ORDER_EVIDENCE],
+    )
+    def test_the_band_admits_every_recorded_measurement(self, figure, expected):
+        """Nothing the fixtures recorded as correct may fail the band."""
+        result = check_order(_ladder(float(figure)), expected)
+        assert result.passed, result.detail
+
+    @pytest.mark.parametrize(
+        ("observed", "expected"),
+        [(1.001, 2.0),   # MADD-ANO-007, boundary datum half a cell in
+         (0.954, 4.0)],  # MADD-ANO-008, ghosts at the wrong positions
+    )
+    def test_the_band_rejects_the_defects_it_is_credited_with(
+        self, observed, expected,
+    ):
+        result = check_order(_ladder(observed), expected)
+        assert result.failed
+        assert "below the declared" in result.detail
+
+    def test_the_band_does_not_catch_the_disarmed_profile_defect(self):
+        """Recorded as a pass, because it is one, and that is the point.
+
+        A linear ghost closure -- genuinely 2nd order -- measured 4.080
+        on the pre-0.4.0 flat-ended profile and sailed through.  What
+        catches it is
+        :class:`TestTheSteadyProfileCanSeeABrokenScheme`, which forbids
+        a manufactured solution flat at the rod ends; on a curved one
+        the same closure measures 2.000 and the *shortfall* rejects it.
+        """
+        assert check_order(_ladder(4.080), 4.0).passed
+        assert check_order(_ladder(2.000), 4.0).failed
+
+    @pytest.mark.parametrize(
+        "excess", [0.02, 0.05, 0.08, 0.1, 0.126, 0.15, 0.25, 0.5, 1.0, 1.5],
+    )
+    def test_no_excess_separates_the_defect_from_a_correct_study(self, excess):
+        """The trap, made executable: do not tighten this band.
+
+        ``check_order`` gates on the finest pair of whatever ladder it
+        is handed, and this constant is global.  The defect's gated
+        value is 4.080; a correct ``tanh_bump`` study read over its
+        coarsest pair -- which is the gated value of any two- or
+        three-level ladder of it -- is 4.126.  4.080 < 4.126, so every
+        upper edge that rejects the defect also rejects that study.
+        Tightening ``DEFAULT_ORDER_EXCESS`` cannot be the fix for the
+        disarmed-profile case at any value whatsoever.
+        """
+        defect = check_order(_ladder(4.080), 4.0, excess=excess).passed
+        correct = check_order(_ladder(4.126), 4.0, excess=excess).passed
+        assert defect or not correct, (
+            f"excess={excess} rejects the 4.080 defect while still admitting "
+            f"the legitimate 4.126 study -- which the recorded fixtures say "
+            f"is impossible, so one of them has moved"
+        )
+
+    def test_every_admissible_figure_is_below_the_edge_it_is_cited_against(
+        self,
+    ):
+        """The arithmetic guard the old docstring failed.
+
+        "1.0 is wide enough for X" is false whenever ``X > 4 + 1.0``.
+        The figure that sentence used to name, 5.02, is exactly that
+        case.
+        """
+        edge = 4.0 + DEFAULT_ORDER_EXCESS
+        assert edge == 5.0
+        for figure, _, admissible in self._FOURTH_ORDER_EVIDENCE:
+            assert admissible and float(figure) < edge, (
+                f"{figure} is cited as admissible but the band's upper edge "
+                f"for a declared 4 is {edge}"
+            )
+        # The figure the docstring used to cite, kept as the negative
+        # control for this check.
+        assert 5.02 > edge
+
+    def test_the_shortfall_sits_between_the_wobble_and_the_defects(self):
+        """0.25 is a ratio to two measured quantities, not a round number.
+
+        Largest honest finest-pair shortfall recorded: 0.043 (the
+        4th-order heat stencil's 3.957 against 4).  Smallest defect it
+        must reject: 1.0 (MADD-ANO-007's 1.001 against 2).
+        """
+        largest_honest_shortfall = 4.0 - 3.957
+        smallest_defect_shortfall = 2.0 - 1.001
+        assert largest_honest_shortfall < DEFAULT_ORDER_SHORTFALL
+        assert DEFAULT_ORDER_SHORTFALL < smallest_defect_shortfall
+        assert DEFAULT_ORDER_SHORTFALL / largest_honest_shortfall > 5.0
+        assert smallest_defect_shortfall / DEFAULT_ORDER_SHORTFALL > 3.5
 
 
 class TestMeasureOrder:

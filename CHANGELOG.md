@@ -235,6 +235,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`HeatNode` reports its boundary flux at the rod end**, not a cell inside:
+  measured order 1.005 -> 1.999 (and 3.993 for `stencil_order=4`), and the units
+  are `K*m/s`, not `W/m^2`. Flux-coupled results move by up to 10%
 - **`rk4`/`heun` are 1st order with a time-varying boundary input** (`MADD-ANO-014`):
   every stage holds the one value you pass. The arithmetic is unchanged; carry time
   as a state field with derivative 1 to get 4.00 back — see the new solvers guide

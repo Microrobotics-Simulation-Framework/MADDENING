@@ -626,3 +626,69 @@ def test_fori_deprecation_warning_points_at_the_users_call_too():
     (w,) = [x for x in caught if issubclass(x.category, DeprecationWarning)]
     assert Path(w.filename) == Path(__file__), w.filename
     assert w.lineno == expected
+
+
+# ---------------------------------------------------------------------------
+# 8. The ``accelerated_fields`` gate in ``compile()`` fires under every
+#    acceleration, including the ones that actually read the field.
+# ---------------------------------------------------------------------------
+#
+# ``compile()`` validates the field list against the group's state
+# fields and raises a message naming the typo and the fields that exist.
+# The ``iqn-imvj`` ``_meta`` seeding calls ``flatten_coupled_state(...,
+# fields=<the user's list>)`` to size the V/W warm start, and that raises
+# a bare ``KeyError: 'typo'``.  It used to run *first*, so the gate fired
+# under ``acceleration="none"`` -- where ``CouplingGroup`` already warns
+# the field is ignored -- and was shadowed under ``iqn-imvj``, the
+# acceleration in which ``accelerated_fields`` is most used.
+
+@pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils", "iqn-imvj"])
+def test_a_bogus_accelerated_field_is_named_under_every_acceleration(acceleration):
+    gm = _cycle_of_two_springs()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.add_coupling_group(
+            ["spring_a", "spring_b"], max_iterations=5, acceleration=acceleration,
+            accelerated_fields={"spring_a": ["not_a_field"]},
+        )
+    with pytest.raises(ValueError) as excinfo:
+        gm.compile()
+
+    message = str(excinfo.value)
+    assert "accelerated_fields['spring_a'] names ['not_a_field']" in message
+    assert "position" in message, "the message must list the fields that do exist"
+
+
+def test_the_accelerated_fields_gate_runs_before_the_imvj_warm_start_is_sized():
+    """Not just the exception type: the gate must run *before* the seeding.
+
+    ``flatten_coupled_state`` raising ``KeyError`` would also fail the
+    test above if ``ValueError`` were merely wrapped around it, so pin
+    the order directly -- nothing in the ``_meta`` build may see an
+    unvalidated field list.
+    """
+    import maddening.core.coupling.acceleration as accel_mod
+
+    gm = _cycle_of_two_springs()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.add_coupling_group(
+            ["spring_a", "spring_b"], max_iterations=5, acceleration="iqn-imvj",
+            accelerated_fields={"spring_a": ["not_a_field"]},
+        )
+
+    seen = []
+    original = accel_mod.flatten_coupled_state
+
+    def _record(*args, **kwargs):
+        seen.append(kwargs.get("fields"))
+        return original(*args, **kwargs)
+
+    accel_mod.flatten_coupled_state = _record
+    try:
+        with pytest.raises(ValueError, match=r"accelerated_fields\['spring_a'\]"):
+            gm.compile()
+    finally:
+        accel_mod.flatten_coupled_state = original
+
+    assert seen == [], f"the warm start was sized before the gate ran: {seen}"

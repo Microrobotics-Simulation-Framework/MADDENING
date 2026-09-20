@@ -3570,6 +3570,37 @@ class GraphManager:
         schedule = topological_sort(node_names, self._edges)
         back_edges = identify_back_edges(schedule, self._edges)
 
+        # Explicit accelerated_fields must name state fields of the group's
+        # nodes (a boundary flux is not a state field; use the default,
+        # which maps a flux edge to the producer's state fields).
+        #
+        # Before *everything* that reads the field, and in particular
+        # before the ``iqn-imvj`` ``_meta`` seeding below, which calls
+        # ``flatten_coupled_state(..., fields=...)`` with the user's list
+        # and dies on an unknown field with a bare ``KeyError: 'typo'``.
+        # That shadowed this message under the one acceleration in which
+        # ``accelerated_fields`` is most used, while it fired cleanly
+        # under ``acceleration="none"``, where ``CouplingGroup`` already
+        # warns that the field is ignored altogether.  The block reads
+        # only ``self._coupling_groups``, ``self._nodes`` and
+        # ``self._state``, all of which are final here.
+        for g in self._coupling_groups:
+            if g.accelerated_fields is None:
+                continue
+            for nn, fields in g.accelerated_fields.items():
+                if nn not in self._nodes or nn not in g.nodes:
+                    raise ValueError(
+                        f"accelerated_fields names node {nn!r}, not in coupling "
+                        f"group {sorted(g.nodes)}"
+                    )
+                have = set(self._state.get(nn, {}).keys())
+                bad = [f for f in fields if f not in have]
+                if bad:
+                    raise ValueError(
+                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
+                        f"of {nn!r} (state fields: {sorted(have)})"
+                    )
+
         # ``_meta`` is *state*, not derived data: ``step_count`` decides
         # which sub-steps a node with a rate divider > 1 fires on, and the
         # ``coupling_*`` entries are the predictor history and the IQN
@@ -3584,10 +3615,12 @@ class GraphManager:
         # zero the counters.
         previous_meta = dict(self._state.get(_META_KEY, {}))
         # From the last *successful* compile, not from ``_rate_dividers``:
-        # a compile that raises after recomputing them (an
-        # ``accelerated_fields`` typo, the static-data refusal) leaves
-        # them describing a step that was never built, and comparing
-        # against those would restart the phase on the repair.
+        # a compile that raises after recomputing them (the static-data
+        # refusal, a failing ``_build_step_fn``) leaves them describing a
+        # step that was never built, and comparing against those would
+        # restart the phase on the repair.  (The ``accelerated_fields``
+        # typo used to be one of those; it is now refused above, before
+        # the dividers are touched at all.)
         previous_dividers = dict(self._committed_rate_dividers)
 
         # Compute multi-rate info.
@@ -3734,26 +3767,6 @@ class GraphManager:
         # validation below, the static-data refusal and ``_build_step_fn``
         # can all still raise, and a compile that fails must leave the
         # sub-step phase and the warm starts exactly as it found them.
-
-        # Explicit accelerated_fields must name state fields of the group's
-        # nodes (a boundary flux is not a state field; use the default,
-        # which maps a flux edge to the producer's state fields).
-        for g in self._coupling_groups:
-            if g.accelerated_fields is None:
-                continue
-            for nn, fields in g.accelerated_fields.items():
-                if nn not in self._nodes or nn not in g.nodes:
-                    raise ValueError(
-                        f"accelerated_fields names node {nn!r}, not in coupling "
-                        f"group {sorted(g.nodes)}"
-                    )
-                have = set(self._state.get(nn, {}).keys())
-                bad = [f for f in fields if f not in have]
-                if bad:
-                    raise ValueError(
-                        f"accelerated_fields[{nn!r}] names {bad}: not a state field "
-                        f"of {nn!r} (state fields: {sorted(have)})"
-                    )
 
         # ``subcycling=True`` on a group whose nodes all share a
         # timestep is demoted to ``use_subcycling = False`` in

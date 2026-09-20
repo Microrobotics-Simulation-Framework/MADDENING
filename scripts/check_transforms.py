@@ -31,11 +31,23 @@ Exit codes:
 """
 
 import ast
+import importlib
+import importlib.util
 import sys
 from pathlib import Path
 
 
 _EDGE_CALLS = {"add_edge", "EdgeSpec"}
+
+#: ``transform`` is the 5th positional parameter of
+#: ``GraphManager.add_edge(source, target, source_field, target_field,
+#: transform, ...)`` and the 5th field of ``EdgeSpec``, so a string there is
+#: resolved at runtime exactly as ``transform="name"`` is.  The gate read
+#: ``node.keywords`` only, so the positional form was invisible
+#: (audit_040_r2/gates, finding G2).
+#: ``tests/compliance/test_gate_scripts.py::TestTransformPositionalForm``
+#: pins this index against both real signatures.
+_TRANSFORM_POSITION = 4
 
 # Default scan roots, relative to the project root.  ``tests`` is in scope
 # deliberately: every string-literal edge transform in the repository lives
@@ -100,19 +112,28 @@ def find_transform_string_refs(tree: ast.AST) -> list[tuple[int, str]]:
     """
     constants = _module_level_string_constants(tree)
     results = []
+
+    def record(value: ast.expr) -> None:
+        if isinstance(value, ast.Constant):
+            if isinstance(value.value, str):
+                results.append((value.lineno, value.value))
+        elif isinstance(value, ast.Name) and value.id in constants:
+            results.append((value.lineno, constants[value.id]))
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         if _call_name(node.func) not in _EDGE_CALLS:
             continue
+        keyworded = False
         for kw in node.keywords:
             if kw.arg != "transform":
                 continue
-            if isinstance(kw.value, ast.Constant):
-                if isinstance(kw.value.value, str):
-                    results.append((kw.value.lineno, kw.value.value))
-            elif isinstance(kw.value, ast.Name) and kw.value.id in constants:
-                results.append((kw.value.lineno, constants[kw.value.id]))
+            keyworded = True
+            record(kw.value)
+        # The positional form means the same thing and resolves the same way.
+        if not keyworded and len(node.args) > _TRANSFORM_POSITION:
+            record(node.args[_TRANSFORM_POSITION])
     return results
 
 
@@ -143,6 +164,58 @@ def scan_file(filepath: Path) -> tuple[list[tuple[int, str]], set[str]]:
     return find_transform_string_refs(tree), find_local_registrations(tree)
 
 
+def registry_after_importing(
+    filepath: Path, project_root: Path
+) -> tuple[set[str] | None, str | None]:
+    """Import ``filepath`` and return the live registry's names.
+
+    ``find_local_registrations`` is a *lexical* check: it finds the
+    ``register_transform("name")`` call expression anywhere in the file,
+    including inside a function nobody calls.  Such a registration never
+    executes, so the name is absent from the registry after import and
+    ``add_edge`` raises ``KeyError`` at runtime -- while the gate said the
+    reference was verified (audit_040_r2/gates, finding G2b).  The realistic
+    shape is a helper a fixture forgot to call, or one behind a
+    ``try/except ImportError`` fallback.
+
+    Returns ``(names, None)`` on success and ``(None, reason)`` when the
+    module cannot be imported.  A module needing an optional extra this
+    environment does not have is *unchecked*, not broken -- the same
+    degradation ``resolve_dotted_name``'s ``unavailable`` handling makes,
+    and for the same reason: this gate must stay usable in a CI that
+    installs only ``[ci]``.
+    """
+    from maddening.core.transforms import _TRANSFORM_REGISTRY
+
+    try:
+        rel = filepath.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        rel = None
+
+    try:
+        if rel is not None:
+            parts = list(rel.with_suffix("").parts)
+            if parts and parts[0] == "src":
+                parts = parts[1:]
+            root = str(project_root)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            importlib.import_module(".".join(parts))
+        else:
+            # A scan root outside the repository (a temporary directory in
+            # the gate's own tests).  Load it by path, without giving it a
+            # place in sys.modules it could collide in.
+            spec = importlib.util.spec_from_file_location(
+                f"_check_transforms_probe_{filepath.stem}", filepath
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 - any import failure degrades
+        return None, f"{type(exc).__name__}: {exc}"
+
+    return set(_TRANSFORM_REGISTRY), None
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     project_root = Path(__file__).parent.parent
@@ -152,9 +225,22 @@ def main(argv: list[str] | None = None) -> int:
 
     roots = [Path(a) for a in argv] or [project_root / r for r in _DEFAULT_ROOTS]
 
+    # Snapshot the registry before anything is imported.  The live check
+    # below imports modules that register transforms, and those
+    # registrations are global: without a snapshot, a name registered by one
+    # test module would start satisfying a reference in another, which is
+    # exactly what "registered in another file does not count" forbids.
+    builtin_names = set(_TRANSFORM_REGISTRY)
+
     errors = []
+    notes = []
     n_checked = 0
+    n_allowlisted = 0
+    n_unconfirmed = 0
     scanned_roots = []
+    # (file, [(lineno, name)]) for references resolved only by a lexical
+    # local registration -- the ones the live check has to confirm.
+    credited: list[tuple[Path, str, list[tuple[int, str]]]] = []
 
     for root in roots:
         if not root.exists():
@@ -168,15 +254,50 @@ def main(argv: list[str] | None = None) -> int:
                 rel = str(pyfile.relative_to(project_root))
             except ValueError:
                 rel = str(pyfile)
+            local_refs: list[tuple[int, str]] = []
             for lineno, name in refs:
                 if (rel, name) in _ALLOWED_UNRESOLVABLE:
+                    n_allowlisted += 1
                     continue
                 n_checked += 1
-                if name not in _TRANSFORM_REGISTRY and name not in local:
-                    errors.append(
-                        f"  {rel}:{lineno}: transform '{name}' is neither in "
-                        f"the TransformRegistry nor registered in this file"
-                    )
+                if name in builtin_names:
+                    continue
+                if name in local:
+                    local_refs.append((lineno, name))
+                    continue
+                errors.append(
+                    f"  {rel}:{lineno}: transform '{name}' is neither in "
+                    f"the TransformRegistry nor registered in this file"
+                )
+            if local_refs:
+                credited.append((pyfile, rel, local_refs))
+
+    # A lexical @register_transform is a claim, not a registration.  Import
+    # the module and check the registry actually gained the name.
+    for pyfile, rel, local_refs in credited:
+        live, reason = registry_after_importing(pyfile, project_root)
+        if live is None:
+            n_unconfirmed += len(local_refs)
+            names = ", ".join(sorted({n for _lineno, n in local_refs}))
+            notes.append(
+                f"{rel}: {len(local_refs)} reference(s) credited to a local "
+                f"@register_transform ({names}) were NOT confirmed against "
+                f"the live registry -- the module could not be imported "
+                f"here ({reason})"
+            )
+            continue
+        for lineno, name in local_refs:
+            if name not in live:
+                errors.append(
+                    f"  {rel}:{lineno}: transform '{name}' is registered by "
+                    f"a @register_transform in this file, but is absent from "
+                    f"the TransformRegistry after the module is imported -- "
+                    f"the registration never executes, and add_edge would "
+                    f"raise KeyError on this name at runtime"
+                )
+
+    for note in notes:
+        print(f"NOTE: {note}")
 
     if errors:
         print(f"FAIL: {len(errors)} unresolvable transform reference(s):")
@@ -185,7 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "\nFix: register each transform with "
             "@register_transform('name') from "
-            "maddening.core.transforms"
+            "maddening.core.transforms, at module level so the registration "
+            "runs on import"
         )
         return 1
 
@@ -199,9 +321,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Verified, declined and unconfirmed are three numbers, not one.  A
+    # single headline that folds in what the gate skipped is how "50
+    # citations verified" came to mean 45.
+    extra = ""
+    if n_allowlisted:
+        extra += f", {n_allowlisted} allowlisted and not checked"
+    if n_unconfirmed:
+        extra += f", {n_unconfirmed} not confirmed against the live registry"
     print(
-        f"OK: {n_checked} string transform reference(s) verified "
-        f"({len(_TRANSFORM_REGISTRY)} transforms in registry)"
+        f"OK: {n_checked} string transform reference(s) verified{extra} "
+        f"({len(builtin_names)} transforms in registry)"
     )
     return 0
 

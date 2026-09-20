@@ -128,6 +128,175 @@ class TestTransformGate:
         assert " 0 string transform reference(s) verified" not in result.stdout
 
 
+class TestTransformPositionalForm:
+    """``transform`` is a positional parameter, and a string there resolves.
+
+    The gate read ``node.keywords`` only, so the identical call written
+    positionally was invisible -- and nothing in the tree uses that form
+    today, which is what makes it a trap rather than a live bug.
+    """
+
+    def test_a_positional_unregistered_transform_fails_the_gate(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "positional_ghost.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", "no_such_transform")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_positional_registered_transform_passes(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "positional_ok.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", "extract_last")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_a_positional_edge_spec_transform_is_seen(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "spec_positional.py").write_text(
+            'EdgeSpec("a", "b", "x", "y", "no_such_transform")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_fifth_positional_that_is_not_a_string_is_not_a_reference(
+        self, transforms_gate, tmp_path
+    ):
+        """``add_edge(..., my_fn)`` passes a callable, not a registry key."""
+        (tmp_path / "callable_positional.py").write_text(
+            "def my_fn(x):\n    return x\n"
+            'gm.add_edge("a", "b", "x", "y", my_fn)\n'
+        )
+        # Nothing in scope -> the empty-scope guard, not a false positive.
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_the_positional_index_is_the_one_both_signatures_have(
+        self, transforms_gate
+    ):
+        """A hand-written index is what a parameter reorder would break."""
+        import dataclasses
+        import inspect
+
+        from maddening.core.edge import EdgeSpec
+        from maddening.core.graph_manager import GraphManager
+
+        index = transforms_gate._TRANSFORM_POSITION
+        params = [
+            name for name, param
+            in inspect.signature(GraphManager.add_edge).parameters.items()
+            if name != "self"
+            and param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        assert params[index] == "transform"
+        fields = [f.name for f in dataclasses.fields(EdgeSpec)]
+        assert fields[index] == "transform"
+
+
+class TestTransformLiveRegistration:
+    """A lexical ``@register_transform`` is a claim; the registry is the fact.
+
+    ``find_local_registrations`` walks the whole AST for the call
+    expression, so a registration inside a function nobody calls satisfied
+    the gate while the name was absent from the registry after import and
+    ``add_edge`` would raise ``KeyError``.
+    """
+
+    _DEAD = (
+        "from maddening.core.transforms import register_transform\n"
+        "\n"
+        "\n"
+        "def _install_later():\n"
+        '    """Never called -- e.g. a helper a fixture forgot to invoke."""\n'
+        '    @register_transform("phantom_transform")\n'
+        "    def _phantom(x):\n"
+        "        return x\n"
+        "\n"
+        "\n"
+        "\n"
+        "def wire(gm):\n"
+        '    gm.add_edge("a", "b", "x", "y", transform="phantom_transform")\n'
+    )
+
+    _LIVE = (
+        "from maddening.core.transforms import register_transform\n"
+        "\n"
+        "\n"
+        '@register_transform("really_registered_transform")\n'
+        "def _t(x):\n"
+        "    return x\n"
+        "\n"
+        "\n"
+        "\n"
+        "def wire(gm):\n"
+        '    gm.add_edge("a", "b", "x", "y", '
+        'transform="really_registered_transform")\n'
+    )
+
+    def test_a_registration_that_never_executes_fails_the_gate(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "dead_registration.py").write_text(self._DEAD)
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_the_error_says_the_registration_never_executes(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        (tmp_path / "dead_registration.py").write_text(self._DEAD)
+        transforms_gate.main([str(tmp_path)])
+        assert "never executes" in capsys.readouterr().out
+
+    def test_a_module_level_registration_passes(
+        self, transforms_gate, tmp_path
+    ):
+        """The other direction: a real registration is confirmed, not merely
+        tolerated."""
+        (tmp_path / "live_registration.py").write_text(self._LIVE)
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_a_module_that_cannot_be_imported_degrades_to_unchecked(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """An optional extra this environment lacks is unchecked, not broken.
+
+        ``resolve_dotted_name``'s ``unavailable`` handling is the precedent:
+        failing a USD-serialisation gate because ``pxr`` is missing would
+        make the gate unusable in a CI that installs only ``[ci]``.
+        """
+        (tmp_path / "needs_an_extra.py").write_text(
+            "import a_module_that_does_not_exist_anywhere  # noqa: F401\n"
+            "from maddening.core.transforms import register_transform\n"
+            "\n"
+            "\n"
+            '@register_transform("transform_behind_an_extra")\n'
+            "def _t(x):\n"
+            "    return x\n"
+            "\n"
+            "\n"
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", '
+            'transform="transform_behind_an_extra")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "NOT confirmed against the live registry" in out
+        assert "not confirmed against the live registry" in out
+
+    def test_the_repository_confirms_every_local_registration(self):
+        """No NOTE means every credited registration really executed."""
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "NOT confirmed" not in result.stdout, (
+            "a local registration could not be confirmed in this "
+            "environment; the gate degraded rather than verified"
+        )
+
+    def test_the_summary_separates_allowlisted_from_verified(self):
+        result = _run("check_transforms")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "allowlisted and not checked" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # check_impl_mapping.py
 # ---------------------------------------------------------------------------

@@ -698,6 +698,17 @@ def _inverse_noise_std(noise_std, residual):
     two apart -- it reports ``0`` for a dict -- so the scalar branch is
     keyed on the type.
 
+    The cast and the reciprocal are computed in **numpy**, not ``jnp``,
+    and only the finished array is handed to a device.  Every ``jnp``
+    operation performed while a ``jax.jit`` trace is open is staged into
+    that trace, concrete inputs or not, so a ``jnp`` cast here would
+    make ``sig`` a tracer and :func:`_check_noise_std` -- which has to
+    read it, because its job is to refuse it -- would raise
+    ``TracerArrayConversionError`` instead.  That is what made
+    ``fim_core(..., noise_std=...)`` untraceable at first.  numpy and
+    XLA both round a float32 division correctly, so the value is
+    unchanged.
+
     ``residual`` is used for its *structure* only -- the pytree shape,
     each leaf's shape and dtype, and the dtype ``ravel_pytree`` would
     promote them to -- so it may be (and from :func:`fim` is) a tree of
@@ -712,20 +723,27 @@ def _inverse_noise_std(noise_std, residual):
     if noise_std is None:
         return None
     flat_r = jax.eval_shape(lambda t: ravel_pytree(t)[0], residual)
+    dtype = np.dtype(flat_r.dtype)
     is_scalar = isinstance(noise_std, numbers.Real) or (
         isinstance(noise_std, (np.ndarray, jax.Array)) and noise_std.ndim == 0
     )
     if is_scalar:
-        sig = jnp.asarray(noise_std, dtype=flat_r.dtype)
+        sig = np.asarray(noise_std, dtype=dtype)
         _check_noise_std(sig, noise_std)
-        return 1.0 / sig
+        return jnp.asarray(np.ones((), dtype) / sig)
     sig = jax.tree.map(
-        lambda leaf, sd: jnp.broadcast_to(jnp.asarray(sd, dtype=leaf.dtype), jnp.shape(leaf)),
+        lambda leaf, sd: np.broadcast_to(
+            np.asarray(sd, dtype=np.dtype(leaf.dtype)), np.shape(leaf)),
         residual, noise_std,
     )
-    flat_sig = ravel_pytree(sig)[0]
+    # ``ravel_pytree``'s own two steps -- cast every leaf to the promoted
+    # dtype, then concatenate in flatten order -- done in numpy, because
+    # ``dtype`` above *is* that promotion, read off the abstract ravel.
+    leaves = [np.asarray(x, dtype=dtype).ravel() for x in jax.tree.leaves(sig)]
+    flat_sig = (np.concatenate(leaves) if leaves
+                else np.zeros(0, dtype=dtype))
     _check_noise_std(flat_sig, noise_std)
-    return 1.0 / flat_sig
+    return jnp.asarray(np.ones((), dtype) / flat_sig)
 
 
 def _check_noise_std(sig, original) -> None:

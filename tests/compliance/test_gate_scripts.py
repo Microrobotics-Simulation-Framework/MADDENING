@@ -706,6 +706,59 @@ class TestAnomalyGateVerifiesSomething:
                       str(REPO_ROOT), "--no-resolve")
         assert result.returncode == 1, result.stdout
 
+    def test_a_registry_whose_every_reference_is_unavailable_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """The case the old guard was written for, and could not reach.
+
+        Every optional extra is installed in most environments, so no real
+        symbol produces an ``unavailable`` note here.  The note is injected
+        instead: one declared reference, one note, zero verified.
+        """
+        gate = _load("check_anomalies")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+
+        def every_reference_unavailable(
+            _path, *, prefix="", repo_root=None,
+            resolve_references=True, notes=None,
+        ):
+            if notes is not None:
+                notes.append(
+                    "MADD-ANO-001: affected_components entry "
+                    "'maddening.nodes.heat.HeatNode' was NOT checked -- "
+                    "simulated missing optional extra"
+                )
+            return []
+
+        monkeypatch.setattr(
+            gate, "validate_anomaly_registry", every_reference_unavailable
+        )
+        assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 1
+
+    def test_one_available_reference_is_enough_to_pass(
+        self, tmp_path, monkeypatch
+    ):
+        """The other direction: the guard fires on zero, not on any."""
+        gate = _load("check_anomalies")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="open").replace(
+            '      - "maddening.nodes.heat.HeatNode"\n',
+            '      - "maddening.nodes.heat.HeatNode"\n'
+            '      - "maddening.core.graph_manager.GraphManager"\n',
+        ))
+
+        def one_unavailable(
+            _path, *, prefix="", repo_root=None,
+            resolve_references=True, notes=None,
+        ):
+            if notes is not None:
+                notes.append("MADD-ANO-001: one entry was NOT checked")
+            return []
+
+        monkeypatch.setattr(gate, "validate_anomaly_registry", one_unavailable)
+        assert gate.main([str(path), "--repo-root", str(REPO_ROOT)]) == 0
+
     def test_the_summary_separates_verified_from_not_checked(self):
         """One headline count that folds in declined references is how
         "50 citations verified" came to mean 45."""

@@ -17,6 +17,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
+from maddening.serialization.json_codec import NON_FINITE_TOKENS
 from maddening.warnings import ExceptionGroup
 from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY
 
@@ -25,11 +26,30 @@ from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY
 # Strategies
 # ---------------------------------------------------------------------------
 
+#: A node name ``add_node`` accepts.  The three non-finite JSON tokens
+#: are mapped aside rather than drawn: ``add_node`` refuses them
+#: (``MADD-ANO-010`` -- a node named ``NaN`` cannot be written to a
+#: config or named by a mapping point reference), so drawing one fails
+#: every test here that expects a name to be *accepted*, for a reason
+#: none of them is about.  This is not a remote corner: Hypothesis
+#: harvests string literals out of local modules and injects them into
+#: draws -- and the refusal put the same three literals into
+#: ``graph_manager`` as well, so the pool for text drawn against the
+#: graph API now contains exactly the strings it rejects.  It turned up
+#: in the first CI run after the refusal landed and will keep turning
+#: up.  Mapped to the nearest *accepted* spelling, not assumed away
+#: (the same choice as the ghost-name strategy below, and as PR 79 made
+#: on the FMI header strategy): the draw is kept, the draw-rejection
+#: rate stays 0.0%, and what the name becomes -- ``"nan"``,
+#: ``"infinity"`` -- is a lookalike the API must accept, so the mapping
+#: exercises the exact-match rule rather than hiding it.  The refusal
+#: itself, and the lookalikes, are pinned in
+#: ``tests/core/test_non_finite_json_tokens.py``.
 node_name_st = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="_-"),
     min_size=1,
     max_size=12,
-)
+).map(lambda n: n.lower() if n in NON_FINITE_TOKENS else n)
 
 # Strategy for generating a random valid node
 def _make_ball(name, dt=0.01):

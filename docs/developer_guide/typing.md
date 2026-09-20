@@ -320,7 +320,15 @@ Delivered on `feat/pep561-phase2` (2026-09-20) except where noted.
    notes.
 3. **`if TYPE_CHECKING:` re-exports for the lazy `__getattr__` tables** --
    done, for all seven packages; `tests/test_lazy_reexports.py` pins it
-   statically so it cannot rot between pyright runs.
+   statically so it cannot rot between pyright runs, in **both**
+   directions: a name in `__all__` that no checker can see, and a name a
+   checker can see that the runtime lazy table has no entry for.  The
+   second one type-checks perfectly and raises `AttributeError`, which
+   with the marker shipped is the direction that reaches a consumer.  A
+   `TYPE_CHECKING` import of a symbol that does not exist is not
+   reachable by an `ast`-based check at all; pyright is the backstop for
+   that, which is why every one of the seven packages -- including the
+   package root module -- has to be inside a tier.
 4. **`src/maddening/py.typed` and the hatch `force-include`** -- done, and
    asserted against a built wheel rather than against the configuration
    (see *PEP 561: shipping the marker*).

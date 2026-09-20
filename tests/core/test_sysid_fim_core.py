@@ -658,6 +658,36 @@ class TestTheCounterItself:
         assert counter.by_kind.get("np.array") == 1, counter.by_kind
         assert counter.by_kind.get("__array__") == 1, counter.by_kind
 
+    @pytest.mark.parametrize("shape", [(), (4,), (2, 2)])
+    def test_it_counts_each_transfer_once(self, shape):
+        """One ``np.asarray`` is one transfer, whatever the rank.
+
+        The hazard is the opposite of the blind spot and just as
+        quiet: hooking *both* ``np.asarray`` and
+        ``ArrayImpl.__buffer__`` counts the same read twice on Python
+        3.12 and once on 3.11, which would make the exact counts below
+        interpreter-dependent in the other direction.  ``__buffer__``
+        is deliberately absent from :class:`_CountTransfers` for that
+        reason, and a 0-d array is included because ``numpy`` is
+        entitled to treat one differently and does not.
+        """
+        x = jnp.ones(shape, dtype=jnp.float32)
+        with _CountTransfers() as counter:
+            np.asarray(x)
+        assert counter.count == 1, counter.by_kind
+        with _CountTransfers() as counter:
+            np.asarray(x, dtype=np.float64)
+        assert counter.count == 1, counter.by_kind
+
+    def test_it_does_not_count_a_shape_read(self):
+        """``_leaf_size`` reads ``np.shape``, which must stay free --
+        it is the whole reason that function exists."""
+        x = jnp.ones((3, 4), dtype=jnp.float32)
+        with _CountTransfers() as counter:
+            np.shape(x)
+            x.shape
+        assert counter.count == 0, counter.by_kind
+
     def test_it_does_not_count_numpy_on_numpy(self):
         """``fim``'s host verdict layer re-wraps its own numpy arrays
         several times.  Counting those would make the exact numbers

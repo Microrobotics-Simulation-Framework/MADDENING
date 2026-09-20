@@ -115,4 +115,4 @@ import time.  Levels:
 | `maddening.sysid.windowed_loss` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*92 API surfaces registered.*
+*96 API surfaces registered.*

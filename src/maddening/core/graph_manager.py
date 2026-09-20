@@ -1146,11 +1146,18 @@ def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
                                node_obj, coupled_bi_names=None, node_params=None):
     """Correct interface DOFs after update to undo internal BC enforcement.
 
-    Nodes like HeatNode enforce Dirichlet BCs by overwriting boundary
-    cells after the FD update.  When those BCs come from coupling,
-    the overwrite destroys the physically meaningful stencil-computed
-    value.  This function asks the node to recompute those values via
+    A node may enforce Dirichlet BCs by overwriting its boundary cells
+    after the update.  When those BCs come from coupling, the overwrite
+    destroys the physically meaningful stencil-computed value.  This
+    function asks the node to recompute those values via
     ``compute_interface_correction``.
+
+    HeatNode was the motivating case and no longer needs it: since
+    0.4.0 it imposes the datum through its ghost cells and never
+    overwrites a cell (MADD-ANO-007), so its correction returns what
+    ``update`` already produced and applying it is an identity.  The
+    hook stays because the contract is about nodes in general, and a
+    node that does overwrite is still entitled to it.
 
     Only boundary inputs that come from coupling edges are corrected.
     External inputs and non-coupling edges are left as-is (standard

@@ -163,7 +163,7 @@ def demo_coupled_heat_rods():
     print()
     print("  At the interface, each rod sends an interior cell temperature")
     print("  as the other's Dirichlet BC.  We use T[-2] and T[1] (skipping")
-    print("  the boundary cells which HeatNode overwrites with the BC).")
+    print("  the end cells, which the boundary closure has just acted on).")
     print()
     print("  The grids have DIFFERENT resolutions ({} vs {} cells), showing".format(
         n_coarse, n_fine))

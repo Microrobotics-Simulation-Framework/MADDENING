@@ -43,7 +43,7 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 # row that loses its backticks, fails instead of reporting a smaller "OK".
 # Raise a number when a guide gains rows; never lower one to make CI pass.
 MIN_MAPPINGS = {
-    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 5,
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
     os.path.join("docs", "algorithm_guide", "nodes", "spring_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "ball_node.md"): 7,

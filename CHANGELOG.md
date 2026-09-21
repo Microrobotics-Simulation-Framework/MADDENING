@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`fim(scale="nominal", specs=gm.param_specs())`: a column scale from the
+  bounds width, not the value** — a parameter at `0.0` is judged on the data;
+  columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
   loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers

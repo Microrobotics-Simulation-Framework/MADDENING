@@ -460,6 +460,19 @@ class FIMReport:
     not about the data -- ``fim(..., scale=None)`` asks the absolute
     question and answers it -- and this field is how the report says
     which of the two happened.  Empty under ``scale=None``.
+
+    ``value_scaled`` names the parameters ``scale="nominal"`` could not
+    give a nominal scale.  Nominal scaling multiplies each column by the
+    width ``hi - lo`` of the parameter's declared ``bounds`` instead of
+    by its value, so a parameter at ``0.0`` keeps a coherent
+    dimensionless column; a spec with no finite width has no such scale,
+    and that column is scaled by the value (``p``, or ``p - lo`` for a
+    ``transform="log"`` spec with a lower bound) exactly as
+    ``"relative"`` would.  This field says which columns those were, so
+    a report under ``"nominal"`` is never quietly half relative; a
+    value-scaled column that is also at zero appears in ``zero_scaled``
+    too.  Empty under every other scale.  The policy is tabulated in
+    :func:`fim`.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -469,6 +482,7 @@ class FIMReport:
     crb: jnp.ndarray
     param_names: tuple[str, ...]
     zero_scaled: tuple[str, ...] = ()
+    value_scaled: tuple[str, ...] = ()
 
     def least_identifiable(self) -> tuple[str, float]:
         """Name and weight of the largest component of the weakest direction."""
@@ -1120,6 +1134,12 @@ class FIMCore:
     rank_rtol : float
         Static.  The cutoff actually in force, already resolved through
         :func:`_resolve_rank_rtol`.
+    value_scaled : tuple of str
+        Static.  :attr:`FIMReport.value_scaled`: the columns
+        ``scale="nominal"`` scaled by the value because their spec has
+        no finite width.  Decided from ``specs`` on the host at trace
+        time, so it is metadata and not a mask -- nothing about it is
+        read back.  Empty under every other scale.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -1134,6 +1154,7 @@ class FIMCore:
     param_names: tuple[str, ...]
     n_residual: int
     rank_rtol: float
+    value_scaled: tuple[str, ...] = ()
 
 
 jax.tree_util.register_dataclass(
@@ -1141,7 +1162,7 @@ jax.tree_util.register_dataclass(
     data_fields=["fim", "eigvals", "eigvecs", "rank", "cond", "crb",
                  "finite", "zero_scaled", "precision_limited",
                  "deciding_ratio"],
-    meta_fields=["param_names", "n_residual", "rank_rtol"],
+    meta_fields=["param_names", "n_residual", "rank_rtol", "value_scaled"],
 )
 
 
@@ -1233,8 +1254,128 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
     return limited, jnp.where(limited, deciding, zero)
 
 
-def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma):
+_SCALES = ("relative", "nominal", None)
+
+
+def _resolve_nominal(params, specs, idx, scale):
+    """The static per-column record ``scale="nominal"`` multiplies by,
+    or ``None`` under any other scale.
+
+    One entry per column of the (masked) Jacobian, ``(name, width,
+    offset)``: ``width`` is ``hi - lo`` for a spec with two finite
+    bounds and ``None`` where there is no finite width, in which case
+    the column is scaled by ``theta - offset`` -- ``offset`` being the
+    lower bound of a ``transform="log"`` spec (the transform's own gain
+    ``dp/du = p - lo``) and ``0.0`` otherwise, i.e. plain relative
+    scaling.  The policy :func:`fim` tabulates lives here and in
+    :func:`_nominal_column_vector` and nowhere else.
+
+    Everything here is host Python over ``specs`` and the *structure*
+    of ``params``; no leaf value is read, so it costs no transfer and
+    the result is a hashable tuple -- which is what lets it key
+    :func:`_fim_jacobian_compiled` and be closed over by a trace, just
+    as ``mask`` is reduced to ``idx``.
+
+    A ``specs`` given under another scale is refused rather than
+    ignored: a spec that changes nothing should not be accepted as if
+    it had.  ``specs=None`` under ``"nominal"`` is refused too -- an
+    empty dict is the honest way to say "no spec has a width", and it
+    produces a report that names every column in ``value_scaled``.
+    """
+    if scale != "nominal":
+        if specs is not None:
+            raise ValueError(
+                f"specs is read only under scale='nominal'; got specs with "
+                f"scale={scale!r}. Drop it, or ask scale='nominal' if the "
+                f"bounds-derived scaling is what you want.")
+        return None
+    if specs is None:
+        raise ValueError(
+            "scale='nominal' derives each column's scale from a ParamSpec "
+            "and needs specs= -- gm.param_specs() for a graph's parameter "
+            "tree, or a dict of ParamSpec mirroring params. Pass {} to say "
+            "explicitly that no leaf has a declared width; every column is "
+            "then value-scaled and FIMReport.value_scaled names them all.")
+    names = _param_names(params)
+    per_leaf: list[tuple[Optional[float], float]] = []
+    sizes: list[int] = []
+    for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+        spec = _spec_for(specs, path)
+        lo, hi = spec.bounds
+        if lo is not None and hi is not None:
+            per_leaf.append((float(hi) - float(lo), 0.0))
+        elif spec.transform == "log":
+            per_leaf.append((None, 0.0 if lo is None else float(lo)))
+        else:
+            per_leaf.append((None, 0.0))
+        sizes.append(_leaf_size(leaf))
+    cols = [entry for entry, n in zip(per_leaf, sizes) for _ in range(n)]
+    if idx is not None:
+        cols = [cols[int(i)] for i in idx]
+        names = tuple(names[int(i)] for i in idx)
+    return tuple((nm, w, off) for nm, (w, off) in zip(names, cols))
+
+
+def _nominal_column_vector(nominal, theta0):
+    """The per-column multiplier for ``scale="nominal"``, as an array
+    shaped like ``theta0`` -- constants where the spec has a width,
+    ``theta0 - offset`` where it has not.
+
+    The width guard is here because this is where the dtype is known.
+    ``ParamSpec`` already refuses ``lo >= hi``, so a width is positive
+    in float64 -- but it is applied at ``theta0``'s precision and
+    squared on the way into ``F = J.T @ J``, and a width of ``1e-300``
+    or a pair of bounds like ``(0.0, 1e39)`` is a zero or an ``inf``
+    column by the time it gets there.  A zero column is the defect this
+    scale exists to remove, so a width that does not survive both is
+    refused by name rather than let through.  Trace time, host side:
+    ``nominal`` is static, so no value of ``theta0`` is consulted.
+    """
+    dtype = theta0.dtype
+    widths = np.ones(len(nominal), dtype=dtype)
+    offsets = np.zeros(len(nominal), dtype=dtype)
+    has_width = np.zeros(len(nominal), dtype=bool)
+    for j, (name, width, offset) in enumerate(nominal):
+        if width is None:
+            offsets[j] = offset
+            continue
+        # The overflow and underflow are the thing being tested for, so
+        # numpy's warnings about them are the guard working, not a
+        # finding: silence them here and read the result.
+        with np.errstate(all="ignore"):
+            w = np.asarray(width, dtype=dtype)
+            sq = w * w
+        if not (np.isfinite(w) and w > 0 and np.isfinite(sq) and sq > 0):
+            raise ValueError(
+                f"scale='nominal': the width of {name}'s bounds is {width!r}, "
+                f"which is not a positive finite number at {np.dtype(dtype)} "
+                f"once squared into F = J^T J ({w!r} -> {sq!r}). A column "
+                f"scaled by it would be zero or non-finite and the parameter "
+                f"would read as unidentifiable whatever the data say -- the "
+                f"failure this scale exists to remove -- so it is refused "
+                f"rather than reported. Widen or narrow the bounds to a "
+                f"width this precision can carry, or re-run under x64.")
+        widths[j] = w
+        has_width[j] = True
+    if bool(has_width.all()):
+        return jnp.asarray(widths)
+    value_scaled = theta0 - jnp.asarray(offsets)
+    if not bool(has_width.any()):
+        return value_scaled
+    return jnp.where(jnp.asarray(has_width), jnp.asarray(widths), value_scaled)
+
+
+def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
+                  nominal=None):
     """``(J, zero-scaled mask)`` -- the expensive half, and the only half.
+
+    Composition, row then column: ``_r`` divides residual row ``i`` by
+    ``sigma_i`` *before* differentiation, so ``J[i, j] = (1 / sigma_i)
+    * d r_i / d theta_j``; the scale multiplies column ``j`` afterwards,
+    ``J[i, j] * s_j``, with ``s_j = theta_j`` under ``"relative"``, the
+    :func:`_resolve_nominal` record under ``"nominal"`` and ``1`` under
+    ``None``.  ``idx`` has already selected the columns, so every
+    ``s_j`` is the scale of the parameter that column belongs to.
 
     ``jacfwd`` over an N-step rollout is what made :func:`fim`
     unusable in a loop: in eager mode every operation of the
@@ -1277,6 +1418,13 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma):
         # this is the first thing a user meets on the default scale.
         zero_scaled = theta0 == 0.0
         J = J * theta0[None, :]
+    elif scale == "nominal":
+        col = _nominal_column_vector(nominal, theta0)
+        # Tested on the multiplier itself and not on ``has_width``: a
+        # width column cannot be zero past the guard, but if it ever
+        # were, this is the field that has to say so.
+        zero_scaled = col == 0.0
+        J = J * col[None, :]
     else:
         zero_scaled = jnp.zeros(theta0.shape, dtype=bool)
     return J, zero_scaled
@@ -1299,11 +1447,18 @@ def _fim_spectrum(J):
     return F, jnp.all(jnp.isfinite(F)), eigvals, eigvecs
 
 
+def _value_scaled_names(nominal) -> tuple[str, ...]:
+    """The columns of a :func:`_resolve_nominal` record with no width."""
+    if nominal is None:
+        return ()
+    return tuple(nm for nm, width, _ in nominal if width is None)
+
+
 def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
-                     rank_rtol) -> FIMCore:
+                     rank_rtol, nominal=None) -> FIMCore:
     """The whole of :func:`fim`'s computation, with nothing read back."""
     J, zero_scaled = _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
-                                   inv_sigma=inv_sigma)
+                                   inv_sigma=inv_sigma, nominal=nominal)
     F, finite, eigvals, eigvecs = _fim_spectrum(J)
     lo, hi = eigvals[0], eigvals[-1]
     # ``lo > 0`` rather than ``not (lo <= 0)``, so a ``NaN`` smallest
@@ -1339,10 +1494,11 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
         crb=crb, finite=finite, zero_scaled=zero_scaled,
         precision_limited=limited, deciding_ratio=ratio,
         param_names=names, n_residual=n_residual, rank_rtol=rtol,
+        value_scaled=_value_scaled_names(nominal),
     )
 
 
-#: Distinct ``(residual_fn, scale, mask)`` signatures whose traced
+#: Distinct ``(residual_fn, scale, mask, nominal)`` signatures whose traced
 #: Jacobian :func:`fim` keeps compiled.  Bounded because each entry
 #: holds a strong reference to the caller's ``residual_fn`` and to
 #: everything it closes over -- a graph, a window of observations -- and
@@ -1352,8 +1508,13 @@ _FIM_JACOBIAN_CACHE_SIZE = 32
 
 
 @functools.lru_cache(maxsize=_FIM_JACOBIAN_CACHE_SIZE)
-def _fim_jacobian_compiled(residual_fn, scale, idx_key):
+def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
     """The jitted :func:`_fim_jacobian` for one static signature.
+
+    ``nominal`` is the :func:`_resolve_nominal` record -- a hashable
+    tuple of Python floats and names, or ``None`` -- and is part of the
+    key because two ``specs`` with different widths compile to
+    different constants in the same shape.
 
     ``fim`` used to re-trace the whole rollout on every call, and to
     call ``residual_fn`` twice per call while doing it.  Tracing and
@@ -1378,7 +1539,7 @@ def _fim_jacobian_compiled(residual_fn, scale, idx_key):
     @jax.jit
     def run(params, inv_sigma):
         return _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
-                             inv_sigma=inv_sigma)
+                             inv_sigma=inv_sigma, nominal=nominal)
 
     return run
 
@@ -1409,6 +1570,7 @@ def fim_core(
     mask: Optional[dict] = None,
     noise_std: Optional[Any] = None,
     rank_rtol: Optional[float] = None,
+    specs: Optional[dict] = None,
 ) -> FIMCore:
     """:func:`fim`'s computation with no host round trip -- jit this.
 
@@ -1421,8 +1583,12 @@ def fim_core(
     under ``jax.lax.scan`` -- and :func:`fim` where a human reads the
     answer.
 
-    ``residual_fn``, ``scale``, ``mask`` and ``rank_rtol`` are static:
-    close over them rather than passing them as traced arguments::
+    ``residual_fn``, ``scale``, ``mask``, ``rank_rtol`` and ``specs``
+    are static: close over them rather than passing them as traced
+    arguments (``specs`` is reduced to a tuple of per-column constants
+    on the host before anything is traced, exactly as ``mask`` is
+    reduced to indices, so ``scale="nominal"`` adds no traced operand
+    and its ``value_scaled`` verdict is metadata, not a mask)::
 
         core_fn = jax.jit(functools.partial(fim_core, residual_fn))
         core = core_fn(params)              # device arrays, no sync
@@ -1467,13 +1633,15 @@ def fim_core(
     --------
     fim : the same computation with the host-side verdict layer on top.
     """
-    if scale not in ("relative", None):
-        raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
+    if scale not in _SCALES:
+        raise ValueError(
+            f"scale must be 'relative', 'nominal' or None, got {scale!r}")
+    idx = _masked_indices(params, mask)
     return _fim_core_traced(
-        residual_fn, params, scale=scale,
-        idx=_masked_indices(params, mask),
+        residual_fn, params, scale=scale, idx=idx,
         inv_sigma=_resolved_noise(residual_fn, params, noise_std),
         rank_rtol=rank_rtol,
+        nominal=_resolve_nominal(params, specs, idx, scale),
     )
 
 
@@ -1486,6 +1654,7 @@ def fim(
     mask: Optional[dict] = None,
     noise_std: Optional[Any] = None,
     rank_rtol: Optional[float] = None,
+    specs: Optional[dict] = None,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -1504,7 +1673,7 @@ def fim(
         simulated-minus-measured trajectory.
     params : dict
         Parameter pytree at which to linearise.
-    scale : {"relative", None}
+    scale : {"relative", "nominal", None}
         ``"relative"`` (default) multiplies each column of ``J`` by the
         parameter's value, i.e. sensitivities to *relative* changes, so
         parameters in different units are comparable and the condition
@@ -1513,7 +1682,47 @@ def fim(
         no relative scale: its column vanishes and it reads as
         unidentifiable however well the data determine it.  Those
         parameters are named in :attr:`FIMReport.zero_scaled`; ask
-        ``scale=None`` for the absolute question about them.
+        ``scale=None`` for the absolute question about them, or
+        ``scale="nominal"`` for the dimensionless one.
+
+        ``"nominal"`` multiplies each column by a scale read from the
+        parameter's :class:`~maddening.core.params.ParamSpec` (via
+        ``specs``) instead of from its value: the **width** ``hi - lo``
+        of a finite ``bounds``.  A width and not a midpoint, because a
+        scale is what a column needs and the midpoint of ``(-1, 1)`` is
+        the ``0.0`` this mode exists to escape; ``ParamSpec`` enforces
+        ``lo < hi``, so a width is never zero, and one that would round
+        to zero or overflow at the parameters' precision is refused by
+        name.  Columns are still dimensionless, so ``cond`` still
+        compares like with like, and the answer no longer depends on
+        where in its range the parameter happens to sit.  A spec with
+        no finite width has no nominal scale; that column keeps the
+        value scaling ``"relative"`` would give it, and the parameter is
+        named in :attr:`FIMReport.value_scaled` so the report says which
+        of its columns were answered from the spec and which from the
+        value.  The policy, per spec:
+
+        ==================================  =============  ============  ================  =================
+        ``bounds``                          ``transform``  column scale  ``value_scaled``  ``zero_scaled``
+        ==================================  =============  ============  ================  =================
+        ``(lo, hi)``, both finite           any            ``hi - lo``   no                never
+        ``(lo, None)``, ``lo`` finite       ``"log"``      ``p - lo``    yes               at ``p == lo``
+        ``(None, None)``                    ``"log"``      ``p``         yes               at ``p == 0``
+        one or both ``None``                ``None``       ``p``         yes               at ``p == 0``
+        ==================================  =============  ============  ================  =================
+
+        The ``"log"`` rows use the transform's own gain ``dp/du =
+        p - lo``, which is the scale an optimiser moving that parameter
+        sees; it is still a value and can still be zero (at the
+        boundary of the transform's domain), so those columns are
+        value-scaled and named like the rest.  Nothing here falls back
+        to ``1.0``: an absolute column among dimensionless ones would
+        put units back into ``cond`` without saying so.  Order of
+        composition: ``noise_std`` divides row ``i`` before
+        differentiation, the scale multiplies column ``j`` after it,
+        ``J[i, j] = (1 / sigma_i) * (d r_i / d theta_j) * s_j``, and
+        ``mask`` selects the columns first, so each ``s_j`` is the scale
+        of the parameter its column belongs to.
     mask : pytree of bool, optional
         Same structure as ``params``; only leaves marked ``True`` are
         treated as parameters (``GraphManager.trainable_mask()``).  The
@@ -1532,6 +1741,17 @@ def fim(
         Every σ must be finite and strictly positive at the residual's
         own precision, which is where a σ that underflows to ``0.0``
         and a negative σ are caught.
+    specs : dict, optional
+        Nested dict of :class:`~maddening.core.params.ParamSpec`
+        mirroring ``params`` -- ``gm.param_specs()`` for a graph's tree,
+        or ``{"k": ParamSpec(bounds=(0.0, 100.0))}`` for a flat one.
+        Required under ``scale="nominal"`` and refused under any other
+        scale, so a spec that is not being read is never silently
+        carried.  A leaf without an entry gets the default (unbounded)
+        spec and is therefore value-scaled and named; ``{}`` is the
+        explicit way to say no leaf has a width.  Static: the column
+        scales are derived from it on the host once and baked into the
+        traced Jacobian as constants, as ``mask`` is reduced to indices.
     rank_rtol : float, optional
         Relative tolerance deciding which directions the data resolves:
         an eigenvalue at or below ``rank_rtol * max(eigvals)`` counts as
@@ -1604,22 +1824,27 @@ def fim(
     Raises
     ------
     ValueError
-        If ``scale``, ``rank_rtol`` or ``noise_std`` is not a value this
-        function can answer for (in particular a σ that is zero,
-        negative, non-finite, or underflows the residual's dtype).
+        If ``scale``, ``rank_rtol``, ``noise_std`` or ``specs`` is not a
+        value this function can answer for (in particular a σ that is
+        zero, negative, non-finite, or underflows the residual's dtype;
+        ``specs`` given without ``scale="nominal"`` or withheld with it;
+        a bounds width that is not positive and finite once squared at
+        the parameters' precision).
     FloatingPointError
         If ``F`` comes out non-finite -- a diverged rollout, an
         overflowing Jacobian, a residual holding a ``NaN``.  There is no
         rank, condition number or bound to read from a NaN
         decomposition, so this raises rather than reporting one.
     """
-    if scale not in ("relative", None):
-        raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
+    if scale not in _SCALES:
+        raise ValueError(
+            f"scale must be 'relative', 'nominal' or None, got {scale!r}")
     idx = _masked_indices(params, mask)
+    nominal = _resolve_nominal(params, specs, idx, scale)
     inv_sigma = _resolved_noise(residual_fn, params, noise_std)
     idx_key = None if idx is None else tuple(int(i) for i in idx)
     try:
-        run = _fim_jacobian_compiled(residual_fn, scale, idx_key)
+        run = _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal)
     except TypeError:
         # An unhashable ``residual_fn`` (a callable object that defines
         # ``__eq__`` without ``__hash__``) cannot key the cache.  That is
@@ -1627,7 +1852,8 @@ def fim(
         # Jacobian eagerly, exactly as this function did before it was
         # jitted at all.
         J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
-                                     idx=idx, inv_sigma=inv_sigma)
+                                     idx=idx, inv_sigma=inv_sigma,
+                                     nominal=nominal)
     else:
         J, zero_mask = run(params, inv_sigma)
     # Eager, and deliberately: see :func:`_fim_jacobian` for why the
@@ -1726,6 +1952,7 @@ def fim(
     return FIMReport(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,
+        value_scaled=_value_scaled_names(nominal),
     )
 
 

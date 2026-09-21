@@ -409,6 +409,206 @@ def estimated_error(residual, amplification, step_scale=1.0):
 
 
 # ------------------------------------------------------------------
+# The spectral bound (``solver="ift"``, ``diagnostics=True``)
+# ------------------------------------------------------------------
+
+#: Power-iteration steps per group per timestep, i.e. the number of
+#: Jacobian-vector products the spectral bound costs.  Each step is one
+#: ``jax.jvp`` of the group's one-pass map -- roughly the price of one
+#: coupling pass.  Eight resolves a dominant eigenvalue from a
+#: competitor at 0.4 of its size to 1e-6 (``0.4**16``), which is the
+#: two-mode failure case with room to spare; two eigenvalues closer
+#: than that are not resolved in eight steps and the increment margin
+#: in :func:`spectral_error_bound` and the stationarity flag in
+#: :func:`spectral_rate_settled` are what report it.
+SPECTRAL_POWER_ITERATIONS = 8
+
+#: How many times the last *increase* of the power-iteration ratio is
+#: added to it before the bound is formed.  For a normal Jacobian the
+#: ratio sequence is non-decreasing and converges geometrically, so its
+#: last increment measures how far it still has to go: a sequence that
+#: has stopped moving contributes no margin, one still rising is
+#: extrapolated.  Two covers a geometric convergence factor of up to
+#: 2/3 exactly (remaining gap = increment * q / (1 - q)); see
+#: :func:`spectral_error_bound` for what it does not cover.
+SPECTRAL_MARGIN = 2.0
+
+#: The stationarity test behind ``spectral_usable``: the last change
+#: of the ratio, as a fraction of the gap ``1 - rho`` that the bound
+#: divides by.  The bound's relative error is that change amplified
+#: by the same ``1/(1 - rho)``, so this is the quantity that decides
+#: whether the number is settled to a few percent.
+SPECTRAL_SETTLED_FRACTION = 0.05
+
+
+def spectral_rate_power_iteration(matvec, v0, n_iter: int = SPECTRAL_POWER_ITERATIONS):
+    """``(rho, rho_prev)``: the last two norm ratios of a power iteration.
+
+    ``matvec(v)`` applies the coupling Jacobian ``dF/dx`` (at the point
+    the caller chose) to ``v``; ``v0`` is the start vector.  The
+    iteration normalises after every product and records the norm
+    ratio ``||A v|| / ||v||``; after ``n_iter`` products the last ratio
+    is the estimate of the spectral radius and the one before it is
+    returned beside it so the caller can see whether the sequence had
+    settled.
+
+    **The estimate converges from below.**  For a normal ``A`` the
+    ratio is a power mean of ``|lambda_i|`` weighted by the start
+    vector's components, so it never exceeds ``rho(A)`` and the
+    sequence is non-decreasing (Cauchy-Schwarz on ``A^k v``).  That is
+    the direction that *understates* a bound, which is why the two
+    ratios are returned rather than one: :func:`spectral_error_bound`
+    inflates the estimate by its own last increment.  For a non-normal
+    ``A`` a ratio can transiently exceed ``rho`` -- the safe direction
+    -- and the sequence need not be monotone.
+
+    ``n_iter`` is static (a Python int) and is the number of
+    Jacobian-vector products the call costs.  A zero ``v0``, or a
+    ``matvec`` that annihilates the iterate (a nilpotent Jacobian),
+    yields a ratio of ``0.0`` rather than a NaN: no direction is
+    amplified, so nothing is extrapolated.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.diag(jnp.array([0.999, 0.2]))
+    >>> rho, rho_prev = spectral_rate_power_iteration(
+    ...     lambda v: A @ v, jnp.ones(2), n_iter=8)
+    >>> bool(abs(rho - 0.999) < 1e-5), bool(rho >= rho_prev)
+    (True, True)
+    """
+    if n_iter < 2:
+        raise ValueError(
+            f"spectral_rate_power_iteration: n_iter={n_iter} < 2; the "
+            "stationarity margin needs two consecutive ratios."
+        )
+    v0 = jnp.asarray(v0)
+
+    def _unit(v):
+        n = jnp.linalg.norm(v)
+        safe = jnp.where(n > 0, n, jnp.ones_like(n))
+        return jnp.where(n > 0, v / safe, v)
+
+    def body(_i, carry):
+        v, _ratio_prev, ratio = carry
+        w = matvec(v)
+        nv = jnp.linalg.norm(v)
+        nw = jnp.linalg.norm(w)
+        safe = jnp.where(nv > 0, nv, jnp.ones_like(nv))
+        new_ratio = jnp.where(nv > 0, nw / safe, jnp.zeros_like(nw))
+        return _unit(w), ratio, new_ratio
+
+    zero = jnp.zeros((), dtype=v0.dtype)
+    _v, rho_prev, rho = jax.lax.fori_loop(
+        0, int(n_iter), body, (_unit(v0), zero, zero),
+    )
+    return rho, rho_prev
+
+
+def spectral_error_bound(residual, rho, rho_prev, margin: float = SPECTRAL_MARGIN):
+    """``residual / (1 - rho_safe)``: the distance to the fixed point, from the spectrum.
+
+    For a *linear* map ``F(x) = A x + b`` the error of any iterate is
+    exactly ``x - x* = (A - I)^{-1} (F(x) - x)``, whatever iteration
+    produced ``x``: no step sequence, no relaxation factor and no
+    accelerator enters.  Its size is therefore at most
+    ``||(I - A)^{-1}|| * residual``, and for a normal ``A`` that
+    operator norm is ``1 / min|1 - lambda| <= 1 / (1 - rho(A))``.  This
+    is the inequality :func:`error_amplification` could not state,
+    because it read ``rho`` off the residual sequence, which reports the
+    mode dominating the *step*; here ``rho`` comes from a power
+    iteration on ``dF/dx`` itself (:func:`spectral_rate_power_iteration`),
+    which sees every mode whatever its current amplitude.
+
+    ``rho_safe`` is the larger of the two ratios handed in, plus
+    ``margin`` times the last increase.  The power iteration converges
+    to the spectral radius from below, so an estimate that was still
+    rising is extrapolated forward rather than trusted; one that had
+    stopped moving gets no margin.  The result is ``inf`` when
+    ``rho_safe >= 1`` -- the raw iteration would not contract, so the
+    geometric argument bounds nothing -- and NaN when either ratio is
+    NaN, which is how a solver that did not compute one reports it.
+    Never smaller than ``residual`` where it is finite.
+
+    **When it is a bound and when it is an estimate.**  It is a bound
+    on ``||x - x*||`` under three conditions, each stated because each
+    can fail: ``F`` is linear (or the iterate is close enough that
+    ``dF/dx`` does not change between ``x`` and ``x*`` -- Ostrowski's
+    theorem makes the statement *asymptotic* for a differentiable
+    non-linear ``F``, and an estimate elsewhere); the Jacobian is
+    normal, or its eigenvector basis is well enough conditioned that
+    ``||(I - A)^{-1}||`` is within ``margin`` of ``1/(1 - rho)`` (the
+    Gauss-Seidel one-pass map of a cycle is *not* normal, but after one
+    pass its error lies in the dominant eigenspace, where the
+    inequality holds exactly); and the group's norm is close enough to
+    a norm on the tail -- the same triangle-inequality condition
+    ``error_amplification`` documents.  The power iteration's finite
+    length is the fourth thing that can fail, and the only one the
+    code reports: two eigenvalues closer than ``n_iter`` steps can
+    separate leave the estimate below the true radius by more than the
+    increment margin recovers.  :func:`spectral_rate_settled` says
+    whether the sequence had stopped moving; it cannot say that it had
+    stopped moving at the right value.
+
+    Examples
+    --------
+    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.999)), 4)
+    0.1
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.4)), 6)   # rising: 0.5 + 2*0.1
+    0.000333
+    >>> round(float(spectral_error_bound(1e-4, 0.9, 0.95)), 6)  # falling: the larger
+    0.002
+    >>> float(spectral_error_bound(1e-4, 1.0, 1.0))
+    inf
+    """
+    residual = jnp.asarray(residual)
+    rho = jnp.asarray(rho)
+    rho_prev = jnp.asarray(rho_prev)
+    dtype = jnp.result_type(residual, rho, rho_prev)
+    residual = residual.astype(dtype)
+    rho = rho.astype(dtype)
+    rho_prev = rho_prev.astype(dtype)
+    inc = jnp.maximum(rho - rho_prev, jnp.zeros_like(rho))
+    rho_safe = jnp.maximum(rho, rho_prev) + margin * inc
+    finite = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
+    contracting = rho_safe < 1
+    ok = jnp.logical_and(finite, contracting)
+    den = jnp.where(ok, 1.0 - rho_safe, jnp.ones_like(rho_safe))
+    bound = jnp.maximum(residual / den, residual)
+    nan = jnp.full_like(bound, jnp.nan)
+    inf = jnp.full_like(bound, jnp.inf)
+    return jnp.where(finite, jnp.where(contracting, bound, inf), nan)
+
+
+def spectral_rate_settled(rho, rho_prev, fraction: float = SPECTRAL_SETTLED_FRACTION):
+    """Whether the power iteration's last change was small against ``1 - rho``.
+
+    ``|rho - rho_prev| <= fraction * (1 - rho)``.  The bound divides by
+    ``1 - rho``, so a change of the ratio is amplified by the same
+    factor in the bound; this asks that the last such change was worth
+    at most ``fraction`` of the bound.  False for a NaN ratio (nothing
+    was computed) and for ``rho >= 1`` (nothing is bounded).
+
+    A sequence that has settled has settled *somewhere*; two eigenvalues
+    the iteration's length cannot separate look settled at the wrong
+    value.  See :func:`spectral_error_bound`.
+
+    Examples
+    --------
+    >>> bool(spectral_rate_settled(0.999, 0.99899)), bool(spectral_rate_settled(0.9, 0.8))
+    (True, False)
+    """
+    rho = jnp.asarray(rho)
+    rho_prev = jnp.asarray(rho_prev, dtype=rho.dtype)
+    gap = 1.0 - rho
+    moved = jnp.abs(rho - rho_prev)
+    finite = jnp.logical_and(jnp.isfinite(rho), jnp.isfinite(rho_prev))
+    return jnp.logical_and(
+        jnp.logical_and(finite, gap > 0), moved <= fraction * gap,
+    )
+
+
+# ------------------------------------------------------------------
 # State flattening / unflattening
 # ------------------------------------------------------------------
 

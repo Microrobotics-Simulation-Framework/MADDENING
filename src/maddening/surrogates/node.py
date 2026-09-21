@@ -5,9 +5,6 @@ Drop-in replacement for any physics node: same state dict, same
 boundary_inputs contract, works with jit/scan/grad/vmap.
 """
 
-from collections.abc import Mapping
-from typing import Any, Callable
-
 import jax
 import jax.numpy as jnp
 
@@ -15,29 +12,38 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.stability import stability
 from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import (
+    DerivFn,
+    FieldValues,
+    Integrator,
+    MutableStateDict,
+    StateDict,
+    WeightOverrides,
+)
 
 
 # ------------------------------------------------------------------
 # Built-in integrators for derivative-mode surrogates
 # ------------------------------------------------------------------
 
-# shape: state, the deriv_fn arg/result, result are {field: Array} -- TypedDict candidate (phase 3)
+# Dynamic keys (the node's own fields): an alias, not a TypedDict --
+# the key set is a runtime property of the caller's node.
 def euler_integrator(
-    state: dict,
-    deriv_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    state: StateDict,
+    deriv_fn: DerivFn,
     dt: float,
-) -> dict:
+) -> MutableStateDict:
     """Forward Euler: state + dt * d(state)/dt."""
     derivs = deriv_fn(state)
     return {k: state[k] + dt * derivs[k] for k in state}
 
 
-# shape: state, the deriv_fn arg/result, result are {field: Array} -- TypedDict candidate (phase 3)
+# Dynamic keys, an alias not a TypedDict: see `euler_integrator`.
 def rk4_integrator(
-    state: dict,
-    deriv_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    state: StateDict,
+    deriv_fn: DerivFn,
     dt: float,
-) -> dict:
+) -> MutableStateDict:
     """Classical 4th-order Runge-Kutta over a state dict."""
     k1 = deriv_fn(state)
     s2 = {k: state[k] + 0.5 * dt * k1[k] for k in state}
@@ -105,11 +111,8 @@ class SurrogateNode(SimulationNode):
         weights: PyTree,
         state_spec: dict[str, tuple],
         boundary_spec: dict[str, tuple],
-        initial_values: dict,
-        integrator: Callable[
-            [dict[str, Any], Callable[[dict[str, Any]], dict[str, Any]], float],
-            dict[str, Any],
-        ] | None = None,
+        initial_values: FieldValues,
+        integrator: Integrator | None = None,
     ) -> None:
         super().__init__(
             name,
@@ -174,15 +177,17 @@ class SurrogateNode(SimulationNode):
         ]
         return jax.tree_util.tree_unflatten(treedef, merged)
 
-    # shape: params is {weights<leafpath>: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys: an alias, not a TypedDict.  `params` is keyed by the
+    # weight pytree's own leaf paths, computed at call time (see
+    # `_weight_leaves`), and `state` by the surrogated node's fields.
     def update(
         self,
-        state: dict,
-        boundary_inputs: dict,
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
         *,
-        params: Mapping[str, Any] | None = None,
-    ) -> dict:
+        params: WeightOverrides | None = None,
+    ) -> MutableStateDict:
         weights = self._resolve_weights(params)
         arch = self.architecture
 
@@ -190,7 +195,7 @@ class SurrogateNode(SimulationNode):
             return arch.forward(weights, state, boundary_inputs, dt)
         else:
             # derivative mode: integrate d(state)/dt
-            def deriv_fn(s: dict[str, Any]) -> dict[str, Any]:
+            def deriv_fn(s: StateDict) -> MutableStateDict:
                 return arch.forward(weights, s, boundary_inputs, dt)
             return self._integrator(state, deriv_fn, dt)
 

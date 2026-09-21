@@ -47,12 +47,23 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol
+from collections.abc import Mapping
+from typing import Any, Callable, Optional, Protocol, TypeAlias
 
 import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+
+#: One node's state as :meth:`LiveStage.update` receives it:
+#: ``{field_name: array_or_scalar}``.
+#:
+#: Dynamic keys: an alias, not a TypedDict.  The fields are whichever
+#: ones the inner node declares, and the updaters below do not even fix
+#: the names they read
+#: -- ``make_translate_updater(field=...)`` takes the field name as an
+#: argument -- so there is no static key set to describe.
+NodeStateDict: TypeAlias = Mapping[str, Any]
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +157,7 @@ class PrimUpdater(Protocol):
         self,
         stage: "Usd.Stage",
         prim_path: str,
-        node_state: dict[str, Any],
+        node_state: NodeStateDict,
         time_code: Optional[Any] = None,
     ) -> None: ...
 
@@ -447,8 +458,7 @@ def make_translate_updater(
     def updater(
         stage: "Usd.Stage",
         prim_path: str,
-        # shape: {"position": np.ndarray} -- TypedDict candidate (phase 3)
-        node_state: dict[str, Any],
+        node_state: NodeStateDict,
         time_code: Optional[Any] = None,
     ) -> None:
         pos = node_state.get(field)
@@ -482,9 +492,7 @@ def make_translate_orient_updater(
     def updater(
         stage: "Usd.Stage",
         prim_path: str,
-        # shape: {"position": np.ndarray, "orientation": np.ndarray}
-        # -- TypedDict candidate (phase 3)
-        node_state: dict[str, Any],
+        node_state: NodeStateDict,
         time_code: Optional[Any] = None,
     ) -> None:
         prim = stage.GetPrimAtPath(prim_path)
@@ -512,6 +520,7 @@ def make_translate_orient_updater(
 
 __all__ = [
     "LiveStage",
+    "NodeStateDict",
     "PrimUpdater",
     "make_translate_updater",
     "make_translate_orient_updater",

@@ -1,11 +1,12 @@
 """Shared utilities for surrogate architectures."""
 
 import math
-from collections.abc import Mapping
-from typing import Any, Sequence
+from typing import Sequence
 
 import jax
 import jax.numpy as jnp
+
+from maddening.surrogates.types import MutableStateDict, SpecDict, StateDict
 
 try:
     import equinox as eqx
@@ -22,8 +23,8 @@ def check_equinox() -> None:
 
 
 def compute_sizes(
-    state_spec: Mapping[str, tuple[int, ...]],
-    boundary_spec: Mapping[str, tuple[int, ...]],
+    state_spec: SpecDict,
+    boundary_spec: SpecDict,
 ) -> tuple[int, int]:
     """Compute input and output sizes from specs."""
     input_size = sum(math.prod(s) if s else 1 for s in state_spec.values())
@@ -33,13 +34,13 @@ def compute_sizes(
     return input_size, output_size
 
 
-# shape: state/boundary_inputs are {field: Array} -- TypedDict candidate (phase 3)
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
 def flatten_inputs(
-    state: Mapping[str, Any],
-    boundary_inputs: Mapping[str, Any],
+    state: StateDict,
+    boundary_inputs: StateDict,
     dt: float,
-    state_spec: Mapping[str, tuple[int, ...]],
-    boundary_spec: Mapping[str, tuple[int, ...]],
+    state_spec: SpecDict,
+    boundary_spec: SpecDict,
 ) -> jax.Array:
     """Flatten state + boundary_inputs + dt into a single vector."""
     parts = []
@@ -55,11 +56,11 @@ def flatten_inputs(
     return jnp.concatenate(parts)
 
 
-# shape: state_spec is {field: shape}, result is {field: Array} -- TypedDict candidates (phase 3)
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
 def unflatten_output(
     output_vec: jax.Array,
-    state_spec: Mapping[str, tuple[int, ...]],
-) -> dict[str, jax.Array]:
+    state_spec: SpecDict,
+) -> MutableStateDict:
     """Reshape a flat output vector back into a state dict."""
     result = {}
     offset = 0
@@ -72,15 +73,15 @@ def unflatten_output(
     return result
 
 
-# shape: state is {field: Array}, result is {field: shape} -- TypedDict candidates (phase 3)
-def get_state_spec(state: Mapping[str, Any]) -> dict[str, tuple[int, ...]]:
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
+def get_state_spec(state: StateDict) -> dict[str, tuple[int, ...]]:
     """Infer state_spec from a state dict."""
     return {k: state[k].shape for k in sorted(state.keys())}
 
 
-# shape: boundary_inputs is {field: Array}, result is {field: shape} -- TypedDict candidates (phase 3)
+# Dynamic keys (the node's own fields): an alias, not a TypedDict.
 def get_boundary_spec(
-    boundary_inputs: Mapping[str, Any],
+    boundary_inputs: StateDict,
 ) -> dict[str, tuple[int, ...]]:
     """Infer boundary_spec from a boundary_inputs dict."""
     if not boundary_inputs:

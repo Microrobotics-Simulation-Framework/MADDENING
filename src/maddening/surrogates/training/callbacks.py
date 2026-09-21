@@ -8,9 +8,11 @@ model checkpointing, and learning rate scheduling during training.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import jax.numpy as jnp
+
+from maddening.surrogates.types import TrainMetrics, TrainState
 
 if TYPE_CHECKING:
     from maddening.surrogates.training.trainer import SurrogateTrainer
@@ -27,26 +29,29 @@ class TrainingCallback:
 
     should_stop: bool = False
 
-    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
-    def on_train_begin(self, trainer: SurrogateTrainer, state: dict) -> None:
+    def on_train_begin(
+        self, trainer: SurrogateTrainer, state: TrainState,
+    ) -> None:
         """Called once before the first epoch."""
 
-    def on_epoch_end(self, epoch: int, metrics: dict, state: dict) -> None:
+    def on_epoch_end(
+        self, epoch: int, metrics: TrainMetrics, state: TrainState,
+    ) -> None:
         """Called at the end of each epoch.
 
         Parameters
         ----------
         epoch : int
             Zero-indexed epoch number.
-        metrics : dict
+        metrics : TrainMetrics
             ``{"train_loss": float, "val_loss": float}``.
-        state : dict
+        state : TrainState
             Mutable training state with ``"weights"`` and ``"opt_state"``
             keys.  Callbacks may modify ``state["weights"]`` (e.g. to
             restore best weights).
         """
 
-    def on_train_end(self, metrics: dict, state: dict) -> None:
+    def on_train_end(self, metrics: TrainMetrics, state: TrainState) -> None:
         """Called once after the last epoch (or after early stop)."""
 
 
@@ -81,9 +86,8 @@ class EarlyStopping(TrainingCallback):
         self.wait = 0
         self._best_weights = None
 
-    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
     def on_train_begin(
-        self, trainer: SurrogateTrainer, state: dict[str, Any],
+        self, trainer: SurrogateTrainer, state: TrainState,
     ) -> None:
         self.best_value = float("inf")
         self.best_epoch = 0
@@ -91,11 +95,12 @@ class EarlyStopping(TrainingCallback):
         self.should_stop = False
         self._best_weights = None
 
-    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
     def on_epoch_end(
-        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+        self, epoch: int, metrics: TrainMetrics, state: TrainState,
     ) -> None:
-        current = metrics.get(self.monitor, metrics.get("val_loss"))
+        # `monitor` is caller-supplied, so this one lookup is dynamic by
+        # design and falls back to a key TrainMetrics does declare.
+        current = metrics.get(self.monitor, metrics["val_loss"])
         if current < self.best_value - self.min_delta:
             self.best_value = current
             self.best_epoch = epoch
@@ -112,9 +117,8 @@ class EarlyStopping(TrainingCallback):
             if self.wait >= self.patience:
                 self.should_stop = True
 
-    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
     def on_train_end(
-        self, metrics: dict[str, Any], state: dict[str, Any],
+        self, metrics: TrainMetrics, state: TrainState,
     ) -> None:
         if self.restore_best and self._best_weights is not None:
             state["weights"] = self._best_weights
@@ -148,20 +152,19 @@ class ModelCheckpoint(TrainingCallback):
         self._state_spec = None
         self._boundary_spec = None
 
-    # shape: state is {weights: PyTree, opt_state: PyTree} -- TypedDict candidate (phase 3)
     def on_train_begin(
-        self, trainer: SurrogateTrainer, state: dict[str, Any],
+        self, trainer: SurrogateTrainer, state: TrainState,
     ) -> None:
         self.best_value = float("inf")
         self._architecture = trainer.architecture
         self._state_spec = trainer.dataset.state_spec
         self._boundary_spec = trainer.dataset.boundary_spec
 
-    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
     def on_epoch_end(
-        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+        self, epoch: int, metrics: TrainMetrics, state: TrainState,
     ) -> None:
-        current = metrics.get(self.monitor, metrics.get("val_loss"))
+        # See EarlyStopping.on_epoch_end: `monitor` is caller-supplied.
+        current = metrics.get(self.monitor, metrics["val_loss"])
         if not self.save_best_only or current < self.best_value:
             self.best_value = current
             path = self.path.replace("{epoch}", str(epoch))
@@ -206,8 +209,7 @@ class LRSchedule(TrainingCallback):
     def lr_multiplier(self) -> float:
         return self._lr_multiplier
 
-    # shape: metrics {train_loss, val_loss}, state {weights, opt_state} -- TypedDict candidates (phase 3)
     def on_epoch_end(
-        self, epoch: int, metrics: dict[str, Any], state: dict[str, Any],
+        self, epoch: int, metrics: TrainMetrics, state: TrainState,
     ) -> None:
         self._lr_multiplier = self.schedule_fn(epoch + 1)

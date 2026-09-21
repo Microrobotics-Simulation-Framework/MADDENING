@@ -16,7 +16,7 @@
   ],
   "pyright_version": "1.1.414",
   "environment": "pip install -e '.[ci]' on Python 3.11 with jax==0.10.2; no usd-core, pyvista, pygfx, rendercanvas, scikit-image, PyGObject or cupy",
-  "measured": "2026-09-20, branch feat/pep561-phase2",
+  "measured": "2026-09-20, branch feat/pep561-phase2; `surrogates` re-measured 2026-09-21 on typing/pep589-typed-dicts (58 -> 55: `TrainMetrics` makes `val_loss` a required key, so the three `metrics.get(\"val_loss\") < float` comparisons in callbacks.py are no longer Optional)",
   "tiers": {
     "tier1": {
       "description": "Annotated to zero: the packages refactors move through.",
@@ -38,7 +38,7 @@
       "description": "Public signatures annotated; bodies ratcheted only. These sit on untyped or optional third-party libraries (matplotlib, pxr, pygfx, pyvista, equinox), so the errors are overwhelmingly attribute access against something with no stubs.",
       "max_errors": {
         "api": 61,
-        "surrogates": 58,
+        "surrogates": 55,
         "usd": 1,
         "viz": 45
       }

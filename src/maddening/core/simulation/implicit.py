@@ -66,6 +66,17 @@ def implicit_euler_step(
         L2 norm of the final residual.  The caller should check this
         against a tolerance and reject the step if Newton did not
         converge (e.g., shrink dt in adaptive timestepping).
+
+    Notes
+    -----
+    **A calibrated ``params`` value does not reach this solve**
+    (``MADD-ANO-018``).  ``residual_fn`` is documented above as the
+    node's ``implicit_residual`` method, and that method takes no
+    ``params``: it reads ``self.params``, the constructor's values.  A
+    parameter fitted through ``gm.params`` or
+    :func:`maddening.sysid.fit` therefore changes ``update()`` and not
+    this path, silently.  Rebuild the node with the calibrated values
+    before solving with it.
     """
     if initial_guess is None:
         x = {k: v.copy() for k, v in state_old.items()}

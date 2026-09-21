@@ -206,10 +206,11 @@ def test_the_two_paths_of_one_node_disagree_by_the_whole_calibration():
         ("SimulationNode.derivatives", SimulationNode.derivatives),
         ("SimulationNode.implicit_residual", SimulationNode.implicit_residual),
         ("integrate_node", integrate_node),
+        ("implicit_euler_step", implicit_euler_step),
     ],
 )
 def test_the_params_limitation_is_documented_where_a_caller_would_look(label, obj):
-    """Each of the three names the anomaly in its own docstring.
+    """Each of the four names the anomaly in its own docstring.
 
     A limitation recorded only in the registry is one a caller reading
     the API never meets.  Deleting these paragraphs would otherwise be

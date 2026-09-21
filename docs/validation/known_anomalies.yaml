@@ -1387,10 +1387,16 @@ anomalies:
       dt, method=...)` (`core/simulation/integrators.py`) is documented,
       exported and takes no `params` either; it hands `node.derivatives`
       straight to the chosen stepper.  `implicit_euler_step`
-      (`core/simulation/implicit.py`) is in the same position.  So the
-      gap is not "the caller forgot to pass it" but "there is no argument
-      to pass": a user who has calibrated a parameter has no way to make
-      these paths use it short of reconstructing the node.
+      (`core/simulation/implicit.py`) reaches it one step further out:
+      it takes a callable, but its own docstring documents that callable
+      as "the node's `implicit_residual` method", and that method is the
+      one with no `params`.  So the gap is not "the caller forgot to pass
+      it" but "there is no argument to pass": a user who has calibrated a
+      parameter has no way to make these paths use it short of
+      reconstructing the node.  The bare steppers `euler_step`,
+      `heun_step` and `rk4_step` are not listed below: they take an
+      arbitrary derivative function and are not node-aware, so a caller
+      who wants calibrated values can close over them.
       Measured at 0.4.0.dev0 on `SpringDamperNode` with constructor
       stiffness 100 against a calibrated 400, from one state
       (position 2.0, velocity 0.0, rest_length 1.0, dt 0.01):

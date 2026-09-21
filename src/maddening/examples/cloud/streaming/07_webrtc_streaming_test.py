@@ -12,8 +12,9 @@ GStreamer encode/push overhead) to quantify streaming cost.
 Interpreter note (read before running).  The server script imports JAX
 and the gi (GStreamer) bindings in one process.  On ``runpod/base`` the
 system ``python3`` is 3.10 and owns the apt ``python3-gi`` bindings, but
-MADDENING requires Python >= 3.11 and ``jax>=0.10`` requires >= 3.11
-(0.11+: >= 3.12), so the install command cannot resolve under 3.10.  The
+MADDENING requires Python >= 3.12 and the ``jax>=0.10,<0.13`` range
+reaches 0.11, which requires >= 3.12 too, so the install command cannot
+resolve under 3.10 or 3.11.  The
 example therefore runs under ``PYTHON`` (3.12, the interpreter the pod's
 ``pip`` targets) and builds PyGObject for it with pip (``< 3.51``: 3.51+
 needs girepository-2.0, which the 22.04-based image lacks) against the
@@ -45,7 +46,7 @@ from maddening.cloud.launcher import (
 
 
 # The interpreter that runs JAX + MADDENING + the gi bindings on the VM
-# (see the module docstring: 3.10 cannot install either any more).
+# (see the module docstring: 3.10 and 3.11 cannot install either).
 PYTHON = "python3.12"
 
 # GStreamer system packages (from 06_selkies_test.py findings), plus the

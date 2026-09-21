@@ -35,10 +35,11 @@ from maddening.cloud.launcher import (
 # Run via SSH directly, not through Ray.
 #
 # Interpreter: on ``runpod/base`` the system ``python3`` is 3.10 but
-# ``pip`` targets 3.12.  MADDENING requires Python >= 3.11 and the JAX
-# range below (``pyproject`` ``cuda12`` extra, ``jax>=0.10``) requires
-# >= 3.11 too (0.11+: >= 3.12), so *neither* installs under 3.10 -- every
-# remote command here uses ``PYTHON`` (3.12) explicitly.  This example
+# ``pip`` targets 3.12.  MADDENING requires Python >= 3.12 and the JAX
+# range below (``pyproject`` ``cuda12`` extra, ``jax>=0.10,<0.13``)
+# reaches 0.11, which requires >= 3.12 too, so *neither* installs under
+# 3.10 or 3.11 -- every remote command here uses ``PYTHON`` (3.12)
+# explicitly.  This example
 # needs no GStreamer/gi bindings, so the interpreter choice is free.
 PYTHON = "python3.12"
 
@@ -202,7 +203,7 @@ def main():
     # --- Phase 2: Install deps via SSH ---
     print()
     print("Phase 2: Installing dependencies via SSH...")
-    print(f"  (Installing into {PYTHON}; JAX >= 0.10 and MADDENING need Python >= 3.11)")
+    print(f"  (Installing into {PYTHON}; JAX and MADDENING need Python >= 3.12)")
     try:
         result = job.ssh_run(INSTALL_CMD, timeout=300, capture=True)
         # Print last few lines of output

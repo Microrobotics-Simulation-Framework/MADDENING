@@ -1,10 +1,20 @@
 """The cloud examples' remote install commands are installable where they run.
 
-``jax>=0.10`` (the ``pyproject`` ``cuda12`` extra) requires Python >= 3.11
-and MADDENING itself requires >= 3.11, so an example that installs the
-pin under ``python3.10`` (the system ``python3`` of ``runpod/base``) fails
-at the install step; the examples must name an interpreter JAX supports,
-and the pin must be the ``pyproject`` range everywhere in the tree (no
+An example that installs the ``cuda12`` pin under an interpreter below the
+floor -- ``python3.10`` is the system ``python3`` of ``runpod/base`` -- fails
+at the install step, on the remote machine, minutes in.  The floor is the
+stricter of two, and both are read from ``pyproject.toml`` rather than
+written down here:
+
+* what the lowest ``jax`` the pin admits needs (``jax>=0.7``: 3.11;
+  ``jax>=0.11``: 3.12), and
+* what MADDENING's own ``requires-python`` needs.
+
+Deriving it is the point.  While the bound was the jax one alone, an example
+naming ``python3.11`` passed this test and still could not install MADDENING,
+and raising ``requires-python`` moved nothing here.
+
+The pin itself must be the ``pyproject`` range everywhere in the tree (no
 stale ``>=0.4,<0.6`` / ``cuda11`` remnants).
 """
 
@@ -36,8 +46,24 @@ def _jax_requires_python_minor(pin: str) -> int:
     low = re.search(r">=(\d+)\.(\d+)", pin)
     assert low, pin
     major, minor = int(low.group(1)), int(low.group(2))
-    # jax 0.7.0 and later require Python >= 3.11 (0.11+: >= 3.12)
+    # jax 0.11 and later require Python >= 3.12; 0.7 - 0.10, >= 3.11.
+    if (major, minor) >= (0, 11):
+        return 12
     return 11 if (major, minor) >= (0, 7) else 10
+
+
+def _maddening_requires_python_minor() -> int:
+    """MADDENING's own floor, read from ``requires-python``."""
+    with open(_PYPROJECT, "rb") as f:
+        spec = tomllib.load(f)["project"]["requires-python"]
+    m = re.search(r">=\s*3\.(\d+)", spec)
+    assert m, spec
+    return int(m.group(1))
+
+
+def _floor_minor(pin: str) -> int:
+    """The interpreter an example must name: the stricter of the two."""
+    return max(_jax_requires_python_minor(pin), _maddening_requires_python_minor())
 
 
 def _examples_installing_jax() -> list[Path]:
@@ -59,14 +85,20 @@ def _install_commands(module) -> list[str]:
 @pytest.mark.parametrize("path", _examples_installing_jax(), ids=lambda p: p.name)
 def test_example_install_commands_target_python_that_jax_supports(path):
     pin = _cuda12_pin()
-    min_minor = _jax_requires_python_minor(pin)
+    min_minor = _floor_minor(pin)
     module = _load(path)
     commands = _install_commands(module)
     assert commands, f"{path.name} mentions jax[cuda12] outside an *INSTALL* command"
     interpreter = getattr(module, "PYTHON", None)
     for cmd in commands:
         assert f'"{pin}"' in cmd, f"{path.name}: pin differs from pyproject ({pin!r})"
-        assert "python3.10" not in cmd, f"{path.name}: installs under python3.10"
+        # Any named interpreter below the floor, not just ``python3.10``:
+        # the literal spelling stopped covering the floor the moment the
+        # floor moved past it.
+        named = [int(v) for v in re.findall(r"python3\.(\d+)", cmd)]
+        assert all(v >= min_minor for v in named), (
+            f"{path.name}: installs under python3.{min(named)}, below the "
+            f"3.{min_minor} floor")
         # bare ``python3``/``pip3`` is the 3.10 interpreter on runpod/base
         assert not re.search(r"(?<![\w.])python3 -m pip", cmd), f"{path.name}: bare python3 -m pip"
         assert not re.search(r"(?<![\w.])pip3 install", cmd), f"{path.name}: bare pip3"

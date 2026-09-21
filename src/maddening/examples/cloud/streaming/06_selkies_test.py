@@ -8,10 +8,11 @@ requires a browser client), but validates the GStreamer layer.
 
 Interpreter note (read before running).  On ``runpod/base`` the system
 ``python3`` is 3.10 and carries the apt ``python3-gi`` bindings, but
-MADDENING requires Python >= 3.11 and ``jax>=0.10`` requires >= 3.11
-(0.11+: >= 3.12): nothing in the install command below resolves under
-3.10 any more.  The example therefore runs everything under ``PYTHON``
-(3.12, the interpreter the pod's ``pip`` targets) and builds PyGObject
+MADDENING requires Python >= 3.12 and the ``jax>=0.10,<0.13`` range
+reaches 0.11, which requires >= 3.12 too: nothing in the install
+command below resolves under 3.10 or 3.11.  The example therefore runs
+everything under ``PYTHON`` (3.12, the interpreter the pod's ``pip``
+targets) and builds PyGObject
 for it with pip against the apt ``libgirepository1.0-dev`` headers
 (``PyGObject < 3.51``; 3.51+ needs girepository-2.0, absent on the
 22.04-based image).  The apt ``python3-gi`` package stays installed only
@@ -39,7 +40,7 @@ from maddening.cloud.launcher import (
 
 
 # The interpreter that runs JAX + MADDENING + SelkiesSession on the VM
-# (see the module docstring: 3.10 cannot install either any more).
+# (see the module docstring: 3.10 and 3.11 cannot install either).
 PYTHON = "python3.12"
 
 # System packages needed for GStreamer + PyGObject (incl. the headers and

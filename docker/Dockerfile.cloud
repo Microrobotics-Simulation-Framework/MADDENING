@@ -4,8 +4,9 @@
 # Incorporates all findings from RunPod cloud testing (2026-03-19/20):
 #   - Uses the system python3 as primary — required for system python3-gi
 #     bindings.  Ubuntu 24.04's python3 is 3.12: MADDENING requires Python
-#     >= 3.11 and jax >= 0.10 requires >= 3.11 (0.11+: >= 3.12), so the
-#     22.04 image (python3 = 3.10) can no longer install either.
+#     >= 3.12 and the jax>=0.10,<0.13 range reaches 0.11, which requires
+#     >= 3.12 too, so the 22.04 image (python3 = 3.10) can install
+#     neither.
 #   - Installs jax[cuda12] with the pyproject range
 #   - GStreamer plugins including -ugly (for x264enc)
 #   - ZMQ for multi-job coordinator communication

@@ -154,6 +154,9 @@ guidance; the itemized changes follow.
 - **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
   `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
   and printed `0.00 ms` for an overhead the run could not resolve
+- **Docs**: the SOUP identification table gives JAX's *verified* version as well
+  as its permitted range; `DESIGN.md`, `DatasetGenerator.from_graph` and
+  `SurrogateValidator.compare_graphs` say they advance the graph they are given
 - **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
   key or a wrong value type is now a type error, and a scene object whose `"x"`
   names a state field no longer kills `setup()` with a `ConversionError`
@@ -333,7 +336,7 @@ guidance; the itemized changes follow.
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
-  and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead
+  and `rtol` under `"l2"`.  Set the knob the message names instead
 - **`fim` reports an unidentifiable parameter as `+inf`, not a tight bound**:
   `crb` was `diag(pinv(F))`, which is small in the null space; the new
   `FIMReport.rank` counts the directions the data resolves (`rank_rtol=`)
@@ -514,6 +517,12 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
+  `update()` and cannot reach `derivatives()`, `implicit_residual()` or
+  `integrate_node()` -- they take no `params`, so they run constructor values
+- **MADD-ANO-017**: `jax_enable_x64` does not reach `GraphManager`'s scan paths --
+  float64 params against a float32 state seed, so `run_scan*`/`run_sweep` raise
+  `TypeError` (open, minor); node-level float64 unaffected, workarounds in the registry
 - **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
   the supported floor, so every `CloudSession` launch, teardown and preemption check
   was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified

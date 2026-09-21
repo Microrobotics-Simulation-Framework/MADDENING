@@ -203,6 +203,38 @@ def read_ci() -> dict:
     }
 
 
+def jax_requirement(pyproject: dict) -> str:
+    """The declared ``jax`` requirement, verbatim from ``pyproject.toml``.
+
+    ``jaxlib>=...`` does not start with ``jax>``, so this picks the
+    framework requirement and not the runtime one.
+    """
+    return next(
+        (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
+        "",
+    )
+
+
+def verified_jax(ci: dict) -> str:
+    """What CI actually installed, phrased so it cannot overclaim.
+
+    The declared range is exercised at whatever points CI pins, which is
+    one.  A range is not evidence for the points inside it that nobody
+    ran, so this never says "verified on 0.10-0.13"; and if the pin
+    cannot be found at all the row says **unknown** rather than falling
+    back to the range, because a SOUP document that silently substitutes
+    a permitted range for a verified one is the exact defect this row
+    exists to avoid.
+    """
+    pins = ci["jax_pins"]
+    if not pins:
+        return "**verified point unknown** (no `jax==` pin found in the CI workflow)"
+    if len(pins) == 1:
+        return f"verified at {pins[0]} (the only version CI installs)"
+    joined = ", ".join(pins)
+    return f"verified at {joined} (the versions CI installs)"
+
+
 def package_version(pyproject: dict) -> str:
     return str(pyproject["project"]["version"])
 
@@ -307,6 +339,14 @@ def render_software_identification(pyproject: dict, citation: dict,
         ["Python Version", f'{project.get("requires-python", "")} permitted; '
                            f'verified on {", ".join(ci["pythons"])} '
                            f'(the CI matrix)'],
+        # Same treatment as the Python row above, and for the same
+        # reason.  ``Base Dependencies`` below states `jax>=0.10,<0.13`,
+        # which is what pip permits; read as the verified configuration
+        # it claims twenty-odd untested releases.  Both CI lanes pin one
+        # version, so the declared range is exercised at exactly one
+        # point, and that point -- not the range -- is the evidence.
+        ["JAX Version", f'{jax_requirement(pyproject)} permitted; '
+                        f'{verified_jax(ci)}'],
         ["Base Dependencies", deps],
         ["Build System", backend.split(".")[0] if backend else ""],
         ["Install", INSTALL_COMMAND],
@@ -400,10 +440,7 @@ def render_test_organization(packages: list[str]) -> str:
 
 
 def render_test_suite(pyproject: dict, packages: list[str], ci: dict) -> str:
-    jax_spec = next(
-        (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
-        "",
-    )
+    jax_spec = jax_requirement(pyproject)
     # Which base dependencies CI actually pins, and which float.  The
     # row used to read "`jax>=0.10,<0.13` supported", which asserts a
     # range on evidence taken at one point inside it, and nothing said

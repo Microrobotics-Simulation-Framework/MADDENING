@@ -260,7 +260,10 @@ One has changed shape:
 Three are **carried over unverified**: the `AdaptiveNode` dtype policy under
 `jax_enable_x64`, the silent USD mapping-weight path, and whether the adaptive
 hooks should take `boundary_inputs` and `dt`. They are recorded at
-`603fef3:docs/developer_guide/api_freeze_proposal.md`. They are not restated
+`603fef3:docs/developer_guide/api_freeze_proposal.md`, which the annotated tag
+`freeze-round-2026-09-17` pins, so the citation stays reachable
+(`git show freeze-round-2026-09-17:docs/developer_guide/api_freeze_proposal.md`)
+after the branch it was written on is cleaned up. They are not restated
 here, because restating a judgement taken against a tree 470 commits ago as if
 it were current is the specific mistake this round was told to avoid.
 

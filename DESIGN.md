@@ -297,10 +297,24 @@ methods eliminate this:
 # Fast batch run (no per-step callbacks or observers)
 final_state = gm.run_scan(10000)
 
+# Both of these are stateful: the graph is left at the final state, so a
+# second batch call continues from there rather than restarting.  Say
+# what the next run should start from before making it.
+gm.reset_state()
+
 # With full history (all intermediate states as stacked JAX arrays)
 final_state, history = gm.run_scan_with_history(10000)
 # history["ball"]["position"] is shape (10000,)
 ```
+
+`step`, `run`, `run_scan`, `run_scan_with_history`, `run_adaptive` and
+`run_adaptive_scan` all write their result back into the graph; each
+docstring says so under **Stateful**.  `run_sweep` is the one batch
+entry point that leaves the graph's state untouched.  Code that builds
+observations more than once from a single `GraphManager` therefore
+measures a *different* initial condition each time unless it resets,
+reconstructs the graph inside the measurement loop, or snapshots with
+`save_state` / `load_state`.
 
 **Design trade-offs**:
 - `run_scan` pushes the entire loop into XLA — orders of magnitude faster

@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **The SOUP identification table states the verified JAX version, not just the
+  permitted range**: `jax>=0.10,<0.13` is what pip allows; `0.10.2` is the one
+  point in it CI has ever run, and the row now says so, read out of the workflow
 - **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
   key or a wrong value type is now a type error, and a scene object whose `"x"`
   names a state field no longer kills `setup()` with a `ConversionError`

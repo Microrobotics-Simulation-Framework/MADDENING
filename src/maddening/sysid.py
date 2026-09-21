@@ -55,8 +55,9 @@ from maddening.core.compliance.stability import stability
 # ``_spec_for`` is the one place that resolves a params path to its
 # ParamSpec (the same walk ``trainable_mask`` / ``constrain`` use);
 # duplicating it here would be a second definition of "which spec
-# governs this leaf".
-from maddening.core.params import _spec_for
+# governs this leaf".  ``_validate_specs_mirror`` is its strict
+# companion: it refuses a ``specs`` tree that reaches nothing.
+from maddening.core.params import _spec_for, _validate_specs_mirror
 from maddening.warnings import PrecisionLimitWarning
 
 _META_KEY = "_meta"
@@ -1281,6 +1282,13 @@ def _resolve_nominal(params, specs, idx, scale):
     it had.  ``specs=None`` under ``"nominal"`` is refused too -- an
     empty dict is the honest way to say "no spec has a width", and it
     produces a report that names every column in ``value_scaled``.
+    The same principle refuses a ``specs`` that does not mirror
+    ``params`` (:func:`~maddening.core.params._validate_specs_mirror`):
+    ``_spec_for`` answers the default spec for every leaf it cannot
+    reach, so a mis-nested tree, a ``ParamSpec.to_dict()`` entry, a
+    misspelt key or a non-dict ``specs`` would otherwise yield a report
+    bit-identical to ``scale="relative"`` and indistinguishable from
+    the honest ``specs={}``.
     """
     if scale != "nominal":
         if specs is not None:
@@ -1296,6 +1304,7 @@ def _resolve_nominal(params, specs, idx, scale):
             "tree, or a dict of ParamSpec mirroring params. Pass {} to say "
             "explicitly that no leaf has a declared width; every column is "
             "then value-scaled and FIMReport.value_scaled names them all.")
+    _validate_specs_mirror(params, specs)
     names = _param_names(params)
     per_leaf: list[tuple[Optional[float], float]] = []
     sizes: list[int] = []
@@ -1749,7 +1758,14 @@ def fim(
         scale, so a spec that is not being read is never silently
         carried.  A leaf without an entry gets the default (unbounded)
         spec and is therefore value-scaled and named; ``{}`` is the
-        explicit way to say no leaf has a width.  Static: the column
+        explicit way to say no leaf has a width.  The tree must mirror
+        ``params``, though: a key that matches no parameter, a dict
+        where a leaf needs a ``ParamSpec`` (``to_dict()`` output), a
+        ``ParamSpec`` above a dict level or a non-dict ``specs`` is a
+        ``ValueError`` naming the key path, because a spec that reaches
+        nothing would otherwise produce ``"relative"`` in disguise.  A
+        list/tuple of leaves takes a list/tuple of specs by position or
+        one ``ParamSpec`` covering every position.  Static: the column
         scales are derived from it on the host once and baked into the
         traced Jacobian as constants, as ``mask`` is reduced to indices.
     rank_rtol : float, optional
@@ -1827,9 +1843,10 @@ def fim(
         If ``scale``, ``rank_rtol``, ``noise_std`` or ``specs`` is not a
         value this function can answer for (in particular a σ that is
         zero, negative, non-finite, or underflows the residual's dtype;
-        ``specs`` given without ``scale="nominal"`` or withheld with it;
-        a bounds width that is not positive and finite once squared at
-        the parameters' precision).
+        ``specs`` given without ``scale="nominal"`` or withheld with it,
+        or a ``specs`` tree that does not mirror ``params``; a bounds
+        width that is not positive and finite once squared at the
+        parameters' precision).
     FloatingPointError
         If ``F`` comes out non-finite -- a diverged rollout, an
         overflowing Jacobian, a residual holding a ``NaN``.  There is no

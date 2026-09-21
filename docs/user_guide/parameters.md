@@ -175,6 +175,31 @@ float32 rescaling the residual (by `noise_std`, say) can round the
 smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
 `rank`'s threshold scales with the matrix.  Freeze one of them, then fit:
 
+`scale="relative"` — the default, and the coordinates the eigenvectors
+above are in — multiplies each Jacobian column by the parameter's value,
+so a parameter sitting at exactly `0.0` (`SpringDamperNode`'s
+`initial_velocity` default) has no column at all and reads as
+unidentifiable however well the data determine it; `report.zero_scaled`
+names those.  `scale="nominal"` removes the problem by taking the column
+scale from the parameter's `ParamSpec` instead — the width `hi - lo` of a
+finite `bounds`, a scale and not a location, so a symmetric range around
+zero is no longer a zero:
+
+```python
+gm.set_param_spec("spring", "initial_velocity",
+                  ParamSpec(trainable=False, bounds=(-1.0, 1.0)))
+report = fim(residual, gm.params, scale="nominal", specs=gm.param_specs())
+report.value_scaled          # columns whose spec had no finite width
+```
+
+A spec with no finite width — `(0.0, None)`, `(None, None)`, a `"log"`
+constant — has no nominal scale, so that column keeps the value scaling
+(`p`, or `p - lo` under `"log"`) and is named in `report.value_scaled`: a
+nominal report says which columns were answered from the spec and which
+from the value, and a value-scaled zero still appears in `zero_scaled`.
+Nothing falls back to an absolute `1.0`, which would put units back into
+`cond` unannounced.  The `fim` docstring tabulates the policy per spec.
+
 ### Asking the same question inside a loop
 
 `fim` is the reporting path: it reads the answer back to the host so it
@@ -196,7 +221,7 @@ flat ~100 ms per call whatever the problem size, against ~0.3 ms warm
 and ~0.04 ms for `fim_core`.
 
 `FIMCore` carries the same verdicts as `FIMReport` — `rank`, `cond`,
-`crb`, `zero_scaled` — plus `finite`, which is what `fim` raises on, and
+`crb`, `zero_scaled`, `value_scaled` — plus `finite`, which is what `fim` raises on, and
 `precision_limited`, which is what it warns on.  Read them as a third
 outcome rather than a refusal: a `precision_limited` core means *verdict
 unavailable*, not *unidentifiable*.  `crb` keeps `fim`'s polarity, `+inf`

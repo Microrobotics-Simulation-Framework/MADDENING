@@ -154,6 +154,12 @@ guidance; the itemized changes follow.
 - **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
   key or a wrong value type is now a type error, and a scene object whose `"x"`
   names a state field no longer kills `setup()` with a `ConversionError`
+- **The six `step` / `run_*` entry points document that they advance the
+  graph's own state**: a second call continues from the first's final state,
+  so measure from a fresh `GraphManager`; `run_sweep`, which does not, says so
+- **`fit_lm` and `fit_multiple_shooting` hold the undetermined directions too**,
+  as `fit` already did, so all three fill `FitResult.excited_rank`; the spring's
+  `(k, c, m)` scale drifted 0.43-4.8% before. `hold_undetermined=False` opts out
 - **`fit` holds the directions the data cannot determine at the values it was
   given**, so a degenerate combination no longer lands wherever `n_iter` and
   `lr` leave it; `FitResult.excited_rank`, or `hold_undetermined=False`
@@ -256,6 +262,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fit_lm` no longer runs a whole rollout it throws away**: the residual was
+  evaluated for a pytree structure `jax.eval_shape` can trace, once per call
+  even with `noise_std=None`, and at `n_iter=0` it was the only call made
 - **Three more gates that could not fail**: the pyright tiers now cover
   `maddening/__init__.py`, the SOUP drift classifier no longer calls a lost evidence
   row a safe regenerate, and `check_transforms` counts only confirmed references

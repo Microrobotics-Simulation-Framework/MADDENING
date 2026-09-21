@@ -1,4 +1,4 @@
-"""``fit`` must not move along directions the data cannot determine.
+"""No fitter may move along directions the data cannot determine.
 
 The spring's ``(k, c, m)`` common-scale degeneracy is exact: position-only
 data sees ``k/m`` and ``c/m``, so multiplying all three by the same factor
@@ -8,11 +8,24 @@ direction ``(1, 1, 1)/sqrt(3)``, which
 ``FIMReport.least_identifiable`` both name, and here it is the direction
 along which the *geometric mean* of ``(k, c, m)`` is the coordinate.
 
-Adam's diagonal preconditioner moves along it.  ``g . v`` is exactly zero
-because every gradient is ``J^T r``, but the *update* is ``-lr * D g`` and
-``(D g) . v`` is not, so the fitted scale is decided by the iteration
-budget and the learning rate rather than by the data.  What is measured
-below is that the guard removes that, and that it removes nothing else.
+Every fitter here moves along it, each by its own route.  ``g . v`` is
+exactly zero because every gradient is ``J^T r``, but no step rule in this
+module is the gradient:
+
+* ``fit`` and ``fit_multiple_shooting`` take ``-lr * D g`` for a diagonal
+  Adam preconditioner ``D``, and ``(D g) . v`` is not zero.  The drift does
+  not converge, so the fitted scale is decided by the iteration budget and
+  the learning rate rather than by the data.  That is a reproducibility
+  defect.
+* ``fit_lm`` solves ``(A + lam * diag(A))^-1 g``, which is orthogonal to
+  ``null(A)`` only where ``diag(A)`` is isotropic there.  Its step vanishes
+  with the gradient, so its drift *converges*: the answer is the same for
+  every budget, it is simply neither the caller's value nor one the data
+  chose.  That is a consistency defect and not the same thing, and the
+  tests below assert the difference rather than eliding it.
+
+What is measured is that the guard removes that, and that it removes
+nothing else.
 """
 
 import os
@@ -33,6 +46,8 @@ from maddening.sysid import (
     fim,
     fit,
     fit_lm,
+    fit_multiple_shooting,
+    init_window_states,
     observations_from_history,
     windowed_loss,
 )
@@ -330,28 +345,17 @@ def test_hold_undetermined_refuses_a_non_bool(noisy_fit):
 
 
 # ---------------------------------------------------------------------------
-# ``fit_lm`` for comparison -- it drifts too, which is not what was reported
+# ``fit_lm``: the same drift by a different route, and now the same guard
 # ---------------------------------------------------------------------------
 
 
-def test_fit_lm_also_moves_along_the_scale_direction_but_stops(clean_fit):
-    """Pins a correction to the finding this guard came from.
+def _lm_residual(gm, obs):
+    """``params -> residual`` for the whole trajectory, for ``fit_lm``.
 
-    The claim was that ``fit_lm`` *cannot* move in an exactly-null
-    direction, because ``J v = 0`` makes ``(J^T r) . v = 0``.  The gradient
-    is indeed orthogonal to ``v``, but the step is not the gradient: the
-    Marquardt solve is ``(A + lam * diag(A))^-1 g``, and that is orthogonal
-    to ``null(A)`` only when ``diag(A)`` is isotropic on the relevant
-    subspace.  ``fit_lm`` does move along the scale direction.
-
-    What is different in kind, and why it is not the defect ``fit`` has, is
-    that the step vanishes as the gradient does: the drift converges and
-    stops, so the answer does not depend on the budget.  Both halves are
-    asserted, because a future change that made LM's drift budget-dependent
-    would be the same defect arriving by a different route.
+    ``fit_lm`` wants the residual itself rather than a scalar loss, so it
+    cannot share ``_loss``; everything else -- graph, observations,
+    degeneracy -- is the one the rest of this file measures.
     """
-    gm = _spring()
-    obs = _observations(gm, noisy=False)
     step_fn = gm._build_step_fn()                     # noqa: SLF001
     ext = gm._default_external_inputs()               # noqa: SLF001
     init = jax.tree.map(lambda x: x[0], obs)
@@ -365,18 +369,245 @@ def test_fit_lm_also_moves_along_the_scale_direction_but_stops(clean_fit):
         _, pos = jax.lax.scan(body, init, None, length=N_STEPS)
         return pos - truth
 
+    return residual
+
+
+@pytest.mark.parametrize("noisy", [False, True])
+def test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges(noisy):
+    """Pins the correction PR 100 made to the finding it came from, and
+    keeps it visible now that the default hides it.
+
+    The claim was that ``fit_lm`` *cannot* move in an exactly-null
+    direction, because ``J v = 0`` makes ``(J^T r) . v = 0``.  The gradient
+    is indeed orthogonal to ``v``, but the step is not the gradient: the
+    Marquardt solve is ``(A + lam * diag(A))^-1 g``, and that is orthogonal
+    to ``null(A)`` only when ``diag(A)`` is isotropic on the relevant
+    subspace.  Counterexample in two dimensions: ``A = [[1, 2], [2, 4]]``
+    and ``g = (1, 2)`` give a step ``prop (2, 1)`` for every ``lam``, while
+    ``null(A)`` is spanned by ``(2, -1)``.
+
+    What is different in kind, and why this is a consistency fix rather
+    than the reproducibility defect ``fit`` had, is that the step vanishes
+    as the gradient does: the drift converges and stops.  Both halves are
+    asserted.  A future change that made LM's drift budget-dependent would
+    be the same defect arriving by a different route, and a change that
+    silently stopped LM drifting at all would make the guarded tests below
+    tautologies -- this is what stops either passing unnoticed.
+    """
+    gm = _spring()
+    residual = _lm_residual(gm, _observations(gm, noisy=noisy))
     start = _with(gm, START)
-    short = fit_lm(gm, residual, params=start, n_iter=10, notify_every=0)
-    long_ = fit_lm(gm, residual, params=start, n_iter=60, notify_every=0)
-    drift = _scale(short.params) / START_SCALE - 1.0
-    # It moves: not the "cannot move" the finding claimed.
-    assert abs(drift) > 1e-3, drift
-    # But by well under Adam's, and it has stopped: the budget does not
-    # decide the answer.
-    assert abs(drift) < 0.05, drift
-    assert _scale(short.params) == _scale(long_.params)
-    # LM does not run the guard, and must say so rather than claim a rank.
-    assert short.excited_rank is None and short.undetermined_drift is None
+    kw = dict(params=start, notify_every=0, hold_undetermined=False)
+
+    budgets = [5, 10, 25, 60, 200]
+    raw = [fit_lm(gm, residual, n_iter=n, **kw) for n in budgets]
+    drifts = [_scale(r.params) / START_SCALE - 1.0 for r in raw]
+    # It moves: not the "cannot move" the finding claimed.  Measured on
+    # this fixture: -0.849% noiseless, +0.429% at sigma = 0.02 -- four
+    # decades above the 1e-7 the guarded runs below leave behind.
+    assert all(abs(d) > 1e-3 for d in drifts), dict(zip(budgets, drifts))
+    # And it has stopped, so the budget does not decide the answer.  From
+    # the second budget on the scale is identical to the last bit; the
+    # first is included to show the convergence, not asserted equal.
+    settled = [_scale(r.params) for r in raw[1:]]
+    assert len(set(settled)) == 1, dict(zip(budgets[1:], settled))
+    # LM reports the guard it did not run.
+    assert raw[0].excited_rank is None and raw[0].undetermined_drift is None
+
+
+@pytest.mark.parametrize("n_iter", [10, 60, 200])
+def test_fit_lm_returns_the_starting_scale_for_every_budget(n_iter):
+    """Guarded, ``fit_lm`` must return the scale it was given.
+
+    The data determines ``k/m`` and ``c/m`` and says nothing at all about
+    the overall scale, so the only defensible value for it is the caller's.
+    """
+    gm = _spring()
+    residual = _lm_residual(gm, _observations(gm, noisy=True))
+    res = fit_lm(gm, residual, params=_with(gm, START), n_iter=n_iter,
+                 notify_every=0)
+    assert res.excited_rank == 2, res.excited_rank
+    assert res.undetermined_drift is not None and res.undetermined_drift > 1e-3
+    assert abs(_scale(res.params) / START_SCALE - 1.0) < 1e-4, _scale(res.params)
+
+
+def test_fit_lm_holding_costs_neither_loss_nor_the_identifiable_ratios():
+    """The guard moves along a flat direction, so ``0.5 ||r||^2`` and the
+    two combinations the data does determine must be unchanged."""
+    gm = _spring()
+    obs = _observations(gm, noisy=True)
+    residual = _lm_residual(gm, obs)
+    kw = dict(params=_with(gm, START), n_iter=40, notify_every=0)
+    held = fit_lm(gm, residual, **kw)
+    raw = fit_lm(gm, residual, hold_undetermined=False, **kw)
+
+    def sse(p):
+        r = np.asarray(residual(p))
+        return 0.5 * float(r @ r)
+
+    assert sse(held.params) <= sse(raw.params) * 1.001 + 1e-9, (
+        sse(held.params), sse(raw.params))
+    for num in ("stiffness", "damping"):
+        a = (float(held.params["nodes"]["s"][num])
+             / float(held.params["nodes"]["s"]["mass"]))
+        b = (float(raw.params["nodes"]["s"][num])
+             / float(raw.params["nodes"]["s"]["mass"]))
+        assert abs(a / b - 1.0) < 1e-3, (num, a, b)
+    # The iterates are untouched; only the returned params differ.
+    np.testing.assert_array_equal(held.losses, raw.losses)
+    assert held.n_iter == raw.n_iter and held.converged == raw.converged
+
+
+def test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit():
+    """With ``mass`` frozen the remaining ``(k, c)`` are identifiable, so
+    the guard has nothing to remove and must return the same bits as a run
+    without it -- not merely the same value to a tolerance.
+
+    Two trainable parameters, not one: a one-parameter fixture cannot
+    express a rank deficiency at all, so it would pass on a guard that had
+    been broken into never firing.  ``excited_rank == 2`` is asserted for
+    the same reason -- it says the guard ran and found full rank, rather
+    than declining and returning the iterate by the other route.
+    """
+    gm = _spring()
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False, units="kg"))
+    residual = _lm_residual(gm, _observations(gm, noisy=True))
+    kw = dict(params=_with(gm, START), n_iter=40, notify_every=0)
+    held = fit_lm(gm, residual, **kw)
+    raw = fit_lm(gm, residual, hold_undetermined=False, **kw)
+    assert held.excited_rank == 2, held.excited_rank
+    assert held.undetermined_drift == 0.0
+    for key, value in held.params["nodes"]["s"].items():
+        assert float(value) == float(raw.params["nodes"]["s"][key]), key
+    assert float(held.params["nodes"]["s"]["mass"]) == 1.0
+
+
+def test_fit_lm_refuses_a_non_bool_hold_undetermined():
+    """Refused before any model evaluation, like the other hyper-parameters."""
+    gm = _spring()
+    residual = _lm_residual(gm, _observations(gm, noisy=False))
+    with pytest.raises(ValueError, match="hold_undetermined must be a bool"):
+        fit_lm(gm, residual, params=_with(gm, START), n_iter=2,
+               hold_undetermined="yes")         # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# ``fit_multiple_shooting``: Adam again, so the budget decides
+# ---------------------------------------------------------------------------
+
+
+def _ms_kwargs(gm, obs):
+    return dict(observations=obs, obs_fn=lambda h: h["s"]["position"],
+                window=WINDOW, params=_with(gm, START), notify_every=0)
+
+
+#: ``lr`` / ``n_iter`` pairs whose *unguarded* answers span -4.80% to
+#: -1.97% of the starting scale -- a 3.0% spread, which is the thing the
+#: guard has to remove.  The same shape of schedule ``fit``'s own
+#: reproducibility test uses, and for the same reason: on this fixture the
+#: dependence is mostly on ``lr``, so a grid that varied only ``n_iter``
+#: would understate it by a factor of ten.
+_MS_SCHEDULE = [(0.01, 200), (0.01, 1200), (0.2, 200), (0.2, 1200)]
+
+
+def test_multiple_shooting_scale_does_not_depend_on_the_schedule():
+    """``fit_multiple_shooting`` is Adam, so it drifts for ``fit``'s reason
+    and, like ``fit`` on this fixture, the drift depends on the schedule.
+    Measured unguarded: -4.35% at ``lr=0.01, n_iter=200``, -4.80% at 1200,
+    -1.97% at ``lr=0.2, n_iter=200`` and -2.02% at 1200 -- a 3.0% spread in
+    the answer for a loss that agrees to four digits.  Most of it is the
+    learning rate; extending the budget to 4,000 moves ``lr=0.2`` on to
+    -2.31%, so it has not settled either.
+
+    The ``hold_undetermined=False`` half is what makes this a regression
+    test rather than a tautology: it asserts the defect is still there when
+    the guard is off, so a guard that silently stopped running could not
+    make both halves pass.
+    """
+    gm = _spring()
+    obs = _observations(gm, noisy=True)
+    kw = _ms_kwargs(gm, obs)
+
+    held = [fit_multiple_shooting(gm, lr=lr, n_iter=n, **kw)[0]
+            for lr, n in _MS_SCHEDULE]
+    for res, (lr, n) in zip(held, _MS_SCHEDULE):
+        assert res.excited_rank == 2, (lr, n, res.excited_rank)
+        assert res.undetermined_drift is not None
+    scales = [_scale(r.params) for r in held]
+    assert max(scales) / min(scales) - 1.0 < 1e-4, dict(
+        zip(map(str, _MS_SCHEDULE), scales))
+    for s in scales:
+        assert abs(s / START_SCALE - 1.0) < 1e-4, s
+
+    raw = [_scale(fit_multiple_shooting(gm, lr=lr, n_iter=n,
+                                        hold_undetermined=False, **kw)[0].params)
+           for lr, n in _MS_SCHEDULE]
+    assert max(raw) / min(raw) - 1.0 > 1e-2, (
+        dict(zip(map(str, _MS_SCHEDULE), raw)),
+        "the unguarded schedule dependence this test exists for did not "
+        "reproduce",
+    )
+
+
+def test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone():
+    """The guard covers the parameters only.
+
+    The window starts are decision variables of this fit, not constants a
+    caller records as provenance, and a caller warm-starting from them
+    needs the values the optimiser actually reached.  They must come back
+    identical to the unguarded run, and so must ``losses``.
+
+    "Identical to the unguarded run" is not enough on its own: a
+    ``fit_multiple_shooting`` that reset the window states to their seed
+    would satisfy it in *both* runs, and this test passed on exactly that
+    seeded fault until the non-vacuity assertion below was added.  So the
+    states are also required to have moved off ``init_window_states``.
+    """
+    gm = _spring()
+    obs = _observations(gm, noisy=True)
+    kw = dict(_ms_kwargs(gm, obs), n_iter=200, lr=0.2)
+    held, ws_held = fit_multiple_shooting(gm, **kw)
+    raw, ws_raw = fit_multiple_shooting(gm, hold_undetermined=False, **kw)
+
+    assert held.excited_rank == 2 and held.undetermined_drift > 1e-3
+    assert _scale(held.params) != _scale(raw.params)      # the guard did fire
+    seed = init_window_states(obs, WINDOW)
+    assert any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(jax.tree.leaves(ws_held), jax.tree.leaves(seed))
+    ), "the window states never left their seed; the comparison below is vacuous"
+    held_leaves = jax.tree.leaves_with_path(ws_held)
+    raw_leaves = dict(jax.tree.leaves_with_path(ws_raw))
+    assert held_leaves, "the window-state tree is empty; this asserts nothing"
+    for path, value in held_leaves:
+        np.testing.assert_array_equal(
+            np.asarray(value), np.asarray(raw_leaves[path]),
+            err_msg=jax.tree_util.keystr(path))
+    np.testing.assert_array_equal(held.losses, raw.losses)
+    assert held.n_iter == raw.n_iter and held.converged == raw.converged
+
+
+def test_a_well_posed_multiple_shooting_fit_gets_its_iterate_back_bit_for_bit():
+    """Two identifiable parameters, so the guard removes nothing and the
+    returned bits are those of a run without it."""
+    gm = _spring()
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False, units="kg"))
+    obs = _observations(gm, noisy=True)
+    kw = dict(_ms_kwargs(gm, obs), n_iter=300, lr=0.1)
+    held, _ = fit_multiple_shooting(gm, **kw)
+    raw, _ = fit_multiple_shooting(gm, hold_undetermined=False, **kw)
+    assert held.excited_rank == 2, held.excited_rank
+    assert held.undetermined_drift == 0.0
+    for key, value in held.params["nodes"]["s"].items():
+        assert float(value) == float(raw.params["nodes"]["s"][key]), key
+
+
+def test_multiple_shooting_refuses_a_non_bool_hold_undetermined():
+    gm = _spring()
+    obs = _observations(gm, noisy=False)
+    with pytest.raises(ValueError, match="hold_undetermined must be a bool"):
+        fit_multiple_shooting(gm, n_iter=2, hold_undetermined="yes",
+                              **_ms_kwargs(gm, obs))   # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

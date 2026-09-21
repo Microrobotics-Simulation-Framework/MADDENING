@@ -1898,6 +1898,72 @@ class _ExcitationTracker:
         return rank, basis @ basis.T
 
 
+def _check_hold_undetermined(value) -> None:
+    """Refuse a non-bool ``hold_undetermined``.
+
+    A truthy non-bool (``"no"``, ``0.0``, an array) would silently pick a
+    branch the caller did not mean, and the branch it picks decides whether
+    the returned parameters are reproducible.  Called at the top of each
+    fitter, with the rest of the hyper-parameter checks, so an argument
+    error is raised before any model evaluation -- and again inside
+    :func:`_make_excitation_tracker`, so no caller of that can skip it.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"hold_undetermined must be a bool, got {value!r}"
+        )
+
+
+def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationTracker]:
+    """The tracker for a fit's trainable block, or ``None`` if it cannot run.
+
+    Shared by :func:`fit`, :func:`fit_lm` and :func:`fit_multiple_shooting`
+    so that all three answer :attr:`FitResult.excited_rank` by the same
+    rule.  ``None`` means "not measured", which is what
+    :attr:`FitResult.excited_rank` reports as ``None``: the caller switched
+    the guard off, there are more trainable coordinates than
+    :data:`_EXCITATION_MAX_PARAMS`, or the block is empty or not
+    floating-point.
+    """
+    _check_hold_undetermined(hold_undetermined)
+    if (hold_undetermined
+            and 0 < theta0.size <= _EXCITATION_MAX_PARAMS
+            and jnp.issubdtype(theta0.dtype, jnp.floating)):
+        return _ExcitationTracker(int(theta0.size), theta0.dtype)
+    return None
+
+
+def _hold_undetermined_directions(tracker, theta, theta0):
+    """``(theta, excited_rank, undetermined_drift)`` with the undetermined
+    component of ``theta - theta0`` removed.
+
+    The one implementation of the hold, shared by all three fitters: an
+    optimiser-specific copy would let the three drift apart in exactly the
+    quantity they exist to make reproducible.  Every step rule this module
+    has moves along ``null(J)`` for its own reason -- Adam through its
+    diagonal preconditioner, Levenberg-Marquardt through ``lam * diag(A)``,
+    which is orthogonal to ``null(A)`` only where ``diag(A)`` is isotropic
+    there -- and none of them is told anything about those directions by
+    the data.
+
+    ``theta`` comes back untouched, and therefore bit for bit, whenever the
+    rank is full or the question could not be answered.
+    """
+    if tracker is None:
+        return theta, None, None
+    excited_rank, projector = tracker.projector()
+    if projector is None:
+        return theta, excited_rank, (None if excited_rank is None else 0.0)
+    moved = (np.asarray(theta, dtype=np.float64)
+             - np.asarray(theta0, dtype=np.float64))
+    kept = projector @ moved
+    drift = float(np.linalg.norm(moved - kept))
+    # ``theta0 + kept``, not ``kept`` alone: the guard holds the
+    # undetermined directions at the values they *started* at, which
+    # is the one thing about them the data has not contradicted.
+    return theta0 + jnp.asarray(kept, dtype=theta0.dtype), excited_rank, drift
+
+
 def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
     """Observer notification every ``notify_every`` iterations (or None)."""
     if notify_every <= 0 or not getattr(gm, "_observers", None):
@@ -1940,10 +2006,9 @@ class FitResult:
     round-tripped through ``constrain(unconstrain(p))``, which for a
     ``log`` leaf is ``exp(log(p))`` and lands one ulp away.
 
-    ``excited_rank`` and ``undetermined_drift`` report :func:`fit`'s
-    identifiability guard (``hold_undetermined``); both are ``None`` from
-    :func:`fit_lm` and :func:`fit_multiple_shooting`, which do not run it,
-    and from a :func:`fit` that could not answer the question.
+    ``excited_rank`` and ``undetermined_drift`` report the identifiability
+    guard (``hold_undetermined``), which all three fitters run, and are
+    ``None`` from one that could not answer the question.
 
     ``excited_rank``
         How many independent directions the run's gradients spanned, out
@@ -1955,7 +2020,7 @@ class FitResult:
         where an unobserved direction cannot be told from an unobservable
         one.
     ``undetermined_drift``
-        How far the raw Adam iterate had wandered along those undetermined
+        How far the raw iterate had wandered along those undetermined
         directions before the guard removed it, as a Euclidean norm in the
         **unconstrained** coordinates (``log`` for a positive parameter, so
         a drift of 0.04 there is a 4% drift in the parameter itself).
@@ -1964,6 +2029,11 @@ class FitResult:
         error: the value it reports has already been taken out of
         ``params``.  A number far above the fit's own step scale says the
         loss surface has a flat direction worth naming with :func:`fim`.
+
+        For :func:`fit_multiple_shooting` it covers the **parameter** block
+        only.  The window starts are that fit's own decision variables and
+        are returned as the optimiser left them, in the second element of
+        its result rather than in ``params``.
     """
     params: dict
     losses: np.ndarray
@@ -2054,9 +2124,11 @@ def fit(
         the three drifts 3.4% by iteration 200 and **46% by iteration
         10,000**, with the loss unchanged in its first six digits, and
         ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
-        budget.  :func:`fit_lm` drifts too — ``λ·diag(A)`` damping is not
-        orthogonal to the null space either — but by 0.5% and it stops once
-        converged.
+        budget.  :func:`fit_lm` and :func:`fit_multiple_shooting` drift too
+        — ``λ·diag(A)`` damping is no more orthogonal to the null space
+        than Adam's preconditioner is — and since 0.4.0 all three run this
+        same guard.  What differs is that LM's step vanishes with the
+        gradient, so its drift *converges*; see :func:`fit_lm`.
 
         With the guard on, :func:`fit` accumulates ``Σ_t g_t g_tᵀ`` over the
         run and removes the net displacement's component along that matrix's
@@ -2081,13 +2153,7 @@ def fit(
         ``fim(scale="relative")`` already assumes.
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
-    if not isinstance(hold_undetermined, bool):
-        # A truthy non-bool ("no", 0.0, an array) would silently pick a
-        # branch the caller did not mean, and the branch it picks decides
-        # whether the returned parameters are reproducible.
-        raise ValueError(
-            f"hold_undetermined must be a bool, got {hold_undetermined!r}"
-        )
+    _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -2119,11 +2185,7 @@ def fit(
     theta = theta0
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
-    tracker: Optional[_ExcitationTracker] = None
-    if (hold_undetermined
-            and 0 < theta0.size <= _EXCITATION_MAX_PARAMS
-            and jnp.issubdtype(theta0.dtype, jnp.floating)):
-        tracker = _ExcitationTracker(int(theta0.size), theta0.dtype)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
     converged = False
     i = 0
@@ -2151,21 +2213,8 @@ def fit(
             break
         theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
 
-    excited_rank: Optional[int] = None
-    undetermined_drift: Optional[float] = None
-    if tracker is not None:
-        excited_rank, projector = tracker.projector()
-        if projector is not None:
-            moved = (np.asarray(theta, dtype=np.float64)
-                     - np.asarray(theta0, dtype=np.float64))
-            kept = projector @ moved
-            undetermined_drift = float(np.linalg.norm(moved - kept))
-            # ``theta0 + kept``, not ``kept`` alone: the guard holds the
-            # undetermined directions at the values they *started* at, which
-            # is the one thing about them the data has not contradicted.
-            theta = theta0 + jnp.asarray(kept, dtype=theta0.dtype)
-        elif excited_rank is not None:
-            undetermined_drift = 0.0
+    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
+        tracker, theta, theta0)
 
     final = to_params(theta)
     return FitResult(
@@ -2190,6 +2239,7 @@ def fit_lm(
     noise_std: Optional[Any] = None,
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
+    hold_undetermined: bool = True,
 ) -> FitResult:
     """Levenberg–Marquardt on ``0.5 * ||residual_fn(params)||²`` under the
     graph's :class:`ParamSpec` (unconstrained coordinates, trainable mask).
@@ -2207,6 +2257,49 @@ def fit_lm(
     ``0.5 ||r||²`` at the start of iteration ``i``; ``converged`` when
     the loss reached ``tol`` or the step norm in unconstrained
     coordinates fell below ``step_tol``.
+
+    Parameters
+    ----------
+    hold_undetermined : bool
+        Keep the fitted parameters out of the directions the data does not
+        determine, exactly as :func:`fit` does and by the same shared
+        machinery.  **New in 0.4.0, and on by default**; ``False`` restores
+        the pre-0.4.0 iterate exactly.
+
+        The gradient ``g = Jᵀr`` is orthogonal to ``null(J)``, but the step
+        is not the gradient: the Marquardt solve is
+        ``(A + λ·diag(A))⁻¹ g``, and that is orthogonal to ``null(A)`` only
+        where ``diag(A)`` is isotropic on the relevant subspace.  Take
+        ``A = [[1, 2], [2, 4]]`` and ``g = (1, 2)``: the step is
+        ``∝ (2, 1)`` for every ``λ`` while ``null(A)`` is spanned by
+        ``(2, −1)``.  So LM drifts along an exactly-null direction too.
+
+        It drifts **differently from Adam**, and the difference is worth
+        knowing.  LM's step vanishes with the gradient, so the drift
+        converges and stops.  Measured on the spring's ``(k, c, m)``
+        common-scale degeneracy, the geometric mean of the three lands
+        **−0.849%** (noiseless data) or **+0.429%** (σ = 0.02) from the
+        value it was given, and then does not move again: the answer is
+        identical to the last bit for ``n_iter`` 10 through 200.  On the
+        same data :func:`fit` lands −7.1% at ``lr=0.05`` and −5.4% at
+        ``lr=0.2`` — a spread the *schedule* chooses, not the data.
+
+        So this is a **consistency** fix and not the reproducibility defect
+        :func:`fit` had: the value LM returns for an undetermined
+        combination does not depend on the budget, it is simply neither the
+        caller's value nor one the data chose.  The reason to fix it anyway
+        is that :attr:`FitResult.excited_rank` and
+        :attr:`FitResult.undetermined_drift` would otherwise be ``None``
+        here for no better reason than that nobody had done it.
+
+        Everything :func:`fit` promises holds here.  The loss, the
+        iterates, ``losses``, ``callback`` and the ``fit_progress`` events
+        are unchanged; a fit whose gradients spanned every direction gets
+        its iterate back bit for bit; the cutoff is numerical rather than
+        statistical, so a merely weakly-identified direction is kept;
+        and the degeneracy has to be a fixed direction in the optimiser's
+        coordinates.  :attr:`FitResult.excited_rank` and
+        :attr:`FitResult.undetermined_drift` say what the guard found.
     """
     _check_count("n_iter", n_iter)
     _check_hyper("lam0", lam0, gt=0.0,
@@ -2228,6 +2321,7 @@ def fit_lm(
                      "be met and 'converged' could only ever mean the loss "
                      "reached tol.")
     _check_count("notify_every", notify_every)
+    _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -2237,11 +2331,18 @@ def fit_lm(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
-    theta = flat_u[idx]
+    theta0 = flat_u[idx]
+    theta = theta0
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
 
-    r_probe = residual_fn(gm.constrain(u0))
-    inv_sigma = _inverse_noise_std(noise_std, r_probe)
+    # ``_resolved_noise``, not ``_inverse_noise_std(noise_std,
+    # residual_fn(...))``: the residual is wanted for its *structure*
+    # only, and evaluating it cost a whole extra rollout per call --
+    # bought nothing at all in the ``noise_std is None`` case, which
+    # returns before looking at it.  Confirmed by counting entries into
+    # ``residual_fn``: 4 per call, of which this was 1, and 1 per call at
+    # ``n_iter=0`` where nothing else ran at all.
+    inv_sigma = _resolved_noise(residual_fn, gm.constrain(u0), noise_std)
 
     def _residual(th):
         p = gm.constrain(unravel(flat_u.at[idx].set(th)))
@@ -2260,6 +2361,7 @@ def fit_lm(
         return th - delta
 
     lam = float(lam0)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
     converged = False
     i = 0
@@ -2269,6 +2371,17 @@ def fit_lm(
         if not np.isfinite(loss) or not bool(jnp.all(jnp.isfinite(J))):
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
+        if tracker is not None:
+            # ``J.T @ r`` is the same ``g`` ``_lm_step`` forms, recomputed
+            # here rather than returned from it: the tracker must not
+            # change the step, and ``_lm_step``'s own ``g`` lives inside a
+            # ``jax.jit`` whose fusion decides ``A``'s last bits (PR 101).
+            # Contracted on the device so only the ``n``-vector is read
+            # back, not the whole ``m x n`` Jacobian.  Folded in before
+            # the ``tol`` break, as in ``fit``: this gradient is
+            # information about the loss surface whether or not a step
+            # was taken on it.
+            tracker.observe(J.T @ r)
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
@@ -2296,8 +2409,14 @@ def fit_lm(
             converged = accepted and step_norm < step_tol
             break
 
+    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
+        tracker, theta, theta0)
+
     final = to_params(theta)
-    return FitResult(params=final, losses=np.asarray(losses), converged=converged, n_iter=i)
+    return FitResult(
+        params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
+        excited_rank=excited_rank, undetermined_drift=undetermined_drift,
+    )
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -2321,6 +2440,7 @@ def fit_multiple_shooting(
     eps: float = 1e-8,
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
+    hold_undetermined: bool = True,
 ) -> tuple[FitResult, dict]:
     """Multiple-shooting fit: Adam jointly over the trainable params (in
     unconstrained coordinates) and the free per-window initial states.
@@ -2332,6 +2452,36 @@ def fit_multiple_shooting(
     do not seed every window with measurement error.
 
     Returns ``(FitResult, window_states)``.
+
+    Parameters
+    ----------
+    hold_undetermined : bool
+        Keep the fitted **parameters** out of the directions the data does
+        not determine, exactly as :func:`fit` does and by the same shared
+        machinery.  **New in 0.4.0, and on by default**; ``False`` restores
+        the pre-0.4.0 iterate exactly.
+
+        This is the same Adam step rule :func:`fit` uses, so it is
+        :func:`fit`'s defect and not merely the consistency issue
+        :func:`fit_lm` had: the drift has not settled, and the *schedule*
+        picks the answer.  Measured on the spring's ``(k, c, m)``
+        common-scale degeneracy with σ = 0.02 observations, the geometric
+        mean of the three lands **−4.35%** at ``lr=0.01, n_iter=200``,
+        **−4.80%** at 1,200, **−1.97%** at ``lr=0.2, n_iter=200`` and
+        **−2.02%** at 1,200 — a 3.0% spread in the returned constants for a
+        loss that agrees to four digits.  Raising the budget to 4,000 moves
+        ``lr=0.2`` on again, to −2.31%, so it is not converging to a value
+        either.  Two runs on the same data return different physical
+        constants and neither is preferred by the objective.
+
+        Only ``theta`` is guarded.  The returned ``window_states`` are
+        nuisance variables of the fit rather than constants a caller
+        records as provenance, and a caller warm-starting from them needs
+        the values the optimiser actually reached; the gradient Gram is
+        accumulated over the parameter block alone, which is where
+        :attr:`FitResult.excited_rank` counts its directions.  That block's
+        gradient is still ``J_θᵀ r`` at every iterate, so a ``v`` with
+        ``J_θ v = 0`` has ``g·v = 0``, which is the whole premise.
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     if lr_states is not None:
@@ -2342,6 +2492,7 @@ def fit_multiple_shooting(
                  why=" A negative weight pays the fit to tear the trajectory "
                      "apart at the window joins.")
     _check_count("sample_every", sample_every, minimum=1)
+    _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -2378,6 +2529,7 @@ def fit_multiple_shooting(
     theta, ws = theta0, ws_flat0
     m_t = jnp.zeros_like(theta); v_t = jnp.zeros_like(theta)
     m_s = jnp.zeros_like(ws); v_s = jnp.zeros_like(ws)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
     converged = False
     i = 0
@@ -2388,6 +2540,11 @@ def fit_multiple_shooting(
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g_t))) \
                 or not bool(jnp.all(jnp.isfinite(g_s))):
             raise FloatingPointError(f"non-finite loss or gradient at iteration {i}")
+        if tracker is not None:
+            # The parameter block's gradient only: the window states are
+            # decision variables of this fit and are returned as the
+            # optimiser left them.  Before the ``tol`` break, as in ``fit``.
+            tracker.observe(g_t)
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
@@ -2401,6 +2558,11 @@ def fit_multiple_shooting(
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
 
+    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
+        tracker, theta, theta0)
+
     final = to_params(theta)
-    return (FitResult(params=final, losses=np.asarray(losses), converged=converged, n_iter=i),
+    return (FitResult(params=final, losses=np.asarray(losses), converged=converged,
+                      n_iter=i, excited_rank=excited_rank,
+                      undetermined_drift=undetermined_drift),
             unravel_ws(ws))

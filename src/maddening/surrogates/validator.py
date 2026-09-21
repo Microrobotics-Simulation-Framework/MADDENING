@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 
 from maddening.surrogates.dataset import SurrogateDataset
+from maddening.surrogates.types import MutableStateDict
 
 if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
@@ -68,8 +69,8 @@ class SurrogateValidator:
         n_samples = next(iter(ds.states.values())).shape[0]
 
         # Run surrogate on each sample
-        # shape: result is {field: Array} -- TypedDict candidate (phase 3)
-        def predict_one(idx: jax.Array) -> dict[str, Any]:
+        # Dynamic keys (the node's own fields): an alias, not a TypedDict.
+        def predict_one(idx: jax.Array) -> MutableStateDict:
             state = {k: v[idx] for k, v in ds.states.items()}
             boundary = {k: v[idx] for k, v in ds.boundary_inputs.items()}
             return surrogate_node.update(state, boundary, ds.dt)

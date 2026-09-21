@@ -11,13 +11,14 @@ through the FNO layers.
 """
 
 import math
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
 
 from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
 from maddening.surrogates.architectures._utils import check_equinox
+from maddening.surrogates.types import MutableStateDict, StateDict
 
 try:
     import equinox as eqx
@@ -281,14 +282,14 @@ class FNODirect(SurrogateArchitecture):
 
         return (fno_params, scalar_mlp_params)
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         (fno_arrays, fno_static), scalar_mlp_params = params
 
         fno_net = eqx.combine(fno_arrays, fno_static)
@@ -407,14 +408,14 @@ class FNODerivative(SurrogateArchitecture):
 
         return (fno_params, scalar_mlp_params)
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         (fno_arrays, fno_static), scalar_mlp_params = params
 
         fno_net = eqx.combine(fno_arrays, fno_static)

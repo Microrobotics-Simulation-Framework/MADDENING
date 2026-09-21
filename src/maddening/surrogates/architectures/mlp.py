@@ -5,12 +5,13 @@ Uses Equinox for the MLP implementation but exposes weights as a
 plain JAX pytree for framework-independence at the SurrogateNode level.
 """
 
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
 
 from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import MutableStateDict, StateDict
 from maddening.surrogates.architectures._utils import (
     check_equinox,
     compute_sizes,
@@ -66,14 +67,14 @@ class MLPDirect(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -128,14 +129,14 @@ class MLPDerivative(SurrogateArchitecture):
         )
         return eqx.partition(mlp, eqx.is_array)
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         arrays, static = params
         mlp = eqx.combine(arrays, static)
         x = flatten_inputs(

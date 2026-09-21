@@ -8,12 +8,13 @@ For MADDENING's lumped-parameter nodes (scalar state fields), the trunk
 degenerates to a learned basis matrix — no spatial query points needed.
 """
 
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 import jax
 import jax.numpy as jnp
 
 from maddening.surrogates.architecture import PyTree, SurrogateArchitecture
+from maddening.surrogates.types import MutableStateDict, StateDict
 from maddening.surrogates.architectures._utils import (
     check_equinox,
     compute_sizes,
@@ -117,14 +118,14 @@ class DeepONetDirect(SurrogateArchitecture):
             self.n_basis, self.branch_hidden, self.activation,
         )
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -174,14 +175,14 @@ class DeepONetDerivative(SurrogateArchitecture):
             self.n_basis, self.branch_hidden, self.activation,
         )
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
         x = flatten_inputs(
@@ -299,14 +300,14 @@ class SDeepONetDirect(SurrogateArchitecture):
         """Return the GRU hidden state size (needed for initial state)."""
         return self.gru_hidden_size
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         """Forward pass with GRU hidden state.
 
         The state dict must contain a ``"_gru_hidden"`` field holding
@@ -399,14 +400,14 @@ class SDeepONetDerivative(SurrogateArchitecture):
     def hidden_size(self) -> int:
         return self.gru_hidden_size
 
-    # shape: state, boundary_inputs, result are {field: Array} -- TypedDict candidate (phase 3)
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     def forward(
         self,
         params: PyTree,
-        state: dict[str, Any],
-        boundary_inputs: dict[str, Any],
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict[str, Any]:
+    ) -> MutableStateDict:
         arrays, static = params
         net = eqx.combine(arrays, static)
 

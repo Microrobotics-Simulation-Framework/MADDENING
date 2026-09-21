@@ -10,15 +10,17 @@ used inside concrete implementations.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+# `PyTree` is re-exported here so the historical
+# `surrogates.architecture.PyTree` import path keeps working; it and the
+# state-dict aliases are defined once, in `surrogates.types`.
+from maddening.surrogates.types import MutableStateDict, PyTree, StateDict
 
 if TYPE_CHECKING:
     import jax
-
-PyTree = Any
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -55,23 +57,24 @@ class SurrogateArchitecture(ABC):
         """
         ...
 
+    # Dynamic keys (the node's own fields): an alias, not a TypedDict.
     @abstractmethod
     def forward(
         self,
         params: PyTree,
-        state: dict,
-        boundary_inputs: dict,
+        state: StateDict,
+        boundary_inputs: StateDict,
         dt: float,
-    ) -> dict:
+    ) -> MutableStateDict:
         """Pure JAX-traceable forward pass.
 
         Parameters
         ----------
         params : PyTree
             Network weights (from init_params or training).
-        state : dict
+        state : StateDict
             Current node state ``{field: array}``.
-        boundary_inputs : dict
+        boundary_inputs : StateDict
             Boundary inputs ``{field: array}``.
         dt : float
             Timestep (scalar).

@@ -279,6 +279,23 @@ gm.set_param_spec("spring", "damping",
                   ParamSpec(bounds=(0.0, None), transform="log"))
 ```
 
+**`fit_lm` and `fit_multiple_shooting` run the same guard**, on the same
+`hold_undetermined` keyword, and fill the same two fields.  Neither is immune
+for the reason it might look immune: the gradient is orthogonal to the null
+space, but no step rule here *is* the gradient.  Levenberg–Marquardt solves
+`(A + λ·diag(A))⁻¹g`, which is orthogonal to `null(A)` only where `diag(A)`
+is isotropic there — take `A = [[1, 2], [2, 4]]` and `g = (1, 2)`, whose step
+is `∝ (2, 1)` for every `λ` against a null space spanned by `(2, −1)`.
+
+They differ in how badly.  `fit_lm`'s step vanishes with the gradient, so its
+drift *converges*: on the spring above it settles 0.85% (noiseless) or 0.43%
+(σ = 0.02) from the scale you supplied and stays there, bit for bit, from
+iteration 10 to 200.  `fit_multiple_shooting` is Adam, so it does not settle:
+2.0% to 4.8% across `lr` 0.01–0.2, a 3.0% spread that the schedule picks and
+the data has no opinion about.  Only the parameters are held there — the
+returned `window_states` are decision variables of that fit and come back as
+the optimiser left them.
+
 All three fitters take a `mask=` that *narrows* `gm.trainable_mask()` —
 fit two of the three trainable constants, say.  It cannot widen it: a
 mask naming a leaf whose spec says `trainable=False` is a `ValueError`,

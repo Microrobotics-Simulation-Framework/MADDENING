@@ -803,8 +803,12 @@ def test_the_sqrt_m_term_earns_its_place_where_the_backend_rounds_loosely(
         )
         assert sample.report.rank == n - 1, (
             f"seed={sample.seed}: the default cutoff must still refuse "
-            f"what the old one accepted -- that difference is the whole "
-            f"of the sqrt(m) term's value."
+            f"what the old n*eps one accepted -- that difference is the "
+            f"whole of the sqrt(m) term's value, and it is gone. Look at "
+            f"the sqrt(m) branch of maddening.sysid._resolve_rank_rtol: "
+            f"if the default has collapsed back to n*eps, this test and "
+            f"the fail-closed one above are both reporting the same "
+            f"regression."
         )
 
 

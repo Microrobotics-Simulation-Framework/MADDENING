@@ -117,8 +117,11 @@ Measured with pyright 1.1.414 on 2026-09-20 (branch `feat/pep561-phase2`,
 forked from `release/0.4.0`), against `pip install -e ".[ci]"` on Python
 3.11 with `jax==0.10.2`.  141 files analysed.  The `typecheck` job moved to
 Python 3.12 on 2026-09-21, when `requires-python` went to `>=3.12` and 3.11
-stopped being installable at all; `typing_tiers.json` records the environment
-the ceilings are compared in, and the job re-measures against it on every run.  The committed ceilings are in `typing_tiers.json`; these
+stopped being installable at all.  That moved nothing: the job re-measured
+**0** errors in tier 1 and **61 / 55 / 1 / 45** in tier 2 -- every package
+exactly at the ceiling it was given on 3.11 -- against the same
+pyright 1.1.414.  `typing_tiers.json` records the environment the ceilings are
+compared in, and the job re-measures against it on every run.  The committed ceilings are in `typing_tiers.json`; these
 are the numbers they were taken from.
 
 | | errors | warnings |

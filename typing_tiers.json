@@ -16,7 +16,7 @@
   ],
   "pyright_version": "1.1.414",
   "environment": "pip install -e '.[ci]' on Python 3.12 with jax==0.10.2; no usd-core, pyvista, pygfx, rendercanvas, scikit-image, PyGObject or cupy",
-  "measured": "2026-09-20, branch feat/pep561-phase2; `surrogates` re-measured 2026-09-21 on typing/pep589-typed-dicts (58 -> 55: `TrainMetrics` makes `val_loss` a required key, so the three `metrics.get(\"val_loss\") < float` comparisons in callbacks.py are no longer Optional); the interpreter moved 3.11 -> 3.12 on 2026-09-21 with the `requires-python` floor (chore/python-312-floor) -- pyright reads stubs rather than running code, and the `typecheck` job re-measures against the ceilings on every run",
+  "measured": "2026-09-20, branch feat/pep561-phase2; `surrogates` re-measured 2026-09-21 on typing/pep589-typed-dicts (58 -> 55: `TrainMetrics` makes `val_loss` a required key, so the three `metrics.get(\"val_loss\") < float` comparisons in callbacks.py are no longer Optional); the interpreter moved 3.11 -> 3.12 on 2026-09-21 with the `requires-python` floor (chore/python-312-floor) and moved nothing: the typecheck job re-measured 0 in tier 1 and 61 / 55 / 1 / 45 in tier 2, every package exactly at its ceiling, on the same pyright 1.1.414",
   "tiers": {
     "tier1": {
       "description": "Annotated to zero: the packages refactors move through.",

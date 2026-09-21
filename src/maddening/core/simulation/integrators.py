@@ -251,6 +251,18 @@ def integrate_node(
     nowhere in this signature to put a stage time, deliberately -- the
     caller who needs one composes the time-augmented derivatives function
     from the module docstring and calls :func:`rk4_step` directly.
+
+    **There is nowhere in this signature to put ``params`` either**
+    (``MADD-ANO-018``).  ``node.derivatives`` is handed to the stepper
+    unaltered and reads ``node.params``, the constructor's values, so a
+    parameter calibrated through ``gm.params`` or
+    :func:`maddening.sysid.fit` does not reach this function at all --
+    not merely "is not passed by default", but cannot be passed.  The
+    same node driven through ``update(..., params=fitted)`` uses the
+    calibrated value and this path does not, silently and with no
+    disagreement visible in either result.  Rebuild the node with the
+    calibrated values before integrating it here, or step it through
+    ``update``.
     """
     integrators = {
         "euler": euler_step,

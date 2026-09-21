@@ -151,9 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
-- **The SOUP identification table states the verified JAX version, not just the
-  permitted range**: `jax>=0.10,<0.13` is what pip allows; `0.10.2` is the one
-  point in it CI has ever run, and the row now says so, read out of the workflow
+- **Docs**: the SOUP identification table gives JAX's *verified* version as well
+  as its permitted range; `DESIGN.md`, `DatasetGenerator.from_graph` and
+  `SurrogateValidator.compare_graphs` say they advance the graph they are given
 - **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
   key or a wrong value type is now a type error, and a scene object whose `"x"`
   names a state field no longer kills `setup()` with a `ConversionError`
@@ -514,6 +514,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
+  `update()` and cannot reach `derivatives()`, `implicit_residual()` or
+  `integrate_node()` -- they take no `params`, so they run constructor values
 - **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
   the supported floor, so every `CloudSession` launch, teardown and preemption check
   was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified

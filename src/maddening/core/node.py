@@ -932,6 +932,29 @@ class SimulationNode(ABC):
         This enables pluggable integration (RK4, etc.) at the graph
         level.  Default raises ``NotImplementedError`` -- override in
         nodes that have a natural ODE form.
+
+        Notes
+        -----
+        **An injected ``params`` cannot reach this method**
+        (``MADD-ANO-018``).  There is no ``params`` argument in the
+        signature, so an implementation has nothing to read but
+        ``self.params`` -- the values the node was constructed with.
+        A parameter calibrated through ``gm.params``,
+        :func:`maddening.sysid.fit` or its siblings therefore changes
+        :meth:`update` and :meth:`compute_interface_correction`, whose
+        contract is the ``{**self.params, **params}`` rule, and leaves
+        every ``derivatives()``-based path running the constructor's
+        constant.  Nothing warns; the answer is finite and plausible.
+
+        Measured on ``SpringDamperNode`` with a constructor stiffness of
+        100 against a calibrated 400: ``update(params=...)`` returns a
+        velocity of ``-4.0`` and
+        :func:`~maddening.core.simulation.integrators.integrate_node`
+        returns ``-1.0`` from the same node object.
+
+        Until ``params`` is threaded through (0.5.0), either drive the
+        node through :meth:`update`, or rebuild it with the calibrated
+        values before handing it to an integrator.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement derivatives(). "
@@ -957,6 +980,15 @@ class SimulationNode(ABC):
 
         Default raises ``NotImplementedError`` -- override in nodes
         that need implicit time integration (e.g., stiff systems).
+
+        Notes
+        -----
+        **An injected ``params`` cannot reach this method either**
+        (``MADD-ANO-018``).  The signature has no ``params`` argument,
+        and every in-tree implementation builds its residual by calling
+        ``self.derivatives(...)``, so it inherits that method's
+        limitation whole: a calibrated value reaches :meth:`update` and
+        not the implicit solve.  See :meth:`derivatives`.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement implicit_residual()."

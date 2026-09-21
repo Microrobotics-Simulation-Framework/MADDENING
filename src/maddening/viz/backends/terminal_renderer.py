@@ -7,7 +7,7 @@ dependencies.
 """
 
 import threading
-from typing import Any, Optional
+from typing import Optional, TypedDict
 
 try:
     from rich.live import Live
@@ -23,6 +23,30 @@ from maddening.viz.renderer import Renderer, GraphInfo
 from maddening.viz.relay import StateRelay
 
 
+class TerminalRendererConfig(TypedDict, total=False):
+    """Keyword options accepted by :class:`TerminalRenderer`.
+
+    Every key is optional -- an empty dict renders every field of every
+    node with the defaults below -- so this is ``total=False``.
+
+    Examples
+    --------
+    >>> cfg: TerminalRendererConfig = {"title": "Rig", "precision": 2}
+    >>> sorted(cfg)
+    ['precision', 'title']
+    """
+
+    #: ``{node_name: [field, ...]}`` -- which fields to display.
+    #: Absent means every field the graph reports.
+    fields: dict[str, list[str]]
+    #: Decimal places for floats (default 4).
+    precision: int
+    #: Header text.
+    title: str
+    #: Display refresh rate in hertz (default 20).
+    refresh_hz: float
+
+
 class TerminalRenderer(Renderer):
     """Render simulation state as a live-updating table in the terminal.
 
@@ -30,23 +54,15 @@ class TerminalRenderer(Renderer):
     ----------
     relay : StateRelay
         The snapshot buffer to poll for new data.
-    config : dict, optional
-        Configuration dictionary.  Supported keys:
-
-        - ``"fields"``: ``{node_name: [field1, ...]}`` -- which fields
-          to display.  Defaults to all fields.
-        - ``"precision"``: int -- decimal places for floats (default 4).
-        - ``"title"``: str -- header text.
-        - ``"refresh_hz"``: float -- display refresh rate (default 20).
+    config : TerminalRendererConfig, optional
+        Configuration dictionary; see that class for the supported keys.
     """
 
-    # config shape: {"fields": {node: [field, ...]}, "precision": int,
-    #   "title": str, "refresh_hz": float} -- TypedDict candidate (phase 3)
     def __init__(
-        self, relay: StateRelay, config: Optional[dict[str, Any]] = None
+        self, relay: StateRelay, config: Optional[TerminalRendererConfig] = None
     ) -> None:
         self._relay = relay
-        self._config = config or {}
+        self._config: TerminalRendererConfig = config or {}
         self._tracked: list[tuple[str, str]] = []
         self._graph_info: Optional[GraphInfo] = None
         self._thread: Optional[threading.Thread] = None

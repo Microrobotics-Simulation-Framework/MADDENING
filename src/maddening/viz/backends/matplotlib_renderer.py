@@ -12,7 +12,7 @@ Use ``run_matplotlib()`` to drive one or more renderers from a single event loop
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Literal, TypedDict
 
 try:
     import matplotlib.pyplot as plt
@@ -26,6 +26,108 @@ except ImportError as _exc:
 
 from maddening.viz.renderer import Renderer, GraphInfo
 from maddening.viz.relay import StateRelay
+
+
+# ------------------------------------------------------------------
+# Configuration shapes
+# ------------------------------------------------------------------
+
+class TimeSeriesPlotConfig(TypedDict, total=False):
+    """Keyword options accepted by :class:`MatplotlibTimeSeriesRenderer`.
+
+    Every key is optional, so this is ``total=False``.
+
+    Examples
+    --------
+    >>> cfg: TimeSeriesPlotConfig = {"title": "Rig", "window": 500}
+    >>> sorted(cfg)
+    ['title', 'window']
+    """
+
+    #: ``{node_name: [field, ...]}`` -- which fields to plot.  Absent
+    #: means every state field of every node.
+    fields: dict[str, list[str]]
+    #: Number of points to keep visible; 0 (the default) shows all.
+    window: int
+    #: Figure title.
+    title: str
+    #: Matplotlib figure size.
+    figsize: tuple[float, float]
+
+
+class _SceneObjectRequired(TypedDict):
+    """The two keys every scene object must carry (see
+    :class:`SceneObjectSpec`)."""
+
+    #: Which shape to draw.
+    type: Literal["circle", "surface", "hline"]
+    #: The simulation node whose state drives this object.
+    node: str
+
+
+class SceneObjectSpec(_SceneObjectRequired, total=False):
+    """One visual object in a :class:`MatplotlibSceneRenderer` scene.
+
+    ``type`` and ``node`` are required -- an object with no shape or no
+    node to follow is not drawable -- and every other key is per-shape
+    and optional.  The split is expressed with a base class rather than
+    with ``NotRequired``, because this module uses PEP 563 string
+    annotations: under ``from __future__ import annotations`` CPython
+    cannot see a ``NotRequired`` wrapper and reports every key as
+    required in ``__required_keys__``.  Two classes give the right
+    answer to a checker *and* at runtime.
+
+    See the renderer's class docstring for which keys each ``type``
+    reads.
+
+    Examples
+    --------
+    >>> ball: SceneObjectSpec = {"type": "circle", "node": "ball", "y": "position"}
+    >>> SceneObjectSpec.__required_keys__ == {"type", "node"}
+    True
+    """
+
+    #: State field driving the y coordinate.
+    y: str
+    #: Fixed x centre, or the name of a state field driving it.
+    x: float | str
+    #: Circle radius.
+    radius: float
+    #: Depth of the filled region below a surface.
+    depth: float
+    #: Fill colour.
+    color: str
+    #: Circle edge colour.
+    edgecolor: str
+    #: Surface line colour.
+    linecolor: str
+    #: Line width.
+    linewidth: float
+
+
+class SceneConfig(TypedDict, total=False):
+    """Scene description accepted by :class:`MatplotlibSceneRenderer`.
+
+    Examples
+    --------
+    >>> cfg: SceneConfig = {"title": "Drop", "objects": []}
+    >>> sorted(cfg)
+    ['objects', 'title']
+    """
+
+    #: Figure title.
+    title: str
+    #: Matplotlib figure size (default ``(5, 7)``).
+    figsize: tuple[float, float]
+    #: x-axis limits.
+    xlim: tuple[float, float]
+    #: y-axis limits.
+    ylim: tuple[float, float]
+    #: Axis aspect ratio (default ``"equal"``): the two names
+    #: matplotlib accepts, or an explicit ratio.
+    aspect: Literal["auto", "equal"] | float
+    #: The visual objects to draw.
+    objects: list[SceneObjectSpec]
 
 
 # ------------------------------------------------------------------
@@ -66,24 +168,15 @@ class MatplotlibTimeSeriesRenderer(Renderer):
     ----------
     relay : StateRelay
         The snapshot buffer to poll for new data.
-    plot_config : dict, optional
-        Configuration dictionary.  Supported keys:
-
-        - ``"fields"``: ``{node_name: [field1, ...]}`` -- which fields
-          to plot.  Defaults to all state fields from all nodes.
-        - ``"window"``: int -- number of data points to keep visible
-          (0 = show all history).
-        - ``"title"``: str -- figure title.
-        - ``"figsize"``: tuple -- matplotlib figure size.
+    plot_config : TimeSeriesPlotConfig, optional
+        Configuration dictionary; see that class for the supported keys.
     """
 
-    # plot_config shape: {"fields": {node: [field, ...]}, "window": int,
-    #   "title": str, "figsize": tuple} -- TypedDict candidate (phase 3)
     def __init__(
-        self, relay: StateRelay, plot_config: dict[str, Any] | None = None
+        self, relay: StateRelay, plot_config: TimeSeriesPlotConfig | None = None
     ) -> None:
         self._relay = relay
-        self._config = plot_config or {}
+        self._config: TimeSeriesPlotConfig = plot_config or {}
         self._fig = None
         self._anim = None
         self._last_sim_time = 0.0
@@ -184,15 +277,9 @@ class MatplotlibSceneRenderer(Renderer):
     ----------
     relay : StateRelay
         The snapshot buffer to poll for new data.
-    scene_config : dict
-        Scene description.  Keys:
-
-        - ``"title"``: str -- figure title.
-        - ``"figsize"``: tuple -- matplotlib figure size (default (5, 7)).
-        - ``"xlim"``: (float, float) -- x-axis limits.
-        - ``"ylim"``: (float, float) -- y-axis limits.
-        - ``"aspect"``: str -- axis aspect ratio (default ``"equal"``).
-        - ``"objects"``: list[dict] -- visual objects.
+    scene_config : SceneConfig
+        Scene description; see that class for the supported keys and
+        :class:`SceneObjectSpec` for one entry of ``"objects"``.
 
     Object types
     ~~~~~~~~~~~~~
@@ -239,10 +326,7 @@ class MatplotlibSceneRenderer(Renderer):
         }
     """
 
-    # scene_config shape: {"figsize": tuple, "xlim": tuple, "ylim": tuple,
-    #   "aspect": str, "title": str, "objects": [obj_spec, ...]}
-    #   -- TypedDict candidate (phase 3)
-    def __init__(self, relay: StateRelay, scene_config: dict[str, Any]) -> None:
+    def __init__(self, relay: StateRelay, scene_config: SceneConfig) -> None:
         self._relay = relay
         self._config = scene_config
         self._fig = None
@@ -279,8 +363,14 @@ class MatplotlibSceneRenderer(Renderer):
             if obj_type == "circle":
                 y0 = 0.0
                 radius = obj.get("radius", 0.2)
+                # A string `x` names a state field, which has no value
+                # until the first update, so the circle starts at 0.0.
+                # Passing the field name straight to Circle would put a
+                # str where matplotlib wants a coordinate.
+                x_spec = obj.get("x", 0.0)
+                x0 = 0.0 if isinstance(x_spec, str) else float(x_spec)
                 circle = patches.Circle(
-                    (obj.get("x", 0.0), y0 + radius), radius,
+                    (x0, y0 + radius), radius,
                     facecolor=obj.get("color", "red"),
                     edgecolor=obj.get("edgecolor", obj.get("color", "red")),
                     linewidth=obj.get("linewidth", 1.5),

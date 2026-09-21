@@ -165,3 +165,28 @@ def test_heat_source_sampled_with_declared_shape(args):
     so the check exercised the real stencil path, not a broadcast scalar."""
     _, bi, _ = args
     assert jnp.shape(bi["heat_source"]) == (N_CELLS,)
+
+
+@pytest.mark.parametrize(
+    "name, paths, unused",
+    [
+        ("spring", "update, derivatives, implicit_residual", None),
+        ("heat", "update, derivatives, implicit_residual", None),
+        ("heart_pump", "update, derivatives, implicit_residual", None),
+        ("rigid_body", "update, derivatives, implicit_residual", None),
+        # The collision-free right-hand side has no use for ``elasticity``:
+        # reported, not failed -- the case that separates "not consumed"
+        # from "read from self.params".
+        ("ball", "update, derivatives", "not consumed by derivatives(): ['elasticity']"),
+    ],
+)
+def test_params_effective_names_the_solver_paths_it_checked(name, paths, unused):
+    case = CASES[name]
+    res = verify_node(
+        case["node"](), case["bounds"], boundary_bounds=case["boundary_bounds"],
+        checks=["params_effective"], **case.get("kwargs", {}), **KW,
+    )["params_effective"]
+    assert res.passed, res.detail
+    assert f"paths checked: {paths}" in res.detail, res.detail
+    if unused:
+        assert unused in res.detail, res.detail

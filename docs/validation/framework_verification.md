@@ -32,8 +32,8 @@ declared range stand in for the tested one.
 | Test runner | pytest |
 | CI system | GitHub Actions |
 | CI runners | `ubuntu-latest` |
-| Python versions | 3.11, 3.12 (floor: >=3.11) |
-| JAX | evidence generated at `0.10.2`, the only version CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
+| Python versions | 3.12 (floor: >=3.12) |
+| JAX | evidence generated at `0.10.2`, `0.11.2`, the 2 versions CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
 | Other base dependencies | `lineax>=0.0.7`, `numpy>=1.24`, `pyyaml>=6.0` — installed from these ranges, not pinned, so the resolved version differs between runs and **is not recorded** |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
 | Test packages | 13 — listed below |

@@ -74,8 +74,12 @@ def test_public_symbols_are_evolving_until_the_api_freeze():
     assert ift_linear_solve._stability_level == StabilityLevel.EXPERIMENTAL
     assert AdaptiveNode.meta.stability == StabilityLevel.EVOLVING
     assert issubclass(AdaptiveNodeBlindnessError, RuntimeError)
+    # The wavelet subclass is the package's one concrete node and is
+    # EXPERIMENTAL, one level below the base class it is built on.
+    from maddening.nodes.adaptive import WaveletAdaptiveNode
+    assert WaveletAdaptiveNode._stability_level == StabilityLevel.EXPERIMENTAL
     assert set(pkg.__all__) == {
-        "AdaptiveNode", "AdaptiveNodeBlindnessError",
+        "AdaptiveNode", "AdaptiveNodeBlindnessError", "WaveletAdaptiveNode",
         "adaptive_diagnostics_enabled", "set_adaptive_diagnostics",
     }
 

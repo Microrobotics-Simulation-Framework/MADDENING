@@ -19,7 +19,8 @@ verification/
 │   └── conftest.py                      # Disable hypothesis deadline (JIT warmup)
 ├── test_gradient_health.py              # Gradient checks
 ├── test_heat_analytical.py              # Analytical benchmark
-└── test_mms_order.py                    # Observed order of convergence (MMS)
+├── test_mms_order.py                    # Observed order of convergence (MMS)
+└── test_wavelet_mms_order.py            # WaveletAdaptiveNode: declared order by MMS, adaptive budget
 ```
 
 ## Properties covered

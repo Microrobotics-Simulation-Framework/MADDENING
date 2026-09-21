@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`WaveletAdaptiveNode`** (`maddening.nodes.adaptive`, `EXPERIMENTAL`): the first
+  concrete `AdaptiveNode` — an interpolating-wavelet solver for `(-Δ + m) u = f`
+  in 1/2/3-D with a CDD active set; declares and measures spatial order 2 by MMS
 - **`fim(scale="nominal", specs=gm.param_specs())`: a column scale from the
   bounds width, not the value** — a parameter at `0.0` is judged on the data;
   columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them

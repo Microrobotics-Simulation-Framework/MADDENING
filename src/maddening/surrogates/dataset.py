@@ -59,6 +59,23 @@ class DatasetGenerator:
         -------
         SurrogateDataset
             Dataset with ``n_steps - 1`` samples.
+
+        Notes
+        -----
+        **Stateful: *gm*'s own state is advanced.**  This calls
+        :meth:`~maddening.core.graph_manager.GraphManager.run_scan_with_history`,
+        which leaves *gm* at the last state of the trajectory, so a
+        second ``from_graph`` on the same graph samples a *continued*
+        trajectory rather than a second one from the same initial
+        condition.  Nothing fails; the dataset is simply drawn from a
+        part of state space the caller did not choose.
+
+        To generate several datasets from one initial condition, build a
+        fresh :class:`~maddening.core.graph_manager.GraphManager` per
+        dataset, call ``gm.reset_state()`` between calls, or snapshot
+        with ``gm.save_state()`` / ``gm.load_state()`` around each one.
+        :meth:`from_sweep` runs through ``run_sweep`` and leaves *gm*
+        untouched.
         """
         node_obj = gm._nodes[target_node].node
         node_dt = node_obj.delta_t

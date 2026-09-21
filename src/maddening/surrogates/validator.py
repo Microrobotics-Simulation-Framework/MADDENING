@@ -132,6 +132,22 @@ class SurrogateValidator:
         -------
         ValidationReport
             Includes per-timestep error arrays.
+
+        Notes
+        -----
+        **Stateful: each graph's own state is advanced.**  Both are run
+        through
+        :meth:`~maddening.core.graph_manager.GraphManager.run_scan_with_history`
+        and left at the end of its rollout, so a second
+        ``compare_graphs`` on the same pair compares the *next*
+        ``n_steps`` instead of repeating the first comparison.  An error
+        curve read that way describes a later part of the trajectory
+        than the caller believes, and error accumulation is exactly what
+        this method is for.
+
+        Rebuild both graphs, or reset them with ``reset_state()``,
+        between rollouts; ``save_state()`` / ``load_state()`` works too
+        when reconstruction is expensive.
         """
         _, hist_phys = gm_physics.run_scan_with_history(n_steps)
         _, hist_surr = gm_surrogate.run_scan_with_history(n_steps)

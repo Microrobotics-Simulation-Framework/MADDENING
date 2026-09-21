@@ -89,7 +89,7 @@ def test_the_committed_soup_tables_match_a_fresh_generation():
 # what was retired and when.  The number stays spoken for, the high-water mark
 # stays honest, and the retirement is a visible line in the diff instead of a
 # gap nobody can account for.
-_HIGHEST_ANOMALY_ID = 16
+_HIGHEST_ANOMALY_ID = 17
 _RETIRED_ANOMALY_IDS: frozenset = frozenset()
 
 _HIGHEST_BENCHMARK_ID = 13

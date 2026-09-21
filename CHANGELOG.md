@@ -511,6 +511,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-017**: `jax_enable_x64` does not reach `GraphManager`'s scan paths --
+  float64 params against a float32 state seed, so `run_scan*`/`run_sweep` raise
+  `TypeError` (open, minor); node-level float64 unaffected, workarounds in the registry
 - **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
   the supported floor, so every `CloudSession` launch, teardown and preemption check
   was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified

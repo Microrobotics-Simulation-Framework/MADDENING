@@ -1365,3 +1365,153 @@ anomalies:
       - "tests/cloud/test_skypilot_client_server_calls.py::TestMonitorPreemption::test_a_permanently_raising_status_check_gives_up_loudly"
       - "tests/cloud/test_skypilot_client_server_calls.py::TestLaunchVm::test_the_cloud_the_config_names_is_the_cloud_that_is_used"
     github_issue: null
+  - anomaly_id: "MADD-ANO-017"
+    title: "jax_enable_x64 does not reach GraphManager's scan paths: a freshly compiled graph refuses to scan because its params are float64 and its state is float32"
+    description: >
+      Under `jax_enable_x64`, every `GraphManager` scan entry point raises
+      `TypeError` on a freshly compiled graph.  Measured 2026-09-21 on CPU,
+      jax/jaxlib 0.11.0, Python 3.12:
+      `JAX_ENABLE_X64=1 pytest tests/core/test_graph_manager.py
+      tests/core/test_sweep.py` gives 21 failed, 69 passed; the same two files
+      with x64 off give 90 passed.
+
+      Mechanism -- a dtype asymmetry between the two halves of the step.
+      `SimulationNode.params_pytree` places a Python-float parameter at JAX's
+      canonical float precision (`jnp.zeros(()).dtype`), which is float64
+      under x64, and `GraphManager._strong_typed` strips the weak typing, so
+      the leaf is *strongly* typed float64.  The state seed does not follow:
+      every node's `initial_state()` writes its fields with an explicit
+      `dtype=jnp.float32`.  Confirmed directly on a ball graph and on a
+      spring graph -- every leaf of `gm.params` float64, every leaf of the
+      seed state float32.  Any node whose `update()` lets a param's dtype
+      reach an output field promotes that field to float64, and `lax.scan`
+      refuses the carry type change:
+
+        TypeError: scan body function carry input and carry output must have
+        equal types, but they differ: the input carry component
+        carry['ball']['position'] has type float32[] but the corresponding
+        output carry component has type float64[]
+
+      This takes out `run_scan`, `run_scan_with_history` and `run_sweep`, and
+      with them everything built on a scan -- parameter sweeps, `maddening.sysid`
+      fits, surrogate dataset generation.
+
+      It is node-dependent, but not in the way the arithmetic suggests.  The
+      discriminator is whether a parameter reaches an output field at all,
+      not how the node computes.  `TableNode.update` returns its state
+      unchanged and reads no parameter, so its carry stays float32 and it
+      scans normally under x64.  `BallNode`, `SpringDamperNode`,
+      `RigidBodyNode` and `RigidBody2DNode` all promote and all raise --
+      including the spring, which an earlier reading recorded as narrowing.
+      It does not; that reading came from a harness that passed explicitly
+      float32 params, which is workaround (b) below rather than a property of
+      the node.
+
+      `step()` does not raise.  It promotes silently and stores the promoted
+      state, so a graph driven step-by-step under x64 runs in float64 from the
+      second step onward on a seed that was rounded to float32, and a
+      `run_scan` issued after a `step()` then succeeds.  The defect is a
+      property of a freshly compiled or freshly reset graph, which is what the
+      verification test below constructs.
+
+      Introduced in 0.4.0 and not present earlier: `gm.params` and
+      `params_pytree` are new in this release (36100a8), and before them
+      `update()` read Python floats out of `self.params`, which are weak-typed
+      and do not promote a float32 state.  A graph scan under x64 therefore
+      ran on 0.3.1 -- in float32, ignoring x64 entirely.  No release has ever
+      had a working float64 graph scan; what 0.4.0 changed is that a silent
+      no-op became a loud refusal.
+
+      Boundary -- what is NOT affected.  Node-level float64 works and is
+      verified.  The MMS order studies behind MADD-VER-010 and MADD-VER-011
+      and the integrator order table enable x64 through the `float64` fixture
+      in `tests/verification/test_mms_order_ode_nodes.py` and call
+      `node.update()` directly, bypassing `GraphManager` entirely.  Every
+      "in float64" figure in the algorithm guides is a node-level
+      measurement, so no release claim depends on this entry.
+
+      Why it stayed invisible: `JAX_ENABLE_X64` appears nowhere in the CI
+      workflows, in `tests/conftest.py` or in `pyproject.toml`.  The suite is
+      float32-only, so no test has ever executed a graph scan under x64.
+
+      Relationship to MADD-ANO-013, which is adjacent and not the same entry.
+      MADD-ANO-013 records nodes that *downcast* a float64 quantity to
+      float32 -- a precision floor, plus a carry rejection when a caller
+      drives such a node from a float64 state.  Its remedy is to stop
+      downcasting.  That remedy does not fix this: here nothing is
+      downcast and the caller does nothing wrong.  `GraphManager` builds its
+      own seed state at float32 from `initial_state()` and its own params at
+      float64 from `params_pytree()`, and the graph refuses to scan against
+      itself on the default path.  The fix is the other direction -- the seed
+      state, or `compile()`'s normalisation of it, has to follow the same
+      canonical float dtype `params_pytree` already follows -- and it reaches
+      every node, including `BallNode` and `SpringDamperNode`, which
+      MADD-ANO-013 does not name.
+
+      Severity.  Recorded `minor` rather than `major`, on three grounds, each
+      checked rather than assumed.  The graph-level failure is loud: a
+      `TypeError` on the first scan, before any number is produced, naming the
+      node and field whose dtype moved.  It is confined to an opt-in mode that
+      is off by default, that nothing in CI enables, and that no shipped
+      figure rests on, since the node-level order studies bypass
+      `GraphManager`.  And no capability was lost, because the pre-0.4.0 path
+      that "worked" under x64 worked by ignoring x64.  What keeps it above
+      `enhancement` is the silent residue described above: `step()` does not
+      raise, so the seed is rounded to single precision with no warning in a
+      mode the user entered specifically to get double.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No result MADDENING ships depends on this.  Nothing in the verification
+      suite runs x64 through a `GraphManager` -- the order studies drive
+      `node.update()` directly -- so the recorded convergence orders,
+      analytical comparisons and benchmark figures are unaffected, and the
+      default float32 path is untouched.  The failure a user is most likely to
+      meet is a `TypeError` before the first result, which is a safe failure:
+      loud, immediate, and impossible to mistake for an answer.
+
+      It is recorded `context_dependent` rather than `not_safety_relevant`
+      because of the quieter half.  `step()` does not raise.  A downstream
+      integrator that enables `jax_enable_x64` for a precision-critical
+      computation -- an ill-conditioned solve, a long accumulation, a gradient
+      through a stiff system -- and drives the graph with `step()` gets double
+      precision from the second step onward on an initial condition that was
+      silently rounded to single, and gets no indication that the precision it
+      asked for did not reach the seed.  Whether a relative perturbation of
+      order 1e-7 in the initial condition matters is a property of the
+      downstream computation and its tolerance budget, not of MADDENING; that
+      is the judgement `context_dependent` exists to record, and the one the
+      integrator has to make.
+
+      It is not `safety_relevant` because the defect cannot arise on the
+      default configuration.  It requires the integrator to have opted into
+      x64, and on any scan-based path the loud half fires first and makes the
+      situation discoverable before a result exists.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_scan"
+      - "maddening.core.graph_manager.GraphManager.run_scan_with_history"
+      - "maddening.core.graph_manager.GraphManager.run_sweep"
+      - "maddening.core.node.SimulationNode.params_pytree"
+      - "maddening.nodes.ball.BallNode.initial_state"
+      - "maddening.nodes.spring.SpringDamperNode.initial_state"
+    affected_versions: ">=0.4.0"
+    workaround: >
+      Both verified on 2026-09-21 on a ball graph under `jax_enable_x64`.
+      (a) If x64 was enabled to get double precision, promote the seed state
+      after `compile()` and before the first scan: for every node,
+      `gm.set_node_state(n, {k: jnp.asarray(v, jnp.float64) for k, v in
+      gm.get_node_state(n).items()})`.  The carry is then float64 on both
+      sides and the graph scans in genuine double precision.
+      (b) If x64 was enabled for something else in the same process and the
+      graph only has to run, narrow the params instead:
+      `gm.run_scan(n, params=jax.tree.map(lambda x: jnp.asarray(x,
+      jnp.float32), gm.params))`.  This scans, in float32; it restores the
+      pre-0.4.0 behaviour and does *not* give double precision, so do not use
+      it when precision was the point.
+      Leaving `jax_enable_x64` off is the third option and the supported one.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      - "tests/core/test_x64_graph_scan_limitation.py"
+    github_issue: null

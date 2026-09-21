@@ -162,15 +162,19 @@ def test_solver_path_uses_the_constructor_stiffness_not_a_calibrated_one(name, r
     constructed = _velocity(node.update(STATE, {}, DT))
     calibrated = _velocity(node.update(STATE, {}, DT, params=CALIBRATED))
 
+    # The actionable assertion first, so a future fix reports what to do
+    # rather than an unexplained numeric mismatch.
+    assert abs(got - calibrated) > abs(got - constructed), (
+        f"{name} moved towards the calibrated stiffness ({got}, against "
+        f"{constructed} constructed and {calibrated} calibrated).  If "
+        f"params now reaches this path, MADD-ANO-018 is resolved: update "
+        f"its resolution_status in docs/validation/known_anomalies.yaml, "
+        f"drop the limitation paragraphs from the three docstrings, and "
+        f"replace this module's expectation."
+    )
     assert got == pytest.approx(constructed, rel=0.05), (
         f"{name} no longer matches update() without params ({got} vs "
         f"{constructed})"
-    )
-    assert abs(got - calibrated) > abs(got - constructed), (
-        f"{name} moved towards the calibrated stiffness.  If params now "
-        f"reaches this path, MADD-ANO-018 is resolved: update its "
-        f"resolution_status in docs/validation/known_anomalies.yaml and "
-        f"replace this module's expectation."
     )
 
 

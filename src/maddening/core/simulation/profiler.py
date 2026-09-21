@@ -727,13 +727,17 @@ def profile_graph(
         ``test_one_iteration_variant_runs_one_pass_from_any_position``
         pins.  Pinning both windows to the same start was measured on
         the compute-bound ``expensive-pair`` fixture (two 1e5-cell heat
-        grids; 10 interleaved repeats, a fresh graph per measurement)
-        and moved ``coupling_overhead_ms`` by -0.11%, against a
-        run-to-run scatter of 8.1% -- two orders of magnitude below the
-        noise, so the computation is left as it is.  Should a cap of one
-        ever regain a data-dependent trip count, the subtraction would
-        begin comparing two different workloads and this window would
-        have to be pinned.
+        grids), interleaving pinned and unpinned measurements with a
+        fresh graph for each, and it moved ``coupling_overhead_ms`` by
+        less than the measurement's own scatter both times: -0.11%
+        against 8.1% run-to-run scatter over 10 repeats on a quiet
+        machine, and -7.6% against 34% scatter over 16 repeats on a
+        loaded one -- 0.03 and 0.62 standard errors of the difference.
+        The scatter tracks the machine's load, the discrepancy does not
+        resolve above it either way, and the computation is therefore
+        left as it is.  Should a cap of one ever regain a data-dependent
+        trip count, the subtraction would begin comparing two different
+        workloads and this window would have to be pinned.
     n_stat_steps : int or None
         Steps in the coupling-iteration statistics pass.  ``None``
         keeps the historical behaviour: ``min(n_steps, 50)`` steps taken
@@ -894,9 +898,11 @@ def profile_graph(
     # ``mean_step_ms`` was measured -- it starts from wherever the timed
     # run and the statistics pass left the state.  A group capped at one
     # iteration has no data-dependent control flow, so the capped step
-    # costs the same from any state and the subtraction stays valid;
-    # measured impact of pinning it, -0.11% against 8.1% run-to-run
-    # scatter.  Full reasoning on ``measure_coupling`` above.
+    # costs the same from any state and the subtraction stays valid.
+    # Measured impact of pinning it: under one standard error of the
+    # difference in two runs (-0.11% against 8.1% run-to-run scatter;
+    # -7.6% against 34% on a loaded box).  Full reasoning on
+    # ``measure_coupling`` above.
     report.sum_node_ms = sum(report.node_times_ms.values())
     if group_keys and measure_coupling:
         with _one_iteration_variant(gm):

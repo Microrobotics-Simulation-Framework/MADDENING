@@ -14,6 +14,14 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.surrogates.architecture import SurrogateArchitecture
 from maddening.surrogates.dataset import SurrogateDataset
+from maddening.surrogates.types import (
+    BatchedStateDict,
+    FieldValues,
+    PyTree,
+    StateDict,
+    TrainMetrics,
+    TrainState,
+)
 
 try:
     import optax
@@ -25,8 +33,6 @@ if TYPE_CHECKING:
 
     from maddening.surrogates.node import SurrogateNode
 
-PyTree = Any
-
 
 def _check_optax():
     if optax is None:
@@ -36,7 +42,7 @@ def _check_optax():
         )
 
 
-def mse_loss(pred: dict, target: dict) -> float:
+def mse_loss(pred: StateDict, target: StateDict) -> jax.Array:
     """Mean squared error across all state fields."""
     total = jnp.float32(0.0)
     count = 0
@@ -57,12 +63,13 @@ class TrainResult:
     state_spec: dict
     boundary_spec: dict
 
-    # shape: initial_values is {field: float | Array} -- TypedDict candidate (phase 3)
     def to_node(
         self,
         name: str,
         timestep: float,
-        initial_values: dict[str, Any],
+        # Not a TypedDict: the fields are whichever ones the surrogated
+        # node declares, so the key set is only known at runtime.
+        initial_values: FieldValues,
         integrator: Optional[Callable] = None,
     ) -> SurrogateNode:
         """Create a SurrogateNode from this training result."""
@@ -243,12 +250,11 @@ class SurrogateTrainer:
         # contains non-array objects like activation functions.
 
         # Build per-sample loss
-        # shape: state, boundary, target are {field: Array} -- TypedDict candidate (phase 3)
         def sample_loss(
             arrays: PyTree,
-            state: dict[str, Any],
-            boundary: dict[str, Any],
-            target: dict[str, Any],
+            state: StateDict,
+            boundary: StateDict,
+            target: StateDict,
             # -> Any: the data loss comes back from a user-supplied, unannotated loss_fn
         ) -> Any:
             pred = arch.forward((arrays, static), state, boundary, dt)
@@ -260,12 +266,11 @@ class SurrogateTrainer:
             return data_loss
 
         # Batch loss: mean over batch
-        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
         def batch_loss(
             arrays: PyTree,
-            states_b: dict[str, Any],
-            boundary_b: dict[str, Any],
-            targets_b: dict[str, Any],
+            states_b: BatchedStateDict,
+            boundary_b: BatchedStateDict,
+            targets_b: BatchedStateDict,
         ) -> jax.Array:
             # vmap over sample dimension
             losses = jax.vmap(
@@ -274,13 +279,12 @@ class SurrogateTrainer:
             return jnp.mean(losses)
 
         @jax.jit
-        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
         def train_step(
             arrays: PyTree,
             opt_state: PyTree,
-            states_b: dict[str, Any],
-            boundary_b: dict[str, Any],
-            targets_b: dict[str, Any],
+            states_b: BatchedStateDict,
+            boundary_b: BatchedStateDict,
+            targets_b: BatchedStateDict,
             lr_mult: jax.Array,
         ) -> tuple[PyTree, PyTree, jax.Array]:
             loss, grads = jax.value_and_grad(batch_loss)(
@@ -293,12 +297,11 @@ class SurrogateTrainer:
             return new_arrays, new_opt_state, loss
 
         @jax.jit
-        # shape: the *_b args are {field: batched Array} -- TypedDict candidate (phase 3)
         def eval_loss(
             arrays: PyTree,
-            states_b: dict[str, Any],
-            boundary_b: dict[str, Any],
-            targets_b: dict[str, Any],
+            states_b: BatchedStateDict,
+            boundary_b: BatchedStateDict,
+            targets_b: BatchedStateDict,
         ) -> jax.Array:
             return batch_loss(arrays, states_b, boundary_b, targets_b)
 
@@ -306,7 +309,9 @@ class SurrogateTrainer:
         val_losses = []
 
         # Callback state (mutable dict shared with callbacks)
-        cb_state = {"weights": (arrays, static), "opt_state": opt_state}
+        cb_state: TrainState = {
+            "weights": (arrays, static), "opt_state": opt_state,
+        }
         for cb in cbs:
             cb.on_train_begin(self, cb_state)
 
@@ -346,7 +351,9 @@ class SurrogateTrainer:
             v_loss = float(eval_loss(arrays, val_states, val_boundary, val_targets))
             val_losses.append(v_loss)
 
-            metrics = {"train_loss": avg_train_loss, "val_loss": v_loss}
+            metrics: TrainMetrics = {
+                "train_loss": avg_train_loss, "val_loss": v_loss,
+            }
 
             if callback is not None:
                 callback(epoch, metrics)
@@ -364,7 +371,9 @@ class SurrogateTrainer:
                 break
 
         # Finalize callbacks
-        final_metrics = {"train_loss": train_losses[-1], "val_loss": val_losses[-1]}
+        final_metrics: TrainMetrics = {
+            "train_loss": train_losses[-1], "val_loss": val_losses[-1],
+        }
         cb_state["weights"] = (arrays, static)
         for cb in cbs:
             cb.on_train_end(final_metrics, cb_state)

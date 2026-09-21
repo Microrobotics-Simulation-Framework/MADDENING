@@ -284,15 +284,18 @@ WORKLOADS: dict[str, tuple] = {
 # workloads.  So:
 #
 #   * The same-version band is not absorbing any known variation.  It
-#     exists because CI runs Python 3.11 and 3.12 and only 3.12 was
-#     measured here; two ops of slack covers an interpreter difference
-#     that would otherwise wedge one matrix leg, and two ops cannot hide
-#     any regression this gate is for.
+#     was sized when CI ran Python 3.11 and 3.12 and only 3.12 had been
+#     measured, so two ops of slack covered an interpreter difference
+#     that would otherwise have wedged one matrix leg.  CI now runs one
+#     interpreter (3.12, the floor), so that leg is gone; the band is
+#     kept because contributors run this locally on whatever they have,
+#     and two ops cannot hide any regression this gate is for.
 #   * The cross-version band is deliberately generous relative to that
-#     evidence.  0.10 -> 0.11 moved nothing, but 0.12 is inside the
-#     supported range and untested, and the cost of being wrong in that
-#     direction is a red CI on an unrelated dependency bump.  A quarter
-#     still catches the 3x regression this gate exists for.
+#     evidence.  0.10 -> 0.11 moved nothing.  It is the band the
+#     jax==0.11.2 CI lane runs under, since the baseline above is
+#     recorded at 0.10.2; a quarter still catches the 3x regression this
+#     gate exists for.  (There is no 0.12 series, so 0.10 and 0.11 are
+#     the whole of the declared jax>=0.10,<0.13.)
 #
 # Two-sided in both cases.  A large *drop* is as much a finding as a
 # rise: it usually means a node stopped running, not that something got

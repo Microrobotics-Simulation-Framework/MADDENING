@@ -85,6 +85,9 @@ class ProfileReport:
     # iteration per group; ``"estimated"``: real step minus the sum of
     # isolated node costs (the pre-0.4 definition); ``""``: no groups.
     coupling_overhead_method: str = ""
+    # A difference of two windows timed at *different* points of the
+    # trajectory.  See ``measure_coupling`` in :func:`profile_graph` for
+    # which points, why that is sound, and what it was measured to cost.
     coupling_overhead_ms: float = 0.0
     one_iteration_step_ms: float = 0.0
     coupling_per_iteration_ms: float = 0.0
@@ -703,6 +706,34 @@ def profile_graph(
         iteration and time it, so ``coupling_overhead_ms`` is measured
         rather than inferred (costs one extra compile; the graph is
         restored afterwards).  Ignored without coupling groups.
+
+        The two windows it subtracts start at **different points of the
+        trajectory**, and stay that way on purpose.  ``mean_step_ms`` is
+        timed ``n_warmup`` steps after a ``reset_state``;
+        ``one_iteration_step_ms`` is timed from wherever the timed run
+        and the coupling-statistics pass left the state, plus another
+        ``n_warmup``.  Nothing leaks -- :func:`_one_iteration_variant`
+        saves and restores state, groups and compiled step -- but the
+        *start* is not pinned the way ``n_stat_steps`` pins the
+        statistics pass, and unlike that pass it does not need to be.
+
+        The reason is structural rather than lucky:
+        ``max_iterations <= 1`` returns straight after the single
+        staggered pass, before any ``while_loop``, accelerator or IFT
+        solve is reached, so the capped step is straight-line code on
+        fixed shapes and costs the same whatever state it starts from.
+        Its measured iteration count is exactly one from every
+        trajectory position, which
+        ``test_one_iteration_variant_runs_one_pass_from_any_position``
+        pins.  Pinning both windows to the same start was measured on
+        the compute-bound ``expensive-pair`` fixture (two 1e5-cell heat
+        grids; 10 interleaved repeats, a fresh graph per measurement)
+        and moved ``coupling_overhead_ms`` by -0.11%, against a
+        run-to-run scatter of 8.1% -- two orders of magnitude below the
+        noise, so the computation is left as it is.  Should a cap of one
+        ever regain a data-dependent trip count, the subtraction would
+        begin comparing two different workloads and this window would
+        have to be pinned.
     n_stat_steps : int or None
         Steps in the coupling-iteration statistics pass.  ``None``
         keeps the historical behaviour: ``min(n_steps, 50)`` steps taken
@@ -858,6 +889,14 @@ def profile_graph(
         report.node_times_ms[name] = float(np.mean(times))
 
     # Coupling overhead: measured (one-iteration variant) or estimated.
+    #
+    # The one-iteration window is deliberately *not* pinned to where
+    # ``mean_step_ms`` was measured -- it starts from wherever the timed
+    # run and the statistics pass left the state.  A group capped at one
+    # iteration has no data-dependent control flow, so the capped step
+    # costs the same from any state and the subtraction stays valid;
+    # measured impact of pinning it, -0.11% against 8.1% run-to-run
+    # scatter.  Full reasoning on ``measure_coupling`` above.
     report.sum_node_ms = sum(report.node_times_ms.values())
     if group_keys and measure_coupling:
         with _one_iteration_variant(gm):

@@ -14,6 +14,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.profiler import (
     ProfileReport,
     TraceSummary,
+    _one_iteration_variant,
     profile_graph,
     profile_report_to_perfetto,
 )
@@ -79,6 +80,52 @@ def test_graph_restored_after_one_iteration_measurement():
     ref.step()
     np.testing.assert_allclose(np.asarray(gm._state["a"]["position"]),
                                np.asarray(ref._state["a"]["position"]), rtol=1e-6)
+
+
+def test_one_iteration_variant_runs_one_pass_from_any_position():
+    """A group capped at one iteration runs one pass wherever it starts.
+
+    ``coupling_overhead_ms`` is ``mean_step_ms`` minus
+    ``one_iteration_step_ms``, and the two are timed at different points
+    of the trajectory: the first ``n_warmup`` steps after a reset, the
+    second from wherever the timed run and the coupling-statistics pass
+    left the state.  The subtraction is meaningful only because
+    ``max_iterations <= 1`` returns straight after the single staggered
+    pass -- no ``while_loop``, no accelerator, no IFT solve -- so the
+    capped step is straight-line code whose cost does not depend on the
+    state it starts from.
+
+    Should a cap of one regain a data-dependent trip count, the two
+    windows would silently start measuring different workloads and the
+    reported overhead would change meaning with ``n_steps``.  Nothing
+    else pins that, so this does.
+    """
+    trip_counts = {}
+    starts = []
+    for advance in (0, 5, 200):
+        gm = _coupled()
+        gm.reset_state()
+        for _ in range(advance):
+            gm.step()
+        jax.block_until_ready(jax.tree.leaves(gm._state))
+        starts.append(float(np.asarray(gm._state["a"]["position"])))
+        with _one_iteration_variant(gm):
+            gm.step()  # compiles the capped variant
+            seen = set()
+            for _ in range(5):
+                gm.step()
+                seen.add(int(gm._state["_meta"]["coupling_a+b_iterations"]))
+        trip_counts[advance] = sorted(seen)
+
+    # The fixture has to be able to express the defect: three genuinely
+    # different starting states, not three copies of one.  (The uncapped
+    # graph takes two or three iterations here, so a cap that stopped
+    # applying would show up as a count above one.)
+    assert len({round(p, 6) for p in starts}) == 3, starts
+    assert all(v == [1] for v in trip_counts.values()), (
+        "a coupling group capped at one iteration must run exactly one pass "
+        f"from every trajectory position, got {trip_counts}"
+    )
 
 
 def test_at_cap_reported_and_recommended():

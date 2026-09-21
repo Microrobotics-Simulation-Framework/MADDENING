@@ -2006,10 +2006,9 @@ class FitResult:
     round-tripped through ``constrain(unconstrain(p))``, which for a
     ``log`` leaf is ``exp(log(p))`` and lands one ulp away.
 
-    ``excited_rank`` and ``undetermined_drift`` report :func:`fit`'s
-    identifiability guard (``hold_undetermined``); both are ``None`` from
-    :func:`fit_lm` and :func:`fit_multiple_shooting`, which do not run it,
-    and from a :func:`fit` that could not answer the question.
+    ``excited_rank`` and ``undetermined_drift`` report the identifiability
+    guard (``hold_undetermined``), which all three fitters run, and are
+    ``None`` from one that could not answer the question.
 
     ``excited_rank``
         How many independent directions the run's gradients spanned, out
@@ -2021,7 +2020,7 @@ class FitResult:
         where an unobserved direction cannot be told from an unobservable
         one.
     ``undetermined_drift``
-        How far the raw Adam iterate had wandered along those undetermined
+        How far the raw iterate had wandered along those undetermined
         directions before the guard removed it, as a Euclidean norm in the
         **unconstrained** coordinates (``log`` for a positive parameter, so
         a drift of 0.04 there is a 4% drift in the parameter itself).
@@ -2030,6 +2029,11 @@ class FitResult:
         error: the value it reports has already been taken out of
         ``params``.  A number far above the fit's own step scale says the
         loss surface has a flat direction worth naming with :func:`fim`.
+
+        For :func:`fit_multiple_shooting` it covers the **parameter** block
+        only.  The window starts are that fit's own decision variables and
+        are returned as the optimiser left them, in the second element of
+        its result rather than in ``params``.
     """
     params: dict
     losses: np.ndarray

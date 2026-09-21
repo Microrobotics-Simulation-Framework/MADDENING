@@ -151,9 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
-- **`profile_graph` documents which two windows `coupling_overhead_ms`
-  subtracts**: they are timed at different points of the trajectory, which is
-  sound because a cap of one iteration has no data-dependent control flow
+- **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
+  `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
+  and printed `0.00 ms` for an overhead the run could not resolve
 - **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
   key or a wrong value type is now a type error, and a scene object whose `"x"`
   names a state field no longer kills `setup()` with a `ConversionError`

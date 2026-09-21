@@ -93,6 +93,13 @@ jobs:
       # JAX rows of the SOUP package.  Changing the matrix moves those
       # rows; removing it makes them say "unknown" rather than quietly
       # falling back to the permitted range.
+      # A lane that fails must not take the other lane's evidence with
+      # it.  Without this, one red leg cancels the other and the log
+      # cannot distinguish "this JAX version broke it" from "it is
+      # broken on both" -- a CANCELLED sibling has already been misread
+      # as a passing one once in this release.  slow-tests.yml has said
+      # `fail-fast: false` all along; this matrix did not.
+      fail-fast: false
       matrix:
         python-version: ["3.12"]
         jax-version: ["0.10.2", "0.11.2"]

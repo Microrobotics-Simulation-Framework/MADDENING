@@ -175,6 +175,7 @@ would have made the two paragraphs contradict each other.
 |-----------|------|---------|-------|-------------|
 | `dt` | float | — | s | Step size, fixed |
 | `method` | str | `"rk4"` | — | `integrate_node` only: `"euler"`, `"heun"`, `"rk4"` |
+| `params` | dict | `None` | — | `integrate_node` only: the node's `gm.params` entry, bound onto `derivatives(..., params=)` for every stage; a non-empty value for an override without the keyword is a `ValueError` |
 
 ## Boundary Inputs
 

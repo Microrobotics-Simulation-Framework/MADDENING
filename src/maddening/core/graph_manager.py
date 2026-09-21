@@ -763,21 +763,55 @@ def _ift_solve_impl(
 #: load-bearing and the failure is raised instead.
 _DENSE_ADJOINT_FALLBACK_MAX_DOF = 50
 
+
+def _dense_peak(n: int) -> str:
+    """Peak working set of the dense adjoint path at ``n`` coupled DOF.
+
+    ``_dense`` materialises the ``n x n`` Jacobian and the identity
+    basis ``jacfwd`` builds it from, so the peak is
+    ``2 * n**2 * itemsize``.  Measured against XLA's compiled-module
+    memory analysis on the exact ``_dense`` body below, which
+    reproduces the figure to within a few tens of kilobytes at every
+    size from 64 to 3.6e5 DOF.  float32; ``jax_enable_x64`` doubles it.
+
+    This exists so the message a user gets when the Krylov adjoint
+    fails names the price of the alternative *at their own N*, rather
+    than calling it "O(N^2)" and leaving them to find out on a grid.
+    """
+    total = 2 * n * n * 4
+    for unit, scale in (("TiB", 2 ** 40), ("GiB", 2 ** 30), ("MiB", 2 ** 20)):
+        if total >= scale:
+            return f"~{total / scale:.1f} {unit}"
+    return f"~{total} bytes"
+
+
 #: Raised (through ``equinox.error_if``, at runtime inside jit) when a
 #: Krylov adjoint solve fails on a group too large to re-solve densely.
 #: It replaces lineax's own message, whose "increase ``restart``"
 #: remedy does not address the mechanism — see ``_ift_linear_solve``.
+#:
+#: The remedies used to be listed with ``linear_solver='dense'`` first
+#: and "O(N^2) memory" as the whole of its cost.  Every group that
+#: reaches this message is already past
+#: ``_DENSE_ADJOINT_FALLBACK_MAX_DOF``, and on a grid-coupled group the
+#: dense path does not run at all — so the first remedy offered was the
+#: one that could not work.  It now leads with the remedy that scales
+#: and prices the dense one at the caller's own N.
 _ADJOINT_SOLVE_FAILED_MSG = (
     "MADDENING: the coupling adjoint solve did not converge "
     "(linear_solver={solver!r}, {n} coupled DOF).  This is usually an "
     "ill-conditioned (I - dF/dx): cond(A) ~ 1/(1 - rho) in the group's "
     "slowest contraction rate, and float32 cannot resolve the solver's "
-    "tolerance once eps*cond(A) exceeds it.  Remedies, in order: pass "
-    "linear_solver='dense' to add_coupling_group() (exact, but O(N^2) "
-    "memory); set MADDENING_IFT_DENSE_SOLVE=1 to force that globally "
-    "for triage; or make the group less stiff (stronger relaxation, a "
-    "smaller timestep, or splitting the cycle).  Raising GMRES's "
-    "restart will NOT help: it is already min(N, 50)."
+    "tolerance once eps*cond(A) exceeds it.  The remedy that scales is "
+    "to make the group less stiff: stronger relaxation, a smaller "
+    "timestep, or splitting the cycle.  You can also re-solve exactly "
+    "by passing linear_solver='dense' to add_coupling_group() (or "
+    "MADDENING_IFT_DENSE_SOLVE=1 to force it globally for triage), but "
+    "price it first: that path materialises the full Jacobian, so at "
+    "{n} coupled DOF it needs {dense_peak} of device memory in float32 "
+    "and grows as N^2.  On a grid-coupled group it is not an escape "
+    "hatch -- it does not run at all.  Raising GMRES's restart will "
+    "NOT help: it is already min(N, 50)."
 )
 
 
@@ -810,8 +844,15 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
 
     * ``"gmres"`` (default) — lineax GMRES.  Safe non-symmetric solver.
     * ``"dense"`` — materialise ``A`` with ``jacfwd`` and LU-solve.
-      O(N^2) memory, O(N^3) compute.  Triage fallback, promoted to a
-      first-class config option.
+      O(N^3) compute, and a peak working set of ``2 * N**2 *
+      itemsize``: the Jacobian plus the identity basis ``jacfwd``
+      builds it from.  In float32 that is 0.48 GiB at N = 8,000, 2 GiB
+      at N = 16,384, 32 GiB at N = 65,536 and, at N ≈ 3.6e5, a single
+      523 GB allocation XLA refuses outright (``Out of memory
+      allocating 523186046552 bytes``).  Triage fallback for a small
+      group, promoted to a first-class config option; **not** a
+      fallback for a grid-coupled one, where the numbers above are
+      ordinary sizes.  See ``_dense_peak``.
     * ``"bicgstab"`` — lineax BiCGStab.  *Disabled at the CouplingGroup
       field level* in lineax 0.0.7: BiCGStab returns NaN when driving a
       ``FunctionLinearOperator`` — confirmed on a well-conditioned
@@ -949,7 +990,9 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
 
         return eqx.error_if(
             sol.value, failed,
-            _ADJOINT_SOLVE_FAILED_MSG.format(solver=effective_solver, n=n),
+            _ADJOINT_SOLVE_FAILED_MSG.format(
+                solver=effective_solver, n=n, dense_peak=_dense_peak(n),
+            ),
         )
 
     solve = _dense if effective_solver == "dense" else _krylov

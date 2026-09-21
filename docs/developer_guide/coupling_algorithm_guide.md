@@ -123,6 +123,11 @@ Three settings that are nearly always right and are not in the table:
 * **Turn on `strict_convergence` for training and calibration runs.**
   The implicit-function-theorem gradient is only valid at a converged
   fixed point.
+* **Leave `linear_solver` at `"gmres"` on anything grid-shaped.** The
+  `"dense"` alternative is exact and is sometimes offered as the thing
+  to try when the adjoint struggles; on a grid it cannot run at all.
+  See [`linear_solver="dense"` is not an escape hatch on a
+  grid](#linear_solverdense-is-not-an-escape-hatch-on-a-grid).
 
 ## Reading `coupling_diagnostics()`
 
@@ -770,6 +775,63 @@ different things, and on a grid the L2 number is mostly a statement
 about the grid, not about the coupling.  Use the
 interface norm on grid couplings, and read `coupling_iter_stats` rather
 than trusting a residual whose units you have not thought about.
+
+## `linear_solver="dense"` is not an escape hatch on a grid
+
+When the GMRES adjoint fails to converge — an ill-conditioned
+`I - dF/dx`, which is what a stiff group produces — the obvious move is
+to swap the matrix-free solve for the exact one and accept the cost.
+Read the cost first.
+
+`"dense"` materialises the full `N x N` coupling Jacobian **and** the
+identity basis `jacfwd` builds it from, so both are live at once and
+the peak working set is `2 * N**2 * itemsize`. In float32:
+
+| coupled DOF `N` | peak working set | single Jacobian |
+|---|---|---|
+| 1,024 | 8.0 MiB | 4.0 MiB |
+| 8,000 | 0.48 GiB | 0.24 GiB |
+| 16,384 | 2.0 GiB | 1.0 GiB |
+| 65,536 | 32.0 GiB | 16.0 GiB |
+| ~3.6e5 | ~975 GiB | **523 GB** |
+
+`jax_enable_x64` doubles every row. The figures are XLA's own
+compiled-module memory analysis of the `_dense` body in
+`maddening.core.graph_manager`, taken on CPython 3.12.3 with
+jax/jaxlib 0.11.0 on the CPU backend; nothing was allocated to produce
+them, and the analysis agrees with `2 * N**2 * 4` to within a few tens
+of kilobytes at every size from 64 DOF to 3.6e5.
+
+The last row is the point. There is no soft edge to this curve: the
+solve does not thrash, or slow down, or lose accuracy. It does not
+start. A grid-coupled group at that size reports
+
+```text
+Out of memory allocating 523186046552 bytes
+```
+
+— a single allocation, the Jacobian, before the first matvec. And
+those are ordinary sizes for a grid coupling: one scalar field over a
+20³ volume is already 8,000 DOF, a volume coupled to a surface
+discretisation runs to 10⁵–10⁶, and the matrix-free path exists
+precisely so that `N` never appears squared.
+
+So the advice, plainly:
+
+* **Small group (N up to a few thousand):** `"dense"` is a real escape
+  hatch. It is exact, it costs megabytes, and
+  `MADDENING_IFT_DENSE_SOLVE=1` is a reasonable triage switch.
+* **Grid-coupled group:** it is not an option at any resolution you
+  would run. The remedy is to make the group less stiff — stronger
+  relaxation, a smaller timestep, or splitting the cycle — which
+  attacks `cond(A) ~ 1 / (1 - rho)` itself. Raising GMRES's `restart`
+  does not help either; it is already `min(N, 50)`.
+
+MADDENING does re-solve densely on its own, but only below
+`_DENSE_ADJOINT_FALLBACK_MAX_DOF` (50), where the Krylov space is
+already the whole space and `N**2` floats of scratch are negligible.
+Above that cap the failure is raised rather than silently paid for, and
+the message it raises now prices the dense path at your own `N`.
 
 ## Invariants
 

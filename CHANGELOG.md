@@ -330,7 +330,7 @@ guidance; the itemized changes follow.
   `boundary_interpolation`, `linear_solver`, `strict_convergence` — at your call line
 - **A `CouplingGroup` tolerance its norm never reads now warns** instead of
   turning silently: `tolerance` under `convergence_norm="mixed"`/`"interface"`,
-  and `atol`/`rtol` under `"l2"`.  Set the knob the message names instead
+  and `rtol` under `"l2"`.  Set the knob the message names instead
 - **`fim` reports an unidentifiable parameter as `+inf`, not a tight bound**:
   `crb` was `diag(pinv(F))`, which is small in the null space; the new
   `FIMReport.rank` counts the directions the data resolves (`rank_rtol=`)

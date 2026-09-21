@@ -1432,7 +1432,7 @@ anomalies:
       `update()` -- the natural way to check a fit -- and then runs
       production through `integrate_node` or an implicit solve sees the
       validation pass and the run use different physics, with the
-      library reporting no disagreement at any point.  A consumer whose
+      library reporting no disagreement at any point.  A caller whose
       analysis depends on a fitted parameter having taken effect cannot
       establish that from anything the library returns.
     affected_components:

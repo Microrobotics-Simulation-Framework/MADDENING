@@ -94,6 +94,12 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.testing.mms",
     "maddening.testing.strategies",
     "maddening.testing.verification",
+    "maddening.nodes.adaptive.wavelet",
+    "maddening.nodes.adaptive.wavelets.cdd",
+    "maddening.nodes.adaptive.wavelets.dirichlet",
+    "maddening.nodes.adaptive.wavelets.operator",
+    "maddening.nodes.adaptive.wavelets.precond",
+    "maddening.nodes.adaptive.wavelets.transform",
 )
 
 

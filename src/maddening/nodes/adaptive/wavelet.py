@@ -441,7 +441,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         Publishing them is what lets :meth:`static_data_deps` make
         ``compile()`` refuse a graph that trains either parameter.
         """
-        return {"scaling": self._D, "sensor_row": self._sensor_row}
+        from maddening.core.static_data import StaticArray
+        return {
+            "scaling": StaticArray(value=self._D, replication="replicate"),
+            "sensor_row": StaticArray(value=self._sensor_row, replication="replicate"),
+        }
 
     def static_data_deps(self) -> dict[str, tuple[str, ...]]:
         return {"scaling": ("mass",), "sensor_row": ("sensor",)}
@@ -491,8 +495,18 @@ class WaveletAdaptiveNode(AdaptiveNode):
         return self._op.Wn @ state["c"]
 
     def _rhs(self, params: dict) -> jax.Array:
-        """Wavelet coefficients of the source, ``h^d Wn^T f``."""
-        return (self._h ** self.dim) * (self._op.Wn.T @ self.source_field(params))
+        """Wavelet coefficients of the source, ``h^d Wn^T f``.
+
+        The source is cast to the node's dtype first.  Under
+        ``jax_enable_x64`` the graph injects float64 leaves whatever the
+        node was built with, so a float32 node's ``grid - theta`` would
+        otherwise promote and a float64 value would be scattered into the
+        float32 coefficient buffer (a ``FutureWarning`` today, an error in
+        a later JAX).  The cast is differentiable; the tangent comes back
+        in the leaf's own dtype.
+        """
+        f = jnp.asarray(self.source_field(params), dtype=self.dtype)
+        return (self._h ** self.dim) * (self._op.Wn.T @ f)
 
     def _scaled_rhs(self, params: dict) -> jax.Array:
         return self._rhs(params) / self._D

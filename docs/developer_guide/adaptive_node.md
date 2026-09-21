@@ -425,9 +425,13 @@ freeze is about to settle anyway, and neither is a correctness bug.
    defaults would keep existing overrides binding, but it changes three hook
    signatures, so it belongs to the freeze.
 
-## Out of scope in 0.4
+## The first concrete subclass
 
-The wavelet subclass (Deslauriers–Dubuc filters, Dahmen–Kunoth scaling,
-Cohen–Dahmen–DeVore bulk-chasing, the sparse-tree representation) and the
-multigrid preconditioner are post-1.0 research items; nothing in the base
-class presumes them.
+`WaveletAdaptiveNode` (Deslauriers–Dubuc interpolating basis, hybrid-Jacobi
+scaling, Cohen–Dahmen–DeVore bulk chasing, a gathered dense frozen solve)
+ships in 0.4.0 as `EXPERIMENTAL`; see the
+[wavelet developer guide](wavelet_adaptive_node.md), which answers each of
+the seven contract items above with the test that pins it and lists what
+the port found awkward in this API. Still out of scope: a sparse-tree
+representation, the multigrid preconditioner, and a time-dependent
+(collocation) wavelet node, which needs open question 2 settled.

@@ -214,6 +214,7 @@ assert_node_order_verified(
 | `HeatNode` (`stencil_order=4`) | space | 4 | 3.957 | — |
 | `LBMNode` (D2Q9, periodic, Guo forcing [@Guo2002]) | space | 2 | 1.998 | MADD-VER-007 |
 | `RigidBodyNode` (symplectic Euler [@Hairer2006]) | time | 1 | 0.999 | MADD-VER-008 |
+| `WaveletAdaptiveNode` (full budget, periodic 1-D; Dirichlet and 2-D ladders in the same module) | space | 2 | 2.000 | MADD-VER-014 |
 
 The two HeatNode spatial rows were strict xfails when this harness landed,
 measuring 1.001 (MADD-ANO-007) and 0.954 (MADD-ANO-008).  Both node defects

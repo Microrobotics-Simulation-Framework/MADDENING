@@ -192,6 +192,7 @@ developer_guide/typing
 developer_guide/coupling_algorithm_guide
 developer_guide/deprecation_policy
 developer_guide/api_freeze_proposal
+developer_guide/wavelet_adaptive_node
 ```
 
 ```{toctree}

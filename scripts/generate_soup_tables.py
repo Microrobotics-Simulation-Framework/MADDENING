@@ -96,6 +96,7 @@ BENCHMARK_MODULES: tuple[str, ...] = (
     "tests.verification.test_gci_order",
     "tests.cloud.multigpu.test_lbm_poiseuille",
     "tests.nodes.adaptive.test_verification",
+    "tests.verification.test_wavelet_mms_order",
 )
 
 #: Prefix that marks a benchmark as MADDENING's own (CONTRIBUTING.md).

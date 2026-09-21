@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`WaveletAdaptiveNode`** (`maddening.nodes.adaptive`, `EXPERIMENTAL`): the first
+  concrete `AdaptiveNode` — an interpolating-wavelet solver for `(-Δ + m) u = f`
+  in 1/2/3-D with a CDD active set; declares and measures spatial order 2 by MMS
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
   loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers

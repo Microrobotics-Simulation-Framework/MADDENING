@@ -260,6 +260,20 @@ def test_from_sweep_leaves_the_graphs_own_state_untouched():
     )
 
 
+def test_from_sweep_says_it_is_not_stateful():
+    """Same marker ``run_sweep`` uses, for the same reason.
+
+    An unmarked non-mutator standing next to a documented mutator reads
+    as an oversight; saying so explicitly is what stops a reader
+    generalising ``from_graph``'s Notes to both.
+    """
+    doc = DatasetGenerator.from_sweep.__doc__ or ""
+    assert "Not stateful" in doc, (
+        "DatasetGenerator.from_sweep leaves the graph untouched (pinned "
+        "above) but its docstring does not say so"
+    )
+
+
 # ------------------------------------------------------------------
 # SurrogateValidator.compare_graphs
 # ------------------------------------------------------------------

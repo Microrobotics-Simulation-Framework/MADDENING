@@ -137,6 +137,13 @@ class DatasetGenerator:
         -------
         SurrogateDataset
             Dataset with ``batch * (n_steps - 1)`` samples.
+
+        Notes
+        -----
+        **Not stateful, unlike :meth:`from_graph`.**  The batch runs from
+        *initial_states_batch*, which the caller supplies, and
+        ``run_sweep`` writes nothing back, so *gm* is left exactly as it
+        was and an identical second call returns an identical dataset.
         """
         node_obj = gm._nodes[target_node].node
         node_dt = node_obj.delta_t

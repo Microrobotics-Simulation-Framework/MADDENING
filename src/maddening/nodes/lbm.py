@@ -1026,8 +1026,11 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state["wall_mask"]
         return result
 
-    def derivatives(self, state: dict, boundary_inputs: dict) -> dict:
-        """Not applicable for LBM (discrete update, not an ODE)."""
+    def derivatives(self, state: dict, boundary_inputs: dict, *, params=None) -> dict:
+        """Not applicable for LBM (discrete update, not an ODE).
+
+        Declared with the ``params`` keyword so the signature matches the
+        contract even though it only raises."""
         raise NotImplementedError(
             "LBMNode uses a discrete lattice Boltzmann update, "
             "not a continuous ODE. derivatives() is not applicable."

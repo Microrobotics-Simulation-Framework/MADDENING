@@ -286,7 +286,9 @@ class ShardedPointwiseNode(SimulationNode):
 
     # -- graph parameter contract (proxied to the inner node) -----------
 
-    def accepts_params(self) -> bool:
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
         return self._inner_accepts_params
 
     def params_pytree(self) -> dict:
@@ -553,7 +555,9 @@ class ShardedStencilNode(SimulationNode):
 
     # -- graph parameter contract (proxied to the inner node) -----------
 
-    def accepts_params(self) -> bool:
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
         return self._inner_accepts_params
 
     def params_pytree(self) -> dict:

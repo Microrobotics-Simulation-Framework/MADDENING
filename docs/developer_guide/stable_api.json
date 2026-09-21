@@ -154,7 +154,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -230,6 +237,11 @@
               "annotation": "dict",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -271,6 +283,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -423,7 +440,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -499,6 +523,11 @@
               "annotation": "dict",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -540,6 +569,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -696,7 +730,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -772,6 +813,11 @@
               "annotation": "dict",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -824,6 +870,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -1867,7 +1918,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -1944,6 +2002,11 @@
               "annotation": "dict",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -1985,6 +2048,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -2189,7 +2257,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -2263,6 +2338,11 @@
             {
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         },
@@ -2303,6 +2383,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -2466,7 +2551,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -2531,6 +2623,11 @@
             {
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         },
@@ -2572,6 +2669,11 @@
             {
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         },
@@ -2755,7 +2857,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -2824,6 +2933,11 @@
             {
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         },
@@ -2860,6 +2974,11 @@
             {
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         },
@@ -3034,7 +3153,14 @@
       "members": {
         "accepts_params": {
           "kind": "method",
-          "parameters": [],
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'update'",
+              "kind": "KEYWORD_ONLY",
+              "name": "method"
+            }
+          ],
           "returns": "bool"
         },
         "boundary_flux_spec": {
@@ -3111,6 +3237,11 @@
               "annotation": "dict",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "boundary_inputs"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"
@@ -3152,6 +3283,11 @@
               "annotation": "float",
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "dt"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ],
           "returns": "dict[str, Any]"

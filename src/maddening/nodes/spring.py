@@ -173,12 +173,18 @@ class SpringDamperNode(SimulationNode):
 
         return {"position": position, "velocity": velocity}
 
-    def derivatives(self, state, boundary_inputs):
-        """dx/dt = v, dv/dt = F/m."""
-        k = self.params["stiffness"]
-        c = self.params["damping"]
-        m = self.params["mass"]
-        rest = self.params["rest_length"]
+    def derivatives(self, state, boundary_inputs, *, params=None):
+        """dx/dt = v, dv/dt = F/m.
+
+        Same constants as ``update`` (``{**self.params, **params}``): a
+        calibrated stiffness drives ``integrate_node`` and the implicit
+        solve as it drives the explicit step.
+        """
+        p = self.params if params is None else {**self.params, **params}
+        k = p["stiffness"]
+        c = p["damping"]
+        m = p["mass"]
+        rest = p["rest_length"]
         anchor = boundary_inputs.get(
             "anchor_position", jnp.array(0.0, dtype=jnp.float32)
         )
@@ -188,9 +194,15 @@ class SpringDamperNode(SimulationNode):
             "velocity": force / m,
         }
 
-    def implicit_residual(self, state_new, state_old, boundary_inputs, dt):
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt, *, params=None):
         """Backward Euler residual: x_new - x_old - dt * f(x_new)."""
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Forward ``params`` only when given, so a subclass whose
+        # ``derivatives`` override predates the keyword still works for
+        # every caller that passes none.
+        derivs = (
+            self.derivatives(state_new, boundary_inputs) if params is None
+            else self.derivatives(state_new, boundary_inputs, params=params)
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

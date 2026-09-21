@@ -42,6 +42,7 @@ import numpy as np
 import numpy.typing as npt
 
 from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.node import _method_accepts_params
 from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -309,6 +310,66 @@ def _node_accepts_params(node) -> bool:
     return bool(probe()) if callable(probe) else False
 
 
+def _implements(node, method: str) -> bool:
+    """Does ``type(node)`` override ``method`` at all?"""
+    from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
+    return getattr(type(node), method, None) is not getattr(_Base, method)
+
+
+def _perturbed(value):
+    """A visibly different constructor value of the same container type
+    (x1.5, or 0.5 where the value is exactly zero)."""
+    arr = np.asarray(value, dtype=np.float64)
+    new = np.where(arr == 0, 0.5, arr * 1.5)
+    if isinstance(value, (list, tuple)):
+        return type(value)(new.tolist())
+    if isinstance(value, np.generic):
+        return type(value)(new)
+    if isinstance(value, float):
+        return float(new)
+    return jnp.asarray(new, dtype=getattr(value, "dtype", None))
+
+
+def _same(a, b) -> bool:
+    x, y = _to_np(a), _to_np(b)
+    try:
+        return bool(np.array_equal(x, y, equal_nan=True))
+    except TypeError:  # a dtype isnan cannot take (bool, object)
+        return bool(np.array_equal(x, y))
+
+
+def _reads_constructor_value(node, call, key, baseline):
+    """Does ``call()`` -- one no-params evaluation of a path -- change
+    when ``node.params[key]`` changes?
+
+    This is what separates a constant a path *does not consume* (the
+    collision-free ``derivatives`` of a bouncing ball has no use for
+    ``elasticity``) from one it consumes *from the wrong place* (an
+    override that reads ``self.params[key]`` and ignores the injected
+    value).  Both have a zero gradient with respect to the injected leaf;
+    only the second moves when the constructor value moves.  The swap is
+    undone in ``finally``.  ``None`` when the probe cannot be made:
+    ``node.params`` is not a plain dict, or the leaf is not a constructor
+    entry.
+    """
+    params = getattr(node, "params", None)
+    if not isinstance(params, dict) or key not in params:
+        return None
+    old = params[key]
+    try:
+        params[key] = _perturbed(old)
+    except Exception:  # noqa: BLE001 - a value this cannot perturb
+        params[key] = old
+        return None
+    try:
+        probe = call()
+    except Exception:  # noqa: BLE001 - it certainly read it: a different value broke it
+        return True
+    finally:
+        params[key] = old
+    return any(not _same(baseline[f], probe[f]) for f in baseline)
+
+
 def _skip_no_params(name: str) -> VerificationResult:
     return VerificationResult(
         name, "SKIP",
@@ -396,7 +457,7 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
 
 
 def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
-    """Every *trainable* parameter influences the output.
+    """Every *trainable* parameter influences the output -- on every path.
 
     A leaf of :meth:`params_pytree` that ``update`` reads from
     ``self.params`` instead of the injected ``params`` is a silent trap:
@@ -408,6 +469,31 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
     inputs (a restitution coefficient without a collision) passes as
     long as one sample exercised it.  ``SKIP`` for nodes without
     ``params`` and for leaves declared ``trainable=False``.
+
+    The same trap has a second door.  A node that implements
+    ``derivatives`` or ``implicit_residual`` is integrated through
+    :func:`~maddening.core.simulation.integrators.integrate_node` and
+    :func:`~maddening.core.simulation.implicit.implicit_euler_step`,
+    which forward ``params`` to those methods; an override that *takes*
+    the keyword and reads ``self.params`` anyway integrates the
+    constructor's constant while ``update`` uses the calibrated one
+    (the ``MADD-ANO-018`` shape, one method further in).  So for each
+    implemented path this check also differentiates the path's output
+    with respect to the injected leaves, and separates a leaf the path
+    does not consume at all (zero gradient, and the output does not move
+    when the constructor value is varied either -- the collision-free
+    right-hand side of a bouncing ball has no use for ``elasticity``)
+    from one it consumes from the wrong place (zero gradient, but the
+    output moves with the constructor value).  The first is reported in
+    ``detail``; the second is a ``FAIL`` naming the method and the
+    leaves.  An override declared without the keyword is a ``FAIL`` too
+    -- the integrators refuse a calibrated ``params`` for it -- and an
+    override that raises ``NotImplementedError`` (a discrete node) is
+    recorded as not applicable.  A path is probed by varying
+    ``node.params[leaf]`` in place and restoring it; a leaf that is not a
+    constructor entry cannot be probed and fails closed if it is alive
+    through ``update`` and dead through the path.  ``detail`` names the
+    paths checked either way.
     """
     node = inputs.node
     if not _node_accepts_params(node):
@@ -419,33 +505,127 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
         return VerificationResult(
             "params_effective", "SKIP", detail="no trainable parameters",
         )
-    seen_nonzero: set[str] = set()
+
+    def via_update(state, bi, dt, p):
+        return _outputs(node, state, bi, dt) if p is None else _outputs(node, state, bi, dt, params=p)
+
+    def via_derivatives(state, bi, dt, p):
+        return node.derivatives(state, bi) if p is None else node.derivatives(state, bi, params=p)
+
+    def via_residual(state, bi, dt, p):
+        # x_new = x_old = state: R = -dt * f(state; params), whose
+        # sensitivity to a constant is dt times f's.
+        return (node.implicit_residual(state, state, bi, dt) if p is None
+                else node.implicit_residual(state, state, bi, dt, params=p))
+
+    paths = {"update": via_update}
+    if _implements(node, "derivatives"):
+        paths["derivatives"] = via_derivatives
+    if _implements(node, "implicit_residual"):
+        paths["implicit_residual"] = via_residual
+    solver_paths = [name for name in paths if name != "update"]
+    accepts = {name: _method_accepts_params(node, name) for name in solver_paths}
+
+    seen_nonzero: dict[str, set[str]] = {name: set() for name in paths}
+    consumed: dict[str, set[str]] = {name: set() for name in solver_paths}
+    unprobeable: dict[str, set[str]] = {name: set() for name in solver_paths}
+    not_applicable: set[str] = set()
 
     def body(state, bi, dt):
-        def loss(p):
-            out = _outputs(node, state, bi, dt, params=p)
-            return sum(jnp.sum(v) for v in out.values()
-                       if jnp.issubdtype(v.dtype, jnp.floating))
+        for name, fn in paths.items():
+            if name in not_applicable:
+                continue
+            baseline = None
+            if name != "update":
+                try:
+                    baseline = fn(state, bi, dt, None)
+                except NotImplementedError:
+                    not_applicable.add(name)
+                    continue
+                if not accepts[name]:
+                    raise AssertionError(
+                        f"update() takes params but {name}() does not: "
+                        "integrate_node / implicit_euler_step refuse a calibrated "
+                        "params for this node rather than integrate the "
+                        "constructor's constants while update() uses the "
+                        f"calibrated ones.  Declare {name}(..., *, params=None) "
+                        "and read constants from {**self.params, **params}."
+                    )
 
-        g = jax.grad(loss)(base)
-        for k in trainable:
-            if k not in seen_nonzero and bool(jnp.any(g[k] != 0)):
-                seen_nonzero.add(k)
+            def loss(p, fn=fn):
+                out = fn(state, bi, dt, p)
+                return sum(jnp.sum(v) for v in out.values()
+                           if jnp.issubdtype(v.dtype, jnp.floating))
+
+            g = jax.grad(loss)(base)
+            for k in trainable:
+                if k not in seen_nonzero[name] and bool(jnp.any(g[k] != 0)):
+                    seen_nonzero[name].add(k)
+            if name == "update":
+                continue
+            for k in trainable:
+                if k in seen_nonzero[name] or k in consumed[name] or k in unprobeable[name]:
+                    continue
+                reads = _reads_constructor_value(
+                    node, lambda fn=fn: fn(state, bi, dt, None), k, baseline,
+                )
+                if reads is None:
+                    unprobeable[name].add(k)
+                elif reads:
+                    consumed[name].add(k)
 
     r = _run("params_effective", inputs, body, **kw)
     if r.status != "PASS":
         return r
-    dead = sorted(set(trainable) - seen_nonzero)
+
+    problems: list[str] = []
+    dead = sorted(set(trainable) - seen_nonzero["update"])
     if dead:
+        problems.append(
+            f"zero gradient on every sample wrt trainable param(s) {dead}: "
+            "update() probably reads them from self.params instead of "
+            "the injected params (or declare them ParamSpec(trainable=False))"
+        )
+    checked = ["update"] + [n for n in solver_paths if n not in not_applicable]
+    for name in checked[1:]:
+        ignored = sorted(consumed[name] - seen_nonzero[name])
+        if ignored:
+            problems.append(
+                f"{name}() reads {ignored} from self.params, not from the "
+                "injected params: the constructor value moves its output and "
+                "the injected value never does, so integrate_node(..., "
+                "params=...) / implicit_euler_step(..., params=...) would "
+                "integrate the constructor's constant while update() used the "
+                "calibrated one.  Read them from {**self.params, **params}."
+            )
+        blind = sorted(
+            k for k in unprobeable[name]
+            if k in seen_nonzero["update"] and k not in seen_nonzero[name]
+        )
+        if blind:
+            problems.append(
+                f"{name}(): zero gradient on every sample wrt {blind} while "
+                "update() has one, and the constructor value could not be "
+                "varied to tell an unused constant from an ignored one "
+                "(not a plain node.params entry); failing closed"
+            )
+    if problems:
         return VerificationResult(
             "params_effective", "FAIL", n_examples=r.n_examples,
-            detail=(
-                f"zero gradient on every sample wrt trainable param(s) {dead}: "
-                "update() probably reads them from self.params instead of "
-                "the injected params (or declare them ParamSpec(trainable=False))"
-            ),
+            detail="; ".join(problems),
         )
-    return r
+
+    notes = [f"paths checked: {', '.join(checked)}"]
+    for name in solver_paths:
+        if name in not_applicable:
+            notes.append(f"{name}(): not applicable (raises NotImplementedError)")
+            continue
+        unused = sorted(set(trainable) - seen_nonzero[name] - consumed[name])
+        if unused:
+            notes.append(f"not consumed by {name}(): {unused}")
+    return VerificationResult(
+        "params_effective", "PASS", n_examples=r.n_examples, detail="; ".join(notes),
+    )
 
 
 def node_boundedness(

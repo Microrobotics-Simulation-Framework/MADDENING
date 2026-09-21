@@ -144,8 +144,15 @@ class BallNode(SimulationNode):
 
         return {"position": position, "velocity": velocity}
 
-    def derivatives(self, state, boundary_inputs):
+    def derivatives(self, state, boundary_inputs, *, params=None):
         """dx/dt = v, dv/dt = g (no collision).
+
+        ``g`` comes from the injected ``params`` when the caller supplies
+        them (``integrate_node(..., params=...)``), by the same
+        ``{**self.params, **params}`` rule as ``update``.  ``elasticity``
+        is not read here at all: this is the collision-free right-hand
+        side, so that parameter has no derivative through this path by
+        construction, not by omission.
 
         ``g`` follows the dtype of the velocity it will be added to,
         rather than being pinned to float32.  Pinning it made this node
@@ -163,7 +170,8 @@ class BallNode(SimulationNode):
         before.  It only stops the node from *demoting* a float64 carry
         halfway through a step.
         """
-        gravity = self.params["gravity"]
+        p = self.params if params is None else {**self.params, **params}
+        gravity = p["gravity"]
         velocity = jnp.asarray(state["velocity"])
         return {
             "position": velocity,

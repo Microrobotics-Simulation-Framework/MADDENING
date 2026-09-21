@@ -274,6 +274,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
+  `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
+  resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop
 - **Docs said `linear_solver="dense"` was the fallback when the GMRES adjoint
   struggles**: it needs `2*N^2*itemsize` and on a grid-coupled group is refused
   outright (523 GB at ~3.6e5 DOF). The option is unchanged; the advice is not
@@ -526,6 +529,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
   `update()` and cannot reach `derivatives()`, `implicit_residual()` or
   `integrate_node()` -- they take no `params`, so they run constructor values

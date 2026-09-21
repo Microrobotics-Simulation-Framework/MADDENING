@@ -1596,31 +1596,80 @@ anomalies:
       - "maddening.core.node.SimulationNode.implicit_residual"
       - "maddening.core.simulation.integrators.integrate_node"
       - "maddening.core.simulation.implicit.implicit_euler_step"
-    affected_versions: ">=0.4.0"
+    affected_versions: ">=0.4.0.dev0, <0.4.0"
     workaround: >
-      Drive the node through `update(..., params=...)`, which honours the
-      injected values, or -- where a `derivatives()`-based integrator is
-      wanted -- reconstruct the node with the calibrated values as
-      constructor arguments before integrating, so `self.params` already
-      holds them.  Both are exact rather than approximations: the
-      limitation is in how the value is delivered, not in the
-      arithmetic.  There is no way to pass `params` to these paths, so
-      "remember to pass it" is not among the options.
-    resolution_status: "open"
+      None needed from 0.4.0: pass the node's `gm.params` entry as
+      `integrate_node(node, state, boundary_inputs, dt, params=...)` or
+      `implicit_euler_step(node.implicit_residual, ..., params=...)`, or
+      bind it yourself with `functools.partial(node.derivatives,
+      params=...)` for the bare steppers.  On a 0.4.0.dev0 build before
+      the fix: drive the node through `update(..., params=...)`, which
+      honoured the injected values, or reconstruct the node with the
+      calibrated values as constructor arguments before integrating it,
+      so `self.params` already holds them.  Both were exact rather than
+      approximations: the limitation was in how the value was delivered,
+      not in the arithmetic.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     residual_risk: >
-      Nothing about the behaviour changes in 0.4.0.  What 0.4.0 adds is
-      discoverability: `derivatives()`, `implicit_residual()` and
-      `integrate_node()` now state the limitation and cite this entry,
-      and the divergence is pinned by measurement so a future change to
-      it cannot pass unnoticed.  Registered `open` rather than
-      `partially_resolved` deliberately -- there was no incorrect claim
-      to withdraw, only an absent one, and documenting a defect in the
-      same release that registers it is not a partial fix of it.
-      Threading `*, params=None` through both methods, with the same
-      `{**self.params, **params}` rule the other two use, is 0.5.0 work
-      and deliberately out of scope here; a loud refusal when `gm.params`
-      holds a non-empty entry for a node whose `derivatives()` is being
-      called is the fallback if the signature change cannot be made.
+      Resolved by threading `*, params=None` through
+      `SimulationNode.derivatives` and `SimulationNode.implicit_residual`
+      with the same `{**self.params, **params}` rule `update` uses;
+      through every in-tree override (six: `BallNode`,
+      `SpringDamperNode`, `HeatNode`, `RigidBodyNode`, `HeartPumpNode`,
+      and `LBMNode`'s not-applicable stub); and through
+      `integrate_node(..., params=)` and `implicit_euler_step(...,
+      params=)`, which bind it onto the method with `functools.partial`
+      before handing it to the stepper or the Newton loop.  Measured
+      after the fix on the same spring and state:
+      `integrate_node(method="euler", params=fitted)` gives -4.0, equal
+      to `update(params=fitted)`; the implicit solve with `params=fitted`
+      gives -3.8095, equal to a node constructed with the calibrated
+      stiffness; `HeatNode` agrees the same way (8.984 on both paths);
+      and with no `params` every path still gives the constructor's
+      answer, unchanged.  The gradient of both solves with respect to
+      the injected stiffness is finite and non-zero.
+      What replaced the silence is a refusal.  A non-empty `params` for a
+      node whose override has no `params` keyword is a `ValueError`
+      naming the class and the method; `None` and `{}` call the old
+      two-argument shape, so an override that predates the keyword keeps
+      working for every caller that passes nothing.
+      `SimulationNode.accepts_params(method=...)` is the probe the
+      integrators use.  `verify_node`'s `params_effective` now also
+      differentiates `derivatives()` and `implicit_residual()` with
+      respect to the injected leaves, and separates a constant a path
+      does not consume (a bouncing ball's `elasticity` has no place in
+      the collision-free right-hand side) from one it consumes from
+      `self.params` while ignoring the injected value, by varying the
+      constructor value in place and restoring it; the second is a FAIL
+      naming the method, and so is an override without the keyword.
+      What remains, and why it is a boundary of the fix rather than a
+      remaining instance of the defect.  (1) The bare steppers
+      `euler_step`, `heun_step` and `rk4_step` take a callable and know
+      nothing of params, by design, as the original entry already said;
+      a caller composing a derivative function closes over the constants
+      it wants.  (2) A subclass that overrides `derivatives` without the
+      keyword but inherits an in-tree `implicit_residual` gets Python's
+      own `TypeError` from the forwarded keyword when params are passed
+      -- loud, and naming the method, but not this fix's message.  (3)
+      The `params_effective` probe cannot see a constant a path consumes
+      through an attribute derived from it at construction time, because
+      varying `self.params` does not move such an attribute; a leaf that
+      is not a constructor entry cannot be probed and fails closed.  (4)
+      `HybridNode` and the sharded wrappers do not implement
+      `derivatives` and raise `NotImplementedError` from the integrators,
+      as before.  No tagged release carried the defect: it was introduced
+      and resolved between 0.3.1 and 0.4.0.
     verification:
-      - "tests/core/test_params_reaching_solver_paths.py"
+      - "tests/core/test_params_reaching_solver_paths.py::test_explicit_paths_reach_the_calibrated_stiffness_exactly"
+      - "tests/core/test_params_reaching_solver_paths.py::test_integrate_node_moves_by_the_whole_calibration_for_every_method"
+      - "tests/core/test_params_reaching_solver_paths.py::test_the_implicit_solve_reaches_the_calibrated_stiffness"
+      - "tests/core/test_params_reaching_solver_paths.py::test_the_two_paths_of_one_node_agree_on_the_same_params"
+      - "tests/core/test_params_reaching_solver_paths.py::test_no_params_still_integrates_the_constructor_constants"
+      - "tests/core/test_params_reaching_solver_paths.py::test_the_gradient_with_respect_to_the_injected_stiffness_reaches_both_solvers"
+      - "tests/core/test_params_reaching_solver_paths.py::test_integrate_node_refuses_params_for_a_legacy_derivatives_override"
+      - "tests/core/test_params_reaching_solver_paths.py::test_implicit_euler_step_refuses_params_for_a_legacy_residual_override"
+      - "tests/core/test_params_reaching_solver_paths.py::test_every_in_tree_override_takes_the_params_keyword"
+      - "tests/verification/test_verify_node_harness.py::test_derivatives_that_ignore_the_injected_params_are_caught"
+      - "tests/verification/test_verify_node_harness.py::test_a_legacy_derivatives_signature_is_caught"
     github_issue: null

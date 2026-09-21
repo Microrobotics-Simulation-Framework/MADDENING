@@ -102,6 +102,26 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12"]
+        # 0.10.2 IS NOT REDUNDANT, AND IS NOT KEPT FOR COMPATIBILITY
+        # ALONE.  It is the only lane that exercises the `sqrt(m)` term
+        # in `rank_rtol`'s default cutoff
+        # (`maddening.sysid._resolve_rank_rtol`).  That term exists
+        # because the float32 error of accumulating `F = J.T @ J` over
+        # `m` residual rows grows with `m`; demonstrating it needs a
+        # backend whose reduction is loose enough to push a null
+        # direction above the older `n * eps` cutoff.  Measured, 64
+        # seeds at n=2, m=4000, CPU:
+        #
+        #   jaxlib 0.10.2 / 0.11.0   floor 10.1 eps   9/64 seeds over
+        #   jaxlib 0.11.2            floor  1.4 eps   0/64 seeds over
+        #
+        # and under 0.11.2 the floor stays flat at ~1 eps out to
+        # m=256000, so no fixture size brings it back -- that backend's
+        # reduction no longer follows the sqrt(m) error model.  So
+        # `test_the_sqrt_m_term_earns_its_place_where_the_backend_rounds_loosely`
+        # asserts on this lane and reports "not applicable" on the
+        # other.  **Dropping the 0.10.2 lane silently deletes the only
+        # coverage that term has.**  Replace the test first.
         jax-version: ["0.10.2", "0.11.2"]
 
     steps:
@@ -139,7 +159,11 @@ jobs:
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
         run: |
-          python -m pytest tests/ -v --tb=short --ignore=tests/viz
+          # -rs prints every skip's reason.  A skip whose reason nobody
+          # reads is indistinguishable from a test that never existed,
+          # and at least one skip here is a *measurement* the log is
+          # meant to carry (see the jax-version matrix comment above).
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz
 
   test-usd:
     needs: changes

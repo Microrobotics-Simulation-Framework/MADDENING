@@ -83,7 +83,7 @@ jobs:
           set +e
           start=$SECONDS
           timeout --kill-after=60s 175m python -m pytest tests/ \
-              -m 'slow or not slow' -v --tb=short --ignore=tests/viz
+              -m 'slow or not slow' -v -rs --tb=short --ignore=tests/viz
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "elapsed_sec=$(( SECONDS - start ))" >> "$GITHUB_OUTPUT"

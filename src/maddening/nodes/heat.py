@@ -953,11 +953,19 @@ class HeatNode(SimulationNode):
         asks every node that declares :meth:`interface_dof_indices` for
         a correction, and answering with the stencil value keeps that
         contract true regardless of how the BC is enforced internally.
-        Same constants as ``update``.
+        Same constants as ``update``: ``thermal_diffusivity`` *and*
+        ``length`` come from the merged dict.  Until 0.4.0 shipped, the
+        Laplacian here was built without the injected ``length``, so
+        ``dx`` was the constructor's while ``update`` used the
+        calibrated one and the two interface cells of a coupled rod
+        landed 11 K from where rods built with that length put them,
+        silently (found by the release audit; see
+        ``tests/core/test_params_persistence_edge_cases.py``).
         """
         p = self.params if params is None else {**self.params, **params}
         n = self.params["n_cells"]
         alpha = p["thermal_diffusivity"]
+        length = p["length"]
 
         T = pre_state["temperature"]
         T_left = boundary_inputs.get("left_temperature", T[0])
@@ -969,7 +977,7 @@ class HeatNode(SimulationNode):
             jnp.asarray(source, dtype=T.dtype), (n,)
         )
 
-        laplacian = self._compute_laplacian(T, T_left, T_right)
+        laplacian = self._compute_laplacian(T, T_left, T_right, length)
         corrections: list[tuple[int, jnp.ndarray]] = []
 
         if "left_temperature" in boundary_inputs:

@@ -92,7 +92,7 @@ def test_the_committed_soup_tables_match_a_fresh_generation():
 _HIGHEST_ANOMALY_ID = 18
 _RETIRED_ANOMALY_IDS: frozenset = frozenset()
 
-_HIGHEST_BENCHMARK_ID = 13
+_HIGHEST_BENCHMARK_ID = 15
 _RETIRED_BENCHMARK_IDS: frozenset = frozenset()
 
 

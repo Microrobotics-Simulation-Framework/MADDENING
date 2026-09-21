@@ -53,6 +53,7 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
+    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 14,
     os.path.join(
         "docs", "algorithm_guide", "solvers", "explicit_integrators.md"
     ): 5,

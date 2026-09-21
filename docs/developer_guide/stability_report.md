@@ -97,6 +97,21 @@ import time.  Levels:
 | `maddening.nodes.adaptive.base.AdaptiveNodeBlindnessError` | evolving |
 | `maddening.nodes.adaptive.base.adaptive_diagnostics_enabled` | evolving |
 | `maddening.nodes.adaptive.base.set_adaptive_diagnostics` | evolving |
+| `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode` | experimental |
+| `maddening.nodes.adaptive.wavelets.cdd.cdd_select` | experimental |
+| `maddening.nodes.adaptive.wavelets.dirichlet.dirichlet_side` | experimental |
+| `maddening.nodes.adaptive.wavelets.dirichlet.synthesis_matrix_dirichlet` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.WaveletOperator` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.assemble_operator` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.gather_solve` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.make_masked_operator` | experimental |
+| `maddening.nodes.adaptive.wavelets.precond.diagonal_scaling` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.analysis` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.level_labels` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.n_dofs` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.side_length` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.synthesis` | experimental |
+| `maddening.nodes.adaptive.wavelets.transform.synthesis_matrix` | experimental |
 | `maddening.nodes.ball.BallNode` | stable |
 | `maddening.nodes.health_check.HealthCheckNode` | experimental |
 | `maddening.nodes.heart_pump.HeartPumpNode` | experimental |
@@ -162,4 +177,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*143 API surfaces registered.*
+*158 API surfaces registered.*

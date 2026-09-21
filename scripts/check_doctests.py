@@ -68,7 +68,7 @@ EXCLUDED = (PACKAGE / "examples",)
 #: exists to catch.  Measured at 15 on release/0.4.0 (8 files); 22 after
 #: the phase-3 TypedDict pass added an example to each new config type
 #: (15 files).  Every new example is in a module `.[ci]` can import.
-MIN_DOCTESTS = 22
+MIN_DOCTESTS = 25
 
 
 def _docstrings(path: Path):

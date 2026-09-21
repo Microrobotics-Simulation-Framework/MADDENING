@@ -134,6 +134,7 @@ def _row(label: str, rep: ProfileReport) -> dict:
         "dispatch_floor_ms": rep.dispatch_floor_ms,
         "one_iteration_step_ms": rep.one_iteration_step_ms,
         "coupling_overhead_ms": rep.coupling_overhead_ms,
+        "coupling_overhead_se_ms": rep.coupling_overhead_se_ms,
         "coupling_overhead_method": rep.coupling_overhead_method,
         "coupling_per_iteration_ms": rep.coupling_per_iteration_ms,
         "coupling_iter_stats": rep.coupling_iter_stats,

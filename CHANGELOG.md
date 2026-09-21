@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
+  `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
+  and printed `0.00 ms` for an overhead the run could not resolve
 - **Python floor is now `>=3.12`** (0.3.1 shipped `>=3.10`): jax 0.11 requires
   3.12 and there is no 0.12, so a 3.11 floor made half of `jax>=0.10,<0.13`
   uninstallable. CI now runs 3.12 against both jax 0.10.2 and 0.11.2

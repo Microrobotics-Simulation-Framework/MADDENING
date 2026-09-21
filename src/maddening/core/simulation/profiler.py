@@ -85,7 +85,23 @@ class ProfileReport:
     # iteration per group; ``"estimated"``: real step minus the sum of
     # isolated node costs (the pre-0.4 definition); ``""``: no groups.
     coupling_overhead_method: str = ""
+    # A difference of two windows timed at *different* points of the
+    # trajectory.  See ``measure_coupling`` in :func:`profile_graph` for
+    # which points, why that is sound, and what it was measured to cost.
     coupling_overhead_ms: float = 0.0
+    # Standard error of ``coupling_overhead_ms``, propagated from the two
+    # windows' own per-step scatter.  An overhead smaller than this was
+    # certainly not resolved; the converse does not follow.  It is a
+    # *lower bound* on the uncertainty, because the two windows are timed
+    # minutes apart and it captures only the scatter within each, not
+    # drift between them -- on a shared machine that drift can dominate,
+    # and the spread over repeated runs is the better guide.  (Measured
+    # on a two-spring pair: 0.0282 ms across 30 runs against a
+    # within-window error several times smaller.)  Only defined for
+    # ``"measured"``; the estimated method has no second window to take a
+    # scatter from and leaves this 0.0, so read it together with
+    # ``coupling_overhead_method``, never on its own.
+    coupling_overhead_se_ms: float = 0.0
     one_iteration_step_ms: float = 0.0
     coupling_per_iteration_ms: float = 0.0
     # Last-step iteration count per group (kept for compatibility).
@@ -143,12 +159,23 @@ class ProfileReport:
         if self.n_coupling_groups > 0:
             lines.append(f"")
             lines.append(f"  Coupling groups: {self.n_coupling_groups}")
+            measured = self.coupling_overhead_method == "measured"
+            # Below its own standard error the difference was not
+            # resolved, and saying so is the whole point of printing the
+            # error beside it: no threshold is chosen here, the
+            # comparison is against the scatter the run itself produced.
+            unresolved = (
+                measured
+                and abs(self.coupling_overhead_ms) < self.coupling_overhead_se_ms
+            )
             lines.append(
-                f"  Coupling overhead: {self.coupling_overhead_ms:.2f} ms "
-                f"({self.coupling_overhead_method or 'n/a'}"
+                f"  Coupling overhead: {self.coupling_overhead_ms:.2f} "
+                + (f"+- {self.coupling_overhead_se_ms:.2f} " if measured else "")
+                + f"ms ({self.coupling_overhead_method or 'n/a'}"
+                + ("; below resolution" if unresolved else "")
                 + (f"; one-iteration step {self.one_iteration_step_ms:.2f} ms, "
                    f"{self.coupling_per_iteration_ms:.2f} ms per extra iteration"
-                   if self.coupling_overhead_method == "measured" else "")
+                   if measured else "")
                 + ")"
             )
             for group_key, st in self.coupling_iter_stats.items():
@@ -703,6 +730,50 @@ def profile_graph(
         iteration and time it, so ``coupling_overhead_ms`` is measured
         rather than inferred (costs one extra compile; the graph is
         restored afterwards).  Ignored without coupling groups.
+
+        The two windows it subtracts start at **different points of the
+        trajectory**, and stay that way on purpose.  ``mean_step_ms`` is
+        timed ``n_warmup`` steps after a ``reset_state``;
+        ``one_iteration_step_ms`` is timed from wherever the timed run
+        and the coupling-statistics pass left the state, plus another
+        ``n_warmup``.  Nothing leaks -- :func:`_one_iteration_variant`
+        saves and restores state, groups and compiled step -- but the
+        *start* is not pinned the way ``n_stat_steps`` pins the
+        statistics pass, and unlike that pass it does not need to be.
+
+        The reason is structural rather than lucky:
+        ``max_iterations <= 1`` returns straight after the single
+        staggered pass, before any ``while_loop``, accelerator or IFT
+        solve is reached, so the capped step is straight-line code on
+        fixed shapes and costs the same whatever state it starts from.
+        Its measured iteration count is exactly one from every
+        trajectory position, which
+        ``test_one_iteration_variant_runs_one_pass_from_any_position``
+        pins.  Pinning both windows to the same start was measured on
+        the compute-bound ``expensive-pair`` fixture (two 1e5-cell heat
+        grids), interleaving pinned and unpinned measurements with a
+        fresh graph for each, and it moved ``coupling_overhead_ms`` by
+        less than the measurement's own scatter both times: -0.11%
+        against 8.1% run-to-run scatter over 10 repeats on a quiet
+        machine, and -7.6% against 34% scatter over 16 repeats on a
+        loaded one -- 0.03 and 0.62 standard errors of the difference.
+        The scatter tracks the machine's load, the discrepancy does not
+        resolve above it either way, and the computation is therefore
+        left as it is.  Should a cap of one ever regain a data-dependent
+        trip count, the subtraction would begin comparing two different
+        workloads and this window would have to be pinned.
+
+        ``coupling_overhead_ms`` is reported **signed**.  On a graph whose
+        step is dominated by dispatch the two windows differ by less than
+        their own scatter and the difference falls on either side of zero
+        from run to run -- measured over 30 runs of a two-spring pair,
+        +0.0051 +- 0.0282 ms, negative in 11 of them.  It used to be
+        clamped at zero, which biased the reported mean upward (+0.0135
+        ms, 2.6x the unclamped value, because only the negative half of
+        the noise was discarded) and printed a confident ``0.00 ms`` for
+        something the run had not resolved.  A negative number says
+        "below this run's resolution" in a way no non-negative one can.
+        ``coupling_overhead_se_ms`` carries the resolution alongside it.
     n_stat_steps : int or None
         Steps in the coupling-iteration statistics pass.  ``None``
         keeps the historical behaviour: ``min(n_steps, 50)`` steps taken
@@ -858,6 +929,16 @@ def profile_graph(
         report.node_times_ms[name] = float(np.mean(times))
 
     # Coupling overhead: measured (one-iteration variant) or estimated.
+    #
+    # The one-iteration window is deliberately *not* pinned to where
+    # ``mean_step_ms`` was measured -- it starts from wherever the timed
+    # run and the statistics pass left the state.  A group capped at one
+    # iteration has no data-dependent control flow, so the capped step
+    # costs the same from any state and the subtraction stays valid.
+    # Measured impact of pinning it: under one standard error of the
+    # difference in two runs (-0.11% against 8.1% run-to-run scatter;
+    # -7.6% against 34% on a loaded box).  Full reasoning on
+    # ``measure_coupling`` above.
     report.sum_node_ms = sum(report.node_times_ms.values())
     if group_keys and measure_coupling:
         with _one_iteration_variant(gm):
@@ -867,7 +948,29 @@ def profile_graph(
                 gm.step(external_inputs)
             one = _time_steps(gm, external_inputs, n_steps)
         report.one_iteration_step_ms = float(np.mean(one))
-        report.coupling_overhead_ms = max(0.0, report.mean_step_ms - report.one_iteration_step_ms)
+        # Signed, deliberately.  This is a difference of two timing means
+        # and on a graph whose step is dominated by dispatch it is noise
+        # centred near zero: measured over 30 runs of a two-spring pair,
+        # +0.0051 +- 0.0282 ms, negative in 11 of them.  Clamping that to
+        # zero did not make it more accurate, it made it *biased* -- the
+        # clamped mean came out at +0.0135 ms, 2.6x the unclamped one,
+        # because only the negative half of the noise was discarded --
+        # and it published a confident-looking ``0.00 ms`` for a quantity
+        # the run could not resolve.  A negative value is the honest
+        # report of exactly that, and is why it travels with
+        # ``coupling_overhead_se_ms``.
+        report.coupling_overhead_ms = (
+            report.mean_step_ms - report.one_iteration_step_ms
+        )
+        # Resolution of that difference, from the two windows' own
+        # per-step scatter rather than any chosen threshold.  Both were
+        # timed ``n_steps`` times, and ``std_step_ms`` is ``np.std``
+        # (ddof=0) of the first, so the same convention is used for the
+        # second and the two combine in quadrature.
+        report.coupling_overhead_se_ms = float(
+            np.sqrt(report.std_step_ms ** 2 + float(np.std(one)) ** 2)
+            / np.sqrt(max(n_steps, 1))
+        )
         report.coupling_overhead_method = "measured"
         extra = sum(
             max(st["mean"] - 1.0, 0.0) for st in report.coupling_iter_stats.values()
@@ -876,6 +979,14 @@ def profile_graph(
             report.coupling_overhead_ms / extra if extra > 0 else 0.0
         )
     elif group_keys:
+        # This clamp is left in place on purpose.  It is a different
+        # estimator -- the step minus the sum of separately jitted node
+        # timings, each carrying its own dispatch -- and it was measured
+        # not to fire: 0 negatives in 20 runs on each of a launch-bound
+        # two-spring pair and a compute-bound 2 x 1e5-cell heat pair.
+        # With no observed case of it converting anything, there is
+        # nothing here to justify changing, and unlike the measured path
+        # there is no second window to derive a resolution from.
         report.coupling_overhead_ms = max(0.0, report.mean_step_ms - report.sum_node_ms)
         report.coupling_overhead_method = "estimated"
 
@@ -1054,6 +1165,11 @@ def profile_report_to_perfetto(report: ProfileReport) -> dict:
         })
         cursor_us += dur_us
 
+    # ``> 0`` rather than ``!= 0``: since the measured overhead is signed
+    # it can be negative, and a trace event with a negative ``dur`` is
+    # not a valid Perfetto slice.  An unresolved or negative overhead
+    # emits no slice at all, which is the right answer -- there was no
+    # measurable overhead to draw.
     if report.coupling_overhead_ms > 0:
         events.append({
             "name": "coupling_overhead",

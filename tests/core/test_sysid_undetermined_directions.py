@@ -47,6 +47,7 @@ from maddening.sysid import (
     fit,
     fit_lm,
     fit_multiple_shooting,
+    init_window_states,
     observations_from_history,
     windowed_loss,
 )
@@ -555,6 +556,12 @@ def test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone():
     caller records as provenance, and a caller warm-starting from them
     needs the values the optimiser actually reached.  They must come back
     identical to the unguarded run, and so must ``losses``.
+
+    "Identical to the unguarded run" is not enough on its own: a
+    ``fit_multiple_shooting`` that reset the window states to their seed
+    would satisfy it in *both* runs, and this test passed on exactly that
+    seeded fault until the non-vacuity assertion below was added.  So the
+    states are also required to have moved off ``init_window_states``.
     """
     gm = _spring()
     obs = _observations(gm, noisy=True)
@@ -564,6 +571,11 @@ def test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone():
 
     assert held.excited_rank == 2 and held.undetermined_drift > 1e-3
     assert _scale(held.params) != _scale(raw.params)      # the guard did fire
+    seed = init_window_states(obs, WINDOW)
+    assert any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(jax.tree.leaves(ws_held), jax.tree.leaves(seed))
+    ), "the window states never left their seed; the comparison below is vacuous"
     held_leaves = jax.tree.leaves_with_path(ws_held)
     raw_leaves = dict(jax.tree.leaves_with_path(ws_raw))
     assert held_leaves, "the window-state tree is empty; this asserts nothing"

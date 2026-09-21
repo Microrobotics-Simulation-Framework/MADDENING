@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
+    _field_reference,
     float_fields_of,
     relaxation_step_scale,
     spectral_error_bound,
@@ -327,8 +328,17 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
-def _spectral_rate_at(step_pure, x_star, consts):
-    """``(rho, arnoldi_residual)`` of ``dF/dx`` at ``x_star``.
+def _spectral_rate_at(step_pure, x_star, consts, weights):
+    """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
+
+    ``weights`` is the flat vector of per-entry factors the group's
+    convergence norm multiplies a state change by at ``x_star`` --
+    ``1 / max|field|`` on a field the norm reads, ``0`` on one it does
+    not (dead band, or off the interface under the interface norm) --
+    so the Arnoldi iteration runs on ``D J D^+`` and the resolvent norm
+    it reports is the one in the norm the residual is quoted in.  The
+    spectral radius is unchanged by that similarity wherever the
+    weights are non-zero.
 
     The matvec is the same ``jax.jvp`` of the one-pass map the IFT
     tangent rule builds (see ``_ift_solve_jvp``); it is applied
@@ -355,12 +365,15 @@ def _spectral_rate_at(step_pure, x_star, consts):
 
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
+    d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
+    live = d > 0
+    d_inv = jnp.where(live, 1.0 / jnp.where(live, d, 1.0), 0.0)
 
     def matvec(v):
         _, Jv = jax.jvp(
-            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (v,)
+            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (v * d_inv,)
         )
-        return Jv
+        return d * Jv
 
     v0 = jax.random.normal(jax.random.PRNGKey(0), x_sg.shape, x_sg.dtype)
     return arnoldi_spectral_radius(matvec, v0)
@@ -1825,7 +1838,7 @@ def _run_coupled_block_impl(
             # ``coupling_diagnostics`` reports as ``spectral_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1885,7 +1898,7 @@ def _run_coupled_block_impl(
             outside the group.  IQN acceleration acts on the
             interface-field subset through a static index map into
             that vector.  ``diag`` is ``(n_iters, final_res, final_amp,
-            rho_spectral, arnoldi_residual)`` -- the last two NaN
+            rho_spectral, arnoldi_residual, amplification)`` -- the last three NaN
             unless ``diagnostics=True`` -- and ``vw`` the IQN ``(V, W)``
             matrices (``None`` for other accelerations).  The IFT derivative is intrinsic to ``F``
             at ``x*`` and unchanged across acceleration modes.
@@ -1961,6 +1974,32 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
+            def _norm_weights(x_full):
+                """Per-entry factors of the group's norm at ``x_full``.
+
+                Mirrors ``_scaled_change``: a field the norm reads is
+                divided by its own magnitude (``max|field|``) and is
+                read only above the dead band; under the interface norm
+                only edge-source fields are read.  A constant factor
+                (``rtol``, the mixed norm's ``1/count``) is left out --
+                the resolvent norm the weights feed is invariant to it.
+                """
+                s_star = _embed(x_full)
+                read = {(e.source_node, e.source_field) for e in group_internal_list}
+                w = {}
+                for nn in group_node_names:
+                    w[nn] = {}
+                    for fld in float_fields[nn]:
+                        val = jnp.asarray(s_star[nn][fld])
+                        if use_interface_norm and (nn, fld) not in read:
+                            w[nn][fld] = jnp.zeros_like(val)
+                            continue
+                        ref = _field_reference(val, val)
+                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
+                        w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
+                return _flatten_full({**s_star, **w})
+
             if accel_fields is not None:
                 # Positions of the accelerated (interface) fields in
                 # the full flat vector: flatten an index-valued state
@@ -2007,12 +2046,13 @@ def _run_coupled_block_impl(
             # not charged for.  NaN is what ``coupling_diagnostics``
             # reads as "not computed" (``spectral_usable=False``).
             if group.diagnostics:
-                rho_spec, spec_resid = _spectral_rate_at(
+                rho_spec, spec_resid, spec_amp = _spectral_rate_at(
                     step_pure, x_star_full, consts,
+                    _norm_weights(jax.lax.stop_gradient(x_star_full)),
                 )
             else:
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
-                spec_resid = rho_spec
+                spec_resid = spec_amp = rho_spec
             if group.strict_convergence:
                 # Lazy for import time only: equinox is a transitive
                 # dependency of lineax, which is a base dependency.
@@ -2042,12 +2082,12 @@ def _run_coupled_block_impl(
                     "coupling_diagnostics().",
                 )
             final = _merge(template_state, _embed(x_star_full), jnp.array(False))
-            return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid),
-                    (vw if vw else None))
+            return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
+                            spec_amp), (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           spec_resid), vw) = _run_ift_forward(state_after_first)
+                           spec_resid, spec_amp), vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
@@ -2057,7 +2097,7 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         spec_resid)
+                         spec_resid, spec_amp)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -2358,7 +2398,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -2467,7 +2507,7 @@ def _run_coupled_block_impl(
     # built by hand without ``_meta`` keeps its structure.  The legacy
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
-        iter_count, final_res, final_amp, rho_spec, spec_resid = diag_data
+        iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp = diag_data
         res_dtype = jnp.asarray(final_res).dtype
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
@@ -2480,7 +2520,7 @@ def _run_coupled_block_impl(
                 final_amp, dtype=res_dtype
             ),
         }
-        # The spectral pair exists only where it can be computed
+        # The spectral triple exists only where it can be computed
         # (``solver="ift"``) and was asked for (``diagnostics=True``);
         # ``compile()`` seeds exactly the same keys under the same
         # condition so the scan carry keeps its structure.
@@ -2492,6 +2532,9 @@ def _run_coupled_block_impl(
                 ),
                 f"coupling_{group_key}_spectral_residual": jnp.asarray(
                     spec_resid, dtype=res_dtype
+                ),
+                f"coupling_{group_key}_spectral_amplification": jnp.asarray(
+                    spec_amp, dtype=res_dtype
                 ),
             }
 
@@ -3875,14 +3918,18 @@ class GraphManager:
                         0.0, dtype=res_dtype
                     )
                     if g.diagnostics and g.solver == "ift":
-                        # The Arnoldi pair (Ritz radius, residual) behind
-                        # the spectral bound; NaN reads as "not computed".  Same
+                        # The Arnoldi triple (Ritz radius, residual,
+                        # resolvent norm) behind the spectral bound; NaN
+                        # reads as "not computed".  Same
                         # condition as the write in
                         # ``_run_coupled_block_impl``.
                         meta[f"coupling_{key}_rho_spectral"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
                         meta[f"coupling_{key}_spectral_residual"] = jnp.array(
+                            jnp.nan, dtype=res_dtype
+                        )
+                        meta[f"coupling_{key}_spectral_amplification"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
                 if g.acceleration == "iqn-imvj":
@@ -4952,8 +4999,9 @@ class GraphManager:
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance
                 )
-                # The spectral pair (Ritz radius, Arnoldi residual) is
-                # present only under solver="ift" with diagnostics=True,
+                # The spectral triple (Ritz radius, Arnoldi residual,
+                # resolvent norm) is present only under solver="ift"
+                # with diagnostics=True,
                 # and NaN there until a step has
                 # computed it (and at max_iterations=1, which solves no
                 # fixed point).  Absent or NaN both read as "not
@@ -4962,8 +5010,10 @@ class GraphManager:
                     f"coupling_{key}_rho_spectral", float("nan")))
                 spec_resid = float(meta.get(
                     f"coupling_{key}_spectral_residual", float("nan")))
+                spec_amp = float(meta.get(
+                    f"coupling_{key}_spectral_amplification", float("nan")))
                 spectral_bound = float(spectral_error_bound(
-                    residual, rho_spec, spec_resid,
+                    residual, rho_spec, spec_resid, spec_amp,
                 ))
                 spectral_usable = bool(
                     math.isfinite(spectral_bound)
@@ -5942,7 +5992,7 @@ class GraphManager:
                     fresh_meta[key] = jnp.zeros_like(value)
                 elif key.endswith("_rho_spectral") or key.endswith(
                     "_spectral_residual"
-                ):
+                ) or key.endswith("_spectral_amplification"):
                     # NaN, not zero: zero would read as a computed
                     # spectral radius of 0 and a bound equal to the
                     # residual.

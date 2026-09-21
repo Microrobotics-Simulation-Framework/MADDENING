@@ -424,12 +424,13 @@ def estimated_error(residual, amplification, step_scale=1.0):
 SPECTRAL_KRYLOV_STEPS = 8
 
 #: How many times the Arnoldi residual ``h_{k+1,k}`` is added to the
-#: Ritz spectral radius before the bound is formed.  That residual is
-#: the norm of the part of ``A q_k`` the Krylov space does not contain,
-#: in the same units as the eigenvalues; for a normal ``A`` every Ritz
-#: value lies within it of a true eigenvalue (Bauer-Fike with constant
-#: one).  It is zero, up to float32 rounding, when the Krylov space is
-#: invariant, so the margin costs a resolved spectrum nothing.
+#: Ritz spectral radius before the spectral-radius form of the bound is
+#: formed.  That residual is the norm of the part of ``A q_k`` the
+#: Krylov space does not contain, in the same units as the eigenvalues;
+#: for a normal ``A`` every Ritz value lies within it of a true
+#: eigenvalue (Bauer-Fike with constant one).  It is zero, up to float32
+#: rounding, when the Krylov space is invariant, so the margin costs a
+#: resolved spectrum nothing.
 SPECTRAL_MARGIN = 2.0
 
 #: The convergence test behind ``spectral_usable``: the Arnoldi
@@ -491,16 +492,39 @@ def _spectral_radius_small(H, n_squarings: int = _GELFAND_SQUARINGS):
 
 
 def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
-    """``(rho, residual)``: the Ritz spectral radius after ``n_steps`` of Arnoldi.
+    """``(rho, residual, amplification)`` after ``n_steps`` of Arnoldi on ``dF/dx``.
 
     ``matvec(v)`` applies the coupling Jacobian ``dF/dx`` (at the point
-    the caller chose) to ``v``; ``v0`` is the start vector.  Modified
-    Gram-Schmidt Arnoldi builds an orthonormal basis ``Q`` of the
-    Krylov space and the Hessenberg matrix ``H = Q^T A Q``; ``rho`` is
-    the spectral radius of ``H`` -- the largest Ritz value in modulus,
-    taken by :func:`_spectral_radius_small` so the call lowers on every
-    backend -- and ``residual`` is ``h_{k+1,k}``, the norm of the part
-    of ``A q_k`` outside the space.
+    the caller chose, in the coordinates the caller's norm is taken in)
+    to ``v``; ``v0`` is the start vector.  Modified Gram-Schmidt Arnoldi
+    builds an orthonormal basis ``Q`` of the Krylov space and the
+    Hessenberg matrix ``H = Q^T A Q``; ``rho`` is the spectral radius
+    of ``H`` -- the largest Ritz value in modulus, taken by
+    :func:`_spectral_radius_small` so the call lowers on every backend
+    -- ``residual`` is ``h_{k+1,k}``, the norm of the part of ``A q_k``
+    outside the space, and ``amplification`` is
+    ``||(I - H)^{-1}||_2 = 1 / sigma_min(I - H)``, the norm of the
+    compressed map's resolvent at 1.
+
+    **Why the resolvent and not only the radius.**  For a normal ``A``
+    the two agree, ``||(I - A)^{-1}|| = 1 / min|1 - lambda| <=
+    1/(1 - rho)``.  A coupling Jacobian need not be normal, and the
+    Jacobi map of a group in which one side responds strongly to the
+    other and the other weakly back is measured *far* from it: its
+    ``+/-lambda`` eigenvector pair is nearly parallel, an error of the
+    shape "grid consistent with probes, both off" has a residual
+    ``(1 - lambda**2)`` times its probe part while its size is the
+    grid's response to that part, and ``residual / (1 - rho)`` read
+    30-40x below the true distance on the heterogeneous benchmark
+    fixture with ``rho`` exactly right.  When the Krylov space is
+    invariant (``residual == 0``) it satisfies ``A Q = Q H``, so for
+    any vector ``r`` in it ``(I - A)^{-1} r = Q (I - H)^{-1} Q^T r`` and
+    ``||(I - A)^{-1} r|| <= amplification * ||r||`` holds *whatever*
+    the eigenvectors do.  The residual of an iterate produced by the
+    coupling loop lies in that space generically (it is in the
+    Jacobian's range, which the space contains once it has broken
+    down), which is what makes :func:`spectral_error_bound` a bound on
+    a non-normal map too.
 
     **When the answer is exact, and how it says so.**  A coupling
     Jacobian has rank at most the number of boundary scalars crossing
@@ -522,18 +546,20 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     products, while Arnoldi's space of dimension 6 is the whole range.
 
     ``n_steps`` is static (a Python int) and is the number of
-    Jacobian-vector products the call costs.  A zero ``v0``, or a
-    Jacobian that annihilates the start (``A v0 = 0``), gives
-    ``rho = 0.0`` and ``residual = 0.0``: nothing is amplified, so
-    nothing is extrapolated.
+    Jacobian-vector products the call costs; the SVD behind
+    ``amplification`` is of a ``k x k`` matrix and costs nothing beside
+    them.  A zero ``v0``, or a Jacobian that annihilates the start
+    (``A v0 = 0``), gives ``rho = 0.0``, ``residual = 0.0`` and
+    ``amplification = 1.0``: nothing is amplified, so nothing is
+    extrapolated.
 
     Examples
     --------
     >>> import jax.numpy as jnp
     >>> A = jnp.diag(jnp.array([0.999, -0.2, 0.0]))
-    >>> rho, res = arnoldi_spectral_radius(lambda v: A @ v, jnp.ones(3), n_steps=8)
-    >>> bool(abs(rho - 0.999) < 1e-5), bool(res < 1e-5)
-    (True, True)
+    >>> rho, res, amp = arnoldi_spectral_radius(lambda v: A @ v, jnp.ones(3), n_steps=8)
+    >>> bool(abs(rho - 0.999) < 1e-5), bool(res < 1e-5), bool(abs(amp - 1000.0) < 1.0)
+    (True, True, True)
     """
     if n_steps < 1:
         raise ValueError(
@@ -572,82 +598,105 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
         return Q, H
 
     _Q, H = jax.lax.fori_loop(0, k, body, (Q0, H0))
-    rho = _spectral_radius_small(H[:k, :k])
-    return rho, H[k, k - 1]
+    Hk = H[:k, :k]
+    rho = _spectral_radius_small(Hk)
+    sigma = jnp.linalg.svd(jnp.eye(k, dtype=dtype) - Hk, compute_uv=False)
+    sigma_min = sigma[-1]
+    invertible = sigma_min > 0
+    amplification = jnp.where(
+        invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,
+    )
+    return rho, H[k, k - 1], amplification
 
 
-def spectral_error_bound(residual, rho, arnoldi_residual, margin: float = SPECTRAL_MARGIN):
-    """``residual / (1 - rho_safe)``: the distance to the fixed point, from the spectrum.
+def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
+                         margin: float = SPECTRAL_MARGIN):
+    """The distance to the fixed point, from the spectrum of ``dF/dx``.
+
+    ``residual * max(amplification, 1 / (1 - rho_safe))``, with
+    ``rho_safe = rho + margin * arnoldi_residual``.
 
     For a *linear* map ``F(x) = A x + b`` the error of any iterate is
     exactly ``x - x* = (A - I)^{-1} (F(x) - x)``, whatever iteration
     produced ``x``: no step sequence, no relaxation factor and no
     accelerator enters.  Its size is therefore at most
-    ``||(I - A)^{-1}|| * residual``, and for a normal ``A`` that
-    operator norm is ``1 / min|1 - lambda| <= 1 / (1 - rho(A))``.  This
-    is the inequality :func:`error_amplification` could not state,
-    because it read ``rho`` off the residual sequence, which reports the
-    mode dominating the *step*; here ``rho`` comes from the spectrum of
-    ``dF/dx`` itself (:func:`arnoldi_spectral_radius`), which sees every
-    mode whatever its current amplitude.
+    ``||(I - A)^{-1}|| * residual``.  Two things stand in for that
+    operator norm, and the larger is used:
 
-    ``rho_safe = rho + margin * arnoldi_residual``.  The Arnoldi
-    residual is zero when the Krylov space captured the Jacobian's
-    range and the spectrum is exact, so a resolved spectrum pays no
-    margin; where it is not zero the Ritz radius is an estimate from
-    below and is pushed up by the size of what the space missed.  The
-    result is ``inf`` when ``rho_safe >= 1`` -- the raw iteration would
-    not contract, so the geometric argument bounds nothing -- and NaN
-    when ``rho`` is NaN, which is how a solver that did not compute one
-    reports it.  Never smaller than ``residual`` where it is finite,
-    and it inherits the residual's float32 noise floor: a residual that
-    reads exactly ``0.0`` gives a bound of ``0.0``, which means
-    "converged to float32" and not "exact".
+    * ``amplification``, the resolvent norm ``||(I - H)^{-1}||_2`` of
+      the Krylov-compressed Jacobian from
+      :func:`arnoldi_spectral_radius`.  When the Krylov space is
+      invariant this *is* the operator norm on that space, whatever the
+      eigenvectors do, and the residual of a coupling iterate lies in
+      it.  It is the term that holds on a non-normal map.
+    * ``1 / (1 - rho_safe)``, the spectral-radius form: exact for a
+      normal ``A`` with a positive dominant eigenvalue, conservative
+      otherwise, and the only one of the two that can be pushed up when
+      the Krylov space is *not* invariant -- the Arnoldi residual is
+      zero when the space captured the Jacobian's range, so a resolved
+      spectrum pays no margin, and where it is not zero the Ritz radius
+      is an estimate from below and is inflated by the size of what the
+      space missed.
+
+    Neither is what :func:`error_amplification` could state: it read
+    ``rho`` off the residual sequence, which reports the mode
+    dominating the *step*; these come from ``dF/dx`` itself, which sees
+    every mode whatever its current amplitude.  The result is ``inf``
+    when ``rho_safe >= 1`` or the compressed ``I - H`` is singular --
+    the raw iteration would not contract, so nothing is bounded -- and
+    NaN when ``rho`` is NaN, which is how a solver that did not compute
+    one reports it.  Never smaller than ``residual`` where it is
+    finite, and it inherits the residual's float32 noise floor: a
+    residual that reads exactly ``0.0`` gives a bound of ``0.0``, which
+    means "converged to float32" and not "exact".
 
     **When it is a bound and when it is an estimate.**  It is a bound
-    on ``||x - x*||`` under three conditions, each stated because each
-    can fail: ``F`` is linear, or the iterate is close enough that
-    ``dF/dx`` does not change between ``x`` and ``x*`` -- Ostrowski's
-    theorem makes the statement *asymptotic* for a differentiable
-    non-linear ``F``, and an estimate elsewhere; the Jacobian is
-    normal, or its eigenvector basis is well enough conditioned that
-    ``||(I - A)^{-1}||`` is within the margin of ``1/(1 - rho)`` (the
-    Gauss-Seidel one-pass map of a cycle is *not* normal, but after one
-    pass its error lies in the dominant eigenspace, where the
-    inequality holds with equality); and the group's norm is close
-    enough to a norm on the tail -- the same triangle-inequality
-    condition ``error_amplification`` documents.  The Krylov space's
-    finite dimension is the fourth thing that can fail, and the only
-    one the code reports: :func:`spectral_rate_settled` says whether
-    the Arnoldi residual was small against ``1 - rho``, and a group
-    with more independent interface scalars than
-    :data:`SPECTRAL_KRYLOV_STEPS` will say it was not.
+    on ``||x - x*||`` in the group's norm under three conditions, each
+    stated because each can fail: ``F`` is linear, or the iterate is
+    close enough that ``dF/dx`` does not change between ``x`` and
+    ``x*`` -- Ostrowski's theorem makes the statement *asymptotic* for
+    a differentiable non-linear ``F``, and an estimate elsewhere; the
+    Krylov space is invariant and the residual lies in it, which is the
+    generic case once Arnoldi has broken down and is what a zero
+    ``arnoldi_residual`` certifies (a group with more independent
+    interface scalars than :data:`SPECTRAL_KRYLOV_STEPS` does not get
+    there, :func:`spectral_rate_settled` says so, and only the
+    spectral-radius form with its margin then stands); and the group's
+    norm is close enough to a norm on the tail -- the weights it
+    divides each field by are taken at the returned iterate and the
+    dead band's excluded fields are outside it, the same conditions
+    ``error_amplification`` documents.
 
     Examples
     --------
-    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.0)), 4)
+    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.0, 1000.0)), 4)
     0.1
-    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.1)), 6)   # 0.5 + 2*0.1
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.1)), 6)   # radius form: 0.5 + 2*0.1
     0.000333
-    >>> float(spectral_error_bound(1e-4, 1.0, 0.0))
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.0, 40.0)), 6)  # resolvent form wins
+    0.004
+    >>> float(spectral_error_bound(1e-4, 1.0, 0.0, 1.0))
     inf
     """
     residual = jnp.asarray(residual)
     rho = jnp.asarray(rho)
     arnoldi_residual = jnp.asarray(arnoldi_residual)
-    dtype = jnp.result_type(residual, rho, arnoldi_residual)
+    amplification = jnp.asarray(amplification)
+    dtype = jnp.result_type(residual, rho, arnoldi_residual, amplification)
     residual = residual.astype(dtype)
     rho = rho.astype(dtype)
     arnoldi_residual = arnoldi_residual.astype(dtype)
+    amplification = amplification.astype(dtype)
     rho_safe = rho + margin * arnoldi_residual
-    finite = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
-    contracting = rho_safe < 1
-    ok = jnp.logical_and(finite, contracting)
+    computed = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
+    contracting = jnp.logical_and(rho_safe < 1, jnp.isfinite(amplification))
+    ok = jnp.logical_and(computed, contracting)
     den = jnp.where(ok, 1.0 - rho_safe, jnp.ones_like(rho_safe))
-    bound = jnp.maximum(residual / den, residual)
+    amp = jnp.maximum(jnp.where(ok, amplification, 1.0), 1.0 / den)
+    bound = jnp.maximum(residual * amp, residual)
     nan = jnp.full_like(bound, jnp.nan)
     inf = jnp.full_like(bound, jnp.inf)
-    return jnp.where(finite, jnp.where(contracting, bound, inf), nan)
+    return jnp.where(computed, jnp.where(contracting, bound, inf), nan)
 
 
 def spectral_rate_settled(rho, arnoldi_residual, fraction: float = SPECTRAL_SETTLED_FRACTION):

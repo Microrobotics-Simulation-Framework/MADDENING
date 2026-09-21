@@ -566,11 +566,13 @@ def test_the_estimate_is_invariant_to_the_relaxation_factor(gain, omega):
     "sqrt guard, can tell that the remaining error already belongs to a "
     "much slower mode.  The pinned example is the audit's: (0.999, 0.2) "
     "reports 9.19e-05 against a true distance of 1.12e-02, 122x, with "
-    "ratio_usable=True.  A real fix needs the spectrum rather than the "
-    "residual sequence and is post-0.4.0 work.  Flipping this to a pass "
-    "means the estimate became a bound: update "
+    "ratio_usable=True.  The spectrum is the fix and it is in the tree "
+    "as a separate key, `spectral_error_bound` (see the property just "
+    "below, which holds on the same draws); `error_estimate` keeps its "
+    "value because 438 recorded verdicts depend on it.  Flipping this to "
+    "a pass therefore means `error_estimate`'s own value changed: update "
     "benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md, the "
-    "caveat on _fixed_point_while, and the example-based twin in "
+    "caveat on _fixed_point_while, and the recorded 122x in "
     "tests/core/test_coupling_error_bound.py."
 ))
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -603,4 +605,180 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
     assert d["error_estimate"] >= distance, (
         f"reported {d['error_estimate']:.4e} for a true distance of "
         f"{distance:.4e} ({distance / d['error_estimate']:.0f}x)"
+    )
+
+
+def _spectral_noise(d, n_entries):
+    """The bound's own float32 uncertainty, in the units it is quoted in.
+
+    ``spectral_error_bound`` is the residual times an amplification of
+    at least ``1 / (1 - rho)``, so the residual's noise floor (one ulp
+    per float entry, summed in quadrature by the L2 norm) is amplified
+    by at least that factor.  The assertions below allow four of those
+    -- a fixed fraction would either be slack at ``rho = 0.5`` or fail
+    at ``rho = 0.98`` for no reason but rounding.
+    """
+    return 4.0 * residual_noise_floor("l2", 1.0, n_entries) / (1.0 - d["rho_spectral"])
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(
+    rho_slow=st.floats(min_value=0.99, max_value=0.9999),
+    rho_fast=st.floats(min_value=0.0, max_value=0.5),
+    c_slow=st.floats(min_value=1e-6, max_value=1e-3),
+)
+@example(rho_slow=0.999, rho_fast=0.2, c_slow=1e-5)
+def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
+    rho_slow, rho_fast, c_slow,
+):
+    """The same draws as the strict xfail above, held by the spectral key.
+
+    Nothing about the two-mode map changes between the two tests --
+    same generator, same criterion, same returned state.  What changes
+    is where ``rho`` comes from: the residual sequence reads the fast
+    mode for as long as it dominates the step, the Arnoldi space of
+    ``dF/dx`` contains both modes from the first product.  For a linear
+    map the error is ``(A - I)^{-1}`` of the residual whatever the
+    iteration did, so the bound holds wherever the residual is above
+    its own noise.
+    """
+    gain = (rho_slow, rho_fast)
+    bias = (c_slow, 1.0)
+    gm = _affine_cycle(gain, bias, max_iterations=60,
+                       tolerance=_ANALYTIC_TOLERANCE)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _exact_distance(gm, gain, bias)
+    note(f"rho={gain} c={bias} distance={distance} {d}")
+    assert d["spectral_usable"] is True, d
+    assert d["rho_spectral"] == pytest.approx(rho_slow, abs=1e-4)
+    assert d["spectral_error_bound"] + _spectral_noise(d, 4) >= distance, (
+        f"reported {d['spectral_error_bound']:.4e} for a true distance of "
+        f"{distance:.4e} ({distance / d['spectral_error_bound']:.2f}x)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Random normal contractions: the spectral bound holds whatever the spectrum
+# ---------------------------------------------------------------------------
+
+
+class _Linear(SimulationNode):
+    """``x <- A u + c`` on a vector field."""
+
+    def __init__(self, name, A, c):
+        super().__init__(name=name, timestep=1.0)
+        self._A = jnp.asarray(A, jnp.float32)
+        self._c = jnp.asarray(c, jnp.float32)
+
+    def initial_state(self):
+        return {"x": jnp.zeros(self._c.shape, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=self._c.shape, dtype=jnp.float32,
+                                       description="u")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._A @ boundary_inputs["u"] + self._c}
+
+
+def _linear_cycle(A, c, **group_kw):
+    """``a -> b -> a`` carrying a full matrix; ``b`` is the identity relay.
+
+    The Gauss-Seidel one-pass Jacobian is ``[[0, A], [0, A]]``: rank at
+    most ``n``, eigenvalues those of ``A``, so an eight-step Krylov
+    space is its whole range for every ``n`` drawn here and the Ritz
+    spectrum is exact.  The fixed point is ``(I - A)^{-1} c`` on both
+    nodes.
+    """
+    n = len(c)
+    gm = GraphManager()
+    gm.add_node(_Linear("a", A, c))
+    gm.add_node(_Linear("b", np.eye(n), np.zeros(n)))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, **group_kw)
+    gm.compile()
+    return gm
+
+
+def _distance_to(gm, x_star):
+    """Distance to ``x_star`` on both nodes, in the group's own L2 norm."""
+    total = 0.0
+    for node in ("a", "b"):
+        got = np.asarray(gm.get_node_state(node)["x"], np.float64)
+        ref = max(np.max(np.abs(got)), np.max(np.abs(x_star)))
+        if ref > 0.0:
+            total += float(np.sum(((got - x_star) / ref) ** 2))
+    return total ** 0.5
+
+
+@st.composite
+def _normal_contractions(draw):
+    """``(A, c, acceleration, relaxation)`` with ``A`` symmetric and ``rho < 1``.
+
+    Eigenvalues are drawn directly, negative ones included, and one of
+    them is pushed towards ``+/-1`` on most draws so the slow-mode
+    regime is exercised rather than found by luck; a random orthogonal
+    basis then makes ``A`` normal with that spectrum.  ``relaxation``
+    stays at or below one: above it a negative eigenvalue near ``-1``
+    makes the *relaxed* iteration diverge, and a state that has left
+    float32 is not a fixture for anything.
+    """
+    n = draw(st.integers(min_value=2, max_value=6))
+    lam = np.asarray(draw(st.lists(
+        st.floats(min_value=-0.9, max_value=0.9), min_size=n, max_size=n,
+    )))
+    edge = draw(st.sampled_from(["none", "slow", "alternating"]))
+    if edge == "slow":
+        lam[0] = draw(st.floats(min_value=0.9, max_value=0.98))
+    elif edge == "alternating":
+        lam[0] = -draw(st.floats(min_value=0.9, max_value=0.98))
+    seed = draw(st.integers(min_value=0, max_value=2**31 - 1))
+    rng = np.random.default_rng(seed)
+    Q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    A = Q @ np.diag(lam) @ Q.T
+    c = rng.uniform(-2.0, 2.0, size=n)
+    acceleration = draw(st.sampled_from(["none", "fixed"]))
+    relaxation = (draw(st.floats(min_value=0.3, max_value=1.0))
+                  if acceleration == "fixed" else 1.0)
+    return A, c, acceleration, relaxation
+
+
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(case=_normal_contractions())
+def test_the_spectral_bound_holds_on_random_normal_contractions(case):
+    """``spectral_error_bound >= ||x - x*||`` for any normal ``A``.
+
+    Under ``"none"`` and ``"fixed"`` at any relaxation, with negative
+    eigenvalues, alternation and a spectral radius up to 0.98, and
+    whether or not the group met its criterion within the cap -- the
+    bound is about the returned iterate, not about convergence.  The
+    spectrum is exact here (``n <= 6 < SPECTRAL_KRYLOV_STEPS``), so
+    ``spectral_usable`` is asserted True rather than assumed: a False
+    would mean the Arnoldi breakdown handling stopped resolving a
+    resolvable spectrum.
+    """
+    A, c, acceleration, relaxation = case
+    kw = dict(acceleration=acceleration)
+    if acceleration == "fixed":
+        kw["relaxation"] = relaxation
+    gm = _linear_cycle(A, c, max_iterations=400,
+                       tolerance=_ANALYTIC_TOLERANCE, **kw)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    x_star = np.linalg.solve(np.eye(len(c)) - A, c)
+    distance = _distance_to(gm, x_star)
+    rho = float(np.max(np.abs(np.linalg.eigvalsh(A))))
+    note(f"rho={rho} {acceleration} omega={relaxation} distance={distance} {d}")
+    assert d["spectral_usable"] is True, d
+    assert d["rho_spectral"] == pytest.approx(rho, abs=1e-4), (
+        f"rho_spectral={d['rho_spectral']} for a spectral radius of {rho}"
+    )
+    assert d["spectral_error_bound"] + _spectral_noise(d, 2 * len(c)) >= distance, (
+        f"{acceleration} omega={relaxation}: bound {d['spectral_error_bound']:.4e} "
+        f"below the true distance {distance:.4e} at rho={rho:.4f}"
     )

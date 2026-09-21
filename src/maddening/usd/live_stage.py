@@ -58,8 +58,9 @@ from maddening.core.compliance.stability import stability
 #: One node's state as :meth:`LiveStage.update` receives it:
 #: ``{field_name: array_or_scalar}``.
 #:
-#: Not a ``TypedDict``.  The fields are whichever ones the inner node
-#: declares, and the updaters below do not even fix the names they read
+#: Dynamic keys: an alias, not a TypedDict.  The fields are whichever
+#: ones the inner node declares, and the updaters below do not even fix
+#: the names they read
 #: -- ``make_translate_updater(field=...)`` takes the field name as an
 #: argument -- so there is no static key set to describe.
 NodeStateDict: TypeAlias = Mapping[str, Any]

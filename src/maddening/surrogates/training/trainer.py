@@ -67,8 +67,8 @@ class TrainResult:
         self,
         name: str,
         timestep: float,
-        # Not a TypedDict: the fields are whichever ones the surrogated
-        # node declares, so the key set is only known at runtime.
+        # Dynamic keys: an alias, not a TypedDict -- the fields are
+        # whichever ones the surrogated node declares.
         initial_values: FieldValues,
         integrator: Optional[Callable] = None,
     ) -> SurrogateNode:
@@ -250,6 +250,7 @@ class SurrogateTrainer:
         # contains non-array objects like activation functions.
 
         # Build per-sample loss
+        # Dynamic keys (the node's own fields): an alias, not a TypedDict.
         def sample_loss(
             arrays: PyTree,
             state: StateDict,
@@ -265,7 +266,8 @@ class SurrogateTrainer:
                 )
             return data_loss
 
-        # Batch loss: mean over batch
+        # Batch loss: mean over batch.  The `*_b` dicts hold the same
+        # dynamic keys with a leading batch axis: an alias, not a TypedDict.
         def batch_loss(
             arrays: PyTree,
             states_b: BatchedStateDict,
@@ -279,6 +281,7 @@ class SurrogateTrainer:
             return jnp.mean(losses)
 
         @jax.jit
+        # Dynamic keys, batched: an alias, not a TypedDict.
         def train_step(
             arrays: PyTree,
             opt_state: PyTree,
@@ -297,6 +300,7 @@ class SurrogateTrainer:
             return new_arrays, new_opt_state, loss
 
         @jax.jit
+        # Dynamic keys, batched: an alias, not a TypedDict.
         def eval_loss(
             arrays: PyTree,
             states_b: BatchedStateDict,

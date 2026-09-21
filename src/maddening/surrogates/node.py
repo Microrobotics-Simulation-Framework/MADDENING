@@ -26,8 +26,8 @@ from maddening.surrogates.types import (
 # Built-in integrators for derivative-mode surrogates
 # ------------------------------------------------------------------
 
-# Not a TypedDict: `state` carries whichever fields the surrogated node
-# declares, so the key set is a runtime property of the caller's node.
+# Dynamic keys (the node's own fields): an alias, not a TypedDict --
+# the key set is a runtime property of the caller's node.
 def euler_integrator(
     state: StateDict,
     deriv_fn: DerivFn,
@@ -38,7 +38,7 @@ def euler_integrator(
     return {k: state[k] + dt * derivs[k] for k in state}
 
 
-# Not a TypedDict, for the same reason as `euler_integrator`.
+# Dynamic keys, an alias not a TypedDict: see `euler_integrator`.
 def rk4_integrator(
     state: StateDict,
     deriv_fn: DerivFn,
@@ -177,9 +177,9 @@ class SurrogateNode(SimulationNode):
         ]
         return jax.tree_util.tree_unflatten(treedef, merged)
 
-    # Not a TypedDict: `params` is keyed by the weight pytree's own leaf
-    # paths, which are computed at call time (see `_weight_leaves`), and
-    # `state` by the surrogated node's fields.
+    # Dynamic keys: an alias, not a TypedDict.  `params` is keyed by the
+    # weight pytree's own leaf paths, computed at call time (see
+    # `_weight_leaves`), and `state` by the surrogated node's fields.
     def update(
         self,
         state: StateDict,

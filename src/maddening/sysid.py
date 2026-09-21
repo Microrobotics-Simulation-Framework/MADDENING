@@ -34,6 +34,7 @@ Usage::
 
 from __future__ import annotations
 
+import functools
 import math
 import numbers
 import warnings
@@ -476,11 +477,30 @@ class FIMReport:
         return self.param_names[i], float(v[i])
 
 
+def _leaf_size(leaf) -> int:
+    """Number of entries in a params leaf, **without reading it**.
+
+    ``int(np.asarray(leaf).size)`` -- what this used to be, in three
+    places -- pulls the whole leaf across the device boundary to read a
+    number that is part of its shape and therefore already known on the
+    host.  On a jax array ``np.asarray`` goes through the C buffer
+    protocol, so it does not show up as an ``__array__`` call, and
+    before Python 3.12 gave that protocol the PEP 688 ``__buffer__``
+    dunder it does not show up as *any* attribute access; it is a
+    device-to-host transfer all the same, and it blocks on whatever
+    computation produced the leaf.  ``np.shape`` reads ``.shape`` and
+    transfers nothing, and falls back to ``np.asarray`` only for a leaf
+    that has no shape of its own (a Python float), where there is
+    nothing on a device to wait for.
+    """
+    return int(math.prod(np.shape(leaf)))
+
+
 def _param_names(params) -> tuple[str, ...]:
     names: list[str] = []
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
         base = jax.tree_util.keystr(path)
-        n = int(np.asarray(leaf).size)
+        n = _leaf_size(leaf)
         if n == 1:
             names.append(base)
         else:
@@ -543,7 +563,7 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
     flags = _mask_flags(params, mask)
     idx, offset = [], 0
     for leaf, flag in zip(leaves, flags):
-        n = int(np.asarray(leaf).size)
+        n = _leaf_size(leaf)
         if bool(flag):
             idx.extend(range(offset, offset + n))
         offset += n
@@ -679,24 +699,53 @@ def _inverse_noise_std(noise_std, residual):
     scalar or broadcastable to the leaf).  ``jnp.ndim`` cannot tell the
     two apart -- it reports ``0`` for a dict -- so the scalar branch is
     keyed on the type.
+
+    The cast and the reciprocal are computed in **numpy**, not ``jnp``,
+    and only the finished array is handed to a device.  Every ``jnp``
+    operation performed while a ``jax.jit`` trace is open is staged into
+    that trace, concrete inputs or not, so a ``jnp`` cast here would
+    make ``sig`` a tracer and :func:`_check_noise_std` -- which has to
+    read it, because its job is to refuse it -- would raise
+    ``TracerArrayConversionError`` instead.  That is what made
+    ``fim_core(..., noise_std=...)`` untraceable at first.  numpy and
+    XLA both round a float32 division correctly, so the value is
+    unchanged.
+
+    ``residual`` is used for its *structure* only -- the pytree shape,
+    each leaf's shape and dtype, and the dtype ``ravel_pytree`` would
+    promote them to -- so it may be (and from :func:`fim` is) a tree of
+    :class:`jax.ShapeDtypeStruct` from :func:`jax.eval_shape` rather
+    than a computed residual.  :func:`fim` used to evaluate
+    ``residual_fn(params)`` in full to get here and then throw the
+    values away, a whole extra rollout per call that bought nothing at
+    all when ``noise_std`` was ``None`` -- the case that returns on the
+    line below.  ``jax.eval_shape`` gets the same structure by tracing,
+    with no compute and no compilation.
     """
     if noise_std is None:
         return None
-    flat_r = ravel_pytree(residual)[0]
+    flat_r = jax.eval_shape(lambda t: ravel_pytree(t)[0], residual)
+    dtype = np.dtype(flat_r.dtype)
     is_scalar = isinstance(noise_std, numbers.Real) or (
         isinstance(noise_std, (np.ndarray, jax.Array)) and noise_std.ndim == 0
     )
     if is_scalar:
-        sig = jnp.asarray(noise_std, dtype=flat_r.dtype)
+        sig = np.asarray(noise_std, dtype=dtype)
         _check_noise_std(sig, noise_std)
-        return 1.0 / sig
+        return jnp.asarray(np.ones((), dtype) / sig)
     sig = jax.tree.map(
-        lambda leaf, sd: jnp.broadcast_to(jnp.asarray(sd, dtype=leaf.dtype), jnp.shape(leaf)),
+        lambda leaf, sd: np.broadcast_to(
+            np.asarray(sd, dtype=np.dtype(leaf.dtype)), np.shape(leaf)),
         residual, noise_std,
     )
-    flat_sig = ravel_pytree(sig)[0]
+    # ``ravel_pytree``'s own two steps -- cast every leaf to the promoted
+    # dtype, then concatenate in flatten order -- done in numpy, because
+    # ``dtype`` above *is* that promotion, read off the abstract ravel.
+    leaves = [np.asarray(x, dtype=dtype).ravel() for x in jax.tree.leaves(sig)]
+    flat_sig = (np.concatenate(leaves) if leaves
+                else np.zeros(0, dtype=dtype))
     _check_noise_std(flat_sig, noise_std)
-    return 1.0 / flat_sig
+    return jnp.asarray(np.ones((), dtype) / flat_sig)
 
 
 def _check_noise_std(sig, original) -> None:
@@ -941,7 +990,10 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float], *,
     catches a component of relative length ``sqrt(n * eps)`` (5e-4 of
     the direction, in float32).
     """
-    dtype = jnp.asarray(eigvals).dtype
+    # ``jnp.result_type`` rather than ``jnp.asarray(...).dtype``: the
+    # latter ships the array to a device to read a dtype the host
+    # already knows, and ``fim`` now hands this function host arrays.
+    dtype = jnp.result_type(eigvals)
     ev = np.asarray(eigvals, dtype=np.float64)
     vecs = np.asarray(eigvecs, dtype=np.float64)
     n = int(ev.size)
@@ -968,6 +1020,461 @@ def _rank_and_crb(eigvals, eigvecs, rank_rtol: Optional[float], *,
     determined = np.isfinite(support) & (support <= n * eps) & np.isfinite(crb)
     crb = np.where(determined, crb, np.inf)
     return rank, jnp.asarray(crb, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# The jitted core: everything the report needs, as device arrays
+# ---------------------------------------------------------------------------
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+@dataclass(frozen=True, kw_only=True)
+class FIMCore:
+    """:func:`fim_core`'s output: the same quantities as :class:`FIMReport`,
+    as **device arrays**, from a function that can be ``jax.jit``-ed.
+
+    Registered as a pytree, so it can be returned from a jitted function
+    and carried through :func:`jax.lax.scan`.  ``param_names``,
+    ``n_residual`` and ``rank_rtol`` are static metadata; every other
+    field is a traced array.
+
+    Keyword-only for the reason :class:`FIMReport` is: a field inserted
+    in the middle would silently re-map every positional argument after
+    it, and a mis-assigned ``rank`` or ``crb`` is a wrong
+    identifiability verdict that raises nothing.
+
+    The fields answer the same questions :class:`FIMReport` answers and
+    by the same rules -- see it for what ``rank``, ``crb``,
+    ``zero_scaled`` and the precision band *mean*; only the types and
+    two deliberate differences are described here.
+
+    **Everything is a device array, including the verdicts.**  ``rank``
+    is a 0-d ``int32``, ``cond`` a 0-d float, ``finite`` and
+    ``precision_limited`` 0-d bools, ``zero_scaled`` a boolean mask over
+    ``param_names`` rather than a tuple of names.  Nothing here has been
+    read back to the host, which is the whole point: a control loop can
+    branch on ``crb`` with :func:`jax.lax.cond` or fold it into a
+    :func:`jax.lax.scan` carry without ever stalling on a transfer.
+    The host-side spellings -- the ``FloatingPointError`` on a
+    non-finite ``F``, the ``PrecisionLimitWarning``, the names in
+    ``zero_scaled`` -- all live in :func:`fim`, which is the reporting
+    path and is unchanged.
+
+    **The arithmetic runs at the matrix's own precision.**
+    :func:`fim`'s ``rank``/``crb``/precision-band verdicts widen the
+    eigendecomposition to float64 on the host first; these are computed
+    in float32 (or whatever ``F`` is) on the device, because widening
+    would mean a transfer and JAX has no float64 without the global
+    ``jax_enable_x64``.  The rule applied is identical and the two agree
+    on ``rank`` and on which ``crb`` entries are ``+inf`` over the
+    tested spread; the finite ``crb`` values differ in the last bits,
+    and a verdict close enough to the cutoff for the two to disagree is
+    exactly the one ``precision_limited`` is there to flag.
+
+    ``crb`` keeps :func:`fim`'s fail-closed polarity: ``+inf`` unless
+    finiteness was *positively* established, so ``crb < tol`` reads
+    False for an unidentifiable parameter and for a ``NaN`` matrix
+    rather than propagating a ``NaN`` into a gate.
+
+    Attributes
+    ----------
+    fim : jnp.ndarray
+        ``F = Jᵀ Σ⁻¹ J``, shape ``(n, n)``.
+    eigvals, eigvecs : jnp.ndarray
+        Ascending eigenvalues and their orthonormal columns.
+    rank : jnp.ndarray
+        0-d ``int32``: directions resolved above ``rank_rtol``.
+    cond : jnp.ndarray
+        0-d float: ``eigvals[-1] / eigvals[0]``, ``+inf`` when the
+        smallest eigenvalue is not positive -- including when it is
+        ``NaN``, where :attr:`FIMReport.cond` reports ``NaN``.  ``inf``
+        is the fail-closed reading and this is the gating path; the
+        reporting path keeps the number it has always published.
+    crb : jnp.ndarray
+        Cramér–Rao bound per parameter, ``(n,)``.
+    finite : jnp.ndarray
+        0-d bool: ``all(isfinite(F))``.  False is what makes
+        :func:`fim` raise; a loop should gate on it rather than trust
+        the rest of the record.
+    zero_scaled : jnp.ndarray
+        0-d-per-parameter bool mask, ``(n,)``: the parameters
+        ``scale="relative"`` found at exactly ``0.0``.  All False under
+        ``scale=None``.
+    precision_limited : jnp.ndarray
+        0-d bool: the rank verdict rests on a difference this precision
+        cannot resolve -- the condition :func:`fim` turns into a
+        :class:`~maddening.warnings.PrecisionLimitWarning`.  A live gate
+        should read it as a third outcome, "verdict unavailable",
+        rather than as a refusal.
+    deciding_ratio : jnp.ndarray
+        0-d float: the eigenvalue ratio nearest the cutoff in log
+        distance -- the number :func:`fim`'s warning quotes -- or
+        ``0.0`` when ``precision_limited`` is False.  Zero and not
+        ``NaN``: a reported ratio is always strictly positive, so zero
+        is unambiguous, and nothing in the core produces a ``NaN`` that
+        would stop a ``jax_debug_nans`` run on a value it discarded.
+    param_names : tuple of str
+        Static.  Names in the order the matrix is indexed.
+    n_residual : int
+        Static.  Rows of ``J``, i.e. the flattened residual length.
+    rank_rtol : float
+        Static.  The cutoff actually in force, already resolved through
+        :func:`_resolve_rank_rtol`.
+    """
+    fim: jnp.ndarray
+    eigvals: jnp.ndarray
+    eigvecs: jnp.ndarray
+    rank: jnp.ndarray
+    cond: jnp.ndarray
+    crb: jnp.ndarray
+    finite: jnp.ndarray
+    zero_scaled: jnp.ndarray
+    precision_limited: jnp.ndarray
+    deciding_ratio: jnp.ndarray
+    param_names: tuple[str, ...]
+    n_residual: int
+    rank_rtol: float
+
+
+jax.tree_util.register_dataclass(
+    FIMCore,
+    data_fields=["fim", "eigvals", "eigvecs", "rank", "cond", "crb",
+                 "finite", "zero_scaled", "precision_limited",
+                 "deciding_ratio"],
+    meta_fields=["param_names", "n_residual", "rank_rtol"],
+)
+
+
+def _device_rank_crb(eigvals, eigvecs, rank_rtol: float, n: int):
+    """``(rank, crb)`` on the device, by :func:`_rank_and_crb`'s rule.
+
+    The same two thresholds, the same fail-closed construction of
+    ``crb``; see :func:`_rank_and_crb` for why each is what it is.  Two
+    mechanical differences, both forced by staying on the device:
+
+    * **Precision.**  :func:`_rank_and_crb` widens to float64 before it
+      divides and sums.  There is no float64 here without the global
+      ``jax_enable_x64``, so this runs at ``eigvals``'s own precision.
+    * **No boolean indexing.**  ``vecs[:, resolved]`` needs a shape
+      known at trace time and ``resolved`` is traced, so the sums are
+      written as masked sums over all ``n`` columns.
+
+    The unresolved columns are divided by a substituted ``1.0`` rather
+    than by their own eigenvalue, which is the standard JAX
+    double-``where``.  It does not change a single returned value --
+    ``jnp.where`` *selects*, it does not multiply, so an ``inf`` in the
+    rejected branch is discarded rather than turned into ``0 * inf`` --
+    and it is not defensive padding either: an unresolved eigenvalue is
+    routinely exactly ``0.0`` or negative (the spring's ``(k, c, m)``
+    scale direction, any ``zero_scaled`` parameter), so without it the
+    division really does produce ``inf``/``NaN`` on every rank-deficient
+    problem.  That trips ``jax_debug_nans`` for a user who has turned it
+    on to find a real ``NaN``, and it is the term ``jax.grad`` of this
+    would carry.  ``TestCoreFailsClosed`` runs the whole core under
+    ``jax.debug_nans`` for exactly that reason.
+    """
+    eps = float(np.finfo(eigvals.dtype).eps)
+    resolved = eigvals > jnp.maximum(eigvals[-1], 0.0) * rank_rtol
+    rank = jnp.sum(resolved.astype(jnp.int32))
+    sq = eigvecs ** 2
+    safe = jnp.where(resolved, eigvals, jnp.ones_like(eigvals))
+    crb = jnp.sum(jnp.where(resolved[None, :], sq / safe, 0.0), axis=1)
+    support = jnp.sum(jnp.where(resolved[None, :], 0.0, sq), axis=1)
+    determined = (jnp.isfinite(support) & (support <= n * eps)
+                  & jnp.isfinite(crb))
+    return rank, jnp.where(determined, crb, jnp.inf)
+
+
+def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
+                              factor: float = _PRECISION_WARN_FACTOR):
+    """``(limited, deciding ratio)`` on the device, by
+    :func:`_precision_limited`'s rule.
+
+    Both of its conditions and both of its refusals survive: the ratio
+    must be within ``factor`` of the cutoff *and* at the precision
+    floor, a non-positive or non-finite largest eigenvalue means there
+    is no scale to compare against, and a non-positive ratio is not
+    reported (an exactly rank-deficient ``F`` is a real deficiency, not
+    a precision-limited verdict).  ``rank_rtol <= 0`` is a static
+    Python value, so that branch is taken at trace time and no
+    comparison is emitted at all.
+
+    ``argmin`` over the log distance replaces the host version's
+    ``argmin`` over a filtered array: the non-positive ratios are
+    pushed to ``+inf`` distance rather than removed, which selects the
+    same entry.
+
+    **Nothing here produces a ``NaN``, deliberately.**  Every divisor
+    and every ``log`` argument is masked to a safe value first, and the
+    "no verdict" answer is the ratio ``0.0`` rather than ``NaN`` -- a
+    reported ratio is a ratio of a positive eigenvalue to the largest,
+    so zero is unambiguous.  A ``NaN`` computed and then discarded stops
+    a user who has switched on ``jax_debug_nans`` to find their own, on
+    a value this function never used; and a control loop that logs
+    ``deciding_ratio`` every tick should not be logging ``NaN`` as its
+    normal output.
+    """
+    hi = eigvals[-1]
+    zero = jnp.zeros((), dtype=eigvals.dtype)
+    if rank_rtol <= 0.0:
+        return jnp.zeros((), dtype=bool), zero
+    usable = jnp.isfinite(hi) & (hi > 0.0)
+    ratios = eigvals / jnp.where(usable, hi, jnp.ones_like(hi))
+    pos = jnp.isfinite(ratios) & (ratios > 0.0)
+    distance = jnp.where(
+        pos, jnp.abs(jnp.log(jnp.where(pos, ratios, jnp.ones_like(ratios)))
+                     - math.log(rank_rtol)),
+        jnp.inf)
+    deciding = ratios[jnp.argmin(distance)]
+    limited = (usable & jnp.any(pos)
+               & (rank_rtol / factor <= deciding)
+               & (deciding <= rank_rtol * factor)
+               & (deciding <= factor * eps_floor))
+    return limited, jnp.where(limited, deciding, zero)
+
+
+def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma):
+    """``(J, zero-scaled mask)`` -- the expensive half, and the only half.
+
+    ``jacfwd`` over an N-step rollout is what made :func:`fim`
+    unusable in a loop: in eager mode every operation of the
+    ``lax.scan`` is dispatched separately, measured at 61-69 ms for a
+    200-step spring-damper rollout against 14-64 **microseconds** for
+    the same Jacobian under ``jax.jit``.  Everything downstream of
+    ``J`` is ``O(n*m)`` and ``O(n**3)`` on a handful of parameters and
+    costs well under a millisecond however it is scheduled.
+
+    Split out so that :func:`fim` can jit *this* and leave the rest
+    eager.  That is not squeamishness: ``J`` is bit-for-bit the same
+    jitted or not, but ``F = J.T @ J`` is not -- ``jax.jit`` folds the
+    transpose into the dot's dimension numbers instead of materialising
+    it, which accumulates in a different order and moves ``F`` by up to
+    a float32 ulp.  That is inside the ``max(n, sqrt(m)) * eps`` floor
+    this module declares its answers are good to, and it still moves
+    published verdicts, because ``rank`` and ``cond`` are decided by
+    comparisons *at* that floor: measured over this module's own test
+    problems, the spring's ``(k, c, m)`` scale direction -- whose
+    smallest eigenvalue is a rounding artefact either side of zero --
+    moved ``cond`` from ``inf`` to ``3.45e+07``, and a Fisher matrix
+    built with its smallest eigenvalue ratio *on* the cutoff moved
+    ``rank`` from 3 to 2.  :func:`fim` is the reporting path and its
+    numbers do not move; :func:`fim_core` jits the lot and says so.
+    """
+    flat, unravel = ravel_pytree(params)
+
+    def _r(theta):
+        full = theta if idx is None else flat.at[idx].set(theta)
+        r = ravel_pytree(residual_fn(unravel(full)))[0]
+        return r if inv_sigma is None else r * inv_sigma
+
+    theta0 = flat if idx is None else flat[idx]
+    J = jax.jacfwd(_r)(theta0)
+    if scale == "relative":
+        # A column scaled by a parameter sitting at exactly zero is zero,
+        # so the parameter drops out of F however well the data determine
+        # it.  Report that as what it is rather than as a verdict on the
+        # data: SpringDamperNode's initial_velocity defaults to 0.0, so
+        # this is the first thing a user meets on the default scale.
+        zero_scaled = theta0 == 0.0
+        J = J * theta0[None, :]
+    else:
+        zero_scaled = jnp.zeros(theta0.shape, dtype=bool)
+    return J, zero_scaled
+
+
+def _fim_spectrum(J):
+    """``(F, all-finite, eigvals, eigvecs)`` from the scaled Jacobian.
+
+    One definition, run two ways: eagerly by :func:`fim`, where it is
+    the same three operations in the same order that function has
+    always performed, and inside the trace by :func:`fim_core`.
+    ``eigh`` is evaluated before the finiteness of ``F`` is known
+    because a traced computation cannot branch on it; on a non-finite
+    ``F`` it returns ``NaN`` eigenvalues and eigenvectors rather than
+    raising, which is what :func:`fim` then refuses to build a report
+    from.
+    """
+    F = J.T @ J
+    eigvals, eigvecs = jnp.linalg.eigh(F)
+    return F, jnp.all(jnp.isfinite(F)), eigvals, eigvecs
+
+
+def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
+                     rank_rtol) -> FIMCore:
+    """The whole of :func:`fim`'s computation, with nothing read back."""
+    J, zero_scaled = _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
+                                   inv_sigma=inv_sigma)
+    F, finite, eigvals, eigvecs = _fim_spectrum(J)
+    lo, hi = eigvals[0], eigvals[-1]
+    # ``lo > 0`` rather than ``not (lo <= 0)``, so a ``NaN`` smallest
+    # eigenvalue reads ``inf`` -- singular -- and not ``NaN``, and the
+    # division never sees a zero.  :func:`fim` computes ``cond`` on the
+    # host from float64 copies and keeps the ``NaN`` there, because that
+    # is the number it has always published.
+    positive = lo > 0.0
+    cond = jnp.where(positive, hi / jnp.where(positive, lo, jnp.ones_like(lo)),
+                     jnp.inf)
+    names = _param_names(params)
+    if idx is not None:
+        names = tuple(names[i] for i in idx)
+    # The residual length ``J`` was summed over.  ``_r`` ravels its output,
+    # so this is the flattened residual row count whatever pytree shape
+    # ``residual_fn`` returns, and it is the only place ``m`` is visible:
+    # ``F`` and its decomposition have already discarded it.
+    n_residual = int(J.shape[0])
+    n_params = int(eigvals.shape[0])
+    rtol = _resolve_rank_rtol(eigvals.dtype, n_params, rank_rtol,
+                              n_residual=n_residual)
+    # The precision floor the band is anchored to is the *default*
+    # cutoff, which is what "the resolution of this arithmetic" means.
+    # It has to move with the cutoff: anchoring to the n-only form
+    # would re-impose the blind spot the sqrt(m) term removes, on the
+    # warning if no longer on the rank.
+    floor = _resolve_rank_rtol(eigvals.dtype, n_params, None,
+                               n_residual=n_residual)
+    rank, crb = _device_rank_crb(eigvals, eigvecs, rtol, n_params)
+    limited, ratio = _device_precision_limited(eigvals, rtol, floor)
+    return FIMCore(
+        fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
+        crb=crb, finite=finite, zero_scaled=zero_scaled,
+        precision_limited=limited, deciding_ratio=ratio,
+        param_names=names, n_residual=n_residual, rank_rtol=rtol,
+    )
+
+
+#: Distinct ``(residual_fn, scale, mask)`` signatures whose traced
+#: Jacobian :func:`fim` keeps compiled.  Bounded because each entry
+#: holds a strong reference to the caller's ``residual_fn`` and to
+#: everything it closes over -- a graph, a window of observations -- and
+#: an unbounded cache keyed on user callables is a leak.  ``jax.jit``
+#: caches on the same principle.
+_FIM_JACOBIAN_CACHE_SIZE = 32
+
+
+@functools.lru_cache(maxsize=_FIM_JACOBIAN_CACHE_SIZE)
+def _fim_jacobian_compiled(residual_fn, scale, idx_key):
+    """The jitted :func:`_fim_jacobian` for one static signature.
+
+    ``fim`` used to re-trace the whole rollout on every call, and to
+    call ``residual_fn`` twice per call while doing it.  Tracing and
+    compiling costs the same 60-70 ms that eager ``jacfwd`` costs, so
+    the win is entirely in *not paying it again*: a caller that holds
+    its ``residual_fn`` across calls -- which is what a control loop
+    does -- pays the trace once and 14-64 us thereafter.
+
+    A caller that builds a fresh closure per call misses the cache
+    every time and is no worse off than before, because compile and
+    eager measure the same; it gets no benefit either, so the one thing
+    a loop must do is hoist ``residual_fn`` out of it.
+    :func:`fim_core` is the direct way to say that.
+
+    ``inv_sigma`` is an *argument* of the returned function rather than
+    part of the key, so a noise model does not have to be hashable to
+    be cached and changing sigma between calls does not recompile: only
+    its shape and dtype are baked in, by ``jax.jit`` itself.
+    """
+    idx = None if idx_key is None else np.asarray(idx_key)
+
+    @jax.jit
+    def run(params, inv_sigma):
+        return _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
+                             inv_sigma=inv_sigma)
+
+    return run
+
+
+def _resolved_noise(residual_fn, params, noise_std):
+    """``1 / sigma``, or ``None``, without evaluating the residual.
+
+    ``jax.eval_shape`` traces ``residual_fn`` for its output structure
+    and dtypes and runs none of it.  ``fim`` used to call
+    ``residual_fn(params)`` in full here -- a whole extra rollout per
+    call -- and then hand the result to :func:`_inverse_noise_std`,
+    which returns ``None`` on the first line when ``noise_std`` is
+    ``None`` and never looks at it.  That is the common case and the
+    rollout was pure waste; now nothing is traced at all unless a noise
+    model was given.
+    """
+    if noise_std is None:
+        return None
+    return _inverse_noise_std(noise_std, jax.eval_shape(residual_fn, params))
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+def fim_core(
+    residual_fn: Callable[[dict], Any],
+    params: dict,
+    *,
+    scale: Optional[str] = "relative",
+    mask: Optional[dict] = None,
+    noise_std: Optional[Any] = None,
+    rank_rtol: Optional[float] = None,
+) -> FIMCore:
+    """:func:`fim`'s computation with no host round trip -- jit this.
+
+    Same arguments and same mathematics as :func:`fim`; see it for what
+    every argument means.  What differs is that nothing is read back to
+    the host: the result is a :class:`FIMCore` of device arrays, there
+    is no ``FloatingPointError``, no ``PrecisionLimitWarning`` and no
+    tuple of ``zero_scaled`` names, and the whole thing traces.  Use it
+    where :func:`fim` is too slow to call -- inside a control loop, or
+    under ``jax.lax.scan`` -- and :func:`fim` where a human reads the
+    answer.
+
+    ``residual_fn``, ``scale``, ``mask`` and ``rank_rtol`` are static:
+    close over them rather than passing them as traced arguments::
+
+        core_fn = jax.jit(functools.partial(fim_core, residual_fn))
+        core = core_fn(params)              # device arrays, no sync
+        ok = core.finite & (core.crb[0] < tol) & ~core.precision_limited
+
+    ``params`` and ``noise_std`` may be traced, with one restriction:
+    ``noise_std`` is validated on the host (a sigma that is zero,
+    negative, non-finite or underflows the residual's dtype is refused,
+    and a ``jax.jit`` trace cannot refuse anything), so inside ``jit``
+    it has to be a value the trace already holds -- a constant closed
+    over, not an argument of the jitted function.  Pass the reciprocal
+    yourself if you need sigma to vary per call.
+
+    Returns
+    -------
+    FIMCore
+        ``fim``, ``eigvals``, ``eigvecs``, and the verdicts ``rank``,
+        ``cond``, ``crb``, ``finite``, ``zero_scaled``,
+        ``precision_limited`` and ``deciding_ratio``, all as device
+        arrays.  ``crb`` keeps :func:`fim`'s fail-closed ``+inf``
+        polarity, so ``crb < tol`` is False for an unidentifiable
+        parameter and for a ``NaN`` matrix alike.
+
+    Raises
+    ------
+    ValueError
+        For a ``scale``, ``mask``, ``rank_rtol`` or ``noise_std`` this
+        function cannot answer for -- at trace time, since that is when
+        they are read.
+
+    Notes
+    -----
+    A non-finite ``F`` is reported in ``finite`` rather than raised.
+    That is the one deliberate behaviour difference from :func:`fim`
+    and it is forced: a traced computation has no value to test.  It is
+    also what a loop wants, which is to notice and hold last-known-good
+    rather than to unwind.  **A caller that ignores ``finite`` gets a
+    report built on ``NaN``**, where ``rank`` is 0 and every ``crb`` is
+    ``+inf`` -- fail-closed, but silent.
+
+    See Also
+    --------
+    fim : the same computation with the host-side verdict layer on top.
+    """
+    if scale not in ("relative", None):
+        raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
+    return _fim_core_traced(
+        residual_fn, params, scale=scale,
+        idx=_masked_indices(params, mask),
+        inv_sigma=_resolved_noise(residual_fn, params, noise_std),
+        rank_rtol=rank_rtol,
+    )
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -1108,36 +1615,35 @@ def fim(
     """
     if scale not in ("relative", None):
         raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
-    flat, unravel = ravel_pytree(params)
     idx = _masked_indices(params, mask)
-    r0 = residual_fn(params)
-    inv_sigma = _inverse_noise_std(noise_std, r0)
+    inv_sigma = _resolved_noise(residual_fn, params, noise_std)
+    idx_key = None if idx is None else tuple(int(i) for i in idx)
+    try:
+        run = _fim_jacobian_compiled(residual_fn, scale, idx_key)
+    except TypeError:
+        # An unhashable ``residual_fn`` (a callable object that defines
+        # ``__eq__`` without ``__hash__``) cannot key the cache.  That is
+        # a reason to skip the cache, not to refuse the call: build the
+        # Jacobian eagerly, exactly as this function did before it was
+        # jitted at all.
+        J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
+                                     idx=idx, inv_sigma=inv_sigma)
+    else:
+        J, zero_mask = run(params, inv_sigma)
+    # Eager, and deliberately: see :func:`_fim_jacobian` for why the
+    # Gram product stays off the compiler's hands in the reporting path.
+    F, finite, eigvals, eigvecs = _fim_spectrum(J)
 
-    def _r(theta):
-        full = theta if idx is None else flat.at[idx].set(theta)
-        r = ravel_pytree(residual_fn(unravel(full)))[0]
-        return r if inv_sigma is None else r * inv_sigma
-
-    theta0 = flat if idx is None else flat[idx]
-    J = jax.jacfwd(_r)(theta0)
-    names = _param_names(params)
-    if idx is not None:
-        names = tuple(names[i] for i in idx)
-    zero_scaled: tuple[str, ...] = ()
-    if scale == "relative":
-        # A column scaled by a parameter sitting at exactly zero is zero,
-        # so the parameter drops out of F however well the data determine
-        # it.  Report that as what it is rather than as a verdict on the
-        # data: SpringDamperNode's initial_velocity defaults to 0.0, so
-        # this is the first thing a user meets on the default scale.
-        zero_scaled = tuple(
-            nm for nm, at_zero in zip(names, np.asarray(theta0) == 0.0)
-            if bool(at_zero)
-        )
-        J = J * theta0[None, :]
-
-    F = J.T @ J
-    if not bool(jnp.all(jnp.isfinite(F))):
+    # One blocking read, four buffers, and everything below is host
+    # numpy.  ``_rank_and_crb`` and ``_precision_limited`` re-widen to
+    # float64 and would each have pulled ``eigvals`` across on their
+    # own; handing them arrays that are already on the host means the
+    # count does not grow with the number of host-side verdicts.  It is
+    # asserted in the tests, because a stray ``float(...)`` reintroducing
+    # a sync is invisible in every other way.
+    eigvals_h, eigvecs_h, finite_h, zero_h = jax.device_get(
+        (eigvals, eigvecs, finite, zero_mask))
+    if not bool(finite_h):
         raise FloatingPointError(
             "non-finite Fisher matrix: F = J^T J holds inf or NaN at these "
             "params. eigh of a non-finite matrix returns NaN eigenvalues and "
@@ -1148,32 +1654,35 @@ def fim(
             "diverged rollout), that its Jacobian does not overflow, and that "
             "noise_std is not so small that r / sigma does."
         )
-    eigvals, eigvecs = jnp.linalg.eigh(F)
-    lo, hi = float(eigvals[0]), float(eigvals[-1])
+    names = _param_names(params)
+    if idx is not None:
+        names = tuple(names[i] for i in idx)
+    zero_scaled: tuple[str, ...] = tuple(
+        nm for nm, at_zero in zip(names, zero_h) if bool(at_zero))
+    # float() of two float32s, divided in float64 -- as before.  Doing it
+    # on the device instead would round the quotient to float32 and move
+    # a published number for no gain; ``eigvals`` is on the host already.
+    lo, hi = float(eigvals_h[0]), float(eigvals_h[-1])
     cond = float("inf") if lo <= 0.0 else hi / lo
-    # The residual length ``J`` was summed over.  ``_r`` ravels its output,
-    # so this is the flattened residual row count whatever pytree shape
-    # ``residual_fn`` returns, and it is the only place ``m`` is visible:
-    # ``F`` and its decomposition have already discarded it.
     n_residual = int(J.shape[0])
-    rank, crb = _rank_and_crb(eigvals, eigvecs, rank_rtol,
+    rank, crb = _rank_and_crb(eigvals_h, eigvecs_h, rank_rtol,
                               n_residual=n_residual)
-    n_params = int(np.asarray(eigvals).size)
+    n_params = int(eigvals_h.shape[0])
     limited = _precision_limited(
-        eigvals,
-        _resolve_rank_rtol(eigvals.dtype, n_params, rank_rtol,
+        eigvals_h,
+        _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
                            n_residual=n_residual),
         # The precision floor the band is anchored to is the *default*
         # cutoff, which is what "the resolution of this arithmetic" means.
         # It has to move with the cutoff: anchoring to the n-only form
         # would re-impose the blind spot the sqrt(m) term removes, on the
         # warning if no longer on the rank.
-        _resolve_rank_rtol(eigvals.dtype, n_params, None,
+        _resolve_rank_rtol(eigvals_h.dtype, n_params, None,
                            n_residual=n_residual),
     )
     if limited is not None:
         ratio, cutoff = limited
-        dtype = np.asarray(eigvals).dtype
+        dtype = eigvals_h.dtype
         # Under x64 the remedy has already been taken, and repeating it
         # would send a user round a loop they have finished.  There is
         # no third precision to escalate to, so say what is left: the

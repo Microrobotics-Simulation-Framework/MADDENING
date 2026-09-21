@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
+  trip** — jittable, zero device syncs, device-array verdicts for a control
+  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers
 - **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
   every `>>>` in `src/maddening` now runs, and the gate fails if the
   collection shrinks — an example that stops working is a failing build

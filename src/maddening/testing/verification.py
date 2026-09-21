@@ -36,13 +36,12 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import inspect
 
 import numpy as np
 import numpy.typing as npt
 
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import _method_accepts_params
+from maddening.core.node import _method_accepts_params, _signature_takes_params
 from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -280,10 +279,7 @@ def _produces_fluxes(node) -> bool:
 
 
 def _flux_accepts_params(node) -> bool:
-    try:
-        return "params" in inspect.signature(node.compute_boundary_fluxes).parameters
-    except (TypeError, ValueError):
-        return False
+    return _signature_takes_params(node.compute_boundary_fluxes)
 
 
 def _outputs(node, state, bi, dt, params=_NO_PARAMS):

@@ -196,6 +196,38 @@ class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
     ]
 
     @staticmethod
+    def _refusal_message(call, entry_point: str) -> str:
+        """Call ``call`` and return the ``TypeError`` it must raise.
+
+        Written out rather than ``pytest.raises(TypeError)`` because the
+        no-raise branch is the one that matters most here: a bare
+        ``Failed: DID NOT RAISE <class 'TypeError'>`` is the single most
+        likely message a future maintainer will see from this module, and it
+        has to say what to do about it.
+        """
+        try:
+            call()
+        except TypeError as exc:
+            return str(exc)
+        except Exception as exc:  # noqa: BLE001 - shape change, report it
+            pytest.fail(
+                f"{entry_point} raised {type(exc).__name__} under x64, but "
+                f"{_ANOMALY} records a TypeError from `lax.scan` about the "
+                f"carry dtype.  The mechanism has changed.  "
+                f"{_UPDATE_THE_ENTRY}\n\n{exc}"
+            )
+        pytest.fail(
+            f"{entry_point} now succeeds under `jax_enable_x64` on a freshly "
+            f"compiled graph.  {_ANOMALY} records that it cannot: the params "
+            f"pytree is float64 and the state seed is float32, so `lax.scan` "
+            f"refuses the carry.  If x64 now reaches the graph scan paths, "
+            f"that limitation is gone and the entry should be resolved -- "
+            f"check `TestTheDtypeAsymmetryThatCausesIt` first, because "
+            f"narrowing the params back to float32 also makes this pass and "
+            f"is NOT a fix.  {_UPDATE_THE_ENTRY}"
+        )
+
+    @staticmethod
     def _assert_is_the_recorded_failure(message: str, node_name: str) -> None:
         """The failure's *shape*, not JAX's exact wording.
 
@@ -222,9 +254,10 @@ class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
     def test_run_scan_raises_on_the_carry_dtype(self, make_node, node_name):
         with _x64():
             gm = _compiled(make_node())
-            with pytest.raises(TypeError) as excinfo:
-                gm.run_scan(4)
-        self._assert_is_the_recorded_failure(str(excinfo.value), node_name)
+            message = self._refusal_message(
+                lambda: gm.run_scan(4), "GraphManager.run_scan"
+            )
+        self._assert_is_the_recorded_failure(message, node_name)
 
     @pytest.mark.parametrize("make_node, node_name", _NODES)
     def test_run_scan_with_history_raises_the_same_way(
@@ -232,9 +265,11 @@ class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
     ):
         with _x64():
             gm = _compiled(make_node())
-            with pytest.raises(TypeError) as excinfo:
-                gm.run_scan_with_history(4)
-        self._assert_is_the_recorded_failure(str(excinfo.value), node_name)
+            message = self._refusal_message(
+                lambda: gm.run_scan_with_history(4),
+                "GraphManager.run_scan_with_history",
+            )
+        self._assert_is_the_recorded_failure(message, node_name)
 
     def test_the_same_graphs_scan_without_x64(self):
         """The control.

@@ -293,3 +293,135 @@ def test_assert_node_verified_reports_all_failures():
                              bounds={"x": (0.0, 1.0)}, **KW)
     msg = str(ei.value)
     assert "finite: FAIL" in msg and "gradient_finite: FAIL" in msg
+
+
+# ---------------------------------------------------------------------------
+# params_effective through the solver paths (derivatives / implicit_residual)
+# ---------------------------------------------------------------------------
+#
+# Every fixture below decays ``x`` at rate ``k``; the state envelope
+# ``(0.25, 1.0)`` keeps ``x`` away from zero so ``d(-k x)/dk = -x`` is
+# non-zero on every sample -- a fixture sitting at ``x == 0`` (the analogue
+# of a spring at its rest length) has a zero sensitivity to ``k`` whatever
+# the path does with it, and could not express the fault.
+
+class _Decay(_Scalar):
+    """``update`` and ``derivatives`` both read ``k`` from the merged dict."""
+    def __init__(self, name, timestep, **extra):
+        super().__init__(name, timestep, k=2.0, **extra)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": s["x"] - dt * p["k"] * s["x"]}
+
+    def derivatives(self, s, bi, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": -p["k"] * s["x"]}
+
+
+class DerivativesIgnoreInjectedParams(_Decay):
+    """Takes the keyword and reads ``self.params`` anyway: the fault the
+    guard cannot see (the signature is right) and this probe exists for."""
+    def derivatives(self, s, bi, *, params=None):
+        return {"x": -self.params["k"] * s["x"]}
+
+
+class DerivativesLegacySignature(_Decay):
+    """No keyword at all: ``integrate_node(..., params=...)`` refuses it."""
+    def derivatives(self, s, bi):
+        return {"x": -self.params["k"] * s["x"]}
+
+
+class DerivativesOmitALeaf(_Decay):
+    """``bounce`` matters to ``update`` (a floor) and is legitimately absent
+    from the continuous right-hand side -- the ball's ``elasticity``."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, bounce=0.5)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        x = s["x"] - dt * p["k"] * s["x"]
+        return {"x": jnp.where(x < 0.5, 0.5 + (0.5 - x) * p["bounce"], x)}
+
+
+class ResidualIgnoresInjectedParams(_Decay):
+    """A standalone ``implicit_residual`` (not built on ``derivatives``)
+    that takes the keyword and reads ``self.params``."""
+    def implicit_residual(self, s_new, s_old, bi, dt, *, params=None):
+        return {"x": s_new["x"] - s_old["x"] + dt * self.params["k"] * s_new["x"]}
+
+
+class ResidualClean(_Decay):
+    def implicit_residual(self, s_new, s_old, bi, dt, *, params=None):
+        d = self.derivatives(s_new, bi, params=params)
+        return {"x": s_new["x"] - s_old["x"] - dt * d["x"]}
+
+
+class DerivativesNotApplicable(_Decay):
+    """A discrete node: the override exists only to say so."""
+    def derivatives(self, s, bi, *, params=None):
+        raise NotImplementedError("discrete update, no ODE form")
+
+
+_DECAY_BOUNDS = {"x": (0.25, 1.0)}
+
+
+def test_derivatives_that_ignore_the_injected_params_are_caught():
+    res = verify_node(DerivativesIgnoreInjectedParams(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, **KW)
+    assert res["params_consistent"].passed      # update() is clean
+    assert res["params_effective"].failed       # derivatives() is not
+    detail = res["params_effective"].detail
+    assert "derivatives() reads ['k'] from self.params" in detail
+    assert "update()" not in detail.split("derivatives()")[0]  # update is not blamed
+
+
+def test_a_legacy_derivatives_signature_is_caught():
+    res = verify_node(DerivativesLegacySignature(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert res["params_effective"].failed
+    assert "update() takes params but derivatives() does not" in res["params_effective"].detail
+
+
+def test_a_clean_derivatives_override_passes_and_the_detail_names_the_paths():
+    res = verify_node(_Decay(name="n", timestep=0.01), bounds=_DECAY_BOUNDS, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["params_effective"].detail == "paths checked: update, derivatives"
+
+
+def test_a_leaf_the_right_hand_side_does_not_consume_is_reported_not_failed():
+    res = verify_node(DerivativesOmitALeaf(name="n", timestep=0.01),
+                      bounds={"x": (0.25, 0.75)}, checks=["params_effective"], **KW)
+    assert res["params_effective"].passed, res["params_effective"].detail
+    assert "not consumed by derivatives(): ['bounce']" in res["params_effective"].detail
+    assert "'k'" not in res["params_effective"].detail
+
+
+def test_an_implicit_residual_that_ignores_the_injected_params_is_caught():
+    res = verify_node(ResidualIgnoresInjectedParams(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert res["params_effective"].failed
+    assert "implicit_residual() reads ['k'] from self.params" in res["params_effective"].detail
+    assert "derivatives() reads" not in res["params_effective"].detail
+
+
+def test_a_clean_implicit_residual_is_checked_and_named():
+    res = verify_node(ResidualClean(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert res["params_effective"].passed, res["params_effective"].detail
+    assert res["params_effective"].detail == "paths checked: update, derivatives, implicit_residual"
+
+
+def test_a_not_applicable_derivatives_override_is_recorded_not_failed():
+    res = verify_node(DerivativesNotApplicable(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert res["params_effective"].passed, res["params_effective"].detail
+    assert "derivatives(): not applicable" in res["params_effective"].detail
+    assert "paths checked: update" in res["params_effective"].detail
+
+
+def test_the_constructor_value_probe_restores_the_node():
+    node = DerivativesIgnoreInjectedParams(name="n", timestep=0.01)
+    before = dict(node.params)
+    verify_node(node, bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert node.params == before

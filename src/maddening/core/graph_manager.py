@@ -444,15 +444,20 @@ def _fixed_point_while(
        mode emerges.  The same mechanism, inverted, is why IQN
        understates — a superlinear sequence reads ``rho -> 0``.
        **Under ``solver="ift"`` with ``diagnostics=True`` this one is
-       measured rather than guessed**: a short Arnoldi iteration on
-       ``dF/dx`` at the returned iterate gives ``rho_spectral``, and
-       ``coupling_diagnostics()['spectral_error_bound']`` is
-       ``residual / (1 - rho_spectral)`` with a margin -- a bound for
-       a linear ``F`` with a normal Jacobian, and an asymptotic
-       estimate otherwise (see
-       :func:`~maddening.core.coupling.acceleration.spectral_error_bound`).
-       On the same two-mode case it reports 6-7x *over* the true
-       distance where ``error_estimate`` reports 122x under.  The
+       measured rather than guessed**: eight Arnoldi steps on ``dF/dx``
+       at the returned iterate, in the group's own norm coordinates,
+       give ``rho_spectral`` and the resolvent norm of the compressed
+       Jacobian, and ``coupling_diagnostics()['spectral_error_bound']``
+       is the residual times the larger of that norm and
+       ``1 / (1 - rho_spectral)`` (with a margin for an unresolved
+       Krylov space).  For a linear ``F`` the error of *any* iterate is
+       ``(A - I)^{-1}`` of its residual, so that is a bound whatever
+       the step sequence, the relaxation or the accelerator did; for a
+       non-linear ``F`` it is asymptotic (see
+       :func:`~maddening.core.coupling.acceleration.spectral_error_bound`
+       for the conditions).  On the same two-mode case it reports 8x
+       *over* the true distance where ``error_estimate`` reports 122x
+       under, and 1.2x over under ``aitken`` and ``iqn-ils``.  The
        criterion this loop stops on is unchanged; the spectral number
        is reported beside it, not applied.
     3. *A dynamic step scale.*  ``omega`` above is exact for
@@ -4918,6 +4923,72 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
+            - ``"rho_spectral"`` : float — the spectral radius of
+              ``dF/dx`` at the returned state, from eight Arnoldi steps
+              on the Jacobian-vector product the IFT adjoint already
+              builds (:func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`).
+              Unlike ``"amplification"``'s ``rho``, which is read off
+              the residual sequence and reports the mode dominating the
+              *step*, this sees every mode whatever its current
+              amplitude: on the two-mode case where the sequence reads
+              0.2 it reads 0.999.  Exact (non-zero eigenvalues, to
+              float32) for a group whose Jacobian has rank at most
+              eight -- rank is at most the number of boundary scalars
+              crossing the group's edges -- and an estimate from below
+              otherwise, which ``"spectral_usable"`` reports.  **Only
+              under ``solver="ift"`` with ``diagnostics=True``**; NaN
+              for ``"fori"``, for ``diagnostics=False``, at
+              ``max_iterations=1`` (no fixed point was solved) and
+              before the first step.  Costs eight Jacobian-vector
+              products per group per step, which is why it is gated.
+            - ``"spectral_error_bound"`` : float — ``residual`` times
+              the larger of ``||(I - H)^{-1}||_2`` (the resolvent norm
+              of the Krylov-compressed Jacobian, in the group's own
+              norm) and ``1 / (1 - rho_spectral)`` with a margin for an
+              unresolved Krylov space
+              (:func:`~maddening.core.coupling.acceleration.spectral_error_bound`).
+              For a linear ``F`` the error of *any* iterate is
+              ``(A - I)^{-1}`` of its residual, whatever the step
+              sequence, relaxation or accelerator did -- so this is a
+              **bound** on ``||x - x*||`` where ``"error_estimate"`` is
+              an estimate, and it needs none of the four conditions
+              above: measured 8x *over* the true distance on the
+              two-mode case (``"error_estimate"``: 122x under), 1.2x
+              over under ``aitken`` and ``iqn-ils`` (2x and 1000x
+              under), and never below the true distance on random
+              normal contractions of dimension 2-6 with negative and
+              near-1 eigenvalues.  The resolvent term is what holds on
+              a non-normal Jacobian: the Jacobi map of the heterogeneous
+              benchmark fixture read 30-40x under with
+              ``1/(1 - rho_spectral)`` alone, and 1.5-3.3x over with
+              it -- at the price of being loose elsewhere on that map
+              (up to 119x over).  **What it still is not**: for a
+              non-linear ``F`` it is asymptotic (Ostrowski) -- exact to
+              float32 on a log map within ``tolerance`` of its fixed
+              point, an estimate far from one; it is in the group's
+              norm at the returned state, so the dead band's excluded
+              fields are outside it and the norm's scale drifts with
+              the iterate exactly as it does for ``"residual"``; and
+              it inherits ``"residual"``'s float32 noise floor (a
+              residual of ``0.0`` gives a bound of ``0.0``; on a
+              60,000-entry L2 norm it read 0.991x once).  ``inf``
+              when ``rho_spectral`` (with margin) is at or above one;
+              NaN where ``"rho_spectral"`` is.  It is reported, not
+              applied: ``"converged"`` and the iteration counts are
+              exactly what they were.
+            - ``"spectral_usable"`` : bool — the bound above is finite
+              and the Arnoldi space had settled: the Arnoldi residual
+              ``h_{k+1,k}`` is at most 5% of ``1 - rho_spectral``
+              (:func:`~maddening.core.coupling.acceleration.spectral_rate_settled`).
+              ``False`` where nothing was computed (see
+              ``"rho_spectral"``), where the bound is ``inf``, and for
+              a group with more independent interface scalars than the
+              eight Krylov steps resolve -- there ``"rho_spectral"``
+              is from below and the bound carries only the margin.
+              Like ``"ratio_usable"``, it reports what the code
+              checked and nothing more: a settled space has settled
+              *somewhere*, and the linearity condition is not checked
+              by anything.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -4936,8 +5007,10 @@ class GraphManager:
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
-            here by the same rule, so migrating a graph between them
-            does not move the answer or the verdict.  The returned
+            here by the same rule -- the three spectral keys excepted,
+            which ``"fori"`` has no linearisation to compute and
+            reports as NaN / ``False`` -- so migrating a graph between
+            them does not move the answer or the verdict.  The returned
             state agrees to float32 round-off -- bit-identical on most
             graphs, and 7.3e-07 relative in the worst of 480
             configurations of a subcycled multi-rate group, none of
@@ -4967,8 +5040,10 @@ class GraphManager:
             ``tests/core/test_coupling_solver_equivalence.py``.
 
             Reported for every group under ``solver="ift"``; ``"fori"``
-            groups only with ``diagnostics=True``.  Empty dict if no
-            step has been taken yet.
+            groups only with ``diagnostics=True``.  The three spectral
+            keys are present for every group and carry a value only
+            under ``solver="ift"`` with ``diagnostics=True``.  Empty
+            dict if no step has been taken yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}

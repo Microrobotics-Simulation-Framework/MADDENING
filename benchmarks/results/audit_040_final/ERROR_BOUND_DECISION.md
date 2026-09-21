@@ -137,3 +137,130 @@ which is the signal to revisit this memo.
 `test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged` pins
 the 122x itself, so a partial improvement is visible rather than
 silently still-failing.
+
+
+## 2026-09-22 — the spectrum is measured: `spectral_error_bound`
+
+Appended, not rewritten: everything above stands as the record of the
+decision it describes.  This section records what landed on
+`feat/spectral-error-bound` (Phase 3 item 3) against it.  Measurements
+on this machine, jaxlib 0.11.0, CPU, float32; reproducers were run
+from the session scratchpad and are reproduced by the tests named
+below.
+
+**What was built.**  Under `solver="ift"` with `diagnostics=True`,
+after the fixed-point solve, eight Arnoldi steps on the Jacobian-vector
+product the IFT adjoint already builds — at the *returned* iterate, in
+the group's own norm coordinates (`D J D^+`, `D` the per-field weights
+`_scaled_change` applies there) — give three scalars in `_meta`: the
+Ritz spectral radius `rho_spectral` (Gelfand's formula on the k×k
+Hessenberg, log-space, from above; no non-symmetric `eigvals`, so it
+lowers on every backend), the Arnoldi residual `h_{k+1,k}`, and the
+resolvent norm `||(I - H)^{-1}||_2`.  `coupling_diagnostics()` gains
+`rho_spectral`, `spectral_error_bound = residual * max(||(I - H)^{-1}||,
+1 / (1 - rho_spectral - 2 h_{k+1,k}))` and `spectral_usable`
+(finite, and `h_{k+1,k} <= 0.05 (1 - rho_spectral)`).  The seven
+existing keys keep their names and values, the criterion is unchanged,
+and the returned state is bit-identical to the base tree on 12
+fixture/configuration rows.  Cost: 8 Jacobian-vector products per group
+per step plus an 8×8 SVD and 24 8×8 products, charged only with
+`diagnostics=True`.  `fori`, `diagnostics=False` and `max_iterations=1`
+report NaN and `False`.
+
+**Why Arnoldi and not the power iteration this memo proposed.**  Built
+first as written above.  On 60 random symmetric contractions of
+dimension 2–6 eight power-iteration steps under-resolved clustered
+spectra (true 0.983 read 0.949) and put the bound *below* the true
+distance in about one draw in six, with no stationarity test able to
+see it; on the heterogeneous fixture's Jacobi map, whose spectrum is
+symmetric under sign, the norm-ratio sequence oscillated and the bound
+read `inf` on every step.  A coupling Jacobian's rank is at most the
+number of boundary scalars crossing the group's edges, so an eight-step
+Krylov space is its whole range for any group with up to eight of them
+and the Ritz spectrum is exact — 80/80 draws `spectral_usable` with a
+minimum `bound/distance` of 1.0001 after the change.
+
+**Why the resolvent and not only the radius.**  Item 6 asked for the
+heterogeneous fixture (60 000-cell heat grid + 4 probes, Jacobi, Aitken,
+L2, tolerance 1e-4).  `rho_spectral` resolved exactly on every step
+(0.693), and on the two steps where Aitken produced the residual dip
+this release documented, `residual / (1 - rho_spectral)` read
+**0.031x and 0.024x** of the true per-step distance — 30–40x under, with
+the radius right.  The condition that failed is normality: the grid
+responds strongly to the probes and the probes weakly back, the
+`±lambda` eigenvector pair is nearly parallel, and an error of the shape
+"grid consistent with probes, both off" has a residual `(1 - lambda²)`
+times its probe part while its size is the grid's response to it.  When
+the Krylov space is invariant (`h_{k+1,k} = 0` certifies it) `A Q = Q H`
+and `||(I - A)^{-1} r|| <= ||(I - H)^{-1}|| ||r||` for any `r` in the
+space, whatever the eigenvectors do.  With that term the bound holds on
+all 20 steps: **1.47x and 3.31x** on the two dip steps.
+
+**Measured ratios `spectral_error_bound / true distance`.**
+
+| fixture | configuration | `error_estimate` | `spectral_error_bound` |
+|---|---|---|---|
+| two-mode `(0.999, 0.2)`, tol 1e-4 | gs / none | 0.0082 (122x under) | **7.95** |
+| two-mode | gs / fixed ω=1.3 | 0.0022 | 1.98 |
+| two-mode | gs / aitken (cap 60) | 0.50 | 1.22 |
+| two-mode | gs / iqn-ils | 0.0010 | 1.22 |
+| single mode ρ=0.25 | gs / none | 1.00 | 1.06 |
+| log map `a + g log(1+u)` (non-linear) | gs / none | — | 1.10 |
+| random normal contractions, n=2–6, 80 draws | none / fixed ω≤1 | 0.84–240 | 1.0001–228 |
+| heterogeneous | jacobi / aitken, 20 steps | 0.008–0.72 | **1.47–119** |
+| heterogeneous | gs / none | 0.98–2.3 | 0.991–1.93 |
+| heterogeneous | gs / aitken | 0.72–18 | 1.13–3.49 |
+
+The 1.22 on every two-mode row is the resolvent factor of the
+`a → b → a` relay shape itself (`[[0, R], [0, R]]` is not normal); the
+7.95 is that times the fast mode's share of the residual at the exit,
+both in the conservative direction.  The 0.991 is the float32 floor of a
+60 000-entry L2 norm (`eps sqrt(n) = 3e-5`, where the residual sits).
+The 119 is the price of a rigorous bound on a badly non-normal map: the
+resolvent norm is the worst direction in the space and the actual
+residual is rarely in it.
+
+**Criterion: unchanged, and no opt-in criterion offered.**  On the
+heterogeneous Jacobi/Aitken fixture the 0.4.0 criterion already
+exhausts the cap on 19 of 20 steps (true distance 4–1150x the
+tolerance; the "15–31x converged" this anomaly recorded was the
+pre-0.4.0 flag).  On the one step it passes, the state *is* within
+tolerance (0.41x) and the spectral bound is 48.8x the tolerance: a
+spectral gate would refuse the one correct pass.  A bound that loose is
+right to report and wrong to gate on by default, and an opt-in that
+fails every Jacobi group with a non-normal loop is not worth a
+`CouplingGroup` field at a freeze.  Iteration counts and `converged`
+are therefore exactly what they were, by construction; the
+compile-count baseline and the recorded sweep rows do not move.
+
+**Honesty of the name.**  It is a bound on `||x - x*||` in the group's
+norm for a linear `F` with a resolved Krylov space, whatever the
+iteration did.  What it is not: for a non-linear `F` it is asymptotic
+(Ostrowski; exact to float32 on the log map within tolerance of its
+fixed point); it is in the norm at the returned state, so the dead
+band's excluded fields are outside it and the scale drifts as it does
+for `residual`; it inherits `residual`'s float32 floor; and a group
+with more than eight independent interface scalars gets a radius from
+below and `spectral_usable=False`.  Each of these is on
+`spectral_error_bound`'s docstring, on `coupling_diagnostics`' and in
+MADD-ANO-005's residual risk.
+
+**Tests.**  `test_the_estimate_is_never_smaller_than_the_distance_it_estimates`
+in `tests/core/` is now
+`test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds`
+and passes on the new key; the property-file twin stays a strict xfail
+on `error_estimate`, whose value is unchanged, with a passing sibling on
+the same draws.  `test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged`
+still pins 122x two-sided; its sibling pins 7.95x two-sided and
+`rho_spectral = 0.999` to 1e-4.  Random normal contractions, the
+accelerators, the relaxation factor, the non-linear map, the absent
+cases and the numerics each have a named test in the same two files.
+
+**Side finding, not acted on here.**  A relaxed iteration that diverges
+past float32 range is reported `residual=0.0, converged=True,
+ratio_usable=True` on the base tree: the NaN successor makes
+`_field_reference` NaN, the dead band drops the field, the norm reads
+zero and the loop returns the last finite iterate.  Reproduced on
+`release/0.4.0` with `acceleration="fixed", relaxation=1.5` on a
+`(-0.95, 0.3)` cycle.  It belongs to the dead band, not to this branch;
+recorded for a registry entry.

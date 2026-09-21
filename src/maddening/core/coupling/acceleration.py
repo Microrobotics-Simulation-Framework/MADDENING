@@ -325,6 +325,17 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     full list of what the estimate rests on is in
     ``graph_manager._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+
+    **The spectrum is measured, beside this, under ``solver="ift"``
+    with ``diagnostics=True``.**  :func:`arnoldi_spectral_radius` takes
+    eight Jacobian-vector products of the one-pass map at the returned
+    iterate and :func:`spectral_error_bound` turns them into
+    ``coupling_diagnostics()['spectral_error_bound']``, which on the
+    same two-mode case reads 8x *over* the true distance where this
+    rate's estimate reads 122x under.  This function is unchanged
+    because the criterion both solvers stop on is built from it and
+    438 recorded step verdicts depend on that; the spectral keys are
+    reported next to it, not in place of it.
     """
     if prev2_residual is None:
         prev2_residual = prev_residual

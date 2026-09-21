@@ -73,8 +73,56 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
+      # Two lanes: every supported interpreter crossed with every JAX
+      # minor the declared range can reach.
+      #
+      # Interpreters: one.  `requires-python = ">=3.12"`, so 3.12 is the
+      # floor and there is nothing below it to test.
+      #
+      # JAX: two, and that is the whole declared range.
+      # `jax>=0.10,<0.13` looks like three minors but there is no 0.12
+      # series, so 0.10 and 0.11 are all of it.  Pinning only 0.10 left
+      # half the range claimed and never installed -- a support claim
+      # with no evidence behind it, which is the thing this matrix is
+      # for.  Both pins are exact: a floating pin makes a red build
+      # unreproducible and silently re-defines what the evidence in
+      # docs/validation/soup_package.md was generated against.
+      #
+      # These two values are read by scripts/generate_soup_tables.py
+      # (`read_ci`) and become the "verified on" half of the Python and
+      # JAX rows of the SOUP package.  Changing the matrix moves those
+      # rows; removing it makes them say "unknown" rather than quietly
+      # falling back to the permitted range.
+      # A lane that fails must not take the other lane's evidence with
+      # it.  Without this, one red leg cancels the other and the log
+      # cannot distinguish "this JAX version broke it" from "it is
+      # broken on both" -- a CANCELLED sibling has already been misread
+      # as a passing one once in this release.  slow-tests.yml has said
+      # `fail-fast: false` all along; this matrix did not.
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
+        # 0.10.2 IS NOT REDUNDANT, AND IS NOT KEPT FOR COMPATIBILITY
+        # ALONE.  It is the only lane that exercises the `sqrt(m)` term
+        # in `rank_rtol`'s default cutoff
+        # (`maddening.sysid._resolve_rank_rtol`).  That term exists
+        # because the float32 error of accumulating `F = J.T @ J` over
+        # `m` residual rows grows with `m`; demonstrating it needs a
+        # backend whose reduction is loose enough to push a null
+        # direction above the older `n * eps` cutoff.  Measured, 64
+        # seeds at n=2, m=4000, CPU:
+        #
+        #   jaxlib 0.10.2 / 0.11.0   floor 10.1 eps   9/64 seeds over
+        #   jaxlib 0.11.2            floor  1.4 eps   0/64 seeds over
+        #
+        # and under 0.11.2 the floor stays flat at ~1 eps out to
+        # m=256000, so no fixture size brings it back -- that backend's
+        # reduction no longer follows the sqrt(m) error model.  So
+        # `test_the_sqrt_m_term_earns_its_place_where_the_backend_rounds_loosely`
+        # asserts on this lane and reports "not applicable" on the
+        # other.  **Dropping the 0.10.2 lane silently deletes the only
+        # coverage that term has.**  Replace the test first.
+        jax-version: ["0.10.2", "0.11.2"]
 
     steps:
       - uses: actions/checkout@v4
@@ -87,8 +135,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Pin JAX to known-good version to avoid jaxlib segfaults
-          pip install "jax==0.10.2" "jaxlib==0.10.2"
+          # Exact JAX pin per lane; jaxlib tracks jax version-for-version.
+          pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
       - name: Install C toolchain for the FMU wrapper tests
@@ -111,7 +159,11 @@ jobs:
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
         run: |
-          python -m pytest tests/ -v --tb=short --ignore=tests/viz
+          # -rs prints every skip's reason.  A skip whose reason nobody
+          # reads is indistinguishable from a test that never existed,
+          # and at least one skip here is a *measurement* the log is
+          # meant to carry (see the jax-version matrix comment above).
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz
 
   test-usd:
     needs: changes
@@ -166,7 +218,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         # Same JAX pin and extra as the test job so pyright resolves the
@@ -174,7 +226,12 @@ jobs:
         # way the tests see them; pyright itself comes from the ci extra.
         # `environment` in typing_tiers.json records this exact set --
         # installing more (usd-core, pyvista) resolves more and RAISES
-        # the counts, so the ceilings would no longer apply.
+        # the counts, so the ceilings would no longer apply.  The
+        # interpreter is part of that set: it is 3.12 because that is
+        # the floor, and pyrightconfig.json's `pythonVersion` says the
+        # same.  The lane pins the lower of the two JAX versions the
+        # test matrix runs; pyright reads stubs, not behaviour, and the
+        # ceilings were measured against this one.
         run: |
           python -m pip install --upgrade pip
           pip install "jax==0.10.2" "jaxlib==0.10.2"

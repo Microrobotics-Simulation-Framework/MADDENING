@@ -104,7 +104,7 @@ JSON has no comments, so the settings are explained here.
 |---|---|---|
 | `include` | `["src/maddening"]` | The package only.  `tests/`, `benchmarks/`, `docs/`, `scripts/` are excluded for now; `src/maddening/examples` (61 example scripts shipped inside the package) is excluded because it is not an API surface and would dominate the numbers. |
 | `typeCheckingMode` | `"basic"` | Start where the signal is actionable.  Measured distance to the stricter modes is given below. |
-| `pythonVersion` | `"3.11"` | The floor in `pyproject.toml` (`requires-python = ">=3.11"`), so syntax/stdlib checks match the oldest supported interpreter. |
+| `pythonVersion` | `"3.12"` | The floor in `pyproject.toml` (`requires-python = ">=3.12"`), so syntax/stdlib checks match the oldest supported interpreter.  It moved 3.11 → 3.12 with the floor; the `typecheck` job installs the same interpreter, because below the floor `pip install -e .` refuses outright. |
 | `pythonPlatform` | `"Linux"` | Matches CI; avoids platform-conditional stdlib noise. |
 | `reportMissingImports` | `"warning"` | Optional extras (`gi`/PyGObject, `pygfx`, `rendercanvas`, `skimage`, `fsspec`, `cupy`, plus `pxr`, `sky`, `zmq`, `fmpy` ... when those extras are not installed) are imported lazily or behind `try:`.  They must not count as errors in an environment without those extras. |
 | `reportMissingModuleSource` | `"warning"` | Same reason, for packages that ship only stubs. |
@@ -115,8 +115,13 @@ JSON has no comments, so the settings are explained here.
 
 Measured with pyright 1.1.414 on 2026-09-20 (branch `feat/pep561-phase2`,
 forked from `release/0.4.0`), against `pip install -e ".[ci]"` on Python
-3.11 with `jax==0.10.2` -- the same environment the CI job builds.  141
-files analysed.  The committed ceilings are in `typing_tiers.json`; these
+3.11 with `jax==0.10.2`.  141 files analysed.  The `typecheck` job moved to
+Python 3.12 on 2026-09-21, when `requires-python` went to `>=3.12` and 3.11
+stopped being installable at all.  That moved nothing: the job re-measured
+**0** errors in tier 1 and **61 / 55 / 1 / 45** in tier 2 -- every package
+exactly at the ceiling it was given on 3.11 -- against the same
+pyright 1.1.414.  `typing_tiers.json` records the environment the ceilings are
+compared in, and the job re-measures against it on every run.  The committed ceilings are in `typing_tiers.json`; these
 are the numbers they were taken from.
 
 | | errors | warnings |

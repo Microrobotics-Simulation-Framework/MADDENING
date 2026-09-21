@@ -95,8 +95,15 @@ def ift_linear_solve(
         ``symmetric_tag`` + ``positive_semidefinite_tag``); the user
         is responsible for the assertion.  ``"dense"`` materialises
         ``A`` columnwise on ``jnp.eye(N)`` and falls back to
-        ``jnp.linalg.solve`` — appropriate for small problems or
-        triage.
+        ``jnp.linalg.solve``.  Appropriate for a **small** problem or
+        for triage, and "small" is a number: both the basis and the
+        matrix are live at once, so the peak working set is
+        ``2 * N**2 * itemsize`` — 0.48 GiB at N = 8,000, 2 GiB at
+        N = 16,384, 32 GiB at N = 65,536 in float32, and twice that
+        under ``jax_enable_x64``.  There is no degradation at the top
+        of that curve: at N ≈ 3.6e5 the matrix alone is a single
+        523 GB allocation and XLA refuses it.  See
+        ``ift_linear_solve``'s Raises section.
     preconditioner : callable or None, default None
         ``v -> M^{-1} @ v``.  If provided, applied during the linear
         solve.  The preconditioner's gradient is blocked via
@@ -136,7 +143,14 @@ def ift_linear_solve(
         lineax names (``stagnation_iters``, ``restart``) is not reachable
         through this signature; both are open questions for the 0.4.0 API
         freeze (see ``docs/developer_guide/adaptive_node.md``).  Until
-        then, ``solver="dense"`` is the escape hatch for a small system.
+        then, ``solver="dense"`` is the escape hatch **for a small
+        system only** — it needs ``2 * N**2 * itemsize`` of device
+        memory, so it is an escape hatch at N = 10^3 (8 MiB), a
+        deliberate choice at N = 10^4 (0.75 GiB), and nothing at all on
+        a grid-coupled problem, where N runs to 10^5-10^6 and the
+        allocation is refused before the solve starts.  There the
+        remedy is to condition the problem better, not to change
+        backend.
 
     Examples
     --------

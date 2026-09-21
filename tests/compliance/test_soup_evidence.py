@@ -570,3 +570,134 @@ def test_a_partially_resolved_anomaly_is_counted_as_reachable():
     rendered = gen.render_known_anomalies(registry)
     assert "3 have a defect reachable in this version" in rendered, rendered
     assert "1 `open`" in rendered and "2 `partially_resolved`" in rendered, rendered
+
+
+class TestTheCiDerivedRowsFollowTheMatrix:
+    """The Python and JAX evidence rows must move when CI's matrix moves.
+
+    Both rows say "verified on X" next to a permitted range, and the
+    whole point of generating them is that X is read from
+    ``.github/workflows/ci.yml`` rather than retyped.  A reader of the
+    SOUP package cannot tell a row that tracks the matrix from one that
+    is merely a plausible constant, so the tracking is pinned here.
+
+    The failure mode these guard is specific and has happened to the
+    JAX pin twice in shape: the pin is found by a regex over the
+    workflow text, so the day the lanes install
+    ``jax==${{ matrix.jax-version }}`` instead of a literal, the regex
+    matches nothing.  Without a fail-closed path that reads "the
+    declared range" rather than "what ran" -- which is the one
+    substitution an IEC 62304 evidence table must never make.
+
+    ``gen.CI_WORKFLOW`` is repointed at a temporary file, so none of
+    this reads or writes the committed workflow.
+    """
+
+    @staticmethod
+    def _ci(monkeypatch, tmp_path, text: str) -> dict:
+        path = tmp_path / "ci.yml"
+        path.write_text(text)
+        monkeypatch.setattr(gen, "CI_WORKFLOW", path)
+        return gen.read_ci()
+
+    _MATRIX = """\
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.14"]
+        jax-version: ["0.10.2", "0.11.2"]
+    steps:
+      - run: pip install "jax==${{ matrix.jax-version }}"
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install "jax==0.10.2"
+"""
+
+    def test_both_axes_of_the_matrix_reach_the_rows(self, monkeypatch, tmp_path):
+        ci = self._ci(monkeypatch, tmp_path, self._MATRIX)
+        assert ci["pythons"] == ["3.12", "3.14"]
+        # The literal pin in `compliance` and the axis the test lanes
+        # install from are both points CI ran.  The regex alone sees
+        # only the first.
+        assert ci["jax_pins"] == ["0.10.2", "0.11.2"]
+        assert "3.12, 3.14" in gen.verified_pythons(ci)
+        assert "0.10.2, 0.11.2" in gen.verified_jax(ci)
+
+    def test_the_include_form_of_a_matrix_is_read_too(self, monkeypatch, tmp_path):
+        ci = self._ci(monkeypatch, tmp_path, """\
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - python-version: "3.12"
+            jax-version: "0.10.2"
+          - python-version: "3.13"
+            jax-version: "0.11.2"
+""")
+        assert ci["pythons"] == ["3.12", "3.13"]
+        assert ci["jax_pins"] == ["0.10.2", "0.11.2"]
+
+    def test_a_python_matrix_that_cannot_be_read_says_unknown(
+        self, monkeypatch, tmp_path,
+    ):
+        """Never an empty string beside the word "verified"."""
+        ci = self._ci(monkeypatch, tmp_path, """\
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install "jax==0.10.2"
+""")
+        assert ci["pythons"] == []
+        row = gen.verified_pythons(ci)
+        assert "**unknown**" in row, row
+        assert "python-version" in row, row
+        assert gen.ci_pythons(ci).startswith("**unknown**")
+
+    def test_a_workflow_with_no_jax_pin_says_unknown_not_the_range(
+        self, monkeypatch, tmp_path,
+    ):
+        """The substitution a SOUP document must never make."""
+        ci = self._ci(monkeypatch, tmp_path, """\
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - run: pip install jax
+""")
+        assert ci["jax_pins"] == []
+        row = gen.verified_jax(ci)
+        assert "**verified point unknown**" in row, row
+        evidence = gen.jax_evidence(ci, "jax>=0.10,<0.13")
+        assert "**unknown**" in evidence, evidence
+        assert "is not evidence" in evidence, evidence
+
+    def test_the_jax_evidence_row_counts_the_pins_it_names(
+        self, monkeypatch, tmp_path,
+    ):
+        """Two pins must not be described as "the only version"."""
+        two = gen.jax_evidence({"jax_pins": ["0.10.2", "0.11.2"]}, "jax>=0.10,<0.13")
+        assert "the 2 versions CI installs" in two, two
+        assert "the only version" not in two, two
+        one = gen.jax_evidence({"jax_pins": ["0.10.2"]}, "jax>=0.10,<0.13")
+        assert "the only version CI installs" in one, one
+
+    def test_a_deleted_job_or_strategy_degrades_instead_of_raising(
+        self, monkeypatch, tmp_path,
+    ):
+        """A traceback is neither the answer nor the honest unknown."""
+        for text in ("jobs:\n  test:\n",
+                     "jobs:\n  test:\n    strategy:\n",
+                     "jobs:\n",
+                     "{}\n"):
+            ci = self._ci(monkeypatch, tmp_path, text)
+            assert ci["pythons"] == []
+            assert "**unknown**" in gen.verified_pythons(ci)

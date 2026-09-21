@@ -219,13 +219,26 @@ class CouplingGroup:
         non-symmetric coupling Jacobians MADDENING produces.
         ``"dense"`` is the legacy ``jacrev + jnp.linalg.solve`` path,
         promoted from an env-var-gated fallback to a first-class
-        config option (O(N^2) memory, O(N^3) compute — only viable
-        for small groups).  The ``MADDENING_IFT_DENSE_SOLVE=1`` env
-        var forces ``"dense"`` regardless of this setting and
-        overrides for triage.  Read **only** under ``solver="ift"``,
-        the only path that solves a tangent system; setting it away
-        from its default under ``"fori"`` is inert and warns
-        (``UserWarning``).
+        config option.  It is viable for a **small** group only, and
+        "small" is a specific number: the path materialises the full
+        ``N x N`` Jacobian and the identity basis used to build it, so
+        its peak working set is ``2 * N**2 * itemsize`` — 0.48 GiB at
+        N = 8,000, 2 GiB at N = 16,384 and 32 GiB at N = 65,536 in
+        float32, and twice that under ``jax_enable_x64``.  A
+        grid-coupled group passes those DOF counts as a matter of
+        course, and there the solve does not degrade, it does not
+        start: at N ≈ 3.6e5 the Jacobian alone is a single 523 GB
+        allocation and XLA refuses it (``Out of memory allocating
+        523186046552 bytes``).  **So ``"dense"`` is not the fallback
+        to reach for when the GMRES adjoint struggles on a grid**; the
+        remedy that scales is to make the group less stiff (stronger
+        relaxation, a smaller timestep, or splitting the cycle).  The
+        ``MADDENING_IFT_DENSE_SOLVE=1`` env var forces ``"dense"``
+        regardless of this setting and overrides for triage — with the
+        same memory, so it is a triage tool for small groups too.
+        Read **only** under ``solver="ift"``, the only path that
+        solves a tangent system; setting it away from its default
+        under ``"fori"`` is inert and warns (``UserWarning``).
 
         Note on BiCGStab: lineax 0.0.7 ships ``lineax.BiCGStab``, but
         it returns NaN when driving a ``FunctionLinearOperator`` (the

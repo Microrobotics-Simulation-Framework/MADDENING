@@ -1,19 +1,22 @@
 """MADDENING-specific warning categories and edge-validation exceptions."""
 
-import sys
-
-# ExceptionGroup is a builtin on 3.11+; the ``exceptiongroup`` backport
-# package supplies it on 3.10.  GraphManager.compile() raises
-# ExceptionGroup so callers can ``except*`` over Shape/Dtype mismatches
-# independently while still seeing every problem in a single pass.
-if sys.version_info >= (3, 11):
-    BaseExceptionGroup = BaseExceptionGroup  # noqa: F821 — 3.11+ builtin
-    ExceptionGroup = ExceptionGroup  # noqa: F821 — 3.11+ builtin
-else:  # pragma: no cover — 3.10 fallback
-    from exceptiongroup import (  # type: ignore[import-not-found]
-        BaseExceptionGroup,
-        ExceptionGroup,
-    )
+# ``BaseExceptionGroup`` / ``ExceptionGroup`` are builtins on every
+# interpreter MADDENING supports (``requires-python = ">=3.12"``).  They
+# are re-exported from this module anyway because
+# ``GraphManager.compile()`` raises an ``ExceptionGroup`` -- so callers
+# can ``except*`` over Shape/Dtype mismatches independently while still
+# seeing every problem in one pass -- and importing the name from the
+# module that documents the raise is what the migration guide tells
+# people to do.
+#
+# This used to be a ``sys.version_info >= (3, 11)`` branch with an
+# ``exceptiongroup`` backport import under it.  That fallback was
+# already unreachable at the 3.11 floor, and ``exceptiongroup`` was not
+# a declared dependency, so the branch could only ever have raised
+# ImportError.  A branch that cannot be taken is not a compatibility
+# guarantee.
+BaseExceptionGroup = BaseExceptionGroup  # noqa: F821 — builtin, re-exported
+ExceptionGroup = ExceptionGroup  # noqa: F821 — builtin, re-exported
 
 
 class PerformanceWarning(UserWarning):

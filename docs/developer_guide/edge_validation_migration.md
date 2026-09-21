@@ -74,11 +74,13 @@ reshape.
 
 ## Catching the errors
 
-`ExceptionGroup` is a builtin on Python 3.11+; MADDENING declares
-`exceptiongroup` as a backport dependency on 3.10.  Two equivalent
-ways to handle the group:
+`ExceptionGroup` is a builtin on every interpreter MADDENING supports
+(`requires-python = ">=3.12"`), so `except*` is always available.
+`maddening.warnings` re-exports `ExceptionGroup` all the same, for code
+that is also expected to run somewhere older.  Two equivalent ways to
+handle the group:
 
-### Python 3.11+ — `except*`
+### `except*`
 
 ```python
 from maddening.warnings import ShapeMismatchError, DtypeMismatchError
@@ -93,7 +95,7 @@ except* DtypeMismatchError as eg:
         print("dtype:", err)
 ```
 
-### Python 3.10 (or version-agnostic) — explicit iteration
+### Version-agnostic — explicit iteration
 
 ```python
 from maddening.warnings import (

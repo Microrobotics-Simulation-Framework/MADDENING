@@ -2,7 +2,7 @@
 
 ## Base Install
 
-MADDENING requires Python 3.11+ (3.12+ for JAX 0.11 and later) and installs with CPU-based {term}`JAX` by default:
+MADDENING requires Python 3.12+ and installs with CPU-based {term}`JAX` by default. The floor is 3.12 rather than 3.11 because `jax`/`jaxlib` 0.11 requires 3.12 and there is no 0.12 series: 0.10 and 0.11 are the whole of the declared `jax>=0.10,<0.13`, and a 3.11 floor would make one of the two uninstallable.
 
 ```bash
 pip install maddening

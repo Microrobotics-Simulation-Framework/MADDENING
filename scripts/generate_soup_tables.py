@@ -175,31 +175,58 @@ def read_citation() -> dict:
         return yaml.safe_load(fh)
 
 
+def _matrix_axis(matrix: dict, key: str) -> list[str]:
+    """Every value one matrix axis takes, in workflow order.
+
+    A GitHub matrix declares an axis either as a top-level list
+    (``python-version: ["3.12"]``, crossed with the other axes) or as
+    per-leg entries under ``include:``.  Reading only the first form is
+    how a matrix rewrite turns into a silently empty evidence table, so
+    both are read and their union returned.
+    """
+    values: list[str] = []
+    for value in matrix.get(key) or []:
+        if str(value) not in values:
+            values.append(str(value))
+    for leg in matrix.get("include") or []:
+        if isinstance(leg, dict) and key in leg and str(leg[key]) not in values:
+            values.append(str(leg[key]))
+    return values
+
+
 def read_ci() -> dict:
-    """Python versions, JAX pin and runner, read out of the CI workflow.
+    """Python versions, JAX pins and runner, read out of the CI workflow.
 
     The old hand-written page said "Python: 3.12" and "JAX: 0.4+" while
     CI ran 3.11 and 3.12 against a jax==0.10.2 pin.  Nothing about the
     verified configuration is retyped here.
+
+    Both axes of the ``test`` matrix are read.  The JAX pins are the
+    union of the literal ``jax==X`` the single-lane jobs install and the
+    ``jax-version`` axis the matrix lanes install from: the regex alone
+    stopped seeing the test lanes the moment their pin became
+    ``jax==${{ matrix.jax-version }}``, which would have dropped a
+    verified point out of the SOUP package without failing anything.
     """
     with CI_WORKFLOW.open() as fh:
         workflow = yaml.safe_load(fh)
 
-    jobs = workflow.get("jobs", {})
-    pythons = (
-        jobs.get("test", {})
-        .get("strategy", {})
-        .get("matrix", {})
-        .get("python-version", [])
-    )
+    jobs = workflow.get("jobs") or {}
+    # ``or {}`` at every hop: a deleted job, strategy or matrix
+    # parses as ``None``, and a traceback here is neither the
+    # answer nor the honest "unknown" the rows are built to print.
+    test_job = jobs.get("test") or {}
+    matrix = (test_job.get("strategy") or {}).get("matrix") or {}
     runners = sorted({
-        job["runs-on"] for job in jobs.values() if isinstance(job.get("runs-on"), str)
+        job["runs-on"] for job in jobs.values()
+        if isinstance(job, dict) and isinstance(job.get("runs-on"), str)
     })
-    pins = sorted(set(_JAX_PIN_RE.findall(CI_WORKFLOW.read_text())))
+    pins = set(_JAX_PIN_RE.findall(CI_WORKFLOW.read_text()))
+    pins.update(_matrix_axis(matrix, "jax-version"))
     return {
-        "pythons": [str(v) for v in pythons],
+        "pythons": _matrix_axis(matrix, "python-version"),
         "runners": runners,
-        "jax_pins": pins,
+        "jax_pins": sorted(pins),
     }
 
 
@@ -212,6 +239,46 @@ def jax_requirement(pyproject: dict) -> str:
     return next(
         (d for d in pyproject["project"]["dependencies"] if d.startswith("jax>")),
         "",
+    )
+
+
+def ci_pythons(ci: dict) -> str:
+    """The interpreters CI runs, or an explicit unknown.
+
+    ``requires-python`` is what pip permits; this is what ran.  An empty
+    matrix prints the unknown rather than an empty string next to the
+    word "verified", which reads as a claim and is not one -- the same
+    fail-closed rule ``verified_jax`` applies to the pin.
+    """
+    if not ci["pythons"]:
+        return "**unknown** (no `python-version` matrix found in the CI workflow)"
+    return ", ".join(ci["pythons"])
+
+
+def verified_pythons(ci: dict) -> str:
+    """The Python half of the Software Identification row."""
+    if not ci["pythons"]:
+        return f"verified point {ci_pythons(ci)}"
+    return f"verified on {ci_pythons(ci)} (the CI matrix)"
+
+
+def jax_evidence(ci: dict, jax_spec: str) -> str:
+    """The JAX row of the test-suite table: what ran, never what is allowed."""
+    pins = ci["jax_pins"]
+    if not pins:
+        return (
+            "**unknown** — no `jax==` pin found in the CI workflow, so what "
+            "the evidence was generated against is not recorded; "
+            f"`{jax_spec}` is the *declared* range and is not evidence"
+        )
+    joined = ", ".join(f"`{v}`" for v in pins)
+    installs = (
+        "the only version CI installs" if len(pins) == 1
+        else f"the {len(pins)} versions CI installs"
+    )
+    return (
+        f"evidence generated at {joined}, {installs}; `{jax_spec}` is the "
+        "*declared* range and no other point in it has been exercised"
     )
 
 
@@ -337,8 +404,7 @@ def render_software_identification(pyproject: dict, citation: dict,
         # this software is".  State both, the way the verification table
         # already does for JAX.
         ["Python Version", f'{project.get("requires-python", "")} permitted; '
-                           f'verified on {", ".join(ci["pythons"])} '
-                           f'(the CI matrix)'],
+                           f'{verified_pythons(ci)}'],
         # Same treatment as the Python row above, and for the same
         # reason.  ``Base Dependencies`` below states `jax>=0.10,<0.13`,
         # which is what pip permits; read as the verified configuration
@@ -459,13 +525,9 @@ def render_test_suite(pyproject: dict, packages: list[str], ci: dict) -> str:
         ["Test runner", "pytest"],
         ["CI system", "GitHub Actions"],
         ["CI runners", ", ".join(f"`{r}`" for r in ci["runners"])],
-        ["Python versions", ", ".join(ci["pythons"]) + " (floor: "
+        ["Python versions", ci_pythons(ci) + " (floor: "
                             f"{pyproject['project'].get('requires-python', '')})"],
-        ["JAX", "evidence generated at "
-                + ", ".join(f"`{v}`" for v in ci["jax_pins"])
-                + f", the only version CI installs; `{jax_spec}` is the "
-                  "*declared* range and no other point in it has been "
-                  "exercised"],
+        ["JAX", jax_evidence(ci, jax_spec)],
         ["Other base dependencies", ", ".join(f"`{d}`" for d in floating)
                                     + " — installed from these ranges, "
                                       "not pinned, so the resolved version "

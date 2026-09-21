@@ -134,16 +134,23 @@ _ARRAY_DUNDERS = ("__array__", "__float__", "__int__", "__bool__",
 #: mis-measured.
 #:
 #: They are hooked *here*, on the numpy side, and not as
-#: ``ArrayImpl.__buffer__``, because **that attribute only exists on
-#: Python 3.12+**.  PEP 688 gave the buffer protocol a Python-level
-#: ``__buffer__`` dunder in 3.12; on 3.11 a C type filling ``tp_as_buffer``
-#: exposes nothing at all, so ``np.asarray(device_array)`` is invisible
-#: to any patch of the array type -- measured, on CPython 3.11.15 with
-#: the pinned jaxlib 0.10.2 CI installs.  A ``hasattr`` guard would
-#: therefore not have fixed this: it would have stopped the
-#: ``AttributeError`` and left the counter silently **undercounting by
-#: one** on the very version CI runs.  The numpy-side hook is the same
-#: on both, and measured to give the same totals on both.
+#: ``ArrayImpl.__buffer__``.  Two reasons, and only the first has
+#: expired:
+#:
+#: * ``__buffer__`` is the PEP 688 dunder, Python-visible only from
+#:   3.12.  On 3.11 a C type filling ``tp_as_buffer`` exposed nothing at
+#:   all, so ``np.asarray(device_array)`` was invisible to any patch of
+#:   the array type -- measured, on CPython 3.11.15 with jaxlib 0.10.2,
+#:   while 3.11 was still in the matrix.  A ``hasattr`` guard would not
+#:   have fixed that: it would have stopped the ``AttributeError`` and
+#:   left the counter silently **undercounting by one** on the version
+#:   CI ran.  The floor is now ``>=3.12`` and that interpreter is gone,
+#:   but the shape of the mistake is why this comment stays.
+#: * Hooking both routes would count one ``np.asarray`` **twice**, since
+#:   numpy reaches the host through the buffer protocol.  That reason
+#:   still holds, and it is why :class:`_CountTransfers` keeps
+#:   ``__buffer__`` out of its hook set while
+#:   :class:`_CountBufferProtocol` is built on it alone.
 #:
 #: ``jax.transfer_guard`` is no substitute for any of this: on the CPU
 #: backend it treats every transfer as free and blocks nothing.
@@ -220,9 +227,13 @@ class _CountTransfers:
 class _CountBufferProtocol:
     """A second counter that hooks ``ArrayImpl.__buffer__`` directly.
 
-    Complete, and only constructible on Python 3.12+.  Used by one test,
-    to prove that :class:`_CountTransfers` -- which is portable but
-    indirect -- misses nothing.
+    Complete, and constructible on every interpreter this project
+    supports: ``__buffer__`` is the PEP 688 dunder, new in Python 3.12,
+    and the floor is ``>=3.12``.  Used by one test, to prove that
+    :class:`_CountTransfers` -- which is portable but indirect -- misses
+    nothing.  ``available`` is kept, and asserted rather than skipped
+    on, so that an ``ArrayImpl`` that stopped implementing the buffer
+    protocol is a failure and not a silent absence.
     """
 
     available = hasattr(_ArrayImpl, "__buffer__")
@@ -564,14 +575,16 @@ class TestNoHostSyncs:
     An exact number is only safe because these four are **invariant
     across the interpreters and jaxlibs this project is tested on**, and
     that was measured rather than hoped: 4 / 4 / 5 / 0 on CPython 3.12.3
-    with jaxlib 0.11.0, and 4 / 4 / 5 / 0 on CPython 3.11.15 with the
-    jaxlib 0.10.2 that CI pins.  They are counts of *this module's* host
-    reads, which are ordinary Python calls, so there is no reason for a
-    backend version to move them -- but the reason this docstring says
-    so is that the first version of the counter did move, by one, on
-    3.11 (see :class:`TestTheCounterItself`), and a number that moves
-    with the environment has to be either fixed or stopped being
-    asserted.
+    with jaxlib 0.11.0, and 4 / 4 / 5 / 0 on CPython 3.11.15 with
+    jaxlib 0.10.2, taken while 3.11 was still in the matrix.  CI now
+    runs 3.12 against both jaxlib 0.10.2 and 0.11.2, so both pins
+    re-assert these numbers on every run.  They are counts of *this
+    module's* host reads, which are ordinary Python calls, so there is
+    no reason for a backend version to move them -- but the reason this
+    docstring says so is that the first version of the counter did
+    move, by one, on 3.11 (see :class:`TestTheCounterItself`), and a
+    number that moves with the environment has to be either fixed or
+    stopped being asserted.
     """
 
     def test_fim_core_reads_nothing_back(self, problems):
@@ -664,12 +677,12 @@ class TestTheCounterItself:
 
         The hazard is the opposite of the blind spot and just as
         quiet: hooking *both* ``np.asarray`` and
-        ``ArrayImpl.__buffer__`` counts the same read twice on Python
-        3.12 and once on 3.11, which would make the exact counts below
-        interpreter-dependent in the other direction.  ``__buffer__``
-        is deliberately absent from :class:`_CountTransfers` for that
-        reason, and a 0-d array is included because ``numpy`` is
-        entitled to treat one differently and does not.
+        ``ArrayImpl.__buffer__`` counts the same read twice, because
+        numpy reaches the host through the buffer protocol.
+        ``__buffer__`` is deliberately absent from
+        :class:`_CountTransfers` for that reason, and a 0-d array is
+        included because ``numpy`` is entitled to treat one differently
+        and does not.
         """
         x = jnp.ones(shape, dtype=jnp.float32)
         with _CountTransfers() as counter:
@@ -708,27 +721,35 @@ class TestTheCounterItself:
                  _ArrayImpl.__array__, _ArrayImpl.__float__)
         assert before == after
 
-    @pytest.mark.skipif(
-        not _CountBufferProtocol.available,
-        reason="ArrayImpl.__buffer__ is the PEP 688 dunder, which exists "
-               "only on Python 3.12+; on 3.11 a C type filling "
-               "tp_as_buffer exposes no Python attribute, so the complete "
-               "counter this cross-check compares against cannot be "
-               "built. The portable counter and every sync assertion "
-               "still run on 3.11 -- only this redundancy check, which "
-               "needs two independent instruments, does not.")
     def test_the_portable_counter_misses_nothing(self, problems):
-        """Where the interpreter lets both instruments exist, they must
-        agree.
+        """The two instruments must agree.
 
         :class:`_CountTransfers` hooks ``numpy``'s entry points;
         :class:`_CountBufferProtocol` hooks the buffer protocol itself
         and so sees *any* consumer of it, including a bare
         ``np.isfinite(device_array)`` that no numpy-entry-point hook
         would catch.  Running both over the paths that matter is what
-        licenses trusting the portable one on Python 3.11, where the
-        complete one cannot be built.
+        licenses trusting the portable one.
+
+        This test carried a ``skipif`` on
+        ``_CountBufferProtocol.available``, because PEP 688 gave the
+        buffer protocol its Python-visible ``__buffer__`` dunder only in
+        3.12 and the complete counter could not be built on 3.11.  With
+        ``requires-python = ">=3.12"`` that skip can never fire, and a
+        skip that can never fire is a check that cannot fail.  It is an
+        assertion now, which *can*: see the message below for the one
+        way left to reach it.
         """
+        assert _CountBufferProtocol.available, (
+            "ArrayImpl has no __buffer__ attribute.  On every interpreter "
+            "this project supports (>=3.12) CPython synthesises the PEP 688 "
+            "dunder for any C type filling tp_as_buffer, so the only way to "
+            "get here is that ArrayImpl stopped implementing the buffer "
+            "protocol.  That would mean np.asarray no longer reaches the "
+            "host by that route and _CountTransfers is hooking the wrong "
+            "set of entry points -- the counts in TestNoHostSyncs would be "
+            "measuring something else.  Re-derive the hook set; do not "
+            "restore a skip, which would hide exactly this.")
         fn, params, kw = problems["identifiable_pair"]
         sigma = jnp.full((200,), 0.5)
         core_fn = jax.jit(functools.partial(fim_core, fn, **kw))
@@ -749,8 +770,8 @@ class TestTheCounterItself:
                 f"call {i}: portable counter saw {portable.count} "
                 f"({portable.by_kind}), buffer-protocol counter saw "
                 f"{complete.count} ({complete.by_kind}) -- the portable "
-                "counter has a blind spot, and on Python 3.11 nothing "
-                "would report it")
+                "counter has a blind spot, and this cross-check is the "
+                "only thing that would report it")
 
 
 class TestTracedOnce:

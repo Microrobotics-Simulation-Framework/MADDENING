@@ -16,6 +16,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import collections
 import contextlib
 import warnings
 
@@ -648,57 +649,167 @@ def _fim_of_matrix(J64, **kw):
                    scale=None, **kw)
 
 
-def test_a_long_residual_does_not_make_a_missing_direction_identifiable():
-    """The defect the ``sqrt(m)`` term fixes, in the form a user meets it.
+#: The rank-cutoff population: an exactly rank-deficient Jacobian at a
+#: residual length long enough that forming ``F = J.T @ J`` over it is
+#: the dominant float32 error term.  ``n=2, m=4000`` puts the old
+#: ``n * eps`` cutoff at 2 eps, well inside the range a loosely-rounding
+#: backend's floor reaches.
+_CUTOFF_N, _CUTOFF_M, _CUTOFF_SEEDS = 2, 4000, 64
+
+_CutoffSample = collections.namedtuple(
+    "_CutoffSample", "seed jacobian report ratio")
+
+
+@pytest.fixture(scope="module")
+def rank_deficient_population():
+    """``fim`` over 64 exactly-rank-deficient Jacobians, measured once.
+
+    Both tests below read this, and they read it for different reasons:
+    one asserts what must hold on **every** backend, the other asserts
+    something that is only true where the backend's reduction rounds
+    loosely enough to produce it.  Keeping the measurement in one place
+    is what lets the second test decide its own applicability from the
+    numbers rather than from the jax version.
+    """
+    records = []
+    for seed in range(_CUTOFF_SEEDS):
+        jacobian = _exactly_rank_deficient(_CUTOFF_N, _CUTOFF_M, seed)
+        report = _fim_of_matrix(jacobian)
+        ev = np.asarray(report.eigvals, dtype=np.float64)
+        records.append(_CutoffSample(
+            seed, jacobian, report, float(ev[0]) / float(ev[-1])))
+    return records
+
+
+def test_a_long_residual_does_not_make_a_missing_direction_identifiable(
+    rank_deficient_population,
+):
+    """The fail-closed claim, and it holds on every backend.
 
     ``F = J.T @ J`` is summed over ``m`` residual rows and its error
     grows with ``m``; ``F`` cannot show that, and a cutoff of
-    ``n * eps`` does not ask.  At ``n = 2, m = 4000`` the cutoff is
-    ``2 eps`` while the measured float32 floor reaches ``9 eps``, so the
-    null direction's eigenvalue can come back *above* the cutoff -- and
-    then ``rank`` counts a direction that is not in the data at all and
-    ``crb`` reports a finite variance bound for parameters no estimator
-    can determine.  A false "identifiable", which is the direction
-    :class:`~maddening.sysid.FIMReport` fails safe against everywhere
-    else.
+    ``n * eps`` does not ask.  Where the backend's reduction is loose
+    enough, the null direction's eigenvalue comes back *above* such a
+    cutoff -- and then ``rank`` counts a direction that is not in the
+    data at all and ``crb`` reports a finite variance bound for
+    parameters no estimator can determine.  A false "identifiable",
+    which is the direction :class:`~maddening.sysid.FIMReport` fails
+    safe against everywhere else.
 
-    Sixty-four fixed seeds; float64 says ``rank = 1`` for every one.
+    ``max(n, sqrt(m)) * eps`` is a **widening** of ``n * eps`` by
+    construction (see
+    :func:`test_the_default_cutoff_is_max_of_n_and_sqrt_m`), so a
+    backend that rounds *more* tightly than the model can make the
+    ``sqrt(m)`` term unnecessary but never unsafe.  This test therefore
+    asserts unconditionally, on every lane: sixty-four fixed seeds,
+    float64 says ``rank = 1`` for every one, and so must float32.
+
+    What is environment-dependent is whether the term is *doing work*
+    here, and that is a separate claim with a separate test below.
     """
-    n, m = 2, 4000
-    old_cutoff = n * _EPS32
-    new_cutoff = max(n, np.sqrt(m)) * _EPS32
-    over_old = wrong_rank = finite_crb = 0
-    for seed in range(64):
-        J64 = _exactly_rank_deficient(n, m, seed)
-        report = _fim_of_matrix(J64)
-        ev = np.asarray(report.eigvals, dtype=np.float64)
-        ratio = float(ev[0]) / float(ev[-1])
-        over_old += ratio > old_cutoff
-        # what the old cutoff would have said, asked of this very report
-        if ratio > old_cutoff:
-            wrong_rank += 1
-            finite_crb += bool(
-                np.isfinite(np.asarray(_fim_of_matrix(
-                    J64, rank_rtol=old_cutoff).crb)).all())
-        assert report.rank == n - 1, (
-            f"seed={seed}: rank={report.rank} for a Jacobian that is "
-            f"exactly rank {n - 1} in float64; lam0/lamMax = "
-            f"{ratio / _EPS32:.2f} eps against a cutoff of "
-            f"{new_cutoff / _EPS32:.2f} eps"
+    n = _CUTOFF_N
+    cutoff = max(n, np.sqrt(_CUTOFF_M)) * _EPS32
+    for sample in rank_deficient_population:
+        assert sample.report.rank == n - 1, (
+            f"seed={sample.seed}: rank={sample.report.rank} for a Jacobian "
+            f"that is exactly rank {n - 1} in float64; lam0/lamMax = "
+            f"{sample.ratio / _EPS32:.2f} eps against a cutoff of "
+            f"{cutoff / _EPS32:.2f} eps"
         )
-        assert not np.isfinite(np.asarray(report.crb)).any(), report.crb
+        assert not np.isfinite(
+            np.asarray(sample.report.crb)).any(), sample.report.crb
 
-    # Non-vacuity, and the only thing that stops this test passing for the
-    # wrong reason.  If a future XLA rounds the 4000-row sum more tightly
-    # the population stops exercising the defect, and then the assertions
-    # above hold under the old cutoff too and pin nothing.  Fail loudly
-    # instead of quietly becoming a tautology.
-    assert over_old > 0, (
-        "the population no longer straddles the old n*eps cutoff, so this "
-        "test can no longer distinguish the two cutoffs; re-measure the "
-        "float32 floor and raise m"
-    )
-    assert wrong_rank == over_old and finite_crb == over_old
+
+def test_the_sqrt_m_term_earns_its_place_where_the_backend_rounds_loosely(
+    rank_deficient_population,
+):
+    """That the ``sqrt(m)`` term is load-bearing -- where it can be shown.
+
+    This is the claim the test above deliberately does not make: not
+    "the cutoff is safe" but "removing the ``sqrt(m)`` term would break
+    something here".  It can only be shown on a backend whose float32
+    reduction over ``m`` rows is loose enough to push the null
+    direction above the old ``n * eps`` cutoff, and **whether that is
+    so is decided by measuring, not by reading the jax version.**
+    Version-sniffing would rot the next time a backend changes how it
+    reduces -- which is exactly what happened to the assertion this
+    test replaces.
+
+    Measured, 64 seeds at ``n=2, m=4000``, CPython 3.12, CPU:
+
+    ==============  ====================  ========================
+    jaxlib          max |lam0/lamMax|     seeds above ``n * eps``
+    ==============  ====================  ========================
+    0.10.2 / 0.11.0 10.1 eps              9 / 64
+    0.11.2          1.4 eps               0 / 64
+    ==============  ====================  ========================
+
+    and under 0.11.2 the floor stays flat at ~1 eps from ``m = 4000``
+    to ``m = 256000``, so raising ``m`` does not bring it back: that
+    backend's reduction no longer follows the ``sqrt(m)`` error model
+    the term encodes.  **Coverage of the term therefore lives on the
+    jax 0.10.2 lane of the CI matrix** -- see the comment beside that
+    pin in ``.github/workflows/ci.yml``.  Do not drop that lane without
+    replacing this test.
+    """
+    n = _CUTOFF_N
+    old_cutoff = n * _EPS32
+    over_old = [s for s in rank_deficient_population
+                if s.ratio > old_cutoff]
+    floor_eps = max(abs(s.ratio) for s in rank_deficient_population) / _EPS32
+
+    if not over_old:
+        # Not applicable here, and that verdict is a measurement with a
+        # number attached -- never a silent pass and never a bare skip.
+        # The reason string carries the floor so the CI log says which
+        # backend behaviour was observed; the test lanes run with -rs
+        # so it is printed rather than hidden behind a bare `s`.
+        pytest.skip(
+            f"this backend rounds the {_CUTOFF_M}-row sum too tightly to "
+            f"exercise the sqrt(m) term: the measured float32 floor over "
+            f"{_CUTOFF_SEEDS} seeds is {floor_eps:.3f} eps, entirely below "
+            f"the old n*eps = {n} eps cutoff, so both cutoffs agree here "
+            f"and nothing distinguishes them. This is not a defect -- "
+            f"max(n, sqrt(m)) is a widening, so a tighter reduction makes "
+            f"the term unnecessary, never unsafe, and "
+            f"test_a_long_residual_does_not_make_a_missing_direction_"
+            f"identifiable still asserts the fail-closed behaviour here. "
+            f"Coverage for the sqrt(m) term itself lives on the jax "
+            f"0.10.2 lane (measured 10.1 eps, 9/64 seeds above the old "
+            f"cutoff). Raising m does not help: the floor is flat at "
+            f"~1 eps out to m=256000."
+        )
+
+    # It is exercised: show that the old cutoff would have got these
+    # very reports wrong, which is what makes the term load-bearing.
+    for sample in over_old:
+        under_old = _fim_of_matrix(sample.jacobian, rank_rtol=old_cutoff)
+        assert under_old.rank == n, (
+            f"seed={sample.seed}: lam0/lamMax = "
+            f"{sample.ratio / _EPS32:.3f} eps is above the old n*eps = "
+            f"{n} eps cutoff, so that cutoff should have over-counted the "
+            f"rank -- it reported {under_old.rank}. Either the sqrt(m) "
+            f"term has been removed from _resolve_rank_rtol (in which "
+            f"case the default and the old cutoff now coincide and this "
+            f"test can no longer tell them apart) or rank is no longer "
+            f"read off rank_rtol."
+        )
+        assert np.isfinite(np.asarray(under_old.crb)).all(), (
+            f"seed={sample.seed}: the old n*eps cutoff counted the null "
+            f"direction as resolved but still returned a non-finite crb; "
+            f"the sqrt(m) term's justification is that it stops a "
+            f"*finite* variance bound being reported for an "
+            f"undeterminable parameter."
+        )
+        assert sample.report.rank == n - 1, (
+            f"seed={sample.seed}: the default cutoff must still refuse "
+            f"what the old n*eps one accepted -- that difference is the "
+            f"whole of the sqrt(m) term's value, and it is gone. Look at "
+            f"the sqrt(m) branch of maddening.sysid._resolve_rank_rtol: "
+            f"if the default has collapsed back to n*eps, this test and "
+            f"the fail-closed one above are both reporting the same "
+            f"regression."
+        )
 
 
 def test_the_default_cutoff_is_max_of_n_and_sqrt_m():

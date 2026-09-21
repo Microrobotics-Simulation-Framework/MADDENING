@@ -154,6 +154,9 @@ guidance; the itemized changes follow.
 - **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
   `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
   and printed `0.00 ms` for an overhead the run could not resolve
+- **Python floor is now `>=3.12`** (0.3.1 shipped `>=3.10`): jax 0.11 requires
+  3.12 and there is no 0.12, so a 3.11 floor made half of `jax>=0.10,<0.13`
+  uninstallable. CI now runs 3.12 against both jax 0.10.2 and 0.11.2
 - **Docs**: the SOUP identification table gives JAX's *verified* version as well
   as its permitted range; `DESIGN.md`, `DatasetGenerator.from_graph` and
   `SurrogateValidator.compare_graphs` say they advance the graph they are given
@@ -268,6 +271,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Docs said `linear_solver="dense"` was the fallback when the GMRES adjoint
+  struggles**: it needs `2*N^2*itemsize` and on a grid-coupled group is refused
+  outright (523 GB at ~3.6e5 DOF). The option is unchanged; the advice is not
 - **`fit_lm` no longer runs a whole rollout it throws away**: the residual was
   evaluated for a pytree structure `jax.eval_shape` can trace, once per call
   even with `noise_std=None`, and at `n_iter=0` it was the only call made

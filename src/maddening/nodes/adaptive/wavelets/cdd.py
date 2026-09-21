@@ -19,13 +19,16 @@ Two properties the node's contract with
   room left under the budget, which is what lets the node solve on a
   gathered ``K x K`` block with no risk of silently truncating the set.
 
-JIT shape: the outer loop is a Python ``for`` unrolled at trace time to
-:data:`MAX_OUTER` iterations, short-circuited with ``jnp.where`` on a
-``converged`` flag (a ``lax.while_loop`` compiles but its early exit is
-not usable under reverse-mode differentiation of the caller).  The mark
-step is vectorised (``argsort`` + ``cumsum`` + first-crossing), so the
-whole selection is a static graph over fixed-shape arrays and the mask
-it returns is a boolean ``(N,)`` array.
+JIT shape: the outer loop is a ``lax.while_loop`` bounded by
+:data:`MAX_OUTER`, so the body is compiled once and the loop exits as
+soon as the budget is reached.  A ``while_loop`` cannot be
+reverse-differentiated, which is fine here *because* nothing may be
+differentiated through a selection: the caller passes a right-hand
+side under ``stop_gradient`` (the node does), and the base class wraps
+the returned mask in ``stop_gradient`` again.  The mark step is
+vectorised (``argsort`` + ``cumsum`` + first-crossing), so the whole
+selection is a static graph over fixed-shape arrays and the mask it
+returns is a boolean ``(N,)`` array.
 
 .. [CohenDahmenDeVore2001] Cohen, A., Dahmen, W., DeVore, R. (2001).
    Adaptive wavelet methods for elliptic operator equations: convergence
@@ -47,8 +50,8 @@ from maddening.core.compliance.stability import stability
 
 __all__ = ["cdd_select", "MAX_OUTER", "THETA_D"]
 
-#: Unrolled outer iterations.  The 1-D and 2-D problems in the test suite
-#: reach their budget in at most 15; 3-D in about 17.
+#: Bound on the outer iterations.  The 1-D and 2-D problems in the test
+#: suite reach their budget in at most 15; 3-D in about 17.
 MAX_OUTER: int = 30
 
 #: Doerfler bulk parameter: each marking step takes the smallest set of
@@ -106,7 +109,9 @@ def cdd_select(
         ``max_outer + 1`` times, so it should be the cheap gathered
         solve rather than a full-size iterative one.
     b : jax.Array
-        Right-hand side, shape ``(N,)``.
+        Right-hand side, shape ``(N,)``.  Pass it under
+        ``jax.lax.stop_gradient``: the loop is not reverse-differentiable
+        and a selection must not carry a tangent anyway.
     coarse_mask : jax.Array
         Boolean ``(N,)`` seed; must be non-empty and have at most ``K``
         entries set (the caller validates this once, at construction).
@@ -114,7 +119,7 @@ def cdd_select(
         Active-set budget.  Growth stops once ``|mask| >= K``; the cap in
         the marking step guarantees ``|mask| <= K`` throughout.
     theta_d, max_outer
-        Doerfler bulk and unrolled iteration count.
+        Doerfler bulk and the iteration bound.
 
     Returns
     -------
@@ -123,14 +128,18 @@ def cdd_select(
         in the caller's coordinates.  The mask is a plain array: the
         node's base class wraps it in ``stop_gradient``.
     """
-    mask = jnp.asarray(coarse_mask, dtype=bool)
-    c = solve_masked(mask, b)
-    for _ in range(max_outer):
-        converged = jnp.sum(mask) >= K
+    mask0 = jnp.asarray(coarse_mask, dtype=bool)
+    c0 = solve_masked(mask0, b)
+
+    def keep_going(carry):
+        i, mask, _c = carry
+        return (i < max_outer) & (jnp.sum(mask) < K)
+
+    def grow(carry):
+        i, mask, c = carry
         resid = b - apply_operator(c)
-        grown = _doerfler_grow(mask, resid, theta_d, K)
-        new_mask = jnp.where(converged, mask, grown)
-        new_c = solve_masked(new_mask, b)
-        mask = jnp.where(converged, mask, new_mask)
-        c = jnp.where(converged, c, new_c)
+        mask = _doerfler_grow(mask, resid, theta_d, K)
+        return i + 1, mask, solve_masked(mask, b)
+
+    _, mask, c = jax.lax.while_loop(keep_going, grow, (jnp.int32(0), mask0, c0))
     return mask, c

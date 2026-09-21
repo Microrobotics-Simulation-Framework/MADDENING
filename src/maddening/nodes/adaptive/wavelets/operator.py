@@ -38,6 +38,7 @@ from typing import Any, Callable
 import jax
 import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -57,57 +58,60 @@ BOUNDARIES: tuple[str, ...] = ("periodic", "dirichlet")
 
 
 # ---------------------------------------------------------------------------
-# Physical-space finite-difference operators (dense)
+# Physical-space finite-difference operators (dense, NumPy)
 # ---------------------------------------------------------------------------
+#
+# Assembly happens once per node, eagerly.  It is written in NumPy rather
+# than jnp on purpose: an eager jnp assembly pays a separate XLA compile
+# for every distinct ``.at[].set`` / ``kron`` shape it meets (seconds per
+# new grid size), and nothing here needs to be traced or differentiated.
 
-def _stiffness_periodic(side: int, h: float, dtype: Any) -> jax.Array:
+def _stiffness_periodic(side: int, h: float) -> np.ndarray:
     """Periodic 1-D stiffness of ``-d2/dx2`` (circulant ``[-1, 2, -1] / h``)."""
-    idx = jnp.arange(side)
-    S = jnp.zeros((side, side), dtype=dtype)
-    S = S.at[idx, idx].set(2.0 / h)
-    S = S.at[idx, (idx + 1) % side].add(-1.0 / h)
-    S = S.at[idx, (idx - 1) % side].add(-1.0 / h)
+    idx = np.arange(side)
+    S = np.zeros((side, side))
+    S[idx, idx] = 2.0 / h
+    S[idx, (idx + 1) % side] += -1.0 / h
+    S[idx, (idx - 1) % side] += -1.0 / h
     return S
 
 
-def _stiffness_dirichlet(side: int, h: float, dtype: Any) -> jax.Array:
+def _stiffness_dirichlet(side: int, h: float) -> np.ndarray:
     """1-D stiffness of ``-d2/dx2`` on ``side`` interior nodes, zero at the walls."""
-    idx = jnp.arange(side)
-    S = jnp.zeros((side, side), dtype=dtype)
-    S = S.at[idx, idx].set(2.0 / h)
-    S = S.at[idx[:-1], idx[:-1] + 1].set(-1.0 / h)
-    S = S.at[idx[1:], idx[1:] - 1].set(-1.0 / h)
+    idx = np.arange(side)
+    S = np.zeros((side, side))
+    S[idx, idx] = 2.0 / h
+    S[idx[:-1], idx[:-1] + 1] = -1.0 / h
+    S[idx[1:], idx[1:] - 1] = -1.0 / h
     return S
 
 
-def _tensor_sum(S: jax.Array, M: jax.Array, dim: int, mass: float) -> jax.Array:
+def _tensor_sum(S: np.ndarray, M: np.ndarray, dim: int, mass: float) -> np.ndarray:
     """``sum_axes kron(M, ..., S, ..., M) + mass * kron(M, ..., M)``."""
     if dim == 1:
         return S + mass * M
-    factors = [[M] * dim for _ in range(dim)]
-    for ax in range(dim):
-        factors[ax][ax] = S
     out = None
-    for f in factors:
-        term = f[0]
-        for g in f[1:]:
-            term = jnp.kron(term, g)
+    for ax in range(dim):
+        factors = [M] * dim
+        factors[ax] = S
+        term = factors[0]
+        for g in factors[1:]:
+            term = np.kron(term, g)
         out = term if out is None else out + term
     mass_term = M
     for _ in range(dim - 1):
-        mass_term = jnp.kron(mass_term, M)
+        mass_term = np.kron(mass_term, M)
     assert out is not None
     return out + mass * mass_term
 
 
-def _physical_operator(side: int, dim: int, h: float, mass: float,
-                       boundary: str, dtype: Any) -> jax.Array:
+def _physical_operator(side: int, dim: int, h: float, mass: float, boundary: str) -> np.ndarray:
     """Dense ``(-Laplacian + mass)`` bilinear form with lumped mass ``M = h I`` per axis."""
     if boundary == "periodic":
-        S = _stiffness_periodic(side, h, dtype)
+        S = _stiffness_periodic(side, h)
     else:
-        S = _stiffness_dirichlet(side, h, dtype)
-    M = h * jnp.eye(side, dtype=dtype)
+        S = _stiffness_dirichlet(side, h)
+    M = h * np.eye(side)
     return _tensor_sum(S, M, dim, mass)
 
 
@@ -197,25 +201,38 @@ def assemble_operator(
     if boundary == "periodic":
         side = _tr.side_length(n_levels, n_coarse)
         h = 1.0 / side
-        W = _tr.synthesis_matrix(n_levels, n_coarse, order=order, dim=dim, dtype=dt)
+        W = np.asarray(
+            _tr.synthesis_matrix(n_levels, n_coarse, order=order, dim=dim, dtype=dt),
+            dtype=np.float64,
+        )
         levels = _tr.level_labels(n_levels, n_coarse, dim)
     else:
-        W, levels, side = _dir.synthesis_matrix_dirichlet(
+        W_j, levels, side = _dir.synthesis_matrix_dirichlet(
             n_levels, n_coarse, order=order, dim=dim, dtype=dt,
         )
+        W = np.asarray(W_j, dtype=np.float64)
         h = 1.0 / (side + 1)
     n = side ** dim
-    A_phys = _physical_operator(side, dim, h, float(mass), boundary, dt)
-    norms = jnp.sqrt((h ** dim) * jnp.sum(W ** 2, axis=0))
-    norms = jnp.where(norms > 0, norms, 1.0)
+    # Assembled in float64 NumPy whatever the requested dtype, then cast:
+    # the Galerkin triple product is where a float32 basis would lose
+    # symmetry at round-off, and the cast happens once.
+    A_phys = _physical_operator(side, dim, h, float(mass), boundary)
+    norms = np.sqrt((h ** dim) * np.sum(W ** 2, axis=0))
+    norms = np.where(norms > 0, norms, 1.0)
     Wn = W / norms[None, :]
     A = Wn.T @ A_phys @ Wn
     A = 0.5 * (A + A.T)
-    thr = sparse_threshold * jnp.max(jnp.abs(A))
-    A_sparse = jsparse.BCOO.fromdense(jnp.where(jnp.abs(A) >= thr, A, 0.0))
+    thr = sparse_threshold * np.max(np.abs(A))
+    rows, cols = np.nonzero(np.abs(A) >= thr)
+    A_sparse = jsparse.BCOO(
+        (jnp.asarray(A[rows, cols], dtype=dt),
+         jnp.asarray(np.stack([rows, cols], axis=1), dtype=jnp.int32)),
+        shape=(n, n),
+    )
     return WaveletOperator(
-        A=A, A_sparse=A_sparse, Wn=Wn, levels=levels, side=int(side), n=int(n),
-        h=float(h), dim=int(dim), boundary=str(boundary),
+        A=jnp.asarray(A, dtype=dt), A_sparse=A_sparse, Wn=jnp.asarray(Wn, dtype=dt),
+        levels=levels, side=int(side), n=int(n), h=float(h), dim=int(dim),
+        boundary=str(boundary),
     )
 
 

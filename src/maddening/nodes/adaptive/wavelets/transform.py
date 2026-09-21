@@ -330,6 +330,10 @@ def synthesis_matrix(n_levels: int, n_coarse: int, *, order: int = 4,
     synth: Callable[[jax.Array], jax.Array] = (
         lambda e: synthesis(e, n_levels, n_coarse, order=order, dim=dim)
     )
-    cols = jax.vmap(synth)(eye)
+    # ``jit`` around the ``vmap``: a bare vmap executes op by op and every
+    # batched scatter and roll is compiled separately on first use -- about
+    # 60 compiles and 11 s for a 128-point basis.  One fused compile is a
+    # fraction of a second, and this runs once per node.
+    cols = jax.jit(jax.vmap(synth))(eye)
     # ``cols[j]`` is synthesis(e_j) = W[:, j], so W = cols.T
     return cols.T

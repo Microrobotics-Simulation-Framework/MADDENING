@@ -517,6 +517,9 @@ guidance; the itemized changes follow.
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
   `update()` and cannot reach `derivatives()`, `implicit_residual()` or
   `integrate_node()` -- they take no `params`, so they run constructor values
+- **MADD-ANO-017**: `jax_enable_x64` does not reach `GraphManager`'s scan paths --
+  float64 params against a float32 state seed, so `run_scan*`/`run_sweep` raise
+  `TypeError` (open, minor); node-level float64 unaffected, workarounds in the registry
 - **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
   the supported floor, so every `CloudSession` launch, teardown and preemption check
   was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified

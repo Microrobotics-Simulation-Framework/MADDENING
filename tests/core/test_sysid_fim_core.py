@@ -35,6 +35,7 @@ import pytest
 from jax.flatten_util import ravel_pytree
 
 from maddening.core.graph_manager import GraphManager
+from maddening.core.params import ParamSpec, _spec_for
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import (
     FIMCore,
@@ -60,7 +61,7 @@ _EPS32 = float(np.finfo(np.float32).eps)
 
 
 def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
-                   noise_std=None, rank_rtol=None):
+                   noise_std=None, rank_rtol=None, specs=None):
     """``fim``'s pipeline as it stood before the jitted core, eager
     throughout.
 
@@ -72,8 +73,8 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
     the Jacobian is built, in what order the Gram product and ``eigh``
     run, and at what precision each stage lands.
     """
-    if scale not in ("relative", None):
-        raise ValueError(f"scale must be 'relative' or None, got {scale!r}")
+    if scale not in ("relative", "nominal", None):
+        raise ValueError(f"scale must be 'relative', 'nominal' or None, got {scale!r}")
     flat, unravel = ravel_pytree(params)
     idx = _masked_indices(params, mask)
     r0 = residual_fn(params)
@@ -90,11 +91,37 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
     if idx is not None:
         names = tuple(names[i] for i in idx)
     zero_scaled = ()
+    value_scaled = ()
     if scale == "relative":
         zero_scaled = tuple(
             nm for nm, at_zero in zip(names, np.asarray(theta0) == 0.0)
             if bool(at_zero))
         J = J * theta0[None, :]
+    elif scale == "nominal":
+        # The policy table of ``fim``'s docstring, transcribed: a finite
+        # width scales the column, otherwise the value (less a log
+        # spec's lower bound) does, and that column is named.
+        per_col = []
+        for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+            spec = _spec_for(specs, path)
+            lo, hi = spec.bounds
+            if lo is not None and hi is not None:
+                entry = (float(hi) - float(lo), 0.0)
+            elif spec.transform == "log":
+                entry = (None, 0.0 if lo is None else float(lo))
+            else:
+                entry = (None, 0.0)
+            per_col.extend([entry] * int(np.asarray(leaf).size))
+        if idx is not None:
+            per_col = [per_col[int(i)] for i in idx]
+        theta_h = np.asarray(theta0)
+        col = np.array([theta_h[j] - off if w is None else w
+                        for j, (w, off) in enumerate(per_col)],
+                       dtype=theta_h.dtype)
+        value_scaled = tuple(nm for nm, (w, _) in zip(names, per_col)
+                             if w is None)
+        zero_scaled = tuple(nm for nm, c in zip(names, col) if c == 0.0)
+        J = J * jnp.asarray(col)[None, :]
     F = J.T @ J
     if not bool(jnp.all(jnp.isfinite(F))):
         raise FloatingPointError("non-finite Fisher matrix")
@@ -110,7 +137,8 @@ def _reference_fim(residual_fn, params, *, scale="relative", mask=None,
         _resolve_rank_rtol(eigvals.dtype, n, None, n_residual=m))
     return dict(fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank,
                 cond=cond, crb=crb, param_names=names,
-                zero_scaled=zero_scaled, limited=limited is not None)
+                zero_scaled=zero_scaled, value_scaled=value_scaled,
+                limited=limited is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +415,28 @@ def problems():
     B[:, 2] = B[:, 1]
     fn, params = _linear_residual(B)
     out["duplicate_column"] = (fn, params, {"scale": None})
+    # ``scale="nominal"``: the zero-valued parameter with a width, so it
+    # is resolved; the spring under its node's own specs plus a bounded
+    # override, so one column is width-scaled and one value-scaled; and
+    # a mask, so the nominal record is index-selected like the columns.
+    fn, params = _linear_residual(rng.standard_normal((40, 3)))
+    params = dict(params, p1=jnp.float32(0.0))
+    widths = {"p0": ParamSpec(bounds=(0.0, 2.0)),
+              "p1": ParamSpec(bounds=(-1.0, 1.0)),
+              "p2": ParamSpec(bounds=(-5.0, 5.0), transform="logit")}
+    out["nominal_zero_param"] = (fn, params, {"scale": "nominal",
+                                              "specs": widths})
+    node_specs = gm.param_specs()["nodes"]["s"]
+    mixed = {"stiffness": node_specs["stiffness"],
+             "damping": ParamSpec(bounds=(0.0, 10.0))}
+    out["nominal_spring_mixed"] = (res2, sub2, {"scale": "nominal",
+                                                "specs": mixed})
+    out["nominal_masked"] = (res3, sub3, {
+        "scale": "nominal",
+        "specs": {"stiffness": ParamSpec(bounds=(0.0, 100.0)),
+                  "damping": node_specs["damping"],
+                  "mass": ParamSpec(bounds=(0.5, 2.0))},
+        "mask": {"stiffness": True, "damping": False, "mass": True}})
     return out
 
 
@@ -396,6 +446,7 @@ ALL_PROBLEMS = [
     "rank_rtol_zero", "masked", "zero_scaled", "zero_scaled_absolute",
     "on_cutoff_n3_m200", "on_cutoff_n4_m1024", "on_cutoff_n2_m64",
     "well_conditioned", "exactly_singular", "duplicate_column",
+    "nominal_zero_param", "nominal_spring_mixed", "nominal_masked",
 ]
 
 
@@ -428,6 +479,7 @@ class TestFimUnchangedByJitting:
         assert repr(got.cond) == repr(want["cond"]), (got.cond, want["cond"])
         assert got.param_names == want["param_names"]
         assert got.zero_scaled == want["zero_scaled"]
+        assert got.value_scaled == want["value_scaled"]
         for field in ("fim", "eigvals", "eigvecs", "crb"):
             a = np.asarray(getattr(got, field))
             b = np.asarray(want[field])
@@ -525,6 +577,7 @@ class TestCoreAgreesWithReport:
                       if bool(z))
         assert named == report.zero_scaled
         assert core.param_names == report.param_names
+        assert core.value_scaled == report.value_scaled
 
     @pytest.mark.parametrize("name", ALL_PROBLEMS)
     def test_precision_limited_flag_matches_the_warning(self, problems, name):
@@ -615,6 +668,22 @@ class TestNoHostSyncs:
         with _CountTransfers() as counter:
             _quiet(fim, fn, params, **kw)
         assert counter.count == 4, counter.by_kind
+
+    def test_a_nominal_scale_costs_no_extra_transfer(self, problems):
+        """``specs`` is reduced to constants on the host before the
+        trace and ``value_scaled`` is metadata decided there, so the
+        nominal report reads back the same four buffers -- and the
+        core still reads nothing."""
+        fn, params, kw = problems["nominal_spring_mixed"]
+        _quiet(fim, fn, params, **kw)
+        with _CountTransfers() as counter:
+            _quiet(fim, fn, params, **kw)
+        assert counter.count == 4, counter.by_kind
+        core_fn = jax.jit(functools.partial(fim_core, fn, **kw))
+        jax.block_until_ready(core_fn(params))
+        with _CountTransfers() as counter:
+            jax.block_until_ready(core_fn(params))
+        assert counter.count == 0, counter.by_kind
 
     def test_a_host_side_noise_model_costs_no_extra_transfer(
             self, problems):

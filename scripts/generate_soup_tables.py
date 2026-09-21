@@ -211,10 +211,15 @@ def read_ci() -> dict:
     with CI_WORKFLOW.open() as fh:
         workflow = yaml.safe_load(fh)
 
-    jobs = workflow.get("jobs", {})
-    matrix = jobs.get("test", {}).get("strategy", {}).get("matrix") or {}
+    jobs = workflow.get("jobs") or {}
+    # ``or {}`` at every hop: a deleted job, strategy or matrix
+    # parses as ``None``, and a traceback here is neither the
+    # answer nor the honest "unknown" the rows are built to print.
+    test_job = jobs.get("test") or {}
+    matrix = (test_job.get("strategy") or {}).get("matrix") or {}
     runners = sorted({
-        job["runs-on"] for job in jobs.values() if isinstance(job.get("runs-on"), str)
+        job["runs-on"] for job in jobs.values()
+        if isinstance(job, dict) and isinstance(job.get("runs-on"), str)
     })
     pins = set(_JAX_PIN_RE.findall(CI_WORKFLOW.read_text()))
     pins.update(_matrix_axis(matrix, "jax-version"))

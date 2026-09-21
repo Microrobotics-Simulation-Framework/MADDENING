@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
+  `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
+  and printed `0.00 ms` for an overhead the run could not resolve
 - **Docs**: the SOUP identification table gives JAX's *verified* version as well
   as its permitted range; `DESIGN.md`, `DatasetGenerator.from_graph` and
   `SurrogateValidator.compare_graphs` say they advance the graph they are given

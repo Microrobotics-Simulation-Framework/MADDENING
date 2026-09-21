@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **The six `step` / `run_*` entry points document that they advance the
+  graph's own state**: a second call continues from the first's final state,
+  so measure from a fresh `GraphManager`; `run_sweep`, which does not, says so
 - **`fit_lm` and `fit_multiple_shooting` hold the undetermined directions too**,
   as `fit` already did, so all three fill `FitResult.excited_rank`; the spring's
   `(k, c, m)` scale drifted 0.43-4.8% before. `hold_undetermined=False` opts out

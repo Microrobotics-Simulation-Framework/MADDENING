@@ -4845,6 +4845,23 @@ class GraphManager:
 
         Returns the full state dict after the step (excluding internal
         metadata).
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        the state this one step reaches, so the next :meth:`step` or
+        ``run_*`` call continues from there rather than from the state
+        the graph held before this call.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
@@ -4884,6 +4901,25 @@ class GraphManager:
             inputs that change each step, use :meth:`step` in a loop
             or use a ``CommandReceiver`` with ``RealtimeRunner``.
             Completed and validated as in :meth:`step`.
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        the state the last of the *n_steps* steps reaches, so the next
+        :meth:`step` or ``run_*`` call continues from there rather than
+        from the state the graph held before this call.  The state moves
+        at every iteration, so an exception part-way through leaves the
+        graph at the last completed step, not where it started.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
@@ -4996,6 +5032,24 @@ class GraphManager:
         dict[str, dict]
             The final state of the graph after *n_steps* (excluding
             internal metadata).
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        the final state of the scan -- the same state this call returns
+        -- so the next :meth:`step` or ``run_*`` call continues from
+        there rather than from the state the graph held before this
+        call.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
@@ -5063,6 +5117,24 @@ class GraphManager:
             ``history["ball"]["position"]`` is a 1-D array of shape
             ``(n_steps,)`` (or ``(n_steps, *field_shape)`` for
             non-scalar fields) holding the value **after** each step.
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        *final_state*, the **last** entry of *history* and not the
+        first, so the next :meth:`step` or ``run_*`` call continues from
+        there rather than from the state the graph held before this
+        call.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
@@ -5141,6 +5213,16 @@ class GraphManager:
         appears in the returned states.  Pass an explicit ``_meta`` entry
         in ``initial_states`` — batched like any other leaf — to start
         each simulation from a different phase.
+
+        **Not stateful, unlike every other ``run_*`` entry point.**  The
+        graph's own state is *not* advanced.  This call reads
+        ``self._state`` only for the ``_meta`` seed described above and
+        writes nothing back, so the graph is left exactly as it was and
+        an identical second call returns identical results; the batch
+        runs from *initial_states*, which the caller supplies.
+        :meth:`step`, :meth:`run`, :meth:`run_scan`,
+        :meth:`run_scan_with_history`, :meth:`run_adaptive` and
+        :meth:`run_adaptive_scan` all *do* advance it.
 
         Returns
         -------
@@ -5377,6 +5459,25 @@ class GraphManager:
             *info* is a dict with ``n_steps``, ``n_rejected``,
             ``dt_history`` (list of used timesteps), and
             ``t_history`` (list of simulation times).
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        the state reached at ``t_end``, so the next :meth:`step` or
+        ``run_*`` call continues from there rather than from the state
+        the graph held before this call.  The simulation clock reported
+        in *info* restarts from zero on the next call; the state does
+        not.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()
@@ -5534,6 +5635,26 @@ class GraphManager:
             *final_state*: state after last accepted step.
             *history*: stacked state at each step (shape ``(max_steps, ...)``).
             *info*: dict with ``n_steps`` (actual steps taken, as JAX array).
+
+        Notes
+        -----
+        **Stateful: the graph's own state is advanced.**  ``self`` is left at
+        *final_state*, the state after the last accepted step and not
+        the first entry of *history*, so the next :meth:`step` or
+        ``run_*`` call continues from there rather than from the state
+        the graph held before this call.  The simulation clock reported
+        in *info* restarts from zero on the next call; the state does
+        not.
+
+        Building observations more than once from a single
+        :class:`GraphManager` therefore measures a *different* initial
+        condition each time.  For repeated measurements from one initial
+        condition, construct a fresh :class:`GraphManager` inside the
+        measurement loop, or snapshot and restore explicitly with
+        :meth:`save_state` / :meth:`load_state`; :meth:`reset_state`
+        returns the graph to its nodes' ``initial_state()``.
+        :meth:`run_sweep` is the one batch entry point that leaves the
+        graph's state untouched.
         """
         self._recover_from_escaped_tracers()
         self._check_static_data_dirty()

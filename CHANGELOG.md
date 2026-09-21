@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **The six `step` / `run_*` entry points document that they advance the
+  graph's own state**: a second call continues from the first's final state,
+  so measure from a fresh `GraphManager`; `run_sweep`, which does not, says so
 - **`fit` holds the directions the data cannot determine at the values it was
   given**, so a degenerate combination no longer lands wherever `n_iter` and
   `lr` leave it; `FitResult.excited_rank`, or `hold_undetermined=False`

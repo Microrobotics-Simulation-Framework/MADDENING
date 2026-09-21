@@ -328,15 +328,16 @@ def _F_dispatch(step_pure, x, consts):
 
 
 def _spectral_rate_at(step_pure, x_star, consts):
-    """``(rho, rho_prev)`` of ``dF/dx`` at ``x_star`` by power iteration.
+    """``(rho, arnoldi_residual)`` of ``dF/dx`` at ``x_star``.
 
     The matvec is the same ``jax.jvp`` of the one-pass map the IFT
     tangent rule builds (see ``_ift_solve_jvp``); it is applied
-    ``SPECTRAL_POWER_ITERATIONS`` times, which is the whole cost.  The
-    inputs are ``stop_gradient``-ed so the estimate is forward-only
-    bookkeeping like the rest of the diagnostics: under ``jax.grad``
-    nothing here is linearised, and the adjoint of the step is
-    unchanged by its presence.
+    ``SPECTRAL_KRYLOV_STEPS`` times by
+    :func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`,
+    which is the whole cost.  The inputs are ``stop_gradient``-ed so
+    the estimate is forward-only bookkeeping like the rest of the
+    diagnostics: under ``jax.grad`` nothing here is linearised, and
+    the adjoint of the step is unchanged by its presence.
 
     The start vector is a fixed-seed normal draw rather than the
     residual direction.  It costs no extra evaluation of ``F`` and has
@@ -344,12 +345,12 @@ def _spectral_rate_at(step_pure, x_star, consts):
     radius of the whole map -- an upper bound on the rate of any mode
     the error happens to live in, which is the conservative side.  A
     map whose Jacobian has rank ``m`` (the usual coupling case: rank
-    at most the interface DOF count) puts the iterate into that
-    ``m``-dimensional range on the first product, so a large state
-    does not slow the estimate down.
+    at most the number of boundary scalars crossing the group's
+    edges) has its whole range inside an ``m``-step Krylov space, so
+    a large state does not slow the estimate down or blur it.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        spectral_rate_power_iteration,
+        arnoldi_spectral_radius,
     )
 
     x_sg = jax.lax.stop_gradient(x_star)
@@ -362,7 +363,7 @@ def _spectral_rate_at(step_pure, x_star, consts):
         return Jv
 
     v0 = jax.random.normal(jax.random.PRNGKey(0), x_sg.shape, x_sg.dtype)
-    return spectral_rate_power_iteration(matvec, v0)
+    return arnoldi_spectral_radius(matvec, v0)
 
 
 #: Accelerations that may not *stop iterating* on a single pass at or
@@ -430,8 +431,8 @@ def _fixed_point_while(
        mode emerges.  The same mechanism, inverted, is why IQN
        understates — a superlinear sequence reads ``rho -> 0``.
        **Under ``solver="ift"`` with ``diagnostics=True`` this one is
-       measured rather than guessed**: a power iteration on ``dF/dx``
-       at the returned iterate gives ``rho_spectral``, and
+       measured rather than guessed**: a short Arnoldi iteration on
+       ``dF/dx`` at the returned iterate gives ``rho_spectral``, and
        ``coupling_diagnostics()['spectral_error_bound']`` is
        ``residual / (1 - rho_spectral)`` with a margin -- a bound for
        a linear ``F`` with a normal Jacobian, and an asymptotic
@@ -1884,7 +1885,7 @@ def _run_coupled_block_impl(
             outside the group.  IQN acceleration acts on the
             interface-field subset through a static index map into
             that vector.  ``diag`` is ``(n_iters, final_res, final_amp,
-            rho_spectral, rho_spectral_prev)`` -- the last two NaN
+            rho_spectral, arnoldi_residual)`` -- the last two NaN
             unless ``diagnostics=True`` -- and ``vw`` the IQN ``(V, W)``
             matrices (``None`` for other accelerations).  The IFT derivative is intrinsic to ``F``
             at ``x*`` and unchanged across acceleration modes.
@@ -2001,17 +2002,17 @@ def _run_coupled_block_impl(
             # The spectral bound's ingredients, at the state being
             # returned (``x_star_full`` before the strict guard, whose
             # value it is).  Only with ``diagnostics=True``: it costs
-            # ``SPECTRAL_POWER_ITERATIONS`` Jacobian-vector products
+            # ``SPECTRAL_KRYLOV_STEPS`` Jacobian-vector products
             # per group per step, which the always-on ift report is
             # not charged for.  NaN is what ``coupling_diagnostics``
             # reads as "not computed" (``spectral_usable=False``).
             if group.diagnostics:
-                rho_spec, rho_spec_prev = _spectral_rate_at(
+                rho_spec, spec_resid = _spectral_rate_at(
                     step_pure, x_star_full, consts,
                 )
             else:
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
-                rho_spec_prev = rho_spec
+                spec_resid = rho_spec
             if group.strict_convergence:
                 # Lazy for import time only: equinox is a transitive
                 # dependency of lineax, which is a base dependency.
@@ -2041,12 +2042,12 @@ def _run_coupled_block_impl(
                     "coupling_diagnostics().",
                 )
             final = _merge(template_state, _embed(x_star_full), jnp.array(False))
-            return (final, (n_iters, final_res, final_amp, rho_spec, rho_spec_prev),
+            return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid),
                     (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           rho_spec_prev), vw) = _run_ift_forward(state_after_first)
+                           spec_resid), vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
@@ -2056,7 +2057,7 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         rho_spec_prev)
+                         spec_resid)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -2466,7 +2467,7 @@ def _run_coupled_block_impl(
     # built by hand without ``_meta`` keeps its structure.  The legacy
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
-        iter_count, final_res, final_amp, rho_spec, rho_spec_prev = diag_data
+        iter_count, final_res, final_amp, rho_spec, spec_resid = diag_data
         res_dtype = jnp.asarray(final_res).dtype
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
@@ -2489,8 +2490,8 @@ def _run_coupled_block_impl(
                 f"coupling_{group_key}_rho_spectral": jnp.asarray(
                     rho_spec, dtype=res_dtype
                 ),
-                f"coupling_{group_key}_rho_spectral_prev": jnp.asarray(
-                    rho_spec_prev, dtype=res_dtype
+                f"coupling_{group_key}_spectral_residual": jnp.asarray(
+                    spec_resid, dtype=res_dtype
                 ),
             }
 
@@ -3874,14 +3875,14 @@ class GraphManager:
                         0.0, dtype=res_dtype
                     )
                     if g.diagnostics and g.solver == "ift":
-                        # The power-iteration pair behind the spectral
-                        # bound; NaN reads as "not computed".  Same
+                        # The Arnoldi pair (Ritz radius, residual) behind
+                        # the spectral bound; NaN reads as "not computed".  Same
                         # condition as the write in
                         # ``_run_coupled_block_impl``.
                         meta[f"coupling_{key}_rho_spectral"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
-                        meta[f"coupling_{key}_rho_spectral_prev"] = jnp.array(
+                        meta[f"coupling_{key}_spectral_residual"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
                 if g.acceleration == "iqn-imvj":
@@ -4951,21 +4952,22 @@ class GraphManager:
                     1.0 if group.convergence_norm in ("mixed", "interface")
                     else group.tolerance
                 )
-                # The spectral pair is present only under solver="ift"
-                # with diagnostics=True, and NaN there until a step has
+                # The spectral pair (Ritz radius, Arnoldi residual) is
+                # present only under solver="ift" with diagnostics=True,
+                # and NaN there until a step has
                 # computed it (and at max_iterations=1, which solves no
                 # fixed point).  Absent or NaN both read as "not
                 # computed": the bound is NaN and the flag False.
                 rho_spec = float(meta.get(
                     f"coupling_{key}_rho_spectral", float("nan")))
-                rho_spec_prev = float(meta.get(
-                    f"coupling_{key}_rho_spectral_prev", float("nan")))
+                spec_resid = float(meta.get(
+                    f"coupling_{key}_spectral_residual", float("nan")))
                 spectral_bound = float(spectral_error_bound(
-                    residual, rho_spec, rho_spec_prev,
+                    residual, rho_spec, spec_resid,
                 ))
                 spectral_usable = bool(
                     math.isfinite(spectral_bound)
-                    and spectral_rate_settled(rho_spec, rho_spec_prev)
+                    and spectral_rate_settled(rho_spec, spec_resid)
                 )
                 result[key] = _CouplingDiagnostics({
                     "iterations": int(meta[iter_key]),
@@ -5939,7 +5941,7 @@ class GraphManager:
                 ):
                     fresh_meta[key] = jnp.zeros_like(value)
                 elif key.endswith("_rho_spectral") or key.endswith(
-                    "_rho_spectral_prev"
+                    "_spectral_residual"
                 ):
                     # NaN, not zero: zero would read as a computed
                     # spectral radius of 0 and a bound equal to the

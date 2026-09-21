@@ -412,100 +412,171 @@ def estimated_error(residual, amplification, step_scale=1.0):
 # The spectral bound (``solver="ift"``, ``diagnostics=True``)
 # ------------------------------------------------------------------
 
-#: Power-iteration steps per group per timestep, i.e. the number of
+#: Arnoldi steps per group per timestep, i.e. the number of
 #: Jacobian-vector products the spectral bound costs.  Each step is one
 #: ``jax.jvp`` of the group's one-pass map -- roughly the price of one
-#: coupling pass.  Eight resolves a dominant eigenvalue from a
-#: competitor at 0.4 of its size to 1e-6 (``0.4**16``), which is the
-#: two-mode failure case with room to spare; two eigenvalues closer
-#: than that are not resolved in eight steps and the increment margin
-#: in :func:`spectral_error_bound` and the stationarity flag in
-#: :func:`spectral_rate_settled` are what report it.
-SPECTRAL_POWER_ITERATIONS = 8
+#: coupling pass.  A coupling Jacobian's rank is at most the number of
+#: boundary scalars that cross the group's edges, and a Krylov space of
+#: that dimension *is* the Jacobian's range, so eight steps give the
+#: exact non-zero spectrum of any group with up to eight independent
+#: interface scalars and report, through the Arnoldi residual, when a
+#: group has more (see :func:`arnoldi_spectral_radius`).
+SPECTRAL_KRYLOV_STEPS = 8
 
-#: How many times the last *increase* of the power-iteration ratio is
-#: added to it before the bound is formed.  For a normal Jacobian the
-#: ratio sequence is non-decreasing and converges geometrically, so its
-#: last increment measures how far it still has to go: a sequence that
-#: has stopped moving contributes no margin, one still rising is
-#: extrapolated.  Two covers a geometric convergence factor of up to
-#: 2/3 exactly (remaining gap = increment * q / (1 - q)); see
-#: :func:`spectral_error_bound` for what it does not cover.
+#: How many times the Arnoldi residual ``h_{k+1,k}`` is added to the
+#: Ritz spectral radius before the bound is formed.  That residual is
+#: the norm of the part of ``A q_k`` the Krylov space does not contain,
+#: in the same units as the eigenvalues; for a normal ``A`` every Ritz
+#: value lies within it of a true eigenvalue (Bauer-Fike with constant
+#: one).  It is zero, up to float32 rounding, when the Krylov space is
+#: invariant, so the margin costs a resolved spectrum nothing.
 SPECTRAL_MARGIN = 2.0
 
-#: The stationarity test behind ``spectral_usable``: the last change
-#: of the ratio, as a fraction of the gap ``1 - rho`` that the bound
-#: divides by.  The bound's relative error is that change amplified
-#: by the same ``1/(1 - rho)``, so this is the quantity that decides
+#: The convergence test behind ``spectral_usable``: the Arnoldi
+#: residual as a fraction of the gap ``1 - rho`` the bound divides by.
+#: A shift of the dominant eigenvalue by the residual would move the
+#: bound by this fraction of itself, so it is the quantity that decides
 #: whether the number is settled to a few percent.
 SPECTRAL_SETTLED_FRACTION = 0.05
 
+#: Arnoldi breakdown threshold, relative to ``||A q_j||``.  Below it
+#: the new direction is float32 noise left over from orthogonalising a
+#: vector that lay in the Krylov space, and normalising noise into a
+#: basis vector would let a *non-normal* Jacobian's field of values --
+#: which can exceed its spectral radius -- leak into the Ritz values.
+#: The basis stops growing instead and the remaining Hessenberg columns
+#: stay zero, which is the exact answer.
+_ARNOLDI_BREAKDOWN_RTOL = 1e-5
 
-def spectral_rate_power_iteration(matvec, v0, n_iter: int = SPECTRAL_POWER_ITERATIONS):
-    """``(rho, rho_prev)``: the last two norm ratios of a power iteration.
+#: Squarings in the Gelfand estimate of a small matrix's spectral
+#: radius, ``||H^(2^J)||_F ** (1 / 2^J)``.  The estimate is never below
+#: the true radius and its excess after ``J`` squarings is bounded by
+#: ``2**-J`` times the log of the eventual squaring ratio, i.e. below
+#: 1e-6 relative for anything float32 can distinguish.
+_GELFAND_SQUARINGS = 24
+
+
+def _spectral_radius_small(H, n_squarings: int = _GELFAND_SQUARINGS):
+    """``rho(H)`` of a small dense matrix by repeated squaring, from above.
+
+    Gelfand: ``rho(H) = lim ||H^m||^(1/m)``, and ``||H^m||_F >= rho^m``
+    for every ``m``, so the truncated estimate is an upper bound that
+    converges to the radius.  Computed in log space over normalised
+    powers, ``log rho = log ||H|| + sum_j 2^-(j+1) log ||N_j^2||_F``,
+    so neither ``0.999**(2**24)`` nor ``0.2**(2**24)`` is ever formed.
+    Only matrix products and norms: it lowers on every backend, where a
+    non-symmetric ``eigvals`` does not.  A nilpotent ``H`` (some
+    ``N_j^2 == 0``) reports exactly ``0.0``.
+    """
+    H = jnp.asarray(H)
+    c0 = jnp.linalg.norm(H)
+    alive0 = c0 > 0
+    N0 = jnp.where(alive0, H / jnp.where(alive0, c0, 1.0), H)
+    log_rho0 = jnp.where(alive0, jnp.log(jnp.where(alive0, c0, 1.0)), 0.0)
+
+    def body(j, carry):
+        N, log_rho, alive = carry
+        M = N @ N
+        s = jnp.linalg.norm(M)
+        alive = jnp.logical_and(alive, s > 0)
+        safe = jnp.where(alive, s, 1.0)
+        N = jnp.where(alive, M / safe, M)
+        log_rho = log_rho + jnp.log(safe) / (2.0 ** (j + 1))
+        return N, log_rho, alive
+
+    _N, log_rho, alive = jax.lax.fori_loop(
+        0, int(n_squarings), body, (N0, log_rho0, alive0),
+    )
+    return jnp.where(alive, jnp.exp(log_rho), jnp.zeros_like(log_rho))
+
+
+def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
+    """``(rho, residual)``: the Ritz spectral radius after ``n_steps`` of Arnoldi.
 
     ``matvec(v)`` applies the coupling Jacobian ``dF/dx`` (at the point
-    the caller chose) to ``v``; ``v0`` is the start vector.  The
-    iteration normalises after every product and records the norm
-    ratio ``||A v|| / ||v||``; after ``n_iter`` products the last ratio
-    is the estimate of the spectral radius and the one before it is
-    returned beside it so the caller can see whether the sequence had
-    settled.
+    the caller chose) to ``v``; ``v0`` is the start vector.  Modified
+    Gram-Schmidt Arnoldi builds an orthonormal basis ``Q`` of the
+    Krylov space and the Hessenberg matrix ``H = Q^T A Q``; ``rho`` is
+    the spectral radius of ``H`` -- the largest Ritz value in modulus,
+    taken by :func:`_spectral_radius_small` so the call lowers on every
+    backend -- and ``residual`` is ``h_{k+1,k}``, the norm of the part
+    of ``A q_k`` outside the space.
 
-    **The estimate converges from below.**  For a normal ``A`` the
-    ratio is a power mean of ``|lambda_i|`` weighted by the start
-    vector's components, so it never exceeds ``rho(A)`` and the
-    sequence is non-decreasing (Cauchy-Schwarz on ``A^k v``).  That is
-    the direction that *understates* a bound, which is why the two
-    ratios are returned rather than one: :func:`spectral_error_bound`
-    inflates the estimate by its own last increment.  For a non-normal
-    ``A`` a ratio can transiently exceed ``rho`` -- the safe direction
-    -- and the sequence need not be monotone.
+    **When the answer is exact, and how it says so.**  A coupling
+    Jacobian has rank at most the number of boundary scalars crossing
+    the group's edges; once the Krylov space contains that range the
+    next Arnoldi vector is zero (breakdown, see
+    ``_ARNOLDI_BREAKDOWN_RTOL``), the remaining columns of ``H`` stay
+    zero, the non-zero Ritz values are the non-zero eigenvalues of
+    ``A`` exactly, and ``residual`` is ``0.0``.  A group with more
+    independent interface scalars than ``n_steps`` gets Ritz values
+    that lie, for a normal ``A``, inside the convex hull of the
+    spectrum -- an estimate of ``rho`` *from below* -- and a
+    ``residual`` that is not small, which is what
+    :func:`spectral_rate_settled` reports and
+    :func:`spectral_error_bound` adds a margin for.  Eight steps
+    resolve any spectrum whatever its clustering where the rank allows
+    it, which is where a power iteration of the same cost does not: on
+    random symmetric contractions of dimension 6 with eigenvalues
+    0.949 and 0.983 the power iteration read 0.949 after eight
+    products, while Arnoldi's space of dimension 6 is the whole range.
 
-    ``n_iter`` is static (a Python int) and is the number of
+    ``n_steps`` is static (a Python int) and is the number of
     Jacobian-vector products the call costs.  A zero ``v0``, or a
-    ``matvec`` that annihilates the iterate (a nilpotent Jacobian),
-    yields a ratio of ``0.0`` rather than a NaN: no direction is
-    amplified, so nothing is extrapolated.
+    Jacobian that annihilates the start (``A v0 = 0``), gives
+    ``rho = 0.0`` and ``residual = 0.0``: nothing is amplified, so
+    nothing is extrapolated.
 
     Examples
     --------
     >>> import jax.numpy as jnp
-    >>> A = jnp.diag(jnp.array([0.999, 0.2]))
-    >>> rho, rho_prev = spectral_rate_power_iteration(
-    ...     lambda v: A @ v, jnp.ones(2), n_iter=8)
-    >>> bool(abs(rho - 0.999) < 1e-5), bool(rho >= rho_prev)
+    >>> A = jnp.diag(jnp.array([0.999, -0.2, 0.0]))
+    >>> rho, res = arnoldi_spectral_radius(lambda v: A @ v, jnp.ones(3), n_steps=8)
+    >>> bool(abs(rho - 0.999) < 1e-5), bool(res < 1e-5)
     (True, True)
     """
-    if n_iter < 2:
+    if n_steps < 1:
         raise ValueError(
-            f"spectral_rate_power_iteration: n_iter={n_iter} < 2; the "
-            "stationarity margin needs two consecutive ratios."
+            f"arnoldi_spectral_radius: n_steps={n_steps} < 1; at least "
+            "one Jacobian-vector product is needed."
         )
     v0 = jnp.asarray(v0)
+    k = int(n_steps)
+    n = v0.shape[0]
+    dtype = v0.dtype
 
     def _unit(v):
-        n = jnp.linalg.norm(v)
-        safe = jnp.where(n > 0, n, jnp.ones_like(n))
-        return jnp.where(n > 0, v / safe, v)
+        nrm = jnp.linalg.norm(v)
+        ok = nrm > 0
+        return jnp.where(ok, v / jnp.where(ok, nrm, 1.0), v)
 
-    def body(_i, carry):
-        v, _ratio_prev, ratio = carry
-        w = matvec(v)
-        nv = jnp.linalg.norm(v)
-        nw = jnp.linalg.norm(w)
-        safe = jnp.where(nv > 0, nv, jnp.ones_like(nv))
-        new_ratio = jnp.where(nv > 0, nw / safe, jnp.zeros_like(nw))
-        return _unit(w), ratio, new_ratio
+    Q0 = jnp.zeros((k + 1, n), dtype).at[0].set(_unit(v0))
+    H0 = jnp.zeros((k + 1, k), dtype)
 
-    zero = jnp.zeros((), dtype=v0.dtype)
-    _v, rho_prev, rho = jax.lax.fori_loop(
-        0, int(n_iter), body, (_unit(v0), zero, zero),
-    )
-    return rho, rho_prev
+    def body(j, carry):
+        Q, H = carry
+        w = matvec(Q[j])
+        scale = jnp.linalg.norm(w)
+        # Modified Gram-Schmidt against every basis vector; rows not yet
+        # filled (and rows after a breakdown) are zero and contribute
+        # nothing, which keeps the loop static in shape.
+        for i in range(k + 1):
+            h = jnp.dot(Q[i], w)
+            w = w - h * Q[i]
+            H = H.at[i, j].set(h)
+        h_next = jnp.linalg.norm(w)
+        grown = h_next > _ARNOLDI_BREAKDOWN_RTOL * scale
+        H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
+        q_next = jnp.where(grown, w / jnp.where(grown, h_next, 1.0), 0.0)
+        Q = Q.at[j + 1].set(q_next)
+        return Q, H
+
+    _Q, H = jax.lax.fori_loop(0, k, body, (Q0, H0))
+    rho = _spectral_radius_small(H[:k, :k])
+    return rho, H[k, k - 1]
 
 
-def spectral_error_bound(residual, rho, rho_prev, margin: float = SPECTRAL_MARGIN):
+def spectral_error_bound(residual, rho, arnoldi_residual, margin: float = SPECTRAL_MARGIN):
     """``residual / (1 - rho_safe)``: the distance to the fixed point, from the spectrum.
 
     For a *linear* map ``F(x) = A x + b`` the error of any iterate is
@@ -516,60 +587,59 @@ def spectral_error_bound(residual, rho, rho_prev, margin: float = SPECTRAL_MARGI
     operator norm is ``1 / min|1 - lambda| <= 1 / (1 - rho(A))``.  This
     is the inequality :func:`error_amplification` could not state,
     because it read ``rho`` off the residual sequence, which reports the
-    mode dominating the *step*; here ``rho`` comes from a power
-    iteration on ``dF/dx`` itself (:func:`spectral_rate_power_iteration`),
-    which sees every mode whatever its current amplitude.
+    mode dominating the *step*; here ``rho`` comes from the spectrum of
+    ``dF/dx`` itself (:func:`arnoldi_spectral_radius`), which sees every
+    mode whatever its current amplitude.
 
-    ``rho_safe`` is the larger of the two ratios handed in, plus
-    ``margin`` times the last increase.  The power iteration converges
-    to the spectral radius from below, so an estimate that was still
-    rising is extrapolated forward rather than trusted; one that had
-    stopped moving gets no margin.  The result is ``inf`` when
-    ``rho_safe >= 1`` -- the raw iteration would not contract, so the
-    geometric argument bounds nothing -- and NaN when either ratio is
-    NaN, which is how a solver that did not compute one reports it.
-    Never smaller than ``residual`` where it is finite.
+    ``rho_safe = rho + margin * arnoldi_residual``.  The Arnoldi
+    residual is zero when the Krylov space captured the Jacobian's
+    range and the spectrum is exact, so a resolved spectrum pays no
+    margin; where it is not zero the Ritz radius is an estimate from
+    below and is pushed up by the size of what the space missed.  The
+    result is ``inf`` when ``rho_safe >= 1`` -- the raw iteration would
+    not contract, so the geometric argument bounds nothing -- and NaN
+    when ``rho`` is NaN, which is how a solver that did not compute one
+    reports it.  Never smaller than ``residual`` where it is finite,
+    and it inherits the residual's float32 noise floor: a residual that
+    reads exactly ``0.0`` gives a bound of ``0.0``, which means
+    "converged to float32" and not "exact".
 
     **When it is a bound and when it is an estimate.**  It is a bound
     on ``||x - x*||`` under three conditions, each stated because each
-    can fail: ``F`` is linear (or the iterate is close enough that
+    can fail: ``F`` is linear, or the iterate is close enough that
     ``dF/dx`` does not change between ``x`` and ``x*`` -- Ostrowski's
     theorem makes the statement *asymptotic* for a differentiable
-    non-linear ``F``, and an estimate elsewhere); the Jacobian is
+    non-linear ``F``, and an estimate elsewhere; the Jacobian is
     normal, or its eigenvector basis is well enough conditioned that
-    ``||(I - A)^{-1}||`` is within ``margin`` of ``1/(1 - rho)`` (the
+    ``||(I - A)^{-1}||`` is within the margin of ``1/(1 - rho)`` (the
     Gauss-Seidel one-pass map of a cycle is *not* normal, but after one
     pass its error lies in the dominant eigenspace, where the
-    inequality holds exactly); and the group's norm is close enough to
-    a norm on the tail -- the same triangle-inequality condition
-    ``error_amplification`` documents.  The power iteration's finite
-    length is the fourth thing that can fail, and the only one the
-    code reports: two eigenvalues closer than ``n_iter`` steps can
-    separate leave the estimate below the true radius by more than the
-    increment margin recovers.  :func:`spectral_rate_settled` says
-    whether the sequence had stopped moving; it cannot say that it had
-    stopped moving at the right value.
+    inequality holds with equality); and the group's norm is close
+    enough to a norm on the tail -- the same triangle-inequality
+    condition ``error_amplification`` documents.  The Krylov space's
+    finite dimension is the fourth thing that can fail, and the only
+    one the code reports: :func:`spectral_rate_settled` says whether
+    the Arnoldi residual was small against ``1 - rho``, and a group
+    with more independent interface scalars than
+    :data:`SPECTRAL_KRYLOV_STEPS` will say it was not.
 
     Examples
     --------
-    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.999)), 4)
+    >>> round(float(spectral_error_bound(1e-4, 0.999, 0.0)), 4)
     0.1
-    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.4)), 6)   # rising: 0.5 + 2*0.1
+    >>> round(float(spectral_error_bound(1e-4, 0.5, 0.1)), 6)   # 0.5 + 2*0.1
     0.000333
-    >>> round(float(spectral_error_bound(1e-4, 0.9, 0.95)), 6)  # falling: the larger
-    0.002
-    >>> float(spectral_error_bound(1e-4, 1.0, 1.0))
+    >>> float(spectral_error_bound(1e-4, 1.0, 0.0))
     inf
     """
     residual = jnp.asarray(residual)
     rho = jnp.asarray(rho)
-    rho_prev = jnp.asarray(rho_prev)
-    dtype = jnp.result_type(residual, rho, rho_prev)
+    arnoldi_residual = jnp.asarray(arnoldi_residual)
+    dtype = jnp.result_type(residual, rho, arnoldi_residual)
     residual = residual.astype(dtype)
     rho = rho.astype(dtype)
-    rho_prev = rho_prev.astype(dtype)
-    inc = jnp.maximum(rho - rho_prev, jnp.zeros_like(rho))
-    rho_safe = jnp.maximum(rho, rho_prev) + margin * inc
+    arnoldi_residual = arnoldi_residual.astype(dtype)
+    rho_safe = rho + margin * arnoldi_residual
     finite = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
     contracting = rho_safe < 1
     ok = jnp.logical_and(finite, contracting)
@@ -580,31 +650,32 @@ def spectral_error_bound(residual, rho, rho_prev, margin: float = SPECTRAL_MARGI
     return jnp.where(finite, jnp.where(contracting, bound, inf), nan)
 
 
-def spectral_rate_settled(rho, rho_prev, fraction: float = SPECTRAL_SETTLED_FRACTION):
-    """Whether the power iteration's last change was small against ``1 - rho``.
+def spectral_rate_settled(rho, arnoldi_residual, fraction: float = SPECTRAL_SETTLED_FRACTION):
+    """Whether the Arnoldi residual was small against ``1 - rho``.
 
-    ``|rho - rho_prev| <= fraction * (1 - rho)``.  The bound divides by
-    ``1 - rho``, so a change of the ratio is amplified by the same
-    factor in the bound; this asks that the last such change was worth
-    at most ``fraction`` of the bound.  False for a NaN ratio (nothing
-    was computed) and for ``rho >= 1`` (nothing is bounded).
+    ``arnoldi_residual <= fraction * (1 - rho)``.  The bound divides by
+    ``1 - rho``, so a shift of the dominant eigenvalue by the residual
+    moves the bound by that fraction of itself; this asks that the
+    unresolved part of the spectrum was worth at most ``fraction`` of
+    the bound.  False for a NaN ``rho`` (nothing was computed) and for
+    ``rho >= 1`` (nothing is bounded).
 
-    A sequence that has settled has settled *somewhere*; two eigenvalues
-    the iteration's length cannot separate look settled at the wrong
-    value.  See :func:`spectral_error_bound`.
+    A zero residual means the Krylov space was invariant and the Ritz
+    values are eigenvalues.  A small non-zero one means the space
+    nearly was; it does not say which eigenvalue was approximated, so
+    read this beside :func:`spectral_error_bound`'s conditions.
 
     Examples
     --------
-    >>> bool(spectral_rate_settled(0.999, 0.99899)), bool(spectral_rate_settled(0.9, 0.8))
+    >>> bool(spectral_rate_settled(0.999, 0.0)), bool(spectral_rate_settled(0.9, 0.05))
     (True, False)
     """
     rho = jnp.asarray(rho)
-    rho_prev = jnp.asarray(rho_prev, dtype=rho.dtype)
+    arnoldi_residual = jnp.asarray(arnoldi_residual, dtype=rho.dtype)
     gap = 1.0 - rho
-    moved = jnp.abs(rho - rho_prev)
-    finite = jnp.logical_and(jnp.isfinite(rho), jnp.isfinite(rho_prev))
+    finite = jnp.logical_and(jnp.isfinite(rho), jnp.isfinite(arnoldi_residual))
     return jnp.logical_and(
-        jnp.logical_and(finite, gap > 0), moved <= fraction * gap,
+        jnp.logical_and(finite, gap > 0), arnoldi_residual <= fraction * gap,
     )
 
 

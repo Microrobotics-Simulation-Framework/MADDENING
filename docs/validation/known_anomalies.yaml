@@ -1515,3 +1515,112 @@ anomalies:
     verification:
       - "tests/core/test_x64_graph_scan_limitation.py"
     github_issue: null
+  - anomaly_id: "MADD-ANO-018"
+    title: "A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node()"
+    description: >
+      0.4.0 added the graph parameter pytree: node constants become traced
+      inputs, `gm.params` carries them, `maddening.sysid.fit` and its
+      siblings produce them, and a node opts in with
+      `update(..., *, params=None)` and the `{**self.params, **params}`
+      rule.  Three of a node's entry points took the new argument and two
+      did not.  `SimulationNode.compute_interface_correction`
+      (`core/node.py`) takes `params` and its docstring states the
+      contract -- "A node that takes `params` in `update()` must take it
+      here too (same `{**self.params, **params}` rule)".
+      `SimulationNode.derivatives` and `SimulationNode.implicit_residual`
+      take no `params` at all, so an implementation has nothing to read
+      but `self.params`, the values the node was constructed with.  Every
+      in-tree `implicit_residual` builds its residual by calling
+      `self.derivatives(...)`, so it inherits the limitation whole.
+      This is reachable through public API, and not only by a caller
+      reaching past one.  `integrate_node(node, state, boundary_inputs,
+      dt, method=...)` (`core/simulation/integrators.py`) is documented,
+      exported and takes no `params` either; it hands `node.derivatives`
+      straight to the chosen stepper.  `implicit_euler_step`
+      (`core/simulation/implicit.py`) reaches it one step further out:
+      it takes a callable, but its own docstring documents that callable
+      as "the node's `implicit_residual` method", and that method is the
+      one with no `params`.  So the gap is not "the caller forgot to pass
+      it" but "there is no argument to pass": a user who has calibrated a
+      parameter has no way to make these paths use it short of
+      reconstructing the node.  The bare steppers `euler_step`,
+      `heun_step` and `rk4_step` are not listed below: they take an
+      arbitrary derivative function and are not node-aware, so a caller
+      who wants calibrated values can close over them.
+      Measured at 0.4.0.dev0 on `SpringDamperNode` with constructor
+      stiffness 100 against a calibrated 400, from one state
+      (position 2.0, velocity 0.0, rest_length 1.0, dt 0.01):
+      `update(params=fitted)` gives velocity -4.0; `update()` without
+      params, `euler_step(node.derivatives, ...)`,
+      `integrate_node(method="euler")` all give -1.0, and
+      `implicit_euler_step` gives -0.980.  `HeatNode` with a calibrated
+      `thermal_diffusivity` of 0.5 against a constructor 0.01 diverges
+      the same way.  The factor between the two answers is exactly the
+      factor between the two stiffnesses: the calibration is not
+      attenuated, it is discarded.
+      Not a regression in the older sense: before 0.4.0 there was no way
+      to inject a value at all, and `update` and `derivatives` both read
+      `self.params`, so the two agreed.  The divergence is the cost of
+      migrating one of them.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` rather than `minor` because the defect produces a
+      wrong number on a documented public path with nothing to indicate
+      it: no exception, no warning, no NaN, and a trajectory that stays
+      smooth and finite.  The error is not a small bias but the whole
+      calibration -- the measured answers differ by the full ratio of the
+      two stiffnesses -- and the 0.4.0 release ships the machinery
+      (`gm.params`, `ParamSpec`, `fit`, `fit_lm`,
+      `fit_multiple_shooting`) whose entire purpose is producing the
+      value that is then dropped.  Not `critical`: there is a complete
+      workaround, nothing crashes or corrupts state, and the defect is
+      inert for any caller who never injects params.
+      Graded `context_dependent` rather than `safety_relevant` because
+      MADDENING is a general simulation library and the defect needs two
+      user choices at once to bite -- calibrating a parameter through
+      `gm.params`, and then integrating through a `derivatives()`-based
+      path instead of `update()`.  Whether a program does both is a
+      property of that program and not of this library, and no in-tree
+      caller does.  What raises it above `not_safety_relevant` is the
+      shape rather than the frequency: the two answers come from *one
+      node object*, so a user who validates a calibration through
+      `update()` -- the natural way to check a fit -- and then runs
+      production through `integrate_node` or an implicit solve sees the
+      validation pass and the run use different physics, with the
+      library reporting no disagreement at any point.  A caller whose
+      analysis depends on a fitted parameter having taken effect cannot
+      establish that from anything the library returns.
+    affected_components:
+      - "maddening.core.node.SimulationNode.derivatives"
+      - "maddening.core.node.SimulationNode.implicit_residual"
+      - "maddening.core.simulation.integrators.integrate_node"
+      - "maddening.core.simulation.implicit.implicit_euler_step"
+    affected_versions: ">=0.4.0"
+    workaround: >
+      Drive the node through `update(..., params=...)`, which honours the
+      injected values, or -- where a `derivatives()`-based integrator is
+      wanted -- reconstruct the node with the calibrated values as
+      constructor arguments before integrating, so `self.params` already
+      holds them.  Both are exact rather than approximations: the
+      limitation is in how the value is delivered, not in the
+      arithmetic.  There is no way to pass `params` to these paths, so
+      "remember to pass it" is not among the options.
+    resolution_status: "open"
+    residual_risk: >
+      Nothing about the behaviour changes in 0.4.0.  What 0.4.0 adds is
+      discoverability: `derivatives()`, `implicit_residual()` and
+      `integrate_node()` now state the limitation and cite this entry,
+      and the divergence is pinned by measurement so a future change to
+      it cannot pass unnoticed.  Registered `open` rather than
+      `partially_resolved` deliberately -- there was no incorrect claim
+      to withdraw, only an absent one, and documenting a defect in the
+      same release that registers it is not a partial fix of it.
+      Threading `*, params=None` through both methods, with the same
+      `{**self.params, **params}` rule the other two use, is 0.5.0 work
+      and deliberately out of scope here; a loud refusal when `gm.params`
+      holds a non-empty entry for a node whose `derivatives()` is being
+      called is the fallback if the signature change cannot be made.
+    verification:
+      - "tests/core/test_params_reaching_solver_paths.py"
+    github_issue: null

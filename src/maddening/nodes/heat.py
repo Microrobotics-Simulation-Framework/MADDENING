@@ -895,10 +895,18 @@ class HeatNode(SimulationNode):
 
         return {"temperature": T_new}
 
-    def derivatives(self, state, boundary_inputs):
-        """dT/dt = alpha * d^2T/dx^2 + source."""
+    def derivatives(self, state, boundary_inputs, *, params=None):
+        """dT/dt = alpha * d^2T/dx^2 + source.
+
+        ``thermal_diffusivity`` and ``length`` come from the injected
+        ``params`` when the caller supplies them, exactly as in
+        :meth:`update`; ``n_cells`` is structural and always read from
+        ``self.params``.
+        """
         n = self.params["n_cells"]
-        alpha = self.params["thermal_diffusivity"]
+        p = self.params if params is None else {**self.params, **params}
+        alpha = p["thermal_diffusivity"]
+        length = p["length"]
 
         T = state["temperature"]
         T_left = boundary_inputs.get("left_temperature", T[0])
@@ -910,13 +918,19 @@ class HeatNode(SimulationNode):
             jnp.asarray(source, dtype=T.dtype), (n,)
         )
 
-        laplacian = self._compute_laplacian(T, T_left, T_right)
+        laplacian = self._compute_laplacian(T, T_left, T_right, length)
 
         return {"temperature": alpha * laplacian + source}
 
-    def implicit_residual(self, state_new, state_old, boundary_inputs, dt):
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt, *, params=None):
         """Backward Euler residual: T_new - T_old - dt * f(T_new)."""
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Forward ``params`` only when given, so a subclass whose
+        # ``derivatives`` override predates the keyword still works for
+        # every caller that passes none.
+        derivs = (
+            self.derivatives(state_new, boundary_inputs) if params is None
+            else self.derivatives(state_new, boundary_inputs, params=params)
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

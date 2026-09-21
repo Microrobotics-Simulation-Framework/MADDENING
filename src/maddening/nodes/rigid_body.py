@@ -289,15 +289,20 @@ class RigidBodyNode(SimulationNode):
     # ------------------------------------------------------------------
 
     def derivatives(
-        self, state: dict, boundary_inputs: dict
+        self, state: dict, boundary_inputs: dict, *, params=None,
     ) -> dict[str, Any]:
         """Compute time derivatives of all state fields.
 
-        Returns {field: d_field/dt}.
+        Returns {field: d_field/dt}.  ``mass``, ``inertia`` and
+        ``gravity`` come from the injected ``params`` when the caller
+        supplies them (same ``{**self.params, **params}`` rule as
+        ``update``); ``constraints`` is structural and always read from
+        ``self.params``.
         """
-        mass = self.params["mass"]
-        inertia = jnp.array(self.params["inertia"], dtype=jnp.float32)
-        gravity = jnp.array(self.params["gravity"], dtype=jnp.float32)
+        p = self.params if params is None else {**self.params, **params}
+        mass = p["mass"]
+        inertia = jnp.array(p["inertia"], dtype=jnp.float32)
+        gravity = jnp.array(p["gravity"], dtype=jnp.float32)
         constraints = self.params["constraints"]
 
         vel = state["velocity"]
@@ -350,9 +355,17 @@ class RigidBodyNode(SimulationNode):
         state_old: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, Any]:
         """Backward Euler residual: x_new - x_old - dt * f(x_new)."""
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Forward ``params`` only when given, so a subclass whose
+        # ``derivatives`` override predates the keyword still works for
+        # every caller that passes none.
+        derivs = (
+            self.derivatives(state_new, boundary_inputs) if params is None
+            else self.derivatives(state_new, boundary_inputs, params=params)
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

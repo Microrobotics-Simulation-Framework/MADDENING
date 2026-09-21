@@ -11,6 +11,7 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import functools
 import inspect
 import warnings
 from abc import ABC, abstractmethod
@@ -138,6 +139,69 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
             object.__setattr__(node, guard, False)
         except (AttributeError, TypeError):
             pass
+
+
+def _params_empty(params: Any) -> bool:
+    """``True`` for ``None`` and for an empty mapping -- the two spellings
+    of "nothing to inject"."""
+    if params is None:
+        return True
+    try:
+        return len(params) == 0
+    except TypeError:
+        return False
+
+
+def _method_accepts_params(node: Any, method: str) -> bool:
+    """``node.accepts_params(method=method)``, tolerating a probe override
+    that predates the ``method`` keyword.
+
+    The in-tree wrappers forward ``method``; a third-party subclass that
+    still declares ``accepts_params(self)`` gets the same answer read off
+    the method's own signature, so the integrators' refusal cannot be
+    switched off by an old override of the *probe*.
+    """
+    probe = getattr(node, "accepts_params", None)
+    if callable(probe):
+        try:
+            return bool(probe(method=method))
+        except TypeError:
+            pass
+    fn = getattr(node, method, None)
+    if fn is None:
+        return False
+    try:
+        return "params" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _method_with_params(node: Any, method: str, params: Any) -> Callable:
+    """The bound ``node.<method>`` with ``params`` applied, or a refusal.
+
+    Empty ``params`` (``None`` or ``{}``) returns the bound method as it
+    is, to be called the way it always was: that is what keeps an
+    override declared without the keyword working.  A non-empty
+    ``params`` returns ``functools.partial(method, params=params)`` when
+    the override can take it, and raises ``ValueError`` naming the class
+    and the method when it cannot.  The one thing it never does is call
+    the method without the params it was given -- integrating the
+    constructor's constants while ``update`` used the calibrated ones
+    was ``MADD-ANO-018``.
+    """
+    fn = getattr(node, method)
+    if _params_empty(params):
+        return fn
+    if not _method_accepts_params(node, method):
+        raise ValueError(
+            f"params given, but {type(node).__name__}.{method}() takes no "
+            "'params' keyword: calling it without would integrate the "
+            "constructor's constants while update() used the calibrated "
+            f"ones (MADD-ANO-018).  Declare {method}(..., *, params=None) "
+            "and read constants from {**self.params, **params}, or pass "
+            "no params."
+        )
+    return functools.partial(fn, params=params)
 
 
 def static_data_dep_violations(
@@ -354,16 +418,43 @@ class SimulationNode(ABC):
         """
         ...
 
-    def accepts_params(self) -> bool:
-        """True when :meth:`update` declares a ``params`` keyword.
+    def accepts_params(self, *, method: str = "update") -> bool:
+        """True when ``method`` (default :meth:`update`) declares a ``params`` keyword.
 
         Such nodes receive their entry of the graph parameter pytree on
         every call; the others keep the 3-argument contract and read
         constants from ``self.params`` (baked into the trace, so not
         differentiable through the graph).
+
+        Parameters
+        ----------
+        method : str, optional
+            Which entry point to inspect.  ``"update"`` (the default)
+            answers the graph's question.  ``"derivatives"`` and
+            ``"implicit_residual"`` answer the integrators' question:
+            :func:`~maddening.core.simulation.integrators.integrate_node`
+            and
+            :func:`~maddening.core.simulation.implicit.implicit_euler_step`
+            refuse a non-empty ``params`` for a node whose override of
+            the method they call has no ``params`` keyword, rather than
+            calling it without and integrating the constructor's
+            constants (the ``MADD-ANO-018`` shape).  Any other attribute
+            name is inspected the same way; a missing one is ``False``.
+
+        Notes
+        -----
+        The base-class :meth:`derivatives` and :meth:`implicit_residual`
+        take ``params``, so this is ``True`` for a node that does not
+        override them -- the base then raises ``NotImplementedError``
+        when called, which is the right outcome.  It is the *override
+        without the keyword* the integrators need to know about, and
+        that is what ``False`` means here.
         """
+        fn = getattr(self, method, None)
+        if fn is None:
+            return False
         try:
-            sig = inspect.signature(self.update)
+            sig = inspect.signature(fn)
         except (TypeError, ValueError):
             return False
         return "params" in sig.parameters
@@ -921,7 +1012,7 @@ class SimulationNode(ABC):
         return {}
 
     def derivatives(
-        self, state: dict, boundary_inputs: dict
+        self, state: dict, boundary_inputs: dict, *, params=None,
     ) -> dict[str, Any]:
         """Compute time derivatives of the state fields.
 
@@ -933,28 +1024,37 @@ class SimulationNode(ABC):
         level.  Default raises ``NotImplementedError`` -- override in
         nodes that have a natural ODE form.
 
+        Parameters
+        ----------
+        state : dict
+            Current state.
+        boundary_inputs : dict
+            Boundary inputs for this evaluation.
+        params : dict, optional
+            The node's entry of the graph parameter pytree.  A node that
+            takes ``params`` in :meth:`update` must take it here too and
+            read its constants by the same ``{**self.params, **params}``
+            rule, so that a value calibrated through ``gm.params`` or
+            :func:`maddening.sysid.fit` drives
+            :func:`~maddening.core.simulation.integrators.integrate_node`
+            exactly as it drives :meth:`update`.  ``None`` (the default)
+            reads ``self.params``, the constructor's values.
+
         Notes
         -----
-        **An injected ``params`` cannot reach this method**
-        (``MADD-ANO-018``).  There is no ``params`` argument in the
-        signature, so an implementation has nothing to read but
-        ``self.params`` -- the values the node was constructed with.
-        A parameter calibrated through ``gm.params``,
-        :func:`maddening.sysid.fit` or its siblings therefore changes
-        :meth:`update` and :meth:`compute_interface_correction`, whose
-        contract is the ``{**self.params, **params}`` rule, and leaves
-        every ``derivatives()``-based path running the constructor's
-        constant.  Nothing warns; the answer is finite and plausible.
-
-        Measured on ``SpringDamperNode`` with a constructor stiffness of
-        100 against a calibrated 400: ``update(params=...)`` returns a
-        velocity of ``-4.0`` and
-        :func:`~maddening.core.simulation.integrators.integrate_node`
-        returns ``-1.0`` from the same node object.
-
-        Until ``params`` is threaded through (0.5.0), either drive the
-        node through :meth:`update`, or rebuild it with the calibrated
-        values before handing it to an integrator.
+        An override may still be declared without the keyword
+        (``def derivatives(self, state, boundary_inputs)``); it keeps
+        working for every caller that passes no ``params``.  What it
+        cannot do is have one silently dropped for it:
+        ``integrate_node`` refuses a non-empty ``params`` for such a
+        node with a ``ValueError`` naming the class and the method,
+        because calling it without would integrate the constructor's
+        constants while ``update`` used the calibrated ones.  That
+        silent divergence -- a factor of four on a spring calibrated
+        from 100 to 400, from one node object -- was ``MADD-ANO-018``,
+        resolved in 0.4.0 by this keyword; before it existed there was
+        no way to deliver the value at all.
+        ``accepts_params(method="derivatives")`` is the probe.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement derivatives(). "
@@ -967,6 +1067,8 @@ class SimulationNode(ABC):
         state_old: dict,
         boundary_inputs: dict,
         dt: float,
+        *,
+        params=None,
     ) -> dict[str, Any]:
         """Compute the residual for implicit (backward Euler) integration.
 
@@ -981,14 +1083,29 @@ class SimulationNode(ABC):
         Default raises ``NotImplementedError`` -- override in nodes
         that need implicit time integration (e.g., stiff systems).
 
-        Notes
-        -----
-        **An injected ``params`` cannot reach this method either**
-        (``MADD-ANO-018``).  The signature has no ``params`` argument,
-        and every in-tree implementation builds its residual by calling
-        ``self.derivatives(...)``, so it inherits that method's
-        limitation whole: a calibrated value reaches :meth:`update` and
-        not the implicit solve.  See :meth:`derivatives`.
+        Parameters
+        ----------
+        state_new : dict
+            The unknown state the Newton iteration is solving for.
+        state_old : dict
+            State at the beginning of the timestep.
+        boundary_inputs : dict
+            Boundary inputs for this step.
+        dt : float
+            Timestep.
+        params : dict, optional
+            Same contract as :meth:`derivatives`: the node's entry of
+            the graph parameter pytree, read as
+            ``{**self.params, **params}``.  Every in-tree override
+            builds its residual from
+            ``self.derivatives(state_new, boundary_inputs, params=params)``,
+            so a calibrated value reaches the implicit solve through the
+            same door it reaches :meth:`update`.
+            :func:`~maddening.core.simulation.implicit.implicit_euler_step`
+            forwards its own ``params`` keyword here, and refuses a
+            non-empty one for an override that has no such keyword
+            rather than solving with the constructor's constants
+            (``MADD-ANO-018``, resolved in 0.4.0).
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement implicit_residual()."

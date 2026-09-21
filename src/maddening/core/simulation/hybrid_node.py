@@ -68,7 +68,9 @@ class HybridNode(SimulationNode):
         return self.physics_node.initial_state()
 
     # -- graph params contract: delegate to the wrapped physics node ----
-    def accepts_params(self) -> bool:
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
         return _accepts_params(self.physics_node.update)
 
     def params_pytree(self) -> dict:

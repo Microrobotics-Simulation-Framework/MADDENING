@@ -81,6 +81,8 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 
+from maddening.core.node import _method_with_params
+
 
 
 def euler_step(
@@ -221,6 +223,8 @@ def integrate_node(
     boundary_inputs: dict,
     dt: float,
     method: str = "rk4",
+    *,
+    params=None,
 ) -> dict:
     """Integrate a single node using its ``derivatives()`` method.
 
@@ -236,11 +240,33 @@ def integrate_node(
         Timestep.
     method : str
         Integration method: ``"euler"``, ``"heun"``, or ``"rk4"``.
+    params : dict, optional
+        The node's entry of the graph parameter pytree
+        (``gm.params["nodes"][node.name]``, or what
+        :func:`maddening.sysid.fit` returned for it).  Forwarded to
+        ``node.derivatives(..., params=params)`` at every stage, under
+        the same ``{**self.params, **params}`` rule ``update`` applies,
+        so a calibrated stiffness drives this path exactly as it drives
+        ``update``.  ``None`` or ``{}`` (the default) calls
+        ``derivatives`` the 2-argument way and integrates the
+        constructor's constants -- which is also what keeps an override
+        declared without the keyword working.
 
     Returns
     -------
     dict
         New state after integration.
+
+    Raises
+    ------
+    ValueError
+        A non-empty ``params`` for a node whose ``derivatives`` override
+        takes no ``params`` keyword.  The alternative -- calling it
+        without, and integrating the constructor's constants while
+        ``update`` used the calibrated ones -- is the silent divergence
+        that was ``MADD-ANO-018`` (resolved in 0.4.0), so it is a
+        refusal naming the class and the method, never a fallback.
+        ``node.accepts_params(method="derivatives")`` is the probe.
 
     Notes
     -----
@@ -252,17 +278,12 @@ def integrate_node(
     caller who needs one composes the time-augmented derivatives function
     from the module docstring and calls :func:`rk4_step` directly.
 
-    **There is nowhere in this signature to put ``params`` either**
-    (``MADD-ANO-018``).  ``node.derivatives`` is handed to the stepper
-    unaltered and reads ``node.params``, the constructor's values, so a
-    parameter calibrated through ``gm.params`` or
-    :func:`maddening.sysid.fit` does not reach this function at all --
-    not merely "is not passed by default", but cannot be passed.  The
-    same node driven through ``update(..., params=fitted)`` uses the
-    calibrated value and this path does not, silently and with no
-    disagreement visible in either result.  Rebuild the node with the
-    calibrated values before integrating it here, or step it through
-    ``update``.
+    ``params`` stops at this layer, also deliberately.  :func:`euler_step`,
+    :func:`heun_step` and :func:`rk4_step` take an arbitrary
+    ``derivatives_fn(state, boundary_inputs)`` and know nothing of
+    nodes; a caller composing one closes over whatever constants it
+    wants.  ``functools.partial(node.derivatives, params=p)`` is exactly
+    what this function hands them.
     """
     integrators = {
         "euler": euler_step,
@@ -274,4 +295,5 @@ def integrate_node(
             f"Unknown integration method '{method}'. "
             f"Choose from: {list(integrators.keys())}"
         )
-    return integrators[method](node.derivatives, state, boundary_inputs, dt)
+    derivatives_fn = _method_with_params(node, "derivatives", params)
+    return integrators[method](derivatives_fn, state, boundary_inputs, dt)

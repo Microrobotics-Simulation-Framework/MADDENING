@@ -257,23 +257,28 @@ class HeartPumpNode(SimulationNode):
             "flow_rate": Q_heart,
         }
 
-    def derivatives(self, state, boundary_inputs):
+    def derivatives(self, state, boundary_inputs, *, params=None):
         """Time derivatives for higher-order integration.
 
         Note: flow_rate derivative is not continuous (waveform has
         a discontinuity at systole/diastole transition), so we return
         an approximate zero for it.
+
+        The Windkessel constants come from the injected ``params`` when
+        the caller supplies them, by the same ``{**self.params,
+        **params}`` rule as ``update``.
         """
-        R = self.params["resistance"]
-        C = self.params["compliance"]
-        hr = self.params["heart_rate"]
-        sf = self.params["systole_fraction"]
-        P_venous = self.params["venous_pressure"]
+        p = self.params if params is None else {**self.params, **params}
+        R = p["resistance"]
+        C = p["compliance"]
+        hr = p["heart_rate"]
+        sf = p["systole_fraction"]
+        P_venous = p["venous_pressure"]
 
         P_art = state["arterial_pressure"]
         phase = state["phase"]
 
-        q_max = self._compute_q_max()
+        q_max = self._compute_q_max(p)
         Q_heart = _cardiac_output(phase, sf, q_max)
 
         P_downstream = boundary_inputs.get("backpressure", P_venous)
@@ -288,12 +293,18 @@ class HeartPumpNode(SimulationNode):
             "flow_rate": jnp.array(0.0, dtype=jnp.float32),
         }
 
-    def implicit_residual(self, state_new, state_old, boundary_inputs, dt):
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt, *, params=None):
         """Backward Euler residual for the pressure ODE.
 
         R(x_new) = x_new - x_old - dt * f(x_new, boundary_inputs)
         """
-        derivs = self.derivatives(state_new, boundary_inputs)
+        # Forward ``params`` only when given, so a subclass whose
+        # ``derivatives`` override predates the keyword still works for
+        # every caller that passes none.
+        derivs = (
+            self.derivatives(state_new, boundary_inputs) if params is None
+            else self.derivatives(state_new, boundary_inputs, params=params)
+        )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]
             for k in derivs

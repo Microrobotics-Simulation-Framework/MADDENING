@@ -283,7 +283,9 @@ class ShardedUnstructuredNode(SimulationNode):
     # -----------------------------------------------------------------
     # Pure-Python update plumbing (for tests / single-shard verification)
     # -----------------------------------------------------------------
-    def accepts_params(self) -> bool:
+    def accepts_params(self, *, method: str = "update") -> bool:
+        if method != "update":
+            return super().accepts_params(method=method)
         return "params" in inspect.signature(self._inner.update_padded).parameters
 
     def params_pytree(self) -> dict:

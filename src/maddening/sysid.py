@@ -2120,9 +2120,11 @@ def fit(
         the three drifts 3.4% by iteration 200 and **46% by iteration
         10,000**, with the loss unchanged in its first six digits, and
         ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
-        budget.  :func:`fit_lm` drifts too — ``λ·diag(A)`` damping is not
-        orthogonal to the null space either — but by 0.5% and it stops once
-        converged.
+        budget.  :func:`fit_lm` and :func:`fit_multiple_shooting` drift too
+        — ``λ·diag(A)`` damping is no more orthogonal to the null space
+        than Adam's preconditioner is — and since 0.4.0 all three run this
+        same guard.  What differs is that LM's step vanishes with the
+        gradient, so its drift *converges*; see :func:`fit_lm`.
 
         With the guard on, :func:`fit` accumulates ``Σ_t g_t g_tᵀ`` over the
         run and removes the net displacement's component along that matrix's
@@ -2270,15 +2272,21 @@ def fit_lm(
 
         It drifts **differently from Adam**, and the difference is worth
         knowing.  LM's step vanishes with the gradient, so the drift
-        converges and stops: measured on the spring's ``(k, c, m)``
+        converges and stops.  Measured on the spring's ``(k, c, m)``
         common-scale degeneracy, the geometric mean of the three lands
-        0.85% (noiseless data) or 3.3% (σ = 0.02) from the value it was
-        given and then does not move again — the same answer for ``n_iter``
-        5 through 200, where :func:`fit` reached +46% at ``lr=0.2``.  This
-        is therefore a **consistency** fix and not the reproducibility
-        defect :func:`fit` had: the value LM returns for an undetermined
-        combination does not depend on the budget, it is simply not the
-        caller's and not the data's either.
+        **−0.849%** (noiseless data) or **+0.429%** (σ = 0.02) from the
+        value it was given, and then does not move again: the answer is
+        identical to the last bit for ``n_iter`` 10 through 200.  On the
+        same data :func:`fit` lands −7.1% at ``lr=0.05`` and −5.4% at
+        ``lr=0.2`` — a spread the *schedule* chooses, not the data.
+
+        So this is a **consistency** fix and not the reproducibility defect
+        :func:`fit` had: the value LM returns for an undetermined
+        combination does not depend on the budget, it is simply neither the
+        caller's value nor one the data chose.  The reason to fix it anyway
+        is that :attr:`FitResult.excited_rank` and
+        :attr:`FitResult.undetermined_drift` would otherwise be ``None``
+        here for no better reason than that nobody had done it.
 
         Everything :func:`fit` promises holds here.  The loss, the
         iterates, ``losses``, ``callback`` and the ``fit_progress`` events
@@ -2449,16 +2457,18 @@ def fit_multiple_shooting(
         machinery.  **New in 0.4.0, and on by default**; ``False`` restores
         the pre-0.4.0 iterate exactly.
 
-        This is the same Adam step rule :func:`fit` uses, so it is the same
-        defect and not merely the consistency issue :func:`fit_lm` had: the
-        drift does not converge, and the returned value of a degenerate
-        combination is decided by the budget.  Measured on the spring's
-        ``(k, c, m)`` common-scale degeneracy with σ = 0.02 observations,
-        the geometric mean of the three lands **−3.6% at ``lr=0.05,
-        n_iter=200`` and −10.0% at ``n_iter=1200``**; at ``lr=0.2`` it is
-        **+87.6%** and **+36.4%** for the same two budgets.  Two runs on the
-        same data return different physical constants and neither is
-        preferred by the objective.
+        This is the same Adam step rule :func:`fit` uses, so it is
+        :func:`fit`'s defect and not merely the consistency issue
+        :func:`fit_lm` had: the drift has not settled, and the *schedule*
+        picks the answer.  Measured on the spring's ``(k, c, m)``
+        common-scale degeneracy with σ = 0.02 observations, the geometric
+        mean of the three lands **−4.35%** at ``lr=0.01, n_iter=200``,
+        **−4.80%** at 1,200, **−1.97%** at ``lr=0.2, n_iter=200`` and
+        **−2.02%** at 1,200 — a 3.0% spread in the returned constants for a
+        loss that agrees to four digits.  Raising the budget to 4,000 moves
+        ``lr=0.2`` on again, to −2.31%, so it is not converging to a value
+        either.  Two runs on the same data return different physical
+        constants and neither is preferred by the objective.
 
         Only ``theta`` is guarded.  The returned ``window_states`` are
         nuisance variables of the fit rather than constants a caller

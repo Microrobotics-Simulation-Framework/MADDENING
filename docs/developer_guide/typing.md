@@ -137,7 +137,7 @@ CI environment does not install (`gi`, `pxr`, `pygfx`, `rendercanvas`,
 | package | errors | why it is ratcheted, not cleaned |
 |---|---|---|
 | `api` | 61 | matplotlib artists and figures typed `X \| None` in the frame renderers |
-| `surrogates` | 58 | optional network layers in `architectures/*.py`, equinox internals |
+| `surrogates` | 55 | optional network layers in `architectures/*.py`, equinox internals.  Lowered from 58 by the phase-3 `TypedDict` pass (below) |
 | `viz` | 45 | matplotlib, pygfx, pyvista, rendercanvas -- mostly absent, none with stubs |
 | `usd` | 1 | `pxr` has no stubs and is not installed in CI |
 
@@ -337,9 +337,59 @@ Delivered on `feat/pep561-phase2` (2026-09-20) except where noted.
    run, and the ceilings live in `typing_tiers.json`.  The baseline is
    recorded above.
 
+## Phase 3 item 1: the PEP 589 `TypedDict` pass
+
+Delivered on `typing/pep589-typed-dicts` (2026-09-21).  Phase 2 left 39
+`TypedDict candidate (phase 3)` markers in 13 modules (`surrogates` 33,
+`viz` 4, `usd` 2); none on the core graph/node path.  **Report the two numbers separately: 11 markers were
+converted to a `TypedDict`, 28 were given a named alias instead.**
+
+The dividing question is whether the keys are known statically:
+
+- **Converted (11 markers, 7 `TypedDict`s plus two private
+  required-key bases).**  `TrainState` and
+  `TrainMetrics` in `surrogates.types`; `TerminalRendererConfig`,
+  `TimeSeriesPlotConfig`, `SceneConfig` + `SceneObjectSpec` in the viz
+  backends; `TubeConfig` in `viz.usd_viewer`.  Each key set is fixed by
+  this package, so a checker rejects a misspelling and a wrong value
+  type.
+- **Aliased (28 markers).**  `StateDict`, `MutableStateDict`,
+  `BatchedStateDict`, `SpecDict`, `FieldValues`, `WeightOverrides`,
+  `DerivFn` and `Integrator` in
+  `maddening.surrogates.types`, and `NodeStateDict` in
+  `maddening.usd.live_stage`.  These sit on generic call sites -- an
+  architecture's `forward`, a physics loss, a USD prim updater -- whose
+  keys are whichever fields the caller's node declares.  `TypedDict`
+  requires statically-known keys and cannot express that.  Every such
+  site carries a one-line note saying so, greppable as
+  `not a TypedDict`.
+
+Two things to know before adding another one:
+
+- **A `TypedDict` is a `dict` at runtime** -- same class, same
+  `PyTreeDef`, invisible to `jax.jit`.  This pass changed no
+  representation and no trace count.  Making one of these a
+  `NamedTuple`, a `register_dataclass` or an `equinox.Module` *would*
+  change the pytree; that is a different piece of work.
+- **Split required from optional with a base class, not
+  `NotRequired`.**  Under `from __future__ import annotations` (which
+  all three affected modules use) CPython cannot see a `NotRequired`
+  wrapper and reports every key in `__required_keys__`.  Measured on
+  3.12.3; a checker gets it right either way, the runtime does not.
+
+The pass was verified by making the checker the test: a probe calling
+the converted surfaces with three misspelled keys, three wrong value
+types and one invalid `Literal` draws **0 errors on `release/0.4.0` and
+7 on this branch**.  It also found a real defect --
+`MatplotlibSceneRenderer.setup()` passed a scene object's `"x"` straight
+to `patches.Circle`, so the documented "or a state field name" spelling
+died with `ConversionError` before the first frame (fixed, with
+`tests/viz/test_scene_renderer_object_spec.py`).
+
 ### What phase 2 did not do
 
-- **The PEP 589 `TypedDict` conversion** (checklist item 2, above).
+- **The PEP 589 `TypedDict` conversion** (checklist item 2, above) --
+  done in phase 3, above.
 - **The 106 remaining `reportOptionalMemberAccess`**, all in tier 2.
   These are *control-flow* changes -- a matplotlib artist or a PyVista
   plotter that is `None` until `setup()` -- not annotations, and several

@@ -65,8 +65,10 @@ EXCLUDED = (PACKAGE / "examples",)
 
 #: The floor.  Raise it when examples are added; never lower it to make a
 #: run pass -- a shrinking set of examples is the failure this number
-#: exists to catch.  Measured at 15 on release/0.4.0 (8 files).
-MIN_DOCTESTS = 15
+#: exists to catch.  Measured at 15 on release/0.4.0 (8 files); 22 after
+#: the phase-3 TypedDict pass added an example to each new config type
+#: (15 files).  Every new example is in a module `.[ci]` can import.
+MIN_DOCTESTS = 22
 
 
 def _docstrings(path: Path):

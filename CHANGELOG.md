@@ -151,6 +151,9 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Renderer and trainer config dicts are PEP 589 `TypedDict`s**: a misspelled
+  key or a wrong value type is now a type error, and a scene object whose `"x"`
+  names a state field no longer kills `setup()` with a `ConversionError`
 - **`fit` holds the directions the data cannot determine at the values it was
   given**, so a degenerate combination no longer lands wherever `n_iter` and
   `lr` leave it; `FitResult.excited_rank`, or `hold_undetermined=False`

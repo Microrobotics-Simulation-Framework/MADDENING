@@ -384,7 +384,9 @@ class HeatNode(SimulationNode):
     grid_points : array-like or None
         Optional non-uniform grid point coordinates of shape
         ``(n_cells,)``.  When provided, the node uses variable-dx
-        finite differences.  ``length`` is ignored.
+        finite differences.  ``length`` is ignored, and
+        :meth:`param_specs` declares it ``trainable=False`` on this
+        configuration.
     geometry_source : str or None
         Optional SdfPath to a USD prim from which to read grid
         coordinates.  Populate via :func:`load_grid_from_usd`.
@@ -656,12 +658,29 @@ class HeatNode(SimulationNode):
         )
 
     def param_specs(self) -> dict[str, ParamSpec]:
+        """Per-parameter specs; ``length`` is trainable on the uniform grid only.
+
+        On a non-uniform grid the geometry *is* ``grid_points`` and no
+        path reads ``length`` -- the constructor docs say it is ignored
+        there -- so declaring it trainable would hand an optimiser a
+        leaf with an identically zero gradient, and
+        :func:`~maddening.testing.verification.verify_node`'s
+        ``params_effective`` check rightly failed that configuration.
+        The spec says so instead.
+        """
+        if self._is_nonuniform:
+            length = ParamSpec(
+                trainable=False, bounds=(0.0, None), transform="log", units="m",
+                description="ignored on a non-uniform grid: the geometry is grid_points",
+            )
+        else:
+            length = ParamSpec(bounds=(0.0, None), transform="log", units="m")
         return {
             **super().param_specs(),
             "thermal_diffusivity": ParamSpec(
                 bounds=(0.0, None), transform="log", units="m^2/s",
             ),
-            "length": ParamSpec(bounds=(0.0, None), transform="log", units="m"),
+            "length": length,
             # Geometry of the non-uniform grid: read from ``self.params``
             # (it fixes the stencil), never fitted.
             "grid_points": ParamSpec(trainable=False, description="grid geometry"),

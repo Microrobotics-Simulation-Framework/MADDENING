@@ -5,6 +5,7 @@ a narrow-window NaN (exercises shrinking), a jit/eager divergence, and an
 energy gain.  A harness that has never been seen to fail is decoration.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -418,6 +419,93 @@ def test_a_not_applicable_derivatives_override_is_recorded_not_failed():
     assert res["params_effective"].passed, res["params_effective"].detail
     assert "derivatives(): not applicable" in res["params_effective"].detail
     assert "paths checked: update" in res["params_effective"].detail
+
+
+class TwoCompartmentExchange(SimulationNode):
+    """A correct, conserving node: ``dA/dt = -k (A - B)``, ``dB/dt = +k (A -
+    B)``, ``k`` read from the merged dict on every path.  ``A + B`` is
+    conserved exactly, so ``d(sum of outputs)/dk == 0`` on every sample
+    although the injected ``k`` moves both fields -- the plain-sum probe
+    FAILed this node with "update() probably reads them from
+    self.params"."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=2.0)
+
+    def initial_state(self):
+        return {"a": jnp.asarray(0.8, jnp.float32), "b": jnp.asarray(0.2, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {}
+
+    def halo_width(self):
+        return {}
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        flux = p["k"] * (s["a"] - s["b"])
+        return {"a": s["a"] - dt * flux, "b": s["b"] + dt * flux}
+
+    def derivatives(self, s, bi, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        flux = p["k"] * (s["a"] - s["b"])
+        return {"a": -flux, "b": flux}
+
+
+class DerivativesReadOneLeafFromSelf(_Decay):
+    """Two leaves; ``derivatives`` takes the injected ``k`` and reads ``c``
+    from ``self.params`` -- half wrong, which the check must still name."""
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, c=0.5)
+
+    def update(self, s, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": s["x"] - dt * (p["k"] * s["x"] + p["c"])}
+
+    def derivatives(self, s, bi, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": -(p["k"] * s["x"] + self.params["c"])}
+
+
+def test_a_conserving_node_passes_the_effective_check():
+    """The plain sum of the outputs is blind to a conserved exchange; the
+    projected probe is not.  The fixture must be able to express it: the
+    plain-sum gradient really is zero here."""
+    node = TwoCompartmentExchange(name="n", timestep=0.01)
+    s0 = node.initial_state()
+    plain = jax.grad(lambda p: sum(jnp.sum(v) for v in node.update(s0, {}, 0.01, params=p).values()))(
+        {"k": jnp.asarray(2.0)}
+    )
+    assert float(plain["k"]) == 0.0
+    res = verify_node(node, bounds={"a": (0.1, 0.9), "b": (0.1, 0.9)}, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["params_effective"].detail == "paths checked: update, derivatives"
+    assert_node_verified(node, bounds={"a": (0.1, 0.9), "b": (0.1, 0.9)}, **KW)
+
+
+def test_a_derivatives_that_reads_one_leaf_from_self_is_still_caught_by_the_projected_probe():
+    res = verify_node(DerivativesReadOneLeafFromSelf(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
+    assert res["params_effective"].failed
+    assert "derivatives() reads ['c'] from self.params" in res["params_effective"].detail
+    assert "'k'" not in res["params_effective"].detail
+
+
+def test_the_projection_is_fixed_by_its_seed():
+    """Two independent runs see the same weights, so a verdict is
+    reproducible from the documented seed rather than from process state."""
+    from maddening.testing.verification import _projected, _projection_weights
+    w1 = _projection_weights("temperature", (5,))
+    w2 = _projection_weights("temperature", (5,))
+    assert np.array_equal(w1, w2)
+    assert np.all(np.abs(w1) >= 0.5) and np.all(np.abs(w1) <= 1.5)
+    # Different fields of the same shape get different weights, so a
+    # law that exchanges a quantity between two same-shaped fields with
+    # equal coefficients cannot cancel.
+    assert not np.array_equal(w1, _projection_weights("pressure", (5,)))
+    out = {"a": jnp.ones(3), "b": jnp.ones(3), "n": jnp.zeros(3, jnp.int32)}
+    assert float(_projected(out)) == pytest.approx(
+        float(np.sum(_projection_weights("a", (3,))) + np.sum(_projection_weights("b", (3,))))
+    )
 
 
 def test_the_constructor_value_probe_restores_the_node():

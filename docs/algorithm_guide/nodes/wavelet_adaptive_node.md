@@ -7,7 +7,7 @@ bibliography: ../../bibliography.bib
 **Module**: `maddening.nodes.adaptive.wavelet`
 **Stability**: experimental
 **Algorithm ID**: `MADD-NODE-010`
-**Version**: 1.0.0
+**Version**: 1.0.1
 
 ## Summary
 
@@ -19,8 +19,9 @@ interpolating (Deslauriers–Dubuc) wavelet basis [@DeslauriersDubuc1989],
 selects the active set by Cohen–Dahmen–DeVore bulk chasing
 [@CohenDahmenDeVore2001; @Doerfler1996] up to a budget $k$, solves on that
 set through a gathered dense block, and returns the sensor reading
-$J = u(x_s)$ with the frozen-active-set adjoint the base class provides
-[@Blondel2022].
+$J = u(x_s)$ with the frozen-active-set adjoint the base class provides:
+plain reverse mode through the gathered solve, or the implicit-function
+rule of [@Blondel2022] on the masked-CG path.
 
 ## Governing Equations
 
@@ -69,7 +70,14 @@ boundary (`MADD-ANO-003`).
   Dirichlet basis is the tensor product of the 1-D one. Columns are
   $L^2$-normalised ($W_n$).
 - **Exact change of basis.** $A = W_n^{\top} A_{\text{phys}} W_n$ is assembled
-  once, in NumPy, and symmetrised. Because it is the finite-difference
+  once, in NumPy, *checked* for symmetry and only then symmetrised: the
+  correct product measures $\max|A - A^{\top}| / \max|A| \approx 10^{-16}$
+  (15 configurations, 1-D to 3-D, both boundaries), a one-sided
+  $[-1, 2, -1]/h$ stencil measures $1.07$, and `SYMMETRY_TOL = 10^{-12}`
+  refuses anything above it. Symmetrising unconditionally would have
+  turned that first-order stencil into a consistent second-order one and
+  passed the order gate against the defect (measured 2.04). Because it is
+  the finite-difference
   operator in another basis, the **full-basis** solve reproduces the
   finite-difference solution to round-off and the **order of accuracy is the
   stencil's: 2 in $h$**, for both boundary types. Declared as
@@ -86,14 +94,29 @@ boundary (`MADD-ANO-003`).
   $\hat r = \hat b - \hat A \hat c$, mark the smallest set of inactive
   functions carrying $\theta_D^2 = 0.25$ of the squared residual (Dörfler
   marking), capped at the room left under $k$, re-solve, repeat until
-  $|M| \ge k$ or 30 iterations, as a `lax.while_loop`. The selection is a
-  function of the parameters alone (never of the previous state), so it never
-  empties, never exceeds $k$, and does not chatter at fixed parameters.
+  $|M| \ge k$ or 30 iterations, as a `lax.while_loop`. The seed is *every
+  level-0 function* -- the coarse block plus the first detail band,
+  $(2 n_c)^d$ periodic or $(2 n_c + 1)^d$ Dirichlet -- and $k$ is validated
+  to hold it. The selection is a function of the parameters alone (never of
+  the previous state), so it never empties, never exceeds $k$, and does not
+  chatter at fixed parameters. For $k$ above about $n_{\max}/2$ the
+  iteration bound is the exit, not the budget: on 128 points $k = 64$ and
+  $k = 96$ both stop at $|M| = 54$ (sensor-reading error $3 \times 10^{-11}$;
+  200 iterations reach 64), because each Dörfler step marks a fixed fraction
+  of the *remaining* residual. The mask is still a valid active set;
+  `selection_diagnostics()` reports `outer_iterations` and `budget_reached`.
 - **Frozen solve.** The $k$ active functions gathered into a dense
   $k \times k$ block and solved directly (`frozen_solver="gather"`,
   $O(k^3)$), or the masked full-size operator (identity off the mask) handed
-  to `ift_linear_solve` with CG (`frozen_solver="cg"`). The two agree to
-  $10^{-16}$.
+  to `ift_linear_solve` with CG (`frozen_solver="cg"`). On the 128-point
+  basis at $k = 8$ the two agree to $3 \times 10^{-17}$ in $\max|\Delta c|$;
+  the property claimed and pinned is agreement to the CG tolerance,
+  $10^{-10}$. Differentiation differs between them: the gathered path is
+  plain reverse mode through `jnp.linalg.solve`; only the CG path uses the
+  implicit-function rule of `ift_linear_solve` [@Blondel2022]. A mask with
+  more than $k$ functions cannot be solved in the gathered block: a concrete
+  one is refused with a message, a traced one poisons the block with NaN
+  rather than silently dropping the excess.
 - **Full-basis gradient.** A dense solve on $A$, overriding the base default:
   the gathered solve holds exactly $k$ functions and an all-true mask would be
   silently truncated.
@@ -110,7 +133,8 @@ boundary (`MADD-ANO-003`).
 | Source $f(x;\theta,\sigma)$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.source_field` | Reads `theta` and `sigma` from the injected `params`; the override point for a manufactured source |
 | Right-hand side $b = h^d W_n^{\top} f$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode._rhs` | Recomputed on every call, so the tangent flows |
 | Active set $M$ by CDD | `maddening.nodes.adaptive.wavelets.cdd.cdd_select`, `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.compute_active_set` | `while_loop` over solve / estimate / mark / refine; input under `stop_gradient`; the coarse level is the seed |
-| Frozen solve $A_M c_M = b_M$ (gathered) | `maddening.nodes.adaptive.wavelets.operator.gather_solve`, `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_frozen` | Dense $k \times k$ block; JAX primitive `jnp.linalg.solve`; requires $\lvert M \rvert \le k$ |
+| Frozen solve $A_M c_M = b_M$ (gathered) | `maddening.nodes.adaptive.wavelets.operator.gather_solve`, `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_frozen` | Dense $k \times k$ block; JAX primitive `jnp.linalg.solve`; requires $\lvert M \rvert \le k$ -- an oversized concrete mask is refused, a traced one is NaN-poisoned |
+| Selection diagnostics (iterations, budget reached) | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.selection_diagnostics`, `maddening.nodes.adaptive.wavelets.cdd.cdd_select_with_iterations` | Host-side; `outer_iterations`, `max_outer`, `active`, `k`, `budget_reached` |
 | Frozen solve (masked CG) | `maddening.nodes.adaptive.wavelets.operator.make_masked_operator`, `maddening.core.solver_utils.ift_linear_solve` | Identity off the mask; `solver="cg"` |
 | $c_j = 0$ for $j \notin M$ | `maddening.nodes.adaptive.base.AdaptiveNode.update` | Inherited: the base class zeroes off the mask after every solve |
 | Sensor functional $J = W_n[s,:]\, c$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective` | Nearest grid point to `sensor` |
@@ -124,9 +148,13 @@ boundary (`MADD-ANO-003`).
    `ParamSpec(trainable=False)`. Variable coefficients are not supported.
 2. The source is the isotropic Gaussian above unless `source_field` is
    overridden; `theta` and `sigma` are the trainable leaves.
-3. $n_c^{\,d} \le k \le n_{\max}$, validated at construction: the CDD seed (the
-   whole coarse level) fits in the gathered buffer and the set never exceeds
-   it. $k = n_{\max}$ turns adaptivity off.
+3. $\text{seed} \le k \le n_{\max}$, validated at construction, where the seed
+   is every level-0 function -- the coarse block plus the first detail band,
+   $(2 n_c)^d$ periodic or $(2 n_c + 1)^d$ Dirichlet, counted from the
+   assembled basis -- so the CDD seed fits in the gathered buffer and the
+   set never exceeds it. The default $k = \min(n_{\max}, \max(\text{seed}, 8,
+   n_{\max}/16))$ always satisfies the bound. $k = n_{\max}$ turns
+   adaptivity off.
 4. The base-class assumptions: the returned gradient is exact within a
    region of constant $M$ and ignores the set's dependence on $\theta$
    (`MADD-ANO-003`); the objective is a scalar function of $c$.
@@ -136,7 +164,9 @@ boundary (`MADD-ANO-003`).
 
 | Parameter | Verified Range | Notes |
 |-----------|---------------|-------|
-| Grid | 16 – 256 points (1-D), $8^2$ – $32^2$ (2-D), $4^3$ – $8^3$ (3-D) | MMS order 2.000 on the 1-D periodic ladder 16/32/64/128/256; 2.000 on the Dirichlet ladder 23 – 191 and 2.022 on the 2-D ladder $8^2$ – $32^2$ (`tests/verification/test_wavelet_mms_order.py`) |
+| Grid, order of accuracy | 16 – 256 points (1-D), $8^2$ – $32^2$ (2-D) | MMS order 2.000 on the 1-D periodic ladder 16/32/64/128/256; 2.000 on the Dirichlet ladder 23 – 191 and 2.022 on the 2-D periodic ladder $8^2$ – $32^2$ (`tests/verification/test_wavelet_mms_order.py`). No 3-D order ladder |
+| Grid, adaptive solve and frozen gradient | up to 256 (1-D), $64^2$ (2-D), $16^3$ (3-D); Dirichlet $23^2$ and $7^3$ | At every size: the seed fits the default budget, the gathered solve equals the masked dense solve to $10^{-12}$, `jax.grad` matches central differences with the set held fixed to $10^{-6}$, capture ratio in $(0.9, 1.1)$. $64^2$ and $16^3$ (4096 functions, budget 256) are `@slow` tests, 10 – 15 s each on a loaded 24-core box (`test_the_largest_sizes_the_metadata_claims_construct_select_solve_and_differentiate`) |
+| Default budget vs seed | all default `(boundary, dim, n_levels <= 2, n_coarse <= 3)` up to 529 functions | The seed (level 0) is inside `k` and every active coefficient is solved -- the 13 cheapest of the 16 default configurations on which it used to be dropped (`test_the_default_budget_holds_the_whole_level_zero_seed_so_no_coefficient_is_dropped`) |
 | Budget $k$ | $n_{\max}/16$ (default) – $n_{\max}$ | At $k = n_{\max}/16$ on 128 points the sensor reading is within $6 \times 10^{-3}$ of the full-basis one over $\theta \in \{0.04, 0.30, 0.42, 0.50, 0.92\}$ and never changes sign (`MADD-VER-015`). The error is **not** monotone in $k$ and no rate in $k$ is claimed |
 | Gradient-capture ratio | 0.99 – 1.01 | $\theta = 0.42$, 1-D 128 points, 2-D $16^2$, 3-D $8^3$, Dirichlet 95 points: the local basis reproduces the full-basis gradient at the default budget, so the cold-start check passes silently |
 | `jax.grad` vs central differences | $1.5 \times 10^{-9}$ (θ), $4 \times 10^{-11}$ (σ) relative | Active set asserted unchanged across the step; through `jit`, `scan` and the compiled graph step |
@@ -163,6 +193,17 @@ boundary (`MADD-ANO-003`).
    plus one gathered solve, whether or not the budget is reached early.
 7. **Singular at $m = 0$** (periodic): the constructor refuses a
    non-positive `mass`.
+8. **The iteration bound, not the budget, ends the selection for
+   $k \gtrsim n_{\max}/2$.** Measured on 128 points: $k = 64$ and $k = 96$
+   both stop at $|M| = 54$ after 30 iterations (200 reach 64); the sensor
+   error there is $3 \times 10^{-11}$, so the objective is unaffected, but
+   `budget_reached` is `False`. The bound is deliberately not raised -- each
+   iteration is a $k \times k$ solve on every update; if the budget matters,
+   `selection_diagnostics()` says whether it was met.
+9. **A mask larger than $k$ is not a valid input to the gathered solve.**
+   The node never produces one (the seed is validated, the marking is
+   capped); one supplied from outside is refused eagerly and NaN-poisoned
+   under `jit`. `frozen_solver="cg"` accepts any mask.
 
 ## Stability Conditions
 
@@ -187,11 +228,11 @@ active set.
 | `dim` | int | 1 | — | Spatial dimension (structural) |
 | `n_levels`, `n_coarse` | int | 6, 2 | — | Refinements and coarse points per axis (structural); together with `boundary` and `dim` they fix `n_max` |
 | `order` | int | 4 | — | Interpolating order, one of 2, 4, 6 (structural) |
-| `k` | int | `min(n_max, max(8, n_max // 16))` | — | Active-set budget (structural) |
+| `k` | int | `min(n_max, max(seed, 8, n_max // 16))` | — | Active-set budget (structural); `seed` is the level-0 count, $(2 n_c)^d$ periodic / $(2 n_c + 1)^d$ Dirichlet; `k < seed` is refused |
 | `theta` | float | 0.42 | — | Source centre on axis 0; **trainable**, bounds $(0, 1)$, logit |
 | `sigma` | float | 0.10 | — | Source width; **trainable**, positive, log |
 | `mass` | float | 1.0 | — | $m$; `trainable=False`, baked into the operator |
-| `sensor` | tuple of float | `(0.30,)`, `(0.30, 0.40)`, `(0.30, 0.40, 0.60)` | — | Sensor location; `trainable=False`, baked into the sensor row |
+| `sensor` | tuple of float | `(0.30,)`, `(0.30, 0.40)`, `(0.30, 0.40, 0.60)` | — | Sensor location, snapped to the nearest grid point -- on the circle for a periodic axis (`1.0` is point 0), among the interior points for a Dirichlet axis; `trainable=False`, baked into the sensor row |
 | `preconditioner` | str | `"hybrid"` | — | `"hybrid"`, `"full"`, `"level"`, `"dk"` |
 | `boundary` | str | `"periodic"` | — | `"periodic"` or `"dirichlet"` |
 | `frozen_solver` | str | `"gather"` | — | `"gather"` or `"cg"` |
@@ -212,7 +253,7 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
 - [@CohenDahmenDeVore2001] Cohen, A., Dahmen, W., DeVore, R. (2001). *Adaptive wavelet methods for elliptic operator equations: convergence rates*. Mathematics of Computation, 70(233), 27–75. — Bulk chasing on the residual; the selection rule.
 - [@Doerfler1996] Dörfler, W. (1996). *A convergent adaptive algorithm for Poisson's equation*. SIAM Journal on Numerical Analysis, 33(3), 1106–1124. — The bulk marking criterion inside the selection.
 - [@DahmenKunoth1992] Dahmen, W., Kunoth, A. (1992). *Multilevel preconditioning*. Numerische Mathematik, 63(1), 315–344. — The level-based diagonal scaling (`preconditioner="dk"`) and why a diagonal scaling suffices.
-- [@Blondel2022] Blondel, M. et al. (2022). *Efficient and modular implicit differentiation*. NeurIPS 35. — The frozen-solve adjoint inherited from `AdaptiveNode`.
+- [@Blondel2022] Blondel, M. et al. (2022). *Efficient and modular implicit differentiation*. NeurIPS 35. — The implicit-function rule used by `ift_linear_solve` on the masked-CG path (`frozen_solver="cg"`); the default gathered path is plain reverse mode through `jnp.linalg.solve` and gives the same adjoint.
 - [@Roache2002] Roache, P. J. (2002). *Code verification by the method of manufactured solutions*. Journal of Fluids Engineering, 124(1), 4–10. — The order study in `MADD-VER-014`.
 
 ## Verification Evidence
@@ -229,9 +270,13 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
 - Test files: `tests/nodes/adaptive/test_wavelet_node.py` (the seven-item
   author-facing contract, traceability, gradients with the active set held
   fixed, round trips, graph integration, the explicit-float32 dtype
-  measurement), `tests/nodes/adaptive/test_wavelet_engine.py` (transforms,
-  assembly, conditioning, both frozen solves, the gather-truncation hazard,
-  CDD), `tests/verification/test_wavelet_mms_order.py` (order studies and the
+  measurement, the seed-fits-the-budget pins in every dimension and both
+  boundaries, refusal of an oversized set, construction inside a trace,
+  the selection diagnostics, the sensor at the periodic seam, $64^2$ and
+  $16^3$), `tests/nodes/adaptive/test_wavelet_engine.py` (transforms,
+  assembly and its symmetry check, conditioning, both frozen solves, the
+  NaN poison on an oversized mask, CDD and its iteration count),
+  `tests/verification/test_wavelet_mms_order.py` (order studies and the
   two benchmarks).
 
 ## Changelog
@@ -239,3 +284,4 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-09-21 | Ported onto the 0.4.0 `AdaptiveNode` API: parameters in the graph pytree, `{c, mask}` state, CDD as a `while_loop`, gathered frozen solve, dense full-basis gradient, declared and measured order 2 |
+| 1.0.1 | 2026-09-22 | Merged-tree audit: `k` sized and validated against the real CDD seed (level 0, not the coarse block) -- 16 default configurations were silently truncating the gathered solve; an oversized set is refused / NaN-poisoned; the assembly checks symmetry before symmetrising; construction is legal inside a trace; `selection_diagnostics()`; a periodic sensor at 1.0 snaps to point 0 |

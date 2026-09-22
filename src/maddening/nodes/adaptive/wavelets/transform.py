@@ -42,6 +42,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -299,6 +300,17 @@ def level_labels(n_levels: int, n_coarse: int, dim: int = 1) -> jax.Array:
     block and the first detail band share a label.  This is what the
     diagonal preconditioners and the CDD coarse seed read.
     """
+    return jnp.asarray(_level_labels_np(n_levels, n_coarse, dim))
+
+
+def _level_labels_np(n_levels: int, n_coarse: int, dim: int = 1) -> "np.ndarray":
+    """:func:`level_labels` as a host ``int32`` NumPy array.
+
+    What the operator assembly and the node's seed-size validation read:
+    a host array stays concrete inside a trace, so ``int(...)`` of a
+    count taken from it is legal there.  Level 0 as a whole (the coarse
+    block plus the first detail band) has ``(2 n_coarse) ** dim`` entries.
+    """
     _check_dim(dim)
     per_level = 2 ** dim - 1
     labs = [0] * (n_coarse ** dim)
@@ -306,7 +318,7 @@ def level_labels(n_levels: int, n_coarse: int, dim: int = 1) -> jax.Array:
     for lvl in range(n_levels):
         labs += [lvl] * (per_level * cur ** dim)
         cur *= 2
-    return jnp.asarray(labs, dtype=jnp.int32)
+    return np.asarray(labs, dtype=np.int32)
 
 
 @stability(StabilityLevel.EXPERIMENTAL)

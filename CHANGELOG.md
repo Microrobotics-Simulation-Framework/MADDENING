@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
 - **`HeatNode.compute_interface_correction(params=)` reads the injected `length`** (a calibrated length
   left coupled interface cells 11 K off, silently); `params_effective` uses a seeded projection (a conserving
   node passes; old-signature subclasses FAIL under `assert_node_verified`); `**kwargs` overrides take `params`
+- **`WaveletAdaptiveNode`: the default budget `k` now holds the whole CDD seed** (every
+  level-0 function, not `n_coarse**dim`): 16 default configurations silently truncated the
+  gathered solve (`dJ/dθ` 5x off at `dim=2, n_levels=2`); `k` below the seed is now refused
 - **`fim(scale="nominal")` refuses a `specs` that does not mirror `params`** (misspelt key,
   `to_dict()` entry, wrong nesting, non-dict) by key path instead of silently reporting `"relative"`;
   a spec keyed for a list/tuple leaf now reaches `fim`, `trainable_mask`, `unconstrain` and `check_bounds`

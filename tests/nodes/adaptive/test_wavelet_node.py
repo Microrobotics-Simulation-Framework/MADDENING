@@ -55,6 +55,33 @@ def _fd(f, x, h=1e-5):
     return (f(x + h) - f(x - h)) / (2 * h)
 
 
+def _fd4(f, x, h=1e-4):
+    """Fourth-order central difference; truncation ~1e-12 relative on these problems."""
+    return (-f(x + 2 * h) + 8 * f(x + h) - 8 * f(x - h) + f(x - 2 * h)) / (12 * h)
+
+
+def _J_fixed(node, state, mask, **leaves):
+    """The objective through the frozen solve on ``mask`` -- the set held fixed by construction."""
+    return node.objective(node.solve_frozen(state, mask, node._merged(leaves)), {})
+
+
+def _assert_frozen_gradient_matches_fd(node, state, x=None, tol=1e-8):
+    """The audit's method: ``grad`` through ``update`` (which re-selects the
+    set) equals ``grad`` through the frozen solve on the set ``state`` was
+    solved on, and that equals a fourth-order central difference of the
+    frozen solve.  Differencing through ``update`` instead would compare
+    two active-set regions whenever ``theta`` sits at a switch, which it
+    does for the 2-D Dirichlet configuration at 0.42."""
+    x = node.params["theta"] if x is None else x
+    mask = state["mask"]
+    g_upd = float(jax.grad(lambda th: _J(node, state, theta=th))(jnp.asarray(x)))
+    g_fix = float(jax.grad(lambda th: _J_fixed(node, state, mask, theta=th))(jnp.asarray(x)))
+    fd = float(_fd4(lambda th: _J_fixed(node, state, mask, theta=th), jnp.asarray(x)))
+    assert abs(g_upd - g_fix) < 1e-12 * (1.0 + abs(g_fix)), (g_upd, g_fix)
+    assert abs(g_fix - fd) / abs(fd) < tol, (g_fix, fd)
+    assert g_fix != 0.0
+
+
 def _same_mask_across(node, state, key, x, h=1e-5) -> bool:
     lo = node.compute_active_set(state, node._merged({key: x - h}))
     hi = node.compute_active_set(state, node._merged({key: x + h}))
@@ -353,11 +380,7 @@ def test_the_frozen_gradient_matches_finite_differences_where_the_seed_used_to_e
     node = _node(**kw)
     s = node.initial_state()
     assert int(s["mask"].sum()) == int((s["c"] != 0).sum()) <= node.k
-    assert _same_mask_across(node, s, "theta", THETA)
-    f = lambda th: _J(node, s, theta=th)
-    g = float(jax.grad(f)(jnp.asarray(THETA)))
-    fd = float(_fd(f, jnp.asarray(THETA)))
-    assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)
+    _assert_frozen_gradient_matches_fd(node, s)
     assert 0.95 < node.gradient_capture_ratio(s) < 1.05
 
 
@@ -641,11 +664,7 @@ def test_other_dimensions_and_the_dirichlet_basis_cold_start_and_differentiate(k
     assert bool(jnp.all(s["mask"][node._coarse])) and int(s["mask"].sum()) <= node.k
     assert int(s["mask"].sum()) == int((s["c"] != 0).sum())
     assert node.grid_shape == (node.side,) * node.dim
-    assert _same_mask_across(node, s, "theta", THETA)
-    f = lambda th: _J(node, s, theta=th)
-    g = float(jax.grad(f)(jnp.asarray(THETA)))
-    fd = float(_fd(f, jnp.asarray(THETA)))
-    assert abs(g - fd) / abs(fd) < 1e-6
+    _assert_frozen_gradient_matches_fd(node, s)
 
 
 @pytest.mark.slow
@@ -672,11 +691,7 @@ def test_the_largest_sizes_the_metadata_claims_construct_select_solve_and_differ
     assert int(s["mask"].sum()) == int((s["c"] != 0).sum()) == node.k
     ref = _masked_dense_reference(node, s["mask"], node.params)
     assert float(jnp.max(jnp.abs(s["c"] - ref))) < 1e-12 * float(jnp.max(jnp.abs(ref)))
-    assert _same_mask_across(node, s, "theta", THETA)
-    f = lambda th: _J(node, s, theta=th)
-    g = float(jax.grad(f)(jnp.asarray(THETA)))
-    fd = float(_fd(f, jnp.asarray(THETA)))
-    assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)
+    _assert_frozen_gradient_matches_fd(node, s)
     assert 0.9 < node.gradient_capture_ratio(s) < 1.1
 
 

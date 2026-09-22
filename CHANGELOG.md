@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`coupling_diagnostics()` gains a bound, `spectral_error_bound`** (with `rho_spectral`,
+  `spectral_usable`): eight Arnoldi steps on `dF/dx` under `solver="ift"`, `diagnostics=True`; 7.95x
+  *over* the true distance where `error_estimate` is 122x under.  Reported, not applied; existing keys unchanged
 - **`WaveletAdaptiveNode`** (`maddening.nodes.adaptive`, `EXPERIMENTAL`): the first
   concrete `AdaptiveNode` — an interpolating-wavelet solver for `(-Δ + m) u = f`
   in 1/2/3-D with a CDD active set; declares and measures spatial order 2 by MMS

@@ -131,9 +131,11 @@ Three settings that are nearly always right and are not in the table:
 
 ## Reading `coupling_diagnostics()`
 
-Each group reports seven fields.  Three of them need reading carefully,
-and one of them was renamed in 0.4.0 because its old name said more than
-it checks.
+Each group reports ten fields: seven for every group, and three
+spectral ones that carry a value only under `solver="ift"` with
+`diagnostics=True`.  Three of the seven need reading carefully, and one
+of them was renamed in 0.4.0 because its old name said more than it
+checks.
 
 | field | what it is |
 |---|---|
@@ -144,6 +146,9 @@ it checks.
 | `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
 | `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
 | `converged` | the *error estimate* met the group's threshold |
+| `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
+| `spectral_error_bound` | `residual · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed and for a group with more than eight independent interface scalars |
 
 ### What `ratio_usable` checks, and what it does not
 
@@ -179,12 +184,57 @@ residuals to take a ratio of.
 Read `error_estimate` as a *better* number than the residual — it is
 never smaller than it, and strictly stronger than the pre-0.4.0
 criterion in every measured case — and not as a certificate.  Where you
-need one, the route is the spectrum: under `solver="ift"` a power
-iteration on `dF/dx` gives `rho_spectral` directly, and
-`residual / (1 - rho_spectral)` *is* a bound.  That is post-0.4.0 work.
+need one, read `spectral_error_bound`.
 The full argument, with reproducers, is in
 `benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md`; the
 standing caveat is `MADD-ANO-005`.
+
+### `spectral_error_bound`: the spectrum, measured
+
+Under `solver="ift"` with `diagnostics=True` the group spends eight
+Jacobian-vector products per step — the same `jax.jvp` of the one-pass
+map the IFT adjoint solves with — on an Arnoldi iteration at the
+returned state, in the coordinates of the group's own norm.  Three
+things come out of it: the Ritz spectral radius `rho_spectral`, the
+Arnoldi residual `h_{k+1,k}`, and the resolvent norm `‖(I − H)⁻¹‖₂` of
+the compressed Jacobian.  A coupling Jacobian's rank is at most the
+number of boundary scalars crossing the group's edges, so for a group
+with up to eight of them the Krylov space is the whole range, the
+non-zero spectrum is exact and `h_{k+1,k}` is zero; for a larger group
+the radius is an estimate from below, `spectral_usable` is false, and
+the bound carries a margin of `2 h_{k+1,k}` on the radius.
+
+For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
+residual — no step sequence, relaxation factor or accelerator enters —
+so `residual · ‖(I − A)⁻¹‖` bounds the distance to the fixed point
+whatever the iteration did.  `1/(1 − rho)` is that norm for a normal
+`A`; the resolvent term is what holds when `A` is not normal, which a
+Jacobi loop between a node that responds strongly and one that
+responds weakly is measured to be.  Measured `spectral_error_bound /
+true distance` (jaxlib 0.11.0, CPU):
+
+| fixture | `error_estimate` | `spectral_error_bound` |
+|---|---|---|
+| two-mode `(0.999, 0.2)`, gs / none | 0.0082 (the 122x) | 7.95 |
+| two-mode, gs / aitken and gs / iqn-ils | 0.50 and 0.0010 | 1.22 |
+| random normal contractions, n = 2–6, 80 draws, none and fixed ω ≤ 1 | 0.84–240 | 1.0001–228 |
+| heterogeneous, jacobi / aitken, 20 steps | 0.008–0.72 | 1.47–119 |
+| heterogeneous, gs / none | 0.98–2.3 | 0.991–1.93 |
+
+The 119 is what a rigorous bound on a badly non-normal map costs — the
+resolvent norm is the worst direction in the space and the residual is
+rarely in it — and it is why the bound is **reported and not applied**:
+`converged`, the iteration counts and the recorded sweep rows are
+exactly what they were.  The 0.991 is the float32 floor of a
+60 000-entry L2 norm, which the bound inherits from `residual`.
+
+What it is not: for a non-linear `F` it is asymptotic (Ostrowski) — exact
+to float32 on a log map within tolerance of its fixed point, an estimate
+far from one; it is taken in the norm at the returned state, so the dead
+band's excluded fields are outside it; and it reads `inf` where
+`rho_spectral` (with margin) is at or above one.  `spectral_usable`
+reports what the code checked — a finite bound and a settled space — and
+not linearity, which nothing checks.
 
 ### The old names
 

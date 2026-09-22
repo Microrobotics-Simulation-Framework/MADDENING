@@ -29,6 +29,7 @@ group forever.
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import jax
@@ -36,8 +37,12 @@ import jax.numpy as jnp
 import pytest
 
 from maddening.core.coupling.acceleration import (
+    SPECTRAL_KRYLOV_STEPS,
+    arnoldi_spectral_radius,
     error_amplification,
     estimated_error,
+    spectral_error_bound,
+    spectral_rate_settled,
 )
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -546,8 +551,11 @@ def test_both_solvers_report_the_same_bound(solver):
 #
 # Two mechanisms, both independent of the already-recorded one (the
 # measure is not a metric, ``test_the_triangle_inequality_does_not_hold``).
-# One is fixed here; one is not, and is pinned as a strict xfail so that
-# fixing it is noticed.  See
+# One is fixed in ``error_estimate`` itself; the other -- a ``rho`` read
+# from the mode dominating the step -- cannot be, and is what the
+# spectral bound below exists for.  ``error_estimate`` keeps its value
+# and its recorded understatement; ``spectral_error_bound`` is the new
+# key that holds.  See
 # ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 # ---------------------------------------------------------------------------
 
@@ -670,46 +678,51 @@ def _two_mode_distance(gm):
     return total ** 0.5
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Recorded, not accepted: `rho` is read from the residual sequence, "
-    "which reports the mode dominating the *step*, and the mode "
-    "dominating the *remaining error* can be a different and much "
-    "slower one.  On (0.999, 0.2) at tolerance=1e-4 the estimate is "
-    "9.19e-05 against a true distance of 1.12e-02 -- 122x -- with "
-    "ratio_usable=True and converged=True.  No test on the residual "
-    "sequence separates this from a genuine single-mode decay at 0.2: "
-    "for the first several passes the two sequences are identical, so "
-    "the two-step sqrt guard reads the same fast rate.  A real fix "
-    "needs the spectrum (e.g. a power iteration on dF/dx, available "
-    "only under solver='ift') and is post-0.4.0 work.  Flipping this "
-    "to a pass means the estimate became a bound: update "
-    "benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md and "
-    "the caveat on _fixed_point_while."
-))
-def test_the_estimate_is_never_smaller_than_the_distance_it_estimates():
-    """The property the field's name claims, on a two-mode contraction.
+def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds():
+    """The property ``error_estimate``'s name claims, held by the spectral key.
 
-    This is the statement ``error_estimate`` would have to satisfy to
-    be a bound.  It does not, and the gap is not small.
+    Until this landed the assertion below was a strict xfail on
+    ``error_estimate``: ``rho`` read from the residual sequence reports
+    the mode dominating the *step*, and on ``(0.999, 0.2)`` the mode
+    owning the remaining error is a different and much slower one, so
+    the estimate came out 122x short with ``ratio_usable=True`` and
+    ``converged=True``.  No function of the residual norms separates
+    that from a genuine single-mode decay at 0.2; the spectrum does.
+    ``rho_spectral`` is the spectral radius of ``dF/dx`` at the returned
+    iterate, taken by :func:`arnoldi_spectral_radius`, and for a linear
+    ``F`` the error of *any* iterate is ``(A - I)^{-1}`` of its residual
+    -- so ``residual / (1 - rho_spectral)`` bounds the distance whatever
+    the step sequence did.  ``error_estimate`` itself is unchanged and
+    still understates here (pinned below); the fix is a new key, not a
+    new value for an old one.
     """
     gm = _two_mode_group(max_iterations=60, tolerance=1e-4)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     distance = _two_mode_distance(gm)
     assert d["ratio_usable"] and d["converged"], d
-    assert d["error_estimate"] >= distance, (
-        f"reported {d['error_estimate']:.4e} for a true distance of "
-        f"{distance:.4e} ({distance / d['error_estimate']:.0f}x)"
+    assert d["spectral_usable"] is True, d
+    assert d["spectral_error_bound"] >= distance, (
+        f"reported {d['spectral_error_bound']:.4e} for a true distance of "
+        f"{distance:.4e} ({distance / d['spectral_error_bound']:.0f}x)"
+    )
+    assert d["error_estimate"] < distance, (
+        "fixture premise: the residual-sequence estimate still understates "
+        "here; if it does not, the two-mode case stopped being two-mode"
     )
 
 
 def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
     """The same case as a measurement, so the memo's number is pinned.
 
-    The strict xfail above says the bound fails; this says *by how
-    much* and that nothing in the report warns.  Kept separate so a
-    partial improvement that shrinks 122x to 3x is visible here rather
-    than silently still failing there.
+    ``error_estimate`` keeps its 0.4.0 value: its criterion moved 438
+    of 14 733 recorded step verdicts when it landed, and the spectral
+    bound is a new key beside it rather than a new value under it.  So
+    this pins *by how much* that field understates on the two-mode case
+    and that nothing in the residual-sequence fields warns -- the
+    spectral key is what does (see the sibling below).  A change here is
+    a change to ``error_amplification`` or to the residual it reads,
+    not to the spectral machinery.
 
     Two-sided, like ``test_the_estimate_is_invariant_to_the_relaxation
     _factor``.  It asserted only ``> 50.0`` until 0.4.0, which caught an
@@ -735,6 +748,394 @@ def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
         f"error_amplification or in the residual the rate is read from, and "
         f"is not a documentation change."
     )
+
+
+#: ``spectral_error_bound / distance`` on the two-mode case, measured
+#: 7.95 (jaxlib 0.11.0, CPU, float32).  Two factors, both in the
+#: conservative direction and neither slack in the spectrum
+#: (``rho_spectral`` reads 0.999 to six figures).  The bound multiplies
+#: the *whole* residual by the amplification while only the slow
+#: mode's share of it -- about a seventh at the exit -- is amplified
+#: that much: 6.5x, a property of where the criterion stops.  And the
+#: amplification is the resolvent norm of the Gauss-Seidel one-pass
+#: map, ``[[0, R], [0, R]]``, which is not normal: 1219 against the
+#: ``1/(1 - 0.999) = 1000`` of the spectral-radius form, another 1.22x
+#: (the same 1.22 appears on every fixture built on this relay shape).
+_TWO_MODE_SPECTRAL_RATIO = 8.0
+
+#: The resolvent-over-radius factor of the ``a -> b -> a`` relay shape,
+#: ``||(I - H)^{-1}|| * (1 - rho)`` for ``H`` the compression of
+#: ``[[0, R], [0, R]]``; measured 1.22 on every fixture of that shape.
+_RELAY_NON_NORMALITY = 1.22
+
+
+def test_the_spectral_bound_on_the_hidden_slow_mode_is_the_recorded_size():
+    """The spectral bound as a measurement, two-sided like its sibling.
+
+    A recorded figure is a figure, not a floor.  Below the band the
+    bound got *tighter* than the arithmetic allows -- which on a linear
+    map with an exact spectrum means ``rho_spectral`` fell below 0.999
+    or the margin was dropped, and the next stop is understating.
+    Above it the bound got looser than the fast mode's residual share
+    and the relay's non-normality explain: an inflated ``rho``, a
+    margin applied where the Arnoldi residual is zero, or a residual
+    that is no longer the returned iterate's.  The band is a factor of ~2.5 each way, matching the
+    sibling's, and the spectral radius itself is pinned tightly beside
+    it because it is the number the whole bound rests on.
+    """
+    gm = _two_mode_group(max_iterations=60, tolerance=1e-4)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm)
+    assert d["spectral_usable"] is True
+    assert d["rho_spectral"] == pytest.approx(max(_TWO_MODE_RHO), abs=1e-4), (
+        f"rho_spectral={d['rho_spectral']} for a map whose spectral radius "
+        f"is exactly {max(_TWO_MODE_RHO)}"
+    )
+    ratio = d["spectral_error_bound"] / distance
+    assert _TWO_MODE_SPECTRAL_RATIO / 2.5 < ratio < _TWO_MODE_SPECTRAL_RATIO * 2.5, (
+        f"spectral_error_bound / distance is now {ratio:.2f}, not the ~"
+        f"{_TWO_MODE_SPECTRAL_RATIO} recorded in ERROR_BOUND_DECISION.md"
+    )
+
+
+@pytest.mark.parametrize("relaxation", (0.5, 1.0, 1.3, 1.6))
+def test_the_spectral_bound_does_not_depend_on_the_relaxation_factor(relaxation):
+    """The spectrum of ``dF/dx`` is ``F``'s; the relaxation is the iterator's.
+
+    ``error_estimate`` needed an ``omega`` correction because it sums
+    the *steps* the iterate takes.  The spectral bound sums nothing: it
+    is ``(A - I)^{-1}`` applied to the residual of whatever iterate was
+    returned, so ``rho_spectral`` must read the same 0.999 at every
+    relaxation and the bound must hold at every one -- including 1.6,
+    where the fast mode is over-relaxed into alternation.
+    """
+    gm = _two_mode_group(max_iterations=200, tolerance=1e-4,
+                         acceleration="fixed", relaxation=relaxation)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm)
+    assert d["spectral_usable"] is True, d
+    assert d["rho_spectral"] == pytest.approx(max(_TWO_MODE_RHO), abs=1e-4)
+    assert d["spectral_error_bound"] >= distance, (
+        f"relaxation={relaxation}: bound {d['spectral_error_bound']:.4e} "
+        f"below the true distance {distance:.4e}"
+    )
+
+
+#: How far ``error_estimate`` falls short on the two-mode case under
+#: each accelerator (``distance / error_estimate``, lower bounds).
+#: Aitken's clipped factor and IQN's superlinear sequence both make the
+#: residual-sequence ``rho`` describe the *step*; the memo's 2.04x and
+#: 4.5x were on the audit fixture, and on this one the same mechanisms
+#: read ~2x and ~1000x.
+_ACCELERATED_UNDERSTATEMENT = {"aitken": 1.5, "iqn-ils": 100.0}
+
+
+@pytest.mark.parametrize("acceleration", sorted(_ACCELERATED_UNDERSTATEMENT))
+def test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not(
+    acceleration,
+):
+    """Aitken and IQN change the step, not ``dF/dx``: the bound survives them.
+
+    Under these two the step is not ``F(x) - x`` at all, which is the
+    third of the four conditions ``error_estimate`` rests on and the
+    one ``relaxation_step_scale`` documents as uncorrected.  The
+    spectral bound never used the step.  Measured on the two-mode case
+    it is *tight* under both -- ratio 1.22, which is exactly the relay
+    shape's non-normality factor -- because both accelerators
+    annihilate the fast mode and leave the whole remaining error in the
+    slow one, where ``residual / (1 - rho)`` holds with equality and
+    the resolvent form adds its 1.22.  Pinned two-sided for that
+    reason, with float32 room, and beside it the size of
+    ``error_estimate``'s shortfall so the contrast is on the record
+    rather than implied.  Aitken exhausts the
+    cap here (its 499x amplification never meets 1e-4 in sixty
+    passes); the bound is a statement about the returned iterate
+    whether or not it converged, so nothing is asserted about
+    ``converged``.
+    """
+    gm = _two_mode_group(max_iterations=60, tolerance=1e-4,
+                         acceleration=acceleration)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm)
+    assert d["spectral_usable"] is True, d
+    ratio = d["spectral_error_bound"] / distance
+    assert 0.98 <= ratio <= _RELAY_NON_NORMALITY * 1.2, (
+        f"{acceleration}: spectral_error_bound / distance = {ratio:.4f}; "
+        f"expected ~{_RELAY_NON_NORMALITY} (all remaining error in the slow "
+        "mode, times the relay's resolvent factor)"
+    )
+    assert distance / d["error_estimate"] > _ACCELERATED_UNDERSTATEMENT[acceleration], (
+        f"fixture premise: error_estimate understates by less than "
+        f"{_ACCELERATED_UNDERSTATEMENT[acceleration]}x under {acceleration}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A non-linear map: the spectrum is taken at the returned iterate
+# ---------------------------------------------------------------------------
+
+
+class _Log(SimulationNode):
+    """``x <- a + g * log(1 + |u|)``: a contraction whose slope moves.
+
+    ``F'(u) = g / (1 + u)`` falls from ``g`` at the origin to
+    ``g / (1 + u*)`` at the fixed point, so the spectral radius at the
+    state the first pass produces (``u = a``) and at the returned
+    iterate differ by a factor ``(1 + u*) / (1 + a)`` -- 3.4x on the
+    parameters below.  A bound computed at the wrong point is therefore
+    visible as the wrong number, not as a slightly loose one.
+    """
+
+    def __init__(self, name, a, g):
+        super().__init__(name=name, timestep=1.0)
+        self._a = float(a)
+        self._g = float(g)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.0, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._a + self._g * jnp.log1p(jnp.abs(boundary_inputs["u"]))}
+
+
+_LOG_A, _LOG_G = 1.0, 2.5
+
+
+def _log_fixed_point():
+    """``u = a + g log(1 + u)`` by bisection in float64."""
+    lo, hi = 0.0, 100.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _LOG_A + _LOG_G * math.log1p(mid) - mid > 0:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _log_graph(**group_kw):
+    gm = GraphManager()
+    gm.add_node(_Log("a", _LOG_A, _LOG_G))
+    gm.add_node(_Affine("b", gain=1.0, bias=0.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    kw = dict(diagnostics=True, max_iterations=60, tolerance=1e-4)
+    kw.update(group_kw)
+    gm.add_coupling_group(["a", "b"], **kw)
+    gm.compile()
+    return gm
+
+
+def test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate():
+    """``rho_spectral`` is ``F'(x*)``, not ``F'`` anywhere along the path.
+
+    Ostrowski's theorem makes the spectral bound *asymptotic* for a
+    non-linear ``F``: it is a statement about ``dF/dx`` at the fixed
+    point, and the code can only evaluate it at the iterate it returns,
+    which is within ``tolerance`` of that point.  Two things are pinned.
+    The radius agrees with the analytic slope at the fixed point to
+    better than the slope's own variation across the tolerance -- so a
+    spectrum taken at the first-pass state (``F'(a) = 1.25``, not even
+    a contraction) or at any earlier iterate fails by an order of
+    magnitude.  And the bound is tight on this map up to the relay
+    shape's resolvent factor (1.22; measured 1.10 here, the residual
+    not being the worst-case direction): the map's curvature over the
+    last ``3e-5`` of relative distance is far below the float32 noise
+    on that distance, so the lower edge of the band is that noise and
+    the upper edge is the factor, not the curvature.
+    """
+    u_star = _log_fixed_point()
+    rho_star = _LOG_G / (1.0 + u_star)
+    assert rho_star == pytest.approx(0.3683, abs=1e-3), "fixture premise"
+    gm = _log_graph()
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["converged"] and d["spectral_usable"], d
+    assert d["rho_spectral"] == pytest.approx(rho_star, rel=2e-3), (
+        f"rho_spectral={d['rho_spectral']:.5f} but F'(x*)={rho_star:.5f}; "
+        f"F' at the first-pass state is {_LOG_G / (1.0 + _LOG_A):.3f}"
+    )
+    x = float(gm.get_node_state("a")["x"])
+    distance = _relative_distance((x, x), (u_star, u_star))
+    assert distance > 0.0, "fixture premise: not converged to float32"
+    ratio = d["spectral_error_bound"] / distance
+    assert 0.97 <= ratio <= _RELAY_NON_NORMALITY * 1.1, (
+        f"spectral_error_bound / distance = {ratio:.4f} on a map where the "
+        "bound is asymptotically exact up to the relay's resolvent factor"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Where no spectrum exists, no number is reported
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label,group_kw", [
+    ("fori", dict(solver="fori")),
+    ("ift without diagnostics", dict(diagnostics=False)),
+    ("max_iterations=1", dict(max_iterations=1, tolerance=1e3)),
+])
+def test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed(
+    label, group_kw,
+):
+    """NaN with a flag, never a plausible number.
+
+    ``"fori"`` has no linearisation of ``F``; ``diagnostics=False``
+    under ``"ift"`` is not charged the Krylov steps; a cap of one solves
+    no fixed point to take a spectrum at.  Each reports the keys --
+    the report's key set is the same for every group -- as NaN, NaN
+    and ``False``.  A ``0.0`` in either float slot would read as a
+    computed spectral radius of zero and a bound equal to the residual,
+    which is why the reset path and the seeds use NaN too.
+    """
+    gm = _contracting_graph(**group_kw)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert math.isnan(d["rho_spectral"]), (label, d)
+    assert math.isnan(d["spectral_error_bound"]), (label, d)
+    assert d["spectral_usable"] is False, (label, d)
+    # The legacy fields are untouched by the absence.
+    assert d["converged"] is True
+
+
+def test_reset_state_forgets_the_spectrum_rather_than_zeroing_it():
+    """``reset_state`` puts the spectral pair back to NaN, not 0.0."""
+    gm = _contracting_graph()
+    gm.step()
+    assert gm.coupling_diagnostics()["a+b"]["spectral_usable"] is True
+    gm.reset_state()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert math.isnan(d["rho_spectral"]) and math.isnan(d["spectral_error_bound"])
+    assert d["spectral_usable"] is False
+
+
+# ---------------------------------------------------------------------------
+# The numerics behind the key, on matrices whose spectrum is known
+# ---------------------------------------------------------------------------
+
+
+def _matvec(A):
+    A = jnp.asarray(A, jnp.float32)
+    return lambda v: A @ v
+
+
+def test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum():
+    """Exact, with a zero residual, once the Krylov space is the range.
+
+    Three spectra the power iteration handles badly or not at all: a
+    ``+/-`` pair of equal modulus (a Jacobi map's), a complex pair (a
+    rotation), and a rank-one *non-normal* map of the Gauss-Seidel
+    shape ``[[0, r], [0, r]]``, whose numerical radius exceeds 1 -- so
+    a breakdown that normalised float32 noise into a basis vector would
+    read a spectral radius above one there and report an infinite
+    bound.
+    """
+    cases = {
+        "pm pair": (jnp.diag(jnp.array([0.9, -0.9, 0.1])), 0.9, 10.0),
+        "rotation": (jnp.array([[0.0, 0.7], [-0.7, 0.0]]), 0.7, 1.0 / (1 + 0.49) ** 0.5),
+        "gauss-seidel rank one": (
+            jnp.array([[0.0, 0.999], [0.0, 0.999]]), 0.999, None),
+        "two-mode": (jnp.diag(jnp.array([0.999, 0.2, 0.0, 0.0])), 0.999, 1000.0),
+    }
+    for label, (A, expected, resolvent) in cases.items():
+        v0 = jax.random.normal(jax.random.PRNGKey(1), (A.shape[0],))
+        rho, resid, amp = arnoldi_spectral_radius(_matvec(A), v0, SPECTRAL_KRYLOV_STEPS)
+        assert float(rho) == pytest.approx(expected, abs=2e-5), (label, float(rho))
+        assert float(resid) <= 1e-5, (label, float(resid))
+        assert bool(spectral_rate_settled(rho, resid)), label
+        # ``||(I - A)^{-1}||_2`` on the resolved space, in closed form
+        # where the matrix is normal (``1 / min|1 - lambda|``); for
+        # the non-normal rank-one map it is the exact operator norm,
+        # which exceeds ``1 / (1 - rho)`` -- that excess is the point.
+        # Never below one: the Hessenberg is zero-padded to the Krylov
+        # size after a breakdown, and the unused directions carry a
+        # Ritz value of zero whose resolvent is exactly one.  The
+        # rotation's 0.82 is therefore reported as 1.0, which the
+        # bound's floor at the residual makes the same number.
+        if resolvent is None:
+            exact = float(jnp.linalg.norm(jnp.linalg.inv(jnp.eye(2) - A), 2))
+            assert exact > 1.0 / (1.0 - expected), "fixture premise"
+            assert float(amp) == pytest.approx(exact, rel=1e-3), (label, float(amp))
+        else:
+            assert float(amp) == pytest.approx(max(resolvent, 1.0), rel=1e-3), (
+                label, float(amp))
+
+
+def test_arnoldi_reports_nothing_for_a_nilpotent_map_and_a_zero_start():
+    """Nothing amplified means nothing extrapolated -- and no NaN.
+
+    A nilpotent map has spectral radius zero and a non-zero Jacobian.
+    Arnoldi breaks down exactly (residual ``0.0``), but the Hessenberg
+    it leaves is nilpotent only in exact arithmetic: float32 puts
+    ~1e-8 of rounding in ``H @ H`` and Gelfand's formula, which is an
+    upper bound by construction, reads ``sqrt`` of that.  So the radius
+    is pinned below 1e-3 rather than at zero -- the bound it feeds is
+    ``residual / (1 - 1e-4)``, i.e. the residual -- and the exact zero
+    is asserted where it is exact: on a start vector nothing can
+    amplify.
+    """
+    N = jnp.array([[0.0, 1.0], [0.0, 0.0]])
+    rho, resid, amp = arnoldi_spectral_radius(_matvec(N), jnp.ones(2))
+    assert 0.0 <= float(rho) < 1e-3 and float(resid) == 0.0
+    assert float(amp) == pytest.approx(
+        float(jnp.linalg.norm(jnp.linalg.inv(jnp.eye(2) - N), 2)), rel=1e-3,
+    ), "the resolvent of a nilpotent map is exact: (I - N)^-1 = I + N"
+    rho, resid, amp = arnoldi_spectral_radius(_matvec(jnp.eye(2) * 0.5), jnp.zeros(2))
+    assert float(rho) == 0.0 and float(resid) == 0.0 and float(amp) == 1.0
+    assert float(spectral_error_bound(1e-3, rho, resid, amp)) == pytest.approx(1e-3)
+
+
+def test_arnoldi_leaves_a_residual_where_the_space_is_too_small():
+    """A spectrum larger than the Krylov space is reported as unresolved.
+
+    Ten distinct eigenvalues in a two-step space: the Ritz radius is an
+    estimate from below and the Arnoldi residual is not small against
+    ``1 - rho``, so ``spectral_rate_settled`` is False -- the honest
+    answer, and the one the margin in ``spectral_error_bound`` is there
+    for.  This is the case a group with more independent interface
+    scalars than ``SPECTRAL_KRYLOV_STEPS`` lands in.
+    """
+    lam = jnp.linspace(-0.95, 0.95, 10)
+    v0 = jax.random.normal(jax.random.PRNGKey(2), (10,))
+    rho, resid, amp = arnoldi_spectral_radius(_matvec(jnp.diag(lam)), v0, n_steps=2)
+    assert float(rho) < 0.95
+    assert float(resid) > 0.05 * (1.0 - float(rho))
+    assert not bool(spectral_rate_settled(rho, resid))
+    # The margin pushes the bound up by the unresolved part, whatever
+    # the (equally unresolved) resolvent of the small space says.
+    plain = 1e-3 / (1.0 - float(rho))
+    assert float(spectral_error_bound(1e-3, rho, resid, amp)) > plain
+
+
+def test_the_spectral_bound_rejects_what_it_cannot_bound():
+    """``inf`` at or above one, NaN for nothing computed, never below the residual."""
+    assert float(spectral_error_bound(1e-3, 1.0, 0.0, 1.0)) == float("inf")
+    assert float(spectral_error_bound(1e-3, 0.98, 0.02, 1.0)) == float("inf"), (
+        "rho + 2 * residual reaches 1.02"
+    )
+    assert float(spectral_error_bound(1e-3, 0.5, 0.0, float("inf"))) == float("inf"), (
+        "a singular I - H is reported, not clipped"
+    )
+    assert math.isnan(float(spectral_error_bound(1e-3, float("nan"), 0.0, 1.0)))
+    assert float(spectral_error_bound(1e-3, 0.0, 0.0, 1.0)) == pytest.approx(1e-3)
+    assert float(spectral_error_bound(1e-3, 0.0, 0.0, 0.5)) == pytest.approx(1e-3), (
+        "an amplification below one is floored at the residual"
+    )
+    # The larger of the two forms wins in both directions.
+    assert float(spectral_error_bound(1e-3, 0.5, 0.0, 40.0)) == pytest.approx(4e-2)
+    assert float(spectral_error_bound(1e-3, 0.9, 0.0, 2.0)) == pytest.approx(1e-2)
+    assert not bool(spectral_rate_settled(float("nan"), 0.0))
+    assert not bool(spectral_rate_settled(1.0, 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +1165,10 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
     Pinned as an exact set rather than a membership check: the old
     names must be absent from ``keys()`` so that ``dict(diag)``, a JSON
     dump and any recorded artefact carry a name that still exists in
-    0.5.0.
+    0.5.0.  The three spectral keys are in the set for every group,
+    computed or not (see
+    ``test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed``),
+    and the same list is quoted in MADD-ANO-005.
     """
     gm = _contracting_graph()
     gm.step()
@@ -772,6 +1176,7 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
     assert set(d) == {
         "iterations", "residual", "amplification", "error_estimate",
         "ratio_usable", "gradient_error_estimate", "converged",
+        "rho_spectral", "spectral_error_bound", "spectral_usable",
     }
     # ``dict()`` copies through the real items, not the aliases.
     assert set(dict(d)) == set(d)

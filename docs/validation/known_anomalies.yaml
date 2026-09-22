@@ -52,6 +52,12 @@ anomalies:
     affected_versions: "<=0.3.1"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
     resolution_status: "resolved"
+    verification:
+      # The resolution is the dependency floor, so the evidence is the
+      # pin on the floor: lowering jax/jaxlib back over 0.5.1 fails the
+      # first, re-attributing or reopening the entry fails the second.
+      - "tests/compliance/test_soup_evidence.py::test_the_dependency_floor_still_excludes_the_jaxlib_madd_ano_001_names"
+      - "tests/compliance/test_soup_evidence.py::test_madd_ano_001_is_recorded_resolved_by_that_floor"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-002"
@@ -1434,6 +1440,41 @@ anomalies:
       workflows, in `tests/conftest.py` or in `pyproject.toml`.  The suite is
       float32-only, so no test has ever executed a graph scan under x64.
 
+      Two more surfaces belong to this entry, found by the release audit of
+      2026-09-22 and re-derived on `release/0.4.0` at 3f55601 (CPU, jaxlib
+      0.11.0, Python 3.12).  Both are the same defect -- x64 does not reach
+      a scan-shaped solver path -- one door further in than `GraphManager`.
+
+      (1) `implicit_euler_step` cannot take a float32 state under x64 at
+      all: with no `params`, with the float64 `params_pytree()`, and with
+      the params cast to float32.  Its Newton iteration runs under
+      `jax.lax.fori_loop`, and the update
+      `jnp.linalg.solve(J + 1e-10 * jnp.eye(n), -r)` is float64 under x64
+      whatever the state dtype, so the carry changes type and the loop
+      raises the same `TypeError` as the graph scans.  A float64 state
+      solves normally, in float64.  This one is NOT a 0.4.0 regression: it
+      is identical at e16a9e3 (before the params keyword reached the
+      solver paths) and at the v0.3.1 tag, and the loop has been written
+      this way since 0.1.0.  It is why `affected_versions` below is
+      open at both ends rather than `>=0.4.0`: the `GraphManager` half is
+      0.4.0-new, the `implicit_euler_step` half is every release.
+
+      (2) `update(params=)` and `integrate_node(..., params=)` on the same
+      node and the same float64 params disagree in *dtype*, not value.
+      `update` promotes every output field to float64 because the params
+      reach every field; `integrate_node` promotes only the fields whose
+      right-hand side touches a parameter.  `SpringDamperNode`: position
+      stays float32, velocity float64 (rk4 promotes both).  `BallNode`:
+      everything stays float32, because `derivatives` casts gravity to the
+      velocity dtype.  `RigidBodyNode` and `HeartPumpNode`: mixed.
+      `HeatNode`: float64 on both paths, no divergence.  Values agree to
+      round-off (<= 4.1e-5 on `HeartPumpNode`'s pressures, <= 1.1e-7
+      elsewhere); a caller that feeds one path's output into a scan seeded
+      by the other, or compares their dtypes, meets the carry refusal
+      above.  Same reproducers as the rest of the entry:
+      `benchmarks/results/audit_040_phase3_wave_a/params-wiring/repro_q6_x64.py`
+      and `repro_q6b_implicit_x64_preexisting.py`.
+
       Relationship to MADD-ANO-013, which is adjacent and not the same entry.
       MADD-ANO-013 records nodes that *downcast* a float64 quantity to
       float32 -- a precision floor, plus a carry rejection when a caller
@@ -1494,7 +1535,13 @@ anomalies:
       - "maddening.core.node.SimulationNode.params_pytree"
       - "maddening.nodes.ball.BallNode.initial_state"
       - "maddening.nodes.spring.SpringDamperNode.initial_state"
-    affected_versions: ">=0.4.0"
+      - "maddening.core.simulation.implicit.implicit_euler_step"
+      - "maddening.core.simulation.integrators.integrate_node"
+    # ">=0.1.0", not ">=0.4.0": the GraphManager scans are 0.4.0-new, but
+    # implicit_euler_step has refused a float32 state under x64 in every
+    # release (see the description).  The field cannot say both, and a
+    # known-anomalies list errs towards the wider range.
+    affected_versions: ">=0.1.0"
     workaround: >
       Both verified on 2026-09-21 on a ball graph under `jax_enable_x64`.
       (a) If x64 was enabled to get double precision, promote the seed state
@@ -1508,7 +1555,10 @@ anomalies:
       jnp.float32), gm.params))`.  This scans, in float32; it restores the
       pre-0.4.0 behaviour and does *not* give double precision, so do not use
       it when precision was the point.
-      Leaving `jax_enable_x64` off is the third option and the supported one.
+      (c) For `implicit_euler_step` called directly, promote the state you
+      hand it: `implicit_euler_step(node.implicit_residual, jax.tree.map(
+      lambda v: v.astype(jnp.float64), state), bi, dt)` solves in float64.
+      Leaving `jax_enable_x64` off is the fourth option and the supported one.
     resolution_status: "open"
     resolution_version: null
     residual_risk: null

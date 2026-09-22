@@ -83,13 +83,59 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     default that ``scale > 0`` term is the whole of the guard, and it
     is the only exclusion that needs no units: a field with no scale
     has no ratio to contribute.
+
+    **A field the criterion cannot be evaluated on fails it; it does
+    not leave it.**  Two conditions make a field unevaluable, and both
+    return ``(inf, True)``: every entry reads ``inf``, the field counts
+    as active, and every norm built on this helper is ``inf`` -- so
+    ``converged`` is False, ``residual`` is reported non-finite,
+    ``error_amplification`` rejects the ratio and ``strict_convergence``
+    raises.  The dead band above is untouched for finite fields: a
+    field that is genuinely at zero still drops out exactly as before.
+
+    1. *A non-finite reference.*  One ``NaN`` or ``inf`` entry in either
+       iterate makes ``ref`` non-finite.  Before 0.4.0 that fed straight
+       into the norm and the residual read ``NaN``, which no criterion
+       accepts.  The dead band changed that: ``NaN > atol`` is False, so
+       a NaN field was *inactive* and contributed exactly zero, and a
+       relaxed iteration that diverged past float32 range reported
+       ``residual=0.0, converged=True`` on the state it had just
+       destroyed (MADD-ANO-019).
+    2. *A reference too large for its own scale.*  ``diff / scale`` is a
+       broadcast divide, which XLA's CPU backend lowers to a multiply by
+       the reciprocal of ``scale``; above ``1 / finfo.tiny`` (about
+       ``8.5e37`` in float32, only reachable under the L2 norm's
+       ``rtol=1.0``) that reciprocal is subnormal and is flushed to
+       zero, so a field moving by twice its own size read as not moving
+       at all, and the same iteration reported ``converged=True`` one
+       pass *before* it overflowed, with a finite state of ``-1.2e38``.
+       Rather than depend on how a backend lowers a divide, a scale
+       whose reciprocal is not a normal number of the field's dtype is
+       out of range.  The boundary this draws: a float32 field within a
+       factor of four of overflow can never read as converged.  No
+       simulation state lives there on purpose, and one that does has
+       already lost every digit of the step it is being asked about.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
+    # ``scale * tiny`` is exact (``tiny`` is a power of two) unless it
+    # underflows, and an underflow means the scale is small, which is
+    # the evaluable side.  Non-finite ``ref`` fails ``isfinite``; an
+    # ``inf`` scale also fails the product test, so the two agree.
+    evaluable = jnp.logical_and(
+        jnp.isfinite(ref),
+        scale * jnp.finfo(jnp.asarray(scale).dtype).tiny <= 1.0,
+    )
     active = jnp.logical_and(ref > atol, scale > 0)
     safe = jnp.where(active, scale, jnp.ones_like(scale))
     diff = jnp.abs(new_val - old_val)
-    return jnp.where(active, diff / safe, jnp.zeros_like(diff)), active
+    scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
+    # ``where`` with the finite computation in the *selected* branch:
+    # an evaluable field's value, and its gradient, are exactly what
+    # they were before this guard existed.
+    scaled = jnp.where(evaluable, scaled, jnp.full_like(diff, jnp.inf))
+    active = jnp.logical_or(active, jnp.logical_not(evaluable))
+    return scaled, active
 
 
 def coupling_residual_l2(

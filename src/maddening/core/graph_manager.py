@@ -1813,16 +1813,36 @@ def _run_coupled_block_impl(
             if group.strict_convergence and group.solver == "ift":
                 import equinox as eqx  # noqa: PLC0415
 
+                single_est = estimated_error(single_r, single_amp, step_scale)
+                # Two checks with exclusive predicates, so the message
+                # names the cause.  A non-finite estimate is a
+                # non-finite *state*: since 0.4.0 the norm reports
+                # ``inf`` for a field it cannot evaluate rather than
+                # dropping it (MADD-ANO-019), and that is the one case
+                # where no amount of iteration would help.  See the ift
+                # branch below.
+                sub = eqx.error_if(
+                    sub,
+                    jnp.logical_not(jnp.isfinite(single_est)),
+                    f"coupling group {sorted(group.nodes)} has a non-finite "
+                    "state (a field is NaN, inf, or beyond the range its "
+                    "dtype can measure a change at): the coupling residual "
+                    "is non-finite and the IFT gradient is invalid here. "
+                    "The iteration diverged; check the relaxation and the "
+                    "node updates, or set strict_convergence=False to only "
+                    "report this via coupling_diagnostics().",
+                )
                 sub = eqx.error_if(
                     # ``not (r <= t)``, not ``r > t``: a NaN residual
                     # answers False to *both* comparisons, so the
                     # second form lets the one state the IFT gradient
-                    # is certainly invalid at through silently.  See
-                    # the ift branch below.
+                    # is certainly invalid at through silently.  The
+                    # non-finite case is caught above by name; this
+                    # predicate keeps the closed form regardless.
                     sub,
-                    jnp.logical_not(
-                        estimated_error(single_r, single_amp, step_scale)
-                        <= conv_threshold_value
+                    jnp.logical_and(
+                        jnp.isfinite(single_est),
+                        jnp.logical_not(single_est <= conv_threshold_value),
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
@@ -2063,21 +2083,40 @@ def _run_coupled_block_impl(
                 # dependency of lineax, which is a base dependency.
                 import equinox as eqx  # noqa: PLC0415
 
+                final_est = estimated_error(final_res, final_amp, step_scale)
+                # A non-finite estimate is a non-finite *state*.  Since
+                # 0.4.0 every norm reports ``inf`` for a field it cannot
+                # evaluate -- a NaN or inf entry, or a magnitude beyond
+                # what its dtype can measure a change at -- instead of
+                # dropping it from the dead band (MADD-ANO-019), so this
+                # is exactly the diverged iteration, and no larger cap
+                # would help.  Named first so the message says so.
+                x_star_full = eqx.error_if(
+                    x_star_full,
+                    jnp.logical_not(jnp.isfinite(final_est)),
+                    f"coupling group {sorted(group.nodes)} has a non-finite "
+                    "state (a field is NaN, inf, or beyond the range its "
+                    "dtype can measure a change at): the coupling residual "
+                    "is non-finite and the IFT gradient is invalid here. "
+                    "The iteration diverged; check the relaxation and the "
+                    "node updates, or set strict_convergence=False to only "
+                    "report this via coupling_diagnostics().",
+                )
                 x_star_full = eqx.error_if(
                     # ``not (r <= t)`` rather than ``r > t``: the two
                     # differ exactly on NaN, which answers False to
                     # both, and a NaN residual is the one case where
-                    # the IFT gradient is certainly invalid.  It is
-                    # also reachable *because* of the measurement
-                    # above: a solve that overflowed reports ``inf``
-                    # from the pass before the cap, but ``inf - inf``
-                    # -- NaN -- when the state it returns is measured.
-                    # ``coupling_diagnostics()`` already reads NaN as
-                    # ``converged=False``; the guard has to agree.
+                    # the IFT gradient is certainly invalid.  That case
+                    # is named by the check above; the predicate here
+                    # stays in the closed form and is made exclusive of
+                    # it so exactly one message fires.
+                    # ``coupling_diagnostics()`` already reads a
+                    # non-finite residual as ``converged=False``; the
+                    # guard has to agree.
                     x_star_full,
-                    jnp.logical_not(
-                        estimated_error(final_res, final_amp, step_scale)
-                        <= conv_threshold_value
+                    jnp.logical_and(
+                        jnp.isfinite(final_est),
+                        jnp.logical_not(final_est <= conv_threshold_value),
                     ),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "

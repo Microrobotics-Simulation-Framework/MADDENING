@@ -286,10 +286,27 @@ anomalies:
       two from bound_valid and gradient_error_bound, because neither is a
       bound: the old spellings still read through with a DeprecationWarning
       and are removed in 0.5.0, and they are deliberately absent from
-      keys(), iteration and len().  The reported keys are exactly
+      keys(), iteration and len().  That estimate is not a bound; see the
+      residual risk.
+      A bound is reported beside it, under solver="ift" with
+      diagnostics=True only: eight Arnoldi steps on dF/dx at the returned
+      state, in the group's own norm, give rho_spectral (the spectral
+      radius, which sees every mode and not only the one dominating the
+      step) and the resolvent norm of the Krylov-compressed Jacobian, and
+      spectral_error_bound is the residual times the larger of that norm
+      and 1/(1 - rho_spectral).  For a linear F the error of any iterate is
+      (A - I)^-1 of its residual whatever the accelerator did, so on the
+      two-mode case where error_estimate reads 122x under the true
+      distance the bound reads 7.95x over, 1.22x over under aitken and
+      iqn-ils, and never under on 80 random normal contractions of
+      dimension 2-6 with negative and near-1 eigenvalues.  It is reported,
+      not applied: converged and the iteration counts are unchanged.
+      spectral_usable says whether the bound is finite and the Krylov space
+      had settled; fori, diagnostics=False and max_iterations=1 report NaN
+      and False, never a number.  The reported keys are exactly
       ['amplification', 'converged', 'error_estimate',
-      'gradient_error_estimate', 'iterations', 'ratio_usable', 'residual'].
-      That estimate is not a bound; see the residual risk.
+      'gradient_error_estimate', 'iterations', 'ratio_usable', 'residual',
+      'rho_spectral', 'spectral_error_bound', 'spectral_usable'].
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -364,27 +381,52 @@ anomalies:
       error: on modes (0.999, 0.2) at tolerance 1e-4 the reported
       error_estimate is 9.19e-05 against a true distance of 1.12e-02 --
       122x -- with ratio_usable=True and converged=True.  This one is a
-      characterised limitation rather than an unfinished fix.  Over the
-      passes that matter the failing sequence and a genuine single-mode
-      decay at 0.2 are the same sequence, with consecutive ratios of
-      0.2000 and 0.2024 -- stationary to three figures -- so the
-      two-step sqrt guard, a longer window, a stationarity test and a
-      multi-term fit all agree with each other and all read the fast
-      mode.  No function of the residual norms separates the two cases;
-      recovering the slow mode needs the spectrum itself (a power
-      iteration on dF/dx, available under solver="ift", for which
-      residual / (1 - rho_spectral) is a genuine bound), which is a new
-      numerical component rather than a change to the existing one.
-      Second, the step scale is corrected only where it is constant:
-      under acceleration="fixed" the series now accounts for relaxation,
-      having understated by 1/omega before that landed (0.51x at
-      omega=1.95), but Aitken's clipped per-pass factor is not carried
-      and understates by 2.04x where it saturates at 2.0.  The IQN
-      quasi-Newton step is not a multiple of F(x) - x at all; its
-      measured 4.5x shortfall is the first mechanism rather than this
-      one, because a superlinear sequence reads rho -> 0.  Neither is
-      corrected in 0.4.0.  ratio_usable reports a usable *ratio*, not a
-      valid *bound* -- which is what the 0.4.0 rename is for.
+      characterised limitation of error_estimate rather than an
+      unfinished fix.  Over the passes that matter the failing sequence
+      and a genuine single-mode decay at 0.2 are the same sequence, with
+      consecutive ratios of 0.2000 and 0.2024 -- stationary to three
+      figures -- so the two-step sqrt guard, a longer window, a
+      stationarity test and a multi-term fit all agree with each other
+      and all read the fast mode.  No function of the residual norms
+      separates the two cases; recovering the slow mode needs the
+      spectrum itself, and spectral_error_bound is that measurement
+      (7.95x over on the same case).  Second, the step scale is
+      corrected only where it is constant: under acceleration="fixed"
+      the series now accounts for relaxation, having understated by
+      1/omega before that landed (0.51x at omega=1.95), but Aitken's
+      clipped per-pass factor is not carried and understates by 2.04x
+      where it saturates at 2.0.  The IQN quasi-Newton step is not a
+      multiple of F(x) - x at all; its measured 4.5x shortfall is the
+      first mechanism rather than this one, because a superlinear
+      sequence reads rho -> 0.  Neither is corrected in error_estimate;
+      the spectral bound needs neither, because it never used the step
+      (1.22x over under both, on the two-mode case).  ratio_usable
+      reports a usable *ratio*, not a valid *bound* -- which is what the
+      0.4.0 rename is for.
+      What the spectral bound leaves open, and why this entry stays
+      partially resolved.  It exists only under solver="ift" with
+      diagnostics=True; the fori path has no linearisation to take a
+      spectrum of and reports NaN, and the criterion both solvers stop
+      on is still error_estimate -- the bound is reported, not applied,
+      because on the heterogeneous fixture above (jacobi, aitken) it is
+      a rigorous but loose number: the map is far from normal there, the
+      spectral-radius form alone read 30-40x under the true distance on
+      the two steps where Aitken dipped, the resolvent term covers them
+      (1.5x and 3.3x over) and reads up to 119x over on the one step the
+      0.4.0 criterion passes -- correctly, that state is 0.41x the
+      tolerance from the reference -- so a spectral gate would refuse a
+      correct pass.  For a non-linear F it is asymptotic (Ostrowski):
+      exact to float32 on a log map within tolerance of its fixed point,
+      an estimate far from one, and nothing checks linearity.  It is
+      taken in the group's norm at the returned state, so the dead band's
+      excluded fields are outside it, the interface norm's bound is over
+      the interface fields only, and it inherits residual's float32
+      floor (0.991x once on a 60 000-entry L2 norm; a residual of 0.0
+      gives a bound of 0.0).  A group with more than eight independent
+      interface scalars gets rho_spectral from below, a margin of twice
+      the Arnoldi residual on it, and spectral_usable=False.  Evidence:
+      the 2026-09-22 section of
+      benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"
@@ -393,6 +435,11 @@ anomalies:
       - "tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor"
       - "tests/core/test_coupling_error_bound.py::test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged"
       - "tests/property/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor"
+      - "tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds"
+      - "tests/core/test_coupling_error_bound.py::test_the_spectral_bound_on_the_hidden_slow_mode_is_the_recorded_size"
+      - "tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not"
+      - "tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed"
+      - "tests/property/test_coupling_error_bound.py::test_the_spectral_bound_holds_on_random_normal_contractions"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"

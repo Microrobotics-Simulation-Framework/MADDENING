@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **`coupling_diagnostics()` gains a bound, `spectral_error_bound`** (with `rho_spectral`,
+  `spectral_usable`): eight Arnoldi steps on `dF/dx` under `solver="ift"`, `diagnostics=True`; 7.95x
+  *over* the true distance where `error_estimate` is 122x under.  Reported, not applied; existing keys unchanged
 - **`WaveletAdaptiveNode`** (`maddening.nodes.adaptive`, `EXPERIMENTAL`): the first
   concrete `AdaptiveNode` — an interpolating-wavelet solver for `(-Δ + m) u = f`
   in 1/2/3-D with a CDD active set; declares and measures spatial order 2 by MMS
@@ -280,6 +283,9 @@ guidance; the itemized changes follow.
 - **`HeatNode.compute_interface_correction(params=)` reads the injected `length`** (a calibrated length
   left coupled interface cells 11 K off, silently); `params_effective` uses a seeded projection (a conserving
   node passes; old-signature subclasses FAIL under `assert_node_verified`); `**kwargs` overrides take `params`
+- **`fim(scale="nominal")` refuses a `specs` that does not mirror `params`** (misspelt key,
+  `to_dict()` entry, wrong nesting, non-dict) by key path instead of silently reporting `"relative"`;
+  a spec keyed for a list/tuple leaf now reaches `fim`, `trainable_mask`, `unconstrain` and `check_bounds`
 - **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
   `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
   resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop

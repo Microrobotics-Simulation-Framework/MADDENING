@@ -79,8 +79,9 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-016 | cloud/_skypilot.py was written against a SkyPilot API older than the supported floor | `major` | `not_safety_relevant` | `partially_resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-017 | jax_enable_x64 does not reach GraphManager's scan paths: a freshly compiled graph refuses to scan because its params are float64 and its state is float32 | `minor` | `context_dependent` | `open` | >=0.4.0 |
 | MADD-ANO-018 | A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node() | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.4.0.dev0, <0.4.0 |
+| MADD-ANO-019 | A coupling iteration that diverged to a non-finite state was reported residual=0.0, converged=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.4.0.dev0, <0.4.0 |
 
-*18 anomalies registered.  10 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 7 `open` plus 3 `partially_resolved` whose residual risk is still live.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*19 anomalies registered.  10 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 7 `open` plus 3 `partially_resolved` whose residual risk is still live.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

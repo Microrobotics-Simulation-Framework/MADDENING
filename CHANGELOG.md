@@ -280,6 +280,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
+  solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
+  `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.
 - **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
   `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
   resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop
@@ -535,6 +538,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
   `update()` and cannot reach `derivatives()`, `implicit_residual()` or

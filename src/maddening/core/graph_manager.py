@@ -1824,13 +1824,15 @@ def _run_coupled_block_impl(
                 sub = eqx.error_if(
                     sub,
                     jnp.logical_not(jnp.isfinite(single_est)),
-                    f"coupling group {sorted(group.nodes)} has a non-finite "
-                    "state (a field is NaN, inf, or beyond the range its "
-                    "dtype can measure a change at): the coupling residual "
-                    "is non-finite and the IFT gradient is invalid here. "
-                    "The iteration diverged; check the relaxation and the "
-                    "node updates, or set strict_convergence=False to only "
-                    "report this via coupling_diagnostics().",
+                    f"coupling group {sorted(group.nodes)} exited at "
+                    f"max_iterations={max_iters} without converging: its "
+                    "state is non-finite (a field is NaN, inf, or beyond "
+                    "the range its dtype can measure a change at), so the "
+                    "coupling residual is non-finite and the IFT gradient "
+                    "is invalid here. The iteration diverged and no larger "
+                    "max_iterations would help; check the relaxation and "
+                    "the node updates, or set strict_convergence=False to "
+                    "only report this via coupling_diagnostics().",
                 )
                 sub = eqx.error_if(
                     # ``not (r <= t)``, not ``r > t``: a NaN residual
@@ -2094,13 +2096,15 @@ def _run_coupled_block_impl(
                 x_star_full = eqx.error_if(
                     x_star_full,
                     jnp.logical_not(jnp.isfinite(final_est)),
-                    f"coupling group {sorted(group.nodes)} has a non-finite "
-                    "state (a field is NaN, inf, or beyond the range its "
-                    "dtype can measure a change at): the coupling residual "
-                    "is non-finite and the IFT gradient is invalid here. "
-                    "The iteration diverged; check the relaxation and the "
-                    "node updates, or set strict_convergence=False to only "
-                    "report this via coupling_diagnostics().",
+                    f"coupling group {sorted(group.nodes)} exited at "
+                    f"max_iterations={max_iters} without converging: its "
+                    "state is non-finite (a field is NaN, inf, or beyond "
+                    "the range its dtype can measure a change at), so the "
+                    "coupling residual is non-finite and the IFT gradient "
+                    "is invalid here. The iteration diverged and no larger "
+                    "max_iterations would help; check the relaxation and "
+                    "the node updates, or set strict_convergence=False to "
+                    "only report this via coupling_diagnostics().",
                 )
                 x_star_full = eqx.error_if(
                     # ``not (r <= t)`` rather than ``r > t``: the two

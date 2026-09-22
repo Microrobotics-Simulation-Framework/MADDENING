@@ -277,6 +277,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`WaveletAdaptiveNode`: the default budget `k` now holds the whole CDD seed** (every
+  level-0 function, not `n_coarse**dim`): 16 default configurations silently truncated the
+  gathered solve (`dJ/dθ` 5x off at `dim=2, n_levels=2`); `k` below the seed is now refused
 - **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
   `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
   resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop

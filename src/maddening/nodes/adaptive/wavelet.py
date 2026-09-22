@@ -215,7 +215,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     meta: ClassVar[NodeMeta] = NodeMeta(
         algorithm_id="MADD-NODE-010",
-        algorithm_version="1.0.0",
+        algorithm_version="1.0.1",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "Adaptive interpolating-wavelet (Deslauriers-Dubuc) solver for "

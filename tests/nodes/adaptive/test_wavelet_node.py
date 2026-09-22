@@ -14,7 +14,12 @@ below naming how the wavelet node handles it and pinning that it does:
 
 The rest is the node's own behaviour: traceability, the frozen-set
 adjoint against finite differences with the active set held fixed,
-round trips, graph integration, the alternative solver and boundary.
+round trips, graph integration, the alternative solver and boundary,
+and the pins from the merged-tree audit -- the CDD seed (every level-0
+function, not the coarse block alone) fits the budget in every
+dimension and both boundaries, an oversized set is refused rather than
+truncated, construction inside a trace, the selection diagnostics, the
+sensor at the periodic seam, and the largest sizes the metadata claims.
 The suite's ``conftest.py`` enables float64 per test.
 """
 
@@ -56,6 +61,18 @@ def _same_mask_across(node, state, key, x, h=1e-5) -> bool:
     return bool(jnp.array_equal(lo, hi))
 
 
+def _masked_dense_reference(node, mask, params):
+    """The frozen solve on ``mask`` done the obvious way: index, solve, scatter."""
+    idx = jnp.flatnonzero(mask)
+    sub = jnp.linalg.solve(node._A[jnp.ix_(idx, idx)], node._rhs(params)[idx])
+    return jnp.zeros(node.n_max, dtype=node.dtype).at[idx].set(sub)
+
+
+def _level0_count(node) -> int:
+    nc = node.params["n_coarse"]
+    return (2 * nc) ** node.dim if node.params["boundary"] == "periodic" else (2 * nc + 1) ** node.dim
+
+
 # ---------------------------------------------------------------------------
 # construction and metadata
 # ---------------------------------------------------------------------------
@@ -75,10 +92,22 @@ def test_defaults_size_the_buffer_and_the_budget_from_the_levels():
     dict(frozen_solver="lu"), dict(mass=0.0), dict(mass=-1.0), dict(sigma=0.0),
     dict(k=1), dict(k=129), dict(sensor=(0.3, 0.4)), dict(sensor=(1.5,)),
     dict(n_levels=0),
+    # the seed is level 0 = coarse block + first band = 4 functions here:
+    # k=3 passed the old n_coarse**dim bound and was silently truncated
+    dict(k=3),
 ])
 def test_an_invalid_structural_setting_is_refused_at_construction(bad):
     with pytest.raises(ValueError):
         _node(**bad)
+
+
+def test_a_budget_below_the_seed_is_refused_naming_both_numbers_and_the_remedy():
+    with pytest.raises(ValueError, match=r"got k=3 with seed=4 .*Pass k=4 or larger"):
+        _node(k=3)
+    with pytest.raises(ValueError, match=r"got k=10 with seed=16 .*\(2 n_coarse\)\*\*dim = 16"):
+        _node(dim=2, n_levels=2, k=10)
+    with pytest.raises(ValueError, match=r"seed=25 .*\(2 n_coarse \+ 1\)\*\*dim = 25"):
+        _node(dim=2, n_levels=2, boundary="dirichlet", k=9)
 
 
 def test_the_node_is_experimental_and_its_metadata_is_filled_in():
@@ -258,21 +287,196 @@ def test_the_full_basis_gradient_override_matches_a_dense_finite_difference():
     assert abs(g - fd) / abs(fd) < 1e-6
 
 
-def test_the_base_default_would_truncate_the_gathered_solve_which_is_why_it_is_overridden():
+def test_the_base_default_full_basis_gradient_is_refused_for_the_gathered_solve_which_is_why_it_is_overridden():
     """``AdaptiveNode.compute_full_basis_gradient`` runs ``solve_frozen`` with
     an all-true mask.  For the gathered solve that mask has ``n_max`` active
-    entries in a ``k``-sized buffer and is silently wrong; for the masked-CG
-    solve it is a genuine full solve.  Both facts pinned, so the override
-    cannot be removed as redundant."""
+    entries in a ``k``-sized buffer: the node refuses it by name (it used to
+    be silently truncated to a plausible wrong gradient), and the override
+    -- a dense solve -- is what the diagnostics use.  For the masked-CG solve
+    the base default is a genuine full solve and agrees with the override.
+    Both facts pinned, so the override cannot be removed as redundant."""
     s = _node().initial_state()
     gathered = _node()
     override = float(gathered.compute_full_basis_gradient(s, None)["theta"])
-    base_default = float(AdaptiveNode.compute_full_basis_gradient(gathered, s, None)["theta"])
-    assert abs(base_default - override) / abs(override) > 1e-3
+    with pytest.raises(ValueError, match="active set has 128 functions .* k = 8"):
+        AdaptiveNode.compute_full_basis_gradient(gathered, s, None)
 
     cg = _node(frozen_solver="cg")
     base_cg = float(AdaptiveNode.compute_full_basis_gradient(cg, s, None)["theta"])
     assert abs(base_cg - override) / abs(override) < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# the CDD seed fits the budget -- every dimension, both boundaries
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kw", [
+    dict(dim=2, n_levels=1), dict(dim=2, n_levels=2), dict(dim=2, n_levels=2, n_coarse=3),
+    dict(dim=3, n_levels=1), dict(dim=3, n_levels=2),
+    dict(boundary="dirichlet", dim=2, n_levels=1, n_coarse=1),
+    dict(boundary="dirichlet", dim=2, n_levels=1),
+    dict(boundary="dirichlet", dim=2, n_levels=2, n_coarse=1),
+    dict(boundary="dirichlet", dim=2, n_levels=2),
+    dict(boundary="dirichlet", dim=2, n_levels=2, n_coarse=3),
+    dict(boundary="dirichlet", dim=3, n_levels=1, n_coarse=1),
+    dict(boundary="dirichlet", dim=3, n_levels=1),
+    dict(boundary="dirichlet", dim=3, n_levels=2, n_coarse=1),
+], ids=lambda kw: "-".join(f"{k}={v}" for k, v in kw.items()))
+def test_the_default_budget_holds_the_whole_level_zero_seed_so_no_coefficient_is_dropped(kw):
+    """The CDD seed is every level-0 function -- the coarse block AND the
+    first detail band, ``(2 n_coarse)**dim`` periodic or ``(2 n_coarse + 1)**dim``
+    Dirichlet -- and the default ``k`` must hold it.  These are default
+    constructions on which the seed used to exceed ``k`` and the gathered
+    solve silently dropped the excess (``|mask| = 16`` in a buffer of 8 at
+    ``dim=2, n_levels=2``, ``c`` 4% off and ``dJ/dtheta`` five times too
+    small); 13 of the audit's 16, the three 3-D ones above 1000 functions
+    left out for time.  Pinned: the seed count, the bound, and that every
+    active coefficient is solved -- ``c`` equals the masked dense solve."""
+    node = _node(blindness_gate=False, **kw)
+    seed = int(node._coarse.sum())
+    assert seed == _level0_count(node) == node._seed_size
+    assert seed <= node.k <= node.n_max
+    s = node.initial_state()
+    assert seed <= int(s["mask"].sum()) <= node.k
+    assert int(s["mask"].sum()) == int((s["c"] != 0).sum())
+    ref = _masked_dense_reference(node, s["mask"], node.params)
+    assert float(jnp.max(jnp.abs(s["c"] - ref))) < 1e-12 * float(jnp.max(jnp.abs(ref)))
+
+
+@pytest.mark.parametrize("kw", [dict(dim=2, n_levels=2), dict(dim=3, n_levels=2)],
+                         ids=["2d_8x8", "3d_8x8x8"])
+def test_the_frozen_gradient_matches_finite_differences_where_the_seed_used_to_exceed_the_budget(kw):
+    """The two configurations the audit measured: ``dJ/dtheta`` was -4.9e-3
+    against -2.6e-2 (2-D) and -1.1e-3 against -7.7e-3 (3-D) because half
+    the seed was dropped, while the capture ratio read 0.97 through the
+    same truncated solve.  Gate on, mask held fixed across the stencil."""
+    node = _node(**kw)
+    s = node.initial_state()
+    assert int(s["mask"].sum()) == int((s["c"] != 0).sum()) <= node.k
+    assert _same_mask_across(node, s, "theta", THETA)
+    f = lambda th: _J(node, s, theta=th)
+    g = float(jax.grad(f)(jnp.asarray(THETA)))
+    fd = float(_fd(f, jnp.asarray(THETA)))
+    assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)
+    assert 0.95 < node.gradient_capture_ratio(s) < 1.05
+
+
+@pytest.mark.parametrize("kw", [dict(dim=2, n_levels=1, n_coarse=3), dict(dim=1, n_levels=1, n_coarse=16)])
+def test_the_default_budget_never_violates_the_constructors_own_bound(kw):
+    """``dim=2, n_levels=1, n_coarse=3`` used to raise ``k must satisfy ...
+    got 8`` for a ``k`` the caller never passed.  The default is sized from
+    the seed, so an unset ``k`` always constructs."""
+    node = _node(blindness_gate=False, **kw)
+    assert node.k == node.params["k"] == min(node.n_max, max(node._seed_size, 8, node.n_max // 16))
+    assert node._seed_size <= node.k <= node.n_max
+
+
+def test_an_active_set_larger_than_the_budget_is_refused_eagerly_and_poisoned_under_jit():
+    """The truncation the audit found cannot happen silently any more.  The
+    node's own selection never exceeds ``k`` (seed validated, marking
+    capped); a larger mask handed to the gathered solve is refused with a
+    message on the eager path, and under ``jit`` -- where nothing can raise
+    -- the gathered block is NaN rather than a plausible wrong answer.  A
+    mask exactly at the budget solves, and the masked-CG solve takes any."""
+    node = _node()
+    s = node.initial_state()
+    too_many = jnp.zeros(node.n_max, dtype=bool).at[: node.k + 1].set(True)
+    with pytest.raises(ValueError, match=r"active set has 9 functions .* k = 8"):
+        node.solve_frozen(s, too_many, node.params)
+    c = jax.jit(lambda m: node.solve_frozen(s, m, node.params)["c"])(too_many)
+    assert bool(jnp.all(jnp.isnan(c[: node.k]))) and bool(jnp.all(c[node.k + 1:] == 0.0))
+    exact = jnp.zeros(node.n_max, dtype=bool).at[: node.k].set(True)
+    assert bool(jnp.all(jnp.isfinite(node.solve_frozen(s, exact, node.params)["c"])))
+    cg = _node(frozen_solver="cg")
+    assert bool(jnp.all(jnp.isfinite(cg.solve_frozen(s, too_many, cg.params)["c"])))
+
+
+# ---------------------------------------------------------------------------
+# construction inside a trace
+# ---------------------------------------------------------------------------
+
+def test_the_node_can_be_constructed_inside_a_jit_trace():
+    """Every constant is built on the host from static settings, so a
+    function that builds a fresh node per call traces under ``jax.jit`` --
+    it used to fail in the operator assembly with a
+    ``TracerArrayConversionError`` -- and gives the eager answer."""
+    def run(th):
+        node = WaveletAdaptiveNode("w", 1.0, n_levels=4, blindness_gate=False)
+        out = node.update(node.initial_state(), {}, 1.0, params={"theta": th})
+        return node.objective(out, {}), out["mask"]
+
+    j_eager, m_eager = run(jnp.asarray(THETA))
+    j_jit, m_jit = jax.jit(run)(jnp.asarray(THETA))
+    assert bool(jnp.array_equal(m_eager, m_jit))
+    assert abs(float(j_jit) - float(j_eager)) < 1e-12
+    g = jax.grad(lambda th: run(th)[0])(jnp.asarray(THETA))
+    assert bool(jnp.isfinite(g)) and float(g) != 0.0
+
+
+def test_a_fresh_graph_holding_the_node_can_be_built_inside_the_fim_trace():
+    """The audit's scenario: ``fim`` jits a ``residual_fn`` that constructs a
+    fresh graph per call.  Construction used to fail in ``assemble_operator``
+    with a ``TracerArrayConversionError`` whose traceback pointed at
+    ``sysid.py``."""
+    from maddening.sysid import fim
+
+    def build():
+        gm = GraphManager()
+        gm.add_node(_node(n_levels=4, blindness_gate=False))
+        gm.compile()
+        return gm
+
+    gm0 = build()
+    truth = gm0.run_scan_with_history(3)[1]["wavelet"]["c"].reshape(-1)
+
+    def residual(p):
+        return build().run_scan_with_history(3, params=p)[1]["wavelet"]["c"].reshape(-1) - truth
+
+    rep = fim(residual, gm0.params, scale="relative")
+    assert rep.rank >= 1
+    assert bool(np.all(np.isfinite(np.asarray(rep.value))))
+
+
+# ---------------------------------------------------------------------------
+# selection diagnostics and the sensor at the periodic seam
+# ---------------------------------------------------------------------------
+
+def test_selection_diagnostics_report_whether_the_budget_or_the_iteration_bound_ended_the_selection():
+    """At the default budget the loop stops on the budget in a few
+    iterations.  At ``k = 64`` on the 128-point basis it stops on the bound
+    (30) short of the budget (54 measured; the exact count is not pinned
+    across jaxlib lanes) and ``k = 96`` stops at the same set.  The mask is
+    still valid; its reading is what ``MADD-VER-015`` measures."""
+    default = _node(blindness_gate=False).selection_diagnostics()
+    assert default["budget_reached"] and default["active"] == default["k"] == 8
+    assert 0 < default["outer_iterations"] < default["max_outer"] == 30
+    stalled = _node(k=64, blindness_gate=False).selection_diagnostics()
+    assert not stalled["budget_reached"] and stalled["outer_iterations"] == 30
+    assert 32 < stalled["active"] < 64
+    also = _node(k=96, blindness_gate=False).selection_diagnostics()
+    assert also["active"] == stalled["active"] and not also["budget_reached"]
+    full = _node(k=128, blindness_gate=False).selection_diagnostics()
+    assert full == {"active": 128, "k": 128, "outer_iterations": 0, "max_outer": 30,
+                    "budget_reached": True}
+    moved = _node(blindness_gate=False).selection_diagnostics({"theta": 0.7})
+    assert moved["budget_reached"] and moved["active"] == 8
+
+
+def test_a_periodic_sensor_at_one_snaps_to_its_periodic_image_and_a_dirichlet_one_to_the_wall_neighbour():
+    """``x = 1.0`` is ``x = 0.0`` on a periodic axis, so the sensor row is the
+    same (it used to snap to the last point ``(side - 1) / side``); on a
+    Dirichlet axis there is no grid point at the wall and the nearest
+    interior point is taken."""
+    at_one = _node(sensor=(1.0,), blindness_gate=False)
+    at_zero = _node(sensor=(0.0,), blindness_gate=False)
+    assert at_one._sensor_index == at_zero._sensor_index == 0
+    assert bool(jnp.array_equal(at_one._sensor_row, at_zero._sensor_row))
+    assert _node(sensor=(0.999,), blindness_gate=False)._sensor_index == 0      # nearer 1.0 than 127/128
+    assert _node(sensor=(0.99,), blindness_gate=False)._sensor_index == 127     # nearer 127/128 than 1.0
+    wall = _node(boundary="dirichlet", n_levels=5, sensor=(1.0,), blindness_gate=False)
+    assert wall._sensor_index == wall.side - 1
+    two_d = _node(dim=2, n_levels=3, sensor=(1.0, 0.5), blindness_gate=False)
+    assert two_d._sensor_index == 0 * two_d.side + two_d.side // 2
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +627,18 @@ def test_gradient_through_a_scan_of_updates_matches_finite_differences():
     dict(dim=2, n_levels=3),
     dict(dim=3, n_levels=2, n_coarse=1),
     dict(boundary="dirichlet", n_levels=5),
-], ids=["2d", "3d", "dirichlet"])
+    dict(boundary="dirichlet", dim=2, n_levels=3),
+    dict(boundary="dirichlet", dim=3, n_levels=2, n_coarse=1, k=40),
+], ids=["2d", "3d", "dirichlet", "dirichlet_2d", "dirichlet_3d"])
 def test_other_dimensions_and_the_dirichlet_basis_cold_start_and_differentiate(kw):
+    """Periodic 2-D / 3-D and the Dirichlet basis in 1-D, 2-D (23^2, budget
+    33 over a seed of 25) and 3-D (7^3, budget 40 over a seed of 27): cold
+    start, every active coefficient solved, the frozen gradient against
+    central differences with the set held fixed."""
     node = _node(**kw)
     s = node.initial_state()
     assert bool(jnp.all(s["mask"][node._coarse])) and int(s["mask"].sum()) <= node.k
+    assert int(s["mask"].sum()) == int((s["c"] != 0).sum())
     assert node.grid_shape == (node.side,) * node.dim
     assert _same_mask_across(node, s, "theta", THETA)
     f = lambda th: _J(node, s, theta=th)
@@ -441,6 +652,30 @@ def test_three_dimensional_node_at_the_validated_size():
     node = _node(dim=3, n_levels=3, n_coarse=1)
     s = node.initial_state()
     assert node.n_max == 512 and int(s["mask"].sum()) == node.k
+    assert 0.9 < node.gradient_capture_ratio(s) < 1.1
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kw", [dict(dim=2, n_levels=5), dict(dim=3, n_levels=3)],
+                         ids=["64x64", "16x16x16"])
+def test_the_largest_sizes_the_metadata_claims_construct_select_solve_and_differentiate(kw):
+    """The sizes ``NodeMeta.limitations`` claims as validated (``64^2`` and
+    ``16^3``, 4096 functions), actually constructed: default budget 256,
+    seed inside it, the gathered solve equal to the masked dense solve,
+    ``jax.grad`` against central differences with the set held fixed, and
+    the capture ratio.  About 10-15 s each on a loaded 24-core box, of
+    which construction is ~7 s."""
+    node = _node(blindness_gate=False, **kw)
+    assert node.n_max == 4096 and node.k == 256 and node._seed_size <= node.k
+    s = node.initial_state()
+    assert int(s["mask"].sum()) == int((s["c"] != 0).sum()) == node.k
+    ref = _masked_dense_reference(node, s["mask"], node.params)
+    assert float(jnp.max(jnp.abs(s["c"] - ref))) < 1e-12 * float(jnp.max(jnp.abs(ref)))
+    assert _same_mask_across(node, s, "theta", THETA)
+    f = lambda th: _J(node, s, theta=th)
+    g = float(jax.grad(f)(jnp.asarray(THETA)))
+    fd = float(_fd(f, jnp.asarray(THETA)))
+    assert abs(g - fd) / abs(fd) < 1e-6, (g, fd)
     assert 0.9 < node.gradient_capture_ratio(s) < 1.1
 
 

@@ -234,18 +234,154 @@ DEFAULT_SPEC = ParamSpec()
 # ---------------------------------------------------------------------------
 
 
+def _path_component(key):
+    """The plain Python key a pytree path entry stands for: the dict key
+    of a ``DictKey``, the attribute name of a ``GetAttrKey``, the
+    position of a ``SequenceKey``; ``None`` for anything else."""
+    if isinstance(key, jax.tree_util.DictKey):
+        return key.key
+    if isinstance(key, jax.tree_util.GetAttrKey):
+        return key.name
+    if isinstance(key, jax.tree_util.SequenceKey):
+        return key.idx
+    return None
+
+
 def _spec_for(specs: dict, path) -> ParamSpec:
-    """``specs`` mirrors the params tree as nested dicts of ParamSpec; a
-    missing entry means the default spec."""
+    """The :class:`ParamSpec` governing the params leaf at ``path``.
+
+    ``specs`` mirrors the params tree: a nested dict for every dict (or
+    attribute) level, and for a list/tuple level either a list/tuple of
+    specs read by position or a single ``ParamSpec`` that covers every
+    position beneath it -- one spec per vector, the way one spec covers
+    every element of an array leaf.  A missing entry means the default
+    spec.  This is the per-leaf, lenient read the fitters and the tree
+    maps use; :func:`_validate_specs_mirror` is the strict check that a
+    whole ``specs`` tree reaches what it claims to.
+    """
     node = specs
-    for key in path:
-        k = getattr(key, "key", None)
-        if k is None or not isinstance(node, dict):
+    for i, key in enumerate(path):
+        if isinstance(node, ParamSpec):
+            covers = all(isinstance(k, jax.tree_util.SequenceKey)
+                         for k in path[i:])
+            return node if covers else DEFAULT_SPEC
+        k = _path_component(key)
+        if isinstance(key, jax.tree_util.SequenceKey):
+            if not isinstance(node, (list, tuple)) or not (
+                    isinstance(k, int) and 0 <= k < len(node)):
+                return DEFAULT_SPEC
+            node = node[k]
+        elif k is not None and isinstance(node, dict):
+            node = node.get(k)
+        else:
             return DEFAULT_SPEC
-        node = node.get(k)
         if node is None:
             return DEFAULT_SPEC
     return node if isinstance(node, ParamSpec) else DEFAULT_SPEC
+
+
+def _children(node) -> Optional[dict]:
+    """``{component: child}`` for one level of a pytree node, or ``None``
+    if ``node`` is a leaf.  An empty container (``{}``, ``None``) is
+    not a leaf and has no children."""
+    if jax.tree_util.all_leaves([node]):
+        return None
+    entries = jax.tree_util.tree_flatten_with_path(
+        node, is_leaf=lambda x: x is not node)[0]
+    return {_path_component(path[0]): child for path, child in entries}
+
+
+def _validate_specs_mirror(params, specs) -> None:
+    """Raise ``ValueError`` unless ``specs`` is a dict tree that mirrors
+    ``params`` -- every key path in it either names a params leaf or is
+    a nested dict on the way to one.
+
+    :func:`_spec_for` gives a leaf the default spec whenever the walk
+    to it fails, and a spec that is never reached changes nothing, so a
+    caller that needs to know its ``specs`` were *read* (``fim`` under
+    ``scale="nominal"``) asks this first.  Refused, each by its key
+    path: a ``specs`` that is not a dict; a key that matches no
+    parameter (a misspelt name is the case that must be loud); a dict
+    where a leaf needs a ``ParamSpec`` (``ParamSpec.to_dict()`` output
+    is the common one); a ``ParamSpec`` above a dict level; a
+    list/tuple of specs whose length differs from the params sequence;
+    and an entry that is none of these.  A leaf *without* an entry is
+    not refused -- it gets the default spec, and ``{}`` remains the
+    explicit "no leaf has a declared width".
+    """
+    if not isinstance(specs, dict):
+        raise ValueError(
+            f"specs must be a dict of ParamSpec mirroring params -- "
+            f"gm.param_specs() for a graph's tree, or "
+            f"{{'k': ParamSpec(...)}} for a flat one -- got "
+            f"{type(specs).__name__}")
+
+    def describe(param_node) -> str:
+        ch = _children(param_node)
+        if ch is None:
+            return "a leaf"
+        if not ch:
+            return "an empty container"
+        kind = ("a sequence of" if isinstance(param_node, (list, tuple))
+                else "a dict with keys")
+        return f"{kind} {list(ch)!r}"
+
+    def walk(spec_node, param_node, where: str) -> None:
+        children = _children(param_node)
+        if isinstance(spec_node, ParamSpec):
+            for path, _ in jax.tree_util.tree_flatten_with_path(param_node)[0]:
+                if not all(isinstance(k, jax.tree_util.SequenceKey)
+                           for k in path):
+                    raise ValueError(
+                        f"specs{where} is a ParamSpec but params{where} is "
+                        f"{describe(param_node)}: a ParamSpec belongs at a "
+                        f"leaf (one may cover a list/tuple of leaves); use a "
+                        f"nested dict with an entry per parameter here")
+            return
+        if isinstance(spec_node, dict):
+            if children is None:
+                hint = ""
+                if set(spec_node) <= set(ParamSpec.__dataclass_fields__):
+                    hint = (" (this looks like ParamSpec.to_dict() output; "
+                            "pass ParamSpec.from_dict(...) instead)")
+                raise ValueError(
+                    f"specs{where} is a dict but params{where} is a leaf, "
+                    f"whose entry must be a ParamSpec{hint}")
+            if isinstance(param_node, (list, tuple)):
+                raise ValueError(
+                    f"specs{where} is a dict but params{where} is "
+                    f"{describe(param_node)}: give a list/tuple of ParamSpec "
+                    f"read by position, or one ParamSpec covering every "
+                    f"position")
+            for k, v in spec_node.items():
+                if k not in children:
+                    raise ValueError(
+                        f"specs{where}[{k!r}] matches no parameter: "
+                        f"params{where} is {describe(param_node)}. A spec "
+                        f"that reaches nothing changes nothing, so it is "
+                        f"refused rather than ignored; drop the entry or fix "
+                        f"the key")
+                walk(v, children[k], f"{where}[{k!r}]")
+            return
+        if isinstance(spec_node, (list, tuple)):
+            if not isinstance(param_node, (list, tuple)):
+                raise ValueError(
+                    f"specs{where} is a {type(spec_node).__name__} but "
+                    f"params{where} is {describe(param_node)}: a sequence of "
+                    f"specs is read by position and needs a list/tuple of "
+                    f"parameters")
+            if len(spec_node) != len(param_node):
+                raise ValueError(
+                    f"specs{where} has {len(spec_node)} entries but "
+                    f"params{where} has {len(param_node)} positions")
+            for i, (sv, pv) in enumerate(zip(spec_node, param_node)):
+                walk(sv, pv, f"{where}[{i}]")
+            return
+        raise ValueError(
+            f"specs{where} is {type(spec_node).__name__}; expected a "
+            f"ParamSpec or a nested dict of them")
+
+    walk(specs, params, "")
 
 
 def _map_with_specs(fn, params: dict, specs: dict):

@@ -280,6 +280,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fim(scale="nominal")` refuses a `specs` that does not mirror `params`** (misspelt key,
+  `to_dict()` entry, wrong nesting, non-dict) by key path instead of silently reporting `"relative"`;
+  a spec keyed for a list/tuple leaf now reaches `fim`, `trainable_mask`, `unconstrain` and `check_bounds`
 - **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
   `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
   resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop

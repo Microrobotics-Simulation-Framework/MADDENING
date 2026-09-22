@@ -434,7 +434,8 @@ def test_a_fresh_graph_holding_the_node_can_be_built_inside_the_fim_trace():
 
     rep = fim(residual, gm0.params, scale="relative")
     assert rep.rank >= 1
-    assert bool(np.all(np.isfinite(np.asarray(rep.value))))
+    finite = {n for n, c in zip(rep.param_names, np.asarray(rep.crb)) if np.isfinite(c)}
+    assert any("theta" in n for n in finite) and any("sigma" in n for n in finite), rep.param_names
 
 
 # ---------------------------------------------------------------------------

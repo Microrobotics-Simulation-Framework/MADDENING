@@ -200,6 +200,21 @@ from the value, and a value-scaled zero still appears in `zero_scaled`.
 Nothing falls back to an absolute `1.0`, which would put units back into
 `cond` unannounced.  The `fim` docstring tabulates the policy per spec.
 
+`specs` must mirror `params`: a nested dict for every dict level, a
+`ParamSpec` at each leaf (one spec covers a list/tuple of leaves, or
+give a list of specs by position).  A key that matches no parameter, a
+dict where a leaf needs a `ParamSpec` (`ParamSpec.to_dict()` output), a
+`ParamSpec` above a dict level, or a `specs` that is not a dict is a
+`ValueError` naming the key path — a spec that reaches nothing would
+otherwise be `scale="relative"` under a `"nominal"` label,
+indistinguishable from the honest `specs={}`.  So when you slice
+`params` to a sub-tree, slice the specs the same way
+(`{k: gm.param_specs()["nodes"]["spring"][k] for k in sub}`): the
+node's whole spec dict is a superset and its unreached entries are
+refused, not ignored.  A leaf *without* an entry still gets the default
+spec and is named in `value_scaled`; `{}` remains the explicit "no leaf
+has a declared width".
+
 ### Asking the same question inside a loop
 
 `fim` is the reporting path: it reads the answer back to the host so it
@@ -215,8 +230,9 @@ ok = core.finite & ~core.precision_limited & (core.crb[i] < tol)
 ```
 
 Hoist `residual_fn` out of the loop either way.  `fim` caches the traced
-Jacobian on `(residual_fn, scale, mask)`, so a fresh closure per
-iteration re-traces the whole rollout — which is what made `fim` cost a
+Jacobian on the residual function, the scale, the masked column set and
+the nominal record (the per-column widths `specs` reduces to), so a
+fresh closure per iteration re-traces the whole rollout — which is what made `fim` cost a
 flat ~100 ms per call whatever the problem size, against ~0.3 ms warm
 and ~0.04 ms for `fim_core`.
 

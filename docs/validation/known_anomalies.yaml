@@ -2,9 +2,42 @@
 # --check` (run by tests/compliance/test_soup_evidence.py) fails if
 # `maddening_version` drifts from the version in pyproject.toml, so a release
 # bump has to come through here too.
+#
+# affected_versions -- the convention, enforced by scripts/check_anomalies.py
+# (version_range_errors, which generate_soup_tables.py --check also runs):
+#
+#   The field is a PEP 440 version specifier set, evaluated with
+#   packaging.specifiers.SpecifierSet, pre-releases admitted, against
+#   `maddening_version` below -- the version of the tree this file ships in.
+#
+#   * ">=FIRST", or ">=FIRST, <FIX".  FIRST is the first version that carried
+#     the defect, and the range must admit it.  FIX is the release that
+#     carries the fix.  No other operator is accepted.
+#   * A defect introduced during a development cycle starts at that cycle's
+#     first development build: ">=0.4.0.dev0", never ">=0.4.0".  PEP 440
+#     orders 0.4.0 after every 0.4.0 pre-release, so ">=0.4.0" excludes the
+#     very builds that carry the defect, this registry's own among them.
+#   * open, partially_resolved, wont_fix (and any status not listed here):
+#     the defect is reachable, so the range stays open-ended and must admit
+#     `maddening_version`.  A range may not say "you are not affected" where
+#     the entry says you are.
+#   * resolved: the range must NOT admit `maddening_version`, nor the entry's
+#     `resolution_version`.  PEP 440's "<0.4.0" also excludes 0.4.0's own
+#     pre-releases, so ">=0.1.0, <0.4.0" leaves out this registry's
+#     0.4.0.dev0, whose tree carries the fix -- which is what it should do.
+#   * "none" is the empty set, for a defect introduced and fixed within one
+#     development cycle: no tagged release carried it, and neither does the
+#     tree this file describes.  PEP 440 cannot spell "the 0.4.0.dev0 builds
+#     before the fix", because every build of the cycle is 0.4.0.dev0, before
+#     the fix and after it; the description says which builds had it.
+#     (">=0.4.0.dev0, <0.4.0", which two entries used to carry for this,
+#     admits no version at all -- it read as a window and was empty.)
+#   * duplicate: parsed but not compared; the range lives on the other entry.
+#
+#   An empty or unparseable range fails the gate, as does a missing one.
 schema_version: "1.0"
 maddening_version: "0.4.0.dev0"
-generated_date: "2026-09-19"
+generated_date: "2026-09-23"
 
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -49,7 +82,7 @@ anomalies:
       execution and whether a fallback path exists.  CPU execution is unaffected.
     affected_components:
       - "maddening.nodes.lbm_pipe.LBMPipeNode"
-    affected_versions: "<=0.3.1"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
     resolution_status: "resolved"
     verification:
@@ -166,7 +199,7 @@ anomalies:
     affected_components:
       - "maddening.nodes.adaptive.base.AdaptiveNode"
       - "maddening.nodes.adaptive.base.AdaptiveNode.update"
-    affected_versions: ">=0.4.0"
+    affected_versions: ">=0.4.0.dev0"
     workaround: >
       Use the largest active-set budget the problem affords (the omitted term
       decays with it, to ~1e-8 of |J| at k=64 on the reference problem); add
@@ -198,16 +231,29 @@ anomalies:
       checkpointed calibrated constants all skipped it.  The sibling wrappers
       ShardedStencilNode and ShardedUnstructuredNode proxied the contract
       correctly and were not affected, though they too copied the params dict.
-      The version range was re-derived for the 0.4.0 release rather than
-      carried forward.  ShardedPointwiseNode first appears at v0.2.0 (v0.1.0
-      has only ShardedNode, and no ShardedPointwiseNode to import), and
-      PUT /graph/params/{node_name} exists from v0.2.0 too, so every tag that
-      has the class has the defect.  Driving the entry's own mechanism against
-      `git archive` of each tag gives the same wrapper position 0.014767 after
-      five 0.01 s steps at v0.2.0, v0.2.1, v0.3.0 and v0.3.1, both before and
-      after writing stiffness=1000 into the wrapper's params, against 1.161203
-      for a genuinely k=1000 node.  The 0.3.0 entry in the changelog is the
-      @stability decorator, which sets stable_since and not affected_versions.
+      The version range was re-derived for the 0.4.0 release, and again when
+      that re-derivation turned out to have stopped one tag short.  The
+      wrapper is older than its name: v0.1.0 ships it as ShardedNode, the only
+      class in sharded_node.py, and v0.2.0 renames it ShardedPointwiseNode,
+      keeping ShardedNode as a subclass alias through v0.2.1.
+      PUT /graph/params/{node_name} exists at v0.1.0 as well.  At every tag
+      the wrapper copies the inner node's params into a dict of its own at
+      construction, the endpoint writes to that copy, and update() delegates
+      to the inner node, which never sees the write.  Driving that mechanism
+      through the real endpoint (FastAPI TestClient, PUT stiffness=1000 on a
+      k=10 spring from rest) against `git archive` of each tag answers 200
+      and leaves the wrapper at 0.014767 after five 0.01 s steps -- the k=10
+      trajectory -- at v0.1.0 (as ShardedNode), v0.2.0, v0.2.1, v0.3.0 and
+      v0.3.1, against 1.161203 for a genuinely k=1000 node; at 0.4.0 the same
+      write moves the wrapper to 1.161203.  The earlier revision started the
+      range at v0.2.0 because ShardedPointwiseNode cannot be imported at
+      v0.1.0; the defect does not depend on the class's name.  The
+      parameter-contract surfaces named above (accepts_params,
+      params_pytree, param_specs, set_param_spec, GraphManager.params, sysid,
+      FMI parameter variables) are 0.4.0-cycle additions, so on the tagged
+      releases the defect is the REST write alone.  The 0.3.0 entry in the
+      changelog is the @stability decorator, which sets stable_since and not
+      affected_versions.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -225,12 +271,13 @@ anomalies:
     affected_components:
       - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
       - "maddening.api.server.SimulationServer"
-    affected_versions: "0.2.0, 0.2.1, 0.3.0, 0.3.1"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
-      On 0.2.x and 0.3.x, set the parameter on the inner node before wrapping
-      it (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh)), or
-      write to the inner node's params dict and recompile; do not rely on
-      PUT /graph/params, gm.params or sysid for a pointwise-sharded node.
+      On 0.1.0 to 0.3.1, set the parameter on the inner node before wrapping
+      it (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh);
+      ShardedNode on 0.1.0), or write to the inner node's params dict and
+      recompile; do not rely on PUT /graph/params for a pointwise-sharded
+      node.
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     verification:
@@ -500,9 +547,11 @@ anomalies:
       writer already called json.dumps with its default allow_nan=True,
       and GraphManager.to_dict has always returned a dict whose caller
       serialises it the same way.  The third, the FMI JSON wire, arrived
-      with FmuTcpBridge in 0.4.0.  The range is open-ended because the
-      defect was reachable on every version up to the fix, not because
-      every version is affected on every surface.
+      with FmuTcpBridge during the 0.4.0 cycle and was fixed before any
+      release carried it.  So the range starts at 0.1.0 because the defect
+      was reachable on every release from the first -- not because every
+      release was affected on every surface -- and it closes at 0.4.0, the
+      release that carries the fix.
 
       Fixed in 0.4.0.  All three surfaces write a non-finite float as the
       quoted token "NaN", "Infinity" or "-Infinity", through the shared
@@ -541,7 +590,7 @@ anomalies:
       - "maddening.serialization.config.to_dict"
       - "maddening.usd.serialization.save_graph_to_usd"
       - "maddening.fmi.tcp_bridge.FmuTcpBridge"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: keep parameters finite -- an infinite ParamSpec
       bound means "no bound", which is also what leaving the bound
@@ -909,7 +958,7 @@ anomalies:
       - "maddening.usd.serialization.save_graph_to_usd"
       - "maddening.fmi.tcp_bridge.encode_binary"
       - "maddening.fmi.model_description.build_model_description"
-    affected_versions: ">=0.4.0"
+    affected_versions: ">=0.4.0.dev0"
     workaround: >
       Spell the value differently.  The refusal names the path, and
       every other spelling -- "nan", "inf", "+Infinity", "NaN " -- is
@@ -1418,14 +1467,17 @@ anomalies:
       - "maddening.cloud._skypilot.teardown_vm"
       - "maddening.cloud._skypilot.monitor_preemption"
       - "maddening.cloud.session.CloudSession"
-    affected_versions: ">=0.1.0, <0.4.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       Use `maddening.cloud.launcher.CloudLauncher`, which speaks the current
       SkyPilot API and is the path the shipped cloud examples use.  Do not
-      rely on `CloudSession.teardown()` to have released anything on
-      v0.3.1 or earlier: confirm with `sky status` and release by hand with
-      `sky down <cluster>`.  Do not rely on `PreemptionPolicy` for a spot
-      instance on those versions; the monitor could not detect a preemption.
+      rely on `CloudSession.teardown()` to have released anything, on any
+      version: confirm with `sky status` and release by hand with
+      `sky down <cluster>`.  On v0.3.1 and earlier the calls could not work
+      at all; on 0.4.0 they are well formed but have never been observed
+      against a live provider.  Do not rely on `PreemptionPolicy` for a spot
+      instance either: on v0.3.1 and earlier the monitor could not detect a
+      preemption, and on 0.4.0 it has never been seen to fire on a real one.
     resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
@@ -1449,6 +1501,11 @@ anomalies:
       must not be closed on a signature match.  Until then, an operator
       running `CloudSession` against a provider should confirm teardown with
       `sky status` as on earlier versions.
+      The same reasoning sets `affected_versions`, which is open-ended.  An
+      earlier revision closed it at 0.4.0 (">=0.1.0, <0.4.0"), which asserted
+      that 0.4.0 is unaffected -- the one thing this paragraph says has not
+      been established -- while the SOUP package counted the entry as
+      reachable in 0.4.0.  The range closes when a live provider run does.
     verification:
       - "tests/cloud/test_skypilot_api_contract.py::TestTheModuleMatchesTheInstalledSkyPilot::test_every_call_binds_against_the_installed_signature"
       - "tests/cloud/test_skypilot_api_contract.py::TestTheModuleMatchesTheInstalledSkyPilot::test_sky_launch_no_longer_takes_detach_run"
@@ -1733,7 +1790,7 @@ anomalies:
       - "maddening.core.node.SimulationNode.implicit_residual"
       - "maddening.core.simulation.integrators.integrate_node"
       - "maddening.core.simulation.implicit.implicit_euler_step"
-    affected_versions: ">=0.4.0.dev0, <0.4.0"
+    affected_versions: "none"
     workaround: >
       None needed from 0.4.0: pass the node's `gm.params` entry as
       `integrate_node(node, state, boundary_inputs, dt, params=...)` or
@@ -1889,7 +1946,7 @@ anomalies:
       - "maddening.core.coupling.acceleration.coupling_residual_mixed"
       - "maddening.core.coupling.acceleration.coupling_residual_interface"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
-    affected_versions: ">=0.4.0.dev0, <0.4.0"
+    affected_versions: "none"
     workaround: >
       None needed from 0.4.0.  On a 0.4.0.dev0 build before the fix:
       check the returned state for finiteness yourself

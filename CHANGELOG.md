@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Every anomaly's `affected_versions` is now checked against the version the registry describes** (PEP 440,
+  in `scripts/check_anomalies.py` and the SOUP generator alike): MADD-ANO-016 is open-ended again, ANO-006 closes at
+  0.4.0, ANO-004 starts at 0.1.0, ANO-018/019 read `none`. Re-read any range you copied; the convention is in the registry header
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.

@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Params contract audit:** one "takes `params`" rule for every probe (`update_padded(**kwargs)` calibratable under `ShardedUnstructuredNode`; duck-typed nodes verified);
+  `params_effective` probes each path and vector element by value; a changed `gm.params` leaf the step cannot read (`initial_*`, `static_data_deps`) is a `ValueError`, never serialised; int-spelled
+  declared constants kept; sharded wrappers forward flux/interface hooks; `run_adaptive*` resolve flux edges. Action: rebuild the node rather than edit such a leaf; fix nodes `params_effective` now fails.
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.

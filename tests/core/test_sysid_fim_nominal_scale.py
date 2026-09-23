@@ -272,8 +272,17 @@ class TestThePolicyTable:
                                    [7.0, 4.0], rtol=1e-6)
         assert nom.value_scaled == ("['p0']",)
 
-    @pytest.mark.parametrize("bounds", [(0.0, None), (None, 10.0), (None, None)],
-                             ids=["lower_only", "upper_only", "unbounded"])
+    @pytest.mark.parametrize("bounds", [
+        (0.0, None), (None, 10.0), (None, None),
+        # A non-zero lower bound is what separates "scaled by p" from
+        # "scaled by p - lo", the ``"log"`` rule; with ``lo = 0`` the two
+        # agree and a mutant offsetting identity columns by ``lo``
+        # survived the audit.  ``p0 = 3.0`` against ``lo = 2.0``: 3, not 1.
+        (2.0, None), (-5.0, None),
+        # An outward infinity is "no bound", not a width of ``inf``.
+        (-float("inf"), float("inf")), (2.0, float("inf")),
+    ], ids=["lower_only", "upper_only", "unbounded", "lower_only_nonzero",
+            "lower_only_negative", "infinite_both", "infinite_upper"])
     def test_identity_without_a_width_scales_by_the_value_and_is_named(self, bounds):
         fn, params = _linear(5, 2, 10, (3.0, 2.0))
         specs = {"p0": ParamSpec(bounds=bounds), "p1": ParamSpec(bounds=(0.0, 4.0))}

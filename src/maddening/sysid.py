@@ -1394,11 +1394,17 @@ def _nominal_entry(spec) -> tuple[Optional[float], float]:
     spec's lower bound, the transform's own gain ``dp/du = p - lo``; ``0``
     otherwise).  The policy table in :func:`fim`, as code, in one place.
     """
+    # An infinite bound is accepted by ``ParamSpec`` only where it means
+    # "unbounded" and is read that way here: a width needs two *finite*
+    # bounds, as the table in :func:`fim` says.  (A ``"log"`` spec cannot
+    # carry an infinite lower bound at all.)
     lo, hi = spec.bounds
+    lo = None if lo is None or math.isinf(lo) else float(lo)
+    hi = None if hi is None or math.isinf(hi) else float(hi)
     if lo is not None and hi is not None:
-        return float(hi) - float(lo), 0.0
+        return hi - lo, 0.0
     if spec.transform == "log":
-        return None, 0.0 if lo is None else float(lo)
+        return None, 0.0 if lo is None else lo
     return None, 0.0
 
 

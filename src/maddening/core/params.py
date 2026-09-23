@@ -28,6 +28,8 @@ Transforms::
 
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass
 from typing import Optional
 
@@ -54,7 +56,19 @@ class ParamSpec:
         cannot walk an unidentifiable direction through them (the
         ``(k, c, m)`` common-scale direction of a spring, for one).
     bounds : (lo, hi)
-        Physical range; ``None`` on either side means unbounded.
+        Physical range; ``None`` on either side means unbounded.  Each
+        side is ``None`` or a real number that is not ``NaN``.  An
+        infinity pointing the unbounded way (``lo = -inf``,
+        ``hi = +inf``) is accepted and means exactly what ``None`` means
+        -- to :meth:`check`, :func:`constrain` and ``fim``'s nominal
+        scale alike -- and is kept as given, so a document that stored
+        ``(-inf, inf)`` round-trips; ``None`` is the canonical spelling.
+        Refused: ``NaN`` on either side (every comparison with it is
+        False, so :meth:`check` passed any value and :func:`constrain`
+        returned ``NaN``), an infinity pointing the other way (a lower
+        bound of ``+inf`` admits no value), and an infinite bound under
+        a transform that needs a finite one (``"logit"`` mapped every
+        value to ``-inf`` under ``(0, inf)``).
     transform : {None, "log", "logit"}
         Reparametrisation used by :func:`unconstrain` / :func:`constrain`.
         ``"log"`` needs ``hi is None``; ``"logit"`` needs both bounds.
@@ -73,6 +87,30 @@ class ParamSpec:
                 f"ParamSpec.transform={self.transform!r} not in {_TRANSFORMS}"
             )
         lo, hi = self.bounds
+        for side, b, unbounded in (("lower", lo, -math.inf),
+                                   ("upper", hi, math.inf)):
+            if b is None:
+                continue
+            if isinstance(b, bool) or not isinstance(b, numbers.Real):
+                raise ValueError(
+                    f"ParamSpec.bounds: the {side} bound {b!r} is not a real "
+                    f"number; give a number, or None for no bound")
+            if math.isnan(b):
+                raise ValueError(
+                    f"ParamSpec.bounds: the {side} bound is NaN. Every "
+                    f"comparison with NaN is False, so check() would pass any "
+                    f"value and constrain() would return NaN; give a number, "
+                    f"or None for no bound")
+            if math.isinf(b) and b != unbounded:
+                raise ValueError(
+                    f"ParamSpec.bounds: a {side} bound of {b} admits no value "
+                    f"at all; give a finite number, or None for no bound")
+            if math.isinf(b) and self.transform is not None:
+                raise ValueError(
+                    f"ParamSpec.transform={self.transform!r} needs a finite "
+                    f"{side} bound or None, got {b}: the transform is measured "
+                    f"from its bounds, and from an infinite one every value "
+                    f"maps to an infinite coordinate. Spell no bound as None")
         if lo is not None and hi is not None and not lo < hi:
             raise ValueError(f"ParamSpec.bounds must satisfy lo < hi, got {self.bounds}")
         if self.transform == "log" and hi is not None:

@@ -548,6 +548,20 @@ class SimulationNode(ABC):
         strings and nested dicts are structural (they change shapes or
         the trace) and are excluded; they stay on the recompile path.
 
+        Integer spellings of a declared constant
+        ----------------------------------------
+        One exception to "ints are structural": an integer-valued entry
+        (``stiffness=100``, ``inertia=(1, 2, 3)``, an integer array) whose
+        key :meth:`param_specs` declares with ``trainable=True`` is a
+        physical constant somebody spelled without a decimal point, not a
+        shape, and is promoted to the working float precision like the
+        float spelling of the same number.  Until 0.4.0 shipped it was
+        dropped: ``SpringDamperNode(stiffness=100, mass=2)`` left both out
+        of ``gm.params``, so a fit or an FIM over the graph never saw them
+        and nothing said so.  An integer whose key has no spec, or a spec
+        with ``trainable=False`` (``n_cells``, an ``initial_*`` entry),
+        stays structural.  ``bool`` is never promoted.
+
         Precision
         ---------
         A value that carries a floating dtype of its own — an array, a
@@ -576,8 +590,28 @@ class SimulationNode(ABC):
         """
         canonical = jnp.zeros(()).dtype
         out: dict = {}
+        # Read lazily: most nodes have no integer entry at all, and
+        # ``param_specs`` is a subclass hook.
+        declared: Optional[set] = None
+
+        def declared_trainable(key: str) -> bool:
+            nonlocal declared
+            if declared is None:
+                declared = {
+                    k for k, spec in (self.param_specs() or {}).items()
+                    if spec.trainable
+                }
+            return key in declared
+
         for key, value in self.params.items():
-            if isinstance(value, (bool, int, str, dict)) or value is None:
+            if isinstance(value, (bool, str, dict)) or value is None:
+                continue
+            if isinstance(value, int):
+                # A Python int: structural unless declared a trainable
+                # constant (see "Integer spellings" above).  ``float()``
+                # first, so an int too wide for int32 still converts.
+                if declared_trainable(key):
+                    out[key] = jnp.asarray(float(value), dtype=canonical)
                 continue
             if isinstance(value, float) and not isinstance(value, np.generic):
                 # A Python float states a value, not a precision, so it
@@ -595,7 +629,14 @@ class SimulationNode(ABC):
                 arr = jnp.asarray(value)
             except (TypeError, ValueError):
                 continue
-            if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+            if arr.size == 0:
+                continue
+            if jnp.issubdtype(arr.dtype, jnp.integer):
+                # ``(1, 2, 3)``, ``np.int64(2)``, an integer array.
+                if declared_trainable(key):
+                    out[key] = arr.astype(canonical)
+                continue
+            if not jnp.issubdtype(arr.dtype, jnp.floating):
                 continue
             if isinstance(value, (list, tuple)):
                 arr = arr.astype(canonical)

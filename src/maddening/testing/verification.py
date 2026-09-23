@@ -329,20 +329,6 @@ def _implements(node, method: str) -> bool:
     return getattr(fn, "__func__", fn) is not getattr(_Base, method, None)
 
 
-def _perturbed(value):
-    """A visibly different constructor value of the same container type
-    (x1.5, or 0.5 where the value is exactly zero)."""
-    arr = np.asarray(value, dtype=np.float64)
-    new = np.where(arr == 0, 0.5, arr * 1.5)
-    if isinstance(value, (list, tuple)):
-        return type(value)(new.tolist())
-    if isinstance(value, np.generic):
-        return type(value)(new)
-    if isinstance(value, float):
-        return float(new)
-    return jnp.asarray(new, dtype=getattr(value, "dtype", None))
-
-
 def _same(a, b) -> bool:
     x, y = _to_np(a), _to_np(b)
     try:
@@ -351,36 +337,202 @@ def _same(a, b) -> bool:
         return bool(np.array_equal(x, y))
 
 
-def _reads_constructor_value(node, call, key, baseline):
-    """Does ``call()`` -- one no-params evaluation of a path -- change
-    when ``node.params[key]`` changes?
+def _close(a, b, rtol: float, atol: float) -> bool:
+    """``allclose`` for floating fields, exact equality for the rest."""
+    x, y = _to_np(a), _to_np(b)
+    if x.shape != y.shape:
+        return False
+    if np.issubdtype(x.dtype, np.inexact) or np.issubdtype(y.dtype, np.inexact):
+        return bool(np.allclose(x.astype(np.float64), y.astype(np.float64),
+                                rtol=rtol, atol=atol, equal_nan=True))
+    return bool(np.array_equal(x, y))
 
-    This is what separates a constant a path *does not consume* (the
-    collision-free ``derivatives`` of a bouncing ball has no use for
-    ``elasticity``) from one it consumes *from the wrong place* (an
-    override that reads ``self.params[key]`` and ignores the injected
-    value).  Both have a zero gradient with respect to the injected leaf;
-    only the second moves when the constructor value moves.  The swap is
-    undone in ``finally``.  ``None`` when the probe cannot be made:
-    ``node.params`` is not a plain dict, or the leaf is not a constructor
-    entry.
-    """
-    params = getattr(node, "params", None)
-    if not isinstance(params, dict) or key not in params:
+
+def _all_same(a: dict, b: dict) -> bool:
+    return set(a) == set(b) and all(_same(a[f], b[f]) for f in a)
+
+
+def _all_close(a: dict, b: dict, rtol: float, atol: float) -> bool:
+    return set(a) == set(b) and all(_close(a[f], b[f], rtol, atol) for f in a)
+
+
+def _max_diff(a: dict, b: dict) -> float:
+    out = 0.0
+    for f in set(a) & set(b):
+        x = _to_np(a[f]).astype(np.float64, copy=False)
+        y = _to_np(b[f]).astype(np.float64, copy=False)
+        if x.shape == y.shape and x.size:
+            out = max(out, float(np.max(np.abs(x - y))))
+    return out
+
+
+def _missing_pytree(name: str, node) -> VerificationResult | None:
+    """A node object the graph injects (its ``update`` takes ``params``) but
+    that has no ``params_pytree()`` to build its ``gm.params`` entry from."""
+    if callable(getattr(node, "params_pytree", None)):
         return None
-    old = params[key]
-    try:
-        params[key] = _perturbed(old)
-    except Exception:  # noqa: BLE001 - a value this cannot perturb
-        params[key] = old
+    return VerificationResult(
+        name, "FAIL",
+        detail=(
+            f"update() takes params but {type(node).__name__} has no "
+            "params_pytree(): the graph cannot build this node's entry of "
+            "gm.params.  Subclass SimulationNode or define params_pytree()."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# params_effective: the paths, the perturbations and the references
+# ---------------------------------------------------------------------------
+
+#: Largest number of elements of one leaf the value probes perturb one at a
+#: time; a larger leaf gets this many, evenly spaced.  A vector leaf is
+#: probed per element because "some element acts" is not "every element
+#: acts": a node reading ``g[0]`` from the injected params and ``g[1:]``
+#: from ``self.params`` has a non-zero gradient wrt ``g``.
+_MAX_PROBED_ELEMENTS = 8
+#: The value probes (two extra evaluations per path and element) run on the
+#: first this-many examples; the gradient screen runs on all of them.
+_VALUE_PROBE_EXAMPLES = 20
+#: A (path, element) pair seen consistent, with a visible effect, on this
+#: many examples is not probed again.
+_CONFIRMATIONS = 3
+#: Examples kept for the post-run rebuild probe.
+_KEPT_EXAMPLES = 8
+
+
+def _probe_indices(size: int) -> list[int]:
+    if size <= _MAX_PROBED_ELEMENTS:
+        return list(range(size))
+    return sorted({int(i) for i in np.linspace(0, size - 1, _MAX_PROBED_ELEMENTS)})
+
+
+def _element_label(key: str, shape: tuple, idx: int) -> str:
+    if not shape:
+        return key
+    return f"{key}[{', '.join(str(int(i)) for i in np.unravel_index(idx, shape))}]"
+
+
+def _perturbed_scalar(old: float, spec) -> float:
+    """A visibly different value inside the leaf's ``ParamSpec`` bounds:
+    x1.5, else x0.5 (0.5 / -0.5 at zero), else half-way to a bound."""
+    lo, hi = spec.bounds if spec is not None else (None, None)
+
+    def inside(v):
+        return v != old and (lo is None or v > lo) and (hi is None or v < hi)
+
+    for v in ((old * 1.5, old * 0.5) if old != 0 else (0.5, -0.5)):
+        if inside(v):
+            return v
+    if hi is not None and old < hi:
+        return old + (hi - old) / 2
+    if lo is not None and old > lo:
+        return old - (old - lo) / 2
+    return old + 1.0
+
+
+def _as_constructor_value(old, new: np.ndarray):
+    """``new`` in the container type of the constructor value ``old``, or
+    ``None`` when there is no faithful spelling (the reference is then
+    unavailable for this leaf).  Built from the *float32* leaf, so the
+    constructed and the injected value are the same number."""
+    if isinstance(old, bool):
+        return None
+    if isinstance(old, (int, float)) and not isinstance(old, np.generic):
+        return float(new) if new.ndim == 0 else None
+    if isinstance(old, (list, tuple)):
+        return type(old)(np.asarray(new, dtype=np.float64).tolist())
+    if isinstance(old, np.generic):
+        kind = old.dtype if np.issubdtype(old.dtype, np.floating) else np.float64
+        return np.asarray(new, dtype=kind)[()]
+    if isinstance(old, np.ndarray):
+        kind = old.dtype if np.issubdtype(old.dtype, np.floating) else np.float64
+        return np.asarray(new, dtype=kind).reshape(old.shape)
+    if hasattr(old, "dtype") and hasattr(old, "shape"):
+        kind = old.dtype if jnp.issubdtype(old.dtype, jnp.floating) else jnp.zeros(()).dtype
+        return jnp.asarray(new, dtype=kind).reshape(old.shape)
+    return None
+
+
+def _rebuilder(node) -> Callable[[dict], Any] | None:
+    """``overrides -> type(node)(name, timestep, **{**params, **overrides})``
+    from ``node.to_dict()`` -- the rebuild the config round trip already
+    relies on -- or ``None`` when the node does not describe itself that
+    way.  Whether the rebuild is *faithful* is checked against the node
+    before it is trusted (see :func:`node_params_effective`)."""
+    to_dict = getattr(node, "to_dict", None)
+    if not callable(to_dict):
         return None
     try:
-        probe = call()
-    except Exception:  # noqa: BLE001 - it certainly read it: a different value broke it
-        return True
-    finally:
-        params[key] = old
-    return any(not _same(baseline[f], probe[f]) for f in baseline)
+        d = to_dict()
+        name, timestep, params = d["name"], d["timestep"], dict(d["params"])
+    except Exception:  # noqa: BLE001 - no usable self-description
+        return None
+    cls = type(node)
+
+    def build(overrides: dict):
+        return cls(name, timestep, **{**params, **overrides})
+    return build
+
+
+def _flatten_corrections(out) -> dict:
+    return {
+        f"{field}@{idx}": value
+        for field, pairs in (out or {}).items()
+        for idx, value in pairs
+    }
+
+
+def _path_functions(node) -> dict[str, Callable]:
+    """``name -> fn(target, state, bi, dt, params_or_None) -> dict``, for the
+    paths through which the graph and the integrators read the node's
+    constants: :meth:`update`, :meth:`compute_boundary_fluxes` (what a flux
+    edge delivers), :meth:`derivatives` and :meth:`implicit_residual`
+    (``integrate_node`` / ``implicit_euler_step``) and
+    :meth:`compute_interface_correction` (a coupled interface).  Each is its
+    own path: a summed objective let one path's sensitivity mask another's
+    dead read."""
+    def call(method, *args, p, target):
+        fn = getattr(target, method)
+        return fn(*args) if p is None else fn(*args, params=p)
+
+    paths: dict[str, Callable] = {
+        "update": lambda t, s, bi, dt, p: dict(call("update", s, bi, dt, p=p, target=t)),
+    }
+    if _produces_fluxes(node):
+        paths["compute_boundary_fluxes"] = lambda t, s, bi, dt, p: dict(
+            call("compute_boundary_fluxes", s, bi, dt, p=p, target=t))
+    if _implements(node, "derivatives"):
+        paths["derivatives"] = lambda t, s, bi, dt, p: dict(
+            call("derivatives", s, bi, p=p, target=t))
+    if _implements(node, "implicit_residual"):
+        # x_new = x_old = state: R = -dt * f(state; params), whose
+        # sensitivity to a constant is dt times f's.
+        paths["implicit_residual"] = lambda t, s, bi, dt, p: dict(
+            call("implicit_residual", s, s, bi, dt, p=p, target=t))
+    iface = getattr(node, "interface_dof_indices", None)
+    if _implements(node, "compute_interface_correction") and callable(iface) and iface():
+        paths["compute_interface_correction"] = lambda t, s, bi, dt, p: _flatten_corrections(
+            call("compute_interface_correction", s, bi, dt, p=p, target=t))
+    return paths
+
+
+#: What each path's missing ``params`` keyword costs, for the refusal.
+_WITHOUT_KEYWORD = {
+    "derivatives": ("integrate_node / implicit_euler_step refuse a calibrated "
+                    "params for this node rather than integrate the "
+                    "constructor's constants while update() uses the "
+                    "calibrated ones"),
+    "implicit_residual": ("implicit_euler_step refuses a calibrated params for "
+                          "this node rather than solve with the constructor's "
+                          "constants while update() uses the calibrated ones"),
+    "compute_boundary_fluxes": ("a calibrated constant would change the node's "
+                                "integration but not the flux it delivers over "
+                                "an edge"),
+    "compute_interface_correction": ("a coupled interface would be corrected "
+                                     "with the constructor's constants while "
+                                     "update() uses the calibrated ones"),
+}
 
 
 def _skip_no_params(name: str) -> VerificationResult:
@@ -421,6 +573,9 @@ def node_params_consistent(
                 "params=None) and read constants from params."
             ),
         )
+    missing = _missing_pytree("params_consistent", node)
+    if missing is not None:
+        return missing
     injected = node.params_pytree()
 
     def body(state, bi, dt):
@@ -449,6 +604,9 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     node = inputs.node
     if not _node_accepts_params(node):
         return _skip_no_params("params_gradient_finite")
+    missing = _missing_pytree("params_gradient_finite", node)
+    if missing is not None:
+        return missing
     base = node.params_pytree()
     if not base:
         return VerificationResult(
@@ -504,178 +662,315 @@ def _projected(out: dict) -> Any:
     return jnp.zeros(()) if total is None else total
 
 
-def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
-    """Every *trainable* parameter influences the output -- on every path.
+def node_params_effective(
+    inputs: _Inputs, rtol: float = 1e-5, atol: float = 1e-6, **kw,
+) -> VerificationResult:
+    """Every *trainable* parameter acts through the injected params -- on
+    every path, and the way a constructed value acts.
 
-    A leaf of :meth:`params_pytree` that ``update`` reads from
-    ``self.params`` instead of the injected ``params`` is a silent trap:
-    the graph passes a value, an optimiser moves it, nothing changes and
-    the gradient is identically zero.  ``params_consistent`` cannot see
-    that (both paths read the same constant), so this check aggregates
-    over the sampled inputs and fails if some trainable leaf had a zero
-    gradient on *every* example.  A leaf that only matters on some
-    inputs (a restitution coefficient without a collision) passes as
-    long as one sample exercised it.  ``SKIP`` for nodes without
+    A leaf of :meth:`params_pytree` that a path reads from ``self.params``
+    (or from a copy made in ``__init__``) instead of the injected
+    ``params`` is a silent trap: the graph passes a value, an optimiser
+    moves it, nothing changes.  ``params_consistent`` cannot see it (at
+    the constructor value both spellings read the same number), so this
+    check perturbs each leaf and compares.
+
+    Paths
+    -----
+    Each path the graph or an integrator reads the node's constants
+    through is probed **on its own**: :meth:`update`,
+    :meth:`compute_boundary_fluxes` (what a flux edge delivers),
+    :meth:`derivatives` and :meth:`implicit_residual` (what
+    ``integrate_node`` / ``implicit_euler_step`` integrate) and
+    :meth:`compute_interface_correction` (a coupled interface; probed when
+    the node declares interface DOFs).  Until 0.4.0 shipped ``update`` and
+    the fluxes were summed into one objective, so a flux that read the
+    injected value masked an ``update`` that did not, and the interface
+    correction was never probed.  A path whose override has no ``params``
+    keyword is a ``FAIL``; a ``derivatives`` / ``implicit_residual`` that
+    raises ``NotImplementedError`` (a discrete node) is not applicable.
+
+    Per sample, per path
+    --------------------
+    * a **gradient screen**: the gradient of a fixed random projection
+      of the path's outputs (see :func:`_projected`; a plain sum is
+      annihilated by any equal-coefficient conservation law) with respect
+      to every injected leaf, element by element;
+    * a **value test**, on the first ``_VALUE_PROBE_EXAMPLES`` samples:
+      each element of each trainable leaf (up to ``_MAX_PROBED_ELEMENTS``
+      per leaf, evenly spaced) is moved to a perturbed value inside its
+      ``ParamSpec`` bounds, once through the injected params and once
+      through ``node.params`` (swapped in place and restored).  Where the
+      constructed value moves the output, the injected one must move it
+      to the same place (``rtol`` / ``atol`` as in
+      ``params_consistent``).  A difference test rather than a gradient,
+      so a leaf the path reads only through a comparison (a dead-zone
+      threshold, zero gradient) is not mistaken for a ``self.params``
+      read, and ``0.5 * p["k"] + 0.5 * self.params["k"]`` -- non-zero
+      gradient, half the effect -- is not mistaken for a correct read.
+
+    After the run, an element that moved nothing on a path through
+    either spelling, while it acts on another path, is probed once more
+    against a node **rebuilt** from ``to_dict()`` with the perturbed
+    value (when the node rebuilds, and a rebuild with no override
+    reproduces it): a path that moves for the rebuilt node but never for
+    the injected value reads a copy made at construction.
+
+    Verdicts
+    --------
+    ``FAIL`` for: a path that reads an element from ``self.params``
+    (constructed value moves it, injected never does); a path that
+    applies the injected value differently from a constructed one; a
+    path that reads a copy made at construction (rebuild probe); a
+    trainable leaf that moved nothing on any path on any sample (read
+    nowhere -- or declare it ``ParamSpec(trainable=False)`` -- or the
+    sampled envelope never exercises it); and, failing closed, a non-
+    ``update`` path on which a leaf that acts through ``update`` never
+    moves, when neither ``node.params`` nor a rebuild can provide a
+    reference.  ``detail`` names the paths checked and, on a ``PASS``,
+    the elements each path does not consume.  ``SKIP`` for nodes without
     ``params`` and for leaves declared ``trainable=False``.
 
-    The same trap has a second door.  A node that implements
-    ``derivatives`` or ``implicit_residual`` is integrated through
-    :func:`~maddening.core.simulation.integrators.integrate_node` and
-    :func:`~maddening.core.simulation.implicit.implicit_euler_step`,
-    which forward ``params`` to those methods; an override that *takes*
-    the keyword and reads ``self.params`` anyway integrates the
-    constructor's constant while ``update`` uses the calibrated one
-    (the ``MADD-ANO-018`` shape, one method further in).  So for each
-    implemented path this check also differentiates the path's output
-    with respect to the injected leaves, and separates a leaf the path
-    does not consume at all (zero gradient, and the output does not move
-    when the constructor value is varied either -- the collision-free
-    right-hand side of a bouncing ball has no use for ``elasticity``)
-    from one it consumes from the wrong place (zero gradient, but the
-    output moves with the constructor value).  The first is reported in
-    ``detail``; the second is a ``FAIL`` naming the method and the
-    leaves.  An override declared without the keyword is a ``FAIL`` too
-    -- the integrators refuse a calibrated ``params`` for it -- and an
-    override that raises ``NotImplementedError`` (a discrete node) is
-    recorded as not applicable.  A path is probed by varying
-    ``node.params[leaf]`` in place and restoring it; a leaf that is not a
-    constructor entry cannot be probed and fails closed if it is alive
-    through ``update`` and dead through the path.  ``detail`` names the
-    paths checked either way.
-
-    The scalar differentiated is not the plain sum of the outputs.  A
-    node whose fields exchange a conserved quantity -- two compartments
-    with ``dA/dt = -k (A - B)``, ``dB/dt = +k (A - B)`` -- has
-    ``d(sum)/dk == 0`` exactly on every sample although ``k`` reaches
-    every path and moves every field, and the plain sum failed it.  The
-    probe therefore differentiates a fixed random projection
-    ``sum_f <w_f, out_f>``: one weight per output element, drawn once
-    per field from ``numpy.random.default_rng([_PROBE_SEED,
-    crc32(field)])`` with magnitude in ``[0.5, 1.5]`` and a random sign,
-    so no conservation law with equal coefficients across elements or
-    fields can annihilate it, and the check is reproducible from the
-    seed.
-
-    Limitation: the constructor-value probe is only reached when the
-    gradient is identically zero, so a path that reads a leaf *partly*
-    from the injected params and partly from ``self.params`` (say
-    ``0.5 * p["k"] + 0.5 * self.params["k"]``) has a non-zero gradient
-    and PASSes while ``integrate_node(..., params=)`` still disagrees
-    with a node rebuilt with the calibrated value -- a gradient probe
-    cannot see the split, and this check does not claim to.
+    Limitations
+    -----------
+    Closed in 0.4.0: all five false ``PASS``es and the false ``FAIL`` the
+    release audit planted.  Still open, and documented rather than
+    guessed at: a copy made at construction is caught only when the node
+    rebuilds faithfully from ``to_dict()`` (a node that cannot is
+    reported "not consumed" on that path, as before); the value test runs
+    on the first ``_VALUE_PROBE_EXAMPLES`` samples only, so a split read
+    confined to a region of the envelope those samples miss can pass; and
+    a leaf larger than ``_MAX_PROBED_ELEMENTS`` is value-probed on that
+    many evenly spaced elements (the gradient screen still sees all of
+    them).
     """
     node = inputs.node
     if not _node_accepts_params(node):
         return _skip_no_params("params_effective")
+    missing = _missing_pytree("params_effective", node)
+    if missing is not None:
+        return missing
     base = node.params_pytree()
-    specs = node.param_specs() if hasattr(node, "param_specs") else {}
+    specs = node.param_specs() if callable(getattr(node, "param_specs", None)) else {}
     trainable = [k for k in base if specs.get(k) is None or specs[k].trainable]
     if not trainable:
         return VerificationResult(
             "params_effective", "SKIP", detail="no trainable parameters",
         )
 
-    def via_update(state, bi, dt, p):
-        return _outputs(node, state, bi, dt) if p is None else _outputs(node, state, bi, dt, params=p)
+    paths = _path_functions(node)
+    accepts = {name: _method_accepts_params(node, name) for name in paths if name != "update"}
+    shapes = {k: tuple(np.shape(_to_np(base[k]))) for k in trainable}
+    sizes = {k: int(np.prod(shapes[k], dtype=np.int64)) for k in trainable}
+    elements = [(k, i) for k in trainable for i in _probe_indices(sizes[k])]
+    labels = {el: _element_label(el[0], shapes[el[0]], el[1]) for el in elements}
+    ctor_params = getattr(node, "params", None)
+    injected_for: dict = {}
+    ctor_value: dict = {}
+    for k, i in elements:
+        leaf = _to_np(base[k])
+        flat = np.array(leaf, copy=True).reshape(-1)
+        flat[i] = _perturbed_scalar(float(flat[i]), specs.get(k))
+        new = flat.reshape(leaf.shape).astype(leaf.dtype)
+        injected_for[(k, i)] = {**base, k: jnp.asarray(new, dtype=jnp.asarray(base[k]).dtype)}
+        ctor_value[(k, i)] = (
+            _as_constructor_value(ctor_params[k], new)
+            if isinstance(ctor_params, dict) and k in ctor_params else None
+        )
 
-    def via_derivatives(state, bi, dt, p):
-        return node.derivatives(state, bi) if p is None else node.derivatives(state, bi, params=p)
-
-    def via_residual(state, bi, dt, p):
-        # x_new = x_old = state: R = -dt * f(state; params), whose
-        # sensitivity to a constant is dt times f's.
-        return (node.implicit_residual(state, state, bi, dt) if p is None
-                else node.implicit_residual(state, state, bi, dt, params=p))
-
-    paths = {"update": via_update}
-    if _implements(node, "derivatives"):
-        paths["derivatives"] = via_derivatives
-    if _implements(node, "implicit_residual"):
-        paths["implicit_residual"] = via_residual
-    solver_paths = [name for name in paths if name != "update"]
-    accepts = {name: _method_accepts_params(node, name) for name in solver_paths}
-
-    seen_nonzero: dict[str, set[str]] = {name: set() for name in paths}
-    consumed: dict[str, set[str]] = {name: set() for name in solver_paths}
-    unprobeable: dict[str, set[str]] = {name: set() for name in solver_paths}
+    grad_any = {name: {k: np.zeros(sizes[k], dtype=bool) for k in trainable} for name in paths}
+    inj_moved: dict[str, set] = {name: set() for name in paths}
+    ref_moved: dict[str, set] = {name: set() for name in paths}
+    confirmed: dict[str, dict] = {name: {} for name in paths}
+    mismatch: dict[str, dict] = {name: {} for name in paths}
     not_applicable: set[str] = set()
+    kept: list = []
+    count = 0
 
     def body(state, bi, dt):
+        nonlocal count
+        count += 1
+        if len(kept) < _KEPT_EXAMPLES:
+            kept.append((state, bi, dt))
         for name, fn in paths.items():
             if name in not_applicable:
                 continue
-            baseline = None
-            if name != "update":
-                try:
-                    baseline = fn(state, bi, dt, None)
-                except NotImplementedError:
+            try:
+                baseline = fn(node, state, bi, dt, None)
+            except NotImplementedError:
+                if name in ("derivatives", "implicit_residual"):
                     not_applicable.add(name)
                     continue
-                if not accepts[name]:
-                    raise AssertionError(
-                        f"update() takes params but {name}() does not: "
-                        "integrate_node / implicit_euler_step refuse a calibrated "
-                        "params for this node rather than integrate the "
-                        "constructor's constants while update() uses the "
-                        f"calibrated ones.  Declare {name}(..., *, params=None) "
-                        "and read constants from {**self.params, **params}."
-                    )
-
-            def loss(p, fn=fn):
-                return _projected(fn(state, bi, dt, p))
-
-            g = jax.grad(loss)(base)
-            for k in trainable:
-                if k not in seen_nonzero[name] and bool(jnp.any(g[k] != 0)):
-                    seen_nonzero[name].add(k)
-            if name == "update":
-                continue
-            for k in trainable:
-                if k in seen_nonzero[name] or k in consumed[name] or k in unprobeable[name]:
-                    continue
-                reads = _reads_constructor_value(
-                    node, lambda fn=fn: fn(state, bi, dt, None), k, baseline,
+                raise
+            if name != "update" and not accepts[name]:
+                raise AssertionError(
+                    f"update() takes params but {name}() does not: "
+                    f"{_WITHOUT_KEYWORD[name]}.  Declare {name}(..., *, "
+                    "params=None) and read constants from "
+                    "{**self.params, **params}."
                 )
-                if reads is None:
-                    unprobeable[name].add(k)
-                elif reads:
-                    consumed[name].add(k)
+            g = jax.grad(lambda p, fn=fn: _projected(fn(node, state, bi, dt, p)))(base)
+            for k in trainable:
+                grad_any[name][k] |= (_to_np(g[k]) != 0).reshape(-1)
+            if count > _VALUE_PROBE_EXAMPLES:
+                continue
+            injected_base = fn(node, state, bi, dt, base)
+            for el in elements:
+                if el in mismatch[name] or confirmed[name].get(el, 0) >= _CONFIRMATIONS:
+                    continue
+                inj = fn(node, state, bi, dt, injected_for[el])
+                moved_inj = not _all_same(inj, injected_base)
+                if moved_inj:
+                    inj_moved[name].add(el)
+                value = ctor_value[el]
+                if value is None:
+                    continue
+                assert isinstance(ctor_params, dict)  # value is None otherwise
+                key = el[0]
+                old = ctor_params[key]
+                ctor_params[key] = value
+                try:
+                    try:
+                        ref = fn(node, state, bi, dt, None)
+                    except Exception:  # noqa: BLE001 - a different value broke it: it reads it
+                        ref = None
+                finally:
+                    ctor_params[key] = old
+                if ref is None:
+                    ref_moved[name].add(el)
+                    if not moved_inj:
+                        mismatch[name][el] = (float("nan"), float("nan"), False)
+                    continue
+                if _all_same(ref, baseline):
+                    continue
+                ref_moved[name].add(el)
+                if _all_close(inj, ref, rtol, atol):
+                    confirmed[name][el] = confirmed[name].get(el, 0) + 1
+                else:
+                    mismatch[name][el] = (_max_diff(inj, ref), _max_diff(baseline, ref), moved_inj)
 
     r = _run("params_effective", inputs, body, **kw)
     if r.status != "PASS":
         return r
 
+    checked = [name for name in paths if name not in not_applicable]
+
+    def acts(name, el) -> bool:
+        k, i = el
+        return bool(grad_any[name][k][i]) or el in inj_moved[name] or el in ref_moved[name]
+
+    # Post-run: the rebuild probe, for an element that moved nothing on a
+    # path through either spelling while it acts on another one.
+    rebuilt_moved: dict[str, set] = {name: set() for name in paths}
+    build = _rebuilder(node)
+    rebuilt0 = None
+    faithful: dict[str, bool] = {}
+    rebuilt_for: dict = {}
+    if build is not None and kept:
+        try:
+            rebuilt0 = build({})
+        except Exception:  # noqa: BLE001 - the node does not rebuild
+            rebuilt0 = None
+    for name in checked:
+        fn = paths[name]
+        candidates = [
+            el for el in elements
+            if not acts(name, el) and ctor_value[el] is not None
+            and any(acts(other, el) for other in checked if other != name)
+        ]
+        if not candidates or rebuilt0 is None:
+            continue
+        try:
+            faithful[name] = all(
+                _all_close(fn(rebuilt0, s, bi, dt, None), fn(node, s, bi, dt, None), rtol, atol)
+                for s, bi, dt in kept
+            )
+        except Exception:  # noqa: BLE001 - the rebuilt node cannot run this path
+            faithful[name] = False
+        if not faithful[name]:
+            continue
+        for el in candidates:
+            if el not in rebuilt_for:
+                try:
+                    rebuilt_for[el] = build({el[0]: ctor_value[el]})
+                except Exception:  # noqa: BLE001 - that value does not construct
+                    rebuilt_for[el] = None
+            rebuilt1 = rebuilt_for[el]
+            if rebuilt1 is None:
+                continue
+            try:
+                if any(not _all_same(fn(rebuilt1, s, bi, dt, None), fn(rebuilt0, s, bi, dt, None))
+                       for s, bi, dt in kept):
+                    rebuilt_moved[name].add(el)
+            except Exception:  # noqa: BLE001 - a different value broke it: it reads it
+                rebuilt_moved[name].add(el)
+
+    def names(els) -> list[str]:
+        return [labels[el] for el in sorted(els, key=lambda e: (trainable.index(e[0]), e[1]))]
+
     problems: list[str] = []
-    dead = sorted(set(trainable) - seen_nonzero["update"])
+    for name in checked:
+        where = f"{name}()"
+        never = [el for el, (_, _, moved) in mismatch[name].items()
+                 if not moved and el not in inj_moved[name]
+                 and not grad_any[name][el[0]][el[1]]]
+        split = [el for el in mismatch[name] if el not in never]
+        if never:
+            problems.append(
+                f"{where} reads {names(never)} from self.params, not from the "
+                "injected params: the constructor value moves its output and "
+                "the injected value never does, so "
+                + _CONSEQUENCE[name]
+                + ".  Read them from {**self.params, **params}."
+            )
+        if split:
+            worst = max(
+                (mismatch[name][el][0] / mismatch[name][el][1]
+                 for el in split if mismatch[name][el][1] > 0),
+                default=float("nan"),
+            )
+            problems.append(
+                f"{where} does not apply the injected {names(split)} the way a "
+                "constructed value is applied: at a perturbed value the injected "
+                "output misses the constructed one by up to "
+                f"{worst:.2f} of the perturbation's own effect (a read split "
+                "between the injected params and self.params?), so "
+                + _CONSEQUENCE[name] + "."
+            )
+        if rebuilt_moved[name]:
+            problems.append(
+                f"{where} ignores the injected {names(rebuilt_moved[name])}: a node "
+                "constructed with a different value gives a different output and "
+                "the injected value never does -- it reads a copy made at "
+                "construction.  Read them from {**self.params, **params} at call "
+                "time."
+            )
+        if name != "update":
+            blind = [
+                el for el in elements
+                if ctor_value[el] is None and not acts(name, el)
+                and el not in rebuilt_moved[name] and acts("update", el)
+            ]
+            if blind:
+                problems.append(
+                    f"{where}: the injected {names(blind)} never move its output "
+                    "while update()'s do, and the constructor value could not be "
+                    "varied to tell an unused constant from an ignored one (not a "
+                    "plain node.params entry); failing closed"
+                )
+    dead = [
+        k for k in trainable
+        if not any(grad_any[name][k].any() for name in checked)
+        and not any(acts(name, (k, i)) or (k, i) in rebuilt_moved[name]
+                    for name in checked for i in _probe_indices(sizes[k]))
+    ]
     if dead:
         problems.append(
-            f"zero gradient on every sample wrt trainable param(s) {dead}: "
-            "update() probably reads them from self.params instead of "
-            "the injected params (or declare them ParamSpec(trainable=False))"
+            f"zero gradient on every sample wrt trainable param(s) {dead}, and "
+            "neither the injected nor the constructed value moves any output: "
+            "no path reads them (declare them ParamSpec(trainable=False)), or "
+            "the sampled envelope never exercises them"
         )
-    checked = ["update"] + [n for n in solver_paths if n not in not_applicable]
-    for name in checked[1:]:
-        ignored = sorted(consumed[name] - seen_nonzero[name])
-        if ignored:
-            problems.append(
-                f"{name}() reads {ignored} from self.params, not from the "
-                "injected params: the constructor value moves its output and "
-                "the injected value never does, so integrate_node(..., "
-                "params=...) / implicit_euler_step(..., params=...) would "
-                "integrate the constructor's constant while update() used the "
-                "calibrated one.  Read them from {**self.params, **params}."
-            )
-        blind = sorted(
-            k for k in unprobeable[name]
-            if k in seen_nonzero["update"] and k not in seen_nonzero[name]
-        )
-        if blind:
-            problems.append(
-                f"{name}(): zero gradient on every sample wrt {blind} while "
-                "update() has one, and the constructor value could not be "
-                "varied to tell an unused constant from an ignored one "
-                "(not a plain node.params entry); failing closed"
-            )
     if problems:
         return VerificationResult(
             "params_effective", "FAIL", n_examples=r.n_examples,
@@ -683,16 +978,41 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
         )
 
     notes = [f"paths checked: {', '.join(checked)}"]
-    for name in solver_paths:
+    for name in paths:
         if name in not_applicable:
             notes.append(f"{name}(): not applicable (raises NotImplementedError)")
-            continue
-        unused = sorted(set(trainable) - seen_nonzero[name] - consumed[name])
+    for name in checked:
+        unused: list[str] = []
+        for k in trainable:
+            idx = _probe_indices(sizes[k])
+            quiet = [i for i in idx if not acts(name, (k, i))]
+            if not quiet:
+                continue
+            if len(quiet) == len(idx) and not grad_any[name][k].any():
+                unused.append(k)
+            elif shapes[k]:
+                # A vector leaf the path reads only part of: name the rest.
+                unused.extend(labels[(k, i)] for i in quiet)
         if unused:
             notes.append(f"not consumed by {name}(): {unused}")
     return VerificationResult(
         "params_effective", "PASS", n_examples=r.n_examples, detail="; ".join(notes),
     )
+
+
+#: What a path that ignores the injected value does to a calibration.
+_CONSEQUENCE = {
+    "update": "the graph would step the constructor's constant while an optimiser moves the injected one",
+    "compute_boundary_fluxes": "a flux edge would deliver the constructor's flux while update() uses the calibrated constant",
+    "derivatives": ("integrate_node(..., params=...) / implicit_euler_step(..., params=...) "
+                    "would integrate the constructor's constant while update() used the "
+                    "calibrated one"),
+    "implicit_residual": ("implicit_euler_step(..., params=...) would solve with the "
+                          "constructor's constant while update() used the calibrated one"),
+    "compute_interface_correction": ("a coupled interface would be corrected with the "
+                                     "constructor's constant while update() uses the "
+                                     "calibrated one"),
+}
 
 
 def node_boundedness(

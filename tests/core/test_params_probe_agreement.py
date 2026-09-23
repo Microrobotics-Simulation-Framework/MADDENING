@@ -282,6 +282,16 @@ PROBES = {
         "HybridNode.accepts_params": _node_probe(
             lambda n: HybridNode(n, lambda *a: {}).accepts_params()),
         "HybridNode forwards": _hybrid_forwards("update"),
+        # Through a wrapper that answers for what it wraps: a probe that
+        # read the wrapper's own signature (explicit ``params``) instead of
+        # asking it would say True for a legacy inner node.
+        "HybridNode(ShardedPointwiseNode).accepts_params": lambda kind, s: HybridNode(
+            ShardedPointwiseNode(_make(kind, s, halo=False), _MESH), lambda *a: {},
+        ).accepts_params(),
+        "graph add_node spec of ShardedPointwiseNode": lambda kind, s: (
+            lambda gm: (gm.add_node(ShardedPointwiseNode(_make(kind, s, halo=False), _MESH)),
+                        gm._nodes["n"].accepts_params)[1]
+        )(GraphManager()),
         "verification _node_accepts_params": _node_probe(ver_mod._node_accepts_params),
         "REST pre-compile probe": _server_treats_as_params_node,
     },

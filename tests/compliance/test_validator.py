@@ -361,10 +361,77 @@ class TestSharedResolver:
         from maddening.compliance._validate import resolve_test_reference
 
         root = TestActualRegistryReferences.REPO_ROOT
-        real = "tests/compliance/test_validator.py::test_repo_registry_is_valid"
+        # A method's node id names its class.  This line used to omit it, and
+        # the old resolver, which only asked whether each name was defined
+        # somewhere in the file, accepted that.
+        real = "tests/compliance/test_validator.py::TestActualRegistry::test_repo_registry_is_valid"
         assert resolve_test_reference(real, root) is None
         renamed = "tests/compliance/test_validator.py::test_renamed_away"
         assert resolve_test_reference(renamed, root) is not None
+
+
+class TestANodeIdResolvesTheWayPytestReadsIt:
+    """``File::Class::method`` names a method *of that class*.
+
+    The resolver used to accept it whenever both names were defined
+    anywhere in the file, so a verification entry putting a module-level
+    test under a class it is not in -- a node id pytest reports as "not
+    found" -- passed the registry gate.
+    """
+
+    _FILE = "tests/compliance/test_validator.py"
+
+    @staticmethod
+    def _resolve(ref):
+        from maddening.compliance._validate import resolve_test_reference
+
+        return resolve_test_reference(ref, TestActualRegistryReferences.REPO_ROOT)
+
+    def test_a_method_of_the_named_class_resolves(self):
+        ref = f"{self._FILE}::TestSharedResolver::test_a_renamed_test_is_caught_even_though_the_file_exists"
+        assert self._resolve(ref) is None
+
+    def test_a_module_level_function_under_a_class_it_is_not_in_is_refused(self):
+        assert self._resolve(f"{self._FILE}::valid_registry") is None
+        ref = f"{self._FILE}::TestSharedResolver::valid_registry"
+        reason = self._resolve(ref)
+        assert reason is not None and "in class TestSharedResolver" in reason
+
+    def test_a_method_of_another_class_is_refused(self):
+        ref = (f"{self._FILE}::TestSchemaEnumsMatchTheDataclass::"
+               f"test_a_renamed_test_is_caught_even_though_the_file_exists")
+        assert self._resolve(ref) is not None
+
+    def test_a_method_named_at_module_level_is_refused(self):
+        ref = f"{self._FILE}::test_a_renamed_test_is_caught_even_though_the_file_exists"
+        reason = self._resolve(ref)
+        assert reason is not None and "at module level" in reason
+
+    def test_a_function_has_no_children(self):
+        ref = f"{self._FILE}::valid_registry::valid_registry"
+        reason = self._resolve(ref)
+        assert reason is not None and "is a function" in reason
+
+    def test_an_inherited_method_resolves_through_a_base_in_the_same_file(
+        self, tmp_path
+    ):
+        """pytest collects an inherited test under the subclass's node id."""
+        from maddening.compliance._validate import resolve_test_reference
+
+        (tmp_path / "test_inherit.py").write_text(
+            "class Base:\n"
+            "    def test_shared(self):\n"
+            "        pass\n"
+            "\n"
+            "class Child(Base):\n"
+            "    pass\n"
+            "\n"
+            "class Unrelated:\n"
+            "    pass\n"
+        )
+        root = str(tmp_path)
+        assert resolve_test_reference("test_inherit.py::Child::test_shared", root) is None
+        assert resolve_test_reference("test_inherit.py::Unrelated::test_shared", root)
 
 
 class TestSchemaEnumsMatchTheDataclass:

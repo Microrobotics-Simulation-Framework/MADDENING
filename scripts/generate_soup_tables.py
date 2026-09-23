@@ -49,11 +49,13 @@ Usage
 CI fails on a stale table instead of shipping one.
 
 Cross-file consistency is checked in both modes: the registry header
-and ``CITATION.cff`` must name the version ``pyproject.toml`` names, an
-unresolved anomaly must not record a closed ``affected_versions`` range,
-and every test module registering a ``MADD-VER-`` benchmark must be in
-``BENCHMARK_MODULES`` (otherwise it would silently drop out of the
-index -- the drift this script exists to stop).
+and ``CITATION.cff`` must name the version ``pyproject.toml`` names,
+every ``affected_versions`` range must agree with its entry's status
+about that version (``check_anomalies.version_range_errors``, the same
+function the registry gate runs), and every test module registering a
+``MADD-VER-`` benchmark must be in ``BENCHMARK_MODULES`` (otherwise it
+would silently drop out of the index -- the drift this script exists to
+stop).
 """
 
 from __future__ import annotations
@@ -76,6 +78,13 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(REPO_ROOT))  # so `tests.…` imports resolve
 
 import yaml  # noqa: E402  (after sys.path setup)
+
+# The registry gate owns the affected_versions rule and the set of
+# statuses that count as "not reachable"; this script imports both rather
+# than keeping a second copy that could drift (it did: this file tested
+# ``startswith(">=")`` while the gate never read the field at all).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_anomalies as _anomaly_gate  # noqa: E402
 
 SOUP_PACKAGE = REPO_ROOT / "docs" / "validation" / "soup_package.md"
 FRAMEWORK_VERIFICATION = REPO_ROOT / "docs" / "validation" / "framework_verification.md"
@@ -105,15 +114,15 @@ BENCHMARK_MODULES: tuple[str, ...] = (
 #: so the filter is what makes the generated table order-independent.
 BENCHMARK_PREFIX = "MADD-VER-"
 
-#: The only ``resolution_status`` values that may record a closed
-#: ``affected_versions`` range.  See
-#: ``_check_unresolved_anomalies_are_open_ended``.  Note that the
-#: registry uses ``partially_resolved``, which
-#: ``maddening.core.compliance.anomaly.ResolutionStatus`` does not
-#: define -- the status field is not enum-checked anywhere today, so
-#: this deliberately defaults an unrecognised status to "unresolved"
-#: rather than trusting the spelling.
-_STATUSES_THAT_MAY_CLOSE_A_RANGE = frozenset({"resolved", "duplicate"})
+#: The ``resolution_status`` values whose defect cannot reach the version
+#: the registry describes -- the complement of the §3 headline's
+#: "reachable" count.  Imported from the registry gate, which uses the
+#: same set to decide which ranges must admit that version, so the
+#: headline and the range rule cannot disagree.  An unrecognised status
+#: is outside it and so counts as reachable; it is also refused outright
+#: by the schema validator (``maddening.compliance._validate``), which
+#: enum-checks ``resolution_status`` against ``ResolutionStatus``.
+_UNREACHABLE_STATUSES = _anomaly_gate.UNREACHABLE_STATUSES
 
 #: What each top-level package under ``tests/`` covers.  Which packages
 #: exist comes from the tree, and
@@ -450,32 +459,52 @@ def render_known_anomalies(registry: dict) -> str:
     # are in that set -- MADD-ANO-005's estimate still falls back to the
     # pre-0.4.0 residual test on a reachable path, and MADD-ANO-014's
     # own residual risk says "the degraded path is still the default and
-    # still silent".  Counting only ``open`` reported 6 where 8 defects
-    # were reachable, and it under-reported, which is the dangerous
-    # direction.
+    # still silent".  Counting only ``open`` left every
+    # ``partially_resolved`` entry out of the total, and under-reported,
+    # which is the dangerous direction.
     #
-    # "Reachable" is deliberately the *same* predicate as
-    # ``_check_unresolved_anomalies_are_open_ended``'s: an entry may
-    # close its ``affected_versions`` range exactly when the defect is
-    # gone.  Deriving both from ``_STATUSES_THAT_MAY_CLOSE_A_RANGE``
-    # means the headline and the range gate cannot come to disagree, and
-    # an unrecognised status counts as reachable rather than being
-    # quietly dropped from the total.
-    n_open = sum(
-        1 for a in registry.get("anomalies", [])
-        if a.get("resolution_status") == "open"
-    )
-    n_reachable = sum(
-        1 for a in registry.get("anomalies", [])
-        if a.get("resolution_status") not in _STATUSES_THAT_MAY_CLOSE_A_RANGE
-    )
+    # "Reachable" is deliberately the *same* predicate as the registry
+    # gate's range rule (``check_anomalies.version_range_errors``): a
+    # reachable entry's ``affected_versions`` must admit the version the
+    # registry describes.  Both read ``_UNREACHABLE_STATUSES``, so the
+    # headline and the range gate cannot come to disagree, and an
+    # unrecognised status counts as reachable rather than being quietly
+    # dropped from the total.
+    #
+    # The breakdown names every reachable status it counts.  It used to
+    # print "N `open` plus M `partially_resolved`" with M computed as
+    # everything reachable that was not open, which would have labelled
+    # a `wont_fix` entry `partially_resolved`.
+    reachable_by_status: dict[str, int] = {}
+    for a in registry.get("anomalies", []):
+        status = a.get("resolution_status")
+        if status in _UNREACHABLE_STATUSES:
+            continue
+        key = str(status)
+        reachable_by_status[key] = reachable_by_status.get(key, 0) + 1
+    n_reachable = sum(reachable_by_status.values())
+    order = ["open", "partially_resolved", "wont_fix"]
+    order += sorted(set(reachable_by_status) - set(order))
+    parts = []
+    for status in order:
+        count = reachable_by_status.get(status, 0)
+        if status in ("open", "partially_resolved") or count:
+            part = f"{count} `{status}`"
+            if status == "partially_resolved":
+                part += " whose residual risk is still live"
+            parts.append(part)
     return (
         f"{table}\n\n"
         f"*{n} anomalies registered.  {n_reachable} have a defect reachable "
         f"in this version — every entry whose `resolution_status` is not "
-        f"`resolved` or `duplicate`, which is {n_open} `open` plus "
-        f"{n_reachable - n_open} `partially_resolved` whose residual risk is "
-        f"still live.  Rationale, workaround, affected components and "
+        f"`resolved` or `duplicate`, which is {' plus '.join(parts)}.  "
+        f"The Affected Versions column is a PEP 440 specifier set read "
+        f"against this document's version; `{_anomaly_gate.EMPTY_RANGE}` "
+        f"marks a defect "
+        f"introduced and fixed within one development cycle, which no "
+        f"release carried.  The convention, and the gate that holds every "
+        f"range to it, are in the header of `known_anomalies.yaml`.  "
+        f"Rationale, workaround, affected components and "
         f"verification evidence for each: `known_anomalies.yaml`.*"
     )
 
@@ -569,42 +598,26 @@ def _check_versions(pyproject: dict, registry: dict, citation: dict) -> list[str
     return errors
 
 
-def _check_unresolved_anomalies_are_open_ended(registry: dict) -> list[str]:
-    """An unresolved anomaly must not record a closed ``affected_versions``.
+def _check_version_ranges(registry: dict) -> list[str]:
+    """Every ``affected_versions`` must agree with its entry's status.
 
-    ``affected_versions: "0.1.0"`` beside ``resolution_status: open``
-    says two incompatible things: that the defect is still present and
-    that it stopped being present after 0.1.0.  The first is what
-    ``open`` means, so the range has to stay open-ended (``>=X``) until
-    closure evidence arrives.  MADD-ANO-001 and MADD-ANO-002 sat in that
-    state for three releases.
+    The rule and its PEP 440 convention live in
+    ``scripts/check_anomalies.py`` (``version_range_errors``), which CI's
+    compliance job runs; this calls the same function so the SOUP table
+    cannot print a range the registry gate would refuse.
 
-    The rule is an allowlist rather than a check for ``open``, because
-    ``open`` is not the only status that means "reachable in the version
-    you are running".  MADD-ANO-005 recorded ``<=0.3.0`` while its own
-    ``residual_risk`` describes a fallback path on which the pre-0.4.0
-    behaviour returns: a range that asserts "you are not affected" where
-    a reachable path says otherwise is worse than a stale one, because
-    it is confidently wrong rather than merely old.  ``wont_fix`` is in
-    the same position by definition.  Only ``resolved`` (the defect is
-    gone) and ``duplicate`` (the range lives on the other entry) may
-    close a range, and an unrecognised status is treated as unresolved.
+    It replaced ``_check_unresolved_anomalies_are_open_ended``, whose test
+    was ``affected.startswith(">=")``: ``">=0.1.0, <0.4.0"`` starts with
+    ``>=`` and closes the range, so MADD-ANO-016 (``partially_resolved``)
+    shipped a claim that 0.4.0 was unaffected beside a footer counting it
+    as reachable.  The semantic check compares each range with the
+    registry's own ``maddening_version`` instead: a reachable entry's
+    range must admit it, a ``resolved`` entry's must not, and an
+    unparseable range fails.  MADD-ANO-001 and MADD-ANO-002, which sat
+    ``open`` with a closed range for three releases, and MADD-ANO-005,
+    ``partially_resolved`` with ``<=0.3.0``, are the history it exists for.
     """
-    errors = []
-    for a in registry.get("anomalies", []):
-        status = a.get("resolution_status")
-        if status in _STATUSES_THAT_MAY_CLOSE_A_RANGE:
-            continue
-        affected = str(a.get("affected_versions", "")).strip()
-        if not affected.startswith(">="):
-            errors.append(
-                f"{a.get('anomaly_id')}: resolution_status is {status!r}, which "
-                f"leaves the defect reachable, but affected_versions is "
-                f"{affected!r}, which closes the range.  Write an open-ended "
-                f"range ('>=X') and let the prose carry the condition, or "
-                f"resolve the anomaly."
-            )
-    return errors
+    return _anomaly_gate.version_range_errors(registry)
 
 
 def _check_test_directories_are_described(packages: list[str]) -> list[str]:
@@ -686,7 +699,7 @@ def build() -> tuple[dict[Path, str], list[str]]:
 
     errors = (
         _check_versions(pyproject, registry, citation)
-        + _check_unresolved_anomalies_are_open_ended(registry)
+        + _check_version_ranges(registry)
         + _check_test_directories_are_described(packages)
         + _check_benchmark_modules_are_complete()
     )

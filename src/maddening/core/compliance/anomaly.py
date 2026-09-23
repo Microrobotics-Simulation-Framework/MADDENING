@@ -30,10 +30,20 @@ class ResolutionStatus(Enum):
     """Resolution status for an anomaly.
 
     ``PARTIALLY_RESOLVED`` is a real IEC 62304 state rather than a hedge:
-    the defect is fixed in the released version but a bounded residual
-    risk remains, recorded in the entry's ``residual_risk`` field.
-    MADD-ANO-005 is one.  Until v0.4.0 the enum could not represent the
-    registry MADDENING itself ships.
+    a fix has landed, and it does not cover the whole defect.  Part of it
+    is still reachable in the version the registry describes, and the
+    entry's ``residual_risk`` field says which part and why.  So for every
+    purpose that asks whether a user can meet the defect it counts as
+    reachable, exactly as ``OPEN`` does: the SOUP package's reachable-defect
+    count includes it, and ``scripts/check_anomalies.py`` requires its
+    ``affected_versions`` range to admit the current version.  What sets it
+    apart from ``OPEN`` is that the fix exists and its tests are cited under
+    ``verification``.  MADD-ANO-005 (the criterion falls back to the
+    pre-0.4.0 test on a reachable path), MADD-ANO-014 (the documentation is
+    fixed, the default behaviour is not) and MADD-ANO-016 (the port is
+    signature-correct and unobserved against a live provider) are examples.
+    Until v0.4.0 the enum could not represent the registry MADDENING
+    itself ships.
     """
     OPEN = "open"
     RESOLVED = "resolved"

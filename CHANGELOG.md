@@ -34,7 +34,7 @@ guidance; the itemized changes follow.
   collection shrinks — an example that stops working is a failing build
 - **The 0.4.0 stability freeze round** (`docs/developer_guide/api_freeze_proposal.md`)
   plus a guard that a `stable` signature cannot change unannounced
-  (`scripts/check_stable_signatures.py`): 141 surfaces tagged, none promoted
+  (`scripts/check_stable_signatures.py`): 34 surfaces tagged, none promoted; `stability_report.md` is the full list
 - **`py.typed`: MADDENING's annotations now reach your type checker.** Under
   PEP 561 they were all ignored downstream; nothing to do but upgrade. The
   pyright job is blocking too — `core`/`nodes`/`fmi`/`cloud`/… at zero errors
@@ -185,8 +185,8 @@ guidance; the itemized changes follow.
   given**, so a degenerate combination no longer lands wherever `n_iter` and
   `lr` leave it; `FitResult.excited_rank`, or `hold_undetermined=False`
 - **`soup_package.md` §3 counts *reachable* defects, not `open` tickets**: it
-  said "6 open" where 8 entries have a live defect; a `partially_resolved` entry
-  with a live residual risk now counts, by the version-range gate's own predicate
+  counted only `open` and left every `partially_resolved` entry out; one with a
+  live residual risk now counts, by the version-range gate's own predicate
 - **`fim`'s rank cutoff now sees the residual length**: `rank_rtol` defaults to
   `max(n, sqrt(m)) * eps`, not `n * eps`.  `rank` falls and `crb` goes `+inf`
   for some long-residual (`m > n**2`) fits; pass `rank_rtol=n * eps` to opt out
@@ -275,8 +275,8 @@ guidance; the itemized changes follow.
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
   removed in 1.0; use `maddening.cloud.download_and_load_state`
-- `AdaptiveNode.blindness_ratio` / `blindness_threshold` warn; use
-  `gradient_capture_ratio` / `gradient_capture_threshold`
+- `AdaptiveNode.blindness_ratio()` and the `blindness_threshold=` keyword warn (reading the
+  attribute does not); use `gradient_capture_ratio` / `gradient_capture_threshold`
 
 ### Removed
 - The stelling formal-verification suite, CI job and `stelling` dependency.
@@ -286,6 +286,9 @@ guidance; the itemized changes follow.
 - **An inline point reference with no `"dtype"` refuses `np.longdouble` values** instead of rounding them to float64
   without a word; the error says no reference form keeps extended precision. Add `"dtype": "float64"` to accept the
   rounding, or convert first (`np.asarray(points, dtype=np.float64).tolist()`); float64 payloads are unaffected
+- **Every anomaly's `affected_versions` is checked against the registry's own version** (PEP 440; convention in the
+  registry header): ANO-016 is open-ended again, ANO-006 closes at 0.4.0, ANO-004 starts at 0.1.0, ANO-018/019 read `none`.
+  A `verification:` `path::Class::method` must now name a method of that class; fix any loose node id in your own registry
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.
@@ -355,7 +358,7 @@ guidance; the itemized changes follow.
 - **Degenerate sysid inputs are refused, not reported**: a non-finite Fisher matrix,
   a σ that is not positive, a mask keyed unlike `params`, and `lr`/`eps`/`lam_up`
   values that invert their meaning now raise; `params_pytree` keeps float64 under x64
-- **The four `scripts/check_*.py` compliance gates now fail on the defects they
+- **The four pre-0.4.0 `scripts/check_*.py` compliance gates now fail on the defects they
   exist to catch** — zero-reference transform scan, MRO-resolved mappings, a
   `%`-commented bib entry, an unchecked `resolution_status`.  Re-run them
 - **A failed graph mutation is now a no-op**: `add_node` builds the state before
@@ -560,12 +563,12 @@ guidance; the itemized changes follow.
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
   release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`
 - **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
-- **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
-  `update()` and cannot reach `derivatives()`, `implicit_residual()` or
-  `integrate_node()` -- they take no `params`, so they run constructor values
+- **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reached
+  `update()` and could not reach `derivatives()`, `implicit_residual()` or
+  `integrate_node()` -- they took no `params`, so they ran constructor values
 - **MADD-ANO-017**: `jax_enable_x64` does not reach `GraphManager`'s scan paths --
   float64 params against a float32 state seed, so `run_scan*`/`run_sweep` raise
-  `TypeError` (open, minor); node-level float64 unaffected, workarounds in the registry
+  `TypeError` (open, minor); node-level `update()` unaffected, workarounds in the registry
 - **MADD-ANO-016**: `cloud/_skypilot.py` was written against a SkyPilot older than
   the supported floor, so every `CloudSession` launch, teardown and preemption check
   was broken -- partially resolved in 0.4.0; end-to-end behaviour still unverified

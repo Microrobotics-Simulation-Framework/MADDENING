@@ -465,20 +465,10 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     unlike magnitude do not swamp the orthogonalisation; every norm is
     the group's, over the fields its norm reads.
     """
-    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        ift_gradient_error_bound,
-        jacobian_range_basis,
-        resolvent_apply,
-        spectral_error_bound,
-    )
-
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
     dtype = x_sg.dtype
     d = jax.lax.stop_gradient(jnp.asarray(weights, dtype))
-    live = (d > 0).astype(dtype)
-    s = jnp.where(d > 0, d, jnp.ones_like(d))
-    s_inv = 1.0 / s
     nan = jnp.full((), jnp.nan, dtype)
 
     probed = [
@@ -488,6 +478,42 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     if not probed:
         # Nothing the fixed point can respond to: no gradient, no error.
         return nan
+
+    def bound(operands):
+        return _gradient_error_bound_body(step_pure, probed, *operands)
+
+    # In a branch of its own, so XLA compiles it as a separate
+    # computation.  Inlined beside the forward, the Jacobian-vector
+    # products in the constants share constants and subexpressions with
+    # the forward's first pass, the algebraic simplifier then rewrites
+    # that pass differently (its rewrites depend on how many users an
+    # instruction has), and the returned *state* moved by one ulp on
+    # one of twelve configurations measured (chain-5, Jacobi, measured
+    # 2.4e-7 relative on the first step it showed) -- a diagnostic
+    # must not move the answer it diagnoses.  A non-finite state has no
+    # gradient bound to compute, which is what makes the predicate a
+    # runtime one.
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nan,
+        (x_sg, consts_sg, d, rho, arnoldi_residual, amplification),
+    )
+
+
+def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
+                               arnoldi_residual, amplification):
+    """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        ift_gradient_error_bound,
+        jacobian_range_basis,
+        resolvent_apply,
+        spectral_error_bound,
+    )
+
+    dtype = x_sg.dtype
+    live = (d > 0).astype(dtype)
+    s = jnp.where(d > 0, d, jnp.ones_like(d))
+    s_inv = 1.0 / s
+    nan = jnp.full((), jnp.nan, dtype)
     keys = jax.random.split(jax.random.PRNGKey(1), len(consts_sg))
     direction = {i: _probe_direction(consts_sg[i], keys[i]) for i in probed}
     row_of = {i: j for j, i in enumerate(probed)}

@@ -266,6 +266,82 @@ def test_the_gradient_bound_holds_across_an_early_exit_sweep(kind):
             )
 
 
+class _SwitchedOff(SimulationNode):
+    """``x <- a + g u**2 + h u**5`` with ``h = 0``: a correction term switched off.
+
+    ``h`` does not change the dynamics at all, and the gradient with
+    respect to it is still a question a calibration asks -- whether to
+    switch the term on.  ``F_h = u**5`` moves five times as fast as
+    ``u`` does in relative terms, against ``F_g = u**2``'s two, so its
+    relative error is the largest of the three and its probe is the one
+    that decides the bound.  A zero-valued constant has no magnitude to
+    perturb it by; it is probed at its fallback scale.
+    """
+
+    def __init__(self, name):
+        super().__init__(name=name, timestep=1.0, a=1.0, g=0.2, h=0.0)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.0, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        u = boundary_inputs["u"]
+        return {"x": jnp.asarray(p["a"]) + jnp.asarray(p["g"]) * u * u
+                + jnp.asarray(p["h"]) * u ** 5}
+
+
+def _switched_off_graph(**group_kw):
+    gm = GraphManager()
+    gm.add_node(_SwitchedOff("a"))
+    gm.add_node(_Relay("b"))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    kw = dict(diagnostics=True, max_iterations=60, tolerance=_UNREACHABLE)
+    kw.update(group_kw)
+    gm.add_coupling_group(["a", "b"], **kw)
+    gm.compile()
+    return gm
+
+
+def test_a_parameter_that_sits_at_zero_is_still_probed():
+    """``h = 0`` still gets a probe, and the bound covers its gradient.
+
+    The probe perturbs each constant by its own magnitude, so a constant
+    at zero would contribute a zero direction, a zero tangent, and drop
+    out of the maximum -- silently, since the other probes still give a
+    number.  Measured when it did: 0.54-0.70 of ``d/dh``'s true error.
+    Probed at the fallback scale it reads 1.17-1.35x, the same two
+    conservative factors as the parameter that decides the bound on the
+    other curved maps (jaxlib 0.11.0).
+    """
+    u_star, _ = _analytic_curved("square")
+    exact_h = u_star ** 5 / (1.0 - 0.4 * u_star)
+    g_star = _gradients(_switched_off_graph, max_iterations=400)
+    assert float(g_star["h"]) == pytest.approx(exact_h, rel=1e-5), "fixture premise"
+    for m in (3, 6):
+        gm = _switched_off_graph(max_iterations=m)
+        gm.step()
+        d = gm.coupling_diagnostics()["a+b"]
+        assert d["iterations"] == m and d["gradient_bound_usable"] is True, d
+        g_k = _gradients(_switched_off_graph, max_iterations=m)
+        true = {p: abs(float(g_k[p]) - float(g_star[p])) / abs(float(g_k[p]))
+                for p in ("a", "g", "h")}
+        assert true["h"] == max(true.values()), (
+            "fixture premise: the switched-off term has the largest error", true)
+        ratio = d["gradient_relative_error_bound"] / true["h"]
+        assert 1.0 <= ratio <= 1.35 * _BAND, (
+            f"m={m}: bound / true for d/dh = {ratio:.3f}; a zero-valued "
+            f"constant that is not probed reads ~0.6 here")
+
+
 # ---------------------------------------------------------------------------
 # The bound is about the gradient, not the solve
 # ---------------------------------------------------------------------------

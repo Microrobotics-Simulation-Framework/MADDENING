@@ -335,58 +335,106 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
-def _spectral_rate_at(step_pure, x_star, consts, weights):
+def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
 
     ``weights`` is the flat vector of per-entry factors the group's
     convergence norm multiplies a state change by at ``x_star`` --
     ``1 / max|field|`` on a field the norm reads, ``0`` on one it does
-    not (dead band, or off the interface under the interface norm) --
-    so the Arnoldi iteration runs on ``D J D^+`` and the resolvent norm
-    it reports is the one in the norm the residual is quoted in.  The
-    spectral radius is unchanged by that similarity wherever the
-    weights are non-zero.
+    not (dead band, or off the interface under the interface norm).
+    ``spectral_weights`` is the same vector with the *dead-banded* fields
+    the norm would otherwise read given a positive weight
+    (``1 / atol``, the caller's declared noise floor) instead of zero;
+    it defaults to ``weights``.  The Arnoldi iteration runs on
+    ``D' J D'^{-1}`` for those weights, so the resolvent norm it reports
+    is in a norm that agrees with the group's on every field the group
+    reads, and the spectral radius is the map's own wherever the weights
+    are positive.
+
+    **Why the dead band does not get weight zero here.**  A field inside
+    the dead band leaves the *residual*; it does not leave the *loop*.
+    Weighted zero, a dead-banded field on the coupling loop -- a small
+    displacement feeding a large stiffness -- zeroed its row and column
+    of ``D J D^+`` and cut the loop out of the spectrum: ``rho_spectral``
+    read ``0.000`` for a map whose spectral radius is ``0.9``, and the
+    bound read 0.15-0.29x the true distance of a field the norm *keeps*
+    with ``spectral_usable=True``.  A positive weight keeps the loop.
+    The bound is still on the group's own norm: ``||e||_{D'} >=
+    ||e_kept||_D`` because the weights agree on the kept fields, and
+    ``||e||_{D'} <= resolvent * ||D' r||``, whose dead-banded part the
+    group's residual does not contain -- so that share is measured here
+    (one evaluation of ``F`` at ``x_star``) and folded in: where it is
+    non-zero the returned ``amplification`` is the factor the bound
+    applies, ``max(resolvent, 1 / (1 - rho_safe)) * sqrt(1 + share**2)``,
+    with ``share`` the dead-banded part of ``D' r`` over the kept part
+    (or over the residual's float floor, where the kept part is below
+    it).  Where it is zero -- no dead-banded field, the usual case --
+    ``amplification`` is the resolvent norm exactly as before.
+
+    **Why the residual is passed into the Krylov space.**  The resolvent
+    norm bounds ``(I - J)^{-1} r`` only for an ``r`` in the invariant
+    space it was computed on, and a space grown from one start vector
+    need not contain the residual (a repeated eigenvalue breaks it down
+    early; a relaxed iterate's residual is not a Jacobian image at all).
+    So ``D' r`` is handed to
+    :func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`
+    as ``v_extra``: the space continues from it at every breakdown and
+    the part it never absorbed is reported as unresolved.  The start
+    vector is still a fixed-seed normal draw, which has a component in
+    every mode, so ``rho`` is the spectral radius of the whole map and
+    not only of the residual's cyclic subspace.
 
     The matvec is the same ``jax.jvp`` of the one-pass map the IFT
     tangent rule builds (see ``_ift_solve_jvp``); it is applied
-    ``SPECTRAL_KRYLOV_STEPS`` times by
-    :func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`,
-    which is the whole cost.  The inputs are ``stop_gradient``-ed so
-    the estimate is forward-only bookkeeping like the rest of the
-    diagnostics: under ``jax.grad`` nothing here is linearised, and
-    the adjoint of the step is unchanged by its presence.
-
-    The start vector is a fixed-seed normal draw rather than the
-    residual direction.  It costs no extra evaluation of ``F`` and has
-    a component in every mode, so what is estimated is the spectral
-    radius of the whole map -- an upper bound on the rate of any mode
-    the error happens to live in, which is the conservative side.  A
-    map whose Jacobian has rank ``m`` (the usual coupling case: rank
-    at most the number of boundary scalars crossing the group's
-    edges) has its whole range inside an ``m``-step Krylov space, so
-    a large state does not slow the estimate down or blur it.
+    ``SPECTRAL_KRYLOV_STEPS`` times, which with the one evaluation of
+    ``F`` is the whole cost.  The inputs are ``stop_gradient``-ed so the
+    estimate is forward-only bookkeeping like the rest of the
+    diagnostics: under ``jax.grad`` nothing here is linearised, and the
+    adjoint of the step is unchanged by its presence.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
+        SPECTRAL_MARGIN,
         arnoldi_spectral_radius,
     )
 
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
     d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
+    dw = d if spectral_weights is None else jax.lax.stop_gradient(
+        jnp.asarray(spectral_weights, x_sg.dtype))
 
     def spectrum(operands):
-        xx, cc, dd = operands
-        live = dd > 0
-        d_inv = jnp.where(live, 1.0 / jnp.where(live, dd, 1.0), 0.0)
+        xx, cc, dd, ww = operands
+        live = ww > 0
+        w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
 
         def matvec(v):
             _, Jv = jax.jvp(
-                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,), (v * d_inv,)
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,), (v * w_inv,)
             )
-            return dd * Jv
+            return ww * Jv
 
+        r_w = ww * (_F_dispatch(step_pure, xx, cc) - xx)
         v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, xx.dtype)
-        return arnoldi_spectral_radius(matvec, v0)
+        rho, resid, amp = arnoldi_spectral_radius(matvec, v0, v_extra=r_w)
+        # The share of ``D' r`` the group's residual does not see: the
+        # dead-banded fields (weight 0 in ``dd``, positive in ``ww``).
+        kept = dd > 0
+        r_kept = jnp.linalg.norm(jnp.where(kept, r_w, 0.0))
+        r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_w))
+        floor = PRECISION_FLOOR_ULPS * jnp.finfo(xx.dtype).eps * jnp.sqrt(
+            jnp.sum(kept.astype(xx.dtype)))
+        denom = jnp.maximum(r_kept, floor)
+        unread = r_unread > 0
+        share = jnp.where(unread, r_unread / jnp.where(denom > 0, denom, 1.0), 0.0)
+        share = jnp.where(jnp.logical_and(unread, denom <= 0), jnp.inf, share)
+        rho_safe = rho + SPECTRAL_MARGIN * resid
+        contracting = rho_safe < 1
+        radius = jnp.where(contracting, 1.0 / jnp.where(contracting, 1.0 - rho_safe, 1.0),
+                           jnp.inf)
+        folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
+        return rho, resid, jnp.where(unread, folded, amp)
 
     nan = jnp.full((), jnp.nan, x_sg.dtype)
     # A Jacobian at a state that has left float range describes nothing
@@ -398,7 +446,7 @@ def _spectral_rate_at(step_pure, x_star, consts, weights):
     # forward and so cannot move the state it diagnoses.
     return jax.lax.cond(
         jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
-        (x_sg, consts_sg, d),
+        (x_sg, consts_sg, d, dw),
     )
 
 
@@ -614,11 +662,19 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # resolvent then amplified into a bound of 2.5e-4 where the true
     # error is exactly zero.
     points = jnp.stack([x_sg, x_sg + delta_s * s_inv])
+    # One extra row beside the probes: the tangent ``delta`` itself with
+    # no constant moved, so its ``G`` is ``J(x) delta`` and the secant of
+    # that row is how much the *Jacobian* changes across the step (see
+    # the leading-order check below).  ``tangent_for`` of an index past
+    # the probes moves no constant.
+    rows_ext = jnp.arange(len(probed) + 1)
+    ts_ext = jnp.concatenate([t_s, delta_s[None]], axis=0)
     G = jax.vmap(
-        lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows, t_s)
+        lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows_ext, ts_ext)
     )(points)
     G = jax.lax.optimization_barrier(G)
-    secant_s = s * (G[1] - G[0])
+    secant_ext = s * (G[1] - G[0])
+    secant_s, jac_secant_s = secant_ext[:-1], secant_ext[-1]
 
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
     distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification,
@@ -633,6 +689,38 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     responds = norm(t_s) > 0
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
+
+    # **Where the leading-order term is not the whole story.**  The bound
+    # above uses the resolvent and the distance taken at ``x_k``; the
+    # exact error needs the resolvent at ``x*`` and the distance under
+    # the Jacobian *between* the two.  Both are within a checkable
+    # factor of the ``x_k`` values while the Jacobian does not move
+    # much across the distance, measured against the gap the resolvent
+    # divides by: ``theta = amp * ||J(x_k + delta) - J(x_k)|| * distance
+    # / ||delta||``, the directional change taken along ``delta``
+    # (Jacobian-linear along it) and scaled to the distance.  The
+    # Banach lemma then gives ``||(I - J(x*))^{-1}|| <= amp / (1 -
+    # theta)``, and the mean-value Jacobian over the segment -- half the
+    # endpoint change -- ``distance / (1 - theta / 2)``; so the bound is
+    # multiplied by ``1 / ((1 - theta) (1 - theta / 2))``, and is
+    # ``inf`` at ``theta >= 1``, where nothing bounds the resolvent at
+    # the fixed point.  ``theta`` is exactly zero on a map whose
+    # Jacobian does not depend on the point (the secant row is then
+    # bit-identical zero), so an affine group's bound is untouched.
+    # Measured on ``x <- a + g u**2`` at ``F'(x*) = 0.99`` with the
+    # forward 0.65-4.5% short of its fixed point: theta 0.47-0.99, and
+    # the uncorrected bound read 0.20-0.96x the true relative error.
+    step = norm(delta_s)
+    theta = jnp.where(
+        step > 0,
+        amp * norm(jac_secant_s) * distance / jnp.where(step > 0, step * step, 1.0),
+        0.0,
+    )
+    held = theta < 1
+    factor = jnp.where(
+        held, 1.0 / jnp.where(held, (1.0 - theta) * (1.0 - 0.5 * theta), 1.0), jnp.inf,
+    )
+    worst = jnp.where(worst == 0, worst, worst * factor)
     return jnp.where(captured, worst, nan)
 
 
@@ -2360,7 +2448,7 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
-            def _norm_weights(x_full):
+            def _norm_weights(x_full, dead_band_weight=0.0):
                 """Per-entry factors of the group's norm at ``x_full``.
 
                 Mirrors ``_scaled_change``: a field the norm reads is
@@ -2369,6 +2457,9 @@ def _run_coupled_block_impl(
                 only edge-source fields are read.  A constant factor
                 (``rtol``, the mixed norm's ``1/count``) is left out --
                 the resolvent norm the weights feed is invariant to it.
+                ``dead_band_weight`` is what a read field inside the dead
+                band gets instead: ``0.0`` for the norm itself, positive
+                for the spectrum (see ``_spectral_rate_at``).
                 """
                 s_star = _embed(x_full)
                 read = {(e.source_node, e.source_field) for e in group_internal_list}
@@ -2382,7 +2473,8 @@ def _run_coupled_block_impl(
                             continue
                         ref = _field_reference(val, val)
                         active = jnp.logical_and(ref > group.atol, ref > 0)
-                        inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
+                        inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0),
+                                        dead_band_weight)
                         w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
@@ -2442,8 +2534,16 @@ def _run_coupled_block_impl(
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 weights = _norm_weights(jax.lax.stop_gradient(x_star_full))
+                # A dead-banded field is at zero *within the caller's
+                # atol*, which is therefore its natural unit; with no
+                # dead band declared only an exactly-zero field lands
+                # here, and any positive weight keeps it on the loop.
+                spec_weights = _norm_weights(
+                    jax.lax.stop_gradient(x_star_full),
+                    dead_band_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
+                )
                 rho_spec, spec_resid, spec_amp = _spectral_rate_at(
-                    step_pure, x_star_full, consts, weights,
+                    step_pure, x_star_full, consts, weights, spec_weights,
                 )
                 # Its distance is the spectral bound and its resolvent
                 # factor the one that bound applies; the curvature is a

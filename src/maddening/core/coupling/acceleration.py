@@ -585,7 +585,8 @@ def _spectral_radius_small(H, n_squarings: int = _GELFAND_SQUARINGS):
     return jnp.where(alive, jnp.exp(log_rho), jnp.zeros_like(log_rho))
 
 
-def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
+def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
+                            v_extra=None):
     """``(rho, residual, amplification)`` after ``n_steps`` of Arnoldi on ``dF/dx``.
 
     ``matvec(v)`` applies the coupling Jacobian ``dF/dx`` (at the point
@@ -614,11 +615,31 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     invariant (``residual == 0``) it satisfies ``A Q = Q H``, so for
     any vector ``r`` in it ``(I - A)^{-1} r = Q (I - H)^{-1} Q^T r`` and
     ``||(I - A)^{-1} r|| <= amplification * ||r||`` holds *whatever*
-    the eigenvectors do.  The residual of an iterate produced by the
-    coupling loop lies in that space generically (it is in the
-    Jacobian's range, which the space contains once it has broken
-    down), which is what makes :func:`spectral_error_bound` a bound on
-    a non-normal map too.
+    the eigenvectors do -- **for a vector in the space**, which an
+    invariant space does not make every vector.
+
+    **Why the residual is put in the space (``v_extra``).**  A Krylov
+    space grown from one start vector is that vector's cyclic subspace,
+    and it can break down -- ``residual == 0``, invariant, settled --
+    while holding only part of the Jacobian's range: where an
+    eigenvalue is repeated the minimal polynomial's degree is below the
+    rank, and ``A = B (x) I_2`` broke down at dimension 2 with a range
+    of dimension 4.  A zero residual was read as certifying that the
+    residual being bounded lay in the space; it did not, and the bound
+    read 0.92x the true distance with ``spectral_usable=True``.  Nor is
+    the residual of a relaxed or accelerated iterate in the range at
+    all (only ``x_k = F(x_{k-1})`` makes ``F(x_k) - x_k`` a Jacobian
+    image).  So the vector the caller will apply the resolvent to is
+    passed as ``v_extra``: whenever the space breaks down, the part of
+    ``v_extra`` it does not yet contain becomes the next basis vector
+    and the iteration continues from it (``H`` keeps a zero on its
+    subdiagonal there, so its spectrum is the union of the blocks').  A
+    space that then breaks down again is invariant *and* contains
+    ``v_extra`` by construction, which is the certificate.  What is
+    still outside the final space -- ``v_extra`` minus its projection,
+    relative to its norm -- is folded into ``residual`` (the larger of
+    the two is returned), so a ``v_extra`` the space never absorbed
+    reads as an unsettled space rather than as a certified one.
 
     **When the answer is exact, and how it says so.**  A coupling
     Jacobian has rank at most the number of boundary scalars crossing
@@ -640,12 +661,14 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     products, while Arnoldi's space of dimension 6 is the whole range.
 
     ``n_steps`` is static (a Python int) and is the number of
-    Jacobian-vector products the call costs; the SVD behind
-    ``amplification`` is of a ``k x k`` matrix and costs nothing beside
-    them.  A zero ``v0``, or a Jacobian that annihilates the start
-    (``A v0 = 0``), gives ``rho = 0.0``, ``residual = 0.0`` and
-    ``amplification = 1.0``: nothing is amplified, so nothing is
-    extrapolated.
+    Jacobian-vector products the call costs, with or without
+    ``v_extra``; the SVD behind ``amplification`` is of a ``k x k``
+    matrix and costs nothing beside them.  A zero ``v0``, or a Jacobian
+    that annihilates the start (``A v0 = 0``), gives ``rho = 0.0``,
+    ``residual = 0.0`` and ``amplification = 1.0`` when there is no
+    ``v_extra`` to continue from: nothing is amplified, so nothing is
+    extrapolated.  A zero ``v_extra`` (a stalled iterate's residual)
+    adds nothing.
 
     Examples
     --------
@@ -654,6 +677,12 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     >>> rho, res, amp = arnoldi_spectral_radius(lambda v: A @ v, jnp.ones(3), n_steps=8)
     >>> bool(abs(rho - 0.999) < 1e-5), bool(res < 1e-5), bool(abs(amp - 1000.0) < 1.0)
     (True, True, True)
+    >>> B = jnp.kron(jnp.array([[0.0, 2.0], [0.02, 0.0]]), jnp.eye(2))   # every eigenvalue twice
+    >>> r = jnp.array([1.0, 0.0, 0.0, 1.0])
+    >>> _, res, amp = arnoldi_spectral_radius(lambda v: B @ v, jnp.array([1.0, 1.0, 1.0, 1.0]), v_extra=r)
+    >>> exact = float(jnp.linalg.norm(jnp.linalg.solve(jnp.eye(4) - B, r)))
+    >>> bool(res < 1e-5), bool(float(amp) * float(jnp.linalg.norm(r)) >= exact)
+    (True, True)
     """
     if n_steps < 1:
         raise ValueError(
@@ -669,6 +698,15 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
         nrm = jnp.linalg.norm(v)
         ok = nrm > 0
         return jnp.where(ok, v / jnp.where(ok, nrm, 1.0), v)
+
+    extra = None if v_extra is None else jnp.asarray(v_extra, dtype)
+
+    def _outside(Q, v):
+        """``v`` minus its projection on the rows of ``Q`` (twice, for float32)."""
+        for _sweep in range(2):
+            for i in range(Q.shape[0]):
+                v = v - jnp.dot(Q[i], v) * Q[i]
+        return v
 
     Q0 = jnp.zeros((k + 1, n), dtype).at[0].set(_unit(v0))
     H0 = jnp.zeros((k + 1, k), dtype)
@@ -688,10 +726,19 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
         grown = h_next > _ARNOLDI_BREAKDOWN_RTOL * scale
         H = H.at[j + 1, j].set(jnp.where(grown, h_next, 0.0))
         q_next = jnp.where(grown, w / jnp.where(grown, h_next, 1.0), 0.0)
+        if extra is not None:
+            # A breakdown with ``v_extra`` not yet in the space: continue
+            # from the part of it the space lacks.  ``H[j + 1, j]`` stays
+            # zero -- the new direction is not ``A q_j``'s.
+            e = _outside(Q, extra)
+            e_norm = jnp.linalg.norm(e)
+            fresh = e_norm > _ARNOLDI_BREAKDOWN_RTOL * jnp.linalg.norm(extra)
+            restart = jnp.logical_and(jnp.logical_not(grown), fresh)
+            q_next = jnp.where(restart, e / jnp.where(restart, e_norm, 1.0), q_next)
         Q = Q.at[j + 1].set(q_next)
         return Q, H
 
-    _Q, H = jax.lax.fori_loop(0, k, body, (Q0, H0))
+    Q, H = jax.lax.fori_loop(0, k, body, (Q0, H0))
     Hk = H[:k, :k]
     rho = _spectral_radius_small(Hk)
     sigma = jnp.linalg.svd(jnp.eye(k, dtype=dtype) - Hk, compute_uv=False)
@@ -700,7 +747,16 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     amplification = jnp.where(
         invertible, 1.0 / jnp.where(invertible, sigma_min, 1.0), jnp.inf,
     )
-    return rho, H[k, k - 1], amplification
+    residual = H[k, k - 1]
+    if extra is not None:
+        # The certificate, tested rather than assumed: the fraction of
+        # ``v_extra`` outside the final space.  Zero (to float32) when the
+        # space absorbed it; otherwise it reads as unresolved spectrum.
+        ex_norm = jnp.linalg.norm(extra)
+        missed = jnp.linalg.norm(_outside(Q[:k], extra)) / jnp.where(ex_norm > 0, ex_norm, 1.0)
+        missed = jnp.where(missed > _ARNOLDI_BREAKDOWN_RTOL, missed, 0.0)
+        residual = jnp.maximum(residual, missed)
+    return rho, residual, amplification
 
 
 #: Units of ``eps * max|field|`` per entry that a computed residual can

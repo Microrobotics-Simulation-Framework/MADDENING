@@ -2000,11 +2000,18 @@ def fim(
         carried.  A leaf without an entry gets the default (unbounded)
         spec and is therefore value-scaled and named; ``{}`` is the
         explicit way to say no leaf has a width.  The tree must mirror
-        ``params``, though: a key that matches no parameter, a dict
-        where a leaf needs a ``ParamSpec`` (``to_dict()`` output), a
-        ``ParamSpec`` above a dict level or a non-dict ``specs`` is a
-        ``ValueError`` naming the key path, because a spec that reaches
-        nothing would otherwise produce ``"relative"`` in disguise.  A
+        ``params``, though: a dict where a leaf needs a ``ParamSpec``
+        (``to_dict()`` output), a ``ParamSpec`` above a dict or record
+        level, a list of specs for a namedtuple or dataclass (address
+        its fields by name, with a dict), a non-dict ``specs``, or a key
+        that matches no parameter *and could have changed a column* (its
+        spec has a finite width, or a ``"log"`` offset from a non-zero
+        lower bound) is a ``ValueError`` naming the key path, because a
+        spec that reaches nothing would otherwise produce ``"relative"``
+        in disguise.  A stray key whose spec gives the default column
+        record is accepted -- the report is identical either way -- so
+        ``gm.param_specs()``, which declares specs for constants
+        ``params_pytree()`` leaves out, is accepted for its own graph.  A
         list/tuple of leaves takes a list/tuple of specs by position or
         one ``ParamSpec`` covering every position.  Static: the column
         scales are derived from it on the host once and baked into the

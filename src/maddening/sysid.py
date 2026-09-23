@@ -479,6 +479,15 @@ class FIMReport:
     value-scaled column that is also at zero appears in ``zero_scaled``
     too.  Empty under every other scale.  The policy is tabulated in
     :func:`fim`.
+
+    ``integer_excluded`` names the leaves of integer or boolean dtype
+    that are **not** in the matrix -- one entry per leaf, by its key
+    path, since none of their entries is a column.  There is no
+    derivative with respect to an integer; left in, such a leaf became a
+    zero column and read as unidentifiable whatever the data said (an
+    integer ``matrix_mapping`` reported rank 0 of 16).  Only ``mask=None``
+    leaves one out; a ``mask`` that selects one is refused.  Store a
+    leaf as floating-point to analyse it.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -489,6 +498,7 @@ class FIMReport:
     param_names: tuple[str, ...]
     zero_scaled: tuple[str, ...] = ()
     value_scaled: tuple[str, ...] = ()
+    integer_excluded: tuple[str, ...] = ()
 
     def least_identifiable(self) -> tuple[str, float]:
         """Name and weight of the largest component of the weakest direction."""
@@ -516,9 +526,18 @@ def _leaf_size(leaf) -> int:
     return int(math.prod(np.shape(leaf)))
 
 
-def _param_names(params) -> tuple[str, ...]:
+def _is_differentiable(leaf) -> bool:
+    """Whether a params leaf has a derivative to take: a floating (or
+    complex) dtype.  Read from the dtype, which the host already has, so
+    it transfers nothing and works on a tracer."""
+    return bool(jnp.issubdtype(jnp.result_type(leaf), jnp.inexact))
+
+
+def _param_names(params, *, differentiable_only: bool = False) -> tuple[str, ...]:
     names: list[str] = []
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+        if differentiable_only and not _is_differentiable(leaf):
+            continue
         base = jax.tree_util.keystr(path)
         n = _leaf_size(leaf)
         if n == 1:
@@ -592,6 +611,100 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
     return np.asarray(idx)
 
 
+def _fim_indices(params: dict, mask: Optional[dict]):
+    """``(idx, integer_excluded)`` for :func:`fim` / :func:`fim_core`.
+
+    ``idx`` indexes the flat vector of the **differentiable** leaves only
+    (:func:`_is_differentiable`), in flatten order -- the vector
+    :func:`_fim_jacobian` differentiates -- and is ``None`` when every one
+    of them is a column.  An integer or boolean leaf has no derivative:
+    ``ravel_pytree`` used to promote it into the float vector and cast it
+    back on the way out, JAX's derivative through that cast is
+    identically zero, and the leaf came back as a zero column -- "the
+    data cannot determine this", however well they do, with nothing in
+    the report to say otherwise.  An integer ``matrix_mapping`` read as
+    rank 0 of 16.
+
+    So an integer leaf is never a column.  With ``mask=None`` -- "every
+    leaf", implicitly -- it is left out and named in
+    ``integer_excluded``; a ``mask`` that selects one *explicitly* asks
+    for a derivative that does not exist and is refused, naming it.
+    """
+    entries = jax.tree_util.tree_flatten_with_path(params)[0]
+    keep = [_is_differentiable(leaf) for _, leaf in entries]
+    n_diff = sum(_leaf_size(leaf) for (_, leaf), k in zip(entries, keep) if k)
+    if mask is None:
+        excluded = tuple(jax.tree_util.keystr(path)
+                         for (path, _), k in zip(entries, keep) if not k)
+        if n_diff == 0:
+            raise ValueError(
+                "params has no floating-point leaf, so there is nothing to "
+                "differentiate: integer and boolean leaves have no derivative "
+                f"(the leaves are {list(excluded)[:6]}"
+                f"{' ...' if len(excluded) > 6 else ''}). Store the "
+                "parameters as floating-point arrays.")
+        return None, excluded
+    flags = _mask_flags(params, mask)
+    asked = [jax.tree_util.keystr(path)
+             for (path, leaf), k, flag in zip(entries, keep, flags)
+             if bool(flag) and not k]
+    if asked:
+        dtypes = sorted({str(jnp.result_type(leaf))
+                         for (_, leaf), k, flag in zip(entries, keep, flags)
+                         if bool(flag) and not k})
+        raise ValueError(
+            f"mask selects {len(asked)} leaf/leaves of integer or boolean "
+            f"dtype ({', '.join(dtypes)}): {asked[:6]}"
+            f"{' ...' if len(asked) > 6 else ''}. A derivative with respect "
+            "to an integer does not exist -- JAX's is identically zero -- so "
+            "its column of J would be zero and the leaf would read as "
+            "unidentifiable whatever the data say. Store it as a "
+            "floating-point array if it is a parameter to analyse, or leave "
+            "it out of mask.")
+    idx, offset = [], 0
+    for (_, leaf), k, flag in zip(entries, keep, flags):
+        if not k:
+            continue
+        n = _leaf_size(leaf)
+        if bool(flag):
+            idx.extend(range(offset, offset + n))
+        offset += n
+    if not idx:
+        raise ValueError("mask selects no parameters")
+    return np.asarray(idx), ()
+
+
+def _refuse_integer_trainable(params: dict, mask: dict) -> None:
+    """Refuse a fit whose trainable set holds an integer or boolean leaf.
+
+    The optimisers move a float vector; an integer leaf rides along
+    promoted to float, its gradient is identically zero, and the fit
+    returned it bit-for-bit unchanged -- with a finite loss, an
+    ``excited_rank`` that quietly counted it as undetermined, and no
+    word about why.  ``params_pytree()`` never produces such a leaf for
+    a node constant, so the one way to get here is to have asked: a
+    ``set_param_spec(..., ParamSpec())`` on an integer mapping weight,
+    a hand-built ``params``, or a ``mask``.
+    """
+    entries = jax.tree_util.tree_flatten_with_path(params)[0]
+    bad = [(path, leaf) for (path, leaf), flag in zip(entries, _mask_flags(params, mask))
+           if bool(flag) and not _is_differentiable(leaf)]
+    if not bad:
+        return
+    listed = "\n".join(
+        f"  - {_leaf_location(path)}  (params{jax.tree_util.keystr(path)}, "
+        f"dtype {jnp.result_type(leaf)})" for path, leaf in bad)
+    raise ValueError(
+        f"the trainable set holds {len(bad)} leaf/leaves of integer or "
+        f"boolean dtype:\n{listed}\nAn optimiser cannot move an integer: "
+        "its gradient is identically zero, so the fit would hand it back "
+        "unchanged while reporting a loss as if it had been fitted. Store it "
+        "as a floating-point array (e.g. matrix_mapping(H.astype(float))) if "
+        "it is a parameter to fit, or keep it out of the trainable set -- "
+        "ParamSpec(trainable=False), the default for mapping weights, or a "
+        "mask that leaves it out.")
+
+
 def _leaf_location(path) -> str:
     """Human description of a ``params`` leaf path: ``"node 's', parameter
     'damping'"`` for a node constant, ``"mapping '<edge>', weight 'H'"``
@@ -624,10 +737,15 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
         are read in flatten order, so different keys fit a different
         parameter), or if it marks a leaf whose ``ParamSpec`` declares
         ``trainable=False`` -- naming every such leaf and the spec change
-        that would make it fittable.
+        that would make it fittable -- or if the resolved trainable set,
+        the graph's own included, holds a leaf of integer or boolean
+        dtype, which no optimiser can move (its gradient is identically
+        zero, and the fit used to hand it back unchanged in silence).
     """
     if mask is None:
-        return gm.trainable_mask(params)
+        resolved = gm.trainable_mask(params)
+        _refuse_integer_trainable(params, resolved)
+        return resolved
     entries = jax.tree_util.tree_flatten_with_path(params)[0]
     flags = _mask_flags(params, mask)
     per_leaf = _resolve_specs(params, gm.param_specs())
@@ -661,6 +779,7 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
             "mask may only narrow the trainable set, never widen it; drop the "
             "leaf from the mask to leave it frozen."
         )
+    _refuse_integer_trainable(params, mask)
     return mask
 
 
@@ -1145,6 +1264,10 @@ class FIMCore:
         no finite width.  Decided from ``specs`` on the host at trace
         time, so it is metadata and not a mask -- nothing about it is
         read back.  Empty under every other scale.
+    integer_excluded : tuple of str
+        Static.  :attr:`FIMReport.integer_excluded`: the integer and
+        boolean leaves left out of the matrix, decided from dtypes on the
+        host at trace time.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -1160,6 +1283,7 @@ class FIMCore:
     n_residual: int
     rank_rtol: float
     value_scaled: tuple[str, ...] = ()
+    integer_excluded: tuple[str, ...] = ()
 
 
 jax.tree_util.register_dataclass(
@@ -1167,7 +1291,8 @@ jax.tree_util.register_dataclass(
     data_fields=["fim", "eigvals", "eigvecs", "rank", "cond", "crb",
                  "finite", "zero_scaled", "precision_limited",
                  "deciding_ratio"],
-    meta_fields=["param_names", "n_residual", "rank_rtol", "value_scaled"],
+    meta_fields=["param_names", "n_residual", "rank_rtol", "value_scaled",
+                 "integer_excluded"],
 )
 
 
@@ -1348,10 +1473,13 @@ def _resolve_nominal(params, specs, idx, scale):
             "then value-scaled and FIMReport.value_scaled names them all.")
     leaf_specs = _validate_specs_mirror(
         params, specs, unmatched_ok=_changes_no_column)
-    names = _param_names(params)
-    per_leaf = [_nominal_entry(spec) for spec in leaf_specs]
-    sizes = [_leaf_size(leaf) for leaf in jax.tree.leaves(params)]
-    cols = [entry for entry, n in zip(per_leaf, sizes) for _ in range(n)]
+    # Columns exist for the differentiable leaves only (:func:`_fim_indices`),
+    # so the record is built over exactly those, in the same order.
+    names = _param_names(params, differentiable_only=True)
+    kept = [(spec, leaf) for spec, leaf in zip(leaf_specs, jax.tree.leaves(params))
+            if _is_differentiable(leaf)]
+    cols = [_nominal_entry(spec) for spec, leaf in kept
+            for _ in range(_leaf_size(leaf))]
     if idx is not None:
         cols = [cols[int(i)] for i in idx]
         names = tuple(names[int(i)] for i in idx)
@@ -1445,7 +1573,24 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     ``rank`` from 3 to 2.  :func:`fim` is the reporting path and its
     numbers do not move; :func:`fim_core` jits the lot and says so.
     """
-    flat, unravel = ravel_pytree(params)
+    leaves, treedef = jax.tree.flatten(params)
+    keep = [_is_differentiable(leaf) for leaf in leaves]
+    if all(keep):
+        flat, unravel = ravel_pytree(params)
+    else:
+        # Integer and boolean leaves are not columns (:func:`_fim_indices`)
+        # and do not go into the vector at all: promoted to float and cast
+        # back they would have a zero derivative, and an integer above
+        # 2**24 would not even survive the round trip in float32.  They
+        # reach ``residual_fn`` as the objects they are.
+        flat, unravel_kept = ravel_pytree(
+            [leaf for leaf, k in zip(leaves, keep) if k])
+
+        def unravel(vec):
+            it = iter(unravel_kept(vec))
+            return jax.tree.unflatten(
+                treedef, [next(it) if k else leaf
+                          for leaf, k in zip(leaves, keep)])
 
     def _r(theta):
         full = theta if idx is None else flat.at[idx].set(theta)
@@ -1499,7 +1644,8 @@ def _value_scaled_names(nominal) -> tuple[str, ...]:
 
 
 def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
-                     rank_rtol, nominal=None) -> FIMCore:
+                     rank_rtol, nominal=None,
+                     integer_excluded: tuple[str, ...] = ()) -> FIMCore:
     """The whole of :func:`fim`'s computation, with nothing read back."""
     J, zero_scaled = _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
                                    inv_sigma=inv_sigma, nominal=nominal)
@@ -1513,7 +1659,7 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     positive = lo > 0.0
     cond = jnp.where(positive, hi / jnp.where(positive, lo, jnp.ones_like(lo)),
                      jnp.inf)
-    names = _param_names(params)
+    names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     # The residual length ``J`` was summed over.  ``_r`` ravels its output,
@@ -1539,6 +1685,7 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
         precision_limited=limited, deciding_ratio=ratio,
         param_names=names, n_residual=n_residual, rank_rtol=rtol,
         value_scaled=_value_scaled_names(nominal),
+        integer_excluded=integer_excluded,
     )
 
 
@@ -1714,12 +1861,13 @@ def fim_core(
     if scale not in _SCALES:
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
-    idx = _masked_indices(params, mask)
+    idx, integer_excluded = _fim_indices(params, mask)
     return _fim_core_traced(
         residual_fn, params, scale=scale, idx=idx,
         inv_sigma=_resolved_noise(residual_fn, params, noise_std),
         rank_rtol=rank_rtol,
         nominal=_resolve_nominal(params, specs, idx, scale),
+        integer_excluded=integer_excluded,
     )
 
 
@@ -1806,6 +1954,10 @@ def fim(
         Same structure as ``params``; only leaves marked ``True`` are
         treated as parameters (``GraphManager.trainable_mask()``).  The
         report's ``param_names`` / matrix are restricted accordingly.
+        ``None`` means every *differentiable* leaf: an integer or boolean
+        leaf has no derivative, so it is left out and named in
+        :attr:`FIMReport.integer_excluded`, and a mask that selects one
+        is a ``ValueError``.
         Unlike the fitters' ``mask`` this one is free to name a leaf the
         specs freeze: ``fim`` only linearises, it never steps a
         parameter, and the sensitivity of a frozen constant is a
@@ -1940,7 +2092,8 @@ def fim(
         ``specs`` given without ``scale="nominal"`` or withheld with it,
         or a ``specs`` tree that does not mirror ``params``; a bounds
         width that is not positive and finite once squared at the
-        parameters' precision).
+        parameters' precision; a ``mask`` selecting an integer or
+        boolean leaf, or a ``params`` with no floating-point leaf).
     FloatingPointError
         If ``F`` comes out non-finite -- a diverged rollout, an
         overflowing Jacobian, a residual holding a ``NaN``.  There is no
@@ -1951,7 +2104,7 @@ def fim(
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
     _check_flag("reuse_trace", reuse_trace)
-    idx = _masked_indices(params, mask)
+    idx, integer_excluded = _fim_indices(params, mask)
     nominal = _resolve_nominal(params, specs, idx, scale)
     inv_sigma = _resolved_noise(residual_fn, params, noise_std,
                                 reuse_trace=reuse_trace)
@@ -2001,7 +2154,7 @@ def fim(
             "diverged rollout), that its Jacobian does not overflow, and that "
             "noise_std is not so small that r / sigma does."
         )
-    names = _param_names(params)
+    names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     zero_scaled: tuple[str, ...] = tuple(
@@ -2074,6 +2227,7 @@ def fim(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,
         value_scaled=_value_scaled_names(nominal),
+        integer_excluded=integer_excluded,
     )
 
 
@@ -2453,6 +2607,9 @@ def fit(
         ``unconstrain`` transform and clip a leaf only when its spec
         says trainable — make the parameter trainable in the spec
         instead, which is what activates its bounds and transform.
+        A trainable set (the default one included) holding an integer or
+        boolean leaf is refused the same way: its gradient is identically
+        zero, so the fit could only hand it back unchanged.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
         at or below it.

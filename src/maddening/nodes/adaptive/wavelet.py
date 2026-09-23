@@ -102,6 +102,9 @@ _DEFAULT_SENSOR: dict[int, tuple[float, ...]] = {
     1: (0.30,), 2: (0.30, 0.40), 3: (0.30, 0.40, 0.60),
 }
 
+#: Periodic image offsets summed by the default source on a periodic axis.
+PERIODIC_IMAGES: tuple[int, ...] = (-2, -1, 0, 1, 2)
+
 #: Largest ``kappa(A_hat) * eps(dtype)`` the constructor accepts, where
 #: ``kappa(A_hat)`` is :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
 #: of the preconditioned operator.  A backward-stable solve returns a
@@ -592,11 +595,25 @@ class WaveletAdaptiveNode(AdaptiveNode):
         """The forcing ``f`` sampled on the grid, flattened row-major.
 
         The default is an isotropic Gaussian of width ``params["sigma"]``
-        centred at ``(params["theta"], 1/2, ...)``.  This is the override
-        point for a different forcing -- a manufactured-solution study
-        subclasses the node and returns its source here -- and it must
-        read every parameter it depends on from ``params``, never from
-        ``self.params``, or the graph's injected values are ignored.
+        centred at ``(params["theta"], 1/2, ...)``.  On a periodic domain
+        it is **periodised** -- summed over its periodic images, which for
+        the separable Gaussian is a product over axes of
+        ``sum_n exp(-(d + n)**2 / sigma**2)`` with ``d`` the distance to
+        the centre wrapped into ``[-1/2, 1/2)`` and ``n`` in
+        :data:`PERIODIC_IMAGES` -- so the problem is translation-invariant
+        on the circle, like the operator and the sensor snapping.  The
+        truncated sum omits images at distance ``>= 2.5``, an error below
+        ``2 exp(-6.25 / sigma**2)`` of the peak per axis (under ``1e-16``
+        for ``sigma <= 0.41``).  It used to be the plain Gaussian on
+        ``[0, 1)``: a source near the seam lost the part that should wrap
+        round, and the same problem shifted across the seam read a 28%
+        different ``J``.  With Dirichlet walls the plain Gaussian is used.
+
+        This is the override point for a different forcing -- a
+        manufactured-solution study subclasses the node and returns its
+        source here -- and it must read every parameter it depends on
+        from ``params``, never from ``self.params``, or the graph's
+        injected values are ignored.
 
         Parameters
         ----------
@@ -609,10 +626,21 @@ class WaveletAdaptiveNode(AdaptiveNode):
         jax.Array
             Shape ``(n_max,)``.
         """
-        r2 = (self._grid[0] - params["theta"]) ** 2
-        for d in range(1, self.dim):
-            r2 = r2 + (self._grid[d] - 0.5) ** 2
-        return jnp.exp(-r2 / params["sigma"] ** 2)
+        centre = [params["theta"]] + [0.5] * (self.dim - 1)
+        periodic = self.params["boundary"] == "periodic"
+        factors = []
+        for axis in range(self.dim):
+            d = self._grid[axis] - centre[axis]
+            if periodic:
+                d = d - jnp.round(d)
+                g = sum(jnp.exp(-(d + n) ** 2 / params["sigma"] ** 2) for n in PERIODIC_IMAGES)
+            else:
+                g = jnp.exp(-d ** 2 / params["sigma"] ** 2)
+            factors.append(g)
+        f = factors[0]
+        for g in factors[1:]:
+            f = f * g
+        return f
 
     def field(self, state: dict) -> jax.Array:
         """``u = Wn c`` on the grid, flattened row-major (``reshape(grid_shape)`` for an image)."""

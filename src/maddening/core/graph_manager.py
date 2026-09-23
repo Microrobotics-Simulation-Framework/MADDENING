@@ -2945,6 +2945,144 @@ def _build_adaptive_scan(
     return jax.jit(adaptive_scan)
 
 
+# ------------------------------------------------------------------
+# Which graph parameters the compiled step reads (structural liveness)
+# ------------------------------------------------------------------
+
+def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
+    """Which inputs of ``jaxpr`` can reach one of its live outputs.
+
+    A backward walk over the equations.  It is *conservative*: an
+    equation whose structure it does not know marks every input live as
+    soon as one output is, and an equation with effects keeps its inputs
+    whatever happens to its outputs.  So an input reported dead is
+    genuinely never read on the way to a live output; an input reported
+    live may still be unused.  The graph uses the dead answer to refuse a
+    write, which is the direction a conservative answer can only make
+    rarer, never wrong.
+
+    ``pjit`` / ``closed_call`` / ``remat`` / ``shard_map`` and any other
+    equation carrying one sub-jaxpr whose inputs and outputs line up with
+    its own are followed into; ``while`` and ``scan`` are solved to a
+    fixed point over their carries; ``cond`` takes the union of its
+    branches.  ``custom_jvp_call`` / ``custom_vjp_call`` are not followed
+    into, because the derivative rule may read an input the primal does
+    not.
+    """
+    from jax.extend.core import Literal
+
+    live = {
+        v for v, keep in zip(jaxpr.outvars, live_out)
+        if keep and not isinstance(v, Literal)
+    }
+    for eqn in reversed(jaxpr.eqns):
+        outs = [o in live for o in eqn.outvars]
+        effectful = bool(eqn.effects)
+        if not any(outs) and not effectful:
+            continue
+        for v, keep in zip(eqn.invars, _live_eqn_inputs(eqn, outs, effectful)):
+            if keep and not isinstance(v, Literal):
+                live.add(v)
+    return [v in live for v in jaxpr.invars]
+
+
+def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
+    """``_live_jaxpr_inputs`` for one equation; see there."""
+    n_in = len(eqn.invars)
+    name = eqn.primitive.name
+    params = eqn.params
+    everything = [True] * n_in
+    if name.startswith("custom_"):
+        return everything
+    try:
+        if name == "while":
+            cond = params["cond_jaxpr"].jaxpr
+            body = params["body_jaxpr"].jaxpr
+            cn, bn = params["cond_nconsts"], params["body_nconsts"]
+            cond_in = _live_jaxpr_inputs(cond, [True])
+            carry = [a or b for a, b in zip(outs, cond_in[cn:])]
+            while True:
+                body_in = _live_jaxpr_inputs(body, carry)
+                grown = [a or b for a, b in zip(carry, body_in[bn:])]
+                if grown == carry:
+                    break
+                carry = grown
+            out = cond_in[:cn] + body_in[:bn] + carry
+        elif name == "scan":
+            body = params["jaxpr"].jaxpr
+            nc, ncar = params["num_consts"], params["num_carry"]
+            carry, ys = list(outs[:ncar]), list(outs[ncar:])
+            while True:
+                body_in = _live_jaxpr_inputs(body, carry + ys)
+                grown = [a or b for a, b in zip(carry, body_in[nc:nc + ncar])]
+                if grown == carry:
+                    break
+                carry = grown
+            out = body_in[:nc] + carry + body_in[nc + ncar:]
+        elif name == "cond":
+            ops = [False] * (n_in - 1)
+            for branch in params["branches"]:
+                branch_in = _live_jaxpr_inputs(branch.jaxpr, outs)
+                if len(branch_in) != n_in - 1:
+                    return everything
+                ops = [a or b for a, b in zip(ops, branch_in)]
+            out = [True] + ops
+        else:
+            subs = [
+                getattr(params[key], "jaxpr", params[key])
+                for key in ("jaxpr", "call_jaxpr", "fun_jaxpr") if key in params
+            ]
+            if len(subs) != 1:
+                return everything
+            sub = subs[0]
+            if len(sub.invars) != n_in or len(sub.outvars) != len(outs):
+                return everything
+            out = _live_jaxpr_inputs(sub, outs)
+    except (KeyError, AttributeError, TypeError):
+        return everything
+    return out if len(out) == n_in else everything
+
+
+def _param_leaves_read(step_fn: Callable, state: dict, ext: dict, params: dict) -> set:
+    """``{(owner, key)}`` of ``params["nodes"]`` that ``step_fn`` can read.
+
+    Traces ``step_fn(state, ext, params)`` once (no compile, nothing
+    executed) and runs :func:`_live_jaxpr_inputs` over the result, every
+    output live.  A leaf of a nested pytree entry counts as read when any
+    of its sub-leaves is.
+    """
+    args = (state, ext, params)
+    closed = jax.make_jaxpr(step_fn)(*args)
+    paths = [p for p, _ in jax.tree_util.tree_flatten_with_path(args)[0]]
+    invars = closed.jaxpr.invars
+    if len(paths) != len(invars):
+        raise ValueError("step inputs do not line up with the traced jaxpr")
+    live = _live_jaxpr_inputs(closed.jaxpr, [True] * len(closed.jaxpr.outvars))
+    reads: set = set()
+    for path, keep in zip(paths, live):
+        if (keep and len(path) >= 4 and getattr(path[0], "idx", None) == 2
+                and getattr(path[1], "key", None) == "nodes"):
+            reads.add((path[2].key, path[3].key))
+    return reads
+
+
+def _leaf_values_equal(a, b) -> bool:
+    la, lb = jax.tree.leaves(a), jax.tree.leaves(b)
+    if len(la) != len(lb):
+        return False
+    for x, y in zip(la, lb):
+        xa, ya = np.asarray(x), np.asarray(y)
+        if xa.shape != ya.shape:
+            return False
+        try:
+            if not np.array_equal(xa, ya, equal_nan=True):
+                return False
+        except TypeError:
+            if not np.array_equal(xa, ya):
+                return False
+    return True
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -2996,6 +3134,13 @@ class GraphManager:
         self.params: dict = {"nodes": {}, "mappings": {}}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
+        # The raw (uncounted, unjitted) step of the last compile, for the
+        # one trace ``_params_read_by_step`` takes; leaves of ``params``
+        # already checked by ``_refuse_baked_param_writes``, by identity;
+        # and that trace's answer, keyed by compile generation.
+        self._raw_step_fn: Optional[Callable] = None
+        self._params_verified: dict[str, dict[str, Any]] = {}
+        self._step_reads: Optional[tuple[int, Optional[set]]] = None
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -3119,6 +3264,9 @@ class GraphManager:
         """Discard live/calibrated values: ``gm.params`` becomes the
         constructor snapshot again (no recompile needed)."""
         self.params = self._snapshot_params()
+        self._params_verified = {
+            owner: dict(leaves) for owner, leaves in self.params.get("nodes", {}).items()
+        }
 
     def _params_or_default(self, params) -> dict:
         """``gm.params`` when ``params`` is None; otherwise ``params``
@@ -3131,6 +3279,7 @@ class GraphManager:
             # it; coerce such leaves in place to the leaf dtype recorded
             # at compile time.
             self._coerce_params_leaves(self.params)
+            self._refuse_baked_param_writes(self.params, live=True)
             return self.params
         if not isinstance(params, dict):
             return params                  # let _validate_params complain
@@ -3155,6 +3304,7 @@ class GraphManager:
         for k, v in params.items():
             if k not in ("nodes", "mappings"):
                 out[k] = v
+        self._refuse_baked_param_writes(out, live=False)
         return _strong_typed(out)
 
     def _validate_params(self, params: dict) -> None:
@@ -3244,6 +3394,134 @@ class GraphManager:
                     f"{sorted(unknown)}; the mapping exposes {sorted(known)}"
                 )
             self._check_param_shapes("mappings", key, weights)
+
+    # ------------------------------------------------------------------
+    # A write to a leaf the compiled step cannot read is refused
+    # ------------------------------------------------------------------
+
+    def _params_read_by_step(self) -> Optional[set]:
+        """``{(node, key)}`` of ``params["nodes"]`` the compiled step reads,
+        or ``None`` when that cannot be told (no compiled step, a dirty
+        graph, a step that does not trace).
+
+        One trace of the step per compile, taken lazily: only a leaf whose
+        value differs from its node's asks.  See :func:`_param_leaves_read`.
+        """
+        gen = self._compile_generation
+        cached = self._step_reads
+        if cached is not None and cached[0] == gen:
+            return cached[1]
+        reads: Optional[set] = None
+        step_fn = self._raw_step_fn
+        if step_fn is not None and not self._dirty:
+            try:
+                with warnings.catch_warnings():
+                    # A node that warns at trace time warned on the real
+                    # trace already; this one is bookkeeping.
+                    warnings.simplefilter("ignore")
+                    reads = _param_leaves_read(
+                        step_fn, self._state, self._default_external_inputs(),
+                        self.params,
+                    )
+            except Exception:  # noqa: BLE001 - the real step reports it
+                reads = None
+        self._step_reads = (gen, reads)
+        return reads
+
+    def _baked_leaf_reason(self, owner: str, key: str) -> Optional[str]:
+        """Why the compiled step cannot read ``params["nodes"][owner][key]``,
+        or ``None`` when it can (or that cannot be told).
+
+        Two sources, declared first: a parameter a
+        :meth:`~maddening.core.node.SimulationNode.static_data_deps` entry
+        names is baked into that static when the node is constructed -- the
+        step reads the static -- and a parameter the traced step has no
+        path from (an ``initial_*`` entry, which only ``initial_state()``
+        reads, or geometry a node consumed in ``__init__``) is read by
+        nothing.
+        """
+        spec = self._nodes.get(owner)
+        if spec is None:
+            return None
+        deps = getattr(spec.node, "static_data_deps", None)
+        declared = (deps() if callable(deps) else None) or {}
+        statics = sorted(s for s, names in declared.items() if key in names)
+        if statics:
+            return (
+                f"{type(spec.node).__name__} bakes it into static_data "
+                f"{statics} when the node is constructed (static_data_deps): "
+                "the compiled step reads the static, not the parameter"
+            )
+        reads = self._params_read_by_step()
+        if reads is not None and (owner, key) not in reads:
+            return (
+                "the compiled step never reads it: no operation of the step "
+                "takes it as an input (an initial condition, which only "
+                "initial_state() reads, from the node; or a value the node "
+                "consumed when it was constructed)"
+            )
+        return None
+
+    def _refuse_baked_param_writes(self, tree: Any, *, live: bool) -> None:
+        """Refuse a leaf that differs from its node's value but that the
+        compiled step cannot read.
+
+        Such a write used to be accepted by ``gm.params``, ``check_params``
+        and every run method, ignored by the step, and then serialised by
+        :meth:`to_dict` -- so a reloaded graph ran a different model from
+        the one that produced the numbers (``HeatNode.grid_points``, 0.093 K
+        after one step; ``WaveletAdaptiveNode.mass``; the ``initial_*``
+        leaves).  ``docs/user_guide/parameters.md`` promises the opposite:
+        "not a silently ignored leaf".
+
+        ``live`` is ``True`` for :attr:`params` itself: a leaf that passes is
+        remembered by identity, so a steady run pays one ``is`` per leaf per
+        call and a value is compared only when a new object was written.
+        An explicit ``params=`` argument is checked without being
+        remembered, and a traced leaf (a fit, an FIM) cannot be compared and
+        is left alone.  The reference is the node's own
+        :meth:`~maddening.core.node.SimulationNode.params_pytree`, so a write
+        that also reaches the node (``PUT /graph/params`` writes both) is not
+        refused.
+        """
+        nodes = tree.get("nodes") if isinstance(tree, dict) else None
+        if not isinstance(nodes, dict):
+            return
+        verified = self._params_verified
+        ctor_cache: dict[str, dict] = {}
+        for owner, leaves in nodes.items():
+            spec = self._nodes.get(owner)
+            if spec is None or not spec.accepts_params or not isinstance(leaves, dict):
+                continue            # _validate_params names these
+            seen = verified.get(owner, {})
+            for key, value in leaves.items():
+                if seen.get(key) is value:
+                    continue
+                if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(value)):
+                    continue
+                if owner not in ctor_cache:
+                    ctor_cache[owner] = spec.node.params_pytree()
+                ctor = ctor_cache[owner].get(key)
+                if ctor is None or not _leaf_values_equal(value, ctor):
+                    reason = self._baked_leaf_reason(owner, key)
+                    if reason is not None:
+                        where = "gm.params" if live else "params"
+                        shown = ""
+                        if ctor is not None and np.size(ctor) <= 8:
+                            shown = f" {np.asarray(ctor).tolist()!r}"
+                        raise ValueError(
+                            f"{where}['nodes'][{owner!r}][{key!r}] differs from "
+                            f"the node's own value{shown}, but {reason}.  The value "
+                            "would be ignored by every run and then written out "
+                            "by to_dict() / save_state(), so a reloaded graph "
+                            "would run a different model from the one that "
+                            "produced these results.  To change it, rebuild the "
+                            "node with the new value (remove_node, then "
+                            "add_node); to drop the edit, restore the leaf or "
+                            "call gm.reset_params()."
+                        )
+                if live:
+                    verified.setdefault(owner, {})[key] = value
 
     # ------------------------------------------------------------------
     # ParamSpec: trainable mask, bounds, reparametrisation
@@ -4352,7 +4630,11 @@ class GraphManager:
         # edge or an external input must not discard a fit); anything
         # that no longer fits is dropped with a warning.  ``reset_params``
         # restores the constructor values on purpose.
-        params = self._merge_live_params(self._snapshot_params(), self.params)
+        fresh = self._snapshot_params()
+        # Which leaves are still the constructor snapshot after the merge:
+        # those need no baked-write check (see _refuse_baked_param_writes).
+        fresh_leaves = {o: dict(v) for o, v in fresh.get("nodes", {}).items()}
+        params = self._merge_live_params(fresh, self.params)
         params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
@@ -4502,6 +4784,13 @@ class GraphManager:
         # (weak types, dtypes, params structure) keeps changing.
         self._n_traces = 0
         self._compiled_step = compiled_step
+        self._raw_step_fn = step_fn
+        self._step_reads = None
+        self._params_verified = {
+            owner: {k: v for k, v in leaves.items()
+                    if fresh_leaves.get(owner, {}).get(k) is v}
+            for owner, leaves in plan.params.get("nodes", {}).items()
+        }
         self._static_data_hashes = static_data_hashes
 
         self._dirty = False
@@ -6834,6 +7123,9 @@ class GraphManager:
         """
         from maddening.core.simulation.checkpoint import save_state
         self._recover_from_escaped_tracers()
+        # A checkpoint stores gm.params: a leaf the step cannot read would
+        # be restored as if it had produced the saved state.
+        self._refuse_baked_param_writes(self.params, live=True)
         return save_state(self, path)
 
     def load_state(self, path) -> None:

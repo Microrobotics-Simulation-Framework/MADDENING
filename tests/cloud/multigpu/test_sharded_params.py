@@ -354,3 +354,58 @@ def test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name():
     # A refused write leaves both the live pytree and the node untouched.
     assert float(gm.params["nodes"]["s"]["stiffness"]) == pytest.approx(10.0)
     assert gm._nodes["s"].node.params["stiffness"] == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# The injected value reaches the inner update through each wrapper -- without
+# the node's own params being written (a REST write writes both, so a test
+# through REST cannot tell a wrapper that forwards params from one that
+# does not).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+def test_a_gm_params_write_reaches_a_pointwise_wrapped_update():
+    from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+    from maddening.nodes.spring import SpringDamperNode
+
+    def graph(k):
+        gm = GraphManager()
+        gm.add_node(ShardedPointwiseNode(
+            SpringDamperNode("s", 0.01, stiffness=k, rest_length=0.6, initial_position=2.0),
+            create_device_mesh(shape=(4,)), shard_axes=(0,)))
+        gm.compile()
+        return gm
+
+    gm = graph(10.0)
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(1000.0, jnp.float32)
+    assert gm._nodes["s"].node.params["stiffness"] == 10.0     # only gm.params moved
+    got = gm.run_scan(5)["s"]["position"]
+    np.testing.assert_allclose(np.asarray(got), np.asarray(graph(1000.0).run_scan(5)["s"]["position"]),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(got), np.asarray(graph(10.0).run_scan(5)["s"]["position"]))
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("leaf, value", [("thermal_diffusivity", 0.026), ("length", 1.69)])
+def test_an_injected_heat_constant_reaches_the_sharded_stencil_update(leaf, value):
+    """``update_padded`` reads both trainable constants from the injected
+    params; only the diffusivity used to be exercised on the sharded path,
+    so one reading ``self.params["length"]`` passed."""
+    from maddening.nodes.heat import HeatNode
+
+    mesh = create_device_mesh(shape=(4,))
+    kw = dict(n_cells=16, thermal_diffusivity=0.02, length=1.3,
+              initial_temperature=[300.0 + 3 * i for i in range(16)])
+
+    def wrapped(**over):
+        return ShardedStencilNode(HeatNode("h", 1e-2, **{**kw, **over}), mesh, {"devices": 0})
+
+    w0, w1 = wrapped(), wrapped(**{leaf: value})
+    s = w0.initial_state()
+    injected = w0.update(s, {}, 1e-2, params={**w0.params_pytree(), leaf: jnp.asarray(value, jnp.float32)})
+    built = w1.update(s, {}, 1e-2)
+    base = w0.update(s, {}, 1e-2)
+    np.testing.assert_allclose(np.asarray(injected["temperature"]), np.asarray(built["temperature"]),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(base["temperature"]), np.asarray(built["temperature"]))

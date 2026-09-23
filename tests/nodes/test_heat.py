@@ -313,3 +313,26 @@ def test_length_is_trainable_on_the_uniform_grid_only():
     # ``thermal_diffusivity`` is still fitted on both grids.
     assert nonuniform.param_specs()["thermal_diffusivity"].trainable is True
 
+
+
+@pytest.mark.parametrize("stencil_order", [2, 4])
+def test_the_uniform_rod_end_flux_reads_the_injected_length(stencil_order):
+    """``compute_boundary_fluxes`` with an injected ``length`` is the flux of
+    a rod built with that length.  The uniform branch divides by
+    ``p["length"] / n``; a flux that read ``self.params["length"]`` there
+    delivered the constructor's flux over every edge while ``update`` used
+    the calibrated length, and no test compared the two."""
+    kw = dict(n_cells=10, thermal_diffusivity=0.02, stencil_order=stencil_order,
+              initial_temperature=[300.0 + 4.0 * i for i in range(10)])
+    built = HeatNode("h", 1e-3, length=1.7, **kw)
+    injected = HeatNode("h", 1e-3, length=1.0, **kw)
+    state = built.initial_state()
+    for bi in ({}, {"left_temperature": jnp.asarray(350.0), "right_temperature": jnp.asarray(280.0)}):
+        want = built.compute_boundary_fluxes(state, bi, 1e-3)
+        got = injected.compute_boundary_fluxes(
+            state, bi, 1e-3, params={**injected.params_pytree(), "length": jnp.asarray(1.7)})
+        for k in want:
+            assert float(got[k]) == pytest.approx(float(want[k]), rel=1e-5)
+        # the fixture can express the fault: the constructor's length differs
+        base = injected.compute_boundary_fluxes(state, bi, 1e-3)
+        assert float(base["left_heat_flux"]) != pytest.approx(float(want["left_heat_flux"]), rel=1e-3)

@@ -477,6 +477,7 @@ anomalies:
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep"
       - "tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far_off"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_anomaly_registry_quotes_the_reported_keys_exactly"
     github_issue: null

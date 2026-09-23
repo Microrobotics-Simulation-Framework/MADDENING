@@ -366,6 +366,25 @@ the state can carry a larger relative error.  It is not spelled
 `gradient_error_bound` because that is the deprecated alias of
 `gradient_error_estimate`.
 
+**Bit-identity, and why the bound runs in a `lax.cond` branch.**  States,
+legacy and spectral diagnostics and a `run_scan(6)` final state were
+compared against the base tree (`c8ec235`) on `chain-5`,
+`stiff-pair-0.5` and `ring-8` x {gs/none/l2, gs/aitken/l2,
+gs/iqn-ils/interface, jacobi/none/l2} x diagnostics on and off, six
+steps each: **24/24 identical**.  They were 23/24 before the branch:
+`chain-5` under Jacobi with `diagnostics=True` moved by 2.4e-7
+relative on its second step (1.2e-6 by the sixth).  The fixed-point
+loop's optimised HLO was identical in both programs, every piece of the
+helper was harmless alone, and `--xla_disable_hlo_passes=algsimp` made
+the two agree: the JVPs in the constants, inlined beside the forward,
+share constants and subexpressions with its first pass, and the
+algebraic simplifier's rewrites depend on an instruction's user count.
+An `optimization_barrier` on every input did not isolate it; a
+`lax.cond` branch (predicate: the state is finite, which is also when a
+bound means anything) is a separate XLA computation and did.  The
+compile-count workloads do not set `diagnostics=True`, so their counts
+cannot move, and the gate passes unchanged.
+
 **From the WIP commit (c08fad9).**  Kept after checking:
 `jacobian_range_basis` and `resolvent_apply` (multi-start range basis,
 Woodbury solve; the identity and the doctests hold).  Rewritten: the

@@ -193,21 +193,22 @@ def _curved_reference(kind):
 #: jaxlib 0.11.0 (CPU, float32) at ``max_iterations`` 3-8, one entry per
 #: (map, parameter).  Why each is the size it is:
 #:
-#: * every ratio carries two conservative factors, both of the
-#:   ``a -> b -> a`` relay shape and neither slack in the curvature: the
-#:   distance is ``spectral_error_bound``, 1.5-1.7x the true distance
-#:   here, and the resolvent factor is that bound's, the relay's 1.22x
-#:   over ``1/(1 - F')``;
+#: * two conservative factors enter every ratio, neither of them slack
+#:   in the curvature: the distance is ``spectral_error_bound``, 1.1x
+#:   the true distance in the group's norm here, and the resolvent
+#:   factor is the one that bound applies, the ``a -> b -> a`` relay's
+#:   1.22x over ``1/(1 - F')``.  So the parameter whose relative error
+#:   is the larger reads near their product -- log's ``a`` 1.21-1.66,
+#:   square's ``g`` 1.17-1.35 -- higher at the earliest caps, where the
+#:   curvature is not constant over the distance (3.5 and 1.03 at a cap
+#:   of two, outside the sweep);
 #: * the reported value is the *largest* over one probe per constant, so
-#:   the parameter whose relative error is the larger reads near those
-#:   two factors (log's ``a``: 1.6-2.1; square's ``g``: 1.2-1.3) and the
-#:   other reads its gap to it (log's ``g`` has a tenth of ``a``'s
-#:   relative error, hence 9-15);
-#: * square's ``a`` sits at 3.5 because its own relative error is 2.8x
-#:   below ``g``'s, the maximum.
+#:   the other parameter reads its gap to that one as well: log's ``g``
+#:   has a ninth of ``a``'s relative error (6.9-11.4), square's ``a``
+#:   2.7x less than ``g``'s (3.46-3.55).
 _RECORDED_RATIO = {
-    ("log", "a"): 1.7,
-    ("log", "g"): 12.0,
+    ("log", "a"): 1.3,
+    ("log", "g"): 9.0,
     ("square", "a"): 3.5,
     ("square", "g"): 1.3,
 }

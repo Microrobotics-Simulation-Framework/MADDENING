@@ -68,7 +68,9 @@ EXCLUDED = (PACKAGE / "examples",)
 #: exists to catch.  Measured at 15 on release/0.4.0 (8 files); 22 after
 #: the phase-3 TypedDict pass added an example to each new config type
 #: (15 files).  Every new example is in a module `.[ci]` can import.
-MIN_DOCTESTS = 25
+#: 31 after the IFT gradient bound added three to coupling/acceleration.py
+#: (28 ran on its base, whose last additions had left the floor at 25).
+MIN_DOCTESTS = 31
 
 
 def _docstrings(path: Path):

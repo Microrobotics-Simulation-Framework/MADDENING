@@ -312,7 +312,10 @@ anomalies:
       distance (a second difference along the Newton correction, one
       probe per floating constant), with gradient_bound_usable beside it.
       It held at every cap of a max_iterations sweep on a concave and a
-      convex map, 1.2-4.8x the true error.  It is a statement about the
+      convex map, 1.2-1.7x the true error for the parameter whose error is
+      the larger (up to 11x for the other, which reads its gap to the worst
+      probe), and 15x on a hidden slow mode where error_estimate's distance
+      would have made it 60x short.  It is a statement about the
       gradient, not the solve: on an affine map with additive parameters
       the IFT gradient is exact wherever the forward stops, so it reads
       0.0 while the state is 1.1e-2 from the fixed point with

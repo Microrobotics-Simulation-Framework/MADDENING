@@ -426,10 +426,12 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        held (:func:`_probe_direction`).  One JVP of ``F`` in the
        constants per probe gives ``w_i = F_c(x_k) c_dot_i`` (and, as
        its primal, ``F(x_k)``).  Per constant, because a relative error
-       is a different number for each and a single combined probe is
-       dominated by whichever constant the fixed point responds to
-       most: on a spring pair it read a stiffness gradient's error
-       nine orders of magnitude low.
+       is a different number for each and a combined direction can
+       cancel: one probe over every constant read ``0.0`` at every cap
+       on the stiff spring pair while its stiffness gradient was
+       0.8-4.8% off -- the random signs moved each node's stiffness and
+       mass by the same relative amount, and the dynamics see only
+       their ratio.
     3. **The tangents and the direction to the fixed point.**
        ``t_i = (I - J(x_k))^{-1} w_i`` (one JVP each) is what the
        adjoint returns for probe ``i``; ``delta = (I - J(x_k))^{-1} r``
@@ -989,7 +991,10 @@ def _ift_solve_impl(
     ``CouplingGroup.strict_convergence``, a runtime error); the
     derivative is off by roughly ``residual * cond(I - dF/dx)``
     whenever it is non-zero, whether the loop stopped on its criterion
-    or at ``max_iter``.  A finite difference of this function's own
+    or at ``max_iter``.  With ``diagnostics=True`` that error is
+    bounded, per constant and relative to the tangent, by
+    ``coupling_diagnostics()['gradient_relative_error_bound']`` (see
+    :func:`_gradient_error_bound_at`).  A finite difference of this function's own
     output is therefore *not* the quantity the adjoint computes: it is
     the derivative of a truncated iterate, and the two agree only as
     ``final_res`` goes to zero.  Tighten the criterion that is live
@@ -5221,12 +5226,13 @@ class GraphManager:
               ``|g_k - g*| <= bound * |g_k|`` for the gradient with
               respect to one scalar constant.  Measured (jaxlib 0.11.0,
               float32) at every cap of a ``max_iterations`` sweep that
-              stops the forward early by construction: never below the
-              true error on a concave and a convex map, 1.2-2.1x it for
-              the parameter whose error is the larger and up to 15x for
-              the other (which reads its gap to the worst probe); 1.81x
-              for a parameter multiplying the state of an affine map;
-              7-11x for a spring pair's stiffness and mass.  **Only
+              stops the forward early by construction (caps 3-8): never
+              below the true error on a concave and a convex map,
+              1.2-1.7x it for the parameter whose error is the larger
+              and up to 11x for the other, which reads its gap to the
+              worst probe; 1.81x for a parameter multiplying the state
+              of an affine map; 7-11x for a spring pair's stiffness and
+              mass; 15x on a hidden slow mode.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` and before the first step; ``inf``

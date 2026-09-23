@@ -428,12 +428,112 @@ def _classify_directions(e, face_axis, face_side):
     return known, unknown, tangential
 
 
+def _zou_he_face_closure(e, w, cs2, face_axis, face_side):
+    """Static (numpy) data of the Zou-He closure on one flat face.
+
+    Classifies the lattice directions for the face and checks, at trace
+    time, the lattice identities the closure in
+    :func:`_zou_he_pressure_face` relies on.  Each one holds for D2Q9 and
+    D3Q19 on every face; a velocity set for which one fails would make
+    the closure impose a density or a tangential velocity other than the
+    one it claims, so it is refused instead of run.
+
+    Returns
+    -------
+    known, unknown, tangential : list of int
+        As :func:`_classify_directions`.
+    sigma : int
+        ``+1`` on a ``"min"`` face, ``-1`` on a ``"max"`` face: the sign of
+        the face-normal component of every *unknown* direction, i.e. the
+        direction pointing into the domain.
+    tang_axes : list of int
+        The spatial axes other than ``face_axis``.
+    tang_weight : dict[int, float]
+        ``1 / sum_{q in unknown} e_{q,t}^2`` for each tangential axis
+        ``t`` -- the transverse-momentum coefficient (``1/2`` for both
+        supported lattices).
+    opp : numpy.ndarray
+        Opposite-direction map.
+    """
+    e = np.asarray(e)
+    w = np.asarray(w, dtype=np.float64)
+    ndim = e.shape[1]
+    known, unknown, tangential = _classify_directions(e, face_axis, face_side)
+    sigma = 1 if face_side == "min" else -1
+    opp = _get_opp_map(e)
+    tang_axes = [a for a in range(ndim) if a != face_axis]
+
+    problems = []
+    if sorted(int(opp[q]) for q in unknown) != sorted(known):
+        problems.append("the opposites of the unknown directions are not "
+                        "exactly the known directions")
+    if np.any(np.abs(e) > 1):
+        problems.append("a velocity component exceeds one lattice unit")
+    e_u = e[unknown].astype(np.float64)
+    w_u = w[unknown]
+    # Normal-momentum bounce-back term sums to rho * u_n over the unknowns.
+    if not np.isclose(2.0 * np.sum(w_u * e_u[:, face_axis] ** 2) / cs2, 1.0):
+        problems.append("2 sum_{unknown} w_q e_qn^2 / cs2 != 1")
+    tang_weight: dict[int, float] = {}
+    for t in tang_axes:
+        # The transverse correction must leave density and normal momentum
+        # alone and act on one tangential axis at a time.
+        if not np.isclose(np.sum(e_u[:, t]), 0.0):
+            problems.append(f"sum_{{unknown}} e_q{t} != 0")
+        if not np.isclose(np.sum(w_u * e_u[:, face_axis] * e_u[:, t]), 0.0):
+            problems.append(f"sum_{{unknown}} w_q e_qn e_q{t} != 0")
+        for t2 in tang_axes:
+            if t2 != t and not np.isclose(np.sum(e_u[:, t] * e_u[:, t2]), 0.0):
+                problems.append(f"sum_{{unknown}} e_q{t} e_q{t2} != 0")
+        s_tt = float(np.sum(e_u[:, t] ** 2))
+        if s_tt <= 0.0:
+            problems.append(f"no unknown direction has a component on axis {t}")
+        else:
+            tang_weight[t] = 1.0 / s_tt
+    if problems:
+        raise ValueError(
+            "the Zou-He pressure closure does not apply to this velocity set "
+            f"on face (axis {face_axis}, {face_side}): " + "; ".join(problems)
+        )
+    return known, unknown, tangential, sigma, tang_axes, tang_weight, opp
+
+
 def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
                           face_axis, face_side, wall_mask):
-    """Apply Zou-He pressure BC on a flat face.
+    """Apply the Zou-He pressure (density) boundary condition on a flat face.
 
-    Non-equilibrium bounce-back method: set unknown distributions so that
-    the prescribed density (pressure / cs2) is satisfied.
+    After this call every fluid cell of the face has exactly the
+    prescribed density ``rho_p`` (to rounding) and zero tangential
+    velocity; the known and tangential populations are not modified, and
+    wall cells on the face are left untouched.
+
+    Closure (Zou & He 1997 for D2Q9; Hecht & Harting 2010 for D3Q19)
+    -----------------------------------------------------------------
+    With ``n`` the face axis, ``sigma = +1`` on a ``"min"`` face and
+    ``-1`` on a ``"max"`` face, the unknown set ``U`` (directions with
+    ``e_qn = sigma``, arriving from outside), the known set ``K``
+    (``e_qn = -sigma``, streamed out of the interior) and the tangential
+    set ``T`` (``e_qn = 0``, rest included)::
+
+        rho_p        = S_T + S_K + S_U
+        rho_p * u_n  = sigma * (S_U - S_K)
+        =>  u_n      = sigma * (1 - (S_T + 2 S_K) / rho_p)
+
+    and, for each unknown ``q`` with opposite ``qbar``, non-equilibrium
+    bounce-back of the normal part plus the transverse-momentum
+    correction that makes the tangential velocity zero::
+
+        f_q = f_qbar + (2 w_q / cs2) * rho_p * e_qn * u_n
+                     - sum_{t != n} e_qt * N_t / (sum_{p in U} e_pt^2),
+        N_t = sum_{p in T} f_p e_pt.
+
+    On D2Q9 ``x_min`` (this module's numbering) that is
+    ``f1 = f2 + 2/3 rho u``, ``f5 = f8 + 1/6 rho u - 1/2 (f3 - f4)``,
+    ``f7 = f6 + 1/6 rho u + 1/2 (f3 - f4)``: Zou & He's equations with
+    ``u_y = 0``.  The factor 2 on ``S_K`` is what makes the rebuilt
+    density equal ``rho_p``; without it the face density comes out as
+    ``rho_p + S_K`` (MADD-ANO-020).  The lattice identities the closure
+    rests on are checked by :func:`_zou_he_face_closure`.
 
     Parameters
     ----------
@@ -451,10 +551,11 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     f_updated : (*grid_shape, Q) float32
     """
     ndim = e.shape[1]
-    known, unknown, tangential = _classify_directions(e, face_axis, face_side)
+    (known, unknown, tangential, sigma, tang_axes, tang_weight,
+     opp_map) = _zou_he_face_closure(e, w, cs2, face_axis, face_side)
 
     # Build slice for the face
-    face_slices = [slice(None)] * ndim
+    face_slices: list[Any] = [slice(None)] * ndim
     if face_side == "min":
         face_slices[face_axis] = 0
     else:
@@ -465,7 +566,7 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     f_face = f[face_sl]
     wall_face = wall_mask[face_sl]
 
-    # Sum of known and tangential distributions at the face
+    # Sums of the known and tangential populations at the face.
     sum_known = jnp.zeros_like(f_face[..., 0])
     for q in known:
         sum_known = sum_known + f_face[..., q]
@@ -473,40 +574,34 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     for q in tangential:
         sum_tang = sum_tang + f_face[..., q]
 
-    # Normal velocity from known distributions
-    # For min face: u_n = 1 - (sum_known + sum_tangential) / rho_prescribed
-    # For max face: u_n = -1 + (sum_known + sum_tangential) / rho_prescribed
-    # (sign convention: velocity pointing into the domain is positive for min,
-    #  negative for max)
+    # Face-normal velocity (component along +face_axis) from the density
+    # and normal-momentum moments.  Known populations count twice: once in
+    # the density and once, reflected, in the momentum.
     rho_p = prescribed_density
-    if face_side == "min":
-        u_normal = 1.0 - (sum_known + sum_tang) / jnp.maximum(rho_p, 1e-10)
-    else:
-        u_normal = -1.0 + (sum_known + sum_tang) / jnp.maximum(rho_p, 1e-10)
-
-    # Non-equilibrium bounce-back for each unknown direction
-    # f_q = f_{opp(q)} + (f_eq_q - f_eq_{opp(q)}) at the prescribed state
-    # Simplified: for each unknown q, its opposite opp_q is known.
-    # The non-equilibrium part: f_q = f_{opp(q)} + rho_p * w_q * (e_q . u) / cs2 * 2
-    # This is the standard Zou-He non-equilibrium bounce-back.
-
-    # Build the velocity vector on the face (only normal component from Zou-He)
-    vel_face = jnp.zeros(f_face.shape[:-1] + (ndim,), dtype=f_face.dtype)
-    vel_face = vel_face.at[..., face_axis].set(u_normal)
-
-    # Compute equilibrium at the face for known velocity/density
-    f_eq_face = _equilibrium(
-        jnp.full_like(f_face[..., 0], rho_p), vel_face, e, w, cs2,
+    u_normal = sigma * (
+        1.0 - (sum_tang + 2.0 * sum_known) / jnp.maximum(rho_p, 1e-10)
     )
 
-    # For unknown directions, use non-equilibrium bounce-back:
-    # f_q = f_opp(q) + f_eq(q) - f_eq(opp(q))
-    opp_map = _get_opp_map(e)
+    # Tangential momentum carried by the tangential populations; the
+    # unknowns are corrected so that the face's tangential momentum is 0.
+    n_t = {}
+    for t in tang_axes:
+        acc = jnp.zeros_like(f_face[..., 0])
+        for q in tangential:
+            if int(e[q, t]) != 0:
+                acc = acc + float(e[q, t]) * f_face[..., q]
+        n_t[t] = acc
 
     f_face_new = f_face
     for q in unknown:
-        opp_q = opp_map[q]
-        f_q_new = f_face[..., opp_q] + f_eq_face[..., q] - f_eq_face[..., opp_q]
+        opp_q = int(opp_map[q])
+        f_q_new = (
+            f_face[..., opp_q]
+            + (2.0 * float(w[q]) / cs2) * rho_p * float(e[q, face_axis]) * u_normal
+        )
+        for t in tang_axes:
+            if int(e[q, t]) != 0:
+                f_q_new = f_q_new - float(e[q, t]) * tang_weight[t] * n_t[t]
         # Only apply to fluid cells, not wall cells
         f_q_corrected = jnp.where(wall_face, f_face[..., q], f_q_new)
         f_face_new = f_face_new.at[..., q].set(f_q_corrected)

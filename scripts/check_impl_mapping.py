@@ -181,7 +181,9 @@ def check_guide(
         # row still "carried a code reference".
         declares_primitive = any(_PRIMITIVE_MARKER.match(c) for c in cells[2:])
         for span in _CODE_SPAN.findall(impl):
-            if span.startswith("`maddening."):
+            # One definition of "a qualified name": the pattern the symbols
+            # are extracted with, so the two can never disagree.
+            if _QNAME.fullmatch(span):
                 continue
             if declares_primitive:
                 skipped.append(

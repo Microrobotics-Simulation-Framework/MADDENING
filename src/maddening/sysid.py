@@ -534,16 +534,29 @@ def _is_differentiable(leaf) -> bool:
 
 
 def _param_names(params, *, differentiable_only: bool = False) -> tuple[str, ...]:
+    """One name per column, in ``ravel_pytree`` order.
+
+    A leaf of one entry is named by its key path; a 1-D leaf's entries
+    as ``path[i]``; an N-D leaf's as ``path[i, j, ...]``, the NumPy index
+    of the element in the leaf.  Row-major flattening is what orders the
+    columns, but a flat position is not an index into the leaf: labelled
+    ``['H'][5]``, the unobserved element ``H[0, 5]`` of a 6x6 matrix
+    read, as the NumPy index it looks like, as the whole of row 5.
+    """
     names: list[str] = []
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
         if differentiable_only and not _is_differentiable(leaf):
             continue
         base = jax.tree_util.keystr(path)
+        shape = tuple(np.shape(leaf))
         n = _leaf_size(leaf)
         if n == 1:
             names.append(base)
-        else:
+        elif len(shape) <= 1:
             names.extend(f"{base}[{i}]" for i in range(n))
+        else:
+            names.extend(f"{base}[{', '.join(str(int(k)) for k in ix)}]"
+                         for ix in np.ndindex(*shape))
     return tuple(names)
 
 

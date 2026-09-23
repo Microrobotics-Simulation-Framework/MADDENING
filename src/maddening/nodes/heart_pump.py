@@ -20,7 +20,12 @@ each heartbeat at a rate of ``heart_rate / 60``.
 
 import jax.numpy as jnp
 
-from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec, SimulationNode
+from maddening.core.node import (
+    BoundaryFluxSpec,
+    BoundaryInputSpec,
+    SimulationNode,
+    _method_with_params,
+)
 from maddening.core.compliance.metadata import (
     DiscretizationOrder,
     NodeMeta,
@@ -298,12 +303,14 @@ class HeartPumpNode(SimulationNode):
 
         R(x_new) = x_new - x_old - dt * f(x_new, boundary_inputs)
         """
-        # Forward ``params`` only when given, so a subclass whose
-        # ``derivatives`` override predates the keyword still works for
-        # every caller that passes none.
-        derivs = (
-            self.derivatives(state_new, boundary_inputs) if params is None
-            else self.derivatives(state_new, boundary_inputs, params=params)
+        # Through the shared binder: empty ``params`` calls the two-argument
+        # form (a ``derivatives`` override that predates the keyword keeps
+        # working for every caller that passes none), and a non-empty one
+        # for such an override is the documented ValueError naming the
+        # class and the method -- not Python's TypeError from one call
+        # deeper (MADD-ANO-018's refusal contract, one method in).
+        derivs = _method_with_params(self, "derivatives", params)(
+            state_new, boundary_inputs,
         )
         return {
             k: state_new[k] - state_old[k] - dt * derivs[k]

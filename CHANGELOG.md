@@ -280,6 +280,15 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`HeatNode.compute_interface_correction(params=)` reads the injected `length`** (a calibrated length
+  left coupled interface cells 11 K off, silently); `params_effective` uses a seeded projection (a conserving
+  node passes; old-signature subclasses FAIL under `assert_node_verified`); `**kwargs` overrides take `params`
+- **`WaveletAdaptiveNode`: the default budget `k` now holds the whole CDD seed** (every
+  level-0 function, not `n_coarse**dim`): 16 default configurations silently truncated the
+  gathered solve (`dJ/dθ` 5x off at `dim=2, n_levels=2`); `k` below the seed is now refused
+- **`fim(scale="nominal")` refuses a `specs` that does not mirror `params`** (misspelt key,
+  `to_dict()` entry, wrong nesting, non-dict) by key path instead of silently reporting `"relative"`;
+  a spec keyed for a list/tuple leaf now reaches `fim`, `trainable_mask`, `unconstrain` and `check_bounds`
 - **A calibrated `params` now reaches `derivatives()`, `implicit_residual()`,
   `integrate_node(..., params=)` and `implicit_euler_step(..., params=)`** (MADD-ANO-018
   resolved); a non-empty `params` for an override without the keyword is a `ValueError`, not a silent drop
@@ -535,6 +544,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
+  release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`
 - **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reaches
   `update()` and cannot reach `derivatives()`, `implicit_residual()` or

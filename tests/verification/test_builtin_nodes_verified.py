@@ -58,6 +58,20 @@ CASES = {
             "heat_source": (-100.0, 100.0),
         },
     ),
+    # The shipped non-uniform configuration: ``length`` is declared
+    # ``trainable=False`` here because the geometry is ``grid_points`` and
+    # no path reads it -- the battery failed this configuration on a dead
+    # trainable leaf until it did.
+    "heat_nonuniform": dict(
+        node=lambda: HeatNode("hn", 1e-4, n_cells=N_CELLS, thermal_diffusivity=0.1,
+                              grid_points=[0.05, 0.12, 0.25, 0.33, 0.5, 0.6, 0.8, 0.95]),
+        bounds={"temperature": (250.0, 400.0)},
+        boundary_bounds={
+            "left_temperature": (250.0, 400.0),
+            "right_temperature": (250.0, 400.0),
+            "heat_source": (-100.0, 100.0),
+        },
+    ),
     "rigid_body": dict(
         node=lambda: RigidBodyNode("r", 0.01, mass=2.0, inertia=(1.0, 2.0, 3.0)),
         bounds={
@@ -119,7 +133,7 @@ CASES = {
 # (except ``params_gradient_finite`` / ``params_effective`` on a node
 # whose ``params_pytree()`` is empty or all non-trainable).
 MIGRATED = {
-    "spring", "ball", "heat", "rigid_body",
+    "spring", "ball", "heat", "heat_nonuniform", "rigid_body",
     "rigid_body_2d", "heart_pump", "table", "health_check",
 }
 
@@ -172,6 +186,7 @@ def test_heat_source_sampled_with_declared_shape(args):
     [
         ("spring", "update, derivatives, implicit_residual", None),
         ("heat", "update, derivatives, implicit_residual", None),
+        ("heat_nonuniform", "update, derivatives, implicit_residual", None),
         ("heart_pump", "update, derivatives, implicit_residual", None),
         ("rigid_body", "update, derivatives, implicit_residual", None),
         # The collision-free right-hand side has no use for ``elasticity``:

@@ -19,9 +19,21 @@ Two properties the node's contract with
   room left under the budget, which is what lets the node solve on a
   gathered ``K x K`` block with no risk of silently truncating the set.
 
+The iteration bound is the other exit.  Each marking step adds the
+smallest Doerfler bulk of the *remaining* residual, so once the source
+is resolved the steps shrink and a large budget is approached slowly:
+on the 128-point periodic basis at the node's default source, ``K = 8``
+is reached in a handful of iterations, but ``K = 64`` and ``K = 96``
+both stop at ``|mask| = 54`` when :data:`MAX_OUTER` is hit (200
+iterations reach 64; the sensor-reading error at 54 is 3e-11).  For
+``K`` above about half the basis the bound is therefore the branch
+taken.  The mask is still a valid active set -- the budget is a
+ceiling, not a target -- and :func:`cdd_select_with_iterations` returns
+the count so a caller can see which exit was taken.
+
 JIT shape: the outer loop is a ``lax.while_loop`` bounded by
 :data:`MAX_OUTER`, so the body is compiled once and the loop exits as
-soon as the budget is reached.  A ``while_loop`` cannot be
+soon as the budget is reached or the bound is.  A ``while_loop`` cannot be
 reverse-differentiated, which is fine here *because* nothing may be
 differentiated through a selection: the caller passes a right-hand
 side under ``stop_gradient`` (the node does), and the base class wraps
@@ -48,10 +60,13 @@ import jax.numpy as jnp
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
-__all__ = ["cdd_select", "MAX_OUTER", "THETA_D"]
+__all__ = ["cdd_select", "cdd_select_with_iterations", "MAX_OUTER", "THETA_D"]
 
 #: Bound on the outer iterations.  The 1-D and 2-D problems in the test
-#: suite reach their budget in at most 15; 3-D in about 17.
+#: suite reach their default budget in at most 15; 3-D in about 17.  A
+#: budget above about half the basis is not reached within the bound (see
+#: the module docstring); the bound is deliberately not raised for that,
+#: since every iteration costs a ``K x K`` solve on every update.
 MAX_OUTER: int = 30
 
 #: Doerfler bulk parameter: each marking step takes the smallest set of
@@ -85,7 +100,7 @@ def _doerfler_grow(mask: jax.Array, resid: jax.Array, theta_d: float,
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
-def cdd_select(
+def cdd_select_with_iterations(
     apply_operator: Callable[[jax.Array], jax.Array],
     solve_masked: Callable[[jax.Array, jax.Array], jax.Array],
     b: jax.Array,
@@ -94,7 +109,7 @@ def cdd_select(
     *,
     theta_d: float = THETA_D,
     max_outer: int = MAX_OUTER,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Grow an active set from the coarse level to the budget ``K``.
 
     Works in whatever coordinates the caller supplies; the node passes
@@ -115,6 +130,8 @@ def cdd_select(
     coarse_mask : jax.Array
         Boolean ``(N,)`` seed; must be non-empty and have at most ``K``
         entries set (the caller validates this once, at construction).
+        With more, the loop never runs and the seed comes back unchanged
+        for the caller's frozen solve to refuse.
     K : int
         Active-set budget.  Growth stops once ``|mask| >= K``; the cap in
         the marking step guarantees ``|mask| <= K`` throughout.
@@ -123,10 +140,12 @@ def cdd_select(
 
     Returns
     -------
-    (mask, c)
-        The boolean active set of shape ``(N,)`` and the solution on it
-        in the caller's coordinates.  The mask is a plain array: the
-        node's base class wraps it in ``stop_gradient``.
+    (mask, c, n_outer)
+        The boolean active set of shape ``(N,)``, the solution on it in
+        the caller's coordinates, and the number of outer iterations run
+        (``int32`` scalar; equal to ``max_outer`` when the bound, not the
+        budget, ended the loop).  The mask is a plain array: the node's
+        base class wraps it in ``stop_gradient``.
     """
     mask0 = jnp.asarray(coarse_mask, dtype=bool)
     c0 = solve_masked(mask0, b)
@@ -141,5 +160,24 @@ def cdd_select(
         mask = _doerfler_grow(mask, resid, theta_d, K)
         return i + 1, mask, solve_masked(mask, b)
 
-    _, mask, c = jax.lax.while_loop(keep_going, grow, (jnp.int32(0), mask0, c0))
+    n_outer, mask, c = jax.lax.while_loop(keep_going, grow, (jnp.int32(0), mask0, c0))
+    return mask, c, n_outer
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+def cdd_select(
+    apply_operator: Callable[[jax.Array], jax.Array],
+    solve_masked: Callable[[jax.Array, jax.Array], jax.Array],
+    b: jax.Array,
+    coarse_mask: jax.Array,
+    K: int,
+    *,
+    theta_d: float = THETA_D,
+    max_outer: int = MAX_OUTER,
+) -> tuple[jax.Array, jax.Array]:
+    """:func:`cdd_select_with_iterations` without the iteration count: ``(mask, c)``."""
+    mask, c, _ = cdd_select_with_iterations(
+        apply_operator, solve_masked, b, coarse_mask, K,
+        theta_d=theta_d, max_outer=max_outer,
+    )
     return mask, c

@@ -25,13 +25,16 @@ was ``MADD-ANO-018``, resolved in 0.4.0.
 from __future__ import annotations
 
 import functools
-import inspect
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
 
-from maddening.core.node import _method_with_params, _params_empty
+from maddening.core.node import (
+    _method_with_params,
+    _params_empty,
+    _signature_takes_params,
+)
 
 
 def _residual_with_params(residual_fn: Callable, params: Any) -> Callable:
@@ -42,17 +45,26 @@ def _residual_with_params(residual_fn: Callable, params: Any) -> Callable:
     the method; any other callable is inspected directly.  Empty
     ``params`` returns the callable untouched, which is what keeps a
     4-argument residual working.
+
+    "Bound node method" is decided by identity, not by ``__name__``: the
+    owner must expose the very same bound method under that name.  A
+    method wrapped by a decorator without ``functools.wraps`` is bound
+    under ``implicit_residual`` but carries the wrapper's ``__name__``
+    (``inner``), and looking *that* up on the owner raised
+    ``AttributeError`` from inside the solver.  Such a callable now takes
+    the direct-inspection route like a ``functools.partial`` does.
     """
     if _params_empty(params):
         return residual_fn
     owner = getattr(residual_fn, "__self__", None)
     name = getattr(residual_fn, "__name__", None)
-    if owner is not None and name and hasattr(owner, "accepts_params"):
+    if (
+        owner is not None and isinstance(name, str)
+        and hasattr(owner, "accepts_params")
+        and getattr(owner, name, None) == residual_fn
+    ):
         return _method_with_params(owner, name, params)
-    try:
-        takes_params = "params" in inspect.signature(residual_fn).parameters
-    except (TypeError, ValueError):
-        takes_params = False
+    takes_params = _signature_takes_params(residual_fn)
     if not takes_params:
         label = getattr(residual_fn, "__qualname__", None) or repr(residual_fn)
         raise ValueError(

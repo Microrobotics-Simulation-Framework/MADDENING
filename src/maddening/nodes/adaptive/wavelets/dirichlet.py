@@ -107,6 +107,23 @@ def _level_labels_1d(n_levels: int, n_coarse: int) -> np.ndarray:
     return np.asarray(labs, dtype=np.int32)
 
 
+def _level_labels_nd(n_levels: int, n_coarse: int, dim: int) -> np.ndarray:
+    """Level label per function of the ``dim``-D tensor-product basis.
+
+    The maximum over axes of the 1-D labels, in the Kronecker (row-major)
+    ordering of :func:`synthesis_matrix_dirichlet`, so the coarse block is
+    exactly level 0 and level 0 as a whole -- the coarse block plus the
+    first detail band per axis -- has ``(2 n_coarse + 1) ** dim`` entries.
+    Host ``int32`` NumPy: what the assembly and the node's seed-size
+    validation read, concrete inside a trace.
+    """
+    lev1 = _level_labels_1d(int(n_levels), int(n_coarse))
+    lev = lev1
+    for _ in range(int(dim) - 1):
+        lev = np.maximum.outer(lev, lev1).reshape(-1)
+    return np.asarray(lev, dtype=np.int32)
+
+
 def _synthesis_matrix_1d(n_levels: int, n_coarse: int, order: int) -> tuple[np.ndarray, np.ndarray]:
     n = dirichlet_side(n_levels, n_coarse)
     W = np.zeros((n, n))
@@ -144,10 +161,10 @@ def synthesis_matrix_dirichlet(n_levels: int, n_coarse: int, *, order: int = 4,
     """
     _check_order(order)
     _check_dim(dim)
-    W1, lev1 = _synthesis_matrix_1d(int(n_levels), int(n_coarse), int(order))
+    W1, _ = _synthesis_matrix_1d(int(n_levels), int(n_coarse), int(order))
     side = W1.shape[0]
-    W, lev = W1, lev1
+    W = W1
     for _ in range(dim - 1):
         W = np.kron(W, W1)
-        lev = np.maximum.outer(lev, lev1).reshape(-1)
+    lev = _level_labels_nd(n_levels, n_coarse, dim)
     return jnp.asarray(W, dtype=dtype), jnp.asarray(lev, dtype=jnp.int32), side

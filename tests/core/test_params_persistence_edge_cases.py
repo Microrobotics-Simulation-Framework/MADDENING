@@ -1,8 +1,8 @@
 """Calibrated parameters through persistence and the coupling internals.
 
 * ``compute_interface_correction`` honours the params pytree (a calibrated
-  diffusivity corrects coupled interface cells, both solvers) and
-  ``HybridNode`` is on its physics node's params contract;
+  diffusivity *and* a calibrated length correct coupled interface cells,
+  both solvers) and ``HybridNode`` is on its physics node's params contract;
 * ``load_state`` before the first compile equals compile-then-load
   (multirate step counter included), checkpoints carry mapping weights,
   and a params leaf of the wrong shape is refused;
@@ -44,12 +44,12 @@ def _spring(compile=True):
 
 # ------------------------------------------------------------ interface correction
 
-def _heat_rods(alpha, **group_kw):
+def _heat_rods(alpha, length=1.0, **group_kw):
     gm = GraphManager()
     gm.add_node(HeatNode(name="rod_a", timestep=0.001, n_cells=10, thermal_diffusivity=alpha,
-                         length=1.0, initial_temperature=100.0))
+                         length=length, initial_temperature=100.0))
     gm.add_node(HeatNode(name="rod_b", timestep=0.001, n_cells=10, thermal_diffusivity=alpha,
-                         length=1.0, initial_temperature=0.0))
+                         length=length, initial_temperature=0.0))
     gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature", transform=lambda T: T[-1])
     gm.add_edge("rod_b", "rod_a", "temperature", "right_temperature", transform=lambda T: T[0])
     gm.add_coupling_group(["rod_a", "rod_b"], **group_kw)
@@ -68,6 +68,29 @@ def test_interface_correction_uses_injected_diffusivity(group_kw):
     for n in ("rod_a", "rod_b"):
         np.testing.assert_allclose(np.asarray(out[n]["temperature"]),
                                    np.asarray(ref[n]["temperature"]), rtol=1e-5)
+
+
+@pytest.mark.parametrize("group_kw", [dict(solver="ift", max_iterations=10),
+                                      dict(solver="fori", max_iterations=10)])
+def test_interface_correction_uses_injected_length(group_kw):
+    """``length`` is trainable and sets ``dx``, and the correction rewrites the
+    two interface cells from the stencil -- so a calibrated length injected
+    through ``gm.params`` has to put them where rods *built* with that length
+    put them.  Until this was pinned the correction built its Laplacian from
+    the constructor's ``length``: every interior cell agreed and the two
+    interface cells sat 11.39 K apart (83.88 vs 95.27) after two steps, with
+    no error anywhere.  The tolerance is the float32 agreement the fixed code
+    measures (5e-7 absolute); the defect is seven orders of magnitude above
+    it.  A fresh graph per arm, because ``run_scan`` advances the graph's own
+    state."""
+    ref = _heat_rods(0.5, length=2.0, **group_kw).run_scan(2)
+    gm = _heat_rods(0.5, length=1.0, **group_kw)
+    for n in ("rod_a", "rod_b"):
+        gm.params["nodes"][n]["length"] = jnp.asarray(2.0, jnp.float32)
+    out = gm.run_scan(2)
+    for n in ("rod_a", "rod_b"):
+        np.testing.assert_allclose(np.asarray(out[n]["temperature"]),
+                                   np.asarray(ref[n]["temperature"]), rtol=1e-6, atol=5e-7)
 
 
 def test_hybrid_node_is_on_its_physics_node_params_contract():

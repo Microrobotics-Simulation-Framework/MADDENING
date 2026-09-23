@@ -39,6 +39,75 @@ from maddening.compliance._validate import validate_anomaly_registry
 #: of the two is legitimately absent.
 _REFERENCE_FIELDS = ("affected_components", "verification")
 
+#: A closed or half-closed entry is a claim that something now prevents
+#: the defect; ``verification`` is where the claim names its evidence.
+_STATUSES_THAT_MUST_CITE_EVIDENCE = ("resolved", "partially_resolved")
+
+
+def _evidence_errors(anomalies):
+    """Registry-level rules the schema validator does not enforce.
+
+    Both fail closed, and both were found missing by the release audit of
+    2026-09-22, which stripped MADD-ANO-018's entire ``verification`` list
+    (status still ``resolved``) and then deleted the entry outright: the
+    gate printed ``OK`` both times.
+
+    1. An entry whose ``resolution_status`` says the defect is (partly)
+       gone must cite at least one ``verification`` test.  The validator
+       resolves every entry that IS there; it has no opinion on a list
+       that is empty or missing, so a resolution could lose its evidence
+       and stay green.
+    2. Within each ID prefix the numbers run contiguously from 001 to the
+       highest present.  Both registries are contiguous by construction
+       (``tests/compliance/test_soup_evidence.py`` says why), so a gap is
+       a deleted entry.  An entry in this list is IEC 62304 evidence: it
+       is retired by recording the retirement, never by deletion.
+
+    What this cannot see is the deletion of the *highest* entry: a pin on
+    the high-water mark has to live outside the file it guards, or it is
+    edited along with the deletion.  That pin is ``_HIGHEST_ANOMALY_ID``
+    in ``tests/compliance/test_soup_evidence.py``, and this gate does not
+    duplicate it.
+    """
+    import re
+
+    errors = []
+    by_prefix: dict = {}
+    for a in anomalies:
+        aid = str(a.get("anomaly_id", "<missing>"))
+        status = a.get("resolution_status")
+        if status in _STATUSES_THAT_MUST_CITE_EVIDENCE:
+            entries = a.get("verification") or []
+            if isinstance(entries, str):
+                entries = [entries]
+            if not entries:
+                errors.append(
+                    f"{aid}: resolution_status is {status!r} but the "
+                    f"verification list is empty or missing.  A resolution "
+                    f"without a named test is a claim, not evidence: cite the "
+                    f"test that pins it (tests/<file>.py::<test>), or set the "
+                    f"status back to 'open'."
+                )
+        m = re.fullmatch(r"(.*?)(\d+)", aid)
+        if m:
+            by_prefix.setdefault(m.group(1), {})[int(m.group(2))] = aid
+    for prefix, numbers in sorted(by_prefix.items()):
+        width = max(len(str(n)) for n in numbers)
+        width = max(width, 3)
+        highest = max(numbers)
+        missing = sorted(set(range(1, highest + 1)) - set(numbers))
+        if missing:
+            names = [f"{prefix}{n:0{width}d}" for n in missing]
+            errors.append(
+                f"anomaly ID(s) missing from the contiguous range "
+                f"{prefix}{1:0{width}d}..{prefix}{highest:0{width}d}: {names}.  "
+                f"An entry in this registry is IEC 62304 evidence; restore it, "
+                f"or record the retirement in the _RETIRED_* frozenset in "
+                f"tests/compliance/test_soup_evidence.py -- never delete it "
+                f"and never reuse the number."
+            )
+    return errors
+
 
 def _census(path):
     """``(anomalies, declared references)`` in the registry, without resolving.
@@ -59,7 +128,7 @@ def _census(path):
             if isinstance(entries, str):
                 entries = [entries]
             declared += len(entries)
-    return len(anomalies), declared
+    return len(anomalies), declared, anomalies
 
 
 def main(argv=None):
@@ -101,6 +170,12 @@ def main(argv=None):
         resolve_references=not args.no_resolve,
         notes=notes,
     )
+    n_anomalies, declared, anomalies = _census(args.path)
+    # Evidence rules run whether or not the schema passed and whether or
+    # not references are resolved: a stripped verification list and a
+    # deleted entry are both structural, and ``--no-resolve`` must not
+    # switch them off.
+    errors = list(errors) + _evidence_errors(anomalies)
 
     # A symbol in an optional subpackage this environment cannot import is
     # unverified, not broken -- but an unverified reference is a hole in the
@@ -121,7 +196,6 @@ def main(argv=None):
     # so it is empty exactly when nothing was skipped.  A registry with no
     # anomalies, or with every reference stripped, entered no guard at all
     # and printed OK (audit_040_r2/gates, finding G7).
-    n_anomalies, declared = _census(args.path)
 
     if n_anomalies == 0:
         print(

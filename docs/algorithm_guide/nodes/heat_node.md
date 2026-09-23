@@ -120,7 +120,7 @@ For `stencil_order=4` the bare 5-point symbol would allow $3/8$, but the cubic b
 | `thermal_diffusivity` | float | 0.01 | m²/s | Thermal diffusivity $\alpha$ |
 | `initial_temperature` | float or array | 0.0 | K | Uniform initial temperature, or one value per cell |
 | `stencil_order` | int | 2 | — | 2 or 4; 4 requires $N \geq 5$ and a uniform grid |
-| `grid_points` | array or None | None | m | Non-uniform cell centres; `length` is then ignored |
+| `grid_points` | array or None | None | m | Non-uniform cell centres; `length` is then ignored and `param_specs()` declares it `trainable=False` |
 
 ## Boundary Inputs
 

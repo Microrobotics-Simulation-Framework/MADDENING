@@ -790,6 +790,136 @@ class TestAnomalyGate:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
+_RESOLVED_WITH_EVIDENCE = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "{status}"
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    verification:
+      - "tests/compliance/test_soup_evidence.py::test_madd_ano_001_is_recorded_resolved_by_that_floor"
+"""
+
+_TWO_ANOMALIES_WITH_A_GAP = """\
+schema_version: "1.0"
+generated_date: "2026-03-12"
+anomalies:
+  - anomaly_id: "MADD-ANO-001"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "open"
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+  - anomaly_id: "MADD-ANO-003"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "open"
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+"""
+
+
+class TestAnomalyGateFailsClosedOnEvidence:
+    """The two holes the release audit of 2026-09-22 walked through.
+
+    Stripping a resolved entry's whole ``verification`` list passed the
+    gate ("126 reference(s) verified"), and deleting an entry passed it
+    too (17 anomalies, OK): the validator resolves what is there and
+    counts what is declared, and neither notices an absence.
+    """
+
+    @pytest.mark.parametrize("status", ["resolved", "partially_resolved"])
+    def test_a_closed_entry_without_verification_fails_naming_the_entry(
+        self, tmp_path, status
+    ):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status=status))
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-001" in result.stderr
+        assert "verification list is empty or missing" in result.stderr
+
+    def test_the_rule_survives_no_resolve(self, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="resolved"))
+        result = _run("check_anomalies", str(path), "--repo-root",
+                      str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "verification list is empty or missing" in result.stderr
+
+    @pytest.mark.parametrize("status", ["resolved", "partially_resolved"])
+    def test_a_closed_entry_that_cites_its_test_passes(self, tmp_path, status):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_RESOLVED_WITH_EVIDENCE.format(status=status))
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_an_open_entry_needs_no_verification(self, tmp_path):
+        """The rule is about closed entries; ``open`` with only
+        ``affected_components`` is the shape MADD-ANO-002 ships in."""
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_a_gap_in_the_id_sequence_fails_naming_the_missing_id(self, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-002" in result.stderr
+        assert "contiguous" in result.stderr
+
+    @staticmethod
+    def _mutated_registry(tmp_path, mutate):
+        import yaml
+
+        registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+        data = yaml.safe_load(registry.read_text())
+        mutate(data)
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return path
+
+    def test_stripping_a_shipped_resolved_entrys_evidence_fails(self, tmp_path):
+        """The audit's M4, made permanent: MADD-ANO-018 without its list."""
+        def strip(data):
+            entry = next(a for a in data["anomalies"] if a["anomaly_id"] == "MADD-ANO-018")
+            assert entry["resolution_status"] == "resolved"
+            del entry["verification"]
+
+        path = self._mutated_registry(tmp_path, strip)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-018" in result.stderr
+
+    def test_deleting_a_shipped_entry_fails(self, tmp_path):
+        """The audit's M5, one entry in from the end so the gate itself --
+        not the out-of-file high-water mark -- is what catches it."""
+        def delete(data):
+            data["anomalies"] = [a for a in data["anomalies"] if a["anomaly_id"] != "MADD-ANO-010"]
+
+        path = self._mutated_registry(tmp_path, delete)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-010" in result.stderr
+
+
 class TestAnomalyGateVerifiesSomething:
     """The two guards check_heat_stability.py has and this gate claimed to.
 

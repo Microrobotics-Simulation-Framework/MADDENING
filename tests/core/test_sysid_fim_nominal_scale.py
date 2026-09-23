@@ -19,8 +19,14 @@ parameter's declared bounds instead.  What this file pins:
 4. the composition with ``noise_std`` (rows, before) and ``mask``
    (columns, selected first) is the one the docstring states;
 5. the refusals: ``specs`` under the wrong scale, no ``specs`` under
-   the right one, and a width that is a zero or an ``inf`` column at
-   the parameters' precision.
+   the right one, a width that is a zero or an ``inf`` column at
+   the parameters' precision, and a ``specs`` tree that does not mirror
+   ``params`` (a non-dict, a misspelt key, a ``to_dict()`` entry, a
+   ``ParamSpec`` above a dict level) -- each of which ``_spec_for``
+   would otherwise resolve to the default spec, giving a report
+   bit-identical to ``scale="relative"`` under the ``"nominal"`` label;
+6. a list/tuple-valued params leaf is reached by a spec keyed for it,
+   either one spec over the sequence or one per position.
 
 Every rank/cond assertion is made on two or more parameters: ``eigh`` of
 a 1x1 matrix has one eigenvector, ``[1.0]``, whatever the entry, so a
@@ -290,12 +296,13 @@ class TestThePolicyTable:
 
     def test_a_leaf_without_a_spec_entry_is_value_scaled_and_named(self):
         """``_spec_for`` gives a missing entry the default spec, which
-        is unbounded.  So a mis-keyed ``specs`` cannot pass unnoticed:
-        every column it failed to reach is named."""
+        is unbounded.  So an incomplete ``specs`` cannot pass unnoticed:
+        every column it failed to reach is named.  (A key that matches
+        no parameter is a different thing -- refused, see
+        :class:`TestASpecsTreeMustMirrorParams`.)"""
         fn, params = _linear(6, 3, 10, (1.0, 2.0, 3.0))
         nom = fim(fn, params, scale="nominal",
-                  specs={"p1": ParamSpec(bounds=(0.0, 4.0)),
-                         "misspelt": ParamSpec(bounds=(0.0, 1.0))})
+                  specs={"p1": ParamSpec(bounds=(0.0, 4.0))})
         assert nom.value_scaled == ("['p0']", "['p2']")
 
     def test_nothing_falls_back_to_one(self):
@@ -514,6 +521,183 @@ class TestRefusals:
             _nominal_column_vector(nominal, np.zeros(2, dtype=np.float32))
         col = _nominal_column_vector(nominal, np.zeros(2, dtype=np.float64))
         assert np.all(np.asarray(col, dtype=np.float64) > 0.0)
+
+
+class TestASpecsTreeMustMirrorParams:
+    """A ``specs`` that reaches nothing is refused, not read as ``{}``.
+
+    ``_spec_for`` answers the default spec for every leaf it cannot
+    reach, so before this check a ``gm.param_specs()`` handed to a
+    sub-tree ``params``, ``ParamSpec.to_dict()`` entries, a list, a
+    bare ``ParamSpec`` or a string all produced a report bit-identical
+    to ``scale="relative"`` -- indistinguishable from the documented
+    ``specs={}``.  Each is now a ``ValueError`` naming the key path.
+    A leaf *without* an entry is still the default spec, so ``{}`` and
+    an incomplete dict stay accepted (the test above pins that).
+    """
+
+    @pytest.fixture()
+    def three(self):
+        fn, params = _linear(9, 3, 12, (1.0, 2.0, 3.0))
+        good = {k: ParamSpec(bounds=(0.0, 5.0)) for k in params}
+        return fn, params, good
+
+    @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
+    @pytest.mark.parametrize("bad", [
+        pytest.param("gm.param_specs()", id="string"),
+        pytest.param(ParamSpec(bounds=(0.0, 1.0)), id="bare_paramspec"),
+        pytest.param([ParamSpec(bounds=(0.0, 1.0))] * 3, id="list"),
+    ])
+    def test_a_specs_that_is_not_a_dict_is_refused(self, runner, three, bad):
+        fn, params, _ = three
+        with pytest.raises(ValueError, match="specs must be a dict of ParamSpec"):
+            runner(fn, params, scale="nominal", specs=bad)
+
+    @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
+    def test_a_key_that_matches_no_parameter_is_refused_by_path(self, runner, three):
+        """A misspelt name is exactly the case that must be loud: the
+        column it meant to reach would be value-scaled and named, but
+        the entry itself would vanish without a word."""
+        fn, params, good = three
+        with pytest.raises(ValueError, match=r"specs\['p9'\] matches no parameter"):
+            runner(fn, params, scale="nominal", specs={**good, "p9": ParamSpec()})
+
+    def test_the_graphs_full_specs_against_a_sub_tree_are_refused(self):
+        """The shape this file's own fixture avoids by filtering:
+        ``gm.param_specs()`` is keyed ``nodes -> name -> key`` and a
+        two-parameter sub-tree has no ``nodes``.  Before the check this
+        was accepted and reported ``rank 1`` where the correctly nested
+        specs give ``rank 2``."""
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0,
+                                     mass=1.0, rest_length=1.0,
+                                     initial_position=0.5))
+        gm.compile()
+        gm.set_param_spec("s", "initial_velocity",
+                          ParamSpec(trainable=False, bounds=(-1.0, 1.0)))
+        specs = gm.param_specs()
+        sub = {k: gm.params["nodes"]["s"][k]
+               for k in ("stiffness", "initial_velocity")}
+        A = jnp.asarray(np.random.default_rng(0).standard_normal((6, 2)),
+                        dtype=jnp.float32)
+
+        def fn(p):
+            return A @ jnp.stack([p["stiffness"], p["initial_velocity"]])
+
+        with pytest.raises(ValueError, match=r"specs\['nodes'\] matches no parameter"):
+            fim(fn, sub, scale="nominal", specs=specs)
+        # The node's whole spec dict is a superset of the sub-tree, and a
+        # superset is refused too: the entries that reach nothing are
+        # named, and the fix is the one-line filter below.
+        with pytest.raises(ValueError, match="matches no parameter"):
+            fim(fn, sub, scale="nominal", specs=specs["nodes"]["s"])
+        right = fim(fn, sub, scale="nominal",
+                    specs={k: specs["nodes"]["s"][k] for k in sub})
+        assert right.rank == 2
+        assert right.value_scaled == ("['stiffness']",)
+        # And the documented full-tree call is untouched, ``mappings: {}``
+        # mirroring ``mappings: {}`` included.
+        whole = fim(lambda p: fn(p["nodes"]["s"]), gm.params,
+                    scale="nominal", specs=specs)
+        assert "['nodes']['s']['initial_velocity']" not in whole.value_scaled
+
+    @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
+    def test_a_to_dict_entry_is_refused_with_the_from_dict_hint(self, runner, three):
+        fn, params, good = three
+        encoded = {k: v.to_dict() for k, v in good.items()}
+        with pytest.raises(ValueError, match=r"specs\['p0'\] is a dict but params\['p0'\] is a leaf") as info:
+            runner(fn, params, scale="nominal", specs=encoded)
+        assert "ParamSpec.from_dict" in str(info.value)
+
+    def test_a_paramspec_above_a_dict_level_is_refused(self, three):
+        fn, params, _ = three
+        nested = {"outer": params}
+        with pytest.raises(ValueError, match=r"specs\['outer'\] is a ParamSpec but params\['outer'\] is a dict"):
+            fim(lambda p: fn(p["outer"]), nested, scale="nominal",
+                specs={"outer": ParamSpec(bounds=(0.0, 1.0))})
+
+    @pytest.mark.parametrize("entry", [None, (0.0, 5.0), 3.0, "log"],
+                             ids=["none", "bounds_tuple", "float", "string"])
+    def test_an_entry_that_is_neither_paramspec_nor_dict_is_refused(self, three, entry):
+        fn, params, good = three
+        with pytest.raises(ValueError, match=r"specs\['p1'\]"):
+            fim(fn, params, scale="nominal", specs={**good, "p1": entry})
+
+    def test_a_refused_specs_is_refused_before_anything_is_traced(self, three):
+        """The check is structural and runs on the host before the
+        Jacobian is compiled: a residual that would fail to trace never
+        gets the chance to, so the error a user sees is about ``specs``."""
+        _, params, good = three
+
+        def never(p):
+            raise AssertionError("residual_fn was traced")
+
+        with pytest.raises(ValueError, match="matches no parameter"):
+            fim(never, params, scale="nominal", specs={**good, "typo": ParamSpec()})
+
+    def test_incomplete_and_empty_specs_remain_the_documented_default(self, three):
+        """Refusing what mirrors nothing must not refuse what is merely
+        incomplete: a missing entry is the default spec, named."""
+        fn, params, good = three
+        partial = fim(fn, params, scale="nominal", specs={"p0": good["p0"]})
+        assert partial.value_scaled == ("['p1']", "['p2']")
+        empty = fim(fn, params, scale="nominal", specs={})
+        assert empty.value_scaled == ("['p0']", "['p1']", "['p2']")
+
+
+class TestAListValuedLeafIsReachedByItsSpec:
+    """``jax.tree_util`` yields a ``SequenceKey`` for a list/tuple
+    position, which has ``.idx`` and no ``.key``; ``_spec_for`` used to
+    stop there and hand the leaf the default spec.  The array spelling
+    of the same vector was already correct, so the two must agree:
+    one spec keyed at the list covers every position, exactly as it
+    covers every element of an array leaf, and a list of specs is read
+    by position.  ``params_pytree()`` turns lists into array leaves, so
+    only a hand-built ``params`` reaches this -- hence the hand-built
+    fixtures.
+    """
+
+    def _fixture(self):
+        A = jnp.asarray(np.random.default_rng(11).standard_normal((8, 2)),
+                        dtype=jnp.float32)
+        as_list = {"v": [jnp.float32(0.0), jnp.float32(1.0)]}
+        as_array = {"v": jnp.array([0.0, 1.0], dtype=jnp.float32)}
+        return (A, as_list, lambda p: A @ jnp.stack(p["v"]),
+                as_array, lambda p: A @ p["v"])
+
+    def test_one_spec_over_a_list_matches_the_array_spelling(self):
+        A, as_list, fn_l, as_array, fn_a = self._fixture()
+        specs = {"v": ParamSpec(trainable=False, bounds=(-1.0, 1.0),
+                                transform="logit")}
+        listed = fim(fn_l, as_list, scale="nominal", specs=specs)
+        arrayed = fim(fn_a, as_array, scale="nominal", specs=specs)
+        _identical(listed, arrayed)
+        assert listed.param_names == ("['v'][0]", "['v'][1]")
+        assert listed.value_scaled == ()
+        assert listed.zero_scaled == ()
+        assert listed.rank == 2
+
+    def test_a_list_of_specs_is_read_by_position(self):
+        A, as_list, fn_l, _, _ = self._fixture()
+        per = {"v": [ParamSpec(bounds=(-1.0, 1.0)), ParamSpec(bounds=(0.0, 4.0))]}
+        nom = fim(fn_l, as_list, scale="nominal", specs=per)
+        np.testing.assert_allclose(
+            _column_scales(nom, fim(fn_l, as_list, scale=None)),
+            [2.0, 4.0], rtol=1e-6)
+        assert nom.value_scaled == ()
+
+    def test_a_tuple_of_leaves_is_covered_too(self):
+        A, _, _, _, _ = self._fixture()
+        params = {"v": (jnp.float32(0.0), jnp.float32(1.0))}
+        nom = fim(lambda p: A @ jnp.stack(p["v"]), params, scale="nominal",
+                  specs={"v": ParamSpec(bounds=(-2.0, 2.0))})
+        assert nom.value_scaled == ()
+        assert nom.zero_scaled == ()
+
+    def test_a_list_of_specs_of_the_wrong_length_is_refused(self):
+        A, as_list, fn_l, _, _ = self._fixture()
+        with pytest.raises(ValueError, match=r"specs\['v'\] has 1 entries but params\['v'\] has 2 positions"):
+            fim(fn_l, as_list, scale="nominal", specs={"v": [ParamSpec()]})
 
 
 # ---------------------------------------------------------------------------

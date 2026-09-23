@@ -31,18 +31,18 @@ Requires ``hypothesis >= 6.165``. Install via::
 from __future__ import annotations
 
 import traceback
+import zlib
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import inspect
 
 import numpy as np
 import numpy.typing as npt
 
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import _method_accepts_params
+from maddening.core.node import _method_accepts_params, _signature_takes_params
 from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -280,10 +280,7 @@ def _produces_fluxes(node) -> bool:
 
 
 def _flux_accepts_params(node) -> bool:
-    try:
-        return "params" in inspect.signature(node.compute_boundary_fluxes).parameters
-    except (TypeError, ValueError):
-        return False
+    return _signature_takes_params(node.compute_boundary_fluxes)
 
 
 def _outputs(node, state, bi, dt, params=_NO_PARAMS):
@@ -456,6 +453,41 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     return _run("params_gradient_finite", inputs, body, **kw)
 
 
+#: Seed of the fixed random projection ``params_effective`` differentiates
+#: (see :func:`_projected`).  Combined with the CRC-32 of the field name so
+#: two fields of the same shape get different weights.
+_PROBE_SEED = 20260922
+
+
+def _projection_weights(name: str, shape: tuple[int, ...]) -> np.ndarray:
+    """One weight per element of output field ``name``: magnitude in
+    ``[0.5, 1.5]``, random sign, fixed by ``_PROBE_SEED`` and the name."""
+    rng = np.random.default_rng([_PROBE_SEED, zlib.crc32(name.encode())])
+    magnitude = rng.uniform(0.5, 1.5, size=shape)
+    sign = rng.choice(np.array([-1.0, 1.0]), size=shape)
+    return magnitude * sign
+
+
+def _projected(out: dict) -> Any:
+    """``sum_f <w_f, out_f>`` over the floating fields of ``out`` -- the
+    scalar whose gradient ``params_effective`` inspects.
+
+    A plain ``sum(jnp.sum(v))`` is annihilated by any conservation law
+    with equal coefficients (mass moving between two compartments at an
+    injected rate has ``d(sum)/d(rate) == 0`` exactly), which made the
+    check FAIL a correct node.  Per-element weights of distinct
+    magnitude and random sign leave no such law standing.
+    """
+    total = None
+    for name, v in out.items():
+        if not jnp.issubdtype(v.dtype, jnp.floating):
+            continue
+        w = jnp.asarray(_projection_weights(name, tuple(v.shape)), dtype=v.dtype)
+        term = jnp.sum(v * w)
+        total = term if total is None else total + term
+    return jnp.zeros(()) if total is None else total
+
+
 def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
     """Every *trainable* parameter influences the output -- on every path.
 
@@ -494,6 +526,27 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
     constructor entry cannot be probed and fails closed if it is alive
     through ``update`` and dead through the path.  ``detail`` names the
     paths checked either way.
+
+    The scalar differentiated is not the plain sum of the outputs.  A
+    node whose fields exchange a conserved quantity -- two compartments
+    with ``dA/dt = -k (A - B)``, ``dB/dt = +k (A - B)`` -- has
+    ``d(sum)/dk == 0`` exactly on every sample although ``k`` reaches
+    every path and moves every field, and the plain sum failed it.  The
+    probe therefore differentiates a fixed random projection
+    ``sum_f <w_f, out_f>``: one weight per output element, drawn once
+    per field from ``numpy.random.default_rng([_PROBE_SEED,
+    crc32(field)])`` with magnitude in ``[0.5, 1.5]`` and a random sign,
+    so no conservation law with equal coefficients across elements or
+    fields can annihilate it, and the check is reproducible from the
+    seed.
+
+    Limitation: the constructor-value probe is only reached when the
+    gradient is identically zero, so a path that reads a leaf *partly*
+    from the injected params and partly from ``self.params`` (say
+    ``0.5 * p["k"] + 0.5 * self.params["k"]``) has a non-zero gradient
+    and PASSes while ``integrate_node(..., params=)`` still disagrees
+    with a node rebuilt with the calibrated value -- a gradient probe
+    cannot see the split, and this check does not claim to.
     """
     node = inputs.node
     if not _node_accepts_params(node):
@@ -553,9 +606,7 @@ def node_params_effective(inputs: _Inputs, **kw) -> VerificationResult:
                     )
 
             def loss(p, fn=fn):
-                out = fn(state, bi, dt, p)
-                return sum(jnp.sum(v) for v in out.values()
-                           if jnp.issubdtype(v.dtype, jnp.floating))
+                return _projected(fn(state, bi, dt, p))
 
             g = jax.grad(loss)(base)
             for k in trainable:

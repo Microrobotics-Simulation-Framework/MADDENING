@@ -244,32 +244,106 @@ def test_gather_solve_gradient_with_respect_to_the_right_hand_side_matches_finit
     assert abs(float(g[k]) - float(fd)) < 1e-6 * (1 + abs(float(fd)))
 
 
-def test_gather_solve_silently_truncates_a_mask_larger_than_its_buffer():
-    """The documented hazard, pinned: with more active functions than the
-    buffer holds the result is *not* the masked solve, and nothing raises.
-    This is why ``WaveletAdaptiveNode`` caps its selection at ``k`` and
-    overrides the all-true full-basis gradient with a dense solve."""
+def test_gather_solve_poisons_a_mask_larger_than_its_buffer_instead_of_truncating():
+    """The former hazard, closed.  With more active functions than the buffer
+    holds the result used to be a plausible wrong answer -- the first ``buf``
+    of them solved, the rest dropped, nothing raised -- which is the
+    mechanism behind the 5x gradient error the audit found at ``dim=2,
+    n_levels=2``.  A jitted function cannot raise, so the gathered block is
+    NaN and nothing downstream can mistake it for the masked solve; exactly
+    at the buffer size, and at the full basis, the solve is exact."""
     op = OP.assemble_operator(5, 2, order=4, dim=1)
     Ah, _ = _scaled(op)
-    full = jnp.ones(op.n, dtype=bool)
     rhs = jnp.asarray(np.random.default_rng(11).standard_normal(op.n))
-    truncated = OP.gather_solve(Ah, full, rhs, buf=8)
-    exact = jnp.linalg.solve(Ah, rhs)
-    assert int((truncated != 0).sum()) == 8
-    assert float(jnp.linalg.norm(truncated - exact) / jnp.linalg.norm(exact)) > 1e-2
+    nine = jnp.zeros(op.n, dtype=bool).at[:9].set(True)
+    poisoned = OP.gather_solve(Ah, nine, rhs, buf=8)
+    assert bool(jnp.all(jnp.isnan(poisoned[:8]))) and bool(jnp.all(poisoned[8:] == 0.0))
+    jitted = jax.jit(OP.gather_solve, static_argnums=3)(Ah, nine, rhs, 8)
+    assert bool(jnp.all(jnp.isnan(jitted[:8])))
+    everything = OP.gather_solve(Ah, jnp.ones(op.n, dtype=bool), rhs, buf=8)
+    assert int(jnp.isnan(everything).sum()) == 8 and int((everything != 0).sum()) == 8
+    eight = jnp.zeros(op.n, dtype=bool).at[:8].set(True)
+    exact = jnp.linalg.solve(Ah[:8, :8], rhs[:8])
+    assert float(jnp.max(jnp.abs(OP.gather_solve(Ah, eight, rhs, buf=8)[:8] - exact))) < 1e-12
+    full = OP.gather_solve(Ah, jnp.ones(op.n, dtype=bool), rhs, buf=op.n)
+    assert float(jnp.max(jnp.abs(full - jnp.linalg.solve(Ah, rhs)))) < 1e-10
+
+
+def test_assembly_refuses_a_non_symmetric_physical_stencil_instead_of_symmetrising_it(monkeypatch):
+    """The audit's one missed mutation (M7s): a one-sided ``[-1, 2, -1] / h``
+    stencil is first order, but ``0.5 (A + A^T)`` turned it into a consistent
+    second-order one and the MMS order gate passed (observed order 2.04).
+    The symmetry check runs before the symmetrisation now, so the stencil
+    is refused by name at construction, in 1-D and through the tensor sum."""
+    def one_sided(side, h):
+        idx = np.arange(side)
+        S = np.zeros((side, side))
+        S[idx, idx] = -1.0 / h
+        S[idx, (idx + 1) % side] += 2.0 / h
+        S[idx, (idx + 2) % side] += -1.0 / h
+        return S
+
+    monkeypatch.setattr(OP, "_stiffness_periodic", one_sided)
+    with pytest.raises(ValueError, match="not symmetric"):
+        OP.assemble_operator(4, 2, order=4, dim=1)
+    with pytest.raises(ValueError, match="not symmetric"):
+        OP.assemble_operator(2, 2, order=4, dim=2)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(n_levels=6, n_coarse=2, dim=1), dict(n_levels=3, n_coarse=2, dim=2),
+    dict(n_levels=2, n_coarse=2, dim=3), dict(n_levels=4, n_coarse=2, dim=1, order=6),
+    dict(n_levels=5, n_coarse=2, dim=1, boundary="dirichlet"),
+    dict(n_levels=2, n_coarse=2, dim=2, boundary="dirichlet"),
+], ids=lambda kw: "-".join(f"{k}={v}" for k, v in kw.items()))
+def test_the_correct_assembly_is_symmetric_two_orders_inside_the_tolerance_the_check_uses(kw):
+    """A check is only safe if what it guards is far from its threshold:
+    rebuild the *un-symmetrised* Galerkin product the way ``assemble_operator``
+    does and measure it.  1e-17 .. 1.1e-16 over 15 configurations when the
+    tolerance was set; ``SYMMETRY_TOL = 1e-12`` leaves four orders, and this
+    pins at least two."""
+    op = OP.assemble_operator(**{k: v for k, v in kw.items()}, mass=1.0)
+    boundary = kw.get("boundary", "periodic")
+    A_phys = OP._physical_operator(op.side, op.dim, op.h, 1.0, boundary)
+    Wn = np.asarray(op.Wn, dtype=np.float64)
+    raw = Wn.T @ A_phys @ Wn
+    asym = np.max(np.abs(raw - raw.T)) / np.max(np.abs(raw))
+    assert asym < 1e-2 * OP.SYMMETRY_TOL, asym
+    assert np.array_equal(np.asarray(op.A), np.asarray(op.A).T)
+
+
+def test_assembly_is_legal_inside_a_jit_trace_and_gives_the_eager_operator():
+    """Every input is a static setting, so the assembly runs on the host under
+    ``ensure_compile_time_eval``; the returned arrays are constants of the
+    trace and equal the eager ones.  ``levels`` and ``diagonal`` are host
+    arrays, which is what lets the node count its seed inside a trace."""
+    eager = OP.assemble_operator(3, 2, order=4, dim=2)
+
+    @jax.jit
+    def f(v):
+        op = OP.assemble_operator(3, 2, order=4, dim=2)
+        return op.A @ v, op.A_sparse @ v, op.Wn @ v
+
+    v = jnp.asarray(np.random.default_rng(12).standard_normal(eager.n))
+    a, a_s, w = f(v)
+    assert float(jnp.max(jnp.abs(a - eager.A @ v))) < 1e-12
+    assert float(jnp.max(jnp.abs(a_s - eager.A_sparse @ v))) < 1e-12
+    assert float(jnp.max(jnp.abs(w - eager.Wn @ v))) < 1e-12
+    assert isinstance(eager.levels, np.ndarray) and isinstance(eager.diagonal, np.ndarray)
+    assert np.allclose(eager.diagonal, np.diag(np.asarray(eager.A)))
 
 
 # ---------------------------------------------------------------------------
 # cdd
 # ---------------------------------------------------------------------------
 
-def _cdd_setup(nl=6, nc=2):
+def _cdd_setup(nl=6, nc=2, sigma=0.06):
     op = OP.assemble_operator(nl, nc, order=4, dim=1)
     Ah, D = _scaled(op)
     lev = np.asarray(op.levels)
     coarse = jnp.asarray(lev == lev.min())
     x = np.arange(op.side) / op.side
-    f = jnp.exp(-((jnp.asarray(x) - 0.42) / 0.06) ** 2)
+    f = jnp.exp(-((jnp.asarray(x) - 0.42) / sigma) ** 2)
     b_hat = (op.h * (op.Wn.T @ f)) / D
     return op, Ah, D, coarse, b_hat
 
@@ -293,6 +367,28 @@ def test_cdd_reaches_the_budget_on_a_localised_source_and_is_accurate_at_the_sen
     srow = op.Wn[sidx] / D
     j_full = float(srow @ jnp.linalg.solve(Ah, b_hat))
     assert abs(float(srow @ c) - j_full) / abs(j_full) < 1e-2
+
+
+def test_cdd_reports_its_iteration_count_and_the_bound_is_the_exit_for_a_budget_near_half_the_basis():
+    """``K = 8`` stops on the budget in a few iterations.  ``K = 64`` on the
+    128-point basis (the node's own source, sigma 0.10) stops on
+    ``MAX_OUTER = 30`` short of the budget -- 54 measured, the count not
+    pinned across jaxlib lanes -- and 200 iterations do reach it.  The
+    Doerfler step marks a fixed fraction of the *remaining* residual, so
+    the steps shrink once the source is resolved.  ``cdd_select`` is the
+    same loop without the count."""
+    op, Ah, D, coarse, b_hat = _cdd_setup(sigma=0.10)
+    apply = lambda v: Ah @ v
+    solve = lambda K: (lambda m, r: OP.gather_solve(Ah, m, r, K))
+    mask, c, n8 = CDD.cdd_select_with_iterations(apply, solve(8), b_hat, coarse, 8)
+    assert int(mask.sum()) == 8 and 0 < int(n8) < CDD.MAX_OUTER
+    m2, c2 = CDD.cdd_select(apply, solve(8), b_hat, coarse, 8)
+    assert bool(jnp.array_equal(mask, m2)) and bool(jnp.array_equal(c, c2))
+    stalled, _, n64 = CDD.cdd_select_with_iterations(apply, solve(64), b_hat, coarse, 64)
+    assert int(n64) == CDD.MAX_OUTER == 30
+    assert int(coarse.sum()) < int(stalled.sum()) < 64
+    reached, _, n200 = CDD.cdd_select_with_iterations(apply, solve(64), b_hat, coarse, 64, max_outer=200)
+    assert int(reached.sum()) == 64 and 30 < int(n200) <= 200
 
 
 def test_cdd_never_marks_a_function_whose_residual_is_exactly_zero():

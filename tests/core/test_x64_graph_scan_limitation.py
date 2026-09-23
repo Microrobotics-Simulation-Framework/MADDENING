@@ -17,6 +17,11 @@ These tests fail in **both** directions, which is the point:
   narrowed to float32, or the state seed widened to the canonical dtype),
   :class:`TestTheDtypeAsymmetryThatCausesIt` fails and names which side moved.
 
+The two solver-path surfaces the entry gained on 2026-09-22 are pinned in
+:class:`TestTheSolverPathsUnderX64`: ``implicit_euler_step`` refusing a
+float32 state whatever the params, and ``update(params=)`` against
+``integrate_node(params=)`` disagreeing in dtype but not in value.
+
 The node-dependence MADD-ANO-017 records is pinned here too, and it is not
 what it looks like.  The discriminator is *whether a parameter reaches an
 output field at all*, not how the node computes: ``TableNode.update`` returns
@@ -38,7 +43,11 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+import numpy as np
+
 from maddening.core.graph_manager import GraphManager
+from maddening.core.simulation.implicit import implicit_euler_step
+from maddening.core.simulation.integrators import integrate_node
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.table import TableNode
@@ -420,6 +429,105 @@ class TestTheRecordedWorkarounds:
                 f"float32 -- pre-0.4.0 behaviour, not double precision.  It "
                 f"produced {sorted(_dtypes(out))}.  {_UPDATE_THE_ENTRY}"
             )
+
+
+class TestTheSolverPathsUnderX64:
+    """The entry's second and third surfaces: the same defect one door in.
+
+    Neither goes through ``GraphManager``.  ``implicit_euler_step`` runs its
+    Newton iteration under ``lax.fori_loop`` and its solve is float64 under
+    x64 whatever the state dtype, so a float32 state hits the same carry
+    refusal as a fresh graph scan -- in every release, not only 0.4.0.
+    And ``integrate_node`` promotes only the fields whose right-hand side
+    touches a parameter, where ``update`` promotes them all.
+    """
+
+    _STATE32 = {
+        "position": jnp.asarray(2.0, jnp.float32),
+        "velocity": jnp.asarray(0.3, jnp.float32),
+    }
+
+    @staticmethod
+    def _spring() -> SpringDamperNode:
+        return SpringDamperNode(name="spring", timestep=0.01, stiffness=100.0,
+                                damping=1.0, mass=1.0, rest_length=1.0)
+
+    @pytest.mark.parametrize("params_kind", ["none", "float64", "float32"])
+    def test_implicit_euler_step_refuses_a_float32_state_whatever_the_params(
+        self, params_kind
+    ):
+        node = self._spring()
+        with _x64():
+            p = node.params_pytree()
+            kw = {
+                "none": {},
+                "float64": {"params": p},
+                "float32": {"params": jax.tree.map(
+                    lambda v: jnp.asarray(v, jnp.float32), p)},
+            }[params_kind]
+            try:
+                implicit_euler_step(node.implicit_residual, self._STATE32, {}, 0.01, **kw)
+            except TypeError as exc:
+                message = str(exc).lower()
+            else:
+                pytest.fail(
+                    f"implicit_euler_step now solves a float32 state under "
+                    f"x64 (params={params_kind}).  {_ANOMALY} records that its "
+                    f"Newton fori_loop refuses the carry because the solve is "
+                    f"float64.  If that is fixed, the entry's solver-path "
+                    f"paragraph is stale.  {_UPDATE_THE_ENTRY}"
+                )
+        for token in ("carry", "float32", "float64"):
+            assert token in message, (
+                f"implicit_euler_step failed under x64, but not in the shape "
+                f"{_ANOMALY} records (no {token!r} in the message).  "
+                f"{_UPDATE_THE_ENTRY}\n\n{message}"
+            )
+
+    def test_a_float64_state_solves_which_is_the_recorded_workaround(self):
+        """Workaround (c): promote the state you hand the solver."""
+        node = self._spring()
+        with _x64():
+            state64 = jax.tree.map(lambda v: v.astype(jnp.float64), self._STATE32)
+            out, _ = implicit_euler_step(node.implicit_residual, state64, {}, 0.01)
+            assert _dtypes(out) == {"float64"}, (
+                f"{_ANOMALY}'s workaround (c) no longer gives a float64 solve "
+                f"({sorted(_dtypes(out))}).  {_UPDATE_THE_ENTRY}"
+            )
+
+    def test_update_and_integrate_node_disagree_in_dtype_but_not_in_value(self):
+        """``update`` promotes both spring fields; ``integrate_node(euler)``
+        promotes only the velocity, whose right-hand side reads the
+        parameters.  The values agree to round-off on each path."""
+        node = self._spring()
+        with _x64():
+            p = node.params_pytree()
+            assert _dtypes(p) == {"float64"}
+            via_update = node.update(self._STATE32, {}, 0.01, params=p)
+            via_update_plain = node.update(self._STATE32, {}, 0.01)
+            via_integrate = integrate_node(node, self._STATE32, {}, 0.01,
+                                           method="euler", params=p)
+            via_integrate_plain = integrate_node(node, self._STATE32, {}, 0.01,
+                                                 method="euler")
+            update_dtypes = {k: str(v.dtype) for k, v in via_update.items()}
+            integrate_dtypes = {k: str(v.dtype) for k, v in via_integrate.items()}
+        assert update_dtypes == {"position": "float64", "velocity": "float64"}, (
+            f"{_ANOMALY} records update(params=) promoting every field under "
+            f"x64; got {update_dtypes}.  {_UPDATE_THE_ENTRY}"
+        )
+        assert integrate_dtypes == {"position": "float32", "velocity": "float64"}, (
+            f"{_ANOMALY} records integrate_node(euler, params=) promoting only "
+            f"the velocity of a spring; got {integrate_dtypes}.  If the two "
+            f"paths now agree, the dtype-divergence paragraph is stale.  "
+            f"{_UPDATE_THE_ENTRY}"
+        )
+        for a, b in ((via_update, via_update_plain), (via_integrate, via_integrate_plain)):
+            for field in a:
+                np.testing.assert_allclose(
+                    np.asarray(a[field], np.float64), np.asarray(b[field], np.float64),
+                    rtol=0, atol=1e-6,
+                    err_msg=f"{_ANOMALY} records a dtype divergence, not a value one",
+                )
 
 
 # ---------------------------------------------------------------------------

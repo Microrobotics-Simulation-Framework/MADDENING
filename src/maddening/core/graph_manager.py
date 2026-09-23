@@ -523,19 +523,29 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
 
     def linearisation(xx, row, ts):
-        """``s * G_row(xx)``: the map's JVP at ``xx`` along ``(t_row, c_dot_row)``."""
+        """``G_row(xx)``: the map's JVP at ``xx`` along ``(t_row, c_dot_row)``."""
         _, out = jax.jvp(
             lambda x_, c_: _F_dispatch(step_pure, x_, c_),
             (xx, consts_sg), (ts * s_inv, tangent_for(row)),
         )
-        return s * out
+        return out
 
     # Both points through one batched evaluation, so ``G`` at ``x_k``
-    # and at ``x_k + delta`` are the same computation on two inputs.
+    # and at ``x_k + delta`` are the same computation on two inputs,
+    # and bit-identical wherever the map's JVP does not depend on the
+    # point.  The barrier keeps the two materialised before they are
+    # subtracted, and the weights are applied *after* the difference:
+    # with ``s * G1 - s * G0`` XLA contracts one product into a fused
+    # multiply-add and the difference comes out as that product's
+    # rounding error -- measured 2.9e-10 on an affine map, which the
+    # resolvent then amplified into a bound of 2.5e-4 where the true
+    # error is exactly zero.
     points = jnp.stack([x_sg, x_sg + delta_s * s_inv])
     G = jax.vmap(
         lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows, t_s)
     )(points)
+    G = jax.lax.optimization_barrier(G)
+    secant_s = s * (G[1] - G[0])
 
     def norm(v):
         return jnp.linalg.norm(live * v, axis=-1)
@@ -543,7 +553,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
     distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification)
     per_probe = ift_gradient_error_bound(
-        amp, distance, norm(G[1] - G[0]), norm(delta_s), norm(t_s),
+        amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
     )
     # The worst probe the fixed point responds to.  A responding probe
     # whose bound is NaN (a non-finite secant) poisons the maximum

@@ -194,6 +194,20 @@ mapping = rbf_mapping(np.asarray(fluid_pts, dtype=np.float64),
                       np.asarray(solid_pts, dtype=np.float64))
 ```
 
+The same applies to the *values* of an inline reference that names no
+`"dtype"`. Such a payload is read as `float64`. `numpy.longdouble` arrays
+and the `numpy.longdouble` scalars their `tolist()` returns used to be
+rounded to `float64` without a word. They are now refused, and the error
+says what you can do instead. No reference form keeps the extra
+precision, so the points can be at most `float64` whichever route you take:
+
+- convert them first: `np.asarray(points, dtype=np.float64).tolist()`
+  gives plain Python floats;
+- or add `"dtype": "float64"` to the reference to accept the rounding
+  explicitly;
+- or, for a set too large to inline, save the `float64` array with
+  `numpy.save` and pass `{"asset": "<file>.npy"}`.
+
 This is a limit of the *serialised* form, not a judgement about extended
 precision, and it is not a closed door.  If a real interface ever needs
 it, extended precision can be supported later behind the same API — a

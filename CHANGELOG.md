@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **An inline point reference with no `"dtype"` refuses `np.longdouble` values** instead of rounding them to float64
+  without a word; the error says no reference form keeps extended precision. Add `"dtype": "float64"` to accept the
+  rounding, or convert first (`np.asarray(points, dtype=np.float64).tolist()`); float64 payloads are unaffected
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.
@@ -550,6 +553,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-021, 022, 023 (open)**: a gradient through a state-triggered branch omits the event time (BallNode's bounce:
+  exactly 0 in the drop height); a mapped edge on a grid derived from a trainable parameter keeps its constructor
+  geometry when that parameter is calibrated; the FMU TCP bridge authenticates no caller. Workarounds in the registry
 - **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
   release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`

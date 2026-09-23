@@ -100,6 +100,16 @@ would hide a precision loss the caller did not ask for, which is a
 well-known source of hard-to-trace numerical bugs; the refusal names the
 dtype and the fix (``np.asarray(points, dtype=np.float64)``).
 
+The same holds for the *values* of an inline reference that names no
+``"dtype"``.  Such a payload is read as ``float64``, and
+``np.longdouble(...).tolist()`` yields ``np.longdouble`` scalars rather
+than Python floats, so an extended-precision payload (scalars in a
+list, or an array) with no ``"dtype"`` used to be rounded to
+``float64`` without a word.  It is refused, and the message says that
+no reference form can keep the extra precision and how to go ahead:
+convert to ``float64`` first, add ``"dtype": "float64"`` to accept the
+rounding explicitly, or save a larger set as a ``.npy`` asset.
+
 This is a limit of the serialised form, not a judgement about extended
 precision.  If a real interface ever needs it, it can be added later
 behind the same API — a composite inline representation (the value
@@ -405,6 +415,86 @@ def normalise_point_reference(ref: Any, *, name: str = "points") -> dict:
     )
 
 
+def _is_extended_float(dtype: np.dtype) -> bool:
+    """A real float wider than :data:`_MAX_ELEMENT_BYTES` (``np.longdouble``
+    where it is wider than ``float64``)."""
+    return dtype.kind == "f" and dtype.itemsize > _MAX_ELEMENT_BYTES
+
+
+def _extended_precision_in(raw: Any) -> Optional[np.dtype]:
+    """The first extended-precision float dtype in an inline payload, or ``None``.
+
+    Walks the payload *without converting it*: lists and tuples item by
+    item, NumPy arrays by dtype (an object array element by element) and
+    NumPy scalars by dtype.  ``np.longdouble.tolist()`` yields
+    ``np.longdouble`` scalars, not Python floats, so a payload built that
+    way carries the dtype on every element.
+
+    Bounded by the element limit rather than by the payload: once more
+    than :data:`INLINE_ELEMENT_LIMIT` numbers have been seen, or a single
+    list or array holds more than that, whatever the payload coerces to
+    has more numbers than the limit (or is empty, or ragged) and is
+    refused after coercion anyway, so nothing past that point can be
+    accepted narrowed.
+    """
+    stack = [raw]
+    seen = 0
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            if len(item) > INLINE_ELEMENT_LIMIT:
+                return None
+            stack.extend(item)
+            continue
+        if isinstance(item, (np.ndarray, np.generic)):
+            if _is_extended_float(item.dtype):
+                return item.dtype
+            if item.size > INLINE_ELEMENT_LIMIT:
+                return None
+            if isinstance(item, np.ndarray) and item.dtype.hasobject:
+                stack.extend(item.ravel().tolist())
+                continue
+            seen += item.size
+        else:
+            seen += 1
+        if seen > INLINE_ELEMENT_LIMIT:
+            return None
+    return None
+
+
+def _refuse_implicit_narrowing(raw: Any, name: str) -> None:
+    """Refuse extended-precision inline values that carry no ``"dtype"``.
+
+    Without a ``"dtype"`` an inline payload is read as ``float64``, and
+    ``np.asarray(values, dtype=float64)`` rounds an ``np.longdouble``
+    value without a word.  The coercion itself is deliberately left
+    alone (it is the property-tested boundary for object and string
+    payloads); this runs before it and fires only when the payload holds
+    extended-precision values *and* the reference names no dtype.  An
+    explicit ``"dtype": "float64"`` is the caller accepting the rounding
+    and goes through unchanged.
+    """
+    found = _extended_precision_in(raw)
+    if found is None:
+        return
+    ours, f64 = np.finfo(found), np.finfo(np.float64)
+    raise PointReferenceError(
+        f"{name}: the inline points hold extended-precision values ({found.name}, "
+        f"about {ours.precision} significant digits) and the reference names no "
+        f"'dtype'.  Inline points without a 'dtype' are read as float64 (about "
+        f"{f64.precision} digits), so they would be rounded without a word; they "
+        f"are refused instead.  Extended precision cannot be kept by any point "
+        f"reference: inline, asset and node-field point sets are all limited to "
+        f"{_MAX_ELEMENT_BYTES}-byte elements, so these points can be at most float64 "
+        f"whichever way you pass them.  To go ahead: convert them yourself first, "
+        f"np.asarray(points, dtype=np.float64).tolist() gives plain Python floats; "
+        f"or keep the values and add 'dtype': 'float64' to the reference to accept "
+        f"the rounding explicitly; or, for a set too large to inline (more than "
+        f"{INLINE_POINT_LIMIT} points), numpy.save the float64 array next to the "
+        f"config and pass {{'asset': '<file>.npy'}}."
+    )
+
+
 def _inline_array(ref: dict, name: str) -> np.ndarray:
     """The validated array of an inline reference."""
     raw = ref["inline"]
@@ -415,6 +505,10 @@ def _inline_array(ref: dict, name: str) -> np.ndarray:
             f"{name}: {len(raw)} inline points exceed INLINE_POINT_LIMIT="
             f"{INLINE_POINT_LIMIT}; save them as an asset or reference a node field"
         )
+    if ref.get("dtype") is None:
+        # The default below would narrow an np.longdouble payload to
+        # float64 silently; refuse that before the coercion.
+        _refuse_implicit_narrowing(raw, name)
     dtype_name = ref.get("dtype", "float64")
     try:
         dtype = np.dtype(dtype_name)

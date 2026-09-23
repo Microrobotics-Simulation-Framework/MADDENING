@@ -229,12 +229,26 @@ core = core_fn(params)                       # no host sync at all
 ok = core.finite & ~core.precision_limited & (core.crb[i] < tol)
 ```
 
-Hoist `residual_fn` out of the loop either way.  `fim` caches the traced
-Jacobian on the residual function, the scale, the masked column set and
-the nominal record (the per-column widths `specs` reduces to), so a
-fresh closure per iteration re-traces the whole rollout — which is what made `fim` cost a
-flat ~100 ms per call whatever the problem size, against ~0.3 ms warm
-and ~0.04 ms for `fim_core`.
+**Tracing freezes what the residual reads.**  A residual usually takes a
+few leaves as its argument and reads the rest of the model from outside
+it — `gm.params` for the leaves it does not fit, an attribute of `self`,
+a window of data.  Tracing reads those values once and compiles them in
+as constants.  So `fim` re-traces on every call by default, and every
+call answers for the residual as it stands then; a 200-step
+spring-damper rollout measured ~230 ms per call that way on four pinned
+CPU cores.  `fim(..., reuse_trace=True)` keeps the compiled Jacobian
+across calls with an equal residual function (plus the same scale,
+column set and nominal record) and costs ~1 ms warm — but it is only
+correct for a *pure* residual, one that depends on its argument and
+on nothing that can change between calls.  With it on, a residual that
+reads `gm.params` reports the first call's matrix after those leaves
+change, and a bound method (equal across attribute accesses) reports
+the first call's matrix after its object changes.  Both are silent.
+
+The same is true of `fim_core` under your own `jax.jit`: `core_fn`
+holds what `residual_fn` read when it was first traced.  Pass anything
+that changes through the argument, or build a new `core_fn` when it
+changes.
 
 `FIMCore` carries the same verdicts as `FIMReport` — `rank`, `cond`,
 `crb`, `zero_scaled`, `value_scaled` — plus `finite`, which is what `fim` raises on, and

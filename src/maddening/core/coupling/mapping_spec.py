@@ -21,7 +21,9 @@ A point set is described by reference, not inlined:
     a node's ``static_data[key]`` (a ``StaticArray`` is unwrapped) or,
     failing that, an array-valued constructor parameter
     ``node.params[key]`` — e.g. ``{"node": "rod", "field": "grid_x"}``
-    for a ``HeatNode``;
+    for a ``HeatNode``.  The coordinates are read **once**, when the
+    mapping is built, and the weights are fixed from then on — see
+    *A node reference does not follow a calibrated parameter* below;
 ``{"asset": "<relative path>.npy", "sha256": ...}`` /
 ``{"asset": "<path>.npz", "key": "<k>", "sha256": ...}``
     an external NumPy file, relative to the directory the config / USD
@@ -41,6 +43,44 @@ A point set is described by reference, not inlined:
     numbers in total, finite, of a bool / integer / float dtype; the
     factories inline automatically when no reference is given and the
     set is that small.
+
+A node reference does not follow a calibrated parameter (MADD-ANO-022)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A ``{"node", "field"}`` reference resolves the node's static data at the
+moment the mapping is built, and the weights computed from it are
+snapshotted into ``gm.params["mappings"]`` at compile time.  If that
+static is *derived from a trainable parameter*, calibrating the
+parameter through ``gm.params`` moves the node and leaves the mapping at
+the constructor's geometry.  The in-tree case is the default, uniform
+``HeatNode``: ``grid_x`` is built in ``__init__`` from ``length``, and
+``length`` is trainable, because the node's own step reads the traced
+``length`` and never ``grid_x``.  So ``static_data_deps`` declares
+nothing and ``compile()`` accepts the graph.  A mapped edge on
+``grid_x`` then interpolates from the old grid.  Measured on an 8-cell
+source rod calibrated from ``length`` 1.0 to 1.25 and mapped onto a
+16-cell rod:
+
+* the target moves by about ``4e-4`` where the same graph constructed at
+  1.25 moves it by about ``1.2e-2``;
+* the gradient of the target with respect to ``length`` has the wrong
+  sign (``-6.4e-3`` against ``+2.7e-1``);
+* a fit of ``length`` from the target's data converges to about 0.22
+  instead of 1.25.
+
+Nothing refuses the graph or warns, and the recorded ``sha256`` still
+matches, because the static itself never changed.
+
+Until a fix lands (being scoped for 0.5.0), use one of these:
+
+* declare the parameter non-trainable when a mapped edge references a
+  grid it derives, e.g. ``gm.set_param_spec("rod", "length",
+  ParamSpec(trainable=False))``, so no fit can move it;
+* give the mapping explicit coordinates, as an ``{"asset"}`` or
+  ``{"inline"}`` reference, so the config states that the mapping's
+  geometry is fixed rather than implying that it follows the node;
+* if the geometry must be calibrated, fit it from observations of the
+  node itself (not through the mapped edge), then rebuild the graph at
+  the fitted value so the mapping is rebuilt from the new grid.
 
 Accepted dtypes
 ---------------

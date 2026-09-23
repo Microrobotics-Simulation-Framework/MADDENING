@@ -160,6 +160,15 @@ the `label` hyper-parameter.  Reading `describe()` back with
 | `{"asset": "<path>.npy"}`, `{"asset": "<path>.npz", "key": "<member>"}` | a NumPy file, **relative to the directory the config / stage lives in** (`from_dict(..., base_dir=)`; `load_graph_from_usd` defaults to the stage file's directory).  Absolute paths and `..` are refused; the path is then `resolve()`d and the *resolved* file must still lie under the resolved `base_dir`, so a symlink (to a file or to a directory) that leaves it is refused too.  `key` selects an `.npz` member and is an error on a `.npy`. |
 | `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) points and `INLINE_ELEMENT_LIMIT` (1024) numbers in total, finite, of an accepted dtype (below) |
 
+A node reference is resolved **once**, when the mapping is built. If the
+static it names is derived from a trainable parameter, such as a uniform
+`HeatNode`'s `grid_x`, which is built from `length`, then calibrating
+that parameter through `gm.params` leaves the weights at the
+constructor's geometry. Nothing refuses it or warns. This is
+**MADD-ANO-022**. See
+[Calibrating a parameter that a mapped edge's grid derives from](../../user_guide/parameters.md#calibrating-a-parameter-that-a-mapped-edges-grid-derives-from)
+for what it does to a fit and for the workarounds.
+
 #### Accepted dtypes
 
 Whatever the reference form, a point set must be a bool, integer or float

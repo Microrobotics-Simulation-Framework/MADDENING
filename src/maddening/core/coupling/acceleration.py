@@ -115,21 +115,58 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
        factor of four of overflow can never read as converged.  No
        simulation state lives there on purpose, and one that does has
        already lost every digit of the step it is being asked about.
+
+    **The other end of the range: a scale too small to be a number.**
+    Under the ``"mixed"`` and ``"interface"`` norms the scale is
+    ``rtol * ref``, and for a field whose own magnitude is a perfectly
+    normal float32 but below ``finfo.tiny / rtol`` (about ``1.2e-32``
+    at ``rtol=1e-6``) that product is subnormal.  The CPU backend
+    flushes it to zero, ``scale > 0`` was False, and the field was
+    *inactive* -- the dead band by another route, one the caller never
+    declared: a field at ``1e-33`` was reported ``iterations=1,
+    residual=0.0, converged=True`` while 90% from its fixed point.
+    Failing closed there, as the overflow end does, would be wrong in
+    the other direction: the field holds its full 24 bits and its
+    change is perfectly measurable, it is only the product that is not.
+    So a field above the dead band whose scale is not a normal number
+    is measured on the rescaled pair ``diff * 2**k / (rtol * (ref *
+    2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same quotient
+    -- a power of two scales exactly -- computed where every operand is
+    normal.  A field whose magnitude is *itself* subnormal is below what
+    the dtype resolves, reads as zero on a flush-to-zero backend, and
+    leaves the norm as a field at zero does.  Every other field takes
+    the selected branch of a ``where`` and its value is bit-identical
+    to what it was before either guard existed.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
+    tiny = jnp.finfo(jnp.asarray(scale).dtype).tiny
     # ``scale * tiny`` is exact (``tiny`` is a power of two) unless it
     # underflows, and an underflow means the scale is small, which is
     # the evaluable side.  Non-finite ``ref`` fails ``isfinite``; an
     # ``inf`` scale also fails the product test, so the two agree.
     evaluable = jnp.logical_and(
         jnp.isfinite(ref),
-        scale * jnp.finfo(jnp.asarray(scale).dtype).tiny <= 1.0,
+        scale * tiny <= 1.0,
     )
-    active = jnp.logical_and(ref > atol, scale > 0)
+    # The underflow end: above the caller's dead band and a normal
+    # magnitude, but a scale that is subnormal (or flushed to zero).
+    # ``ref >= tiny`` is False for a NaN ``ref``, so this is finite-only.
+    underflow = jnp.logical_and(
+        jnp.logical_and(ref > atol, ref >= tiny), jnp.logical_not(scale >= tiny),
+    )
+    active = jnp.logical_or(jnp.logical_and(ref > atol, scale > 0), underflow)
     safe = jnp.where(active, scale, jnp.ones_like(scale))
     diff = jnp.abs(new_val - old_val)
     scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
+    # The rescaled quotient for the underflow end.  Both operands pass
+    # through a ``where`` first so the unselected branch never forms an
+    # ``inf`` a gradient could multiply by zero.
+    inv_tiny = 1.0 / tiny
+    small_diff = jnp.where(underflow, diff, jnp.zeros_like(diff))
+    small_ref = jnp.where(underflow, ref, jnp.ones_like(ref))
+    small = (small_diff * inv_tiny) / (rtol * (small_ref * inv_tiny))
+    scaled = jnp.where(underflow, small, scaled)
     # ``where`` with the finite computation in the *selected* branch:
     # an evaluable field's value, and its gradient, are exactly what
     # they were before this guard existed.

@@ -18,7 +18,6 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 from __future__ import annotations
 
 import functools
-import inspect
 import warnings
 from typing import Any, Optional
 
@@ -31,7 +30,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maddening.cloud.multigpu.halo import halo_exchange
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode
+from maddening.core.node import (
+    SimulationNode,
+    _method_accepts_params,
+    _signature_takes_keyword,
+)
 from maddening.core.static_data import StaticArray, coerce_static_data_value
 
 #: Mesh axis :class:`ShardedPointwiseNode` shards over (the 1-D default
@@ -93,20 +96,16 @@ def _check_shard_divisible(
 
 
 def _accepts_params(node: SimulationNode) -> bool:
-    """True when ``node.update`` declares a ``params`` keyword.
+    """True when ``node.update(..., params=x)`` would deliver ``x``.
 
-    Uses the node's own :meth:`SimulationNode.accepts_params` when it has
-    one and falls back to signature inspection for duck-typed nodes, so
+    :func:`~maddening.core.node._method_accepts_params`, the one params
+    rule: the node's own :meth:`SimulationNode.accepts_params` when it has
+    one, the signature (explicit keyword or ``**kwargs``) otherwise, so
     the wrapper answers exactly what the graph would have answered for
-    the unwrapped node.
+    the unwrapped node.  The duck-typed fallback here used to accept only
+    the explicit keyword.
     """
-    probe = getattr(node, "accepts_params", None)
-    if callable(probe):
-        return bool(probe())
-    try:
-        return "params" in inspect.signature(node.update).parameters
-    except (TypeError, ValueError):
-        return False
+    return _method_accepts_params(node, "update")
 
 
 @stability(StabilityLevel.STABLE)
@@ -439,27 +438,22 @@ class ShardedStencilNode(SimulationNode):
         # its signature does not accept `static_padded`, that is a
         # contract violation and we raise here rather than at first
         # trace.
-        sig = inspect.signature(node.update_padded)
-        params = sig.parameters
-        has_var_kw = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        self._inner_accepts_static_padded = _signature_takes_keyword(
+            node.update_padded, "static_padded",
         )
-        self._inner_accepts_static_padded = (
-            "static_padded" in params or has_var_kw
-        )
-        self._inner_accepts_shard_info = (
-            "shard_info" in params or has_var_kw
+        self._inner_accepts_shard_info = _signature_takes_keyword(
+            node.update_padded, "shard_info",
         )
         # Graph parameter contract on the sharded path: an inner
         # ``update_padded(..., params=None)`` receives the node's entry of
         # ``GraphManager.params`` (replicated across shards).
         #
-        # ``or has_var_kw`` for the same reason as the two probes above,
-        # and it matters more here: a ``**kwargs`` node that did not get
-        # ``params`` silently fell back to its constructor constant, so
-        # the injected leaf never entered the trace and d(loss)/d(param)
-        # came back exactly 0.0 with no error anywhere.
-        self._inner_accepts_params = "params" in params or has_var_kw
+        # The one params rule (explicit keyword or ``**kwargs``), asked
+        # through the inner node's own probe.  A ``**kwargs`` node that
+        # did not get ``params`` silently fell back to its constructor
+        # constant, so the injected leaf never entered the trace and
+        # d(loss)/d(param) came back exactly 0.0 with no error anywhere.
+        self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         if self._sharded_static and not self._inner_accepts_static_padded:
             raise ValueError(
                 f"{type(node).__name__} declares sharded static_data "

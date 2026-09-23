@@ -19,7 +19,6 @@ import math
 import os
 import warnings
 from collections import defaultdict
-import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, Sequence, cast
 
@@ -57,7 +56,7 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import SimulationNode, _signature_takes_params
+from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.core.params import (
     ParamSpec,
     check_bounds as _check_bounds,
@@ -119,17 +118,17 @@ class _StepPlan:
 def _correction_accepts_params(node: SimulationNode) -> bool:
     """Does the graph pass ``params=`` to ``compute_interface_correction``?
 
-    The one signature rule, :func:`~maddening.core.node._signature_takes_params`:
+    The one params rule, :func:`~maddening.core.node._method_accepts_params`:
     an explicit ``params`` keyword *or* a ``**kwargs`` that would forward
-    it.  Until 0.4.0 this probe accepted only the explicit keyword, so a
+    it, asked through the node's own ``accepts_params`` probe when it has
+    one.  Until 0.4.0 this probe accepted only the explicit keyword, so a
     ``def compute_interface_correction(self, *args, **kwargs)`` override
     that forwards to ``super()`` was called without ``params`` and
     corrected the interface cells from the constructor's constants while
     ``update`` used the calibrated ones -- and the verification battery,
     which already read the shared rule, disagreed with the graph.
     """
-    fn = getattr(node, "compute_interface_correction", None)
-    return fn is not None and _signature_takes_params(fn)
+    return _method_accepts_params(node, "compute_interface_correction")
 
 
 def _flux_accepts_params(node: SimulationNode) -> bool:
@@ -139,8 +138,7 @@ def _flux_accepts_params(node: SimulationNode) -> bool:
     ``**kwargs``-forwarding flux producer delivered the constructor's
     flux on every flux edge.
     """
-    fn = getattr(node, "compute_boundary_fluxes", None)
-    return fn is not None and _signature_takes_params(fn)
+    return _method_accepts_params(node, "compute_boundary_fluxes")
 
 
 def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
@@ -153,15 +151,16 @@ def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
 
 
 def _update_accepts_params(node: SimulationNode) -> bool:
-    probe = getattr(node, "accepts_params", None)
-    if callable(probe):
-        return bool(probe())
-    # Duck-typed node objects that don't subclass SimulationNode.
-    try:
-        sig = inspect.signature(node.update)
-    except (TypeError, ValueError):
-        return False
-    return "params" in sig.parameters
+    """Does the graph pass ``params=`` to ``update``?
+
+    :func:`~maddening.core.node._method_accepts_params`, like every other
+    params probe.  Its duck-typed fallback used to accept only an
+    explicit ``params`` keyword, so a node object that does not subclass
+    :class:`SimulationNode` and forwards ``**kwargs`` was left out of
+    ``gm.params`` while the verification battery and a wrapped copy of
+    the same node disagreed about it.
+    """
+    return _method_accepts_params(node, "update")
 
 
 def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):

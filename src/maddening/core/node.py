@@ -152,6 +152,26 @@ def _params_empty(params: Any) -> bool:
         return False
 
 
+def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
+    """Would calling ``fn(..., <keyword>=x)`` deliver ``x``?
+
+    True for a signature that names ``keyword`` and for one that forwards
+    ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``).  A signature that
+    cannot be inspected is ``False``: the refusals built on it fail
+    closed.  :func:`_signature_takes_params` is this rule for
+    ``params``; the sharded wrappers read it for ``static_padded`` and
+    ``shard_info`` too, so one spelling means the same thing for every
+    optional keyword a wrapper forwards.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return keyword in sig.parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
 def _signature_takes_params(fn: Any) -> bool:
     """Would calling ``fn(..., params=x)`` deliver ``x``?
 
@@ -159,39 +179,58 @@ def _signature_takes_params(fn: Any) -> bool:
     ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``), because a
     ``def derivatives(self, *args, **kwargs): return
     super().derivatives(*args, **kwargs)`` receives the keyword exactly
-    as an explicit one does.  This is the one signature rule for the
-    params contract: :meth:`SimulationNode.accepts_params`,
-    :func:`_method_accepts_params`, the implicit solver's residual
-    binder and the verification battery's flux probe all read it, and
-    it matches the rule ``ShardedStencilNode`` applies to
-    ``update_padded`` -- two probes that disagreed on the same spelling
-    until 0.4.0 shipped.  A signature that cannot be inspected is
+    as an explicit one does.  A signature that cannot be inspected is
     ``False``: the refusal fails closed.
+
+    This is the *callable* half of the one params rule; the *node* half
+    is :func:`_method_accepts_params`, which asks the node's own
+    :meth:`SimulationNode.accepts_params` first and falls back to this.
+    Every "does this take ``params``" question in the package goes
+    through one of the two, and
+    ``tests/core/test_params_probe_agreement.py`` runs every probe
+    against one matrix of spellings (explicit keyword, ``**kwargs``,
+    ``functools.partial``, a decorator without ``functools.wraps``, a
+    bound method of another object, a callable object, a duck-typed
+    node) and asserts that they agree.  Until 0.4.0 shipped there were
+    three rules: this one; an explicit-keyword-only one in
+    ``ShardedUnstructuredNode`` and in the duck-typed fallbacks of the
+    graph and of ``ShardedPointwiseNode``; and an always-``False`` one
+    for duck-typed nodes in ``verify_node`` and the REST server.
     """
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    return "params" in sig.parameters or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    return _signature_takes_keyword(fn, "params")
 
 
 def _method_accepts_params(node: Any, method: str) -> bool:
-    """``node.accepts_params(method=method)``, tolerating a probe override
-    that predates the ``method`` keyword.
+    """Would ``node.<method>(..., params=x)`` deliver ``x``?  The node half
+    of the one params rule.
 
-    The in-tree wrappers forward ``method``; a third-party subclass that
-    still declares ``accepts_params(self)`` gets the same answer read off
-    the method's own signature, so the integrators' refusal cannot be
+    ``node.accepts_params(method=method)`` when the node has that probe,
+    so a wrapper that answers for the node it wraps (the sharded
+    wrappers, :class:`~maddening.core.simulation.hybrid_node.HybridNode`)
+    is asked rather than read past; :func:`_signature_takes_params` of
+    the method itself otherwise.  "Otherwise" is a duck-typed node object
+    with no probe at all (the graph accepts those), and a third-party
+    subclass whose override still declares ``accepts_params(self)``
+    without the ``method`` keyword: that override is asked the
+    ``"update"`` question it was written for, and any other method is
+    read off its signature, so the integrators' refusal cannot be
     switched off by an old override of the *probe*.
+
+    The graph, the integrators, the implicit solver, the sharded
+    wrappers, ``HybridNode``, the verification battery and the REST
+    server all ask through here; see :func:`_signature_takes_params` for
+    when they did not.
     """
     probe = getattr(node, "accepts_params", None)
     if callable(probe):
         try:
             return bool(probe(method=method))
         except TypeError:
-            pass
+            if method == "update":
+                try:
+                    return bool(probe())
+                except TypeError:
+                    pass
     fn = getattr(node, method, None)
     if fn is None:
         return False

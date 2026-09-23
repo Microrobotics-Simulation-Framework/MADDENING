@@ -42,7 +42,7 @@ import numpy as np
 import numpy.typing as npt
 
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import _method_accepts_params, _signature_takes_params
+from maddening.core.node import _method_accepts_params
 from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -275,12 +275,12 @@ _NO_PARAMS = object()
 
 
 def _produces_fluxes(node) -> bool:
-    from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
-    return type(node).compute_boundary_fluxes is not _Base.compute_boundary_fluxes
+    return _implements(node, "compute_boundary_fluxes")
 
 
 def _flux_accepts_params(node) -> bool:
-    return _signature_takes_params(node.compute_boundary_fluxes)
+    """The graph's question, through the one params rule."""
+    return _method_accepts_params(node, "compute_boundary_fluxes")
 
 
 def _outputs(node, state, bi, dt, params=_NO_PARAMS):
@@ -303,14 +303,30 @@ def _outputs(node, state, bi, dt, params=_NO_PARAMS):
 
 
 def _node_accepts_params(node) -> bool:
-    probe = getattr(node, "accepts_params", None)
-    return bool(probe()) if callable(probe) else False
+    """Does the graph pass ``params=`` to ``node.update``?
+
+    The graph's own rule, :func:`~maddening.core.node._method_accepts_params`.
+    This used to answer ``False`` for any node object without an
+    ``accepts_params`` method, so a duck-typed node with a ``params``
+    keyword -- which the graph injects -- had every params check
+    reported as ``SKIP``, and ``SKIP`` counts as passed.
+    """
+    return _method_accepts_params(node, "update")
 
 
 def _implements(node, method: str) -> bool:
-    """Does ``type(node)`` override ``method`` at all?"""
+    """Does ``node`` have ``method`` other than the base-class default?
+
+    Read off the bound attribute, not the class, so a duck-typed node
+    (no base class to compare against) and a hook installed as an
+    instance attribute (a ``functools.partial``, a callable object) are
+    seen the way the graph sees them.
+    """
     from maddening.core.node import SimulationNode as _Base  # noqa: PLC0415
-    return getattr(type(node), method, None) is not getattr(_Base, method)
+    fn = getattr(node, method, None)
+    if fn is None:
+        return False
+    return getattr(fn, "__func__", fn) is not getattr(_Base, method, None)
 
 
 def _perturbed(value):

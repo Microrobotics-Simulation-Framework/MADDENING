@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
+  fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
+  run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.

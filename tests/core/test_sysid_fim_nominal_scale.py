@@ -554,13 +554,45 @@ class TestASpecsTreeMustMirrorParams:
             runner(fn, params, scale="nominal", specs=bad)
 
     @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
-    def test_a_key_that_matches_no_parameter_is_refused_by_path(self, runner, three):
+    @pytest.mark.parametrize("stray", [
+        pytest.param(ParamSpec(bounds=(0.0, 5.0)), id="width"),
+        pytest.param(ParamSpec(bounds=(2.0, None), transform="log"), id="log_offset"),
+    ])
+    def test_a_key_that_matches_no_parameter_is_refused_by_path(
+            self, runner, three, stray):
         """A misspelt name is exactly the case that must be loud: the
         column it meant to reach would be value-scaled and named, but
-        the entry itself would vanish without a word."""
+        the entry itself would vanish without a word.  Loud whenever the
+        stray spec would have changed a column -- a width, or a ``log``
+        offset from a non-zero lower bound."""
         fn, params, good = three
         with pytest.raises(ValueError, match=r"specs\['p9'\] matches no parameter"):
-            runner(fn, params, scale="nominal", specs={**good, "p9": ParamSpec()})
+            runner(fn, params, scale="nominal", specs={**good, "p9": stray})
+
+    @pytest.mark.parametrize("stray", [
+        pytest.param(ParamSpec(), id="default"),
+        pytest.param(ParamSpec(trainable=False, description="grid geometry"),
+                     id="frozen_no_bounds"),
+        pytest.param(ParamSpec(bounds=(0.0, None), transform="log"), id="log_from_zero"),
+        pytest.param(ParamSpec(bounds=(-3.0, None)), id="one_sided_identity"),
+    ])
+    def test_a_stray_key_that_could_change_no_column_is_accepted(
+            self, three, stray):
+        """``gm.param_specs()`` declares specs for constants that are not
+        leaves of ``gm.params`` (a uniform ``HeatNode``'s
+        ``grid_points=None``; any constant spelled as a Python ``int``),
+        so refusing every stray key refused the documented
+        ``specs=gm.param_specs()`` for those graphs.  A stray spec whose
+        column record is the default's cannot have changed the report
+        whichever leaf it was meant for, so it is accepted -- and the
+        report is bit-identical to the one without it, which is the
+        whole licence for accepting it."""
+        fn, params, good = three
+        with_stray = fim(fn, params, scale="nominal", specs={**good, "p9": stray})
+        without = fim(fn, params, scale="nominal", specs=good)
+        _identical(with_stray, without)
+        assert with_stray.value_scaled == without.value_scaled
+        assert with_stray.zero_scaled == without.zero_scaled
 
     def test_the_graphs_full_specs_against_a_sub_tree_are_refused(self):
         """The shape this file's own fixture avoids by filtering:
@@ -586,15 +618,21 @@ class TestASpecsTreeMustMirrorParams:
 
         with pytest.raises(ValueError, match=r"specs\['nodes'\] matches no parameter"):
             fim(fn, sub, scale="nominal", specs=specs)
-        # The node's whole spec dict is a superset of the sub-tree, and a
-        # superset is refused too: the entries that reach nothing are
-        # named, and the fix is the one-line filter below.
-        with pytest.raises(ValueError, match="matches no parameter"):
-            fim(fn, sub, scale="nominal", specs=specs["nodes"]["s"])
         right = fim(fn, sub, scale="nominal",
                     specs={k: specs["nodes"]["s"][k] for k in sub})
         assert right.rank == 2
         assert right.value_scaled == ("['stiffness']",)
+        # The node's whole spec dict is a superset of the sub-tree.  Its
+        # unreached entries -- damping, mass, rest_length,
+        # initial_position -- are one-sided or unbounded, so none of them
+        # could change a column and the superset gives exactly the
+        # filtered report.  Give one of them a width and it could, and
+        # the superset is refused by the path of that entry.
+        superset = fim(fn, sub, scale="nominal", specs=specs["nodes"]["s"])
+        _identical(superset, right)
+        gm.set_param_spec("s", "mass", ParamSpec(bounds=(0.5, 2.0)))
+        with pytest.raises(ValueError, match=r"specs\['mass'\] matches no parameter"):
+            fim(fn, sub, scale="nominal", specs=gm.param_specs()["nodes"]["s"])
         # And the documented full-tree call is untouched, ``mappings: {}``
         # mirroring ``mappings: {}`` included.
         whole = fim(lambda p: fn(p["nodes"]["s"]), gm.params,
@@ -633,7 +671,8 @@ class TestASpecsTreeMustMirrorParams:
             raise AssertionError("residual_fn was traced")
 
         with pytest.raises(ValueError, match="matches no parameter"):
-            fim(never, params, scale="nominal", specs={**good, "typo": ParamSpec()})
+            fim(never, params, scale="nominal",
+                specs={**good, "typo": ParamSpec(bounds=(0.0, 1.0))})
 
     def test_incomplete_and_empty_specs_remain_the_documented_default(self, three):
         """Refusing what mirrors nothing must not refuse what is merely
@@ -643,6 +682,62 @@ class TestASpecsTreeMustMirrorParams:
         assert partial.value_scaled == ("['p1']", "['p2']")
         empty = fim(fn, params, scale="nominal", specs={})
         assert empty.value_scaled == ("['p0']", "['p1']", "['p2']")
+
+
+class TestTheGraphsOwnSpecsAreAccepted:
+    """``specs=gm.param_specs()`` is the documented spelling, and it was
+    refused for two ordinary kinds of graph: ``param_specs()`` declares a
+    spec for every constant a node knows, ``params_pytree()`` leaves out
+    the structural ones, and the strict mirror check called every such
+    entry a misspelt key.  Those entries have no width, so they could
+    not change a column; they are accepted now, and the report must be
+    exactly the one the pruned specs give."""
+
+    @staticmethod
+    def _pruned(specs, params):
+        return {sec: {owner: {k: v for k, v in entries.items()
+                              if k in params[sec].get(owner, {})}
+                      for owner, entries in specs[sec].items()}
+                for sec in specs}
+
+    def _assert_accepted_as_pruned(self, gm, residual):
+        specs = gm.param_specs()
+        extra = set(specs["nodes"]["n"]) - set(gm.params["nodes"]["n"])
+        assert extra, "fixture no longer has a declared-but-absent constant"
+        whole = fim(residual, gm.params, scale="nominal", specs=specs)
+        pruned = fim(residual, gm.params, scale="nominal",
+                     specs=self._pruned(specs, gm.params))
+        _identical(whole, pruned)
+        assert whole.value_scaled == pruned.value_scaled
+
+    def test_a_uniform_heat_node_graph(self):
+        """``grid_points=None`` on a uniform grid: declared, not a leaf."""
+        from maddening.nodes.heat import HeatNode
+        gm = GraphManager()
+        gm.add_node(HeatNode("n", 1e-4, n_cells=4))
+        gm.compile()
+
+        def residual(p):
+            h = p["nodes"]["n"]
+            return jnp.stack([h["thermal_diffusivity"] * 1e3, h["length"]])
+
+        self._assert_accepted_as_pruned(gm, residual)
+
+    def test_a_node_built_with_an_int_constant(self):
+        """``stiffness=100`` is structural to ``params_pytree()`` (that it
+        drops out of ``gm.params`` at all is a separate defect); its spec
+        ``(0, None), "log"`` has no width, so it cannot change a column."""
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("n", 0.01, stiffness=100, damping=1.0,
+                                     mass=2.0, rest_length=2.0,
+                                     initial_position=0))
+        gm.compile()
+
+        def residual(p):
+            s = p["nodes"]["n"]
+            return jnp.stack([s["damping"], s["mass"] * 2.0, s["rest_length"]])
+
+        self._assert_accepted_as_pruned(gm, residual)
 
 
 class TestAListValuedLeafIsReachedByItsSpec:

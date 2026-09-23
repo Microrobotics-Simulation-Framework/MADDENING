@@ -29,7 +29,9 @@ from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import (
+    DEFAULT_SPEC,
     ParamSpec,
+    _spec_for,
     check_bounds,
     constrain,
     trainable_mask,
@@ -255,12 +257,20 @@ def test_check_bounds_refuses_an_out_of_range_list_leaf():
     check_bounds({"v": (jnp.float32(0.0), jnp.float32(0.5))}, _LIST_SPEC)
 
 
-def test_a_spec_above_a_dict_level_still_means_the_default_for_the_maps():
-    """``_spec_for`` stays lenient for the tree maps: a ``ParamSpec``
-    placed above a *dict* level covers nothing (only sequence levels
-    are covered), so the leaves below get the default spec -- the
-    documented "missing entry" outcome, not an error.  ``fim`` is the
-    caller that refuses this shape, on top of the same walk."""
-    params = {"outer": {"a": jnp.float32(0.5)}}
-    specs = {"outer": ParamSpec(trainable=False)}
-    assert trainable_mask(params, specs) == {"outer": {"a": True}}
+def test_a_spec_above_a_dict_level_is_refused_by_the_maps():
+    """A ``ParamSpec`` placed above a *dict* level covers nothing (only
+    sequence levels are covered).  The tree maps used to read that as
+    "missing entry" and give the leaves below the default spec, which
+    for ``check_bounds`` -- a safety check -- meant passing a value its
+    author had bounded, and for ``trainable_mask`` marking a leaf its
+    author had frozen.  They share ``fim``'s walk now and refuse it by
+    key path.  ``_spec_for``, the per-path reader, stays lenient; the
+    maps no longer go through it alone."""
+    params = {"outer": {"a": jnp.float32(7.0)}}
+    specs = {"outer": ParamSpec(trainable=False, bounds=(0.0, 1.0))}
+    refusal = r"specs\['outer'\] is a ParamSpec but params\['outer'\] is a dict"
+    for tree_map in (trainable_mask, unconstrain, constrain, check_bounds):
+        with pytest.raises(ValueError, match=refusal):
+            tree_map(params, specs)
+    assert _spec_for(specs, jax.tree_util.tree_flatten_with_path(params)[0][0][0]) \
+        is DEFAULT_SPEC

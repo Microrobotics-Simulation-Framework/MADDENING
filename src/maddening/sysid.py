@@ -52,12 +52,17 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-# ``_spec_for`` is the one place that resolves a params path to its
-# ParamSpec (the same walk ``trainable_mask`` / ``constrain`` use);
-# duplicating it here would be a second definition of "which spec
-# governs this leaf".  ``_validate_specs_mirror`` is its strict
-# companion: it refuses a ``specs`` tree that reaches nothing.
-from maddening.core.params import _spec_for, _validate_specs_mirror
+# ``_resolve_specs`` is the one walk that decides which ParamSpec governs
+# each params leaf -- the walk ``trainable_mask`` / ``constrain`` /
+# ``check_bounds`` use -- and ``_validate_specs_mirror`` is the same walk
+# refusing, in addition, an entry that reaches no leaf.  Duplicating
+# either here would be a second definition of "which spec governs this
+# leaf", which is how a namedtuple level once resolved two ways.
+from maddening.core.params import (
+    DEFAULT_SPEC,
+    _resolve_specs,
+    _validate_specs_mirror,
+)
 from maddening.warnings import PrecisionLimitWarning
 
 _META_KEY = "_meta"
@@ -625,10 +630,9 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
         return gm.trainable_mask(params)
     entries = jax.tree_util.tree_flatten_with_path(params)[0]
     flags = _mask_flags(params, mask)
-    specs = gm.param_specs()
+    per_leaf = _resolve_specs(params, gm.param_specs())
     frozen = []
-    for (path, _), flag in zip(entries, flags):
-        spec = _spec_for(specs, path)
+    for (path, _), flag, spec in zip(entries, flags, per_leaf):
         if bool(flag) and not spec.trainable:
             frozen.append((path, spec))
     if frozen:
@@ -1258,6 +1262,39 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
 _SCALES = ("relative", "nominal", None)
 
 
+def _nominal_entry(spec) -> tuple[Optional[float], float]:
+    """``(width, offset)`` -- the column record ``scale="nominal"`` gives a
+    leaf governed by ``spec``: the width ``hi - lo`` of two finite bounds,
+    else no width and the offset the value is measured from (a ``"log"``
+    spec's lower bound, the transform's own gain ``dp/du = p - lo``; ``0``
+    otherwise).  The policy table in :func:`fim`, as code, in one place.
+    """
+    lo, hi = spec.bounds
+    if lo is not None and hi is not None:
+        return float(hi) - float(lo), 0.0
+    if spec.transform == "log":
+        return None, 0.0 if lo is None else float(lo)
+    return None, 0.0
+
+
+def _changes_no_column(spec) -> bool:
+    """Whether ``spec`` gives a column exactly the record the default spec
+    gives it -- so that a ``specs`` entry holding it cannot have changed a
+    nominal report, whichever leaf it was meant for.
+
+    This is what lets a key that matches no parameter through
+    :func:`_resolve_nominal` when, and only when, it is harmless:
+    ``gm.param_specs()`` declares a spec for every constant a node knows,
+    including those ``params_pytree()`` leaves out (a uniform
+    ``HeatNode``'s ``grid_points=None``, a constant given as a Python
+    ``int``), and refusing those refused the documented
+    ``specs=gm.param_specs()`` for every such graph.  A misspelt key that
+    carries a width or a ``"log"`` offset is still refused, because
+    there the report would differ.
+    """
+    return _nominal_entry(spec) == _nominal_entry(DEFAULT_SPEC)
+
+
 def _resolve_nominal(params, specs, idx, scale):
     """The static per-column record ``scale="nominal"`` multiplies by,
     or ``None`` under any other scale.
@@ -1268,8 +1305,9 @@ def _resolve_nominal(params, specs, idx, scale):
     the column is scaled by ``theta - offset`` -- ``offset`` being the
     lower bound of a ``transform="log"`` spec (the transform's own gain
     ``dp/du = p - lo``) and ``0.0`` otherwise, i.e. plain relative
-    scaling.  The policy :func:`fim` tabulates lives here and in
-    :func:`_nominal_column_vector` and nowhere else.
+    scaling.  The policy :func:`fim` tabulates lives in
+    :func:`_nominal_entry` and :func:`_nominal_column_vector` and
+    nowhere else.
 
     Everything here is host Python over ``specs`` and the *structure*
     of ``params``; no leaf value is read, so it costs no transfer and
@@ -1284,11 +1322,15 @@ def _resolve_nominal(params, specs, idx, scale):
     produces a report that names every column in ``value_scaled``.
     The same principle refuses a ``specs`` that does not mirror
     ``params`` (:func:`~maddening.core.params._validate_specs_mirror`):
-    ``_spec_for`` answers the default spec for every leaf it cannot
-    reach, so a mis-nested tree, a ``ParamSpec.to_dict()`` entry, a
-    misspelt key or a non-dict ``specs`` would otherwise yield a report
-    bit-identical to ``scale="relative"`` and indistinguishable from
-    the honest ``specs={}``.
+    a mis-nested tree, a ``ParamSpec.to_dict()`` entry, a misspelt key
+    or a non-dict ``specs`` would otherwise yield a report bit-identical
+    to ``scale="relative"`` and indistinguishable from the honest
+    ``specs={}``.  One exemption, by :func:`_changes_no_column`: a key
+    that matches no parameter is accepted when its spec would give any
+    column the default record, so ``gm.param_specs()`` -- which declares
+    specs for constants ``params_pytree()`` leaves out -- is accepted
+    for the graph it came from while a misspelt key carrying a width is
+    not.
     """
     if scale != "nominal":
         if specs is not None:
@@ -1304,20 +1346,11 @@ def _resolve_nominal(params, specs, idx, scale):
             "tree, or a dict of ParamSpec mirroring params. Pass {} to say "
             "explicitly that no leaf has a declared width; every column is "
             "then value-scaled and FIMReport.value_scaled names them all.")
-    _validate_specs_mirror(params, specs)
+    leaf_specs = _validate_specs_mirror(
+        params, specs, unmatched_ok=_changes_no_column)
     names = _param_names(params)
-    per_leaf: list[tuple[Optional[float], float]] = []
-    sizes: list[int] = []
-    for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
-        spec = _spec_for(specs, path)
-        lo, hi = spec.bounds
-        if lo is not None and hi is not None:
-            per_leaf.append((float(hi) - float(lo), 0.0))
-        elif spec.transform == "log":
-            per_leaf.append((None, 0.0 if lo is None else float(lo)))
-        else:
-            per_leaf.append((None, 0.0))
-        sizes.append(_leaf_size(leaf))
+    per_leaf = [_nominal_entry(spec) for spec in leaf_specs]
+    sizes = [_leaf_size(leaf) for leaf in jax.tree.leaves(params)]
     cols = [entry for entry, n in zip(per_leaf, sizes) for _ in range(n)]
     if idx is not None:
         cols = [cols[int(i)] for i in idx]

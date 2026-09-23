@@ -200,20 +200,35 @@ from the value, and a value-scaled zero still appears in `zero_scaled`.
 Nothing falls back to an absolute `1.0`, which would put units back into
 `cond` unannounced.  The `fim` docstring tabulates the policy per spec.
 
-`specs` must mirror `params`: a nested dict for every dict level, a
-`ParamSpec` at each leaf (one spec covers a list/tuple of leaves, or
-give a list of specs by position).  A key that matches no parameter, a
-dict where a leaf needs a `ParamSpec` (`ParamSpec.to_dict()` output), a
-`ParamSpec` above a dict level, or a `specs` that is not a dict is a
-`ValueError` naming the key path — a spec that reaches nothing would
-otherwise be `scale="relative"` under a `"nominal"` label,
-indistinguishable from the honest `specs={}`.  So when you slice
-`params` to a sub-tree, slice the specs the same way
-(`{k: gm.param_specs()["nodes"]["spring"][k] for k in sub}`): the
-node's whole spec dict is a superset and its unreached entries are
-refused, not ignored.  A leaf *without* an entry still gets the default
-spec and is named in `value_scaled`; `{}` remains the explicit "no leaf
-has a declared width".
+`specs` must mirror `params`: a nested dict for every dict level — and
+for every namedtuple or dataclass level, keyed by field name, since
+that is how JAX addresses a field — a `ParamSpec` at each leaf, and for
+a list/tuple level either a list of specs by position or one `ParamSpec`
+covering every position.  A dict where a leaf needs a `ParamSpec`
+(`ParamSpec.to_dict()` output), a `ParamSpec` above a dict or record
+level, a list of specs for a namedtuple, or a `specs` that is not a dict
+is a `ValueError` naming the key path, and not only in `fim`:
+`trainable_mask`, `unconstrain`, `constrain` and `check_bounds` read
+`specs` through the same walk and refuse the same entries, where they
+used to hand the leaf the default (trainable, unbounded) spec.
+
+A key that matches *no* parameter is where the two differ.  The tree
+maps ignore it, because `gm.param_specs()` declares specs for constants
+that are not leaves of `gm.params` — a uniform `HeatNode`'s
+`grid_points=None`, any constant spelled as a Python `int` — and
+`gm.check_params` hands them exactly that tree; a misspelt key is
+therefore not caught there.  `fim(scale="nominal")` refuses one whenever
+it could have changed the report: a stray spec carrying a finite width
+or a `"log"` offset from a non-zero lower bound is a `ValueError`, while
+a stray spec whose column record is the default's (unbounded,
+one-sided, `(0, None)` under `"log"`) is accepted, because the report
+is bit-identical with or without it.  That is what lets
+`specs=gm.param_specs()` through for the graph it came from, and it is
+also why slicing `params` to a sub-tree usually needs no matching slice
+of the specs: the node's whole spec dict works unless an entry the
+sub-tree does not reach carries a width.  A leaf *without* an entry
+still gets the default spec and is named in `value_scaled`; `{}` remains
+the explicit "no leaf has a declared width".
 
 ### Asking the same question inside a loop
 

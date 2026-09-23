@@ -65,13 +65,20 @@ default is a silent break, and the policy rates that worse than a failure.
 
 ## What this round changed
 
-| | before | after |
+| | before | after this round |
 |---|---|---|
 | surfaces in the report | 107 | 141 |
 | `stable` | 17 | **17** |
 | `evolving` | 74 | 80 |
 | `experimental` | 10 | 38 |
 | `deprecated` | 6 | 6 |
+
+The right-hand column is the report as this round left it, not as it ships.
+Surfaces that landed later in the cycle were tagged as they landed, so the
+report has grown since; [`stability_report.md`](stability_report.md),
+generated from the tree, is the current list and its per-level counts, and
+they are not copied here to go stale.  The `stable` set is the one number that cannot drift unannounced:
+`scripts/check_stable_signatures.py` fails on any change to it.
 
 **Nothing was promoted to `stable`.** That is the round's main judgement and
 §"Not promoted" gives the reason for each candidate.
@@ -116,7 +123,7 @@ same way: it lives in `core/compliance/metadata.py`, which defines
 
 ### The `[verify]` harnesses (→ `experimental`, 28 surfaces)
 
-`maddening.testing` is new in 0.4.0, has a 31-name `__all__` in `mms.py`
+`maddening.testing` is new in 0.4.0, has a 30-name `__all__` in `mms.py`
 alone, is documented in `node_authoring.md`, `testing_standards.md`,
 `verification.md` and `adaptive_node.md`, and is installed by its own extra.
 It carried **zero** `@stability` tags, and nothing imports it on the way to

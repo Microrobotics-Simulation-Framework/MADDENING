@@ -63,6 +63,11 @@ def citations_gate():
 
 
 @pytest.fixture(scope="module")
+def anomalies_gate():
+    return _load("check_anomalies")
+
+
+@pytest.fixture(scope="module")
 def heat_stability_gate():
     return _load("check_heat_stability")
 
@@ -738,6 +743,7 @@ class TestCitationTemplateAllowlist:
 # nothing, so a fixture without one is no longer a *valid* registry.
 _MINIMAL_ANOMALY = """\
 schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
 generated_date: "2026-03-12"
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -747,12 +753,14 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    affected_versions: "{versions}"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
 """
 
 _ANOMALY_WITHOUT_REFERENCES = """\
 schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
 generated_date: "2026-03-12"
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -762,10 +770,33 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "open"
+    affected_versions: ">=0.1.0"
 """
+
+
+def _range_for(status):
+    """The ``affected_versions`` a fixture entry of ``status`` must carry.
+
+    The gate compares every range with the registry's ``maddening_version``
+    (0.4.0.dev0 in these fixtures): a ``resolved`` entry's range must leave
+    it out, every other status's range must admit it.
+    """
+    return ">=0.1.0, <0.4.0" if status == "resolved" else ">=0.1.0"
+
+
+def _minimal_anomaly(status):
+    return _MINIMAL_ANOMALY.format(status=status, versions=_range_for(status))
+
+
+def _resolved_with_evidence(status):
+    return _RESOLVED_WITH_EVIDENCE.format(
+        status=status, versions=_range_for(status)
+    )
+
 
 _EMPTY_REGISTRY = """\
 schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
 generated_date: "2026-03-12"
 anomalies: []
 """
@@ -774,14 +805,14 @@ anomalies: []
 class TestAnomalyGate:
     def test_an_unrecognised_resolution_status_exits_non_zero(self, tmp_path):
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="probably fine tbh"))
+        path.write_text(_minimal_anomaly(status="probably fine tbh"))
         result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
         assert result.returncode == 1
         assert "resolution_status" in result.stderr
 
     def test_a_valid_registry_exits_zero(self, tmp_path):
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+        path.write_text(_minimal_anomaly(status="open"))
         result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -792,6 +823,7 @@ class TestAnomalyGate:
 
 _RESOLVED_WITH_EVIDENCE = """\
 schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
 generated_date: "2026-03-12"
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -801,6 +833,7 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    affected_versions: "{versions}"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     verification:
@@ -809,6 +842,7 @@ anomalies:
 
 _TWO_ANOMALIES_WITH_A_GAP = """\
 schema_version: "1.0"
+maddening_version: "0.4.0.dev0"
 generated_date: "2026-03-12"
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -818,6 +852,7 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "open"
+    affected_versions: ">=0.1.0"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
   - anomaly_id: "MADD-ANO-003"
@@ -827,6 +862,7 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "open"
+    affected_versions: ">=0.1.0"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
 """
@@ -846,7 +882,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
         self, tmp_path, status
     ):
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status=status))
+        path.write_text(_minimal_anomaly(status=status))
         result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
         assert result.returncode == 1, result.stdout
         assert "MADD-ANO-001" in result.stderr
@@ -854,7 +890,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
 
     def test_the_rule_survives_no_resolve(self, tmp_path):
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="resolved"))
+        path.write_text(_minimal_anomaly(status="resolved"))
         result = _run("check_anomalies", str(path), "--repo-root",
                       str(REPO_ROOT), "--no-resolve")
         assert result.returncode == 1, result.stdout
@@ -863,7 +899,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
     @pytest.mark.parametrize("status", ["resolved", "partially_resolved"])
     def test_a_closed_entry_that_cites_its_test_passes(self, tmp_path, status):
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_RESOLVED_WITH_EVIDENCE.format(status=status))
+        path.write_text(_resolved_with_evidence(status=status))
         result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -871,7 +907,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
         """The rule is about closed entries; ``open`` with only
         ``affected_components`` is the shape MADD-ANO-002 ships in."""
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+        path.write_text(_minimal_anomaly(status="open"))
         result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
         assert result.returncode == 0, result.stdout + result.stderr
 
@@ -964,7 +1000,7 @@ class TestAnomalyGateVerifiesSomething:
         """
         gate = _load("check_anomalies")
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="open"))
+        path.write_text(_minimal_anomaly(status="open"))
 
         def every_reference_unavailable(
             _path, *, prefix="", repo_root=None,
@@ -989,7 +1025,7 @@ class TestAnomalyGateVerifiesSomething:
         """The other direction: the guard fires on zero, not on any."""
         gate = _load("check_anomalies")
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_MINIMAL_ANOMALY.format(status="open").replace(
+        path.write_text(_minimal_anomaly(status="open").replace(
             '      - "maddening.nodes.heat.HeatNode"\n',
             '      - "maddening.nodes.heat.HeatNode"\n'
             '      - "maddening.core.graph_manager.GraphManager"\n',
@@ -1019,6 +1055,290 @@ class TestAnomalyGateVerifiesSomething:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "NOT resolved" in result.stdout
         assert "verified" not in result.stdout
+
+
+def _shipped_registry_with(tmp_path, mutate):
+    """A copy of the shipped registry with one seeded fault, and its path."""
+    import yaml
+
+    registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+    data = yaml.safe_load(registry.read_text())
+    mutate(data)
+    path = tmp_path / "known_anomalies.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    return path
+
+
+def _set_range(aid, value):
+    """A mutation that sets one entry's ``affected_versions`` (or drops it)."""
+    def mutate(data):
+        entry = next(a for a in data["anomalies"] if a["anomaly_id"] == aid)
+        if value is None:
+            entry.pop("affected_versions", None)
+        else:
+            entry["affected_versions"] = value
+    return mutate
+
+
+def _status_of(aid):
+    import yaml
+
+    registry = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+    data = yaml.safe_load(registry.read_text())
+    return next(a for a in data["anomalies"]
+                if a["anomaly_id"] == aid)["resolution_status"]
+
+
+class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
+    """``affected_versions`` is compared with ``maddening_version`` (PEP 440).
+
+    Before this, the SOUP generator's only rule was
+    ``affected.startswith(">=")`` and this gate never read the field, so
+    ``">=0.1.0, <0.4.0"`` on a ``partially_resolved`` entry -- the shape
+    MADD-ANO-016 shipped in, asserting 0.4.0 is unaffected -- and
+    ``"banana"`` on a ``resolved`` one both passed.  Each case seeds one
+    fault into a copy of the shipped registry and runs the gate as CI does
+    (``--no-resolve`` where resolution is beside the point; the rule is
+    structural and must not depend on it).
+    """
+
+    @staticmethod
+    def _gate(path, *extra):
+        return _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                    "--repo-root", str(REPO_ROOT), *extra)
+
+    @pytest.mark.parametrize("aid, closed", [
+        ("MADD-ANO-002", ">=0.1.0, <0.4.0"),
+        ("MADD-ANO-016", ">=0.1.0, <0.4.0"),
+        ("MADD-ANO-005", ">=0.1.0, <0.4.0.dev0"),
+    ])
+    def test_a_reachable_entry_whose_range_leaves_this_version_out_fails(
+        self, tmp_path, aid, closed
+    ):
+        assert _status_of(aid) in ("open", "partially_resolved")
+        path = _shipped_registry_with(tmp_path, _set_range(aid, closed))
+        result = self._gate(path, "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert aid in result.stderr and "does not admit" in result.stderr
+
+    @pytest.mark.parametrize("aid", ["MADD-ANO-006", "MADD-ANO-007"])
+    def test_a_resolved_entry_whose_range_admits_this_version_fails(
+        self, tmp_path, aid
+    ):
+        """MADD-ANO-006 shipped ``resolved`` in 0.4.0 with ``>=0.1.0``."""
+        assert _status_of(aid) == "resolved"
+        path = _shipped_registry_with(tmp_path, _set_range(aid, ">=0.1.0"))
+        result = self._gate(path, "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert aid in result.stderr and "admits 0.4.0.dev0" in result.stderr
+
+    @pytest.mark.parametrize("bad", [
+        "banana",
+        "0.2.0, 0.2.1, 0.3.0, 0.3.1",   # MADD-ANO-004's old explicit list
+        "",                              # parses as "every version"
+        "<=0.3.1",                       # MADD-ANO-001's old spelling
+        "<0.4.0",                        # no stated first version
+        ">=0.4.0.dev0, <0.4.0",          # admits nothing at all
+        "~=0.1",
+        ">=0.1.0, >=0.2.0, <0.4.0",
+        ">=0.1.0, <=0.3.1",              # right shape, wrong operator
+        ">=0.1.0, !=0.2.0, <0.4.0",
+    ])
+    def test_a_range_outside_the_convention_fails_naming_the_entry(
+        self, tmp_path, bad
+    ):
+        path = _shipped_registry_with(tmp_path, _set_range("MADD-ANO-007", bad))
+        result = self._gate(path, "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-007" in result.stderr
+        assert "affected_versions" in result.stderr
+
+    def test_a_missing_range_fails(self, tmp_path):
+        path = _shipped_registry_with(tmp_path, _set_range("MADD-ANO-011", None))
+        result = self._gate(path, "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-011: affected_versions is None" in result.stderr
+
+    def test_a_registry_without_its_version_fails(self, tmp_path):
+        path = _shipped_registry_with(
+            tmp_path, lambda data: data.pop("maddening_version"))
+        result = self._gate(path, "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "no maddening_version" in result.stderr
+
+    def test_the_shipped_defect_fails_the_full_gate_too(self, tmp_path):
+        """MADD-ANO-016 as it shipped, through the run CI actually does."""
+        path = _shipped_registry_with(
+            tmp_path, _set_range("MADD-ANO-016", ">=0.1.0, <0.4.0"))
+        result = self._gate(path)
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-016" in result.stderr
+
+
+class TestTheVersionRangeRule:
+    """``version_range_errors`` directly: the PEP 440 edges the convention
+    is written around, which the gate runs above only exercise at one
+    version."""
+
+    @staticmethod
+    def _registry(version, *entries):
+        return {"maddening_version": version, "anomalies": [
+            {"anomaly_id": f"MADD-ANO-{i:03d}", "resolution_status": status,
+             "affected_versions": rng, **extra}
+            for i, (status, rng, extra) in enumerate(entries, start=1)
+        ]}
+
+    @pytest.mark.parametrize("version", ["0.4.0.dev0", "0.4.0rc1", "0.4.0"])
+    def test_a_cycle_introduced_defect_is_admitted_from_its_first_dev_build(
+        self, anomalies_gate, version
+    ):
+        """``>=0.4.0.dev0`` admits every 0.4.0 build; ``>=0.4.0`` does not."""
+        good = self._registry(version, ("open", ">=0.4.0.dev0", {}))
+        assert anomalies_gate.version_range_errors(good) == []
+        if version != "0.4.0":
+            bad = self._registry(version, ("open", ">=0.4.0", {}))
+            (message,) = anomalies_gate.version_range_errors(bad)
+            assert "'>=0.4.0.dev0'" in message
+
+    @pytest.mark.parametrize("version", ["0.4.0.dev0", "0.4.0", "0.4.1"])
+    def test_a_range_closed_at_the_fix_leaves_out_its_dev_builds(
+        self, anomalies_gate, version
+    ):
+        """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases."""
+        registry = self._registry(
+            version, ("resolved", ">=0.1.0, <0.4.0",
+                      {"resolution_version": "0.4.0"}))
+        assert anomalies_gate.version_range_errors(registry) == []
+
+    def test_a_resolved_range_that_admits_its_resolution_version_fails(self, anomalies_gate):
+        registry = self._registry(
+            "0.4.0.dev0", ("resolved", ">=0.1.0, <0.5.0",
+                           {"resolution_version": "0.4.0"}))
+        errors = anomalies_gate.version_range_errors(registry)
+        assert any("resolution_version is 0.4.0" in e for e in errors), errors
+
+    def test_a_resolved_range_read_by_an_older_registry_is_reachable(self, anomalies_gate):
+        """The same entry, on a registry at 0.3.1, says 0.3.1 is affected."""
+        registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0", {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert "admits 0.3.1" in message
+
+    def test_none_is_the_empty_set(self, anomalies_gate):
+        ok = self._registry("0.4.0.dev0", ("resolved", "none", {}))
+        assert anomalies_gate.version_range_errors(ok) == []
+        for status in ("open", "partially_resolved", "wont_fix", "fixed?"):
+            bad = self._registry("0.4.0.dev0", (status, "none", {}))
+            (message,) = anomalies_gate.version_range_errors(bad)
+            assert "MADD-ANO-001" in message and "does not admit" in message
+
+    def test_a_duplicate_is_parsed_but_not_compared(self, anomalies_gate):
+        ok = self._registry("0.4.0.dev0", ("duplicate", ">=0.1.0, <0.2.0", {}))
+        assert anomalies_gate.version_range_errors(ok) == []
+        bad = self._registry("0.4.0.dev0", ("duplicate", "banana", {}))
+        assert anomalies_gate.version_range_errors(bad)
+
+    @pytest.mark.parametrize("rng, op", [
+        (">=0.1.0, <=0.3.1", "'<='"),
+        (">=0.1.0, !=0.2.0, <0.4.0", "'!='"),
+        (">=0.1.0, <0.4.0, ==0.3.*", "'=='"),
+    ])
+    def test_an_operator_outside_the_convention_is_named(self, anomalies_gate, rng, op):
+        """Each of these has exactly one ``>=`` and excludes this version, so
+        the operator rule is the only one that can refuse it."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert f"uses {op}" in message, message
+
+    @pytest.mark.parametrize("rng", [
+        ">=0.1.0, >=0.2.0, <0.4.0",
+        ">=0.1.0, <0.3.0, <0.4.0",
+    ])
+    def test_a_range_names_one_first_version_and_at_most_one_fix(self, anomalies_gate, rng):
+        """With two ``>=`` bounds, which one is FIRST depends on set order,
+        so the empty-set check would catch it only some of the time; the
+        shape rule has to be pinned on its own message."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert "must name exactly one '>=FIRST'" in message, message
+
+    def test_a_range_that_starts_after_this_version_fails(self, anomalies_gate):
+        registry = self._registry("0.4.0.dev0", ("resolved", ">=0.5.0, <0.6.0", {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert "starts at 0.5.0" in message
+
+    @pytest.mark.parametrize("registry", [
+        {"maddening_version": "0.4.0.dev0", "anomalies": []},
+        {"maddening_version": "0.4.0.dev0"},
+        [],
+    ])
+    def test_nothing_to_check_is_a_failure(self, anomalies_gate, registry):
+        """The generator runs this function too, and an empty registry used
+        to pass its ``--check`` once regenerated."""
+        assert anomalies_gate.version_range_errors(registry)
+
+    @pytest.mark.parametrize("version", [None, "", "zero point four"])
+    def test_an_unusable_registry_version_is_a_failure(self, anomalies_gate, version):
+        registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
+        registry["maddening_version"] = version
+        assert anomalies_gate.version_range_errors(registry)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_range_is_refused_before_it_is_parsed(self, anomalies_gate, blank):
+        """``SpecifierSet("")`` is the set of *every* version.  The one-``>=``
+        rule would refuse it too, so this guard is redundant today; it is
+        pinned so that loosening that rule cannot make a blank range mean
+        "affects everything" without a word."""
+        registry = self._registry("0.4.0.dev0", ("resolved", blank, {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert f"MADD-ANO-001: affected_versions is {blank!r}" in message
+
+    def test_a_non_string_range_is_a_failure(self, anomalies_gate):
+        registry = self._registry("0.4.0.dev0", ("open", 0.1, {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert "MADD-ANO-001: affected_versions is 0.1" in message
+
+    def test_the_rule_does_not_lean_on_packagings_prerelease_default(
+        self, anomalies_gate, monkeypatch
+    ):
+        """``SpecifierSet.contains`` changed its default across packaging
+        releases: 22 (pytest's floor) leaves a pre-release out unless asked,
+        26 lets it in.  On 22, a rule that relied on the default would read
+        ``>=0.1.0`` as not admitting ``0.4.0.dev0`` and fail every open entry
+        of a development registry.  The older default is simulated here, so
+        the rule has to pass ``prereleases`` itself on whichever packaging
+        this runs on."""
+        from packaging.specifiers import SpecifierSet
+
+        real = SpecifierSet.contains
+
+        def packaging_22_default(self, item, prereleases=None, **kwargs):
+            if prereleases is None:
+                prereleases = bool(self.prereleases)
+            return real(self, item, prereleases=prereleases, **kwargs)
+
+        monkeypatch.setattr(SpecifierSet, "contains", packaging_22_default)
+        assert not SpecifierSet(">=0.1.0").contains("0.4.0.dev0")  # simulated
+        registry = self._registry(
+            "0.4.0.dev0",
+            ("open", ">=0.1.0", {}),
+            ("resolved", ">=0.1.0, <0.4.0", {"resolution_version": "0.4.0"}),
+        )
+        assert anomalies_gate.version_range_errors(registry) == []
+
+    def test_without_packaging_the_rule_fails_closed(self, anomalies_gate, monkeypatch):
+        """``packaging`` comes with pytest; if it is ever missing, the rule
+        must say so rather than pass everything."""
+        monkeypatch.setitem(sys.modules, "packaging.specifiers", None)
+        registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
+        (message,) = anomalies_gate.version_range_errors(registry)
+        assert "packaging" in message
+
+    def test_the_shipped_registry_passes(self, anomalies_gate):
+        import yaml
+
+        registry = yaml.safe_load(
+            (REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml").read_text())
+        assert anomalies_gate.version_range_errors(registry) == []
 
 
 class TestTransformGateConstantBinding:

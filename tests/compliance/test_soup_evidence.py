@@ -213,43 +213,78 @@ def test_the_version_is_identified_the_same_way_everywhere():
     ) == []
 
 
-def test_an_unresolved_anomaly_does_not_record_a_closed_version_range():
-    """A reachable defect and a closed version range cannot both be true.
+def test_every_version_range_agrees_with_its_entrys_status():
+    """A reachable defect and a range that leaves this version out cannot
+    both be true, and nor can a resolved one and a range that keeps it in.
 
-    MADD-ANO-001 and MADD-ANO-002 sat in exactly that state for three
-    releases: still reproducible, but recorded as affecting only the
-    version they were first seen in.  MADD-ANO-005 was the worse case --
-    `partially_resolved` with `<=0.3.0`, asserting 0.4.0 is clean while
-    its own `residual_risk` describes the path on which the pre-0.4.0
-    behaviour returns.  Only `resolved` and `duplicate` may close a
-    range; anything else, including a status nobody has enumerated, may
-    not.
+    MADD-ANO-001 and MADD-ANO-002 sat `open` with a closed range for three
+    releases.  MADD-ANO-005 was `partially_resolved` with `<=0.3.0`, and
+    MADD-ANO-016 shipped `partially_resolved` with `>=0.1.0, <0.4.0` -- a
+    range this check's old `startswith(">=")` test waved through -- while
+    MADD-ANO-006 shipped `resolved` in 0.4.0 with `>=0.1.0`.  The rule now
+    compares each range with the registry's own version (PEP 440), and is
+    the registry gate's own function rather than a copy of it.
     """
-    assert gen._check_unresolved_anomalies_are_open_ended(
-        gen.read_registry()
-    ) == []
+    assert gen._check_version_ranges(gen.read_registry()) == []
 
 
 @pytest.mark.parametrize("status", ["open", "partially_resolved", "wont_fix",
                                     "probably fine tbh"])
 def test_a_closed_range_is_refused_for_every_unresolved_status(status):
-    registry = {"anomalies": [{
+    """The shape MADD-ANO-016 shipped in, for every reachable status."""
+    registry = {"maddening_version": "0.4.0.dev0", "anomalies": [{
         "anomaly_id": "MADD-ANO-999",
         "resolution_status": status,
-        "affected_versions": "0.1.0",
+        "affected_versions": ">=0.1.0, <0.4.0",
     }]}
-    errors = gen._check_unresolved_anomalies_are_open_ended(registry)
-    assert len(errors) == 1 and "MADD-ANO-999" in errors[0]
+    errors = gen._check_version_ranges(registry)
+    assert len(errors) == 1 and "MADD-ANO-999" in errors[0], errors
 
 
 @pytest.mark.parametrize("status", ["resolved", "duplicate"])
 def test_a_closed_range_is_allowed_once_the_defect_is_gone(status):
-    registry = {"anomalies": [{
+    registry = {"maddening_version": "0.4.0.dev0", "anomalies": [{
         "anomaly_id": "MADD-ANO-999",
         "resolution_status": status,
-        "affected_versions": "0.3.0, 0.3.1",
+        "affected_versions": ">=0.3.0, <0.4.0",
     }]}
-    assert gen._check_unresolved_anomalies_are_open_ended(registry) == []
+    assert gen._check_version_ranges(registry) == []
+
+
+def test_an_open_range_is_refused_once_the_defect_is_resolved():
+    """The shape MADD-ANO-006 shipped in: resolved in 0.4.0, `>=0.1.0`."""
+    registry = {"maddening_version": "0.4.0.dev0", "anomalies": [{
+        "anomaly_id": "MADD-ANO-999",
+        "resolution_status": "resolved",
+        "resolution_version": "0.4.0",
+        "affected_versions": ">=0.1.0",
+    }]}
+    errors = gen._check_version_ranges(registry)
+    assert errors and all("MADD-ANO-999" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("registry", [
+    {"maddening_version": "0.4.0.dev0", "anomalies": [
+        {"anomaly_id": "MADD-ANO-001", "resolution_status": "resolved",
+         "affected_versions": "banana"}]},
+    {"maddening_version": "0.4.0.dev0", "anomalies": []},
+    {"anomalies": [{"anomaly_id": "MADD-ANO-001",
+                    "resolution_status": "open",
+                    "affected_versions": ">=0.1.0"}]},
+])
+def test_the_generator_and_the_registry_gate_run_one_rule(registry):
+    """Two copies of this rule is how it came to be a prefix test in one
+    place and absent from the other.  Garbage, an empty registry and a
+    registry with no version must fail both, with the same messages."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_range_gate", REPO_ROOT / "scripts" / "check_anomalies.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    errors = gen._check_version_ranges(registry)
+    assert errors, "the generator's range check passed a registry it must refuse"
+    assert errors == gate.version_range_errors(registry)
 
 
 @pytest.mark.parametrize(
@@ -534,14 +569,14 @@ def test_the_anomaly_headline_counts_every_reachable_defect():
     silent".  Eight defects were reachable and the document said six, in
     the direction that understates.
 
-    The predicate is shared with `_check_unresolved_anomalies_are_open_ended`
-    so the headline and the version-range gate cannot drift apart.
+    The predicate is the registry gate's own (`check_anomalies`'s
+    `UNREACHABLE_STATUSES`), so the headline and the version-range rule
+    cannot drift apart.
     """
     registry = gen.read_registry()
     reachable = [
         a["anomaly_id"] for a in registry["anomalies"]
-        if a.get("resolution_status")
-        not in gen._STATUSES_THAT_MAY_CLOSE_A_RANGE
+        if a.get("resolution_status") not in gen._UNREACHABLE_STATUSES
     ]
     assert reachable, "no reachable anomalies — the predicate matched nothing"
 
@@ -569,7 +604,12 @@ def test_a_partially_resolved_anomaly_is_counted_as_reachable():
     ]}
     rendered = gen.render_known_anomalies(registry)
     assert "3 have a defect reachable in this version" in rendered, rendered
-    assert "1 `open`" in rendered and "2 `partially_resolved`" in rendered, rendered
+    # Each reachable status is named with its own count.  This used to read
+    # "2 `partially_resolved`": everything reachable that was not `open`
+    # was labelled partially resolved, `wont_fix` included.
+    assert "1 `open`" in rendered, rendered
+    assert "1 `partially_resolved`" in rendered, rendered
+    assert "1 `wont_fix`" in rendered, rendered
 
 
 class TestTheCiDerivedRowsFollowTheMatrix:

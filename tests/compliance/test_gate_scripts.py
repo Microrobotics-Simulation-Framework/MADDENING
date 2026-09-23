@@ -577,12 +577,120 @@ class TestImplementationMappingGate:
         assert mapping_gate.main([str(tmp_path)]) == 1
 
     def test_a_row_that_declares_the_behaviour_inherited_is_allowed(
-        self, mapping_gate, tmp_path
+        self, mapping_gate, tmp_path, capsys
     ):
         _guide(
             tmp_path,
             "| Serialisation | `maddening.nodes.heat.HeatNode.to_dict` | "
-            "inherited from SimulationNode |\n",
+            "Inherited from `SimulationNode`: the base serialises every "
+            "node |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 0
+        assert "inherited from SimulationNode, as the row states" in (
+            capsys.readouterr().out)
+
+    @pytest.mark.parametrize("notes", [
+        "not inherited",                                    # the audit's M2
+        "Not inherited from `SimulationNode`",
+        "inherited from SimulationNode",                    # the old spelling
+        "see below. Inherited from `SimulationNode`",       # not at the start
+        "Inherited: from the base class",
+    ])
+    def test_prose_about_inheritance_is_not_a_marker(
+        self, mapping_gate, tmp_path, notes
+    ):
+        """Only a Notes cell that begins ``Inherited from `Base``` opts in.
+
+        The check was ``"inherited" in row_text.lower()``, so any mention
+        -- including "not inherited" -- switched the own-class check off
+        (audit_040_phase3_wave_d, M2).
+        """
+        _guide(
+            tmp_path,
+            "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n",
+            f"| Serialisation | `maddening.nodes.heat.HeatNode.to_dict` | "
+            f"{notes} |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_marker_naming_the_wrong_base_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _guide(
+            tmp_path,
+            "| Serialisation | `maddening.nodes.heat.HeatNode.to_dict` | "
+            "Inherited from `BallNode` |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "resolves through SimulationNode" in capsys.readouterr().err
+
+    def test_a_marker_on_a_row_whose_symbol_is_defined_on_its_class_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """The marker is a claim; an override makes it false."""
+        _guide(
+            tmp_path,
+            "| Diffusion | `maddening.nodes.heat.HeatNode.update` | "
+            "Inherited from `SimulationNode` |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "drop the marker" in capsys.readouterr().err
+
+    def test_the_failure_says_how_to_mark_an_intended_inheritance(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _guide(tmp_path,
+               "| Serialisation | `maddening.nodes.heat.HeatNode.to_dict` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "Inherited from `SimulationNode`" in capsys.readouterr().err
+
+    def test_an_implementation_span_without_the_qualifier_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """audit_040_phase3_wave_d, M3: a dropped ``maddening.`` prefix left
+        a code span the gate never resolved, and within a pin's slack the
+        gate stayed green."""
+        _guide(
+            tmp_path,
+            "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n",
+            "| Non-uniform Laplacian | `_laplacian_nonuniform` | |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "`_laplacian_nonuniform`" in capsys.readouterr().err
+
+    def test_a_declared_jax_primitive_is_reported_not_verified(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """The documented convention for a term no MADDENING function owns."""
+        _guide(
+            tmp_path,
+            "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n",
+            "| Boundary conditions | `state.at[0].set(left_T)` | "
+            "JAX primitive: `jax.numpy.ndarray.at[].set()` |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 0
+        out = capsys.readouterr().out
+        assert "declared a JAX primitive" in out
+        assert "OK: 1 implementation mapping(s) verified, 1 not checked" in out
+
+    def test_a_scope_of_only_declared_primitives_fails(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(
+            tmp_path,
+            "| Boundary conditions | `state.at[0].set(left_T)` | "
+            "JAX primitive: `jax.numpy.ndarray.at[].set()` |\n",
+        )
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_code_span_in_the_notes_column_need_not_be_qualified(
+        self, mapping_gate, tmp_path
+    ):
+        """The rule is for the Implementation column, the claim itself."""
+        _guide(
+            tmp_path,
+            "| Diffusion | `maddening.nodes.heat.HeatNode.update` | "
+            "applies `alpha * dt` |\n",
         )
         assert mapping_gate.main([str(tmp_path)]) == 0
 

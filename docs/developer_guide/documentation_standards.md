@@ -128,6 +128,8 @@ Rules:
 - Every governing equation term must appear — no silent omissions
 - Terms handled by JAX primitives must document the primitive and calling convention
 - CI validates all function names resolve to existing callables (`scripts/check_impl_mapping.py`)
+- Every code span in the Implementation column is a fully qualified `maddening.*` name, except in a row whose Notes cell begins `JAX primitive` or `Third-party`
+- A symbol the named class inherits rather than defines needs a Notes cell that begins ``Inherited from `BaseClass` ``; the gate checks the base and fails the marker once the class overrides the symbol
 
 ## Commit Message Convention
 

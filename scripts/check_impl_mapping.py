@@ -6,17 +6,32 @@ extracts every backticked ``maddening.*`` qualified name from its rows, and
 verifies that each one resolves to an existing callable that the named
 class actually defines.
 
-Three things this gate has to get right, because each was a hole:
+Four things this gate has to get right, because each was a hole:
 
 * **Own ``__dict__``, not the MRO.**  ``getattr`` walks base classes, so a
   row naming ``HeatNode.update`` kept resolving after the concrete method
-  was renamed -- ``SimulationNode.update`` answered instead.  A row may opt
-  into inherited behaviour by saying "inherited" in the row; the gate then
-  allows it and says which base it came from.
+  was renamed -- ``SimulationNode.update`` answered instead.  A row opts
+  into inherited behaviour only with an explicit marker: a Notes cell that
+  *begins* ``Inherited from `Base```, naming the class the symbol actually
+  comes from.  The gate checks the named base against the one the symbol
+  resolves through, and fails a marker on a row whose symbols are all
+  defined on the class they name (the override the marker denies).  The
+  marker used to be the substring "inherited" anywhere in the row, so
+  "not inherited" switched the check off (audit_040_phase3_wave_d, M2).
 * **Every symbol in a row**, not just the first, and every row must carry a
   code reference at all -- dropping the backticks used to drop the row.
+* **Every code span in the Implementation column is a qualified
+  ``maddening.*`` name.**  A span that lost its ``maddening.`` prefix still
+  counted as "a code reference", was never resolved, and -- within the
+  slack between a guide's count and its pin -- left the gate green
+  (audit_040_phase3_wave_d, M3).  The one exception is the documented
+  convention for a term a JAX primitive or third-party function handles:
+  a Notes cell that *begins* ``JAX primitive`` or ``Third-party`` declares
+  the row's unqualified spans as such.  They are reported, not verified.
 * **A pinned minimum per guide**, so a table that vanishes fails instead of
-  quietly lowering the count.
+  quietly lowering the count.  The pins sit at the current counts; a guide
+  that gains rows should raise its pin, or the slack reopens for row
+  deletions.
 
 Usage:
     python scripts/check_impl_mapping.py [docs/algorithm_guide/]
@@ -51,9 +66,9 @@ DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
 # pin from 9 to 1 while deleting 8 rows of the guide left every gate and
 # every mapping test green (audit_040_r2/gates, finding G6).
 MIN_MAPPINGS = {
-    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 9,
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 11,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
-    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 14,
+    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 20,
     os.path.join(
         "docs", "algorithm_guide", "solvers", "explicit_integrators.md"
     ): 5,
@@ -65,6 +80,15 @@ MIN_MAPPINGS = {
 
 _QNAME = re.compile(r"`(maddening\.[^`]+)`")
 _CODE_SPAN = re.compile(r"`[^`]+`")
+#: The only spelling that opts a row into inherited resolution: a Notes cell
+#: that *starts* with it, naming the defining base class (bare or
+#: qualified).  Anchored and case-sensitive, so prose that merely mentions
+#: inheritance -- "not inherited", "the inherited update" -- is not a marker.
+_INHERITED_MARKER = re.compile(r"Inherited from `([A-Za-z_][\w.]*)`")
+#: The only spelling that declares an Implementation span to be a JAX
+#: primitive or third-party call rather than a MADDENING symbol
+#: (``docs/developer_guide/documentation_standards.md``); anchored likewise.
+_PRIMITIVE_MARKER = re.compile(r"(?:JAX primitive|Third-party)\b")
 # A Markdown table cell may contain an escaped pipe.  Splitting on a bare
 # ``|`` mangled every row holding LaTeX like ``\|g\|``, which shifted the
 # Implementation column out of cell 1 and made the row invisible to the gate.
@@ -152,14 +176,42 @@ def check_guide(
             )
             continue
 
+        # A code span that is not a qualified name is never resolved, so a
+        # dropped ``maddening.`` prefix made the symbol invisible while the
+        # row still "carried a code reference".
+        declares_primitive = any(_PRIMITIVE_MARKER.match(c) for c in cells[2:])
+        for span in _CODE_SPAN.findall(impl):
+            if span.startswith("`maddening."):
+                continue
+            if declares_primitive:
+                skipped.append(
+                    f"{relpath}: {span} (for term '{term}') is declared a "
+                    f"JAX primitive / third-party call and was NOT checked"
+                )
+            else:
+                errors.append(
+                    f"{relpath}: row '{term}' has {span} in its "
+                    f"Implementation column, which is not a qualified "
+                    f"maddening.* name, so it cannot be checked -- write the "
+                    f"full dotted path, or begin the Notes cell with "
+                    f"'JAX primitive' if it is one"
+                )
+
         row_text = " | ".join(cells)
-        allow_inherited = "inherited" in row_text.lower()
+        marker = next(
+            (m.group(1) for m in (_INHERITED_MARKER.match(c) for c in cells[2:])
+             if m),
+            None,
+        )
+        marker_base = marker.rsplit(".", 1)[-1] if marker else None
+        row_inherited = False
+        row_checked = False
         for match in _QNAME.finditer(row_text):
             qname = match.group(1).rstrip("`).,( ")
             checked += 1
             res = resolve_dotted_name(
                 qname,
-                require_own=not allow_inherited,
+                require_own=marker_base is None,
                 require_callable=True,
             )
             if res.unavailable:
@@ -172,16 +224,41 @@ def check_guide(
                     f"{relpath}: '{qname}' (for term '{term}') was NOT "
                     f"checked -- {res.reason}"
                 )
-            elif not res.ok:
+                continue
+            row_checked = True
+            if not res.ok:
+                hint = ""
+                if res.inherited_from and marker_base is None:
+                    hint = (f"; if the row means the inherited behaviour, "
+                            f"begin its Notes cell with "
+                            f"'Inherited from `{res.inherited_from}`'")
                 errors.append(
                     f"{relpath}: '{qname}' (for term '{term}') does not "
-                    f"resolve: {res.reason}"
+                    f"resolve: {res.reason}{hint}"
                 )
             elif res.inherited_from:
-                notes.append(
-                    f"{relpath}: '{qname}' (for term '{term}') is inherited "
-                    f"from {res.inherited_from}, as the row states"
-                )
+                row_inherited = True
+                if res.inherited_from != marker_base:
+                    errors.append(
+                        f"{relpath}: '{qname}' (for term '{term}') resolves "
+                        f"through {res.inherited_from}, but the row says "
+                        f"'Inherited from `{marker}`'"
+                    )
+                else:
+                    notes.append(
+                        f"{relpath}: '{qname}' (for term '{term}') is "
+                        f"inherited from {res.inherited_from}, as the row "
+                        f"states"
+                    )
+        if marker_base is not None and row_checked and not row_inherited:
+            # The marker is a claim about the code.  When the class now
+            # defines the symbol itself, the claim is stale -- and it is the
+            # very override the row says does not exist.
+            errors.append(
+                f"{relpath}: row '{term}' says 'Inherited from `{marker}`', "
+                f"but every symbol in it is defined on the class it names; "
+                f"drop the marker"
+            )
 
     return checked, errors, notes, skipped
 

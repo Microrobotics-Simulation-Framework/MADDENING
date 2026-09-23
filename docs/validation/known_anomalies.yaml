@@ -1770,3 +1770,147 @@ anomalies:
       - "tests/verification/test_verify_node_harness.py::test_derivatives_that_ignore_the_injected_params_are_caught"
       - "tests/verification/test_verify_node_harness.py::test_a_legacy_derivatives_signature_is_caught"
     github_issue: null
+  - anomaly_id: "MADD-ANO-019"
+    title: "A coupling iteration that diverged to a non-finite state was reported residual=0.0, converged=True"
+    description: >
+      Every 0.4.0 convergence norm (`l2`, `mixed`, `interface`) divides a
+      field's change by the field's own magnitude (`_field_reference`,
+      `max |v|` over both iterates) and drops a field whose magnitude does
+      not exceed the dead band `atol` (`_scaled_change` in
+      `core/coupling/acceleration.py`).  A field with a `NaN` or `inf`
+      entry has a non-finite reference, and `NaN > atol` is False, so the
+      dead band marked it *inactive*: it contributed exactly zero to the
+      norm rather than a non-finite value.  A group whose only moving
+      field had just diverged therefore measured `residual=0.0`, met every
+      criterion, and returned the destroyed state as converged.
+      Measured at 0.4.0.dev0 (this machine, jaxlib 0.11.0, CPU, float32)
+      on a two-node relay with cycle eigenvalues `(-0.95, 0.3)` under
+      `acceleration="fixed", relaxation=1.5` (relaxed operator eigenvalue
+      -1.925: the iterate doubles every pass and leaves float32 range after
+      about 136), `max_iterations=400`, `diagnostics=True`, a fresh graph
+      per measurement, driven through `gm.step()`.  All six solver x norm
+      combinations reported `residual=0.0, converged=True`.  `mixed` and
+      `interface`, both solvers: 139 iterations, returned state `NaN`.
+      `l2`, both solvers: 136 iterations, returned state *finite* at
+      `-1.2185e38` (the fixed point is 0.51), and `ratio_usable=True` as
+      well.  `strict_convergence=True` did not raise on any norm.
+      `run_scan(3)` on a fresh graph reported `iterations=1, residual=0.0,
+      converged=True` on every step after the first.
+      The `l2` rows are a second mechanism, one pass before the first.
+      Under the L2 norm the scale is the bare reference (`rtol=1.0`), and
+      at `1.22e38` its float32 reciprocal is subnormal (`8.2e-39`, below
+      `1.18e-38`).  XLA's CPU backend lowers the broadcast divide
+      `|dx| / scale` to a multiply by that reciprocal and flushes it to
+      zero, so a field that had moved by 1.95 times its own magnitude
+      read as a change of exactly `0.0` (`jnp.asarray([2.38e38, 0.]) /
+      jnp.float32(1.22e38)` is `[0., 0.]` while the scalar quotient is
+      `1.95`).  The norm reported `0.0` on a finite state and the loop
+      returned it.
+      Neither mechanism exists before 0.4.0.  At v0.3.1 the L2 norm was
+      the unscaled `||dx||` and the mixed norm's scale was `atol + rtol
+      * max(|v|)` with no dead band; the same reproducer against an
+      extracted v0.3.1 tree reports `residual=nan` at the cap on all six
+      combinations, and v0.3.1's `coupling_diagnostics()` has no
+      `converged` key to mislead.  The defect was introduced by 0.4.0's
+      move to a reference-scaled criterion with an exclusion dead band
+      (MADD-ANO-005's resolution) and resolved within the same release.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because it is a silent wrong answer on a documented
+      public path: `converged=True` and `residual=0.0` are the two numbers
+      `coupling_diagnostics()` documents as the evidence that a coupled
+      step is trustworthy, and both were produced on a state the
+      iteration had just destroyed.  `strict_convergence=True`, the
+      documented guard for training and calibration runs, passed the
+      same state through, so the one setting a careful user would reach
+      for did not help.  Under the L2 norm the returned state was finite,
+      so nothing downstream would raise on it either; a `NaN` propagates
+      and is eventually noticed, but `-1.2e38` in a field whose fixed
+      point is `0.51` is a plausible-looking number in the wrong units.
+      Not `critical`: the trigger is an iteration that diverges, which is
+      a misconfiguration (over-relaxation past the spectral limit here)
+      rather than a state a well-posed group reaches, the `mixed` and
+      `interface` returns are `NaN` and so are not silent for long, and
+      the fix is a two-line rule in one helper.
+      Graded `context_dependent` rather than `safety_relevant` because
+      MADDENING is a general simulation library and the defect needs a
+      diverging coupled iteration to bite, which is a property of the
+      user's group configuration.  What raises it above
+      `not_safety_relevant` is the shape: a divergence is exactly the
+      event a convergence flag exists to report, and the flag reported
+      its opposite with the most confident value it has.  A caller whose
+      analysis depends on `converged=True` meaning what the docstring
+      says could not establish from anything the library returned that a
+      diverged step had happened.
+    affected_components:
+      - "maddening.core.coupling.acceleration._scaled_change"
+      - "maddening.core.coupling.acceleration.coupling_residual_l2"
+      - "maddening.core.coupling.acceleration.coupling_residual_mixed"
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.4.0.dev0, <0.4.0"
+    workaround: >
+      None needed from 0.4.0.  On a 0.4.0.dev0 build before the fix:
+      check the returned state for finiteness yourself
+      (`jnp.isfinite(gm.get_node_state(n)[f]).all()` for every coupled
+      field) after each step, treating `converged=True` with
+      `residual=0.0` on the first pass as suspect rather than as proof;
+      under the L2 norm additionally check that no coupled field exceeds
+      about `1e37` in float32.  Keeping `relaxation` at or below the
+      group's spectral limit (`relaxation < 2 / (1 - lambda_min)` for
+      the most negative cycle eigenvalue) avoids the divergence that
+      triggers it, but does not make the flag honest about one that
+      happens for another reason.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in `_scaled_change`, the one helper all three norms and
+      both solvers are built on: a field whose reference is non-finite,
+      or whose scale's reciprocal is not a normal number of the field's
+      dtype (`scale * finfo.tiny > 1`), is *active* and contributes
+      `inf` to every entry.  The norm is then `inf`, `converged` is
+      False, `error_amplification` rejects the ratio (`ratio_usable`
+      False, `error_estimate` inf), and `strict_convergence` raises with
+      a new first check whose message names the non-finite state; the
+      pre-existing `without converging` check is made exclusive of it so
+      exactly one message fires.  Measured after the fix on the same
+      reproducer: all six combinations run to the cap (`iterations=400`)
+      and report `residual=inf, converged=False, ratio_usable=False` on a
+      `NaN` state; `strict_convergence=True` raises on every norm;
+      `run_scan(3)` reports the same verdict.  Finite in-range fields
+      take the selected branch of a `where`, so their values, gradients
+      and iteration counts are unchanged: the 27 existing coupling and
+      graph-manager test modules, the 438 recorded coupling verdicts and
+      the `expensive-pair` fixture baseline pass without modification,
+      and a field that is exactly zero still leaves the dead band as
+      before.
+      What remains, and why it is a boundary rather than an instance.
+      (1) The range rule is deliberately conservative: a float32 field
+      whose magnitude is within a factor of about four of overflow
+      (above `8.5e37`) can never read as converged, even if it is
+      constant.  No simulation state lives there on purpose, and the
+      alternative -- depending on how each backend lowers a divide --
+      is what produced the defect.  In float64 the threshold is
+      `4.5e307`.  (2) `strict_convergence` is documented as read only
+      under `solver="ift"`; under `"fori"` it is inert and warns, as
+      before, so a `fori` group reports the divergence through
+      `coupling_diagnostics()` only.  (3) The IFT spectral diagnostics'
+      per-field weights (`_norm_weights`) still give a non-finite field
+      weight zero; the spectral keys are already `NaN` and
+      `spectral_usable=False` on such a step, and they describe a
+      Jacobian at a state that no longer exists.  (4) The dead band's
+      semantics for finite fields are exactly as MADD-ANO-005 left them:
+      a field inside `atol` is at zero and leaves the norm; the caller
+      still owns that number.  No tagged release carried the defect: it
+      was introduced and resolved between 0.3.1 and 0.4.0.
+    verification:
+      - "tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged"
+      - "tests/core/test_coupling_non_finite_state.py::test_strict_convergence_names_the_non_finite_state"
+      - "tests/core/test_coupling_non_finite_state.py::test_run_scan_after_divergence_reports_the_same_verdict"
+      - "tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf"
+      - "tests/core/test_coupling_non_finite_state.py::test_a_reference_beyond_the_dtype_range_contributes_inf"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_dead_band_still_drops_a_field_that_is_exactly_zero"
+      - "tests/core/test_coupling_non_finite_state.py::test_a_finite_field_is_bit_identical_through_the_guard"
+      - "tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf"
+    github_issue: null

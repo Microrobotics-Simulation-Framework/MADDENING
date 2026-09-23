@@ -481,7 +481,7 @@ def test_selection_diagnostics_report_whether_the_budget_or_the_iteration_bound_
     assert also["active"] == stalled["active"] and not also["budget_reached"]
     full = _node(k=128, blindness_gate=False).selection_diagnostics()
     assert full == {"active": 128, "k": 128, "outer_iterations": 0, "max_outer": 30,
-                    "budget_reached": True}
+                    "budget_reached": True, "resolved": False}
     moved = _node(blindness_gate=False).selection_diagnostics({"theta": 0.7})
     assert moved["budget_reached"] and moved["active"] == 8
 

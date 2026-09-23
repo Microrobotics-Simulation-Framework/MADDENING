@@ -50,6 +50,7 @@ from maddening.core.coupling.acceleration import (
     _field_reference,
     float_fields_of,
     relaxation_step_scale,
+    residual_precision_floor,
     spectral_error_bound,
     spectral_rate_settled,
     state_float_image,
@@ -372,17 +373,33 @@ def _spectral_rate_at(step_pure, x_star, consts, weights):
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
     d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
-    live = d > 0
-    d_inv = jnp.where(live, 1.0 / jnp.where(live, d, 1.0), 0.0)
 
-    def matvec(v):
-        _, Jv = jax.jvp(
-            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (v * d_inv,)
-        )
-        return d * Jv
+    def spectrum(operands):
+        xx, cc, dd = operands
+        live = dd > 0
+        d_inv = jnp.where(live, 1.0 / jnp.where(live, dd, 1.0), 0.0)
 
-    v0 = jax.random.normal(jax.random.PRNGKey(0), x_sg.shape, x_sg.dtype)
-    return arnoldi_spectral_radius(matvec, v0)
+        def matvec(v):
+            _, Jv = jax.jvp(
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,), (v * d_inv,)
+            )
+            return dd * Jv
+
+        v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, xx.dtype)
+        return arnoldi_spectral_radius(matvec, v0)
+
+    nan = jnp.full((), jnp.nan, x_sg.dtype)
+    # A Jacobian at a state that has left float range describes nothing
+    # (a spectral radius of 0.0 read there as "contracts instantly"), so
+    # a non-finite state reports the triple as NaN -- "not computed" --
+    # like the gradient bound beside it.  In a branch of its own for the
+    # same reason that one is: compiled as a separate computation, the
+    # Jacobian-vector products cannot share subexpressions with the
+    # forward and so cannot move the state it diagnoses.
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
+        (x_sg, consts_sg, d),
+    )
 
 
 def _probe_direction(c, key):
@@ -509,6 +526,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
         ift_gradient_error_bound,
         jacobian_range_basis,
         resolvent_apply,
@@ -553,7 +571,28 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     rows = jnp.arange(len(probed))
     f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
     r_s = s * (f_k[0] - x_sg)
-    delta_s = resolvent_apply(U, M, r_s, matvec(r_s))
+
+    def norm(v):
+        return jnp.linalg.norm(live * v, axis=-1)
+
+    # The residual's float resolution in the norm used below: ``C`` units
+    # of ``eps * max|field|`` per live entry, which the scaling ``s``
+    # makes ``C * eps`` each (see ``residual_precision_floor``, which is
+    # the same quantity in the group's own norm).  It enters twice.  The
+    # distance carries it, so a stalled float32 iterate -- ``F(x) == x``
+    # bitwise, residual ``0.0`` -- is not reported at the fixed point.
+    # And where the residual is not above it, the residual carries no
+    # direction to take the curvature along (it is rounding, or exactly
+    # zero), so a fixed-seed floor-sized vector stands in: its resolvent
+    # image is dominated by the slowest mode, which is where an error the
+    # rounding left behind is amplified to.
+    floor = PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps * jnp.sqrt(jnp.sum(live))
+    floor_dir = (PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps) * live * jax.random.rademacher(
+        jax.random.PRNGKey(3), x_sg.shape, dtype,
+    )
+    resolved = norm(r_s) > floor
+    r_dir = jnp.where(resolved, r_s, floor_dir)
+    delta_s = resolvent_apply(U, M, r_dir, matvec(r_dir))
     t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
 
     def linearisation(xx, row, ts):
@@ -581,11 +620,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     G = jax.lax.optimization_barrier(G)
     secant_s = s * (G[1] - G[0])
 
-    def norm(v):
-        return jnp.linalg.norm(live * v, axis=-1)
-
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
-    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification)
+    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification,
+                                    floor=floor)
     per_probe = ift_gradient_error_bound(
         amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
     )
@@ -597,6 +634,41 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
     return jnp.where(captured, worst, nan)
+
+
+def _group_state_finite(state, node_names):
+    """Whether every floating field of the group's nodes is finite."""
+    ok = jnp.array(True)
+    for nn in node_names:
+        for v in state[nn].values():
+            v = jnp.asarray(v)
+            if jnp.issubdtype(v.dtype, jnp.floating) and v.size > 0:
+                ok = jnp.logical_and(ok, jnp.all(jnp.isfinite(v)))
+    return ok
+
+
+def _non_finite_reads_as_diverged(state_finite, residual, amplification):
+    """``(residual, amplification)``, reported as diverged on a non-finite state.
+
+    Every norm reports ``inf`` for a field it cannot evaluate
+    (MADD-ANO-019), but a norm only sees the fields it reads: under
+    ``convergence_norm="interface"`` a ``NaN`` in a field no edge reads
+    -- from the initial state, a parameter or an external input -- left
+    the residual finite, and the group was reported ``converged=True``,
+    ``strict_convergence`` did not raise and ``spectral_usable`` was
+    ``True`` on a state that was not finite.  The verdict is about the
+    state the step returns, so it is taken over every floating field of
+    it: a non-finite one makes the residual ``inf`` and rejects the
+    amplification, which is exactly what the norms report for a field
+    they read.  A finite state takes the selected branch of a ``where``
+    and is reported bit-identically.
+    """
+    residual = jnp.asarray(residual)
+    amplification = jnp.asarray(amplification)
+    return (
+        jnp.where(state_finite, residual, jnp.full_like(residual, jnp.inf)),
+        jnp.where(state_finite, amplification, jnp.zeros_like(amplification)),
+    )
 
 
 #: Accelerations that may not *stop iterating* on a single pass at or
@@ -2032,6 +2104,10 @@ def _run_coupled_block_impl(
             # raw residual test.  A caller who wants the bound has to
             # allow the group a second pass.
             single_amp = jnp.zeros_like(single_r)
+            single_r, single_amp = _non_finite_reads_as_diverged(
+                _group_state_finite(state_after_first, group_node_names),
+                single_r, single_amp,
+            )
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
                 import equinox as eqx  # noqa: PLC0415
@@ -2290,6 +2366,12 @@ def _run_coupled_block_impl(
                 int(n_reuse),
                 sub_idx,
                 str(group.linear_solver),
+            )
+            # The verdict on a non-finite state is taken over *every*
+            # floating field of the group, not only the ones the norm
+            # reads (see ``_non_finite_reads_as_diverged``).
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                jnp.all(jnp.isfinite(x_star_full)), final_res, final_amp,
             )
             # The spectral bound's ingredients, at the state being
             # returned (``x_star_full`` before the strict guard, whose
@@ -2671,6 +2753,10 @@ def _run_coupled_block_impl(
                 lambda _s: (loop_res, final_amp),
                 _measure_at_cap,
                 final_state,
+            )
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                _group_state_finite(final_state, group_node_names),
+                final_res, final_amp,
             )
 
         # Merge coupled nodes back into the full state
@@ -5468,8 +5554,21 @@ class GraphManager:
                     f"coupling_{key}_spectral_residual", float("nan")))
                 spec_amp = float(meta.get(
                     f"coupling_{key}_spectral_amplification", float("nan")))
+                # The residual's own float resolution at the returned
+                # state: a computed residual differs from the exact
+                # ``F(x) - x`` by the map's evaluation error, so a
+                # distance bound has to add it -- a stalled float32
+                # iterate reads ``residual=0.0`` arbitrarily far from
+                # its fixed point.  Taken from the state the step left,
+                # by the norm's own field rule.
+                floor = float(residual_precision_floor(
+                    self._state, sorted(group.nodes), group.convergence_norm,
+                    group.atol, group.rtol,
+                    [e for e in self._edges
+                     if e.source_node in group.nodes and e.target_node in group.nodes],
+                ))
                 spectral_bound = float(spectral_error_bound(
-                    residual, rho_spec, spec_resid, spec_amp,
+                    residual, rho_spec, spec_resid, spec_amp, floor=floor,
                 ))
                 spectral_usable = bool(
                     math.isfinite(spectral_bound)
@@ -5498,6 +5597,9 @@ class GraphManager:
                     "gradient_relative_error_bound": grad_bound,
                     "gradient_bound_usable": bool(
                         spectral_usable and math.isfinite(grad_bound)
+                    ),
+                    "precision_limited": bool(
+                        floor > 0.0 and math.isfinite(residual) and residual <= floor
                     ),
                 })
         return result

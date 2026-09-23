@@ -1180,6 +1180,7 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
         "ratio_usable", "gradient_error_estimate", "converged",
         "rho_spectral", "spectral_error_bound", "spectral_usable",
         "gradient_relative_error_bound", "gradient_bound_usable",
+        "precision_limited",
     }
     # ``dict()`` copies through the real items, not the aliases.
     assert set(dict(d)) == set(d)

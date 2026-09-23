@@ -666,12 +666,143 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS):
     return rho, H[k, k - 1], amplification
 
 
+#: Units of ``eps * max|field|`` per entry that a computed residual can
+#: differ from the exact ``F(x) - x`` by -- the constant in
+#: :func:`residual_precision_floor`.
+#:
+#: **Derivation.**  The residual a group reports is ``N(F~(x) - x)``,
+#: with ``F~`` the one-pass map as float arithmetic evaluates it and
+#: ``N`` the group's norm, which divides each field by its own
+#: magnitude.  What a distance bound needs is ``N(F(x) - x)`` for the
+#: *exact* map, and the two differ by at most ``N(F~(x) - F(x))``, the
+#: map's evaluation error (triangle inequality).  Each entry of
+#: ``F~(x)`` is at least rounded once at the output, which is half a
+#: unit in the last place of a number no larger than the field's
+#: magnitude, ``<= eps * max|field| / 2`` -- so a residual of exactly
+#: ``0.0`` does not say ``F(x) == x``; it says the last pass moved no
+#: entry by more than about one ulp, and a slow group can stall there
+#: arbitrarily far from its fixed point (``(1 - rho) * |x - x*|`` below
+#: half an ulp).  Measured, in units of ``eps * max|field|`` per entry
+#: and in the norm the group reports (jaxlib 0.11.0, CPU, float32):
+#:
+#: * the evaluation error of a dense linear update ``A @ u + c``,
+#:   ``n <= 6``, over 3 000 random normal contractions near their fixed
+#:   points: at most **0.72** (median 0.18) -- this *includes* the
+#:   output rounding;
+#: * the disagreement between two compilations of the same pass (the
+#:   ``"ift"`` and ``"fori"`` solvers' reported residuals over the
+#:   480-cell sweep behind ``tests/core/test_coupling_solver_equivalence.py``):
+#:   at most **0.82**.
+#:
+#: Their sum is 1.54; four units is 2.6x that, which is the room a map
+#: with more roundings per entry than one dense product needs (a
+#: sub-stepped integrator, a flux computed from two iterates).  It is a
+#: model of the map's rounding, not a proof of it: a node whose update
+#: cancels catastrophically -- a small output computed as the
+#: difference of two large intermediates -- can exceed any fixed number
+#: of ulps of its *output's* magnitude, and nothing outside the node can
+#: see that.
+PRECISION_FLOOR_ULPS = 4.0
+
+
+def residual_precision_floor(state, node_names, convergence_norm="l2",
+                             atol: float = 0.0, rtol: float = 1.0,
+                             interface_edges=()):
+    """The float resolution of a residual the group's norm reports at *state*.
+
+    ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
+    entry the norm reads, measured in that norm: the size a residual can
+    have that is float rounding and not motion (see
+    :data:`PRECISION_FLOOR_ULPS` for the derivation of the constant).
+    Because every 0.4.0 norm divides a field by its own magnitude, one
+    unit of ``eps * max|field|`` per entry is ``eps`` per entry in the
+    norm's coordinates, so:
+
+    * ``"l2"``: ``C * sqrt(sum over the active fields of size * eps**2)``,
+      i.e. ``C * eps * sqrt(n)`` over the ``n`` float entries it reads;
+    * ``"mixed"`` and ``"interface"``: the RMS of ``eps / rtol`` over the
+      active entries, i.e. ``C * eps / rtol`` for a single dtype;
+
+    with ``C = PRECISION_FLOOR_ULPS`` and "active" exactly the rule the
+    norm applies (:func:`_scaled_change`): a field inside the dead band
+    contributes nothing to the residual and nothing here.  ``0.0`` when
+    the norm reads no active field -- it then measures nothing, and the
+    residual is ``0.0`` too.
+
+    Parameters
+    ----------
+    state : dict
+        ``{node: {field: array}}`` -- the state the residual describes.
+    node_names : iterable of str
+        The group's nodes (read under ``"l2"`` and ``"mixed"``).
+    convergence_norm : {"l2", "mixed", "interface"}
+        The group's norm.
+    atol, rtol : float
+        The group's dead band and relative tolerance (``rtol`` is not
+        read by the L2 norm, whose threshold is ``tolerance``).
+    interface_edges : iterable of EdgeSpec
+        The group's internal edges (read under ``"interface"``).
+
+    Returns
+    -------
+    jnp.ndarray
+        Scalar, in the units ``residual`` is reported in.  Traceable, so
+        it can be taken inside a jitted step as well as on the host.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> s = {"n": {"x": jnp.ones(4, jnp.float32), "k": jnp.int32(3)}}
+    >>> eps = float(jnp.finfo(jnp.float32).eps)
+    >>> round(float(residual_precision_floor(s, ["n"], "l2")) / eps, 4)   # 4 * sqrt(4)
+    8.0
+    >>> round(float(residual_precision_floor(s, ["n"], "mixed", rtol=1e-3)) / eps)  # 4 / rtol
+    4000
+    >>> float(residual_precision_floor(s, ["n"], "l2", atol=2.0))   # dead-banded: nothing read
+    0.0
+    """
+    norm = str(convergence_norm)
+    use_rtol = 1.0 if norm == "l2" else float(rtol)
+    values = []
+    if norm == "interface":
+        for edge in interface_edges:
+            v = state[edge.source_node][edge.source_field]
+            if not _is_float_leaf(v):
+                continue
+            if edge.transform is not None:
+                v = edge.transform(v)
+            values.append(jnp.asarray(v))
+    else:
+        for nn in node_names:
+            for field_name in state[nn]:
+                v = state[nn][field_name]
+                if _is_float_leaf(v):
+                    values.append(jnp.asarray(v))
+    values = [v for v in values if v.size > 0]
+    if not values:
+        return jnp.zeros((), jnp.float32)
+    dtype = jnp.result_type(*[v.dtype for v in values])
+    sum_sq = jnp.zeros((), dtype)
+    count = jnp.zeros((), dtype)
+    for v in values:
+        _scaled, active = _scaled_change(v, v, atol, use_rtol)
+        eps = float(jnp.finfo(v.dtype).eps) / use_rtol
+        n = jnp.where(active, float(v.size), 0.0).astype(dtype)
+        sum_sq = sum_sq + n * (eps * eps)
+        count = count + n
+    if norm != "l2":
+        sum_sq = sum_sq / jnp.maximum(count, 1.0)
+    return PRECISION_FLOOR_ULPS * jnp.sqrt(sum_sq)
+
+
 def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
-                         margin: float = SPECTRAL_MARGIN):
+                         margin: float = SPECTRAL_MARGIN, floor=0.0):
     """The distance to the fixed point, from the spectrum of ``dF/dx``.
 
-    ``residual * max(amplification, 1 / (1 - rho_safe))``, with
-    ``rho_safe = rho + margin * arnoldi_residual``.
+    ``(residual + floor) * max(amplification, 1 / (1 - rho_safe))``,
+    with ``rho_safe = rho + margin * arnoldi_residual`` and ``floor`` the
+    residual's own float resolution (:func:`residual_precision_floor`;
+    ``0.0`` by default, which is the exact-arithmetic statement).
 
     For a *linear* map ``F(x) = A x + b`` the error of any iterate is
     exactly ``x - x* = (A - I)^{-1} (F(x) - x)``, whatever iteration
@@ -702,10 +833,26 @@ def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
     when ``rho_safe >= 1`` or the compressed ``I - H`` is singular --
     the raw iteration would not contract, so nothing is bounded -- and
     NaN when ``rho`` is NaN, which is how a solver that did not compute
-    one reports it.  Never smaller than ``residual`` where it is
-    finite, and it inherits the residual's float32 noise floor: a
-    residual that reads exactly ``0.0`` gives a bound of ``0.0``, which
-    means "converged to float32" and not "exact".
+    one reports it.  Never smaller than ``residual + floor`` where it
+    is finite.
+
+    **Why the floor is added and not compared.**  The operator bound is
+    ``||x - x*|| <= amp * N(F(x) - x)`` for the *exact* map, and the
+    residual that was measured is ``N(F~(x) - x)`` for the map float
+    arithmetic evaluated.  The two differ by the evaluation error, so
+    the measured residual bounds the exact one only after the floor is
+    added: ``N(F(x) - x) <= residual + floor``.  Without it a float32
+    iterate that has *stalled* -- ``F~(x) == x`` bitwise, because
+    ``(1 - rho) * |x - x*|`` is below half an ulp -- reported a residual
+    of ``0.0`` and a bound of ``0.0`` while thousands of ulps from its
+    fixed point (38 348 ulps, a true distance of 4.2e-3, on a relay
+    contracting at 0.99999).  With it the bound on that state is the
+    floor times the amplification, which is what float32 can resolve
+    about a group that slow; see :data:`PRECISION_FLOOR_ULPS`.  The
+    floor term is amplified by the same factor as the residual, which
+    is exact for a normal Jacobian whose non-zero spectrum the Krylov
+    space resolved and an estimate otherwise: the rounding error's
+    direction is not measured.
 
     **When it is a bound and when it is an estimate.**  It is a bound
     on ``||x - x*||`` in the group's norm under three conditions, each
@@ -734,23 +881,30 @@ def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
     0.004
     >>> float(spectral_error_bound(1e-4, 1.0, 0.0, 1.0))
     inf
+    >>> round(float(spectral_error_bound(0.0, 0.999, 0.0, 1000.0, floor=1e-6)), 6)  # stalled
+    0.001
     """
     residual = jnp.asarray(residual)
     rho = jnp.asarray(rho)
     arnoldi_residual = jnp.asarray(arnoldi_residual)
     amplification = jnp.asarray(amplification)
-    dtype = jnp.result_type(residual, rho, arnoldi_residual, amplification)
+    floor = jnp.asarray(floor)
+    dtype = jnp.result_type(residual, rho, arnoldi_residual, amplification, floor)
     residual = residual.astype(dtype)
     rho = rho.astype(dtype)
     arnoldi_residual = arnoldi_residual.astype(dtype)
     amplification = amplification.astype(dtype)
+    floor = floor.astype(dtype)
     rho_safe = rho + margin * arnoldi_residual
     computed = jnp.logical_and(jnp.isfinite(rho_safe), jnp.isfinite(residual))
     contracting = jnp.logical_and(rho_safe < 1, jnp.isfinite(amplification))
     ok = jnp.logical_and(computed, contracting)
     den = jnp.where(ok, 1.0 - rho_safe, jnp.ones_like(rho_safe))
     amp = jnp.maximum(jnp.where(ok, amplification, 1.0), 1.0 / den)
-    bound = jnp.maximum(residual * amp, residual)
+    # The exact map's residual is at most the measured one plus the
+    # evaluation error; see the docstring.
+    measured = residual + floor
+    bound = jnp.maximum(measured * amp, measured)
     nan = jnp.full_like(bound, jnp.nan)
     inf = jnp.full_like(bound, jnp.inf)
     return jnp.where(computed, jnp.where(contracting, bound, inf), nan)
@@ -920,9 +1074,15 @@ def ift_gradient_error_bound(amplification, distance, secant, step, tangent):
     respond to the probe, so a relative error is undefined), where the
     secant is not finite, or where ``step`` is zero with ``distance``
     not -- a curvature cannot be read off a zero step.  ``0.0`` where
-    ``distance`` is ``0.0`` and finite everything else: the returned
-    iterate is the fixed point to float32 and so is its linearisation,
-    which means "converged to float32", not "exact".  ``inf`` where
+    ``distance`` is ``0.0`` and finite everything else.  A distance
+    taken from :func:`spectral_error_bound` with its ``floor`` is never
+    ``0.0`` at a finite iterate the group's norm reads anything of --
+    the floor is what float32 can resolve, and a residual of ``0.0``
+    means only that the last pass moved less than it -- so the branch
+    is reached only where the norm reads nothing and so measures
+    nothing.  (Before 0.4.0 shipped it was reached on every stalled
+    float32 iterate, and read ``0.0`` against true gradient errors of
+    3% at ``F'(x*) = 0.999``.)  ``inf`` where
     ``amplification`` or ``distance`` is ``inf`` (nothing contracts, so
     nothing is bounded) and the rest is finite and non-zero.
 
@@ -930,7 +1090,7 @@ def ift_gradient_error_bound(amplification, distance, secant, step, tangent):
     --------
     >>> round(float(ift_gradient_error_bound(2.0, 0.01, 3e-3, 0.01, 1.0)), 6)
     0.006
-    >>> float(ift_gradient_error_bound(2.0, 0.0, 0.0, 0.0, 1.0))   # converged to float32
+    >>> float(ift_gradient_error_bound(2.0, 0.0, 0.0, 0.0, 1.0))   # a norm that reads nothing
     0.0
     >>> import math
     >>> math.isnan(float(ift_gradient_error_bound(2.0, 0.01, 0.0, 0.01, 0.0)))  # no response

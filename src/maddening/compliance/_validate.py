@@ -42,6 +42,10 @@ _REQUIRED_ANOMALY_FIELDS = (
     # others: it is what tells a reader whether the defect is still live.
     "resolution_status",
 )
+# ``affected_versions`` is not checked here.  MADDENING's own
+# registry holds it to a PEP 440 convention against ``maddening_version``
+# in ``scripts/check_anomalies.py`` (``version_range_errors``); that rule is
+# not applied to other registries validated through this function.
 _OPTIONAL_ANOMALY_FIELDS = (
     "affected_components", "affected_versions", "workaround",
     "resolution_version", "verification", "residual_risk", "github_issue",
@@ -242,25 +246,57 @@ def resolve_dotted_name(
     return Resolution(True, None, inherited_from)
 
 
-def _definitions_in(py_path: str) -> set[str]:
-    """Names of every function and class defined anywhere in a Python file."""
+_DEFINITION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _parse(py_path: str) -> Optional[ast.Module]:
     try:
         with open(py_path) as f:
-            tree = ast.parse(f.read(), filename=py_path)
+            return ast.parse(f.read(), filename=py_path)
     except (SyntaxError, UnicodeDecodeError, OSError):
-        return set()
-    return {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
+        return None
+
+
+def _defined_in(body: list) -> dict:
+    """The functions and classes defined directly in ``body``, by name."""
+    return {node.name: node for node in body if isinstance(node, _DEFINITION)}
+
+
+def _member(
+    cls: ast.ClassDef, name: str, module: dict, seen: frozenset = frozenset()
+) -> Optional[ast.AST]:
+    """``name`` defined on ``cls`` or inherited from a base in the same file.
+
+    pytest collects a test method a class inherits, under the subclass's
+    node id, so an inherited method is a real node id.  A base that is not
+    a class defined in this file cannot be looked into and yields None:
+    the caller fails closed rather than trusting it.
+    """
+    own = _defined_in(cls.body).get(name)
+    if own is not None:
+        return own
+    for base in cls.bases:
+        base_def = module.get(base.id) if isinstance(base, ast.Name) else None
+        if isinstance(base_def, ast.ClassDef) and base_def.name not in seen:
+            found = _member(base_def, name, module, seen | {cls.name})
+            if found is not None:
+                return found
+    return None
 
 
 def resolve_test_reference(ref: str, repo_root: str) -> Optional[str]:
     """Check a ``path/to/test.py::test_name`` reference; return a reason or None.
 
-    The ``::`` part is optional.  ``Class::method`` node ids are accepted:
-    every component after the path must be defined somewhere in the file.
+    The ``::`` part is optional.  After the path, the components are
+    resolved the way pytest reads a node id: the first must be defined at
+    module level, and each further one must be defined in the body of the
+    class the previous one names, or inherited from a base class defined
+    in the same file.  A function has no children in a node id.
+
+    This used to accept ``File::Class::method`` whenever both names were
+    defined *anywhere* in the file, so a verification entry naming a
+    module-level test under a class it is not in -- a node id pytest
+    reports as "not found" -- passed the registry gate.
     """
     parts = str(ref).split("::")
     rel = parts[0]
@@ -269,10 +305,22 @@ def resolve_test_reference(ref: str, repo_root: str) -> Optional[str]:
         return f"test file '{rel}' does not exist"
     if len(parts) == 1:
         return None
-    defined = _definitions_in(abspath)
-    missing = [p for p in parts[1:] if p not in defined]
-    if missing:
-        return f"'{rel}' defines no {' / '.join(repr(m) for m in missing)}"
+    tree = _parse(abspath)
+    if tree is None:
+        return f"'{rel}' could not be parsed, so {ref!r} cannot be resolved"
+    module = _defined_in(tree.body)
+    node: Optional[ast.AST] = None
+    for parent, name in zip([None, *parts[1:-1]], parts[1:]):
+        if node is None:
+            found, where = module.get(name), "at module level"
+        elif isinstance(node, ast.ClassDef):
+            found, where = _member(node, name, module), f"in class {node.name}"
+        else:
+            return (f"'{rel}' defines no {name!r} inside {parent!r}, which is "
+                    f"a function, not a class")
+        if found is None:
+            return f"'{rel}' defines no {name!r} {where}"
+        node = found
     return None
 
 

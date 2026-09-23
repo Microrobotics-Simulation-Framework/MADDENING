@@ -636,6 +636,63 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     return jnp.where(captured, worst, nan)
 
 
+#: Every ``_meta`` slot a coupling group can own, as the suffix after
+#: ``coupling_<group key>_``.  Read by :func:`_refuse_colliding_group_keys`.
+_GROUP_META_SUFFIXES = (
+    "iterations", "residual", "amplification", "rho_spectral",
+    "spectral_residual", "spectral_amplification",
+    "gradient_relative_error_bound", "V", "W", "pred_count",
+    "pred_0", "pred_1", "pred_2",
+)
+
+
+def _refuse_colliding_group_keys(groups) -> None:
+    """Raise if two coupling groups would share a report key or a ``_meta`` slot.
+
+    A group is keyed by its sorted node names joined with ``"+"`` -- the
+    key ``coupling_diagnostics()`` reports it under, and the prefix of
+    every ``_meta`` slot it owns (diagnostics, IQN-IMVJ warm starts,
+    predictor history).  Node names may themselves contain ``"+"`` (and
+    ``"_"``), so two different groups can produce the same key --
+    ``{"a+b", "c"}`` and ``{"a", "b+c"}`` are both ``a+b+c`` -- or one
+    group's key plus a suffix can spell another's slot (a group keyed
+    ``a+b_spectral`` owns ``coupling_a+b_spectral_residual``, which is
+    ``a+b``'s ``spectral_residual``).  Either way one report stood for
+    two groups and their carries overwrote each other; IQN-IMVJ warm
+    starts of different sizes failed with a broadcasting ``ValueError``
+    deep inside the step.
+
+    Refused here, at registration, rather than keyed differently: every
+    existing report key stays what it was, and the only graphs affected
+    are those that could not have been reported correctly anyway.
+    """
+    seen: dict[str, frozenset] = {}
+    slots: dict[str, frozenset] = {}
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        other = seen.get(key)
+        if other is not None and other != group.nodes:
+            raise ValueError(
+                f"Coupling groups {sorted(other)} and {sorted(group.nodes)} "
+                f"would share the diagnostics key {key!r}: a group is keyed "
+                "by its sorted node names joined with '+', and node names "
+                "may contain '+'.  Rename a node so the two keys differ."
+            )
+        seen[key] = group.nodes
+        for suffix in _GROUP_META_SUFFIXES:
+            slot = f"coupling_{key}_{suffix}"
+            owner = slots.get(slot)
+            if owner is not None and owner != group.nodes:
+                raise ValueError(
+                    f"Coupling groups {sorted(owner)} and {sorted(group.nodes)} "
+                    f"would share the internal state slot {slot!r}: a group's "
+                    "slots are named from its sorted node names joined with "
+                    "'+', and one group's name plus a suffix spells the "
+                    "other's.  Rename a node so the two keys differ."
+                )
+            slots[slot] = group.nodes
+
+
 def _group_state_finite(state, node_names):
     """Whether every floating field of the group's nodes is finite."""
     ok = jnp.array(True)
@@ -3819,6 +3876,7 @@ class GraphManager:
         group = self._make_coupling_group(
             nodes, max_iterations, tolerance, **kwargs
         )
+        _refuse_colliding_group_keys([*self._coupling_groups, group])
         self._coupling_groups.append(group)
         self._dirty = True
         return group
@@ -3899,6 +3957,7 @@ class GraphManager:
             self._make_coupling_group(scc, max_iterations, tolerance, **kwargs)
             for scc in sccs
         ]
+        _refuse_colliding_group_keys(groups)
         self._coupling_groups[:] = groups
         self._dirty = True
         return groups

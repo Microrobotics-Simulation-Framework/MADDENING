@@ -247,3 +247,123 @@ def test_every_norm_reads_a_non_finite_field_as_inf(value):
     assert bool(jnp.isposinf(coupling_residual_l2(s_new, s_old, ["a"])))
     assert bool(jnp.isposinf(coupling_residual_mixed(s_new, s_old, ["a"], 0.0, 1e-6)))
     assert bool(jnp.isposinf(coupling_residual_interface(s_new, s_old, [edge], 0.0, 1e-6)))
+
+
+# ---------------------------------------------------------------------------
+# A non-finite field the norm does not read
+#
+# The rule above lives in the norm, and a norm only sees the fields it
+# reads.  ``convergence_norm="interface"`` reads edge sources, so a NaN
+# in an internal field -- one no edge reads -- left the residual finite:
+# ``converged=True``, ``strict_convergence`` silent, ``spectral_usable``
+# True, on a state that was not finite.  The verdict is now taken over
+# every floating field of the returned state.
+# ---------------------------------------------------------------------------
+
+
+class _WithInternal(SimulationNode):
+    """``x <- 0.5 u + c`` (read by the relay) beside ``z <- z_pre + k + w`` (read by nothing)."""
+
+    def __init__(self, name, z0=0.0, k=0.1):
+        super().__init__(name=name, timestep=1.0, c=jnp.float32(1.0), k=jnp.float32(k))
+        self._z0 = z0
+
+    def initial_state(self):
+        return {"x": jnp.float32(1.0), "z": jnp.float32(self._z0)}
+
+    def state_fields(self):
+        return ["x", "z"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0)),
+                "w": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": 0.5 * boundary_inputs["u"] + p["c"],
+                "z": state["z"] + p["k"] + boundary_inputs["w"]}
+
+
+class _ScalarRelay(SimulationNode):
+    def initial_state(self):
+        return {"x": jnp.float32(1.0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": boundary_inputs["u"]}
+
+
+_ROUTES = ("initial state", "parameter", "external input", "none")
+
+
+def _internal_field_graph(route, norm, solver="ift", strict=False):
+    gm = GraphManager()
+    gm.add_node(_WithInternal("a", z0=np.nan if route == "initial state" else 0.0,
+                              k=np.nan if route == "parameter" else 0.1))
+    gm.add_node(_ScalarRelay("b", timestep=1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_external_input("a", "w", shape=(), dtype=jnp.float32)
+    kw = dict(tolerance=1e-4) if norm == "l2" else dict(rtol=1e-3)
+    if solver == "ift":
+        kw["strict_convergence"] = strict
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
+                          max_iterations=40, solver=solver, **kw)
+    gm.compile()
+    ext = ({"a": {"w": jnp.float32(np.inf)}} if route == "external input"
+           else {"a": {"w": jnp.float32(0.0)}})
+    return gm, ext
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("norm", NORMS)
+@pytest.mark.parametrize("route", _ROUTES[:3])
+def test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state(route, norm, solver):
+    """Initial state, parameter or external input; every norm, both solvers.
+
+    ``interface`` is the norm that used to miss it (``l2`` and
+    ``mixed`` read every float field); the other two are here so the
+    three agree by construction rather than by coincidence.
+    """
+    gm, ext = _internal_field_graph(route, norm, solver)
+    gm.step(ext)
+    z = float(gm.get_node_state("a")["z"])
+    assert not math.isfinite(z), "fixture premise: z is non-finite"
+    assert math.isfinite(float(gm.get_node_state("a")["x"])), (
+        "fixture premise: the interface field is finite, so only the "
+        "all-fields rule can see the non-finite state"
+    )
+    d = gm.coupling_diagnostics()["a+b"]
+    _assert_reported_as_diverged(d, f"{route}/{norm}/{solver}")
+    assert d["spectral_usable"] is False, d
+    assert d["gradient_bound_usable"] is False, d
+    if solver == "ift":
+        # A Jacobian at a destroyed state describes nothing: NaN, never
+        # a radius that reads as "contracts at 0.5".
+        assert math.isnan(d["rho_spectral"]), d
+
+
+@pytest.mark.parametrize("norm", NORMS)
+@pytest.mark.parametrize("route", _ROUTES[:3])
+def test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads(route, norm):
+    """The strict guard reads the same verdict, so it names the non-finite state."""
+    gm, ext = _internal_field_graph(route, norm, strict=True)
+    with pytest.raises(Exception, match="state is non-finite"):
+        gm.step(ext)
+        jax.block_until_ready(gm.get_node_state("a")["x"])
+
+
+@pytest.mark.parametrize("norm", NORMS)
+def test_a_finite_internal_field_leaves_the_verdict_alone(norm):
+    """The control: the same graph with every field finite converges as before."""
+    gm, ext = _internal_field_graph("none", norm)
+    gm.step(ext)
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["converged"] is True, d
+    assert math.isfinite(d["residual"]) and d["ratio_usable"] is True, d
+    assert d["spectral_usable"] is True, d

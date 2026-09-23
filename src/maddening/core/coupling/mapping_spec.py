@@ -351,6 +351,11 @@ def normalise_point_reference(ref: Any, *, name: str = "points") -> dict:
 
     Accepts the three reference forms of the module docstring, a plain
     (nested) list for an inline set, or a bare string as an asset path.
+
+    An inline set with no ``"dtype"`` is read as ``float64``; if it holds
+    extended-precision (``np.longdouble``) values it is refused rather
+    than rounded, with a message naming what the format does support
+    (see *Accepted dtypes* in the module docstring).
     """
     if isinstance(ref, str):
         ref = {"asset": ref}

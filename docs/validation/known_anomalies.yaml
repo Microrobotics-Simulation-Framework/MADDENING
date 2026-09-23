@@ -2116,7 +2116,7 @@ anomalies:
           difference of exactly 0), with or without the edge, so the
           whole discrepancy is the mapping's.  The weights are
           bit-for-bit the constructor's, and the operator built at 1.25
-          differs from them by up to 1.49 (max|H| about 2).
+          differs from them by up to 1.49 (max|H| is 2.29 at 1.0 and 1.21 at 1.25).
         - Gradient: d sum(target) / d length at 1.0 is -6.43e-3 by
           `jax.grad`, which matches a finite difference of the
           calibrated path (-6.42e-3), so it is exact for the model as

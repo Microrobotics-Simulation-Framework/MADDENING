@@ -2996,8 +2996,8 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
         return everything
     try:
         if name == "while":
-            cond = params["cond_jaxpr"].jaxpr
-            body = params["body_jaxpr"].jaxpr
+            cond = getattr(params["cond_jaxpr"], "jaxpr", params["cond_jaxpr"])
+            body = getattr(params["body_jaxpr"], "jaxpr", params["body_jaxpr"])
             cn, bn = params["cond_nconsts"], params["body_nconsts"]
             cond_in = _live_jaxpr_inputs(cond, [True])
             carry = [a or b for a, b in zip(outs, cond_in[cn:])]
@@ -3009,8 +3009,20 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
                 carry = grown
             out = cond_in[:cn] + body_in[:bn] + carry
         elif name == "scan":
-            body = params["jaxpr"].jaxpr
-            nc, ncar = params["num_consts"], params["num_carry"]
+            body = getattr(params["jaxpr"], "jaxpr", params["jaxpr"])
+            if "num_consts" in params:
+                nc, ncar = params["num_consts"], params["num_carry"]
+            else:
+                # jaxlib 0.11 describes the operands as a flat tree of three
+                # groups, (consts, carry, xs); ``len`` of a group is its
+                # number of flat inputs.  Checked against the operand count
+                # so a changed layout falls back to "everything live".
+                groups = getattr(params["ft_in"], "elts", None)
+                if groups is None or len(groups) != 3:
+                    return everything
+                nc, ncar = len(groups[0]), len(groups[1])
+                if nc + ncar + len(groups[2]) != n_in:
+                    return everything
             carry, ys = list(outs[:ncar]), list(outs[ncar:])
             while True:
                 body_in = _live_jaxpr_inputs(body, carry + ys)
@@ -3022,7 +3034,7 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
         elif name == "cond":
             ops = [False] * (n_in - 1)
             for branch in params["branches"]:
-                branch_in = _live_jaxpr_inputs(branch.jaxpr, outs)
+                branch_in = _live_jaxpr_inputs(getattr(branch, "jaxpr", branch), outs)
                 if len(branch_in) != n_in - 1:
                     return everything
                 ops = [a or b for a, b in zip(ops, branch_in)]

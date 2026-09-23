@@ -63,6 +63,11 @@ def citations_gate():
 
 
 @pytest.fixture(scope="module")
+def anomalies_gate():
+    return _load("check_anomalies")
+
+
+@pytest.fixture(scope="module")
 def heat_stability_gate():
     return _load("check_heat_stability")
 
@@ -1175,10 +1180,6 @@ class TestTheVersionRangeRule:
     is written around, which the gate runs above only exercise at one
     version."""
 
-    @pytest.fixture(scope="class")
-    def gate(self):
-        return _load("check_anomalies")
-
     @staticmethod
     def _registry(version, *entries):
         return {"maddening_version": version, "anomalies": [
@@ -1189,80 +1190,80 @@ class TestTheVersionRangeRule:
 
     @pytest.mark.parametrize("version", ["0.4.0.dev0", "0.4.0rc1", "0.4.0"])
     def test_a_cycle_introduced_defect_is_admitted_from_its_first_dev_build(
-        self, gate, version
+        self, anomalies_gate, version
     ):
         """``>=0.4.0.dev0`` admits every 0.4.0 build; ``>=0.4.0`` does not."""
         good = self._registry(version, ("open", ">=0.4.0.dev0", {}))
-        assert gate.version_range_errors(good) == []
+        assert anomalies_gate.version_range_errors(good) == []
         if version != "0.4.0":
             bad = self._registry(version, ("open", ">=0.4.0", {}))
-            (message,) = gate.version_range_errors(bad)
+            (message,) = anomalies_gate.version_range_errors(bad)
             assert "'>=0.4.0.dev0'" in message
 
     @pytest.mark.parametrize("version", ["0.4.0.dev0", "0.4.0", "0.4.1"])
     def test_a_range_closed_at_the_fix_leaves_out_its_dev_builds(
-        self, gate, version
+        self, anomalies_gate, version
     ):
         """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases."""
         registry = self._registry(
             version, ("resolved", ">=0.1.0, <0.4.0",
                       {"resolution_version": "0.4.0"}))
-        assert gate.version_range_errors(registry) == []
+        assert anomalies_gate.version_range_errors(registry) == []
 
-    def test_a_resolved_range_that_admits_its_resolution_version_fails(self, gate):
+    def test_a_resolved_range_that_admits_its_resolution_version_fails(self, anomalies_gate):
         registry = self._registry(
             "0.4.0.dev0", ("resolved", ">=0.1.0, <0.5.0",
                            {"resolution_version": "0.4.0"}))
-        errors = gate.version_range_errors(registry)
+        errors = anomalies_gate.version_range_errors(registry)
         assert any("resolution_version is 0.4.0" in e for e in errors), errors
 
-    def test_a_resolved_range_read_by_an_older_registry_is_reachable(self, gate):
+    def test_a_resolved_range_read_by_an_older_registry_is_reachable(self, anomalies_gate):
         """The same entry, on a registry at 0.3.1, says 0.3.1 is affected."""
         registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0", {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert "admits 0.3.1" in message
 
-    def test_none_is_the_empty_set(self, gate):
+    def test_none_is_the_empty_set(self, anomalies_gate):
         ok = self._registry("0.4.0.dev0", ("resolved", "none", {}))
-        assert gate.version_range_errors(ok) == []
+        assert anomalies_gate.version_range_errors(ok) == []
         for status in ("open", "partially_resolved", "wont_fix", "fixed?"):
             bad = self._registry("0.4.0.dev0", (status, "none", {}))
-            (message,) = gate.version_range_errors(bad)
+            (message,) = anomalies_gate.version_range_errors(bad)
             assert "MADD-ANO-001" in message and "does not admit" in message
 
-    def test_a_duplicate_is_parsed_but_not_compared(self, gate):
+    def test_a_duplicate_is_parsed_but_not_compared(self, anomalies_gate):
         ok = self._registry("0.4.0.dev0", ("duplicate", ">=0.1.0, <0.2.0", {}))
-        assert gate.version_range_errors(ok) == []
+        assert anomalies_gate.version_range_errors(ok) == []
         bad = self._registry("0.4.0.dev0", ("duplicate", "banana", {}))
-        assert gate.version_range_errors(bad)
+        assert anomalies_gate.version_range_errors(bad)
 
     @pytest.mark.parametrize("rng, op", [
         (">=0.1.0, <=0.3.1", "'<='"),
         (">=0.1.0, !=0.2.0, <0.4.0", "'!='"),
         (">=0.1.0, <0.4.0, ==0.3.*", "'=='"),
     ])
-    def test_an_operator_outside_the_convention_is_named(self, gate, rng, op):
+    def test_an_operator_outside_the_convention_is_named(self, anomalies_gate, rng, op):
         """Each of these has exactly one ``>=`` and excludes this version, so
         the operator rule is the only one that can refuse it."""
         registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert f"uses {op}" in message, message
 
     @pytest.mark.parametrize("rng", [
         ">=0.1.0, >=0.2.0, <0.4.0",
         ">=0.1.0, <0.3.0, <0.4.0",
     ])
-    def test_a_range_names_one_first_version_and_at_most_one_fix(self, gate, rng):
+    def test_a_range_names_one_first_version_and_at_most_one_fix(self, anomalies_gate, rng):
         """With two ``>=`` bounds, which one is FIRST depends on set order,
         so the empty-set check would catch it only some of the time; the
         shape rule has to be pinned on its own message."""
         registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert "must name exactly one '>=FIRST'" in message, message
 
-    def test_a_range_that_starts_after_this_version_fails(self, gate):
+    def test_a_range_that_starts_after_this_version_fails(self, anomalies_gate):
         registry = self._registry("0.4.0.dev0", ("resolved", ">=0.5.0, <0.6.0", {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert "starts at 0.5.0" in message
 
     @pytest.mark.parametrize("registry", [
@@ -1270,34 +1271,34 @@ class TestTheVersionRangeRule:
         {"maddening_version": "0.4.0.dev0"},
         [],
     ])
-    def test_nothing_to_check_is_a_failure(self, gate, registry):
+    def test_nothing_to_check_is_a_failure(self, anomalies_gate, registry):
         """The generator runs this function too, and an empty registry used
         to pass its ``--check`` once regenerated."""
-        assert gate.version_range_errors(registry)
+        assert anomalies_gate.version_range_errors(registry)
 
     @pytest.mark.parametrize("version", [None, "", "zero point four"])
-    def test_an_unusable_registry_version_is_a_failure(self, gate, version):
+    def test_an_unusable_registry_version_is_a_failure(self, anomalies_gate, version):
         registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
         registry["maddening_version"] = version
-        assert gate.version_range_errors(registry)
+        assert anomalies_gate.version_range_errors(registry)
 
     @pytest.mark.parametrize("blank", ["", "   "])
-    def test_a_blank_range_is_refused_before_it_is_parsed(self, gate, blank):
+    def test_a_blank_range_is_refused_before_it_is_parsed(self, anomalies_gate, blank):
         """``SpecifierSet("")`` is the set of *every* version.  The one-``>=``
         rule would refuse it too, so this guard is redundant today; it is
         pinned so that loosening that rule cannot make a blank range mean
         "affects everything" without a word."""
         registry = self._registry("0.4.0.dev0", ("resolved", blank, {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert f"MADD-ANO-001: affected_versions is {blank!r}" in message
 
-    def test_a_non_string_range_is_a_failure(self, gate):
+    def test_a_non_string_range_is_a_failure(self, anomalies_gate):
         registry = self._registry("0.4.0.dev0", ("open", 0.1, {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert "MADD-ANO-001: affected_versions is 0.1" in message
 
     def test_the_rule_does_not_lean_on_packagings_prerelease_default(
-        self, gate, monkeypatch
+        self, anomalies_gate, monkeypatch
     ):
         """``SpecifierSet.contains`` changed its default across packaging
         releases: 22 (pytest's floor) leaves a pre-release out unless asked,
@@ -1322,22 +1323,22 @@ class TestTheVersionRangeRule:
             ("open", ">=0.1.0", {}),
             ("resolved", ">=0.1.0, <0.4.0", {"resolution_version": "0.4.0"}),
         )
-        assert gate.version_range_errors(registry) == []
+        assert anomalies_gate.version_range_errors(registry) == []
 
-    def test_without_packaging_the_rule_fails_closed(self, gate, monkeypatch):
+    def test_without_packaging_the_rule_fails_closed(self, anomalies_gate, monkeypatch):
         """``packaging`` comes with pytest; if it is ever missing, the rule
         must say so rather than pass everything."""
         monkeypatch.setitem(sys.modules, "packaging.specifiers", None)
         registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
-        (message,) = gate.version_range_errors(registry)
+        (message,) = anomalies_gate.version_range_errors(registry)
         assert "packaging" in message
 
-    def test_the_shipped_registry_passes(self, gate):
+    def test_the_shipped_registry_passes(self, anomalies_gate):
         import yaml
 
         registry = yaml.safe_load(
             (REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml").read_text())
-        assert gate.version_range_errors(registry) == []
+        assert anomalies_gate.version_range_errors(registry) == []
 
 
 class TestTransformGateConstantBinding:

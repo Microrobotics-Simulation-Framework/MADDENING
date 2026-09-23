@@ -739,6 +739,11 @@ def spectral_rate_settled(rho, arnoldi_residual, fraction: float = SPECTRAL_SETT
     )
 
 
+# ------------------------------------------------------------------
+# The IFT gradient's error at an early exit (``solver="ift"``,
+# ``diagnostics=True``)
+# ------------------------------------------------------------------
+
 #: Relative Frobenius residual ``||J U - U M|| / ||J U||`` above which
 #: :func:`jacobian_range_basis` reports that the basis did not capture
 #: the Jacobian's range.  Rounding on a captured range is ~1e-6
@@ -832,51 +837,78 @@ def resolvent_apply(U, M, w, Jw):
     return w + U @ z
 
 
-def tangent_relative_error(amplification, linearisation_error, tangent_norm):
-    """``amplification * linearisation_error / tangent_norm``, with NaN where undefined.
+def ift_gradient_error_bound(amplification, distance, secant, step, tangent):
+    """``amplification * distance * secant / (step * tangent)``: the IFT tangent's relative error.
 
-    The arithmetic of ``coupling_diagnostics()``'s
-    ``gradient_relative_error_estimate``.  The IFT tangent rule solves
-    ``(I - J(x)) t = F_theta(x) theta_dot`` at the *returned* iterate
-    ``x_k`` instead of the fixed point ``x*``; the two solutions differ
-    by ``(I - J(x_k))^{-1}`` applied to the difference of the two
-    linearisations, ``[J(x_k) - J(x*)] t + [F_theta(x_k) -
-    F_theta(x*)] theta_dot``.  ``linearisation_error`` is the norm of
-    that difference measured by the caller (as a secant between ``x_k``
-    and a point at the Newton correction from it, in the group's norm),
-    ``tangent_norm`` is ``||t||`` in the same norm, and
-    ``amplification`` is the resolvent bound
-    :func:`spectral_error_bound` applies to a residual -- so the result
-    bounds the relative error of the tangent for the probed direction
-    exactly where that bound holds, and is an estimate where it is one.
+    The arithmetic of ``coupling_diagnostics()['gradient_relative_error_bound']``,
+    elementwise, with the conventions below.  The IFT tangent rule
+    solves ``(I - J(x)) t = F_c(x) c_dot`` at the iterate the forward
+    *returned*, ``x_k``, where the derivative of the fixed point is the
+    same solve at ``x*``.  Subtracting the two equations gives, exactly,
 
-    NaN when ``amplification`` is NaN (nothing was computed) or when
-    ``tangent_norm`` is zero (the fixed point does not respond to the
-    probe, so a relative error is undefined); ``inf`` when
-    ``amplification`` is ``inf`` and the linearisation error is not
-    zero -- nothing contracts, nothing is bounded.
+        ``t_k - t* = (I - J(x*))^{-1} [G(x_k) - G(x*)]``,
+        ``G(x) = J(x) t_k + F_c(x) c_dot``
+
+    -- the resolvent applied to the change, between the two points, of
+    the one-pass map's Jacobian-vector product along the tangent the
+    rule returned.  Each factor here bounds one piece of that:
+
+    * ``amplification`` bounds the resolvent: the factor
+      :func:`spectral_error_bound` applies to a residual (the larger of
+      ``||(I - H)^{-1}||_2`` and ``1 / (1 - rho_safe)``);
+    * ``distance`` bounds ``||x_k - x*||``: :func:`spectral_error_bound`
+      itself -- not the residual and not ``error_estimate``, which
+      understate the distance by up to 122x;
+    * ``secant / step`` is the change in ``G`` per unit distance: the
+      norm of ``G(x_k + delta) - G(x_k)`` over the norm of the step
+      ``delta`` it was measured across;
+    * ``tangent`` is ``||t_k||``, so the result is relative.
+
+    All norms are the group's, and ``distance``, ``secant``, ``step``
+    and ``tangent`` must be taken in the *same* one: the result is not
+    invariant to rescaling one of them alone.
+
+    Conventions, so a number is never reported where none was computed:
+    NaN where ``amplification`` or ``distance`` is NaN (nothing was
+    computed), where ``tangent`` is zero (the fixed point does not
+    respond to the probe, so a relative error is undefined), where the
+    secant is not finite, or where ``step`` is zero with ``distance``
+    not -- a curvature cannot be read off a zero step.  ``0.0`` where
+    ``distance`` is ``0.0`` and finite everything else: the returned
+    iterate is the fixed point to float32 and so is its linearisation,
+    which means "converged to float32", not "exact".  ``inf`` where
+    ``amplification`` or ``distance`` is ``inf`` (nothing contracts, so
+    nothing is bounded) and the rest is finite and non-zero.
 
     Examples
     --------
-    >>> float(tangent_relative_error(4.0, 0.01, 2.0))
-    0.02
+    >>> round(float(ift_gradient_error_bound(2.0, 0.01, 3e-3, 0.01, 1.0)), 6)
+    0.006
+    >>> float(ift_gradient_error_bound(2.0, 0.0, 0.0, 0.0, 1.0))   # converged to float32
+    0.0
     >>> import math
-    >>> math.isnan(float(tangent_relative_error(4.0, 0.0, 0.0)))
+    >>> math.isnan(float(ift_gradient_error_bound(2.0, 0.01, 0.0, 0.01, 0.0)))  # no response
     True
-    >>> math.isinf(float(tangent_relative_error(math.inf, 0.01, 2.0)))
+    >>> math.isinf(float(ift_gradient_error_bound(math.inf, math.inf, 3e-3, 0.01, 1.0)))
     True
     """
     amp = jnp.asarray(amplification)
-    err = jnp.asarray(linearisation_error)
-    tn = jnp.asarray(tangent_norm)
-    dtype = jnp.result_type(amp, err, tn)
-    amp = amp.astype(dtype)
-    err = err.astype(dtype)
-    tn = tn.astype(dtype)
-    defined = tn > 0
-    ratio = err / jnp.where(defined, tn, 1.0)
-    est = amp * ratio
-    return jnp.where(defined, est, jnp.full_like(est, jnp.nan))
+    dist = jnp.asarray(distance)
+    sec = jnp.asarray(secant)
+    stp = jnp.asarray(step)
+    tan = jnp.asarray(tangent)
+    dtype = jnp.result_type(amp, dist, sec, stp, tan)
+    amp, dist, sec, stp, tan = (a.astype(dtype) for a in (amp, dist, sec, stp, tan))
+    responds = tan > 0
+    measured = jnp.logical_and(jnp.isfinite(sec), jnp.isfinite(stp))
+    computed = jnp.logical_and(~jnp.isnan(amp), ~jnp.isnan(dist))
+    at_fixed_point = jnp.logical_and(dist == 0, jnp.isfinite(amp))
+    curvable = stp > 0
+    safe_den = jnp.where(jnp.logical_and(curvable, responds), stp * tan, 1.0)
+    rel = sec / safe_den
+    value = jnp.where(at_fixed_point, jnp.zeros_like(rel), amp * dist * rel)
+    ok = computed & responds & measured & (at_fixed_point | curvable)
+    return jnp.where(ok, value, jnp.full_like(value, jnp.nan))
 
 
 # ------------------------------------------------------------------

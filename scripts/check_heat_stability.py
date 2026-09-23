@@ -33,6 +33,25 @@ So this walks the AST, and:
 
 Scope is the repository's *tracked* Python files (``git ls-files``),
 so untracked scratch under ``benchmarks/results/`` is not scanned.
+
+Every construction lands in exactly one of three counts, and only the
+first is "verified":
+
+* **verified** -- every argument that decides the Fourier number was read
+  as a literal (or is the constructor's default), and the rod is within
+  its stencil's limit;
+* **refused** -- the same, and the rod is past the limit: the gate fails;
+* **not evaluated** -- something decides the Fourier number that the gate
+  cannot read: a computed argument, a ``**mapping`` held in a variable, a
+  ``*args`` splat, a keyword given twice, a non-positive value, or a
+  stencil order with no limit.  These are counted and reported by reason
+  (``--list-unevaluated`` prints each one), never folded into the verified
+  count, and a scope in which *nothing* could be evaluated fails.
+
+A literal ``**{"thermal_diffusivity": 1e3}`` or ``**dict(...)`` splat is
+read like the keywords it spells.  It used to be dropped silently, so the
+rod was judged on the constructor's *defaults* and counted as verified
+while ``HeatNode.__init__`` refused it (audit_040_phase3_wave_d, H5).
 """
 
 from __future__ import annotations
@@ -187,6 +206,58 @@ def _is_heat_node_call(node, aliases) -> bool:
     return getattr(node.func, "id", None) in aliases
 
 
+def _literal_splat(value):
+    """``{name: node}`` for a literal ``**{...}`` / ``**dict(...)``, else ``None``.
+
+    ``None`` means "a mapping this gate cannot read", which the caller must
+    treat as unevaluable -- never as "no extra arguments".
+    """
+    if isinstance(value, ast.Dict):
+        out = {}
+        for key, item in zip(value.keys, value.values):
+            # ``key is None`` is a nested ``**other`` inside the literal.
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                return None
+            if key.value in out:
+                return None
+            out[key.value] = item
+        return out
+    if (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "dict"
+            and not value.args and all(kw.arg for kw in value.keywords)):
+        return {kw.arg: kw.value for kw in value.keywords}
+    return None
+
+
+def _call_arguments(node):
+    """The constructor arguments by parameter name, or ``(None, reason)``.
+
+    Returns ``(args, None)`` when every argument's *name* is known, and
+    ``(None, reason)`` when a splat hides which parameter receives what.
+    """
+    for positional in node.args:
+        if isinstance(positional, ast.Starred):
+            return None, ("a *args splat hides which parameter receives each "
+                          "positional argument")
+    args = {}
+    for i, positional in enumerate(node.args):
+        if i < len(_POSITIONAL):
+            args[_POSITIONAL[i]] = positional
+    for kw in node.keywords:
+        if kw.arg is not None:
+            items = {kw.arg: kw.value}
+        else:
+            items = _literal_splat(kw.value)
+            if items is None:
+                return None, ("a **mapping the gate cannot read supplies "
+                              "some of the arguments")
+        for name, value in items.items():
+            if name in args:
+                return None, (f"{name!r} is given twice; the constructor "
+                              f"would raise TypeError")
+            args[name] = value
+    return args, None
+
+
 def scan_source(src, origin, defaults, unstable, unchecked, seen):
     """Walk one source string, recursing into embedded source."""
     tree = _parse(src)
@@ -205,10 +276,12 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
         if not _is_heat_node_call(node, aliases):
             continue
 
-        args = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-        for i, positional in enumerate(node.args):
-            if i < len(_POSITIONAL):
-                args.setdefault(_POSITIONAL[i], positional)
+        # A ``**`` splat used to be dropped (``if kw.arg``), so the rod was
+        # judged on the defaults it overrode and counted as verified.
+        args, why_not = _call_arguments(node)
+        if args is None:
+            unchecked.append((origin, node.lineno, why_not))
+            continue
 
         # An explicit grid is not a uniform rod; the guard skips it too.
         if "grid_points" in args:
@@ -283,6 +356,11 @@ def main(argv=None) -> int:
         "roots", nargs="*", default=None,
         help="directories to scan (default: the repository's tracked .py files)",
     )
+    parser.add_argument(
+        "--list-unevaluated", action="store_true",
+        help="print every construction that could not be evaluated, with "
+             "the reason",
+    )
     args = parser.parse_args(argv)
 
     if args.roots:
@@ -338,6 +416,8 @@ def main(argv=None) -> int:
             "than trusting the OK.",
             file=sys.stderr,
         )
+        for origin, lineno, why in unchecked[:20]:
+            print(f"  {origin}:{lineno}: {why}", file=sys.stderr)
         return 1
 
     note = ""
@@ -348,9 +428,24 @@ def main(argv=None) -> int:
         # stability limit).  They are NOT part of the verified count.
         note = (f"; {len(unchecked)} further construction(s) could not be "
                 f"evaluated statically and were NOT checked")
+        by_reason = {}
+        for _origin, _lineno, why in unchecked:
+            key = _reason_key(why)
+            by_reason[key] = by_reason.get(key, 0) + 1
+        print("not evaluated, by reason:")
+        for key, count in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:4d}  {key}")
+        if args.list_unevaluated:
+            for origin, lineno, why in unchecked:
+                print(f"  {origin}:{lineno}: {why}")
     print(f"OK: {len(seen)} HeatNode construction(s) verified within their "
           f"stencil's stability limit{note}")
     return 0
+
+
+def _reason_key(why: str) -> str:
+    """The reason with its per-construction values dropped, for grouping."""
+    return why.split(" (", 1)[0].split(";", 1)[0]
 
 
 if __name__ == "__main__":

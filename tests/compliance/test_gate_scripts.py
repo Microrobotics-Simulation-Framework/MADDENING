@@ -1629,6 +1629,79 @@ class TestHeatStabilityCounts:
         assert len(seen) == 1 and unchecked == [] and unstable == []
 
 
+class TestHeatStabilitySplats:
+    """A ``**`` or ``*`` splat must not make a rod read as verified.
+
+    The keyword map was built with ``if kw.arg``, which drops a ``**``
+    splat entirely: ``HeatNode("h", timestep=1e-3,
+    **{"thermal_diffusivity": 1e3})`` was judged on the *default*
+    diffusivity and counted as verified (139 -> 140), while
+    ``HeatNode.__init__`` refuses it at Fourier number 100
+    (audit_040_phase3_wave_d, H5).
+    """
+
+    _scan = TestHeatStabilityCounts._scan
+
+    @pytest.mark.parametrize("splat", [
+        '**{"thermal_diffusivity": 1e3}',
+        "**dict(thermal_diffusivity=1e3)",
+    ])
+    def test_an_unstable_rod_spelled_through_a_literal_splat_fails(
+        self, heat_stability_gate, tmp_path, capsys, splat
+    ):
+        root = _rod(tmp_path, f'HeatNode("h", timestep=1e-3, {splat})')
+        assert heat_stability_gate.main([str(root)]) == 1
+        assert "Fourier number 100" in capsys.readouterr().out
+
+    def test_a_stable_rod_spelled_through_a_literal_splat_is_verified(
+        self, heat_stability_gate
+    ):
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("ok", timestep=1e-5, **{"thermal_diffusivity": 0.01})\n',
+        )
+        assert len(seen) == 1 and unchecked == [] and unstable == []
+
+    @pytest.mark.parametrize("call, reason", [
+        ('HeatNode("h", timestep=1e-5, **overrides)', "**mapping"),
+        ('HeatNode("h", timestep=1e-5, **{**base, "n_cells": 10})', "**mapping"),
+        ("HeatNode(*positional)", "*args"),
+        ('HeatNode("h", timestep=1e-5, **{"timestep": 1e-3})', "given twice"),
+    ])
+    def test_a_splat_the_gate_cannot_read_is_not_counted_as_verified(
+        self, heat_stability_gate, call, reason
+    ):
+        unstable, unchecked, seen = self._scan(heat_stability_gate, call + "\n")
+        assert seen == [] and unstable == []
+        assert len(unchecked) == 1 and reason in unchecked[0][2], unchecked
+
+    def test_a_scope_of_only_unreadable_splats_fails(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        root = _rod(tmp_path, 'HeatNode("h", timestep=1e-5, **overrides)')
+        assert heat_stability_gate.main([str(root)]) == 1
+        err = capsys.readouterr().err
+        assert "not one of them could be evaluated" in err
+        assert "**mapping" in err
+
+    def test_the_unevaluated_are_reported_by_reason_and_listed_on_request(
+        self, heat_stability_gate, tmp_path, capsys
+    ):
+        root = _rod(
+            tmp_path,
+            'HeatNode("ok", timestep=1e-5, thermal_diffusivity=0.01)\n'
+            'HeatNode("h", timestep=1e-5, **overrides)\n',
+        )
+        assert heat_stability_gate.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "not evaluated, by reason:" in out
+        assert "a **mapping the gate cannot read" in out
+        assert "mod.py:3:" not in out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert heat_stability_gate.main(["--list-unevaluated", str(root)]) == 0
+        assert "mod.py:3:" in capsys.readouterr().out
+
+
 class TestHeatStabilityAllowlist:
     def test_every_entry_carries_a_reason(self, heat_stability_gate):
         for path, reason in heat_stability_gate._ALLOWED_UNSTABLE.items():

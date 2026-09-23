@@ -1165,10 +1165,12 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
     Pinned as an exact set rather than a membership check: the old
     names must be absent from ``keys()`` so that ``dict(diag)``, a JSON
     dump and any recorded artefact carry a name that still exists in
-    0.5.0.  The three spectral keys are in the set for every group,
-    computed or not (see
-    ``test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed``),
-    and the same list is quoted in MADD-ANO-005.
+    0.5.0.  The three spectral keys and the two gradient-bound keys are
+    in the set for every group, computed or not (see
+    ``test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed``
+    and its sibling in ``test_coupling_gradient_error_bound.py``), and
+    the same list is quoted in MADD-ANO-005 -- which that file reads back
+    and compares.
     """
     gm = _contracting_graph()
     gm.step()
@@ -1177,6 +1179,7 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
         "iterations", "residual", "amplification", "error_estimate",
         "ratio_usable", "gradient_error_estimate", "converged",
         "rho_spectral", "spectral_error_bound", "spectral_usable",
+        "gradient_relative_error_bound", "gradient_bound_usable",
     }
     # ``dict()`` copies through the real items, not the aliases.
     assert set(dict(d)) == set(d)

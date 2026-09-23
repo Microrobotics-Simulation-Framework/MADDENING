@@ -385,6 +385,220 @@ def _spectral_rate_at(step_pure, x_star, consts, weights):
     return arnoldi_spectral_radius(matvec, v0)
 
 
+def _probe_direction(c, key):
+    """One constant's probe: its own magnitude, entry by entry, with random signs.
+
+    A zero entry is probed at the constant's largest magnitude (or 1.0
+    for an all-zero constant), so a parameter that happens to sit at
+    zero is still probed -- the relative error of ``dx*/dc`` is defined
+    there even though ``c`` is not a scale.
+    """
+    mag = jnp.abs(c)
+    top = jnp.max(mag)
+    mag = jnp.where(mag > 0, mag, jnp.where(top > 0, top, jnp.ones_like(top)))
+    return mag * jax.random.rademacher(key, c.shape, c.dtype)
+
+
+def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
+                             arnoldi_residual, amplification):
+    """A bound on the relative error of the IFT tangent at the returned iterate.
+
+    The IFT rule (:func:`_ift_solve_jvp`) solves
+    ``(I - J(x)) t = F_c(x) c_dot`` at the iterate the forward
+    *returned*, ``x_k``; the derivative of the fixed point is the same
+    solve at ``x*``.  Exactly,
+    ``t_k - t* = (I - J(x*))^{-1} [G(x_k) - G(x*)]`` with
+    ``G(x) = J(x) t_k + F_c(x) c_dot`` the one-pass map's
+    Jacobian-vector product along the tangent the rule returned (see
+    :func:`~maddening.core.coupling.acceleration.ift_gradient_error_bound`).
+    ``G`` does not move between the two points when ``F`` is affine in
+    the state with coefficients the state does not change -- the reason
+    a linear group's gradient is exact wherever its forward stops -- and
+    moves by ``O(||x_k - x*|| * d^2 F)`` otherwise.  This measures that
+    movement and bounds the rest:
+
+    1. **A resolvent that can be applied.**
+       :func:`~maddening.core.coupling.acceleration.jacobian_range_basis`
+       spans ``range(J)`` with eight random images (``8 + k`` JVPs,
+       ``k = min(n, 8)``; the rank of a coupling Jacobian is at most
+       the number of boundary scalars crossing the group's edges) and
+       :func:`~maddening.core.coupling.acceleration.resolvent_apply`
+       then solves ``(I - J) t = w`` for one JVP each.  A group whose
+       range the basis did not capture reports NaN.
+    2. **One probe per floating constant** the closure-converted map
+       captures -- every parameter leaf, the pre-step states, the
+       states of nodes outside the group it reads -- each perturbed by
+       its own magnitude with a fixed-seed random sign, the others
+       held (:func:`_probe_direction`).  One JVP of ``F`` in the
+       constants per probe gives ``w_i = F_c(x_k) c_dot_i`` (and, as
+       its primal, ``F(x_k)``).  Per constant, because a relative error
+       is a different number for each and a combined direction can
+       cancel: one probe over every constant read ``0.0`` at every cap
+       on the stiff spring pair while its stiffness gradient was
+       0.8-4.8% off -- the random signs moved each node's stiffness and
+       mass by the same relative amount, and the dynamics see only
+       their ratio.
+    3. **The tangents and the direction to the fixed point.**
+       ``t_i = (I - J(x_k))^{-1} w_i`` (one JVP each) is what the
+       adjoint returns for probe ``i``; ``delta = (I - J(x_k))^{-1} r``
+       with ``r = F(x_k) - x_k`` (one JVP) is the Newton correction --
+       exactly ``x* - x_k`` for an affine ``F``, second-order close
+       otherwise.  It supplies the *direction* only.
+    4. **The curvature, as a directional second difference of the
+       adjoint's own matvec**: ``G_i`` evaluated at ``x_k`` and at
+       ``x_k + delta`` by the same Jacobian-vector product (a JVP pair
+       per probe, so the difference is exactly zero on a map whose
+       JVP does not depend on the point, rather than rounding noise
+       amplified by the resolvent).
+    5. **The distance and the resolvent from the spectral bound**:
+       ``distance`` is
+       :func:`~maddening.core.coupling.acceleration.spectral_error_bound`
+       of ``||r||`` and ``amplification`` the factor it applies, both
+       from the Arnoldi triple :func:`_spectral_rate_at` already
+       computed at ``x_k``.  Per probe the bound is
+       ``amplification * distance * ||G_i(x_k + delta) - G_i(x_k)||
+       / (||delta|| * ||t_i||)``, and the reported value is the largest
+       over the probes the fixed point responds to (``||t_i|| > 0``).
+
+    ``9 + k + 4 n_c`` Jacobian-vector products in all (at most
+    ``17 + 4 n_c``), ``n_c`` the number of floating constants, which is
+    why it is gated behind ``diagnostics=True``; the per-probe products
+    are ``vmap``-ed, so the primal is evaluated once.  Every input is
+    ``stop_gradient``-ed: forward-only bookkeeping, and the adjoint of
+    the step is unchanged by its presence.  The linear algebra runs in
+    coordinates scaled by the norm weights where those are non-zero (a
+    similarity, so every solution is the same vector) so fields of
+    unlike magnitude do not swamp the orthogonalisation; every norm is
+    the group's, over the fields its norm reads.
+    """
+    x_sg = jax.lax.stop_gradient(x_star)
+    consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
+    dtype = x_sg.dtype
+    d = jax.lax.stop_gradient(jnp.asarray(weights, dtype))
+    nan = jnp.full((), jnp.nan, dtype)
+
+    probed = [
+        i for i, c in enumerate(consts_sg)
+        if jnp.issubdtype(c.dtype, jnp.floating) and c.size > 0
+    ]
+    if not probed:
+        # Nothing the fixed point can respond to: no gradient, no error.
+        return nan
+
+    def bound(operands):
+        return _gradient_error_bound_body(step_pure, probed, *operands)
+
+    # In a branch of its own, so XLA compiles it as a separate
+    # computation.  Inlined beside the forward, the Jacobian-vector
+    # products in the constants share constants and subexpressions with
+    # the forward's first pass, the algebraic simplifier then rewrites
+    # that pass differently (its rewrites depend on how many users an
+    # instruction has), and the returned *state* moved by one ulp on
+    # one of twelve configurations measured (chain-5, Jacobi, measured
+    # 2.4e-7 relative on the first step it showed) -- a diagnostic
+    # must not move the answer it diagnoses.  A non-finite state has no
+    # gradient bound to compute, which is what makes the predicate a
+    # runtime one.
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nan,
+        (x_sg, consts_sg, d, rho, arnoldi_residual, amplification),
+    )
+
+
+def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
+                               arnoldi_residual, amplification):
+    """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        ift_gradient_error_bound,
+        jacobian_range_basis,
+        resolvent_apply,
+        spectral_error_bound,
+    )
+
+    dtype = x_sg.dtype
+    live = (d > 0).astype(dtype)
+    s = jnp.where(d > 0, d, jnp.ones_like(d))
+    s_inv = 1.0 / s
+    nan = jnp.full((), jnp.nan, dtype)
+    keys = jax.random.split(jax.random.PRNGKey(1), len(consts_sg))
+    direction = {i: _probe_direction(consts_sg[i], keys[i]) for i in probed}
+    row_of = {i: j for j, i in enumerate(probed)}
+
+    def tangent_for(row):
+        """The constants' tangent for probe ``row``: one constant, the rest held."""
+        out = []
+        for i, c in enumerate(consts_sg):
+            if i in row_of:
+                out.append(jnp.where(row == row_of[i], direction[i], jnp.zeros_like(c)))
+            elif jnp.issubdtype(c.dtype, jnp.floating):
+                out.append(jnp.zeros_like(c))
+            else:
+                out.append(np.zeros(c.shape, dtype=jax.dtypes.float0))
+        return tuple(out)
+
+    def matvec(z):
+        """``J(x_k)`` in the scaled coordinates."""
+        _, Jv = jax.jvp(
+            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (z * s_inv,)
+        )
+        return s * Jv
+
+    U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
+
+    def rhs_for(row):
+        return jax.jvp(
+            lambda cc: _F_dispatch(step_pure, x_sg, cc), (consts_sg,), (tangent_for(row),)
+        )
+
+    rows = jnp.arange(len(probed))
+    f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
+    r_s = s * (f_k[0] - x_sg)
+    delta_s = resolvent_apply(U, M, r_s, matvec(r_s))
+    t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
+
+    def linearisation(xx, row, ts):
+        """``G_row(xx)``: the map's JVP at ``xx`` along ``(t_row, c_dot_row)``."""
+        _, out = jax.jvp(
+            lambda x_, c_: _F_dispatch(step_pure, x_, c_),
+            (xx, consts_sg), (ts * s_inv, tangent_for(row)),
+        )
+        return out
+
+    # Both points through one batched evaluation, so ``G`` at ``x_k``
+    # and at ``x_k + delta`` are the same computation on two inputs,
+    # and bit-identical wherever the map's JVP does not depend on the
+    # point.  The barrier keeps the two materialised before they are
+    # subtracted, and the weights are applied *after* the difference:
+    # with ``s * G1 - s * G0`` XLA contracts one product into a fused
+    # multiply-add and the difference comes out as that product's
+    # rounding error -- measured 2.9e-10 on an affine map, which the
+    # resolvent then amplified into a bound of 2.5e-4 where the true
+    # error is exactly zero.
+    points = jnp.stack([x_sg, x_sg + delta_s * s_inv])
+    G = jax.vmap(
+        lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows, t_s)
+    )(points)
+    G = jax.lax.optimization_barrier(G)
+    secant_s = s * (G[1] - G[0])
+
+    def norm(v):
+        return jnp.linalg.norm(live * v, axis=-1)
+
+    amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
+    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification)
+    per_probe = ift_gradient_error_bound(
+        amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
+    )
+    # The worst probe the fixed point responds to.  A responding probe
+    # whose bound is NaN (a non-finite secant) poisons the maximum
+    # rather than dropping out of it; NaN where nothing responds, or
+    # where the basis did not capture the range.
+    responds = norm(t_s) > 0
+    worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
+    worst = jnp.where(jnp.any(responds), worst, nan)
+    return jnp.where(captured, worst, nan)
+
+
 #: Accelerations that may not *stop iterating* on a single pass at or
 #: below the threshold: the criterion has to hold on two consecutive
 #: passes.  See :func:`_fixed_point_while` for the argument, and for
@@ -809,7 +1023,10 @@ def _ift_solve_impl(
     ``CouplingGroup.strict_convergence``, a runtime error); the
     derivative is off by roughly ``residual * cond(I - dF/dx)``
     whenever it is non-zero, whether the loop stopped on its criterion
-    or at ``max_iter``.  A finite difference of this function's own
+    or at ``max_iter``.  With ``diagnostics=True`` that error is
+    bounded, per constant and relative to the tangent, by
+    ``coupling_diagnostics()['gradient_relative_error_bound']`` (see
+    :func:`_gradient_error_bound_at`).  A finite difference of this function's own
     output is therefore *not* the quantity the adjoint computes: it is
     the derivative of a truncated iterate, and the two agree only as
     ``final_res`` goes to zero.  Tighten the criterion that is live
@@ -1867,11 +2084,13 @@ def _run_coupled_block_impl(
             # would contradict itself.  ``solver="fori"`` keeps its own
             # ``diagnostics=True`` gate.
             # No fixed point was solved for, so there is no Jacobian
-            # to take a spectrum of: the spectral pair is NaN, which
-            # ``coupling_diagnostics`` reports as ``spectral_usable=False``.
+            # to take a spectrum of: the spectral triple and the
+            # gradient's bound are NaN, which ``coupling_diagnostics``
+            # reports as ``spectral_usable=False`` and
+            # ``gradient_bound_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -1931,7 +2150,8 @@ def _run_coupled_block_impl(
             outside the group.  IQN acceleration acts on the
             interface-field subset through a static index map into
             that vector.  ``diag`` is ``(n_iters, final_res, final_amp,
-            rho_spectral, arnoldi_residual, amplification)`` -- the last three NaN
+            rho_spectral, arnoldi_residual, amplification,
+            gradient_bound)`` -- the last four NaN
             unless ``diagnostics=True`` -- and ``vw`` the IQN ``(V, W)``
             matrices (``None`` for other accelerations).  The IFT derivative is intrinsic to ``F``
             at ``x*`` and unchanged across acceleration modes.
@@ -2078,10 +2298,22 @@ def _run_coupled_block_impl(
             # per group per step, which the always-on ift report is
             # not charged for.  NaN is what ``coupling_diagnostics``
             # reads as "not computed" (``spectral_usable=False``).
+            # The bound on the IFT gradient's error is built on that
+            # triple, so it has the same gate and the same NaN.
+            grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
+                weights = _norm_weights(jax.lax.stop_gradient(x_star_full))
                 rho_spec, spec_resid, spec_amp = _spectral_rate_at(
-                    step_pure, x_star_full, consts,
-                    _norm_weights(jax.lax.stop_gradient(x_star_full)),
+                    step_pure, x_star_full, consts, weights,
+                )
+                # Its distance is the spectral bound and its resolvent
+                # factor the one that bound applies; the curvature is a
+                # second difference of the adjoint's own matvec.
+                # ``9 + k + 4 n_c`` more JVPs, ``n_c`` the floating
+                # constants (see ``_gradient_error_bound_at``).
+                grad_bound = _gradient_error_bound_at(
+                    step_pure, x_star_full, consts, weights,
+                    rho_spec, spec_resid, spec_amp,
                 )
             else:
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
@@ -2137,11 +2369,11 @@ def _run_coupled_block_impl(
                 )
             final = _merge(template_state, _embed(x_star_full), jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
-                            spec_amp), (vw if vw else None))
+                            spec_amp, grad_bound), (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           spec_resid, spec_amp), vw) = _run_ift_forward(state_after_first)
+                           spec_resid, spec_amp, grad_bound), vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
@@ -2151,7 +2383,7 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         spec_resid, spec_amp)
+                         spec_resid, spec_amp, grad_bound)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -2452,7 +2684,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -2561,7 +2793,8 @@ def _run_coupled_block_impl(
     # built by hand without ``_meta`` keeps its structure.  The legacy
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
-        iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp = diag_data
+        (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
+         grad_bound) = diag_data
         res_dtype = jnp.asarray(final_res).dtype
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
@@ -2589,6 +2822,9 @@ def _run_coupled_block_impl(
                 ),
                 f"coupling_{group_key}_spectral_amplification": jnp.asarray(
                     spec_amp, dtype=res_dtype
+                ),
+                f"coupling_{group_key}_gradient_relative_error_bound": jnp.asarray(
+                    grad_bound, dtype=res_dtype
                 ),
             }
 
@@ -3986,6 +4222,12 @@ class GraphManager:
                         meta[f"coupling_{key}_spectral_amplification"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
+                        # The bound on the IFT gradient's relative
+                        # error, built on the triple; NaN reads as
+                        # "not computed" too.
+                        meta[f"coupling_{key}_gradient_relative_error_bound"] = jnp.array(
+                            jnp.nan, dtype=res_dtype
+                        )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -5038,6 +5280,94 @@ class GraphManager:
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
               by anything.
+            - ``"gradient_relative_error_bound"`` : float — a bound on
+              the **relative** error of the IFT gradient that comes
+              from the forward stopping at the returned iterate ``x_k``
+              instead of the fixed point ``x*``.  The adjoint is solved
+              at ``x_k``, and the tangent it returns differs from the
+              fixed point's by exactly ``(I - dF/dx(x*))^{-1}`` applied
+              to the change, between the two points, of the one-pass
+              map's Jacobian-vector product along that tangent.  The
+              bound is ``"spectral_error_bound"`` (the distance) times
+              the factor that bound applies to a residual (the
+              resolvent) times that change per unit distance -- a
+              second difference of the Jacobian-vector product along
+              the Newton correction ``(I - dF/dx)^{-1} (F(x_k) - x_k)``
+              -- taken for one probe per floating constant the group's
+              map reads (every parameter, the pre-step states, the
+              states of outside nodes it reads), relative to the norm
+              of the tangent the adjoint returns for that probe, and
+              reported for the worst probe.  Read it as
+              ``|g_k - g*| <= bound * |g_k|`` for the gradient with
+              respect to one scalar constant.  Measured (jaxlib 0.11.0,
+              float32) at every cap of a ``max_iterations`` sweep that
+              stops the forward early by construction (caps 3-8): never
+              below the true error on a concave and a convex map,
+              1.2-1.7x it for the parameter whose error is the larger
+              and up to 11x for the other, which reads its gap to the
+              worst probe; 1.81x for a parameter multiplying the state
+              of an affine map; 7-11x for a spring pair's stiffness and
+              mass; 15x on a hidden slow mode.  **Only
+              under ``solver="ift"`` with ``diagnostics=True``**; NaN
+              for ``"fori"``, for ``diagnostics=False``, at
+              ``max_iterations=1`` and before the first step; ``inf``
+              or NaN where ``"spectral_error_bound"`` is; NaN where the
+              fixed point responds to no constant and where the returned
+              state is not finite.  Costs
+              ``9 + k + 4 n_c`` Jacobian-vector products per group per
+              step beside the spectral bound's eight, ``k <= 8`` and
+              ``n_c`` the number of floating constants (see
+              ``_gradient_error_bound_at``).
+
+              *Why a bound*: each factor is taken on its conservative
+              side -- the distance is the spectral bound, not the
+              Newton step's length and never ``"error_estimate"``
+              (which reads 100x short on a hidden slow mode, where
+              this bound holds); the resolvent factor is the larger of
+              the two the spectral bound uses.  *What it rests on*,
+              each of which can fail: every condition of
+              ``"spectral_error_bound"``; the change in the
+              linearisation being linear in the distance and along the
+              Newton correction (exact for an affine map, leading-order
+              otherwise); and the probes -- a field-valued constant is
+              probed along one random direction, and the bound is
+              relative to the tangent's norm in the group's norm, so a
+              scalar loss whose gradient nearly cancels across the
+              state can carry a larger relative error.  One probe per
+              constant rather than one combined probe because a
+              combined direction can cancel: on a spring pair it read
+              0.0 while the stiffness gradient was 0.8-4.8% off (the
+              random signs moved stiffness and mass by the same
+              relative amount, and the dynamics see only their ratio).
+
+              **This is a statement about the gradient, not about the
+              solve.**  On a map that is affine in its state with
+              additive parameters the IFT gradient is the fixed
+              point's from *any* iterate, so this truthfully reads
+              ``0.0`` while the state is far off: 0.0 on a two-mode
+              map sitting 1.1e-2 from its fixed point with
+              ``converged=True``, and 0.0 on the stiff spring pair
+              under ``iqn-ils`` with the interface norm, whose
+              velocities are 1.7% off.  The returned
+              ``(value, gradient)`` pair is then mutually inconsistent
+              -- the gradient is ``d(fixed point)/dtheta`` and the value
+              is not the fixed point -- and nothing in this key says
+              so.  For the health of the solve read
+              ``"spectral_error_bound"``, within its norm (under the
+              interface norm it covers the interface fields only: on
+              that spring pair it reads 2.3e-3).  This key answers
+              only "how far would tightening the forward move the
+              gradient".  It is not ``"gradient_error_estimate"``,
+              which is ``"error_estimate"`` under another name.
+            - ``"gradient_bound_usable"`` : bool — the bound above is
+              finite and ``"spectral_usable"`` is ``True``: its distance
+              and its resolvent factor are the spectral bound's, and
+              are settled on the same condition.  ``False`` where
+              nothing was computed, where the bound is ``inf`` or NaN
+              (including a group whose Jacobian range the eight-vector
+              basis did not capture).  Like the other flags it reports
+              what the code checked, and not the linearity or probe
+              conditions above.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5056,7 +5386,8 @@ class GraphManager:
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
-            here by the same rule -- the three spectral keys excepted,
+            here by the same rule -- the three spectral keys and the
+            two gradient-bound keys excepted,
             which ``"fori"`` has no linearisation to compute and
             reports as NaN / ``False`` -- so migrating a graph between
             them does not move the answer or the verdict.  The returned
@@ -5090,9 +5421,10 @@ class GraphManager:
 
             Reported for every group under ``solver="ift"``; ``"fori"``
             groups only with ``diagnostics=True``.  The three spectral
-            keys are present for every group and carry a value only
-            under ``solver="ift"`` with ``diagnostics=True``.  Empty
-            dict if no step has been taken yet.
+            keys and the two gradient-bound keys are present for every
+            group and carry a value only under ``solver="ift"`` with
+            ``diagnostics=True``.  Empty dict if no step has been taken
+            yet.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
@@ -5143,6 +5475,13 @@ class GraphManager:
                     math.isfinite(spectral_bound)
                     and spectral_rate_settled(rho_spec, spec_resid)
                 )
+                # The gradient's bound is stored ready-made: its
+                # ingredients are vectors the state does not keep.  It
+                # is usable on the spectral bound's condition -- its
+                # distance and resolvent factor come from there -- and
+                # its own finiteness.
+                grad_bound = float(meta.get(
+                    f"coupling_{key}_gradient_relative_error_bound", float("nan")))
                 result[key] = _CouplingDiagnostics({
                     "iterations": int(meta[iter_key]),
                     "residual": residual,
@@ -5156,6 +5495,10 @@ class GraphManager:
                     "rho_spectral": rho_spec,
                     "spectral_error_bound": spectral_bound,
                     "spectral_usable": spectral_usable,
+                    "gradient_relative_error_bound": grad_bound,
+                    "gradient_bound_usable": bool(
+                        spectral_usable and math.isfinite(grad_bound)
+                    ),
                 })
         return result
 
@@ -6116,10 +6459,12 @@ class GraphManager:
                     fresh_meta[key] = jnp.zeros_like(value)
                 elif key.endswith("_rho_spectral") or key.endswith(
                     "_spectral_residual"
-                ) or key.endswith("_spectral_amplification"):
+                ) or key.endswith("_spectral_amplification") or key.endswith(
+                    "_gradient_relative_error_bound"
+                ):
                     # NaN, not zero: zero would read as a computed
                     # spectral radius of 0 and a bound equal to the
-                    # residual.
+                    # residual (or a gradient exact to float32).
                     fresh_meta[key] = jnp.full_like(value, jnp.nan)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.

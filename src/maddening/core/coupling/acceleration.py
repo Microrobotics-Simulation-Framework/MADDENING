@@ -786,6 +786,178 @@ def spectral_rate_settled(rho, arnoldi_residual, fraction: float = SPECTRAL_SETT
 
 
 # ------------------------------------------------------------------
+# The IFT gradient's error at an early exit (``solver="ift"``,
+# ``diagnostics=True``)
+# ------------------------------------------------------------------
+
+#: Relative Frobenius residual ``||J U - U M|| / ||J U||`` above which
+#: :func:`jacobian_range_basis` reports that the basis did not capture
+#: the Jacobian's range.  Rounding on a captured range is ~1e-6
+#: relative in float32; a range larger than the basis leaves an O(1)
+#: residual.  The gap is wide, and 1e-4 leaves room for a badly scaled
+#: field without admitting a missed direction.
+RANGE_CAPTURED_RTOL = 1e-4
+
+
+def jacobian_range_basis(matvec, n, n_vectors: int = SPECTRAL_KRYLOV_STEPS,
+                         dtype=jnp.float32, key=None, rtol: float = RANGE_CAPTURED_RTOL):
+    """``(U, M, captured)``: an orthonormal basis of ``range(J)`` and ``J`` on it.
+
+    ``matvec(v)`` applies the coupling Jacobian ``J = dF/dx`` (the same
+    product :func:`arnoldi_spectral_radius` takes) to a vector of
+    length ``n``.  ``n_vectors`` fixed-seed normal draws are pushed
+    through it and the images orthonormalised (``U``, ``n`` by
+    ``min(n, n_vectors)``); ``M = U^T J U`` is the compression of ``J``
+    onto that span, and ``captured`` says whether the span is
+    invariant, ``||J U - U M||_F <= rtol ||J U||_F``.
+
+    A coupling Jacobian's rank is at most the number of boundary
+    scalars crossing the group's edges, so for a group with at most
+    ``n_vectors`` of them the images of ``n_vectors`` generic vectors
+    span the whole range, ``J = U U^T J`` exactly, and ``captured`` is
+    ``True``.  Unlike a Krylov space grown from one start vector, which
+    finds only that vector's cyclic subspace (a rank-two ``J`` with a
+    repeated eigenvalue gives it a one-dimensional space), a basis
+    built from several starts spans the range whatever the spectrum's
+    multiplicities -- which is what :func:`resolvent_apply` needs, and
+    what :func:`arnoldi_spectral_radius` does not (a radius is read
+    correctly off any invariant subspace).
+
+    Costs ``n_vectors + min(n, n_vectors)`` Jacobian-vector products
+    and one thin QR of an ``n x n_vectors`` matrix.  A zero Jacobian
+    gives a basis of arbitrary directions, ``M = 0`` and
+    ``captured = True``.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.zeros((5, 5)).at[0, 1].set(0.5).at[1, 0].set(0.5)   # rank 2
+    >>> U, M, ok = jacobian_range_basis(lambda v: A @ v, 5, n_vectors=3)
+    >>> U.shape, M.shape, bool(ok)
+    ((5, 3), (3, 3), True)
+    >>> sorted(round(abs(float(x)), 4) for x in jnp.linalg.eigvalsh(0.5 * (M + M.T)))
+    [0.0, 0.5, 0.5]
+    """
+    if n_vectors < 1:
+        raise ValueError(
+            f"jacobian_range_basis: n_vectors={n_vectors} < 1; at least one "
+            "Jacobian-vector product is needed."
+        )
+    key = jax.random.PRNGKey(2) if key is None else key
+    v0 = jax.random.normal(key, (int(n_vectors), int(n)), dtype)
+    images = jax.vmap(matvec)(v0)                      # rows: J v
+    U, _ = jnp.linalg.qr(images.T, mode="reduced")     # (n, k)
+    JU = jax.vmap(matvec)(U.T).T                        # (n, k)
+    M = U.T @ JU
+    resid = jnp.linalg.norm(JU - U @ M)
+    scale = jnp.linalg.norm(JU)
+    captured = resid <= rtol * scale
+    captured = jnp.logical_or(captured, scale == 0)
+    return U, M, captured
+
+
+def resolvent_apply(U, M, w, Jw):
+    """``(I - J)^{-1} w`` from the range basis of :func:`jacobian_range_basis`.
+
+    With ``range(J)`` inside ``span(U)`` and ``M = U^T J U``, the
+    solution of ``(I - J) t = w`` is ``t = w + U z`` with
+    ``(I - M) z = U^T J w`` -- the Woodbury identity for a low-rank
+    ``J`` -- so a solve costs one Jacobian-vector product (``Jw``, which
+    the caller supplies) and one ``k x k`` linear solve, whatever the
+    state's dimension.  ``w`` and ``Jw`` are single vectors; ``vmap``
+    over a batch of right-hand sides.  A singular ``I - M``
+    (``rho(J) = 1``) gives non-finite entries, never a plausible
+    vector.
+
+    Examples
+    --------
+    >>> import jax.numpy as jnp
+    >>> A = jnp.diag(jnp.array([0.5, -0.25, 0.0]))
+    >>> U, M, _ = jacobian_range_basis(lambda v: A @ v, 3, n_vectors=3)
+    >>> w = jnp.array([1.0, 1.0, 1.0])
+    >>> [round(float(x), 4) for x in resolvent_apply(U, M, w, A @ w)]   # 1/(1 - lambda)
+    [2.0, 0.8, 1.0]
+    """
+    k = M.shape[0]
+    z = jnp.linalg.solve(jnp.eye(k, dtype=M.dtype) - M, U.T @ Jw)
+    return w + U @ z
+
+
+def ift_gradient_error_bound(amplification, distance, secant, step, tangent):
+    """``amplification * distance * secant / (step * tangent)``: the IFT tangent's relative error.
+
+    The arithmetic of ``coupling_diagnostics()['gradient_relative_error_bound']``,
+    elementwise, with the conventions below.  The IFT tangent rule
+    solves ``(I - J(x)) t = F_c(x) c_dot`` at the iterate the forward
+    *returned*, ``x_k``, where the derivative of the fixed point is the
+    same solve at ``x*``.  Subtracting the two equations gives, exactly,
+
+        ``t_k - t* = (I - J(x*))^{-1} [G(x_k) - G(x*)]``,
+        ``G(x) = J(x) t_k + F_c(x) c_dot``
+
+    -- the resolvent applied to the change, between the two points, of
+    the one-pass map's Jacobian-vector product along the tangent the
+    rule returned.  Each factor here bounds one piece of that:
+
+    * ``amplification`` bounds the resolvent: the factor
+      :func:`spectral_error_bound` applies to a residual (the larger of
+      ``||(I - H)^{-1}||_2`` and ``1 / (1 - rho_safe)``);
+    * ``distance`` bounds ``||x_k - x*||``: :func:`spectral_error_bound`
+      itself -- not the residual and not ``error_estimate``, which
+      understate the distance by up to 122x;
+    * ``secant / step`` is the change in ``G`` per unit distance: the
+      norm of ``G(x_k + delta) - G(x_k)`` over the norm of the step
+      ``delta`` it was measured across;
+    * ``tangent`` is ``||t_k||``, so the result is relative.
+
+    All norms are the group's, and ``distance``, ``secant``, ``step``
+    and ``tangent`` must be taken in the *same* one: the result is not
+    invariant to rescaling one of them alone.
+
+    Conventions, so a number is never reported where none was computed:
+    NaN where ``amplification`` or ``distance`` is NaN (nothing was
+    computed), where ``tangent`` is zero (the fixed point does not
+    respond to the probe, so a relative error is undefined), where the
+    secant is not finite, or where ``step`` is zero with ``distance``
+    not -- a curvature cannot be read off a zero step.  ``0.0`` where
+    ``distance`` is ``0.0`` and finite everything else: the returned
+    iterate is the fixed point to float32 and so is its linearisation,
+    which means "converged to float32", not "exact".  ``inf`` where
+    ``amplification`` or ``distance`` is ``inf`` (nothing contracts, so
+    nothing is bounded) and the rest is finite and non-zero.
+
+    Examples
+    --------
+    >>> round(float(ift_gradient_error_bound(2.0, 0.01, 3e-3, 0.01, 1.0)), 6)
+    0.006
+    >>> float(ift_gradient_error_bound(2.0, 0.0, 0.0, 0.0, 1.0))   # converged to float32
+    0.0
+    >>> import math
+    >>> math.isnan(float(ift_gradient_error_bound(2.0, 0.01, 0.0, 0.01, 0.0)))  # no response
+    True
+    >>> math.isinf(float(ift_gradient_error_bound(math.inf, math.inf, 3e-3, 0.01, 1.0)))
+    True
+    """
+    amp = jnp.asarray(amplification)
+    dist = jnp.asarray(distance)
+    sec = jnp.asarray(secant)
+    stp = jnp.asarray(step)
+    tan = jnp.asarray(tangent)
+    dtype = jnp.result_type(amp, dist, sec, stp, tan)
+    amp, dist, sec, stp, tan = (a.astype(dtype) for a in (amp, dist, sec, stp, tan))
+    responds = tan > 0
+    measured = jnp.logical_and(jnp.isfinite(sec), jnp.isfinite(stp))
+    computed = jnp.logical_and(~jnp.isnan(amp), ~jnp.isnan(dist))
+    at_fixed_point = jnp.logical_and(dist == 0, jnp.isfinite(amp))
+    curvable = stp > 0
+    safe_den = jnp.where(jnp.logical_and(curvable, responds), stp * tan, 1.0)
+    rel = sec / safe_den
+    value = jnp.where(at_fixed_point, jnp.zeros_like(rel), amp * dist * rel)
+    ok = computed & responds & measured & (at_fixed_point | curvable)
+    return jnp.where(ok, value, jnp.full_like(value, jnp.nan))
+
+
+# ------------------------------------------------------------------
 # State flattening / unflattening
 # ------------------------------------------------------------------
 

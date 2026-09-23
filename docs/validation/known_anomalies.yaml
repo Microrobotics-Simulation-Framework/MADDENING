@@ -303,10 +303,30 @@ anomalies:
       not applied: converged and the iteration counts are unchanged.
       spectral_usable says whether the bound is finite and the Krylov space
       had settled; fori, diagnostics=False and max_iterations=1 report NaN
-      and False, never a number.  The reported keys are exactly
+      and False, never a number.
+      Under the same gate gradient_relative_error_bound bounds the relative
+      error of the IFT gradient that comes from the forward stopping at the
+      returned iterate instead of the fixed point: spectral_error_bound's
+      distance, times the resolvent factor that bound applies, times the
+      change in the one-pass map's Jacobian-vector product per unit
+      distance (a second difference along the Newton correction, one
+      probe per floating constant), with gradient_bound_usable beside it.
+      It held at every cap of a max_iterations sweep on a concave and a
+      convex map, 1.2-1.7x the true error for the parameter whose error is
+      the larger (up to 11x for the other, which reads its gap to the worst
+      probe), and 15x on a hidden slow mode where error_estimate's distance
+      would have made it 60x short.  It is a statement about the
+      gradient, not the solve: on an affine map with additive parameters
+      the IFT gradient is exact wherever the forward stops, so it reads
+      0.0 while the state is 1.1e-2 from the fixed point with
+      converged=True, and the returned value and gradient are then
+      mutually inconsistent -- spectral_error_bound, not this key, is what
+      reports the solve.  The reported keys are exactly
       ['amplification', 'converged', 'error_estimate',
-      'gradient_error_estimate', 'iterations', 'ratio_usable', 'residual',
-      'rho_spectral', 'spectral_error_bound', 'spectral_usable'].
+      'gradient_bound_usable', 'gradient_error_estimate',
+      'gradient_relative_error_bound', 'iterations', 'ratio_usable',
+      'residual', 'rho_spectral', 'spectral_error_bound',
+      'spectral_usable'].
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -427,6 +447,20 @@ anomalies:
       the Arnoldi residual on it, and spectral_usable=False.  Evidence:
       the 2026-09-22 section of
       benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md.
+      gradient_relative_error_bound inherits all of that and adds three
+      conditions of its own.  It is leading-order in the distance: the
+      curvature is measured over the Newton correction and extrapolated
+      linearly to spectral_error_bound's distance.  It is relative to the
+      norm of the tangent for one probe per floating constant, so a
+      field-valued constant is probed along one random direction, and a
+      scalar loss whose gradient nearly cancels across the state can carry
+      a larger relative error than the tangent does.  And it is exactly as
+      blind as the norm: under the interface norm, on the stiff spring pair
+      with iqn-ils and explicit accelerated_fields, it reads 0.0 -- the
+      stiffness gradient is exact to float32 -- while the velocities, which
+      the norm does not read, are 1.7% off and spectral_error_bound, taken
+      over the interface, reads 2.3e-3.  Evidence: the 2026-09-23 section of
+      the same memo.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
       - "tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point"
@@ -440,6 +474,12 @@ anomalies:
       - "tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not"
       - "tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed"
       - "tests/property/test_coupling_error_bound.py::test_the_spectral_bound_holds_on_random_normal_contractions"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far_off"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_anomaly_registry_quotes_the_reported_keys_exactly"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"

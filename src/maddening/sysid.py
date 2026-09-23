@@ -1394,8 +1394,10 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     ``J`` is ``O(n*m)`` and ``O(n**3)`` on a handful of parameters and
     costs well under a millisecond however it is scheduled.
 
-    Split out so that :func:`fim` can jit *this* and leave the rest
-    eager.  That is not squeamishness: ``J`` is bit-for-bit the same
+    Split out so that :func:`fim` can jit *this* -- under
+    ``reuse_trace=True``, the only case where a compiled Jacobian is kept
+    between calls and so the only case where compiling it pays -- and
+    leave the rest eager.  That is not squeamishness: ``J`` is bit-for-bit the same
     jitted or not, but ``F = J.T @ J`` is not -- ``jax.jit`` folds the
     transpose into the dot's dimension numbers instead of materialising
     it, which accumulates in a different order and moves ``F`` by up to
@@ -1508,35 +1510,47 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
 
 
 #: Distinct ``(residual_fn, scale, mask, nominal)`` signatures whose traced
-#: Jacobian :func:`fim` keeps compiled.  Bounded because each entry
-#: holds a strong reference to the caller's ``residual_fn`` and to
-#: everything it closes over -- a graph, a window of observations -- and
-#: an unbounded cache keyed on user callables is a leak.  ``jax.jit``
-#: caches on the same principle.
+#: Jacobian :func:`fim` keeps compiled under ``reuse_trace=True``.
+#: Bounded because each entry holds a strong reference to the caller's
+#: ``residual_fn`` and to everything it closes over -- a graph, a window
+#: of observations -- and an unbounded cache keyed on user callables is a
+#: leak.  ``jax.jit`` caches on the same principle.  Nothing is stored
+#: here by a default call.
 _FIM_JACOBIAN_CACHE_SIZE = 32
 
 
 @functools.lru_cache(maxsize=_FIM_JACOBIAN_CACHE_SIZE)
 def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
-    """The jitted :func:`_fim_jacobian` for one static signature.
+    """The jitted :func:`_fim_jacobian` for one static signature --
+    consulted only by ``fim(..., reuse_trace=True)``.
 
     ``nominal`` is the :func:`_resolve_nominal` record -- a hashable
     tuple of Python floats and names, or ``None`` -- and is part of the
     key because two ``specs`` with different widths compile to
     different constants in the same shape.
 
-    ``fim`` used to re-trace the whole rollout on every call, and to
-    call ``residual_fn`` twice per call while doing it.  Tracing and
-    compiling costs the same 60-70 ms that eager ``jacfwd`` costs, so
-    the win is entirely in *not paying it again*: a caller that holds
-    its ``residual_fn`` across calls -- which is what a control loop
-    does -- pays the trace once and 14-64 us thereafter.
+    **What the key cannot see is why this is opt-in.**  Tracing reads
+    every value ``residual_fn`` takes from anywhere but its argument --
+    the ``params`` of a :class:`GraphManager` it closes over, an
+    attribute of the object it is a bound method of, a module global --
+    and bakes it into the program as a constant.  The key is
+    ``residual_fn`` itself (by equality: a bound method compares equal
+    across attribute accesses), so a later call after that state changed
+    hits this entry and gets the *first* call's Fisher matrix, rank and
+    bounds, with no warning.  Measured before this was made opt-in: a
+    spring's stiffness bound reported as 0.41 against a true 44.7 after
+    its damping moved from 2 to 20 in ``gm.params``, and rank 2 against a
+    true rank 1 after a bound method's excitation changed.  No key can
+    be derived from the callable that changes when the state it reads
+    does, so the default re-traces and only a caller who asserts the
+    residual is pure (``reuse_trace=True``) gets this entry.
 
-    A caller that builds a fresh closure per call misses the cache
-    every time and is no worse off than before, because compile and
-    eager measure the same; it gets no benefit either, so the one thing
-    a loop must do is hoist ``residual_fn`` out of it.
-    :func:`fim_core` is the direct way to say that.
+    What reuse buys, for that caller: tracing and compiling the rollout
+    costs about what eager ``jacfwd`` costs (the scan is compiled either
+    way), so the win is entirely in *not paying it again* -- a 200-step
+    spring-damper rollout measured ~230 ms per default call against ~1 ms
+    warm here, on four pinned cores.  A fresh closure per call misses the
+    cache and gains nothing.
 
     ``inv_sigma`` is an *argument* of the returned function rather than
     part of the key, so a noise model does not have to be hashable to
@@ -1553,7 +1567,7 @@ def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
     return run
 
 
-def _resolved_noise(residual_fn, params, noise_std):
+def _resolved_noise(residual_fn, params, noise_std, *, reuse_trace=False):
     """``1 / sigma``, or ``None``, without evaluating the residual.
 
     ``jax.eval_shape`` traces ``residual_fn`` for its output structure
@@ -1564,10 +1578,19 @@ def _resolved_noise(residual_fn, params, noise_std):
     ``None`` and never looks at it.  That is the common case and the
     rollout was pure waste; now nothing is traced at all unless a noise
     model was given.
+
+    ``jax.eval_shape`` is itself cached by JAX on the function it is
+    handed, which is the same trap :func:`_fim_jacobian_compiled` is
+    opt-in for: a residual whose output *structure* depends on state it
+    reads (a window length held on ``self``) would be given the first
+    call's.  So unless the caller asserted purity with ``reuse_trace``,
+    the residual goes in wrapped in a closure made for this call, which
+    no cache entry can match.
     """
     if noise_std is None:
         return None
-    return _inverse_noise_std(noise_std, jax.eval_shape(residual_fn, params))
+    shape_fn = residual_fn if reuse_trace else (lambda p: residual_fn(p))
+    return _inverse_noise_std(noise_std, jax.eval_shape(shape_fn, params))
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -1602,6 +1625,19 @@ def fim_core(
         core_fn = jax.jit(functools.partial(fim_core, residual_fn))
         core = core_fn(params)              # device arrays, no sync
         ok = core.finite & (core.crb[0] < tol) & ~core.precision_limited
+
+    **Static means frozen at trace time, including what ``residual_fn``
+    reads.**  ``fim_core`` keeps no cache of its own -- called eagerly it
+    re-traces every time -- but under your ``jax.jit`` the compiled
+    ``core_fn`` holds every value ``residual_fn`` took from anywhere
+    other than its argument (the ``params`` of a graph it closes over, an
+    attribute of ``self``, a global) as the constant it was when
+    ``core_fn`` was first traced.  That is ``jax.jit``'s contract for any
+    function, stated here because the natural residual closes over a
+    ``GraphManager`` whose ``params`` a calibration loop changes: pass
+    the changing values in through ``params``, or build a new
+    ``core_fn`` when they change.  :func:`fim` re-traces on every call by
+    default for exactly this reason (see its ``reuse_trace``).
 
     ``params`` and ``noise_std`` may be traced, with one restriction:
     ``noise_std`` is validated on the host (a sigma that is zero,
@@ -1664,6 +1700,7 @@ def fim(
     noise_std: Optional[Any] = None,
     rank_rtol: Optional[float] = None,
     specs: Optional[dict] = None,
+    reuse_trace: bool = False,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -1791,6 +1828,30 @@ def fim(
         Verdicts move only for ``m > n**2``, and only ever toward
         "unresolved"; pass ``rank_rtol=n * eps`` explicitly to keep the
         old cutoff.
+    reuse_trace : bool
+        Reuse the Jacobian compiled by an earlier call with an equal
+        ``residual_fn`` (same ``scale``, ``mask`` and ``specs`` record)
+        instead of tracing it afresh.  **Off by default, and only correct
+        for a pure residual.**  Tracing reads every value ``residual_fn``
+        takes from anywhere but its argument -- the ``params`` of a
+        ``GraphManager`` it closes over, an attribute of the object it is
+        a bound method of, a module global -- and bakes it into the
+        compiled program; a reused program keeps those values.  With
+        ``reuse_trace=True``, a residual that reads the graph's
+        ``params`` for the leaves it does not take as arguments reports
+        the *first* call's matrix after those leaves change, silently,
+        and a bound method (which compares equal across attribute
+        accesses) does the same after its object changes.  So pass it
+        only when the output depends on ``params`` and on nothing that
+        can change between calls.
+
+        What it buys is the trace and compile: a 200-step spring-damper
+        rollout measured ~230 ms per default call against ~1 ms warm
+        with reuse (four pinned CPU cores).  A fresh closure per call
+        misses the cache and gains nothing; an unhashable
+        ``residual_fn`` cannot key it and is traced afresh.  For a loop
+        that needs no host-side report, :func:`fim_core` under your own
+        ``jax.jit`` is the faster path and states the same contract.
 
     Returns
     -------
@@ -1856,18 +1917,28 @@ def fim(
     if scale not in _SCALES:
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
+    _check_flag("reuse_trace", reuse_trace)
     idx = _masked_indices(params, mask)
     nominal = _resolve_nominal(params, specs, idx, scale)
-    inv_sigma = _resolved_noise(residual_fn, params, noise_std)
-    idx_key = None if idx is None else tuple(int(i) for i in idx)
-    try:
-        run = _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal)
-    except TypeError:
-        # An unhashable ``residual_fn`` (a callable object that defines
-        # ``__eq__`` without ``__hash__``) cannot key the cache.  That is
-        # a reason to skip the cache, not to refuse the call: build the
-        # Jacobian eagerly, exactly as this function did before it was
-        # jitted at all.
+    inv_sigma = _resolved_noise(residual_fn, params, noise_std,
+                                reuse_trace=reuse_trace)
+    run = None
+    if reuse_trace:
+        idx_key = None if idx is None else tuple(int(i) for i in idx)
+        try:
+            run = _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal)
+        except TypeError:
+            # An unhashable ``residual_fn`` (a callable object that
+            # defines ``__eq__`` without ``__hash__``) cannot key the
+            # cache.  That is a reason to skip the cache, not to refuse
+            # the call.
+            run = None
+    if run is None:
+        # The default, and deliberately not jitted-and-cached: this
+        # traces ``residual_fn`` now, so everything it reads from outside
+        # its argument is read as it stands at this call.  ``J`` is
+        # bit-for-bit the jitted one (see :func:`_fim_jacobian`), so the
+        # report does not depend on which branch built it.
         J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
                                      idx=idx, inv_sigma=inv_sigma,
                                      nominal=nominal)
@@ -2142,20 +2213,29 @@ class _ExcitationTracker:
         return rank, basis @ basis.T
 
 
+def _check_flag(name: str, value) -> None:
+    """Refuse a non-bool switch.
+
+    A truthy non-bool (``"no"``, ``0.0``, an array) would silently pick a
+    branch the caller did not mean, and for both switches that use this
+    the branch decides whether the answer can be trusted:
+    ``hold_undetermined`` whether the returned parameters are
+    reproducible, ``reuse_trace`` whether ``fim`` may answer from an
+    earlier call's trace.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a bool, got {value!r}")
+
+
 def _check_hold_undetermined(value) -> None:
     """Refuse a non-bool ``hold_undetermined``.
 
-    A truthy non-bool (``"no"``, ``0.0``, an array) would silently pick a
-    branch the caller did not mean, and the branch it picks decides whether
-    the returned parameters are reproducible.  Called at the top of each
-    fitter, with the rest of the hyper-parameter checks, so an argument
-    error is raised before any model evaluation -- and again inside
-    :func:`_make_excitation_tracker`, so no caller of that can skip it.
+    Called at the top of each fitter, with the rest of the
+    hyper-parameter checks, so an argument error is raised before any
+    model evaluation -- and again inside :func:`_make_excitation_tracker`,
+    so no caller of that can skip it.  See :func:`_check_flag`.
     """
-    if not isinstance(value, bool):
-        raise ValueError(
-            f"hold_undetermined must be a bool, got {value!r}"
-        )
+    _check_flag("hold_undetermined", value)
 
 
 def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationTracker]:

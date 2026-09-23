@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fim` no longer reuses a compiled trace across calls unless `reuse_trace=True`** (pure residuals only): the cache
+  froze what the residual read, e.g. `gm.params` (a CRB of 0.41 for a true 44.7).  Specs resolve by one walk (namedtuple
+  levels by field name; `check_bounds` refuses unreadable specs); integer leaves are named, not zeroed; NaN bounds refused
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.

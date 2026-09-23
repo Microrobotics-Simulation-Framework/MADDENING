@@ -60,7 +60,10 @@ import jax.numpy as jnp
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
-__all__ = ["cdd_select", "cdd_select_with_iterations", "MAX_OUTER", "THETA_D"]
+__all__ = [
+    "cdd_select", "cdd_select_with_iterations", "rounding_floor",
+    "MAX_OUTER", "NOISE_FACTOR", "THETA_D",
+]
 
 #: Bound on the outer iterations.  The 1-D and 2-D problems in the test
 #: suite reach their default budget in at most 15; 3-D in about 17.  A
@@ -73,30 +76,78 @@ MAX_OUTER: int = 30
 #: inactive functions carrying ``THETA_D**2`` of the squared residual.
 THETA_D: float = 0.5
 
+#: Margin of :func:`rounding_floor` over the residual's rounding error.
+#: Measured on the 2-D 16x16 periodic problem at theta = 0.61 (jaxlib
+#: 0.11.0): the float32-vs-float64 difference of an inactive residual
+#: magnitude, and the spread of a mirror-symmetric pair within one
+#: evaluation, are at most ``0.2 eps (max|b| + max|c|)`` at mass 1 and
+#: mass 0.01, in both precisions -- so ``16`` leaves a factor of about 80.
+#: It is deliberately not larger: the floor also ends refinement, and in
+#: float32 a larger factor stops the selection on residuals that are
+#: still resolved signal.
+NOISE_FACTOR: float = 16.0
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+def rounding_floor(b: jax.Array, c: jax.Array, factor: float = NOISE_FACTOR) -> jax.Array:
+    """The residual magnitude below which a marking decision would read round-off.
+
+    ``factor * eps * (max|b| + max|c|)``, with ``eps`` the machine epsilon
+    of ``b``'s dtype.  In coordinates where the operator's diagonal is
+    ``O(1)`` -- the symmetrically preconditioned ones the node works in --
+    the rounding error of one residual ``b - A c`` is a small multiple of
+    ``eps * (|b| + |A| |c|)``, so this scalar bounds it with a margin of
+    ``factor``.  The ``max|c|`` term is what makes the floor grow with the
+    conditioning: an ill-conditioned solve returns large coefficients and
+    their products cancel in the residual.  It is both the level below
+    which a function is never marked and the width within which two
+    residual magnitudes count as tied (:func:`cdd_select_with_iterations`).
+    """
+    eps = jnp.finfo(b.dtype).eps
+    return factor * eps * (jnp.max(jnp.abs(b)) + jnp.max(jnp.abs(c)))
+
 
 def _doerfler_grow(mask: jax.Array, resid: jax.Array, theta_d: float,
-                   cap: int) -> jax.Array:
+                   cap: int, tol: jax.Array) -> jax.Array:
     """``mask`` enlarged by the smallest Doerfler bulk of inactive functions.
 
-    Static-shape: sort the inactive residuals, take the prefix whose
-    cumulative squared mass first reaches ``theta_d**2`` of the total,
-    truncate that prefix to the room left under ``cap``, and scatter it
-    back.  Functions with an exactly zero residual are never marked.
+    Static-shape.  ``tol`` is :func:`rounding_floor` at the current
+    iterate; the step reads no difference smaller than it:
+
+    1. inactive residual magnitudes at or below ``tol`` are set to zero --
+       they are indistinguishable from round-off and are never marked;
+    2. the count ``n_take`` is the Doerfler count (the shortest
+       descending-magnitude prefix carrying ``theta_d**2`` of the squared
+       residual) capped at the room left under ``cap``;
+    3. every function whose magnitude exceeds the cutoff ``r_cut`` (the
+       ``n_take``-th largest) by more than ``tol`` is taken, and the rest
+       of ``n_take`` is filled from the band ``|r - r_cut| <= tol`` in
+       **ascending basis index order**.
+
+    Step 3 is the tie-break.  A problem with a mirror symmetry produces
+    residuals that are equal up to rounding, so a plain ``argsort`` let
+    the last bits of the input decide which member of a tied pair
+    survived the cap -- and the eager, jitted and compiled-graph
+    evaluations, or a Python float and its float32-array spelling of the
+    same parameter, round differently.  Here a tie within ``tol`` is
+    broken by a fixed order, so the selected set can change only where a
+    magnitude difference crosses ``tol`` or the cumulative bulk crosses
+    ``theta_d**2`` of the total: isolated parameter values, not every
+    step.
     """
-    n = resid.shape[0]
-    r = jnp.where(mask, 0.0, jnp.abs(resid))       # only inactive functions can be marked
-    order = jnp.argsort(-r)                         # descending |r|
-    csum = jnp.cumsum(r[order] ** 2)
-    total = csum[-1] + 1e-30
-    below = csum < (theta_d ** 2) * total
-    first_cross = jnp.argmin(below.astype(jnp.int32))   # first False
-    take_sorted = below.at[first_cross].set(True)
-    n_room = cap - jnp.sum(mask)
-    rank = jnp.cumsum(take_sorted.astype(jnp.int32))
-    take_sorted = take_sorted & (rank <= n_room)
-    add = jnp.zeros(n, dtype=bool).at[order].set(take_sorted)
-    add = add & (r > 0)
-    return mask | add
+    r = jnp.where(mask, 0.0, jnp.abs(resid))        # only inactive functions can be marked
+    r = jnp.where(r > tol, r, 0.0)                  # below the floor is round-off
+    rs = -jnp.sort(-r)                              # descending magnitudes (values only)
+    csum = jnp.cumsum(rs ** 2)
+    n_bulk = jnp.sum(csum < (theta_d ** 2) * csum[-1]) + 1
+    n_room = jnp.maximum(cap - jnp.sum(mask), 0)
+    n_take = jnp.minimum(jnp.minimum(n_bulk, jnp.sum(r > 0)), n_room)
+    r_cut = rs[jnp.maximum(n_take - 1, 0)]
+    above = r > r_cut + tol
+    band = (r > 0) & (r >= r_cut - tol) & ~above
+    band_rank = jnp.cumsum(band.astype(jnp.int32))  # ascending index order
+    add = above | (band & (band_rank <= n_take - jnp.sum(above)))
+    return mask | (add & (n_take > 0))
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -109,6 +160,7 @@ def cdd_select_with_iterations(
     *,
     theta_d: float = THETA_D,
     max_outer: int = MAX_OUTER,
+    noise_factor: float = NOISE_FACTOR,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Grow an active set from the coarse level to the budget ``K``.
 
@@ -151,16 +203,19 @@ def cdd_select_with_iterations(
     c0 = solve_masked(mask0, b)
 
     def keep_going(carry):
-        i, mask, _c = carry
-        return (i < max_outer) & (jnp.sum(mask) < K)
+        i, mask, _c, grew = carry
+        return (i < max_outer) & (jnp.sum(mask) < K) & grew
 
     def grow(carry):
-        i, mask, c = carry
+        i, mask, c, _grew = carry
         resid = b - apply_operator(c)
-        mask = _doerfler_grow(mask, resid, theta_d, K)
-        return i + 1, mask, solve_masked(mask, b)
+        new = _doerfler_grow(mask, resid, theta_d, K, rounding_floor(b, c, noise_factor))
+        grew = jnp.any(new != mask)
+        return i + 1, new, solve_masked(new, b), grew
 
-    n_outer, mask, c = jax.lax.while_loop(keep_going, grow, (jnp.int32(0), mask0, c0))
+    n_outer, mask, c, _ = jax.lax.while_loop(
+        keep_going, grow, (jnp.int32(0), mask0, c0, jnp.bool_(True)),
+    )
     return mask, c, n_outer
 
 
@@ -174,10 +229,11 @@ def cdd_select(
     *,
     theta_d: float = THETA_D,
     max_outer: int = MAX_OUTER,
+    noise_factor: float = NOISE_FACTOR,
 ) -> tuple[jax.Array, jax.Array]:
     """:func:`cdd_select_with_iterations` without the iteration count: ``(mask, c)``."""
     mask, c, _ = cdd_select_with_iterations(
         apply_operator, solve_masked, b, coarse_mask, K,
-        theta_d=theta_d, max_outer=max_outer,
+        theta_d=theta_d, max_outer=max_outer, noise_factor=noise_factor,
     )
     return mask, c

@@ -454,6 +454,18 @@ def test_the_condition_estimate_is_a_tight_lower_bound_on_the_exact_spectrum(kw)
     assert est >= 0.97 * exact, (est, exact)
 
 
+@pytest.mark.parametrize("side,dim,boundary", [
+    (16, 1, "periodic"), (15, 1, "dirichlet"), (8, 2, "periodic"), (7, 2, "dirichlet"),
+    (4, 3, "periodic"),
+])
+@pytest.mark.parametrize("mass", [1.0, 1e-3])
+def test_the_physical_condition_number_is_the_closed_form_of_the_grid_spectrum(side, dim, boundary, mass):
+    h = 1.0 / side if boundary == "periodic" else 1.0 / (side + 1)
+    ev = np.linalg.eigvalsh(OP._physical_operator(side, dim, h, mass, boundary))
+    assert OP.physical_condition_number(side, dim, mass, boundary) == pytest.approx(
+        ev[-1] / ev[0], rel=1e-9)
+
+
 def test_without_a_preconditioner_the_assembly_reports_no_condition_number():
     assert OP.assemble_operator(4, 2).condition_number is None
 

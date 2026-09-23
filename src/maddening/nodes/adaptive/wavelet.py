@@ -105,20 +105,31 @@ _DEFAULT_SENSOR: dict[int, tuple[float, ...]] = {
 #: Periodic image offsets summed by the default source on a periodic axis.
 PERIODIC_IMAGES: tuple[int, ...] = (-2, -1, 0, 1, 2)
 
-#: Largest ``kappa(A_hat) * eps(dtype)`` the constructor accepts, where
-#: ``kappa(A_hat)`` is :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
-#: of the preconditioned operator.  A backward-stable solve returns a
-#: relative error up to about ``kappa * eps``; measured in float32 against
-#: the float64 solve of the same node (1-D 128 and 256 points, 2-D 8^2,
-#: 3-D 4^3, order 6 on 48 points; mass 1 to 1e-5; full and default budget;
-#: jaxlib 0.11.0), the sensor-reading error was 0.002 to 0.58 times
-#: ``kappa * eps`` and never above it.  ``1e-3`` keeps the solver's share
-#: an order of magnitude inside the ``1e-2`` truncation accuracy the node
-#: documents at its default budget.  The periodic operator's smallest
-#: eigenvalue is proportional to ``mass`` (the constant function), so
-#: ``kappa`` grows like ``1 / mass``: in float32 this refuses a periodic
-#: mass below about ``2e-3`` (1-D) to ``4e-3`` (3-D, order 6); in float64
-#: below about ``1e-11``.  The Dirichlet operator is not affected.
+#: Largest relative solve error the constructor accepts, bounded by
+#:
+#:     kappa(A_hat) * eps(dtype)  +  kappa_phys * eps(float64)
+#:
+#: The first term is the node's own solve: ``kappa(A_hat)`` is
+#: :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
+#: of the preconditioned operator every frozen solve is a block of, and a
+#: backward-stable solve in ``dtype`` is wrong by up to about
+#: ``kappa * eps``.  Measured in float32 against the float64 solve of the
+#: same node (1-D 128 and 256 points, 2-D 8^2, 3-D 4^3, order 6 on 48
+#: points; mass 1 to 1e-5; full and default budget; jaxlib 0.11.0): 0.002
+#: to 0.58 times ``kappa(A_hat) * eps``.  The second is the float64
+#: assembly of the Galerkin product, whose rounding the smallest
+#: eigenvalue divides
+#: (:func:`~maddening.nodes.adaptive.wavelets.operator.physical_condition_number`;
+#: measured 0.005 to 0.25 times the term in float64).  ``1e-3`` keeps the
+#: solver's share an order of magnitude inside the ``1e-2`` truncation
+#: accuracy the node documents at its default budget.
+#:
+#: The periodic operator's smallest eigenvalue is ``mass`` (the constant
+#: function), so both terms grow like ``1 / mass``: in float32 the first
+#: refuses a periodic mass below about ``2e-3`` (1-D) to ``4e-3`` (3-D,
+#: order 6); in float64 the second refuses one below about ``1e-8`` (1-D,
+#: 128 points) to ``6e-8`` (256 points).  The Dirichlet operator is
+#: bounded away from singular and is not affected.
 CONDITION_LIMIT: float = 1e-3
 
 
@@ -454,6 +465,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         #: :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
         #: of the preconditioned operator every frozen solve is a block of.
         self.condition_number = float(op.condition_number)
+        #: :func:`~maddening.nodes.adaptive.wavelets.operator.physical_condition_number`
+        #: of the grid operator the Galerkin product is formed from.
+        self.physical_condition_number = _op.physical_condition_number(
+            int(side), dim, mass, boundary,
+        )
         self._refuse_ill_conditioned(mass=mass, boundary=boundary)
         self._op = op
         self._A = op.A
@@ -495,8 +511,21 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._sensor_index = int(sidx)
         self._sensor_row = op.Wn[self._sensor_index]
 
+    def solve_error_bound(self, dtype: Any = None) -> float:
+        """The relative solve error :data:`CONDITION_LIMIT` is compared with.
+
+        ``condition_number * eps(dtype) + physical_condition_number * eps(float64)``
+        -- the node's solve in ``dtype`` (its own by default) plus the
+        float64 assembly.  The constructor refuses a node whose bound
+        exceeds the limit.
+        """
+        dt = self.dtype if dtype is None else jnp.zeros((), dtype=dtype).dtype
+        eps = float(jnp.finfo(dt).eps)
+        eps64 = float(np.finfo(np.float64).eps)
+        return self.condition_number * eps + self.physical_condition_number * eps64
+
     def _refuse_ill_conditioned(self, *, mass: float, boundary: str) -> None:
-        """Refuse an operator whose conditioning the node's dtype cannot carry.
+        """Refuse an operator whose conditioning the node cannot carry.
 
         See :data:`CONDITION_LIMIT`.  Every frozen solve is on a principal
         block of ``A_hat``, whose condition number is at most
@@ -507,38 +536,41 @@ class WaveletAdaptiveNode(AdaptiveNode):
         ``mass=1e-8`` read ``-2.9e16``, with no warning -- or with one
         blaming the active-set budget at ``k = n_max``.
         """
-        eps = float(jnp.finfo(self.dtype).eps)
-        kappa = self.condition_number
-        if kappa * eps <= CONDITION_LIMIT:
+        bound = self.solve_error_bound()
+        if bound <= CONDITION_LIMIT:
             return
+        eps = float(jnp.finfo(self.dtype).eps)
         eps64 = float(np.finfo(np.float64).eps)
-        if self.dtype != jnp.float64 and kappa * eps64 <= CONDITION_LIMIT:
+        solve_term = self.condition_number * eps
+        assembly_term = self.physical_condition_number * eps64
+        bound64 = self.solve_error_bound(np.float64)
+        if self.dtype != jnp.float64 and bound64 <= CONDITION_LIMIT:
             dtype_hint = (
-                f"Build the node in float64, which carries kappa up to "
-                f"{CONDITION_LIMIT / eps64:.1e}: jax.config.update('jax_enable_x64', "
-                f"True) and dtype=jnp.float64."
+                f"Build the node in float64 (bound {bound64:.1e}): "
+                f"jax.config.update('jax_enable_x64', True) and dtype=jnp.float64."
             )
         else:
-            dtype_hint = "No floating dtype carries it."
+            dtype_hint = "No floating dtype carries it: the float64 assembly alone is too coarse."
         if boundary == "periodic":
             cause = (
-                "The periodic operator's smallest eigenvalue is proportional to "
-                "mass (its eigenvector is the constant function), so kappa grows "
-                "like 1 / mass."
+                "The periodic operator's smallest eigenvalue is mass (its "
+                "eigenvector is the constant function), so both grow like 1 / mass."
             )
             mass_hint = (
                 f"  Or raise mass to at least about "
-                f"{mass * kappa * eps / CONDITION_LIMIT:.1e} for {self.dtype}."
+                f"{mass * bound / CONDITION_LIMIT:.1e} for {self.dtype}."
             )
         else:
             cause, mass_hint = "", ""
         raise ValueError(
-            f"{type(self).__name__} {self.name!r}: the preconditioned operator's "
-            f"condition number is about {kappa:.2e} (mass={mass!r}, "
-            f"boundary={boundary!r}, n_max={self.n_max}), so a {self.dtype} solve "
-            f"(eps {eps:.1e}) can be wrong by a relative {kappa * eps:.1e} -- above "
-            f"the limit CONDITION_LIMIT = {CONDITION_LIMIT:.0e}.  {cause}  "
-            f"{dtype_hint}{mass_hint}"
+            f"{type(self).__name__} {self.name!r}: the solve can be wrong by a "
+            f"relative {bound:.1e} (mass={mass!r}, boundary={boundary!r}, "
+            f"n_max={self.n_max}), above CONDITION_LIMIT = {CONDITION_LIMIT:.0e}: "
+            f"the preconditioned operator's condition number is about "
+            f"{self.condition_number:.2e}, which a {self.dtype} solve (eps "
+            f"{eps:.1e}) turns into {solve_term:.1e}, and the grid operator's is "
+            f"{self.physical_condition_number:.2e}, which the float64 assembly "
+            f"turns into {assembly_term:.1e}.  {cause}  {dtype_hint}{mass_hint}"
         )
 
     # ------------------------------------------------------------------

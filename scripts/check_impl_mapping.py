@@ -61,6 +61,7 @@ MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "ball_node.md"): 7,
     os.path.join("docs", "algorithm_guide", "nodes", "rigid_body_2d_node.md"): 7,
     os.path.join("docs", "algorithm_guide", "nodes", "heart_pump_node.md"): 9,
+    os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md"): 22,
 }
 
 _QNAME = re.compile(r"`(maddening\.[^`]+)`")

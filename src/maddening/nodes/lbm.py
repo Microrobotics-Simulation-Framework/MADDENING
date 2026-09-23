@@ -662,7 +662,8 @@ class LBMNode(SimulationNode):
 
     meta = NodeMeta(
         algorithm_id="MADD-NODE-007",
-        algorithm_version="1.0.0",
+        # 1.1.0: Zou-He closure corrected (MADD-ANO-020); see the guide.
+        algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "General LBM node with BGK collision, Zou-He pressure BCs, "
@@ -683,21 +684,27 @@ class LBMNode(SimulationNode):
                 "because there is no independent timestep: the lattice fixes "
                 "dx = dt = 1 and ``update`` ignores its ``dt`` argument, so "
                 "refining time *is* refining the grid.  Degrades to 1st "
-                "order at curved bounce-back walls (see ``limitations``); "
+                "order at bounce-back walls (see ``limitations``); "
                 "the measurement is on a wall-free periodic domain."
             ),
         ),
         assumptions=(
             "Incompressible flow (Mach number << 1)",
             "BGK single-relaxation-time collision operator",
-            "Rigid, impermeable walls (mid-link bounce-back)",
-            "Zou-He pressure boundary conditions at inlet/outlet",
+            "Rigid, impermeable walls (bounce-back in wall cells)",
+            "Zou-He pressure boundary conditions at inlet/outlet: the face "
+            "carries the prescribed density and zero tangential velocity",
         ),
         limitations=(
             "Compressibility errors at high Mach number (Ma > 0.1)",
             "BGK is less stable than MRT for high Reynolds numbers",
             "No turbulence model",
-            "Wall bounce-back is 1st-order at curved boundaries",
+            "Wall bounce-back is 1st order, straight walls included: wall "
+            "cells collide as well as reflect, and the hydrodynamic wall sits "
+            "about 0.1 lattice units from the wall node rather than mid-link "
+            "(measured by MADD-VER-016)",
+            "Pressure faces reflect acoustic waves, so a pressure-driven flow "
+            "settles more slowly than its viscous time scale",
         ),
         validated_regimes=(
             ValidatedRegime(
@@ -706,7 +713,11 @@ class LBMNode(SimulationNode):
             ),
             ValidatedRegime(
                 "Reynolds number", 0, 100,
-                notes="Validated against Poiseuille analytical solution",
+                notes=(
+                    "Validated against Poiseuille analytical solutions, "
+                    "body-force (MADD-VER-003) and pressure-driven "
+                    "(MADD-VER-016)"
+                ),
             ),
         ),
         hazard_hints=(

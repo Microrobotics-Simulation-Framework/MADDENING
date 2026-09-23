@@ -148,12 +148,16 @@ class TestTransformPositionalForm:
     """
 
     def test_a_positional_unregistered_transform_fails_the_gate(
-        self, transforms_gate, tmp_path
+        self, transforms_gate, tmp_path, capsys
     ):
+        # The extract_last line keeps the scope non-empty, so the exit 1 is
+        # the ghost and not the empty-scope floor.
         (tmp_path / "positional_ghost.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
             'gm.add_edge("a", "b", "x", "y", "no_such_transform")\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_positional_registered_transform_passes(
         self, transforms_gate, tmp_path
@@ -164,12 +168,14 @@ class TestTransformPositionalForm:
         assert transforms_gate.main([str(tmp_path)]) == 0
 
     def test_a_positional_edge_spec_transform_is_seen(
-        self, transforms_gate, tmp_path
+        self, transforms_gate, tmp_path, capsys
     ):
         (tmp_path / "spec_positional.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
             'EdgeSpec("a", "b", "x", "y", "no_such_transform")\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_fifth_positional_that_is_not_a_string_is_not_a_reference(
         self, transforms_gate, tmp_path
@@ -1151,13 +1157,15 @@ class TestTransformGateConstantBinding:
     """A name bound to a string constant is still a string reference."""
 
     def test_a_transform_bound_to_a_module_constant_is_checked(
-        self, transforms_gate, tmp_path
+        self, transforms_gate, tmp_path, capsys
     ):
         (tmp_path / "indirect.py").write_text(
-            'GHOST = "no_such_transform"\n'
+            self._VERIFIABLE
+            + 'GHOST = "no_such_transform"\n'
             'gm.add_edge("a", "b", "x", "y", transform=GHOST)\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_constant_naming_a_registered_transform_passes(
         self, transforms_gate, tmp_path
@@ -1168,16 +1176,24 @@ class TestTransformGateConstantBinding:
         )
         assert transforms_gate.main([str(tmp_path)]) == 0
 
+    #: A reference the gate verifies, so that a failure below is the
+    #: unregistered name and not the empty-scope floor.  Without it, a scan
+    #: that simply did not see the name also exits 1, and the test passes
+    #: over the very hole it is for -- mutation-testing caught exactly that.
+    _VERIFIABLE = 'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+
     def test_a_transform_bound_to_a_function_local_is_checked(
-        self, transforms_gate, tmp_path
+        self, transforms_gate, tmp_path, capsys
     ):
         """audit_040_phase3_wave_d, T6: a local name hid the reference."""
         (tmp_path / "local_name.py").write_text(
-            "def wire(gm):\n"
+            self._VERIFIABLE
+            + "def wire(gm):\n"
             '    name = "no_such_transform"\n'
             '    gm.add_edge("a", "b", "x", "y", transform=name)\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_transform_bound_to_a_function_local_that_resolves_passes(
         self, transforms_gate, tmp_path
@@ -1190,14 +1206,16 @@ class TestTransformGateConstantBinding:
         assert transforms_gate.main([str(tmp_path)]) == 0
 
     def test_every_name_a_loop_binds_is_checked(
-        self, transforms_gate, tmp_path
+        self, transforms_gate, tmp_path, capsys
     ):
         (tmp_path / "loop.py").write_text(
-            "def wire(gm):\n"
+            self._VERIFIABLE
+            + "def wire(gm):\n"
             '    for name in ("extract_last", "no_such_transform"):\n'
             '        gm.add_edge("a", "b", "x", "y", transform=name)\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_parameter_shadows_a_module_constant_of_the_same_name(
         self, transforms_gate, tmp_path
@@ -1216,13 +1234,15 @@ class TestTransformGateConstantBinding:
         '**dict(transform="no_such_transform")',
     ])
     def test_a_transform_passed_through_a_literal_splat_is_checked(
-        self, transforms_gate, tmp_path, splat
+        self, transforms_gate, tmp_path, capsys, splat
     ):
         """audit_040_phase3_wave_d, T7: ``**{...}`` hid the reference."""
         (tmp_path / "splat.py").write_text(
-            f'gm.add_edge("a", "b", "x", "y", {splat})\n'
+            self._VERIFIABLE
+            + f'gm.add_edge("a", "b", "x", "y", {splat})\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+        assert "'no_such_transform'" in capsys.readouterr().out
 
     def test_a_callable_passed_by_name_is_not_a_string_reference(
         self, transforms_gate, tmp_path

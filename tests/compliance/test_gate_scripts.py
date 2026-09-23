@@ -1823,3 +1823,147 @@ class TestHeatStabilityAllowlist:
             f"whole file this gate stops reading; fix the rod instead of "
             f"raising the cap."
         )
+
+
+# ---------------------------------------------------------------------------
+# check_doctests.py
+# ---------------------------------------------------------------------------
+
+#: Runs ``scripts/check_doctests.py`` against a throwaway package instead of
+#: ``src/maddening``, in a fresh interpreter: the gate calls ``pytest.main``
+#: and ``os.chdir``, neither of which belongs inside this test process.
+_DOCTEST_GATE_ON = r"""
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("gate", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+gate.REPO_ROOT = Path(sys.argv[2])
+gate.PACKAGE = Path("src/probe_pkg")
+gate.EXCLUDED = (gate.PACKAGE / "examples",)
+sys.exit(gate.main(sys.argv[3:]))
+"""
+
+_TWO_EXAMPLES = '''\
+def two():
+    """Two examples in one docstring.
+
+    >>> 1 + 1
+    2
+    >>> 2 + 2
+    4
+    """
+'''
+
+
+def _doctest_gate(tmp_path, module_source, *args):
+    pkg = tmp_path / "src" / "probe_pkg"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mod.py").write_text(module_source)
+    env = dict(os.environ, JAX_PLATFORMS="cpu",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    return subprocess.run(
+        [sys.executable, "-c", _DOCTEST_GATE_ON,
+         str(SCRIPTS / "check_doctests.py"), str(tmp_path), *args],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path),
+        timeout=600,
+    )
+
+
+class TestDoctestGate:
+    """``scripts/check_doctests.py`` counts examples, not docstrings.
+
+    A pytest doctest item is a whole docstring, so ``# doctest: +SKIP`` on
+    a wrong example inside a two-example docstring left the item passing
+    and the gate at "OK: 31 docstring examples ran and passed, floor 31"
+    (audit_040_phase3_wave_d, D2).
+    """
+
+    def test_both_examples_of_a_docstring_are_counted(self, tmp_path):
+        """A floor of 2 over one docstring: satisfiable only by examples."""
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ("OK: 2 docstring example(s) in 1 docstring(s) ran and "
+                "passed, 0 skipped") in result.stdout
+
+    def test_a_skipped_wrong_example_inside_a_passing_docstring_fails(
+        self, tmp_path
+    ):
+        # SEEDED FAULT (fixture): the expected output is wrong and +SKIP
+        # hides it -- the defect the gate must catch.
+        source = _TWO_EXAMPLES.replace(
+            "    >>> 2 + 2\n    4\n",
+            "    >>> 2 + 2  # doctest: +SKIP\n    5\n",
+        )
+        result = _doctest_gate(tmp_path, source, "--min", "1")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "1 example(s) inside passing doctests did not run" in (
+            result.stdout)
+        assert "probe_pkg.mod.two: 1 skipped (line(s) 6)" in result.stdout
+
+    def test_fewer_examples_than_the_floor_fails(self, tmp_path):
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "3")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "2 example(s) executed in passing doctests, floor is 3" in (
+            result.stdout)
+
+    def test_a_package_with_no_examples_fails_whatever_the_floor(
+        self, tmp_path
+    ):
+        result = _doctest_gate(tmp_path, "def f():\n    return 1\n",
+                               "--min", "0")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "no docstring example executed" in result.stdout
+
+    def test_deselecting_every_doctest_fails(self, tmp_path):
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "0",
+                               "--", "-k", "no_such_doctest")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "no docstring example executed" in result.stdout
+
+    def test_a_runner_without_the_count_stops_the_gate(self):
+        """The instrument is not optional: no ``tries``, no verdict."""
+        from types import SimpleNamespace
+
+        gate = _load("check_doctests")
+        recorder = gate._Recorder()
+        item = SimpleNamespace(nodeid="m.py::m.f",
+                               dtest=SimpleNamespace(examples=[], lineno=0),
+                               runner=SimpleNamespace())
+        recorder.pytest_runtest_setup(item)
+        assert recorder.instrument_error and "tries" in recorder.instrument_error
+
+    def test_the_recorder_credits_only_the_examples_that_ran(self):
+        """Two examples, the runner executed one: one run, one skipped."""
+        import doctest
+        from types import SimpleNamespace
+
+        gate = _load("check_doctests")
+        recorder = gate._Recorder()
+        examples = [doctest.Example("1\n", "1\n", lineno=2),
+                    doctest.Example("2\n", "2\n", lineno=4,
+                                    options={doctest.SKIP: True})]
+        runner = SimpleNamespace(tries=10)
+        item = SimpleNamespace(nodeid="m.py::m.f", runner=runner,
+                               dtest=SimpleNamespace(examples=examples,
+                                                     lineno=10))
+        recorder.pytest_runtest_setup(item)
+        runner.tries += 1
+        recorder.pytest_runtest_makereport(item, SimpleNamespace(when="call"))
+        recorder.pytest_runtest_logreport(SimpleNamespace(
+            when="call", passed=True, nodeid="m.py::m.f"))
+        assert recorder.passed == {"m.py": 1}
+        assert recorder.examples_run == {"m.py": 1}
+        assert recorder.skipped_examples == [("m.py::m.f", [15], 1)]
+
+    def test_the_floor_is_attainable_from_the_source_as_it_stands(self):
+        """A floor above the examples in the tree could only ever fail.
+
+        Static, so it holds without running the ~100 examples; the gate's
+        own run in the compliance job is the dynamic half.
+        """
+        gate = _load("check_doctests")
+        static = sum(n for _d, n in gate._static_counts().values())
+        assert static >= gate.MIN_EXAMPLES, (static, gate.MIN_EXAMPLES)
+

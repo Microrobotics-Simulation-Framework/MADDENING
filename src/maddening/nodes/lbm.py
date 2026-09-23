@@ -507,9 +507,25 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     velocity; the known and tangential populations are not modified, and
     wall cells on the face are left untouched.
 
-    Closure (Zou & He 1997 for D2Q9; Hecht & Harting 2010 for D3Q19)
-    -----------------------------------------------------------------
-    With ``n`` the face axis, ``sigma = +1`` on a ``"min"`` face and
+    Parameters
+    ----------
+    f : (*grid_shape, Q) float32
+    prescribed_density : scalar float -- rho = P / cs2
+    e : (Q, D) numpy int array
+    w : (Q,) numpy float array
+    cs2 : float
+    face_axis : int -- 0, 1, or 2
+    face_side : str -- "min" or "max"
+    wall_mask : (*grid_shape,) bool -- True at wall cells
+
+    Returns
+    -------
+    f_updated : (*grid_shape, Q) float32
+
+    Notes
+    -----
+    The closure of Zou & He (1997) for D2Q9 and Hecht & Harting (2010)
+    for D3Q19.  With ``n`` the face axis, ``sigma = +1`` on a ``"min"`` face and
     ``-1`` on a ``"max"`` face, the unknown set ``U`` (directions with
     ``e_qn = sigma``, arriving from outside), the known set ``K``
     (``e_qn = -sigma``, streamed out of the interior) and the tangential
@@ -534,21 +550,6 @@ def _zou_he_pressure_face(f, prescribed_density, e, w, cs2,
     density equal ``rho_p``; without it the face density comes out as
     ``rho_p + S_K`` (MADD-ANO-020).  The lattice identities the closure
     rests on are checked by :func:`_zou_he_face_closure`.
-
-    Parameters
-    ----------
-    f : (*grid_shape, Q) float32
-    prescribed_density : scalar float -- rho = P / cs2
-    e : (Q, D) numpy int array
-    w : (Q,) numpy float array
-    cs2 : float
-    face_axis : int -- 0, 1, or 2
-    face_side : str -- "min" or "max"
-    wall_mask : (*grid_shape,) bool -- True at wall cells
-
-    Returns
-    -------
-    f_updated : (*grid_shape, Q) float32
     """
     ndim = e.shape[1]
     (known, unknown, tangential, sigma, tang_axes, tang_weight,

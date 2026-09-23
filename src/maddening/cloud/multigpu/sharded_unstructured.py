@@ -242,6 +242,32 @@ class ShardedUnstructuredNode(SimulationNode):
     def boundary_input_spec(self):
         return self._inner.boundary_input_spec()
 
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        """Refuse, by name, an inner node that declares interface DOFs.
+
+        The graph corrects a coupled interface by writing
+        ``state[field].at[index]``; here the state is in partition layout
+        (``n_devices * n_local_max`` rows, cells permuted and padded), so
+        the inner node's global ``index`` names a different cell, and its
+        ``compute_interface_correction`` reads a state it was not written
+        for.  The base-class answer, ``{}``, left the interface silently
+        uncorrected.  An inner node without interface DOFs is unaffected.
+        ``ShardedPointwiseNode`` and ``ShardedStencilNode`` keep the
+        inner node's global view and forward both hooks.
+        """
+        iface = self._inner.interface_dof_indices()
+        if iface:
+            raise NotImplementedError(
+                f"ShardedUnstructuredNode {self.name!r} cannot forward "
+                f"{type(self._inner).__name__}.interface_dof_indices() "
+                f"{sorted(iface)}: its state is in partition layout, where "
+                "the inner node's global cell indices name different cells, "
+                "so the coupled interface correction would be applied to the "
+                "wrong cells.  Couple the unwrapped node, or shard it with "
+                "ShardedStencilNode, which keeps the global view."
+            )
+        return {}
+
     def initial_state(self) -> dict:
         """Materialise the inner node's initial state onto the mesh.
 

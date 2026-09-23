@@ -31,6 +31,7 @@ from maddening.cloud.multigpu.halo import halo_exchange
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
+    BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
     SimulationNode,
     _method_accepts_params,
     _signature_takes_keyword,
@@ -108,8 +109,61 @@ def _accepts_params(node: SimulationNode) -> bool:
     return _method_accepts_params(node, "update")
 
 
+class _ForwardsCouplingHooks:
+    """The flux and interface-correction hooks, forwarded to ``self._inner``.
+
+    Both wrappers that use this keep the graph-level state in the inner
+    node's own global view -- each field is the inner node's array, placed
+    with a ``NamedSharding`` -- so the inner node's
+    ``compute_boundary_fluxes`` and ``compute_interface_correction`` read
+    it exactly as they would unwrapped, and an index from
+    ``interface_dof_indices`` names the same cell.  Without the
+    forwarding a wrapped node published no fluxes (a flux edge from it
+    failed to compile) and no interface DOFs (a coupled interface was
+    silently left uncorrected).  ``params`` reaches the inner hook under
+    the one params rule, as in
+    :class:`~maddening.core.simulation.hybrid_node.HybridNode`.
+
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+    does not use it: its state is in partition layout, where the inner
+    node's global indices name different cells.
+    """
+
+    _inner: SimulationNode
+
+    def boundary_flux_spec(self) -> dict[str, "BoundaryFluxSpec"]:
+        return self._inner.boundary_flux_spec()
+
+    def compute_boundary_fluxes(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_boundary_fluxes"):
+            return self._inner.compute_boundary_fluxes(
+                state, boundary_inputs, dt, params=params)
+        return self._inner.compute_boundary_fluxes(state, boundary_inputs, dt)
+
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        return self._inner.interface_dof_indices()
+
+    def compute_interface_correction(
+        self,
+        pre_state: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        params=None,
+    ) -> dict[str, list[tuple[int, Any]]]:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_interface_correction"):
+            return self._inner.compute_interface_correction(
+                pre_state, boundary_inputs, dt, params=params)
+        return self._inner.compute_interface_correction(
+            pre_state, boundary_inputs, dt)
+
+
 @stability(StabilityLevel.STABLE)
-class ShardedPointwiseNode(SimulationNode):
+class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
     """Data-parallel wrapper for a pointwise :class:`SimulationNode`.
 
     Only nodes with empty ``halo_width()`` can be wrapped; stencil nodes
@@ -314,7 +368,7 @@ def _params_signature(params) -> tuple:
 
 
 @stability(StabilityLevel.STABLE)
-class ShardedStencilNode(SimulationNode):
+class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 
     On each step, every state field listed in the node's

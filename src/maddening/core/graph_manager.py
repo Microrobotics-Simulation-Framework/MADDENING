@@ -6021,18 +6021,46 @@ class GraphManager:
 
         params_snapshot = self.params
 
+        from maddening.core.node import SimulationNode as _SimBase
+        flux_producers = {
+            nn for nn, sp in nodes_dict.items()
+            if type(sp.node).compute_boundary_fluxes
+            is not _SimBase.compute_boundary_fluxes
+        }
+
         def _resolve_and_update(node_name, new_state, full_state, ext, dt,
-                                node_params, force_forward_edges=None):
+                                node_params, flux_state,
+                                force_forward_edges=None):
             boundary_inputs: dict[str, Any] = {}
             for edge in edges_by_target[node_name]:
-                if edge in back_edge_set and (
+                back = edge in back_edge_set and (
                     force_forward_edges is None
                     or edge not in force_forward_edges
-                ):
-                    src_state = full_state
+                )
+                src_state = full_state if back else new_state
+                src_dict = src_state.get(edge.source_node, {})
+                if edge.source_field in src_dict:
+                    value = src_dict[edge.source_field]
+                elif (not back and edge.source_field
+                      in flux_state.get(edge.source_node, {})):
+                    # A flux edge, resolved as the fixed-step graph
+                    # resolves it: from the fluxes the source node produced
+                    # earlier in this step.  This used to be a bare
+                    # ``KeyError`` naming the field.
+                    value = flux_state[edge.source_node][edge.source_field]
                 else:
-                    src_state = new_state
-                value = src_state[edge.source_node][edge.source_field]
+                    raise ValueError(
+                        f"run_adaptive / run_adaptive_scan cannot resolve edge "
+                        f"{edge.key!r}: {edge.source_field!r} is not a state "
+                        f"field of {edge.source_node!r}"
+                        + (" and it is a back edge, whose flux would have to "
+                           "come from the previous step's boundary inputs, "
+                           "which the adaptive step does not keep"
+                           if back else
+                           ", nor a flux it produced earlier in the step")
+                        + ".  Use step / run_scan, or feed the node from a "
+                        "state field."
+                    )
                 value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
@@ -6048,10 +6076,18 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes_dict[node_name]
-            return _node_update(
+            new_node_state = _node_update(
                 spec, new_state[node_name], boundary_inputs, dt,
                 node_params.nodes.get(node_name),
             )
+            if node_name in flux_producers:
+                fluxes = _node_fluxes(
+                    spec, new_node_state, boundary_inputs, dt,
+                    node_params.nodes.get(node_name),
+                )
+                if fluxes:
+                    flux_state[node_name] = fluxes
+            return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
             if params is None:
@@ -6062,6 +6098,8 @@ class GraphManager:
                 params.get("nodes", {}), params.get("mappings", {}),
             )
             new_state = {k: v for k, v in state.items()}
+            # Per call, not per build: a flux is a value of *this* step.
+            flux_state: dict[str, dict] = {}
 
             if has_coupling:
                 for block in blocks:
@@ -6069,7 +6107,7 @@ class GraphManager:
                         nn = block[1]
                         new_state[nn] = _resolve_and_update(
                             nn, new_state, state, external_inputs, dt,
-                            node_params,
+                            node_params, flux_state,
                         )
                     else:
                         _, group, group_schedule = block
@@ -6089,7 +6127,7 @@ class GraphManager:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(
                         nn, new_state, state, external_inputs, dt,
-                        node_params,
+                        node_params, flux_state,
                     )
 
             return new_state

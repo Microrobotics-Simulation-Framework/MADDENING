@@ -5263,7 +5263,8 @@ class GraphManager:
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` and before the first step; ``inf``
               or NaN where ``"spectral_error_bound"`` is; NaN where the
-              fixed point responds to no constant.  Costs
+              fixed point responds to no constant and where the returned
+              state is not finite.  Costs
               ``9 + k + 4 n_c`` Jacobian-vector products per group per
               step beside the spectral bound's eight, ``k <= 8`` and
               ``n_c`` the number of floating constants (see

@@ -460,7 +460,7 @@ def _rebuilder(node) -> Callable[[dict], Any] | None:
     relies on -- or ``None`` when the node does not describe itself that
     way.  Whether the rebuild is *faithful* is checked against the node
     before it is trusted (see :func:`node_params_effective`)."""
-    to_dict = getattr(node, "to_dict", None)
+    to_dict: Callable[..., Any] | None = getattr(node, "to_dict", None)
     if not callable(to_dict):
         return None
     try:
@@ -878,7 +878,7 @@ def node_params_effective(
             if not acts(name, el) and ctor_value[el] is not None
             and any(acts(other, el) for other in checked if other != name)
         ]
-        if not candidates or rebuilt0 is None:
+        if not candidates or rebuilt0 is None or build is None:
             continue
         try:
             faithful[name] = all(

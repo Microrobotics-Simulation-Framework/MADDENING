@@ -88,12 +88,17 @@ def test_an_initial_condition_edit_is_refused_as_never_read():
         gm.step()
 
 
-def test_an_explicit_params_argument_is_refused_too():
+def test_an_explicit_params_argument_is_not_refused_but_the_live_leaves_under_it_are():
+    """A caller's ``params=`` is never serialised, and a leaf the step
+    ignores may be one the caller's own code consumes (a residual seeding
+    the initial state from ``initial_velocity``); it runs.  The live leaves
+    a partial pytree is completed from are ``gm.params`` and are checked."""
     gm = _spring()
-    with pytest.raises(ValueError, match=r"params\['nodes'\]\['s'\]\['initial_position'\]"):
-        gm.run_scan(2, params={"nodes": {"s": {"initial_position": jnp.asarray(0.9, jnp.float32)}}})
-    # ...and it wrote nothing into gm.params.
+    gm.run_scan(2, params={"nodes": {"s": {"initial_position": jnp.asarray(0.9, jnp.float32)}}})
     assert float(gm.params["nodes"]["s"]["initial_position"]) == pytest.approx(0.2)
+    gm.params["nodes"]["s"]["initial_velocity"] = jnp.asarray(0.3, jnp.float32)
+    with pytest.raises(ValueError, match=r"gm\.params\['nodes'\]\['s'\]\['initial_velocity'\]"):
+        gm.run_scan(2, params={"nodes": {"s": {"stiffness": jnp.asarray(50.0, jnp.float32)}}})
 
 
 def test_an_edit_to_a_leaf_the_step_reads_is_honoured():

@@ -3304,7 +3304,16 @@ class GraphManager:
         for k, v in params.items():
             if k not in ("nodes", "mappings"):
                 out[k] = v
-        self._refuse_baked_param_writes(out, live=False)
+        # The live leaves this completion carries over are checked as live
+        # ones; the caller's own leaves are not refused (see
+        # _refuse_baked_param_writes for why).
+        self._refuse_baked_param_writes(
+            {"nodes": {o: {k: v for k, v in leaves.items()
+                           if self.params.get("nodes", {}).get(o, {}).get(k) is v}
+                       for o, leaves in out.get("nodes", {}).items()
+                       if isinstance(leaves, dict)}},
+            live=True,
+        )
         return _strong_typed(out)
 
     def _validate_params(self, params: dict) -> None:
@@ -3443,7 +3452,9 @@ class GraphManager:
         spec = self._nodes.get(owner)
         if spec is None:
             return None
-        deps = getattr(spec.node, "static_data_deps", None)
+        # `Callable[..., Any] | None`, not `Any`: `callable()` narrows a bare
+        # `Any` to `(...) -> object`, whose result has no `.items()`.
+        deps: Callable[..., Any] | None = getattr(spec.node, "static_data_deps", None)
         declared = (deps() if callable(deps) else None) or {}
         statics = sorted(s for s, names in declared.items() if key in names)
         if statics:
@@ -3474,12 +3485,17 @@ class GraphManager:
         leaves).  ``docs/user_guide/parameters.md`` promises the opposite:
         "not a silently ignored leaf".
 
-        ``live`` is ``True`` for :attr:`params` itself: a leaf that passes is
-        remembered by identity, so a steady run pays one ``is`` per leaf per
-        call and a value is compared only when a new object was written.
-        An explicit ``params=`` argument is checked without being
-        remembered, and a traced leaf (a fit, an FIM) cannot be compared and
-        is left alone.  The reference is the node's own
+        Only leaves of :attr:`params` itself are refused (``live=True``): a
+        leaf that passes is remembered by identity, so a steady run pays one
+        ``is`` per leaf per call and a value is compared only when a new
+        object was written.  A caller's explicit ``params=`` pytree is not
+        refused -- it is never serialised, and a leaf the step ignores may
+        be one the caller's own code consumes (a residual that seeds the
+        initial state from ``initial_velocity``, say); the live leaves a
+        partial pytree is completed from are checked as live ones.  A
+        traced leaf (a fit, an FIM) cannot be compared and is left alone.
+        ``live=False`` checks without remembering.  The reference is the
+        node's own
         :meth:`~maddening.core.node.SimulationNode.params_pytree`, so a write
         that also reaches the node (``PUT /graph/params`` writes both) is not
         refused.

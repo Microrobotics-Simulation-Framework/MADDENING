@@ -1136,6 +1136,8 @@ class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
         ">=0.4.0.dev0, <0.4.0",          # admits nothing at all
         "~=0.1",
         ">=0.1.0, >=0.2.0, <0.4.0",
+        ">=0.1.0, <=0.3.1",              # right shape, wrong operator
+        ">=0.1.0, !=0.2.0, <0.4.0",
     ])
     def test_a_range_outside_the_convention_fails_naming_the_entry(
         self, tmp_path, bad
@@ -1234,6 +1236,30 @@ class TestTheVersionRangeRule:
         bad = self._registry("0.4.0.dev0", ("duplicate", "banana", {}))
         assert gate.version_range_errors(bad)
 
+    @pytest.mark.parametrize("rng, op", [
+        (">=0.1.0, <=0.3.1", "'<='"),
+        (">=0.1.0, !=0.2.0, <0.4.0", "'!='"),
+        (">=0.1.0, <0.4.0, ==0.3.*", "'=='"),
+    ])
+    def test_an_operator_outside_the_convention_is_named(self, gate, rng, op):
+        """Each of these has exactly one ``>=`` and excludes this version, so
+        the operator rule is the only one that can refuse it."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = gate.version_range_errors(registry)
+        assert f"uses {op}" in message, message
+
+    @pytest.mark.parametrize("rng", [
+        ">=0.1.0, >=0.2.0, <0.4.0",
+        ">=0.1.0, <0.3.0, <0.4.0",
+    ])
+    def test_a_range_names_one_first_version_and_at_most_one_fix(self, gate, rng):
+        """With two ``>=`` bounds, which one is FIRST depends on set order,
+        so the empty-set check would catch it only some of the time; the
+        shape rule has to be pinned on its own message."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = gate.version_range_errors(registry)
+        assert "must name exactly one '>=FIRST'" in message, message
+
     def test_a_range_that_starts_after_this_version_fails(self, gate):
         registry = self._registry("0.4.0.dev0", ("resolved", ">=0.5.0, <0.6.0", {}))
         (message,) = gate.version_range_errors(registry)
@@ -1255,10 +1281,48 @@ class TestTheVersionRangeRule:
         registry["maddening_version"] = version
         assert gate.version_range_errors(registry)
 
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_range_is_refused_before_it_is_parsed(self, gate, blank):
+        """``SpecifierSet("")`` is the set of *every* version.  The one-``>=``
+        rule would refuse it too, so this guard is redundant today; it is
+        pinned so that loosening that rule cannot make a blank range mean
+        "affects everything" without a word."""
+        registry = self._registry("0.4.0.dev0", ("resolved", blank, {}))
+        (message,) = gate.version_range_errors(registry)
+        assert f"MADD-ANO-001: affected_versions is {blank!r}" in message
+
     def test_a_non_string_range_is_a_failure(self, gate):
         registry = self._registry("0.4.0.dev0", ("open", 0.1, {}))
         (message,) = gate.version_range_errors(registry)
         assert "MADD-ANO-001: affected_versions is 0.1" in message
+
+    def test_the_rule_does_not_lean_on_packagings_prerelease_default(
+        self, gate, monkeypatch
+    ):
+        """``SpecifierSet.contains`` changed its default across packaging
+        releases: 22 (pytest's floor) leaves a pre-release out unless asked,
+        26 lets it in.  On 22, a rule that relied on the default would read
+        ``>=0.1.0`` as not admitting ``0.4.0.dev0`` and fail every open entry
+        of a development registry.  The older default is simulated here, so
+        the rule has to pass ``prereleases`` itself on whichever packaging
+        this runs on."""
+        from packaging.specifiers import SpecifierSet
+
+        real = SpecifierSet.contains
+
+        def packaging_22_default(self, item, prereleases=None, **kwargs):
+            if prereleases is None:
+                prereleases = bool(self.prereleases)
+            return real(self, item, prereleases=prereleases, **kwargs)
+
+        monkeypatch.setattr(SpecifierSet, "contains", packaging_22_default)
+        assert not SpecifierSet(">=0.1.0").contains("0.4.0.dev0")  # simulated
+        registry = self._registry(
+            "0.4.0.dev0",
+            ("open", ">=0.1.0", {}),
+            ("resolved", ">=0.1.0, <0.4.0", {"resolution_version": "0.4.0"}),
+        )
+        assert gate.version_range_errors(registry) == []
 
     def test_without_packaging_the_rule_fails_closed(self, gate, monkeypatch):
         """``packaging`` comes with pytest; if it is ever missing, the rule

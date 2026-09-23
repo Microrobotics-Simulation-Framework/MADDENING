@@ -96,11 +96,14 @@ anomalies:
   - anomaly_id: "MADD-ANO-002"
     title: "HeatNode CFL stability not enforced at runtime"
     description: >
-      The HeatNode does not check the CFL stability condition (dt < dx^2 / (2*alpha))
-      at runtime.  If the user provides a timestep that violates this condition,
-      the explicit finite-difference scheme becomes unstable and produces silently
-      incorrect results (temperature values that grow without bound).  There is no
-      warning or error — the simulation runs but the output is wrong.
+      Until 0.4.0 the HeatNode checked its explicit scheme's stability condition
+      nowhere.  The condition bounds the Fourier number dt*alpha/dx^2: by 1/2 for
+      the default stencil_order=2 (dt < dx^2 / (2*alpha), the only bound this
+      entry used to quote) and by 5/16 for stencil_order=4, which MADD-ANO-009
+      found the quoted bound did not cover.  A timestep that violates it makes the
+      explicit finite-difference scheme unstable and produces silently incorrect
+      results (temperature values that grow without bound), with no warning or
+      error -- the simulation runs but the output is wrong.
       Narrowed but not closed at 0.4.0.  The constructor now refuses a
       configuration above its stencil's Fourier limit, naming the number: the
       20-cell rod of length 1.0 with thermal_diffusivity=0.01 at Fo = 5.0
@@ -154,6 +157,14 @@ anomalies:
       fit cannot reach an unstable configuration, and check the field for
       non-finite values after the step if it can.
     resolution_status: "open"
+    verification:
+      # The narrowing: the constructor's check (MADD-ANO-009's).
+      - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_constructor_refuses_an_unstable_configuration"
+      # What stays open, pinned so that a fix, or a drifted figure, fails.
+      - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_constructor_does_refuse_the_same_fourier_number"
+      - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_dt_passed_to_update_diverges_silently"
+      - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_injected_thermal_diffusivity_diverges_silently"
+      - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_stable_end_of_the_rod_decays_to_the_recorded_figures"
     github_issue: null
 
 
@@ -210,6 +221,12 @@ anomalies:
       Check for a crossing by re-selecting the active set at both ends of a
       step and comparing the masks.
     resolution_status: "open"
+    verification:
+      - "tests/nodes/adaptive/test_active_set_switch.py::test_frozen_objective_jump_at_an_active_set_switch_does_not_vanish_with_the_step"
+      - "tests/nodes/adaptive/test_active_set_switch.py::test_central_finite_difference_across_a_switch_diverges_as_one_over_h"
+      - "tests/nodes/adaptive/test_active_set_switch.py::test_gradient_inside_an_active_set_region_matches_the_selected_branch"
+      - "tests/nodes/adaptive/test_active_set_switch.py::test_integrated_gradient_plus_switch_jumps_reconstructs_the_objective_change"
+      - "tests/nodes/adaptive/test_active_set_switch.py::test_the_omitted_term_decays_with_the_active_set_budget"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-004"
@@ -1225,9 +1242,15 @@ anomalies:
       node's coupling variable -- the pressure fed back from a downstream
       domain such as an LBM outlet -- so the coupling is pinned to single
       precision whatever the caller's precision is.  No other MADDENING node
-      downcasts a boundary input this way; HeatNode, LBMNode and RigidBodyNode
-      all run in float64 under `jax_enable_x64`, which is what their MMS
-      studies rely on.
+      downcasts a *boundary input* this way.  An earlier revision went on to say
+      that HeatNode, LBMNode and RigidBodyNode all run in float64 under
+      `jax_enable_x64`; re-measured at 0.4.0.dev0 (jaxlib 0.11.0, CPU), that
+      holds only for a state the caller builds in float64, which is how the MMS
+      studies drive them.  From their own `initial_state()` seeds,
+      HeatNode's temperature and all four RigidBodyNode fields are float32 and
+      stay float32 through `update()` -- the casts recorded below -- and LBMNode
+      seeds its distribution `f` at float64 but `density`, `velocity` and
+      `pressure` at float32, which its first `update()` promotes.
       Two consequences, both reproduced at 0.4.0.dev0 under
       `jax_enable_x64`.  (1) Precision: two backpressures differing by 1e-6 at
       100 units -- about 1/7 of a float32 ulp there, and 5e8 float64 ulps --
@@ -1406,9 +1429,12 @@ anomalies:
   - anomaly_id: "MADD-ANO-016"
     title: "cloud/_skypilot.py was written against a SkyPilot API older than the supported floor"
     description: >
-      From v0.1.0 to v0.4.0, `src/maddening/cloud/_skypilot.py` was
+      From v0.1.0 to v0.3.1, `src/maddening/cloud/_skypilot.py` was
       byte-identical and written against SkyPilot's pre-0.7, pre-client-server
-      API, while every release declared `skypilot>=0.11`.  Every call in the
+      API, while every release declared `skypilot>=0.11`; the 0.4.0 development
+      line edited the module (the published ports, the container's credential
+      environment) and kept every one of those calls until the port recorded
+      below.  Every call in the
       module was therefore wrong against every version the package claims to
       support.  Verified against the installed sky 0.12.2:
 
@@ -1440,8 +1466,9 @@ anomalies:
 
       The defect survived because there are two independent SkyPilot paths and
       only one was broken.  `CloudLauncher` -- the user-facing script/CLI path
-      -- has used the client-server API since v0.2.0 across fourteen call
-      sites and works.  `CloudSession` is the only importer of `_skypilot.py`
+      -- has used the client-server API since v0.1.0 across fourteen call
+      sites and works: `cloud/launcher.py` is byte-identical from v0.1.0 to
+      v0.3.1.  (An earlier revision said "since v0.2.0".)  `CloudSession` is the only importer of `_skypilot.py`
       (`cloud/session.py:329, 408-410`), and that path was plausibly never
       exercised against a real provider.  The test suite could not see it
       either: `tests/cloud/test_skypilot_ports.py` substituted a fake `sky`
@@ -1516,7 +1543,7 @@ anomalies:
       - "tests/cloud/test_skypilot_client_server_calls.py::TestLaunchVm::test_the_cloud_the_config_names_is_the_cloud_that_is_used"
     github_issue: null
   - anomaly_id: "MADD-ANO-017"
-    title: "jax_enable_x64 does not reach GraphManager's scan paths: a freshly compiled graph refuses to scan because its params are float64 and its state is float32"
+    title: "Under jax_enable_x64 a scan-shaped path refuses a float32 carry: implicit_euler_step in every release, and GraphManager's scans on a freshly compiled graph from 0.4.0"
     description: >
       Under `jax_enable_x64`, every `GraphManager` scan entry point raises
       `TypeError` on a freshly compiled graph.  Measured 2026-09-21 on CPU,
@@ -1555,7 +1582,10 @@ anomalies:
       including the spring, which an earlier reading recorded as narrowing.
       It does not; that reading came from a harness that passed explicitly
       float32 params, which is workaround (b) below rather than a property of
-      the node.
+      the node.  `LBMNode` raises as well, by a route that needs no parameter:
+      its seed already mixes a float64 distribution `f` with float32
+      `density`, `velocity` and `pressure`, and `update()` derives those three
+      from `f` (measured on a fresh 6x5x5 graph, `run_scan(2)`, 0.4.0.dev0).
 
       `step()` does not raise.  It promotes silently and stores the promoted
       state, so a graph driven step-by-step under x64 runs in float64 from the
@@ -1572,8 +1602,10 @@ anomalies:
       had a working float64 graph scan; what 0.4.0 changed is that a silent
       no-op became a loud refusal.
 
-      Boundary -- what is NOT affected.  Node-level float64 works and is
-      verified.  The MMS order studies behind MADD-VER-010 and MADD-VER-011
+      Boundary -- what is NOT affected.  Node-level `update()` in float64 works
+      and is verified; `implicit_euler_step`, which is node-level too, is the
+      exception described under (1) below.  The MMS order studies behind
+      MADD-VER-010 and MADD-VER-011
       and the integrator order table enable x64 through the `float64` fixture
       in `tests/verification/test_mms_order_ode_nodes.py` and call
       `node.update()` directly, bypassing `GraphManager` entirely.  Every
@@ -1599,9 +1631,11 @@ anomalies:
       solves normally, in float64.  This one is NOT a 0.4.0 regression: it
       is identical at e16a9e3 (before the params keyword reached the
       solver paths) and at the v0.3.1 tag, and the loop has been written
-      this way since 0.1.0.  It is why `affected_versions` below is
-      open at both ends rather than `>=0.4.0`: the `GraphManager` half is
-      0.4.0-new, the `implicit_euler_step` half is every release.
+      this way since 0.1.0.  It is why `affected_versions` below starts at
+      0.1.0 rather than at 0.4.0.dev0: the `GraphManager` half is 0.4.0-new,
+      the `implicit_euler_step` half is every release.  (An earlier revision
+      called that range "open at both ends"; it is open at the top only, as
+      every reachable entry's range is.)
 
       (2) `update(params=)` and `integrate_node(..., params=)` on the same
       node and the same float64 params disagree in *dtype*, not value.
@@ -1615,9 +1649,12 @@ anomalies:
       round-off (<= 4.1e-5 on `HeartPumpNode`'s pressures, <= 1.1e-7
       elsewhere); a caller that feeds one path's output into a scan seeded
       by the other, or compares their dtypes, meets the carry refusal
-      above.  Same reproducers as the rest of the entry:
-      `benchmarks/results/audit_040_phase3_wave_a/params-wiring/repro_q6_x64.py`
-      and `repro_q6b_implicit_x64_preexisting.py`.
+      above.  Both surfaces are pinned by the tests this entry cites,
+      `TestTheSolverPathsUnderX64` in
+      `tests/core/test_x64_graph_scan_limitation.py`.  An earlier revision
+      cited two reproducers under
+      `benchmarks/results/audit_040_phase3_wave_a/`, a directory that was
+      never committed; the tests are the evidence.
 
       Relationship to MADD-ANO-013, which is adjacent and not the same entry.
       MADD-ANO-013 records nodes that *downcast* a float64 quantity to
@@ -1679,10 +1716,11 @@ anomalies:
       - "maddening.core.node.SimulationNode.params_pytree"
       - "maddening.nodes.ball.BallNode.initial_state"
       - "maddening.nodes.spring.SpringDamperNode.initial_state"
+      - "maddening.nodes.lbm.LBMNode.initial_state"
       - "maddening.core.simulation.implicit.implicit_euler_step"
       - "maddening.core.simulation.integrators.integrate_node"
-    # ">=0.1.0", not ">=0.4.0": the GraphManager scans are 0.4.0-new, but
-    # implicit_euler_step has refused a float32 state under x64 in every
+    # ">=0.1.0", not ">=0.4.0.dev0": the GraphManager scans are 0.4.0-new,
+    # but implicit_euler_step has refused a float32 state under x64 in every
     # release (see the description).  The field cannot say both, and a
     # known-anomalies list errs towards the wider range.
     affected_versions: ">=0.1.0"
@@ -1708,6 +1746,8 @@ anomalies:
     residual_risk: null
     verification:
       - "tests/core/test_x64_graph_scan_limitation.py"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_implicit_euler_step_refuses_a_float32_state_whatever_the_params"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_update_and_integrate_node_disagree_in_dtype_but_not_in_value"
     github_issue: null
   - anomaly_id: "MADD-ANO-018"
     title: "A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node()"
@@ -1843,9 +1883,16 @@ anomalies:
       nothing of params, by design, as the original entry already said;
       a caller composing a derivative function closes over the constants
       it wants.  (2) A subclass that overrides `derivatives` without the
-      keyword but inherits an in-tree `implicit_residual` gets Python's
-      own `TypeError` from the forwarded keyword when params are passed
-      -- loud, and naming the method, but not this fix's message.  (3)
+      keyword but inherits an in-tree `implicit_residual` gets the same
+      `ValueError`, naming the class and the method, when params are
+      passed -- whether it calls `implicit_residual(..., params=)` itself
+      or goes through `implicit_euler_step(..., params=)` -- because every
+      in-tree `implicit_residual` (`HeartPumpNode`, `HeatNode`,
+      `RigidBodyNode`, `SpringDamperNode`) reaches `derivatives` through
+      the shared binder.  An earlier revision said such a subclass got
+      Python's own `TypeError` from the forwarded keyword; that described
+      the code before the binder was shared and is withdrawn, so this item
+      is closed rather than a boundary.  (3)
       The `params_effective` probe cannot see a constant a path consumes
       through an attribute derived from it at construction time, because
       varying `self.params` does not move such an attribute; a leaf that

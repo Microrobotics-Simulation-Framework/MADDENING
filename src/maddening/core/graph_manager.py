@@ -3536,7 +3536,8 @@ class GraphManager:
                         where = "gm.params" if live else "params"
                         shown = ""
                         if ctor is not None and np.size(ctor) <= 8:
-                            shown = f" {np.asarray(ctor).tolist()!r}"
+                            shown = " " + np.array2string(
+                                np.asarray(ctor), precision=7, separator=", ")
                         raise ValueError(
                             f"{where}['nodes'][{owner!r}][{key!r}] differs from "
                             f"the node's own value{shown}, but {reason}.  The value "

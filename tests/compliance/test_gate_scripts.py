@@ -90,12 +90,19 @@ class TestTransformGate:
     def test_a_transform_the_same_file_registers_passes(
         self, transforms_gate, tmp_path
     ):
+        # The fixture has to be importable: the gate confirms a local
+        # registration by importing the module.  This one used to lack the
+        # import and call ``gm`` at module level, so it raised NameError on
+        # import and passed only because every import failure degraded to
+        # "unconfirmed" -- it never exercised the path it is named for.
         (tmp_path / "registers_its_own.py").write_text(
+            "from maddening.core.transforms import register_transform\n"
             '@register_transform("locally_defined")\n'
             "def _t(x):\n"
             "    return x\n"
             '\n'
-            'gm.add_edge("a", "b", "x", "y", transform="locally_defined")\n'
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", transform="locally_defined")\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 0
 
@@ -122,7 +129,10 @@ class TestTransformGate:
         assert transforms_gate.main([str(tmp_path)]) == 1
 
     def test_the_repository_transform_references_all_resolve(self):
-        result = _run("check_transforms")
+        # ``--allow-missing-optional``: the test matrix installs only
+        # ``[ci]``, so the USD test modules cannot be imported here.  The CI
+        # compliance job runs the gate without the flag, with the extras.
+        result = _run("check_transforms", "--allow-missing-optional")
         assert result.returncode == 0, result.stdout + result.stderr
         # Regression guard on the audit finding: the gate reported
         # "OK: 0 ... verified" for the whole of v0.3 and v0.4-dev.
@@ -255,36 +265,151 @@ class TestTransformLiveRegistration:
         (tmp_path / "live_registration.py").write_text(self._LIVE)
         assert transforms_gate.main([str(tmp_path)]) == 0
 
-    def test_a_module_that_cannot_be_imported_degrades_to_unchecked(
+    _NEEDS_AN_EXTRA = (
+        "import a_module_that_does_not_exist_anywhere  # noqa: F401\n"
+        "from maddening.core.transforms import register_transform\n"
+        "\n"
+        "\n"
+        '@register_transform("transform_behind_an_extra")\n'
+        "def _t(x):\n"
+        "    return x\n"
+        "\n"
+        "\n"
+        "def wire(gm):\n"
+        '    gm.add_edge("a", "b", "x", "y", '
+        'transform="transform_behind_an_extra")\n'
+    )
+
+    def test_a_scope_whose_only_reference_is_unconfirmed_fails(
         self, transforms_gate, tmp_path, capsys
     ):
-        """An optional extra this environment lacks is unchecked, not broken.
+        """Nothing verified is a failure, whatever else was found.
 
-        ``resolve_dotted_name``'s ``unavailable`` handling is the precedent:
-        failing a USD-serialisation gate because ``pxr`` is missing would
-        make the gate unusable in a CI that installs only ``[ci]``.
+        The floor used to be on references *in scope*, so this printed
+        "OK: 0 string transform reference(s) verified, 1 not confirmed
+        against the live registry" and exited 0 (audit_040_phase3_wave_d,
+        T5).  ``--allow-missing-optional`` must not reopen it.
         """
-        (tmp_path / "needs_an_extra.py").write_text(
-            "import a_module_that_does_not_exist_anywhere  # noqa: F401\n"
-            "from maddening.core.transforms import register_transform\n"
-            "\n"
-            "\n"
-            '@register_transform("transform_behind_an_extra")\n'
-            "def _t(x):\n"
-            "    return x\n"
-            "\n"
-            "\n"
-            "def wire(gm):\n"
-            '    gm.add_edge("a", "b", "x", "y", '
-            'transform="transform_behind_an_extra")\n'
+        (tmp_path / "needs_an_extra.py").write_text(self._NEEDS_AN_EXTRA)
+        for extra in ([], ["--allow-missing-optional"]):
+            assert transforms_gate.main([*extra, str(tmp_path)]) == 1, extra
+            captured = capsys.readouterr()
+            assert "FAIL: 0 string transform reference(s) verified" in (
+                captured.err), captured
+            assert "1 not confirmed against the live registry" in captured.err
+            assert "OK:" not in captured.out
+
+    def test_an_unconfirmed_reference_fails_unless_explicitly_accepted(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """Unconfirmed is not verified, and by default not a pass either.
+
+        The CI job that runs this gate installs the extras precisely so
+        that nothing is unconfirmed; an unconfirmed reference there means
+        the gate quietly started verifying less.  A lane without the extras
+        opts in, and the reference is still reported.
+        """
+        (tmp_path / "needs_an_extra.py").write_text(self._NEEDS_AN_EXTRA)
+        (tmp_path / "verifiable.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
         )
-        assert transforms_gate.main([str(tmp_path)]) == 0
+        assert transforms_gate.main([str(tmp_path)]) == 2
+        captured = capsys.readouterr()
+        assert "could not be confirmed" in captured.err
+        assert "--allow-missing-optional" in captured.err
+        assert "NOT confirmed against the live registry" in captured.out
+        assert "a_module_that_does_not_exist_anywhere" in captured.out
+
+        assert transforms_gate.main(
+            ["--allow-missing-optional", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         assert "NOT confirmed against the live registry" in out
-        assert "not confirmed against the live registry" in out
-        # The one reference in scope was not verified, so the headline
-        # must not claim it was.
-        assert "OK: 0 string transform reference(s) verified" in out
+        assert ("OK: 1 string transform reference(s) verified, 1 not "
+                "confirmed against the live registry") in out, out
+
+    def test_a_module_that_raises_at_import_is_broken_not_unconfirmed(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """Only a missing third-party package is the environment's fault.
+
+        Every import failure used to degrade to "unconfirmed", so a module
+        that raises on import -- whose registrations therefore run nowhere
+        -- was reported as merely unchecked.
+        """
+        (tmp_path / "raises.py").write_text(
+            "from maddening.core.transforms import register_transform\n"
+            '@register_transform("registered_before_the_crash")\n'
+            "def _t(x):\n"
+            "    return x\n"
+            'raise RuntimeError("a module-level bug")\n'
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", '
+            'transform="registered_before_the_crash")\n'
+        )
+        (tmp_path / "verifiable.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+        )
+        for extra in ([], ["--allow-missing-optional"]):
+            assert transforms_gate.main([*extra, str(tmp_path)]) == 1, extra
+            out = capsys.readouterr().out
+            assert "fails to import" in out and "a module-level bug" in out
+
+    def test_a_missing_first_party_module_is_broken_not_unconfirmed(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        """``maddening.<gone>`` is a broken import, not an optional extra."""
+        (tmp_path / "stale_import.py").write_text(
+            "import maddening.no_such_submodule_anywhere  # noqa: F401\n"
+            "from maddening.core.transforms import register_transform\n"
+            '@register_transform("behind_a_stale_import")\n'
+            "def _t(x):\n"
+            "    return x\n"
+            "def wire(gm):\n"
+            '    gm.add_edge("a", "b", "x", "y", '
+            'transform="behind_a_stale_import")\n'
+        )
+        (tmp_path / "verifiable.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+        )
+        assert transforms_gate.main(
+            ["--allow-missing-optional", str(tmp_path)]) == 1
+        assert "fails to import" in capsys.readouterr().out
+
+    def test_a_subpackage_refusing_its_extra_is_unconfirmed(
+        self, transforms_gate, tmp_path
+    ):
+        """The re-raised form ``maddening.usd`` uses is still a missing extra.
+
+        It raises ``ImportError("... requires 'usd-core'")`` from the
+        ``ModuleNotFoundError``, and carries no ``name`` of its own; the
+        classification walks the chain.
+        """
+        exc = ImportError("maddening.usd requires 'usd-core'")
+        exc.__cause__ = ModuleNotFoundError("No module named 'pxr'",
+                                            name="pxr")
+        assert transforms_gate.missing_optional_package(exc, REPO_ROOT) == "pxr"
+        first_party = ModuleNotFoundError("No module named 'maddening.gone'",
+                                          name="maddening.gone")
+        assert transforms_gate.missing_optional_package(
+            first_party, REPO_ROOT) is None
+        assert transforms_gate.missing_optional_package(
+            RuntimeError("no"), REPO_ROOT) is None
+
+    def test_loading_the_same_probe_twice_does_not_collide(
+        self, transforms_gate, tmp_path
+    ):
+        """A probe load re-executes the module; the registry is put back.
+
+        Without that, the second load re-registers the name to a new
+        function object, ``register_transform`` raises, and a correct probe
+        is reported as broken -- which the property tests, loading many
+        probes in one process, would hit at random.
+        """
+        (tmp_path / "live_registration.py").write_text(self._LIVE)
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        assert transforms_gate.main([str(tmp_path)]) == 0
+        from maddening.core.transforms import _TRANSFORM_REGISTRY
+        assert "really_registered_transform" not in _TRANSFORM_REGISTRY
 
     def test_an_unconfirmed_reference_is_not_counted_in_the_verified_total(
         self, transforms_gate, tmp_path, capsys
@@ -313,7 +438,8 @@ class TestTransformLiveRegistration:
             'transform="only_lexically_registered")\n'
             '    gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
         )
-        assert transforms_gate.main([str(tmp_path)]) == 0
+        assert transforms_gate.main(
+            ["--allow-missing-optional", str(tmp_path)]) == 0
         out = capsys.readouterr().out
         # Not just the exit code, and not just a substring of the caveat:
         # the number in the headline is what a reader takes away as
@@ -368,7 +494,7 @@ class TestTransformLiveRegistration:
         been able to import, which is indistinguishable from the dead
         registration this check exists to catch.
         """
-        result = _run("check_transforms")
+        result = _run("check_transforms", "--allow-missing-optional")
         assert result.returncode == 0, result.stdout + result.stderr
         unexplained = [
             line for line in result.stdout.splitlines()
@@ -390,7 +516,7 @@ class TestTransformLiveRegistration:
         "registered in another file does not count" forbids.  The headline
         count is the visible half of that snapshot.
         """
-        result = _run("check_transforms")
+        result = _run("check_transforms", "--allow-missing-optional")
         assert result.returncode == 0, result.stdout + result.stderr
         reported = int(
             result.stdout.rsplit("(", 1)[1].split(" transforms")[0]
@@ -410,7 +536,7 @@ class TestTransformLiveRegistration:
         )
 
     def test_the_summary_separates_allowlisted_from_verified(self):
-        result = _run("check_transforms")
+        result = _run("check_transforms", "--allow-missing-optional")
         assert result.returncode == 0, result.stdout + result.stderr
         assert "allowlisted and not checked" in result.stdout
 
@@ -1042,6 +1168,62 @@ class TestTransformGateConstantBinding:
         )
         assert transforms_gate.main([str(tmp_path)]) == 0
 
+    def test_a_transform_bound_to_a_function_local_is_checked(
+        self, transforms_gate, tmp_path
+    ):
+        """audit_040_phase3_wave_d, T6: a local name hid the reference."""
+        (tmp_path / "local_name.py").write_text(
+            "def wire(gm):\n"
+            '    name = "no_such_transform"\n'
+            '    gm.add_edge("a", "b", "x", "y", transform=name)\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_transform_bound_to_a_function_local_that_resolves_passes(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "local_name_ok.py").write_text(
+            "def wire(gm):\n"
+            '    name = "extract_last"\n'
+            '    gm.add_edge("a", "b", "x", "y", transform=name)\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    def test_every_name_a_loop_binds_is_checked(
+        self, transforms_gate, tmp_path
+    ):
+        (tmp_path / "loop.py").write_text(
+            "def wire(gm):\n"
+            '    for name in ("extract_last", "no_such_transform"):\n'
+            '        gm.add_edge("a", "b", "x", "y", transform=name)\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_parameter_shadows_a_module_constant_of_the_same_name(
+        self, transforms_gate, tmp_path
+    ):
+        """The parameter is what reaches the call, not the constant."""
+        (tmp_path / "shadow.py").write_text(
+            'NAME = "no_such_transform"\n'
+            "def wire(gm, NAME):\n"
+            '    gm.add_edge("a", "b", "x", "y", transform=NAME)\n'
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 0
+
+    @pytest.mark.parametrize("splat", [
+        '**{"transform": "no_such_transform"}',
+        '**dict(transform="no_such_transform")',
+    ])
+    def test_a_transform_passed_through_a_literal_splat_is_checked(
+        self, transforms_gate, tmp_path, splat
+    ):
+        """audit_040_phase3_wave_d, T7: ``**{...}`` hid the reference."""
+        (tmp_path / "splat.py").write_text(
+            f'gm.add_edge("a", "b", "x", "y", {splat})\n'
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
     def test_a_callable_passed_by_name_is_not_a_string_reference(
         self, transforms_gate, tmp_path
     ):
@@ -1099,6 +1281,31 @@ class TestTransformAllowlist:
             'gm.add_edge("a", "b", "x", "y", transform="this_does_not_exist")\n'
         )
         assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_scope_of_nothing_but_allowlisted_references_fails(
+        self, transforms_gate, tmp_path, monkeypatch
+    ):
+        """Allowlisted is not verified; a scope of only those verified nothing."""
+        probe = tmp_path / "only_allowlisted.py"
+        probe.write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="deliberately_absent")\n'
+        )
+        monkeypatch.setitem(
+            transforms_gate._ALLOWED_UNRESOLVABLE,
+            (str(probe), "deliberately_absent"),
+            "the fixture for this test",
+        )
+        assert transforms_gate.main([str(tmp_path)]) == 1
+
+    def test_a_scan_root_that_does_not_exist_fails_naming_it(
+        self, transforms_gate, tmp_path, capsys
+    ):
+        (tmp_path / "ok.py").write_text(
+            'gm.add_edge("a", "b", "x", "y", transform="extract_last")\n'
+        )
+        missing = tmp_path / "no_such_dir"
+        assert transforms_gate.main([str(tmp_path), str(missing)]) == 1
+        assert str(missing) in capsys.readouterr().err
 
 
 def _rod(tmp_path, body, name="mod.py"):

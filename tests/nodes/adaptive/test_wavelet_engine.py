@@ -421,3 +421,148 @@ def test_cdd_runs_under_jit_and_under_grad_when_its_input_carries_no_tangent():
     e = 1e-5
     fd = float((J(th + e) - J(th - e)) / (2 * e))
     assert abs(g - fd) / abs(fd) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# conditioning: the estimate the node's dtype guard reads
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kw", [
+    dict(n_levels=6, mass=1.0), dict(n_levels=6, mass=1e-4), dict(n_levels=6, mass=1e-8),
+    dict(n_levels=4, n_coarse=3, order=6, mass=1e-6),
+    dict(n_levels=3, dim=2, mass=1e-6),
+    dict(n_levels=5, boundary="dirichlet", mass=1e-8),
+    dict(n_levels=6, mass=1e-3, preconditioner="dk"),
+])
+def test_the_condition_estimate_is_a_tight_lower_bound_on_the_exact_spectrum(kw):
+    """``assemble_operator(preconditioner=...)`` estimates kappa(D^-1 A D^-1)
+    within 3% of ``eigvalsh`` and not above it: both extremes are
+    approached from inside the spectrum, so a refusal made on the estimate
+    is never spurious.  "Not above" is up to 1e-5 relative: at the
+    smallest masses the closed-form constant-mode quotient describes the
+    exact operator and ``eigvalsh`` the assembled one, and the two differ
+    by the assembly's rounding (measured up to 4e-7)."""
+    kw = dict(kw)
+    kind = kw.pop("preconditioner", "hybrid")
+    nl, nc = kw.pop("n_levels"), kw.pop("n_coarse", 2)
+    op = OP.assemble_operator(nl, nc, dtype=jnp.float64, preconditioner=kind, **kw)
+    D = PC._diagonal_scaling_np(op.diagonal, op.levels, kind)
+    exact = _kappa(np.asarray(op.A) / D[:, None] / D[None, :])
+    est = op.condition_number
+    assert est is not None
+    assert est <= exact * (1.0 + 1e-5), (est, exact)
+    assert est >= 0.97 * exact, (est, exact)
+
+
+def test_without_a_preconditioner_the_assembly_reports_no_condition_number():
+    assert OP.assemble_operator(4, 2).condition_number is None
+
+
+def test_on_the_periodic_basis_the_condition_number_grows_like_one_over_the_mass():
+    """The smallest eigenvalue of the periodic operator belongs to the
+    constant function and is proportional to ``mass``; the Dirichlet
+    operator has no such mode and does not care."""
+    per = [OP.assemble_operator(6, 2, mass=m, preconditioner="hybrid").condition_number
+           for m in (1e-2, 1e-4)]
+    assert per[0] is not None and per[1] is not None
+    assert 95.0 < per[1] / per[0] < 105.0, per
+    dir_ = [OP.assemble_operator(5, 2, mass=m, boundary="dirichlet",
+                                 preconditioner="hybrid").condition_number for m in (1e-2, 1e-8)]
+    assert dir_[0] is not None and dir_[1] is not None
+    assert abs(dir_[1] / dir_[0] - 1.0) < 0.01, dir_
+
+
+def test_the_constant_mode_bound_supplies_the_small_eigenvalue_a_short_lanczos_run_misses():
+    """At small mass the constant function's eigenvalue is isolated far
+    below the rest; a few Lanczos steps from a random start do not resolve
+    it, and the closed-form Rayleigh quotient does."""
+    op = OP.assemble_operator(6, 2, mass=1e-8, dtype=jnp.float64)
+    D = PC._diagonal_scaling_np(op.diagonal, op.levels, "hybrid")
+    Ah = np.asarray(op.A) / D[:, None] / D[None, :]
+    exact = _kappa(Ah)
+    q = OP._constant_mode_rayleigh(np.asarray(op.Wn), D, op.levels, 1e-8, op.h, 1)
+    assert q is not None
+    short = OP.condition_estimate(Ah, steps=4)
+    assert short < 0.5 * exact
+    assert abs(OP.condition_estimate(Ah, steps=4, rayleigh_bound=q) / exact - 1.0) < 0.03
+    wall = OP.assemble_operator(4, 2, mass=1e-8, boundary="dirichlet", dtype=jnp.float64)
+    Dw = PC._diagonal_scaling_np(wall.diagonal, wall.levels, "hybrid")
+    assert OP._constant_mode_rayleigh(np.asarray(wall.Wn), Dw, wall.levels, 1e-8, wall.h, 1) is None
+
+
+def test_an_operator_that_is_not_positive_definite_estimates_an_infinite_condition_number():
+    A = np.diag([1.0, 2.0, -1e-3])
+    assert OP.condition_estimate(A) == float("inf")
+    assert OP.condition_estimate(np.eye(3), rayleigh_bound=0.0) == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# cdd: the marking step reads no difference below the rounding floor
+# ---------------------------------------------------------------------------
+
+def _grow(r, *, cap, mask=None, tol=1e-9):
+    r = jnp.asarray(r, dtype=jnp.float64)
+    mask = jnp.zeros(r.shape[0], bool) if mask is None else jnp.asarray(mask)
+    return np.asarray(CDD._doerfler_grow(mask, r, CDD.THETA_D, cap, jnp.float64(tol)))
+
+
+_TIED = np.array([0.0, 0.3, 0.3, 0.0, 0.3, 0.3, 0.0, 0.3, 0.3])   # six equal, at 1 2 4 5 7 8
+
+
+@pytest.mark.parametrize("bump", [0.0, 1e-15, -1e-15])
+def test_a_tie_at_the_cap_is_broken_by_basis_index_not_by_the_last_bits(bump):
+    """Six equal residuals, so the Doerfler count is 2 (the first two carry
+    ``theta_D**2 = 0.25`` of the squared mass).  With room for one, or for
+    the two, the lowest indices are taken -- whichever member the last
+    bits make larger.  The old marking took ``argsort``'s order, i.e. the
+    rounding's."""
+    r = _TIED.copy()
+    r[8] += bump                     # the highest index, larger or smaller by 1 ulp-ish
+    r[1] -= bump
+    assert np.flatnonzero(_grow(r, cap=1)).tolist() == [1]
+    assert np.flatnonzero(_grow(r, cap=2)).tolist() == [1, 2]
+    assert np.flatnonzero(_grow(r, cap=9)).tolist() == [1, 2]
+
+
+def test_a_magnitude_gap_wider_than_the_tolerance_is_respected_over_index_order():
+    r = _TIED.copy()
+    r[8] += 1e-6                     # a real gap: 1000x the tolerance below
+    assert np.flatnonzero(_grow(r, cap=1, tol=1e-9)).tolist() == [8]
+    assert np.flatnonzero(_grow(r, cap=2, tol=1e-9)).tolist() == [1, 8]
+
+
+def test_a_doerfler_crossing_inside_a_tie_band_takes_the_lowest_index():
+    """Three equal residuals: the Doerfler count is 1 and the band holds
+    all three; index order decides, not the sort."""
+    r = np.array([0.0, 0.3, 0.0, 0.3, 0.0, 0.3 + 1e-15])
+    assert np.flatnonzero(_grow(r, cap=6)).tolist() == [1]
+
+
+def test_residuals_at_or_below_the_rounding_floor_are_never_marked():
+    r = np.array([0.0, 1e-9, 5e-10, 1e-12])
+    assert not _grow(r, cap=4, tol=1e-9).any()
+    r2 = np.array([0.0, 1e-9, 2e-9, 1e-12])
+    assert _grow(r2, cap=4, tol=1e-9).tolist() == [False, False, True, False]
+
+
+def test_the_rounding_floor_is_the_stated_multiple_of_eps_and_scales_with_b_and_c():
+    b = jnp.asarray([0.5, -2.0], dtype=jnp.float32)
+    c = jnp.asarray([3.0, -1.0], dtype=jnp.float32)
+    got = float(CDD.rounding_floor(b, c))
+    want = CDD.NOISE_FACTOR * float(jnp.finfo(jnp.float32).eps) * (2.0 + 3.0)
+    assert got == pytest.approx(want, rel=1e-6)
+    assert float(CDD.rounding_floor(b.astype(jnp.float64), c.astype(jnp.float64))) < 1e-12
+
+
+def test_cdd_stops_once_nothing_above_the_floor_is_left_instead_of_spinning_to_the_bound():
+    """A right-hand side whose residual vanishes after the seed solve (it
+    lies in the coarse span) leaves nothing to mark: the loop exits after
+    one marking attempt, not after ``MAX_OUTER`` solves."""
+    op, Ah, D, coarse, _ = _cdd_setup(nl=4)
+    K = op.n // 2
+    b = jnp.where(coarse, 1.0, 0.0)
+    b = Ah @ OP.gather_solve(Ah, coarse, b, K)     # exactly representable on the seed
+    mask, _, n_outer = CDD.cdd_select_with_iterations(
+        lambda v: Ah @ v, lambda m, r: OP.gather_solve(Ah, m, r, K), b, coarse, K,
+    )
+    assert bool(jnp.array_equal(mask, coarse)) and int(n_outer) == 1

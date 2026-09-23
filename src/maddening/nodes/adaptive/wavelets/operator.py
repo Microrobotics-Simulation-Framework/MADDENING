@@ -195,9 +195,11 @@ def condition_estimate(A_hat: np.ndarray, *, rayleigh_bound: Optional[float] = N
     the smallest eigenvalue to within a few percent once the mass is
     small (the eigenvalue a random-start Lanczos resolves last, and the
     one the ``1 / mass`` growth lives in).  Both extremes are therefore
-    approached from inside the spectrum and the estimate is a lower
-    bound on the true condition number: a refusal made on it is never
-    spurious.
+    approached from inside the spectrum and, in exact arithmetic, the
+    estimate is a lower bound on the true condition number: a refusal
+    made on it is never spurious.  (Against ``eigvalsh`` of the
+    assembled float64 operator it is within 3% below and at most 4e-7
+    above -- the assembly's own rounding at the smallest masses.)
 
     Parameters
     ----------

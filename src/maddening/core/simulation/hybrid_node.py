@@ -20,15 +20,15 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from maddening.core.node import SimulationNode
+from maddening.core.node import SimulationNode, _signature_takes_params
 
 
 def _accepts_params(fn) -> bool:
-    import inspect  # noqa: PLC0415
-    try:
-        return "params" in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
+    """Would ``fn(..., params=x)`` deliver ``x``?  The shared rule
+    (:func:`~maddening.core.node._signature_takes_params`), so a wrapped
+    node whose hook forwards ``**kwargs`` gets its params through the
+    hybrid exactly as it would unwrapped."""
+    return _signature_takes_params(fn)
 
 
 class HybridNode(SimulationNode):

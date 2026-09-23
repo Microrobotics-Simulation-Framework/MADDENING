@@ -57,7 +57,7 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import SimulationNode
+from maddening.core.node import SimulationNode, _signature_takes_params
 from maddening.core.params import (
     ParamSpec,
     check_bounds as _check_bounds,
@@ -117,24 +117,30 @@ class _StepPlan:
 
 
 def _correction_accepts_params(node: SimulationNode) -> bool:
+    """Does the graph pass ``params=`` to ``compute_interface_correction``?
+
+    The one signature rule, :func:`~maddening.core.node._signature_takes_params`:
+    an explicit ``params`` keyword *or* a ``**kwargs`` that would forward
+    it.  Until 0.4.0 this probe accepted only the explicit keyword, so a
+    ``def compute_interface_correction(self, *args, **kwargs)`` override
+    that forwards to ``super()`` was called without ``params`` and
+    corrected the interface cells from the constructor's constants while
+    ``update`` used the calibrated ones -- and the verification battery,
+    which already read the shared rule, disagreed with the graph.
+    """
     fn = getattr(node, "compute_interface_correction", None)
-    if fn is None:
-        return False
-    try:
-        return "params" in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
+    return fn is not None and _signature_takes_params(fn)
 
 
 def _flux_accepts_params(node: SimulationNode) -> bool:
+    """Does the graph pass ``params=`` to ``compute_boundary_fluxes``?
+
+    Same rule and same history as :func:`_correction_accepts_params`: a
+    ``**kwargs``-forwarding flux producer delivered the constructor's
+    flux on every flux edge.
+    """
     fn = getattr(node, "compute_boundary_fluxes", None)
-    if fn is None:
-        return False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return False
-    return "params" in sig.parameters
+    return fn is not None and _signature_takes_params(fn)
 
 
 def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):

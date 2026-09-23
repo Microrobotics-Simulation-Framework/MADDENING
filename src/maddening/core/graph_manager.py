@@ -5200,63 +5200,92 @@ class GraphManager:
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
               by anything.
-            - ``"gradient_relative_error_estimate"`` : float — an
-              estimate of the **relative** error of the IFT gradient
-              caused by the forward stopping at the returned iterate
-              ``x_k`` instead of the fixed point ``x*``.  The adjoint
-              linearises ``F`` at ``x_k``; the gradient it returns is
-              the fixed point's gradient plus ``(I - dF/dx)^{-1}``
-              applied to the change in that linearisation between
-              ``x_k`` and ``x*`` -- zero for a map linear in the state
-              whose parameters enter additively, and of order
-              ``||x_k - x*|| * ||d^2 F||`` otherwise.  The change is
-              measured as a secant over the Newton correction
-              ``(I - dF/dx)^{-1} (F(x_k) - x_k)`` (never longer than
-              ``"spectral_error_bound"`` in the group's norm, and
-              exactly ``x* - x_k`` for a linear map), for one probed
-              parameter direction (every constant the map captures,
-              perturbed by its own magnitude with a fixed random sign),
-              applied to the tangent that direction produces, and the
-              resolvent is bounded by the same amplification
-              ``"spectral_error_bound"`` uses.  Read it as
-              ``|g_k - g*| / |g*|`` -- measured 1.0-1.3x the true
-              ratio on a concave and a convex scalar map across a
-              ``max_iterations`` sweep that stops the forward early
-              by construction (see ``_gradient_error_at``).  **Only
+            - ``"gradient_relative_error_bound"`` : float — a bound on
+              the **relative** error of the IFT gradient that comes
+              from the forward stopping at the returned iterate ``x_k``
+              instead of the fixed point ``x*``.  The adjoint is solved
+              at ``x_k``, and the tangent it returns differs from the
+              fixed point's by exactly ``(I - dF/dx(x*))^{-1}`` applied
+              to the change, between the two points, of the one-pass
+              map's Jacobian-vector product along that tangent.  The
+              bound is ``"spectral_error_bound"`` (the distance) times
+              the factor that bound applies to a residual (the
+              resolvent) times that change per unit distance -- a
+              second difference of the Jacobian-vector product along
+              the Newton correction ``(I - dF/dx)^{-1} (F(x_k) - x_k)``
+              -- taken for one probe per floating constant the group's
+              map reads (every parameter, the pre-step states, the
+              states of outside nodes it reads), relative to the norm
+              of the tangent the adjoint returns for that probe, and
+              reported for the worst probe.  Read it as
+              ``|g_k - g*| <= bound * |g_k|`` for the gradient with
+              respect to one scalar constant.  Measured (jaxlib 0.11.0,
+              float32) at every cap of a ``max_iterations`` sweep that
+              stops the forward early by construction: never below the
+              true error on a concave and a convex map, 1.2-2.1x it for
+              the parameter whose error is the larger and up to 15x for
+              the other (which reads its gap to the worst probe); 1.81x
+              for a parameter multiplying the state of an affine map;
+              7-11x for a spring pair's stiffness and mass.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
-              for ``"fori"``, ``diagnostics=False``, at
+              for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` and before the first step; ``inf``
-              or NaN where ``"spectral_error_bound"`` is.  Costs
-              twenty Jacobian-vector products per group per step
-              beside the bound's eight.
+              or NaN where ``"spectral_error_bound"`` is; NaN where the
+              fixed point responds to no constant.  Costs
+              ``9 + k + 4 n_c`` Jacobian-vector products per group per
+              step beside the spectral bound's eight, ``k <= 8`` and
+              ``n_c`` the number of floating constants (see
+              ``_gradient_error_bound_at``).
+
+              *Why a bound*: each factor is taken on its conservative
+              side -- the distance is the spectral bound, not the
+              Newton step's length and never ``"error_estimate"``
+              (which reads 100x short on a hidden slow mode, where
+              this bound holds); the resolvent factor is the larger of
+              the two the spectral bound uses.  *What it rests on*,
+              each of which can fail: every condition of
+              ``"spectral_error_bound"``; the change in the
+              linearisation being linear in the distance and along the
+              Newton correction (exact for an affine map, leading-order
+              otherwise); and the probes -- a field-valued constant is
+              probed along one random direction, and the bound is
+              relative to the tangent's norm in the group's norm, so a
+              scalar loss whose gradient nearly cancels across the
+              state can carry a larger relative error.  One probe per
+              constant rather than one combined probe because a
+              combined direction can cancel: on a spring pair it read
+              0.0 while the stiffness gradient was 0.8-4.8% off (the
+              random signs moved stiffness and mass by the same
+              relative amount, and the dynamics see only their ratio).
 
               **This is a statement about the gradient, not about the
-              solve.**  A map that is linear in its state returns the
-              fixed point's gradient from *any* iterate, so this
-              truthfully reads ~0 on a group whose forward value is
-              1.7% off (the stiff spring pair: velocities 1.7% wrong,
-              ``d(velocity)/d(stiffness)`` right to 16 digits).  The
-              returned ``(value, gradient)`` pair is then mutually
-              inconsistent -- the gradient is ``d(fixed point)/dtheta``
-              and the value is not the fixed point -- and nothing in
-              this key says so.  For the health of the solve read
-              ``"spectral_error_bound"`` and ``"converged"``; this key
-              answers only "how much would tightening the forward move
-              the gradient".  It is not ``"gradient_error_estimate"``,
-              which is ``"error_estimate"`` under another name (an
-              absolute distance from the residual sequence); it is not
-              a bound, because it probes one direction and bounds the
-              resolvent by its norm rather than applying it; and a
-              parameter the map is far less sensitive to than its other
-              constants has a small share of the probe and can carry a
-              larger relative error than reported.
-            - ``"gradient_relative_error_usable"`` : bool — the
-              estimate above is finite and ``"spectral_usable"`` is
-              ``True``: the Krylov solves behind it are exact on the
-              same condition (a settled space) as the bound whose
-              amplification it borrows.  ``False`` where nothing was
-              computed.  Like the other flags it reports what the code
-              checked -- not that the probed direction is yours.
+              solve.**  On a map that is affine in its state with
+              additive parameters the IFT gradient is the fixed
+              point's from *any* iterate, so this truthfully reads
+              ``0.0`` while the state is far off: 0.0 on a two-mode
+              map sitting 1.1e-2 from its fixed point with
+              ``converged=True``, and 0.0 on the stiff spring pair
+              under ``iqn-ils`` with the interface norm, whose
+              velocities are 1.7% off.  The returned
+              ``(value, gradient)`` pair is then mutually inconsistent
+              -- the gradient is ``d(fixed point)/dtheta`` and the value
+              is not the fixed point -- and nothing in this key says
+              so.  For the health of the solve read
+              ``"spectral_error_bound"``, within its norm (under the
+              interface norm it covers the interface fields only: on
+              that spring pair it reads 2.3e-3).  This key answers
+              only "how far would tightening the forward move the
+              gradient".  It is not ``"gradient_error_estimate"``,
+              which is ``"error_estimate"`` under another name.
+            - ``"gradient_bound_usable"`` : bool — the bound above is
+              finite and ``"spectral_usable"`` is ``True``: its distance
+              and its resolvent factor are the spectral bound's, and
+              are settled on the same condition.  ``False`` where
+              nothing was computed, where the bound is ``inf`` or NaN
+              (including a group whose Jacobian range the eight-vector
+              basis did not capture).  Like the other flags it reports
+              what the code checked, and not the linearity or probe
+              conditions above.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5276,7 +5305,7 @@ class GraphManager:
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
             here by the same rule -- the three spectral keys and the
-            two gradient-error keys excepted,
+            two gradient-bound keys excepted,
             which ``"fori"`` has no linearisation to compute and
             reports as NaN / ``False`` -- so migrating a graph between
             them does not move the answer or the verdict.  The returned
@@ -5310,7 +5339,7 @@ class GraphManager:
 
             Reported for every group under ``solver="ift"``; ``"fori"``
             groups only with ``diagnostics=True``.  The three spectral
-            keys and the two gradient-error keys are present for every
+            keys and the two gradient-bound keys are present for every
             group and carry a value only under ``solver="ift"`` with
             ``diagnostics=True``.  Empty dict if no step has been taken
             yet.

@@ -1957,6 +1957,22 @@ class TestDoctestGate:
         assert recorder.examples_run == {"m.py": 1}
         assert recorder.skipped_examples == [("m.py::m.f", [15], 1)]
 
+    #: The committed floor, deliberately in a second file.  Lowering
+    #: ``MIN_EXAMPLES`` alone -- the one-number edit that makes a shrinking
+    #: example set pass -- now fails here; the same two-file ratchet
+    #: ``min_mappings_floor.json`` gives the mapping pins
+    #: (audit_040_r2/gates, finding G6).  Raise both when examples are
+    #: added; lowering both belongs in a commit that says why.
+    COMMITTED_EXAMPLE_FLOOR = 98
+
+    def test_the_floor_is_not_below_its_committed_value(self):
+        gate = _load("check_doctests")
+        assert gate.MIN_EXAMPLES >= self.COMMITTED_EXAMPLE_FLOOR, (
+            f"MIN_EXAMPLES is {gate.MIN_EXAMPLES}, below the committed floor "
+            f"{self.COMMITTED_EXAMPLE_FLOOR}; an example set that shrank "
+            f"needs a reason, not a lower number"
+        )
+
     def test_the_floor_is_attainable_from_the_source_as_it_stands(self):
         """A floor above the examples in the tree could only ever fail.
 

@@ -1954,3 +1954,373 @@ anomalies:
       - "tests/core/test_coupling_non_finite_state.py::test_a_finite_field_is_bit_identical_through_the_guard"
       - "tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-021"
+    title: "A node that branches on its own state inside update() returns the gradient of the branch it took; BallNode's gradient through a bounce omits the contact time and is exactly zero in the drop height"
+    description: >
+      MADDENING differentiates a step by differentiating whatever
+      `update()` computes.  A node that tests its own state inside
+      `update()` and picks a branch -- a contact, a threshold, a
+      stick-slip transition -- is traceable, because the branch is a
+      `jnp.where`, but `jax.grad` returns the gradient of the branch the
+      step took.  The term that comes from the event time, how the
+      moment of the switch moves when a parameter or the initial state
+      moves, is missing, because nothing in the step locates the event.
+      Where the branch clamps a state to a constant, the gradient
+      through the event is exactly zero.  Nothing warns.  This is a
+      framework limitation and not a quirk of one node: the
+      node-authoring contract (`SimulationNode.update`, and the guide
+      that asks for `jnp.where` in place of `if`/`else`) said nothing
+      about what that does to gradients until this entry.
+
+      `BallNode` is the in-tree instance, and it matters because the
+      example nodes are copied as templates.  Its `update()` tests for
+      contact once per step and, on contact, pins the position to the
+      table and reflects the velocity.  Measured 2026-09-24 on CPU,
+      jax/jaxlib 0.11.0, float32, driving `BallNode.update` under
+      `lax.scan` from a fresh state for each evaluation: a drop from
+      rest onto a table at 0 with e = 0.8, g = 9.81, dt = 1e-3 and 800
+      steps, so T = 0.8 s holds exactly one bounce.  The reference is
+      the exact continuous solution (contact at t_c = sqrt(2h/g),
+      rebound speed e*g*t_c).
+        - d x(T) / d h is exactly 0.0 at h = 1.0, 1.005, 1.0101 and
+          1.015, against exact derivatives of +0.5892, +0.5813,
+          +0.5732 and +0.5655.  It is still exactly 0.0 at dt = 2.5e-4
+          and at dt = 1e-4, so it is not a resolution effect.
+        - d x(T) / d|g| is +0.0651 against an exact +0.0051, about 13
+          times too large: a parameter that moves the contact time gets
+          a gradient that is non-zero and wrong.
+        - d x(T) / d e is +1.5431 against an exact +1.5436, which is
+          right, because the first contact time does not depend on the
+          restitution coefficient.  That is the boundary of the defect.
+        - The values are right.  |x_tick - x_exact| is at most 3.0e-3
+          over h in [1.00, 1.02], which is one tick of travel
+          (e*g*t_c*dt, about 3.5e-3).
+
+      Mechanism.  The clamp sets the position to a constant, and the
+      impact velocity is the number of whole steps the fall took times
+      g*dt, which depends on h only through that integer.  So
+      everything after the bounce is flat in h within each one-step
+      window and jumps between windows.  Over h in [1.00, 1.02] there
+      are 4 jumps of about 2.55e-3, and the secant slope across the
+      window is +0.5103 against an exact mean of +0.5734.  A gradient
+      taken anywhere inside a window is the slope of a flat piece.
+
+      Present since 0.1.0.  The same reproducer against a v0.1.0 tree
+      extracted with `git archive` gives identical numbers.  The
+      collision code in `update()` has not changed since then; 0.4.0
+      only added the `params` keyword.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because a user who differentiates through an event
+      gets a wrong derivative on a documented path, `jax.grad` through a
+      `STABLE` node, with nothing to indicate it.  There is no
+      exception, no warning and no NaN, and the trajectory the gradient
+      belongs to is correct to one step, so checking the forward
+      solution, the natural validation, passes.  The error is not a
+      small bias.  In the drop height it is the whole derivative (100 %,
+      an exact zero), and in gravity it is a factor of 13.  0.4.0 ships
+      the machinery (`gm.params`, `maddening.sysid.fit`, `fit_lm`,
+      `fim`) whose purpose is to act on these gradients.  An optimiser
+      reads an exact zero as a stationary point and stops at the
+      starting guess, and `fim` reads it as a parameter the data cannot
+      identify.  Not `critical`: values are unaffected, a caller who
+      never differentiates through an event is unaffected, and there is
+      a complete workaround.
+
+      Graded `context_dependent` rather than `safety_relevant` because
+      it needs a particular use to bite: a gradient-based calibration,
+      sensitivity study or optimisation whose differentiated interval
+      contains a state-triggered switch.  Whether a program does that
+      is a property of the program and its model, not of the library.
+      Simulation, prediction and every gradient-free use are
+      unaffected.  What raises it above `not_safety_relevant` is that
+      the failure is silent and looks like a result: a calibration that
+      stops at its initial guess reports a converged fit, and a
+      sensitivity of exactly zero reads as "this input does not
+      matter".  A caller cannot tell from anything the library returns
+      that an event was crossed.
+    affected_components:
+      - "maddening.nodes.ball.BallNode.update"
+      - "maddening.core.node.SimulationNode.update"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Smooth the switch: replace a hard contact or threshold with a
+      penalty or regularised form (a stiff spring active below the
+      surface, a `softplus` in place of a step, a regularised friction
+      law), so the dynamics are differentiable and the event time is
+      implicit in them.  State the smoothing length as a modelling
+      choice in the node's `NodeMeta`.  Or do not differentiate through
+      the event: fit over intervals that contain no switch, or estimate
+      the event time some other way.  For `BallNode` specifically,
+      gradients with respect to `elasticity` across a first bounce are
+      correct; gradients with respect to the initial height, the
+      initial velocity or `gravity` across a bounce are not.  Event
+      localisation with an implicit-function-theorem derivative of the
+      event time is planned for 0.5.0.  That is a plan, not a promise;
+      until it lands and this entry is resolved, treat any gradient
+      through a state-triggered branch as unverified.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # The acceptance criterion: a strict xfail against the exact
+      # derivative, which flips when event localisation lands.
+      - "tests/nodes/test_ball_event_gradient.py::test_the_bounce_gradient_matches_the_exact_event_time_derivative"
+      # What a user observes today, pinned so a partial change is seen.
+      - "tests/nodes/test_ball_event_gradient.py::test_the_bounce_gradient_with_respect_to_the_drop_height_is_exactly_zero"
+      - "tests/nodes/test_ball_event_gradient.py::test_the_exact_derivative_the_criterion_compares_against"
+      - "tests/nodes/test_ball_event_gradient.py::test_the_gravity_gradient_misses_the_event_time_term"
+      - "tests/nodes/test_ball_event_gradient.py::test_the_bounce_value_is_within_one_tick_of_travel_of_the_exact_solution"
+      - "tests/nodes/test_ball_event_gradient.py::test_the_elasticity_gradient_is_right_because_the_contact_time_does_not_depend_on_it"
+      - "tests/nodes/test_ball_event_gradient.py::test_nothing_in_maddening_warns_about_the_missing_term"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-022"
+    title: "A mapped edge whose point reference names a grid derived from a trainable parameter keeps the constructor's geometry when that parameter is calibrated"
+    description: >
+      An interface mapping built from a `{"node": ..., "field": ...}`
+      point reference (`core/coupling/mapping_spec.py`) resolves its
+      coordinates from the node's `static_data[field]` once, when the
+      mapping is built, and the weights computed from them are
+      snapshotted into `gm.params["mappings"]` at compile time.  If that
+      static is derived from a trainable parameter, calibrating the
+      parameter through `gm.params` moves the node and leaves the
+      mapping's weights at the constructor's geometry.  Nothing declares
+      the dependence and nothing refuses or warns.  This is a framework
+      limitation of how point references meet the parameter pytree, not
+      of one node.
+
+      The in-tree case is the default, uniform `HeatNode`.  Its
+      `grid_x` static is built in `__init__` from `length` and
+      `n_cells`, and `length` is trainable, because the node's own step
+      reads the traced `length` (`dx = length / n_cells`) and never
+      `grid_x`.  So `static_data_deps` names nothing and `compile()`
+      accepts the graph, which is correct for the node's own step and
+      wrong for a mapping that reads `grid_x`.
+
+      Reproduced 2026-09-24 on CPU, jax/jaxlib 0.11.0, float32, with a
+      fresh graph for every measurement (`run_scan` advances the
+      graph's state).  An 8-cell source `HeatNode` (alpha 0.05, dt
+      1e-3), a 16-cell target rod of length 1.25, and a declarative
+      mapped edge `src.temperature -> dst.heat_source` (thin-plate
+      spline RBF, epsilon 2.0, linear polynomial, both point sets
+      referenced as `grid_x` node fields), run for 40 steps.  The
+      source is constructed at `length` 1.0 and calibrated to 1.25
+      through `gm.params`.  The reference is the same graph constructed
+      at 1.25.
+        - Forward: the calibrated target moves by 4.2e-4 where the
+          constructed one moves by 1.16e-2, and ends 1.18e-2 from it.
+          The source rod itself is identical on both paths (a
+          difference of exactly 0), with or without the edge, so the
+          whole discrepancy is the mapping's.  The weights are
+          bit-for-bit the constructor's, and the operator built at 1.25
+          differs from them by up to 1.49 (max|H| about 2).
+        - Gradient: d sum(target) / d length at 1.0 is -6.43e-3 by
+          `jax.grad`, which matches a finite difference of the
+          calibrated path (-6.42e-3), so it is exact for the model as
+          wired.  A finite difference over graphs constructed at each
+          length gives +2.69e-1: the gradient has the wrong sign.
+        - Calibration: `fit_lm` of `length` alone from the target's
+          data, generated by the graph constructed at 1.25 and started
+          at 1.0, stops at 0.2201 with a loss of 1.19e-5, so the fit
+          looks successful.  Through `gm.params` the windowed loss at
+          the true length is 9.80e-3, not zero.  The same fit from the
+          source rod's own data recovers 1.249974.
+        - Silence: the graph compiles, `length` is in the default
+          trainable mask, no warning is raised, and `to_dict` writes the
+          node references.  Their recorded `sha256` still matches,
+          because the static array itself never changed.
+
+      Introduced in 0.4.0, and not present earlier.  Mapped edges, the
+      parameter pytree and `mapping_spec.py` all first appear in the
+      0.4.0 development line: v0.3.1 has neither `gm.params` nor a
+      `mapping` keyword on `add_edge`, so no parameter could be
+      calibrated underneath a mapping.  The fix is being scoped for
+      0.5.0.  Widening the static-data declaration contract to "read by
+      the step or by a mapping" would make the default `HeatNode` be
+      refused again, which is why this release documents the limitation
+      instead.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because a user who calibrates a geometry parameter
+      in a coupled graph gets a wrong number with nothing to indicate
+      it.  The fitted value can be far from the truth (0.22 against
+      1.25 in the reproducer), the fit reports a small loss, the
+      gradient it followed has the wrong sign, and the graph compiled,
+      ran and serialised without a warning.  0.4.0 ships this
+      combination as a feature: declarative mapped edges built from
+      node fields, and a trainable `length` on the default `HeatNode`.
+      Not `critical`: nothing crashes or corrupts state, a caller who
+      calibrates no parameter underneath a mapping is unaffected, and
+      the documented workarounds are complete.
+
+      Graded `context_dependent` rather than `safety_relevant` because
+      it needs two user choices at once: a mapped edge whose point
+      reference names a parameter-derived static, and a calibration or
+      sensitivity study that moves that parameter.  Whether a program
+      does both is a property of the program, and no in-tree caller
+      does.  What raises it above `not_safety_relevant` is the shape.
+      The node honours the calibrated value and the edge does not, so
+      checking the calibrated node on its own, the natural validation,
+      passes while the coupled result uses a different geometry.  A
+      caller cannot establish from anything the library returns that
+      the two disagree.
+    affected_components:
+      - "maddening.core.coupling.mapping_spec.normalise_point_reference"
+      - "maddening.core.coupling.mapping_spec.make_point_resolver"
+      - "maddening.core.graph_manager.GraphManager.add_edge"
+      - "maddening.nodes.heat.HeatNode.static_data"
+      - "maddening.nodes.heat.HeatNode.static_data_deps"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Verified on the reproducer's graph.  (a) Declare the parameter
+      non-trainable when a mapped edge references a grid it derives:
+      `gm.set_param_spec("rod", "length", ParamSpec(trainable=False))`.
+      The default mask then leaves it out, and `sysid.fit` refuses a
+      mask that tries to widen back onto it.  (b) Give the mapping
+      explicit coordinates, as an `{"asset": ...}` or `{"inline": ...}`
+      point reference, so the config states that the mapping's geometry
+      is fixed rather than implying that it follows the node.  This
+      does not make the weights follow a calibrated parameter.  (c) If
+      the geometry has to be calibrated, fit it from observations of
+      the node itself rather than through the mapped edge; the same fit
+      from the source rod's own data recovers the true length.  Then
+      rebuild the graph at the fitted value, so the mapping is rebuilt
+      from the new grid.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      # The acceptance criterion: changes state under either kind of fix
+      # (XPASS if the mapping follows the parameter, an error if the
+      # graph is refused).
+      - "tests/core/test_mapping_trainable_geometry.py::test_a_calibrated_length_reaches_the_mapped_edge"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_fixture_can_express_the_defect"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_source_rod_itself_honours_the_calibrated_length"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_calibration_barely_moves_the_mapped_target"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_weights_stay_the_constructor_weights_after_calibration"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_length_gradient_through_the_edge_has_the_wrong_sign"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_model_cannot_fit_its_own_data_at_the_true_length"
+      - "tests/core/test_mapping_trainable_geometry.py::test_a_fit_of_the_length_through_the_mapped_edge_lands_far_from_the_truth"
+      - "tests/core/test_mapping_trainable_geometry.py::test_nothing_refuses_or_warns_about_the_stale_geometry"
+      - "tests/core/test_mapping_trainable_geometry.py::test_the_workaround_freezing_the_length_keeps_a_fit_off_it"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-023"
+    title: "The FMU TCP bridge authenticates no caller: any process that can reach its port can read, write, step and hold the model"
+    description: >
+      `maddening.fmi.tcp_bridge.FmuTcpBridge` serves one `FmuSidecar` to
+      the FMU C wrapper over TCP.  By default it binds
+      `host="127.0.0.1"` on an ephemeral port (`port=0`), and its module
+      docstring says to keep it on loopback unless the network is
+      trusted.  Nothing on the socket establishes who is calling.  The
+      `hello` handshake returns the model's instantiation token, but the
+      token identifies the instance to the FMU (the C wrapper refuses a
+      bridge whose token differs from its own modelDescription.xml).  It
+      is not a credential: it is a deterministic hash of the model's
+      schema, it is written in plain text into the FMU's
+      modelDescription.xml, and the bridge returns it to anyone who
+      sends `hello`.  No op requires it, and no op requires `hello`
+      first.  The endpoint itself is in the FMU's
+      `resources/endpoint.txt` or in `MADDENING_FMU_ENDPOINT`.
+
+      Reproduced 2026-09-24 on CPU, jaxlib 0.11.0, Python 3.12, against a
+      bridge on its default loopback bind serving the test suite's
+      table/ball/spring graph.  The unrelated client was a separate
+      interpreter started with `python -I -S` (no site-packages and no
+      `PYTHONPATH`, so no MADDENING and no shared secret), given only
+      the host and port, and speaking the documented framing with the
+      standard library.  Its first frame was a `get`, with no `hello`:
+        - `get` returned the spring's position and stiffness,
+          `[0.5, 30.0]`;
+        - `set` wrote a stiffness of 77.0 and got `{"ok": true}`;
+        - `step` advanced the model one communication step and got
+          `{"ok": true, "t": 0.01}`;
+        - `hello` returned the instantiation token.
+      An importer that connected afterwards read a stiffness of 77.0 and
+      a time of 0.01.  The stranger's write and step carried into its
+      session, because the bridge keeps the sidecar's state across
+      connections and the C wrapper does not reset on instantiation.
+      Separately, a client that connects first and keeps talking holds
+      the bridge's single instance slot.  A later importer's `hello` is
+      refused with "bridge already serves an FMU instance", after the
+      two-second hand-over grace, for as long as the holder sends a
+      frame within each five-minute idle window.
+
+      So on the default bind, any local process of any user can connect
+      and read or drive a running model.  An operator who passes a
+      non-loopback `host` exposes the same thing to the network.  The
+      constructor hands `host` to `bind()` unchanged, with no check or
+      warning for a non-loopback address.
+
+      This agrees with MADD-ANO-015.  Its residual risk already says
+      that the bridge "is an unauthenticated listening socket with its
+      own protocol; it is a different component, is not covered by this
+      entry, and is documented as trusted-clients-only", and that its
+      default is loopback on an ephemeral port.  This entry is that
+      component's own record.
+
+      Introduced with the bridge in 2efcaea, during the 0.4.0
+      development line.  No tagged release contains it: v0.1.0 to
+      v0.3.1 have no `src/maddening/fmi/tcp_bridge.py`.
+
+      Planned direction, stated as a plan and not a promise: 0.5.0 is to
+      label the sidecar a local development mode and refuse a
+      non-loopback bind without an explicit flag.  An in-process FMU
+      export, under design, would remove the socket from distributable
+      FMUs altogether.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` for what a caller who reaches the port can do and
+      what the importer then sees.  They can read the model's state and
+      parameters.  They can write parameters and state and advance time,
+      which changes the physics of a co-simulation that is running or
+      about to run, and the importer is told nothing unless it reads the
+      values back.  They can hold the one instance slot and lock the
+      importer out.  The worst of these is a plausible-looking wrong
+      result, not a crash.  Not `critical`: the default bind is
+      loopback, so reaching the port takes either another process on
+      the same host or an explicit non-loopback bind by the operator.
+      No shipped default puts it on a network interface, unlike the
+      wildcard binds MADD-ANO-015 records.
+
+      Graded `context_dependent` rather than `safety_relevant` because
+      whether anyone else can reach the port is a property of the
+      deployment, not of the library.  On a single-user host, or in a
+      container whose network namespace nothing else shares, the
+      loopback bind leaves no other caller.  On a shared host, or with a
+      non-loopback bind, any local user or network peer can.  What
+      raises it above `not_safety_relevant` is that tampering is silent.
+      A parameter written by a stranger before the importer connects
+      produces a co-simulation that runs, converges and returns finite
+      numbers from physics the importer never set, and nothing on the
+      importer's side of the protocol distinguishes that session from
+      an honest one.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge.handle"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Keep the default loopback bind, and never pass a non-loopback
+      `host` unless every host that can reach it is trusted.  Run the
+      sidecar on a single-user host, or in a container with its own
+      network namespace, so that no other user or process can reach its
+      loopback port.  On a shared host, firewall the port, for example
+      with an owner-matching nftables or iptables rule that admits only
+      the importer's user to it.  An importer that must be sure of its
+      starting point can call `fmi3Reset` (the bridge's `reset`, which
+      restores the initial state and parameters) or restore a known
+      FMU state after instantiating.  That undoes an earlier stranger's
+      writes; it does not stop a later one.
+    resolution_status: "open"
+    resolution_version: null
+    residual_risk: null
+    verification:
+      - "tests/fmi/test_bridge_unauthenticated_access.py::test_an_unrelated_local_process_reads_writes_and_steps_the_model_with_no_secret"
+      - "tests/fmi/test_bridge_unauthenticated_access.py::test_an_unrelated_client_holding_the_slot_locks_the_importer_out"
+      - "tests/fmi/test_bridge_unauthenticated_access.py::test_the_default_bind_is_loopback"
+    github_issue: null

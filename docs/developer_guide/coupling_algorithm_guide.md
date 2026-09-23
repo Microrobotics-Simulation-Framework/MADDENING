@@ -131,11 +131,11 @@ Three settings that are nearly always right and are not in the table:
 
 ## Reading `coupling_diagnostics()`
 
-Each group reports ten fields: seven for every group, and three
-spectral ones that carry a value only under `solver="ift"` with
-`diagnostics=True`.  Three of the seven need reading carefully, and one
-of them was renamed in 0.4.0 because its old name said more than it
-checks.
+Each group reports twelve fields: seven for every group, and five --
+three spectral, two about the gradient -- that carry a value only under
+`solver="ift"` with `diagnostics=True`.  Three of the seven need
+reading carefully, and one of them was renamed in 0.4.0 because its old
+name said more than it checks.
 
 | field | what it is |
 |---|---|
@@ -149,6 +149,8 @@ checks.
 | `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `residual · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
 | `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed and for a group with more than eight independent interface scalars |
+| `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
+| `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed |
 
 ### What `ratio_usable` checks, and what it does not
 
@@ -235,6 +237,86 @@ band's excluded fields are outside it; and it reads `inf` where
 `rho_spectral` (with margin) is at or above one.  `spectral_usable`
 reports what the code checked — a finite bound and a settled space — and
 not linearity, which nothing checks.
+
+### `gradient_relative_error_bound`: the gradient, not the solve
+
+The IFT adjoint solves `(I − dF/dx)ᵀ λ = ∂L/∂x` at the iterate the
+forward *returned*, `x_k`, not at the fixed point `x*`.  With `t_k` the
+tangent it returns and `G(x) = J(x) t_k + F_c(x) ċ` the one-pass map's
+Jacobian-vector product along it, exactly
+
+    t_k − t* = (I − J(x*))⁻¹ [G(x_k) − G(x*)]
+
+so the error is the resolvent applied to how much the linearisation
+moves between the two points.  Each factor is bounded by something the
+group already has or measures cheaply:
+
+1. **the distance** `‖x_k − x*‖` is `spectral_error_bound` — not the
+   residual and never `error_estimate`, which reads 100x short on a
+   hidden slow mode where this bound holds;
+2. **the resolvent** is bounded by the factor `spectral_error_bound`
+   applies to a residual, the larger of `‖(I − H)⁻¹‖₂` and
+   `1/(1 − rho_spectral)`;
+3. **the curvature** is a directional second difference of the
+   adjoint's own matvec: `G` evaluated by the same Jacobian-vector
+   product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
+   Newton correction (which supplies the direction only), divided by
+   `‖δ‖`.  No Hessian is formed.
+
+The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
+relative to the tangent, taken for **one probe per floating constant**
+the closure-converted map reads (each parameter, the pre-step states,
+the outside states it reads) and reported for the worst.  Per constant,
+because a combined direction can cancel: one probe over every constant
+read 0.0 on the stiff spring pair while its stiffness gradient was
+0.8–4.8% off — the random signs moved each node's stiffness and mass by
+the same relative amount, and the dynamics see only their ratio.  The
+tangents and `δ` come from a Woodbury solve on an eight-vector basis of
+the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
+the cost is `9 + k + 4 n_c` Jacobian-vector products per group per step
+(`k ≤ 8`, `n_c` the floating constants) beside the spectral bound's
+eight — which is why it shares its gate.
+
+Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
+gradient from tight `ift` and `fori` arms that agree, every point a
+fresh graph stepped through `gm.step()` and stopped early by
+construction:
+
+| fixture | `bound / true` |
+|---|---|
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.21–1.66 for `d/da`, 6.9–11.4 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.17–1.35 for `d/dg`, 3.5 for `d/da` |
+| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.81 at every cap |
+| stiff spring pair, stiffness and mass, caps 2–6 | 7–11 |
+| two-mode, concave slow mode, `converged=True` | 15 (with `error_estimate`'s distance: 60x short) |
+
+The parameter with the larger relative error reads near the product of
+the two conservative factors (the distance 1.1x, the relay's resolvent
+1.22x); the other reads its gap to the worst probe as well.
+
+**What it is not — read this before using it.**  It is a statement
+about the gradient, not about the solve.  On a map affine in its state
+with additive parameters the IFT gradient is the fixed point's from
+*any* iterate, so the bound truthfully reads **0.0** while the state is
+far off: on the two-mode case it is 0.0 while the state sits 1.1e-2
+from the fixed point with `converged=True`, and on the stiff spring pair
+under `iqn-ils` with the interface norm and explicit
+`accelerated_fields` it is 0.0 while the velocities are 1.7% off.  The
+returned `(value, gradient)` pair is then **mutually inconsistent** —
+the gradient is `d(fixed point)/dθ`, the value is not the fixed point —
+and this key cannot say so.  For the health of the solve read
+`spectral_error_bound`, within its norm: under the interface norm it
+covers the interface fields only and on that spring pair reads 2.3e-3.
+Beyond that: it inherits every condition of `spectral_error_bound`; it
+is leading-order in the distance (the curvature is measured over `δ` and
+extrapolated linearly); a field-valued constant is probed along one
+random direction; and it is relative to the tangent's norm, so a scalar
+loss whose gradient nearly cancels across the state can carry a larger
+relative error.  `gradient_bound_usable` reports a finite bound and a
+settled spectrum, not those conditions.  It is not spelled
+`gradient_error_bound`: that spelling is the deprecated alias of
+`gradient_error_estimate` (below), and code written against 0.3.x
+would read a new meaning under it as the old number.
 
 ### The old names
 

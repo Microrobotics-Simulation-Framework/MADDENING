@@ -5509,8 +5509,10 @@ class GraphManager:
             groups only with ``diagnostics=True``.  The three spectral
             keys and the two gradient-bound keys are present for every
             group and carry a value only under ``solver="ift"`` with
-            ``diagnostics=True``.  Empty dict if no step has been taken
-            yet.
+            ``diagnostics=True``.  A group that has not taken a step
+            yet -- before the first ``step()``, and again after
+            ``reset_state()`` -- has no entry, so the dict is empty
+            until something has run.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
@@ -5519,7 +5521,13 @@ class GraphManager:
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
             amp_key = f"coupling_{key}_amplification"
-            if iter_key in meta:
+            # ``compile()`` and ``reset_state()`` seed the counter at 0
+            # and every coupled step reports at least one pass, so 0 is
+            # "no step taken yet".  The seeds beside it (a residual of
+            # 0.0, a rejected amplification) are there to keep the scan
+            # carry's structure, not to be read: reported, they said
+            # ``converged=True`` about a group that had never run.
+            if iter_key in meta and int(meta[iter_key]) > 0:
                 residual = float(meta[res_key])
                 amp = float(meta.get(amp_key, 0.0))
                 # A valid amplification is ``1/(1 - rho)`` with
@@ -6552,14 +6560,11 @@ class GraphManager:
         if live_meta is not None:
             fresh_meta = dict(live_meta)
             for key, value in live_meta.items():
-                if key in ("step_count", "sub_step") or key.endswith("_iterations") \
-                        or key.endswith("_pred_count"):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_residual") or key.endswith(
-                    "_amplification"
-                ):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_rho_spectral") or key.endswith(
+                # The spectral suffixes first: ``_spectral_residual``
+                # also ends in ``_residual``, and matched there it was
+                # zeroed instead of put back to NaN.  The target is the
+                # ``_meta`` ``compile()`` seeds, value for value.
+                if key.endswith("_rho_spectral") or key.endswith(
                     "_spectral_residual"
                 ) or key.endswith("_spectral_amplification") or key.endswith(
                     "_gradient_relative_error_bound"
@@ -6568,6 +6573,13 @@ class GraphManager:
                     # spectral radius of 0 and a bound equal to the
                     # residual (or a gradient exact to float32).
                     fresh_meta[key] = jnp.full_like(value, jnp.nan)
+                elif key in ("step_count", "sub_step") or key.endswith("_iterations") \
+                        or key.endswith("_pred_count"):
+                    fresh_meta[key] = jnp.zeros_like(value)
+                elif key.endswith("_residual") or key.endswith(
+                    "_amplification"
+                ):
+                    fresh_meta[key] = jnp.zeros_like(value)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.
                 elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:

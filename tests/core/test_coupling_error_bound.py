@@ -34,6 +34,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from maddening.core.coupling.acceleration import (
@@ -1009,14 +1010,110 @@ def test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed(
 
 
 def test_reset_state_forgets_the_spectrum_rather_than_zeroing_it():
-    """``reset_state`` puts the spectral pair back to NaN, not 0.0."""
+    """``reset_state`` puts the spectral triple back to NaN, not 0.0.
+
+    The report has no entry for a group that has not stepped since the
+    reset (``test_no_report_before_a_step_or_after_a_reset``), so the
+    slots are read directly: all three -- ``_spectral_residual`` and
+    ``_spectral_amplification`` used to match the ``_residual`` /
+    ``_amplification`` branch first and come back ``0.0``.
+    """
     gm = _contracting_graph()
     gm.step()
     assert gm.coupling_diagnostics()["a+b"]["spectral_usable"] is True
     gm.reset_state()
-    d = gm.coupling_diagnostics()["a+b"]
-    assert math.isnan(d["rho_spectral"]) and math.isnan(d["spectral_error_bound"])
-    assert d["spectral_usable"] is False
+    assert "a+b" not in gm.coupling_diagnostics()
+    meta = gm._state["_meta"]
+    for suffix in ("rho_spectral", "spectral_residual", "spectral_amplification",
+                   "gradient_relative_error_bound"):
+        value = float(meta[f"coupling_a+b_{suffix}"])
+        assert math.isnan(value), f"{suffix} reset to {value!r}, not NaN"
+
+
+class _Far(SimulationNode):
+    """``x <- 0.9 u + 100``: fixed point 1000, started at 0."""
+
+    def initial_state(self):
+        return {"x": jnp.float32(0.0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": 0.9 * boundary_inputs["u"] + 100.0}
+
+
+class _FarRelay(_Far):
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": boundary_inputs["u"]}
+
+
+@pytest.mark.parametrize("solver", ("ift", "fori"))
+def test_no_report_before_a_step_or_after_a_reset(solver):
+    """A group that has not run has no entry -- not ``converged=True``.
+
+    ``compile()`` seeds the ``_meta`` slots so the scan carry keeps its
+    structure: iterations 0, residual 0.0, amplification rejected.  Read
+    as a report, those seeds said ``iterations=0, residual=0.0,
+    converged=True`` about a group started a thousand units from its
+    fixed point, before it had taken a single pass -- and said it again
+    after ``reset_state()``.  The docstring promised an empty dict.
+    """
+    gm = GraphManager()
+    gm.add_node(_Far("a", timestep=1.0))
+    gm.add_node(_FarRelay("b", timestep=1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], solver=solver, diagnostics=True, max_iterations=3)
+    gm.compile()
+    assert gm.coupling_diagnostics() == {}
+    gm.step()
+    first = dict(gm.coupling_diagnostics()["a+b"])
+    assert first["iterations"] == 3 and first["converged"] is False, first
+    gm.reset_state()
+    assert gm.coupling_diagnostics() == {}
+    gm.step()
+    again = dict(gm.coupling_diagnostics()["a+b"])
+    assert again["iterations"] == first["iterations"]
+    assert again["residual"] == first["residual"], "the reset did not reset"
+
+
+def _meta_snapshot(gm):
+    return {k: np.asarray(v) for k, v in gm._state["_meta"].items()}
+
+
+@pytest.mark.parametrize("label,group_kw", [
+    ("ift diagnostics", dict(diagnostics=True)),
+    ("ift", dict(diagnostics=False)),
+    ("fori diagnostics", dict(solver="fori", diagnostics=True)),
+    ("iqn-imvj", dict(acceleration="iqn-imvj", jacobian_reuse=2)),
+    ("predictor", dict(predictor="linear")),
+])
+def test_reset_state_restores_the_meta_compile_seeds(label, group_kw):
+    """``reset_state()`` leaves ``_meta`` exactly as ``compile()`` left it.
+
+    Key for key, dtype for dtype and value for value (NaN where the seed
+    is NaN).  Two defects lived in the gap between the two: the reset
+    zeroed two of the four spectral slots it meant to put back to NaN,
+    and a changed seed -- which the report now never reads -- would have
+    gone unnoticed by every test that goes through the report.
+    """
+    fresh = _contracting_graph(**group_kw)
+    seeds = _meta_snapshot(fresh)
+    gm = _contracting_graph(**group_kw)
+    gm.step()
+    gm.step()
+    gm.reset_state()
+    after = _meta_snapshot(gm)
+    assert set(after) == set(seeds), label
+    for key, want in seeds.items():
+        got = after[key]
+        assert got.dtype == want.dtype and got.shape == want.shape, (label, key)
+        np.testing.assert_array_equal(got, want, err_msg=f"{label}: {key}")
 
 
 # ---------------------------------------------------------------------------

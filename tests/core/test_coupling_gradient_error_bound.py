@@ -571,17 +571,20 @@ def test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed(
 
 
 def test_before_a_step_and_after_reset_state_the_gradient_bound_is_nan():
-    """Seeded NaN by ``compile()``, and put back to NaN, not 0.0, by a reset."""
+    """Seeded NaN by ``compile()``, and put back to NaN, not 0.0, by a reset.
+
+    Neither is reported -- a group that has not stepped has no entry --
+    so the slot is read where the next step's carry will find it.
+    """
     gm = _curved_graph("log", max_iterations=4)
-    d = gm.coupling_diagnostics()["a+b"]
-    assert math.isnan(d["gradient_relative_error_bound"]), d
-    assert d["gradient_bound_usable"] is False
+    slot = "coupling_a+b_gradient_relative_error_bound"
+    assert "a+b" not in gm.coupling_diagnostics()
+    assert math.isnan(float(gm._state["_meta"][slot]))
     gm.step()
     assert gm.coupling_diagnostics()["a+b"]["gradient_bound_usable"] is True
     gm.reset_state()
-    d = gm.coupling_diagnostics()["a+b"]
-    assert math.isnan(d["gradient_relative_error_bound"]), d
-    assert d["gradient_bound_usable"] is False
+    assert "a+b" not in gm.coupling_diagnostics()
+    assert math.isnan(float(gm._state["_meta"][slot]))
 
 
 # ---------------------------------------------------------------------------

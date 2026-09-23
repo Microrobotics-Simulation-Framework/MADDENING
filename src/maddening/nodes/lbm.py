@@ -1043,18 +1043,7 @@ class LBMNode(SimulationNode):
         D = self._D
         ndim = D
 
-        # Runtime wall mask precedence:
-        #   1. boundary_inputs["wall_mask_update"] (explicit override)
-        #   2. state["wall_mask"]                  (stateful path; stored as uint8)
-        #   3. self._wall_mask                     (legacy: pre-state)
-        if "wall_mask_update" in boundary_inputs:
-            wall_mask = boundary_inputs["wall_mask_update"].astype(jnp.bool_)
-        elif "wall_mask" in state:
-            wall_mask = state["wall_mask"].astype(jnp.bool_)
-        else:
-            wall_mask = self._wall_mask
-
-        fluid_mask = ~wall_mask
+        wall_mask = self._runtime_wall_mask(state, boundary_inputs)
 
         # 1. Body force (Guo forcing).  Accept either the full grid shape
         # or a uniform (D,) vector which we broadcast.
@@ -1121,6 +1110,22 @@ class LBMNode(SimulationNode):
             result["wall_mask"] = state["wall_mask"]
         return result
 
+    def _runtime_wall_mask(self, state: dict, boundary_inputs: dict):
+        """The wall mask ``update`` applies, as a bool array.
+
+        Precedence: ``boundary_inputs["wall_mask_update"]`` (explicit
+        override), then ``state["wall_mask"]`` (the stateful path, stored as
+        uint8), then the constructor's mask (a state built before the mask
+        joined it).  :meth:`compute_boundary_fluxes` reads the same mask, so
+        the outlet average excludes exactly the cells the step treated as
+        walls.
+        """
+        if "wall_mask_update" in boundary_inputs:
+            return boundary_inputs["wall_mask_update"].astype(jnp.bool_)
+        if "wall_mask" in state:
+            return state["wall_mask"].astype(jnp.bool_)
+        return self._wall_mask
+
     def derivatives(self, state: dict, boundary_inputs: dict, *, params=None) -> dict:
         """Not applicable for LBM (discrete update, not an ODE).
 
@@ -1135,6 +1140,13 @@ class LBMNode(SimulationNode):
         self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
     ) -> dict:
         """Expose average pressure at the outlet face for coupling.
+
+        The average is over the fluid cells of the outlet face under the
+        *runtime* wall mask -- the one :meth:`update` applied
+        (``wall_mask_update``, else the ``wall_mask`` state field, else the
+        constructor's) -- so a wall injected at run time is excluded here
+        too.  Every such fluid cell carries the imposed outlet pressure
+        after a step, so with an ``outlet_pressure`` input this returns it.
 
         Reads no constants, so ``params`` is accepted for the contract only."""
         pressure = state["pressure"]
@@ -1151,8 +1163,8 @@ class LBMNode(SimulationNode):
         face_sl = tuple(face_slices)
 
         p_face = pressure[face_sl]
-        # Mask out wall cells at the outlet face
-        wall_face = self._wall_mask[face_sl]
+        # Mask out wall cells at the outlet face: the runtime mask, as update.
+        wall_face = self._runtime_wall_mask(state, boundary_inputs)[face_sl]
         fluid_count = jnp.sum(~wall_face)
         p_sum = jnp.sum(jnp.where(wall_face, 0.0, p_face))
         outlet_pressure_avg = p_sum / jnp.maximum(fluid_count, 1.0)

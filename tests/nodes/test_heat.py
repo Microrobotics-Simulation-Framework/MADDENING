@@ -295,3 +295,21 @@ class TestHeatNodeInGraph:
         state = gm2.get_node_state("rod")
         assert state["temperature"].shape == (8,)
         assert jnp.allclose(state["temperature"], jnp.full(8, 25.0))
+
+
+def test_length_is_trainable_on_the_uniform_grid_only():
+    """On a non-uniform grid the geometry is ``grid_points`` and nothing
+    reads ``length`` (the constructor docs say it is ignored), so the spec
+    must not offer it to an optimiser: a trainable leaf with an
+    identically zero gradient is the dead-leaf trap ``params_effective``
+    exists to catch, and it caught this configuration."""
+    uniform = HeatNode("u", 1e-4, n_cells=8, length=1.0, thermal_diffusivity=0.01)
+    nonuniform = HeatNode("n", 1e-4, n_cells=8, length=1.0, thermal_diffusivity=0.01,
+                          grid_points=[0.05, 0.12, 0.25, 0.33, 0.5, 0.6, 0.8, 0.95])
+    assert uniform.param_specs()["length"].trainable is True
+    spec = nonuniform.param_specs()["length"]
+    assert spec.trainable is False
+    assert "grid_points" in spec.description
+    # ``thermal_diffusivity`` is still fitted on both grids.
+    assert nonuniform.param_specs()["thermal_diffusivity"].trainable is True
+

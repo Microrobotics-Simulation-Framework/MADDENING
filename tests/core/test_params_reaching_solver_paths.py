@@ -276,13 +276,124 @@ def test_implicit_euler_step_refuses_params_for_a_legacy_residual_override():
     )
 
 
-def test_a_legacy_derivatives_override_under_an_inherited_residual_is_loud_not_silent():
-    """The inherited ``implicit_residual`` takes ``params`` and forwards it
-    to a ``derivatives`` that cannot: Python's own ``TypeError`` names
-    ``LegacyDerivatives.derivatives``.  Not this module's message, but
-    not silence either -- and that is the property this pins."""
-    with pytest.raises(TypeError, match=r"derivatives\(\).*params"):
-        implicit_euler_step(_spring(LegacyDerivatives).implicit_residual, STATE, {}, DT, params=CALIBRATED)
+def test_a_legacy_derivatives_override_under_an_inherited_residual_gets_the_documented_refusal():
+    """One method deep, the refusal is still the documented one.
+
+    ``LegacyDerivatives`` inherits an ``implicit_residual`` that takes
+    ``params``, so ``accepts_params(method="implicit_residual")`` is True
+    and the solver's own probe passes; the residual then reaches the
+    legacy ``derivatives``.  Until this was pinned that ended in Python's
+    raw ``TypeError`` from the call itself -- loud, but not the
+    ``ValueError`` naming the class and the method that the params
+    contract promises.  Every in-tree residual now reaches
+    ``derivatives`` through the shared binder, so all three routes give
+    the same message, and no params still solves."""
+    node = _spring(LegacyDerivatives)
+    assert node.accepts_params(method="implicit_residual") is True
+    refusal = r"LegacyDerivatives\.derivatives\(\) takes no 'params'"
+    with pytest.raises(ValueError, match=refusal):
+        implicit_euler_step(node.implicit_residual, STATE, {}, DT, params=CALIBRATED)
+    with pytest.raises(ValueError, match=refusal):
+        node.implicit_residual(STATE, STATE, {}, DT, params=CALIBRATED)
+    with pytest.raises(ValueError, match=refusal):
+        integrate_node(node, STATE, {}, DT, method="euler", params=CALIBRATED)
+    new, _ = implicit_euler_step(node.implicit_residual, STATE, {}, DT)
+    assert _velocity(new) == pytest.approx(
+        _velocity(implicit_euler_step(_spring().implicit_residual, STATE, {}, DT)[0]), rel=1e-6,
+    )
+
+
+# ------------------------------------------------------------------
+# What "takes params" means: an explicit keyword, or a **kwargs that
+# would forward it
+# ------------------------------------------------------------------
+
+class StarArgsForwarder(SpringDamperNode):
+    """Overrides that hide the keyword behind ``**kwargs`` and forward it.
+
+    The two probes in the tree disagreed on this spelling until 0.4.0
+    shipped: ``ShardedStencilNode`` counted ``VAR_KEYWORD`` as accepting
+    for ``update_padded``, ``accepts_params`` did not, so this node was
+    refused by ``integrate_node`` although it would have delivered the
+    value."""
+
+    def derivatives(self, *args, **kwargs):  # noqa: D102
+        return super().derivatives(*args, **kwargs)
+
+    def implicit_residual(self, *args, **kwargs):  # noqa: D102
+        return super().implicit_residual(*args, **kwargs)
+
+
+def _no_wraps(fn):
+    """A decorator that forgets ``functools.wraps``: the bound method's
+    ``__name__`` becomes ``inner``, which its owner has no attribute of."""
+    def inner(self, *args, **kwargs):
+        return fn(self, *args, **kwargs)
+    return inner
+
+
+class DecoratedWithoutWraps(SpringDamperNode):
+    @_no_wraps
+    def implicit_residual(self, state_new, state_old, boundary_inputs, dt, *, params=None):  # noqa: D102
+        return super().implicit_residual(state_new, state_old, boundary_inputs, dt, params=params)
+
+
+@pytest.mark.parametrize(
+    "spelling, expected",
+    [
+        pytest.param("explicit", True, id="explicit-keyword"),
+        pytest.param("var_keyword", True, id="**kwargs"),
+        pytest.param("legacy", False, id="neither"),
+    ],
+)
+def test_accepts_params_counts_a_var_keyword_as_declaring_the_keyword(spelling, expected):
+    """The single signature rule, in the three spellings a subclass can
+    use.  ``**kwargs`` is the one that used to differ between
+    ``accepts_params`` and ``ShardedStencilNode._inner_accepts_params``."""
+    node = {
+        "explicit": _spring(), "var_keyword": _spring(StarArgsForwarder),
+        "legacy": _spring(LegacyDerivatives),
+    }[spelling]
+    assert node.accepts_params(method="derivatives") is expected
+    assert node.accepts_params(method="implicit_residual") is (expected or spelling == "legacy")
+
+
+def test_a_var_keyword_forwarder_receives_the_calibrated_params_on_every_path():
+    """Accepted, and the value really arrives: the whole calibration on
+    the explicit path and the calibrated implicit solve on the other."""
+    node = _spring(StarArgsForwarder)
+    assert _velocity(integrate_node(node, STATE, {}, DT, method="euler", params=CALIBRATED)) == pytest.approx(-4.0, rel=1e-6)
+    reference = implicit_euler_step(_spring(k=K_CALIBRATED).implicit_residual, STATE, {}, DT)[0]
+    new, _ = implicit_euler_step(node.implicit_residual, STATE, {}, DT, params=CALIBRATED)
+    assert _velocity(new) == pytest.approx(_velocity(reference), rel=1e-6)
+
+
+def test_a_free_residual_that_forwards_kwargs_is_accepted_by_the_solver():
+    spring = _spring()
+
+    def residual(x_new, x_old, bi, dt, **kw):
+        return spring.implicit_residual(x_new, x_old, bi, dt, **kw)
+
+    reference = implicit_euler_step(_spring(k=K_CALIBRATED).implicit_residual, STATE, {}, DT)[0]
+    new, _ = implicit_euler_step(residual, STATE, {}, DT, params=CALIBRATED)
+    assert _velocity(new) == pytest.approx(_velocity(reference), rel=1e-6)
+
+
+def test_a_residual_decorated_without_wraps_solves_with_params_instead_of_crashing():
+    """The bound method's ``__name__`` is ``inner``; the solver used to look
+    ``inner`` up on the node and die with ``AttributeError`` -- only when
+    params were given, so a residual that worked in every test without
+    them crashed the first calibrated solve.  It is now inspected like any
+    other callable and forwards the value."""
+    node = _spring(DecoratedWithoutWraps)
+    assert node.implicit_residual.__name__ == "inner"      # the fixture expresses the trap
+    reference = implicit_euler_step(_spring(k=K_CALIBRATED).implicit_residual, STATE, {}, DT)[0]
+    new, _ = implicit_euler_step(node.implicit_residual, STATE, {}, DT, params=CALIBRATED)
+    assert _velocity(new) == pytest.approx(_velocity(reference), rel=1e-6)
+    plain, _ = implicit_euler_step(node.implicit_residual, STATE, {}, DT)
+    assert _velocity(plain) == pytest.approx(
+        _velocity(implicit_euler_step(_spring().implicit_residual, STATE, {}, DT)[0]), rel=1e-6,
+    )
 
 
 def test_implicit_euler_step_refuses_params_for_a_free_function_without_the_keyword():
@@ -360,6 +471,36 @@ def test_the_in_tree_derivatives_overrides_are_the_six_the_fix_covered():
         "BallNode", "SpringDamperNode", "HeatNode", "RigidBodyNode",
         "HeartPumpNode", "LBMNode",
     }
+
+
+def _in_tree_residual_overriders():
+    return [
+        cls for cls in _in_tree_node_classes()
+        if cls.implicit_residual is not SimulationNode.implicit_residual
+    ]
+
+
+@pytest.mark.parametrize(
+    "cls", _in_tree_residual_overriders(), ids=lambda c: c.__qualname__,
+)
+def test_every_in_tree_residual_refuses_through_the_binder_for_a_legacy_derivatives(cls):
+    """Self-maintaining form of the test above: a legacy ``derivatives``
+    grafted under *each* in-tree ``implicit_residual`` override gets the
+    ValueError naming the subclass and ``derivatives``, never a
+    ``TypeError`` from one call deeper.  A node added with a residual
+    that calls ``self.derivatives(..., params=params)`` directly fails
+    here before it ships."""
+    legacy = type(
+        f"Legacy{cls.__name__}", (cls,),
+        {"derivatives": lambda self, state, bi: cls.derivatives(self, state, bi)},
+    )
+    node = legacy("n", 0.01)
+    leaf = next(iter(node.params_pytree()))
+    state = node.initial_state()
+    with pytest.raises(ValueError, match=rf"Legacy{cls.__name__}\.derivatives\(\) takes no 'params'"):
+        node.implicit_residual(state, state, {}, 0.01, params={leaf: jnp.asarray(1.0)})
+    node.implicit_residual(state, state, {}, 0.01)          # no params: the 2-arg form
+    node.implicit_residual(state, state, {}, 0.01, params={})  # empty: the same
 
 
 # ------------------------------------------------------------------

@@ -77,7 +77,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-013 | Several nodes pin a float64 quantity to float32: HeartPumpNode's backpressure, and the rigid-body and HeatNode parameter and initial_state casts | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-014 | Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-016 | cloud/_skypilot.py was written against a SkyPilot API older than the supported floor | `major` | `not_safety_relevant` | `partially_resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
-| MADD-ANO-017 | jax_enable_x64 does not reach GraphManager's scan paths: a freshly compiled graph refuses to scan because its params are float64 and its state is float32 | `minor` | `context_dependent` | `open` | >=0.4.0 |
+| MADD-ANO-017 | jax_enable_x64 does not reach GraphManager's scan paths: a freshly compiled graph refuses to scan because its params are float64 and its state is float32 | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-018 | A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node() | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.4.0.dev0, <0.4.0 |
 | MADD-ANO-019 | A coupling iteration that diverged to a non-finite state was reported residual=0.0, converged=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.4.0.dev0, <0.4.0 |
 

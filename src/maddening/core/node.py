@@ -152,6 +152,31 @@ def _params_empty(params: Any) -> bool:
         return False
 
 
+def _signature_takes_params(fn: Any) -> bool:
+    """Would calling ``fn(..., params=x)`` deliver ``x``?
+
+    True for a signature that names ``params`` and for one that forwards
+    ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``), because a
+    ``def derivatives(self, *args, **kwargs): return
+    super().derivatives(*args, **kwargs)`` receives the keyword exactly
+    as an explicit one does.  This is the one signature rule for the
+    params contract: :meth:`SimulationNode.accepts_params`,
+    :func:`_method_accepts_params`, the implicit solver's residual
+    binder and the verification battery's flux probe all read it, and
+    it matches the rule ``ShardedStencilNode`` applies to
+    ``update_padded`` -- two probes that disagreed on the same spelling
+    until 0.4.0 shipped.  A signature that cannot be inspected is
+    ``False``: the refusal fails closed.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return "params" in sig.parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
 def _method_accepts_params(node: Any, method: str) -> bool:
     """``node.accepts_params(method=method)``, tolerating a probe override
     that predates the ``method`` keyword.
@@ -170,10 +195,7 @@ def _method_accepts_params(node: Any, method: str) -> bool:
     fn = getattr(node, method, None)
     if fn is None:
         return False
-    try:
-        return "params" in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
+    return _signature_takes_params(fn)
 
 
 def _method_with_params(node: Any, method: str, params: Any) -> Callable:
@@ -421,6 +443,10 @@ class SimulationNode(ABC):
     def accepts_params(self, *, method: str = "update") -> bool:
         """True when ``method`` (default :meth:`update`) declares a ``params`` keyword.
 
+        A ``**kwargs`` that would forward the keyword counts as declaring
+        it (the same rule ``ShardedStencilNode`` applies to
+        ``update_padded``); see :func:`_signature_takes_params`.
+
         Such nodes receive their entry of the graph parameter pytree on
         every call; the others keep the 3-argument contract and read
         constants from ``self.params`` (baked into the trace, so not
@@ -453,11 +479,7 @@ class SimulationNode(ABC):
         fn = getattr(self, method, None)
         if fn is None:
             return False
-        try:
-            sig = inspect.signature(fn)
-        except (TypeError, ValueError):
-            return False
-        return "params" in sig.parameters
+        return _signature_takes_params(fn)
 
     def param_specs(self) -> dict[str, ParamSpec]:
         """Per-parameter :class:`ParamSpec` for the leaves of

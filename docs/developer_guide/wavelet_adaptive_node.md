@@ -32,7 +32,11 @@ dJ = jax.grad(lambda th: node.objective(
 `dim` is 1, 2 or 3; the grid has `n_coarse * 2**n_levels` points per axis
 (periodic) or `(n_coarse + 1) * 2**n_levels - 1` interior points
 (`boundary="dirichlet"`); `n_max` is that to the power `dim`, and the default
-budget is `k = max(8, n_max // 16)`. `k = n_max` turns adaptivity off.
+budget is `k = min(n_max, max(seed, 8, n_max // 16))`, where `seed` is the
+CDD seed -- every level-0 function, the coarse block *plus the first detail
+band*, `(2 * n_coarse) ** dim` periodic or `(2 * n_coarse + 1) ** dim`
+Dirichlet. A `k` below the seed is refused with both numbers in the message.
+`k = n_max` turns adaptivity off.
 
 Inside a graph the node is an edge **source**: it declares no boundary
 inputs and `update` reads neither `dt` nor `boundary_inputs`, because the
@@ -49,13 +53,13 @@ unless stated):
 
 | # | Item | How the wavelet node handles it | Pinned by |
 |---|------|----------------------------------|-----------|
-| 1 | Empty active set at cold start | CDD is seeded with the whole coarse level and only grows; the selection reads the *parameters*, never `c`, so the all-zero cold-start coefficients cannot empty it. `is_cold_start` is accepted and ignored | `test_the_cold_start_set_is_never_empty_because_the_coarse_level_seeds_it`, `test_the_selection_is_non_empty_and_within_budget_across_the_source_range` |
+| 1 | Empty active set at cold start | CDD is seeded with level 0 (the coarse block plus the first detail band, which the budget is validated to hold) and only grows; the selection reads the *parameters*, never `c`, so the all-zero cold-start coefficients cannot empty it. `is_cold_start` is accepted and ignored | `test_the_cold_start_set_is_never_empty_because_the_coarse_level_seeds_it`, `test_the_selection_is_non_empty_and_within_budget_across_the_source_range`, `test_the_default_budget_holds_the_whole_level_zero_seed_so_no_coefficient_is_dropped` |
 | 2 | Non-boolean mask | The mask is built from boolean operations on a boolean seed (`mask \| add`); the `k == n_max` branch returns `jnp.ones(..., bool)` | `test_the_hook_itself_returns_a_boolean_mask_not_only_the_validated_state`, and `test_cdd_keeps_the_coarse_level_returns_a_bool_mask_and_never_exceeds_the_budget` in `test_wavelet_engine.py` |
 | 3 | Basis array baked from a trainable parameter | `theta` and `sigma` enter only through the right-hand side, recomputed from `params` on every call. `mass` (operator) and `sensor` (sensor row) *are* baked: both are `ParamSpec(trainable=False)` and published through `static_data` with `static_data_deps`, so `compile()` refuses a graph that unfreezes them | `test_gradients_with_respect_to_the_trainable_leaves_match_finite_differences`, `test_mass_and_sensor_are_frozen_and_their_statics_are_declared`, `test_compile_refuses_a_graph_that_unfreezes_a_baked_parameter`, `test_the_full_basis_gradient_is_not_bitwise_zero_for_any_trainable_leaf` |
 | 4 | `update` ignores `dt` / `boundary_inputs` | Correct for a steady elliptic solve: two different `dt` and an unexpected boundary input give bitwise the same state, and the node declares no boundary inputs. The consequence — edge source only — is documented, and a time-dependent wavelet node would need the base class's open freeze question answered | `test_update_is_a_steady_solve_that_reads_neither_dt_nor_boundary_inputs` |
 | 5 | `extra_initial_state()` carried unmasked | The state is exactly `{c, mask}`; `extra_initial_state()` is `{}`. Nothing can carry a stale per-mode value across an active-set change | `test_the_state_is_exactly_c_and_mask_so_nothing_can_carry_a_stale_value` |
 | 6 | Hooks receive non-numeric settings in `params` | The hooks index the named leaves (`params["theta"]`, `params["sigma"]`) and never `tree.map` over the dict; the merged dict with its strings and bools and the numeric-only dict give identical results. The jitted kernels take the *arrays*, never the dict | `test_the_hooks_read_named_leaves_and_tolerate_the_merged_dict_with_its_strings` |
-| 7 | `compute_full_basis_gradient` assumes an all-true mask is a valid solve | It is not, for the gathered solve: the buffer holds exactly `k` functions and a larger mask is silently truncated. The node overrides the hook with a dense solve on `A`; the test shows the base default disagrees for `frozen_solver="gather"` and agrees for `"cg"`, so the override cannot be removed as redundant | `test_the_full_basis_gradient_override_matches_a_dense_finite_difference`, `test_the_base_default_would_truncate_the_gathered_solve_which_is_why_it_is_overridden`, and `test_gather_solve_silently_truncates_a_mask_larger_than_its_buffer` in `test_wavelet_engine.py` |
+| 7 | `compute_full_basis_gradient` assumes an all-true mask is a valid solve | It is not, for the gathered solve: the buffer holds exactly `k` functions. A larger *concrete* mask is refused by name and a traced one is NaN-poisoned (it used to be silently truncated to a plausible wrong answer -- the mechanism behind the audit's 5x gradient error). The node overrides the hook with a dense solve on `A`; the test shows the base default is refused for `frozen_solver="gather"` and agrees for `"cg"`, so the override cannot be removed as redundant | `test_the_full_basis_gradient_override_matches_a_dense_finite_difference`, `test_the_base_default_full_basis_gradient_is_refused_for_the_gathered_solve_which_is_why_it_is_overridden`, `test_an_active_set_larger_than_the_budget_is_refused_eagerly_and_poisoned_under_jit`, and `test_gather_solve_poisons_a_mask_larger_than_its_buffer_instead_of_truncating` in `test_wavelet_engine.py` |
 
 ## Declared order, measured
 
@@ -74,6 +78,65 @@ symmetry about the centre, and for Dirichlet a non-zero second derivative at
 mass term is shown to fail the gate. Adaptive truncation is a separate claim
 (`MADD-VER-015`): within 1e-2 of the full solve at `k = n_max / 16`, same
 sign across the source sweep, no rate in `k`.
+
+## What the merged-tree audit changed (1.0.1)
+
+The pre-release audit found that the CDD seed is *every level-0 function*
+-- the coarse block plus the first detail band -- while `k` was validated
+against `n_coarse ** dim` and the default `k` sized from that. On 16 default
+configurations the seed exceeded `k`, `gather_solve` kept the first `k`
+active functions and dropped the rest, and nothing objected: at `dim=2,
+n_levels=2` the mask had 16 functions in a buffer of 8, `c` was 4% off the
+masked solve and `dJ/dtheta` was five times too small, while the capture
+ratio read 0.97 because it measured through the same truncated solve. Now:
+
+- the seed is counted from the level labels it is built from, `k >= seed`
+  is validated (message names both numbers and the remedy), the default is
+  `max(seed, 8, n_max // 16)`, and the count is re-checked against the
+  assembled seed;
+- an oversized concrete mask is refused on every eager path
+  (`_refuse_oversized_mask`), and `gather_solve` poisons an oversized block
+  with NaN under a trace -- the truncation cannot happen silently;
+- `assemble_operator` measures `max|A - A^T| / max|A|` *before* symmetrising
+  and refuses above `SYMMETRY_TOL = 1e-12` (correct assembly ~1e-16, a
+  one-sided stencil 1.07), so the symmetrisation can no longer turn a
+  first-order stencil into a consistent second-order one that passes the
+  order gate;
+- a periodic sensor at `1.0` snaps to grid point 0, its periodic image,
+  rather than to `(side - 1) / side`.
+
+## Construction inside a trace
+
+Every constant of the node is built on the host from static settings
+(`assemble_operator` runs under `jax.ensure_compile_time_eval`; `levels` and
+`diagonal` are NumPy arrays), so a function that builds a fresh node -- or a
+fresh `GraphManager` holding one -- per call traces under `jax.jit`. This is
+what a `residual_fn` for `sysid.fim` that constructs its graph inside the
+call needs; it used to fail in the assembly with a
+`TracerArrayConversionError` whose traceback pointed at `sysid.py`. Build
+with `blindness_gate=False` inside a trace: the gate's diagnostics return
+host floats and cannot run traced. Pinned by
+`test_the_node_can_be_constructed_inside_a_jit_trace` and
+`test_a_fresh_graph_holding_the_node_can_be_built_inside_the_fim_trace`.
+
+## Observing the selection: `selection_diagnostics`
+
+```python
+node.selection_diagnostics()
+# {'active': 8, 'k': 8, 'outer_iterations': 4, 'max_outer': 30, 'budget_reached': True}
+WaveletAdaptiveNode("w", 1.0, n_levels=6, k=64, blindness_gate=False).selection_diagnostics()
+# {'active': 54, 'k': 64, 'outer_iterations': 30, 'max_outer': 30, 'budget_reached': False}
+```
+
+The CDD loop has two exits, the budget and the 30-iteration bound, and for
+`k` above about `n_max / 2` the bound is the one taken: each Dörfler step
+marks a fixed fraction of the *remaining* residual, so the steps shrink once
+the source is resolved. Measured on 128 points at the default source:
+`k = 64` and `k = 96` both stop at `|mask| = 54` (200 iterations reach 64;
+the sensor-reading error at 54 is 3e-11, so the objective does not care).
+The bound is deliberately not raised -- every iteration is a `k x k` solve
+on every update. If reaching the budget matters, read `budget_reached`; the
+engine-level `cdd_select_with_iterations` returns the same count.
 
 ## Using a different source: `source_field`
 
@@ -99,9 +162,13 @@ full-basis gradient is bitwise zero.
   box: ~10 s for the first node of a new size (all first-use compiles),
   ~1 s for the next instance, `update` jit ≈ 1.2 s, `grad` jit ≈ 1.4 s.
 - Each `update` runs up to 30 CDD iterations, each with one `k × k` solve
-  and one sparse matvec, then one gathered solve.
-- The dense `n_max × n_max` operator is a constant of the step; the validated
-  range stops at 256 / $32^2$ / $8^3$.
+  and one sparse matvec, then one gathered solve. At the default budget the
+  loop stops on the budget in a few iterations; for `k` above about
+  `n_max / 2` it runs all 30 (see *Observing the selection*).
+- The dense `n_max × n_max` operator is a constant of the step. MMS order
+  is measured to 256 / $32^2$; construction, the adaptive solve and the
+  frozen gradient are tested at $64^2$ and $16^3$ (4096 functions, `@slow`,
+  10 – 15 s each on a loaded box, ~7 s of it the assembly).
 
 ## What porting it onto the 0.4.0 API found
 

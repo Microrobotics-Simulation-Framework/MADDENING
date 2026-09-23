@@ -28,8 +28,9 @@ How the pieces map onto the base class
   bulk chasing (:mod:`~maddening.nodes.adaptive.wavelets.cdd`) grown
   from the coarse level to a budget ``k``.  It is a function of the
   parameters alone, never of the previous state, so it never empties
-  (the coarse level is the seed), never exceeds ``k``, and does not
-  chatter between steps at fixed parameters.
+  (level 0 is the seed), never exceeds ``k`` (the seed is validated to
+  fit at construction and every marking step is capped at the room
+  left), and does not chatter between steps at fixed parameters.
 * **Frozen solve** (:meth:`solve_frozen`): the ``k`` active functions
   gathered into a dense ``k x k`` block and solved directly
   (``frozen_solver="gather"``, the default), or the masked full-size
@@ -51,6 +52,13 @@ call, so their gradients are exact within an active-set region.
 at construction; both are declared ``ParamSpec(trainable=False)`` and
 published through :attr:`static_data` with :meth:`static_data_deps`, so
 ``compile()`` refuses a graph that tries to train either.
+
+Every constant is built on the host from static settings (NumPy under
+``jax.ensure_compile_time_eval``), so the node may be constructed
+*inside* a ``jax.jit`` trace -- a ``residual_fn`` for
+:func:`maddening.sysid.fim` that builds a fresh graph per call, say --
+with ``blindness_gate=False``: the gate's diagnostics return host
+floats and cannot run traced.
 
 Examples
 --------
@@ -112,12 +120,15 @@ _DEFAULT_SENSOR: dict[int, tuple[float, ...]] = {
 
 @partial(jax.jit, static_argnames=("k",))
 def _select_kernel(Ah: jax.Array, Ah_sparse: Any, coarse: jax.Array,
-                   b_hat: jax.Array, *, k: int) -> jax.Array:
+                   b_hat: jax.Array, *, k: int) -> tuple[jax.Array, jax.Array]:
+    """``(mask, outer_iterations)``; the node's hook returns the mask alone."""
     def solve(mask: jax.Array, rhs: jax.Array) -> jax.Array:
         return _op.gather_solve(Ah, mask, rhs, k)
 
-    mask, _ = _cdd.cdd_select(lambda v: Ah_sparse @ v, solve, b_hat, coarse, k)
-    return mask
+    mask, _, n_outer = _cdd.cdd_select_with_iterations(
+        lambda v: Ah_sparse @ v, solve, b_hat, coarse, k,
+    )
+    return mask, n_outer
 
 
 @partial(jax.jit, static_argnames=("k",))
@@ -159,9 +170,13 @@ class WaveletAdaptiveNode(AdaptiveNode):
     order : {2, 4, 6}
         Interpolating order of the basis (4 by default).
     k : int, optional
-        Active-set budget.  Default ``min(n_max, max(8, n_max // 16))``.
-        Must satisfy ``n_coarse**dim <= k <= n_max``; ``k == n_max``
-        turns adaptivity off (every function active).
+        Active-set budget.  Must satisfy ``seed <= k <= n_max``, where
+        ``seed`` is the CDD seed size: every level-0 function, i.e. the
+        coarse block *plus the first detail band*, ``(2 n_coarse)**dim``
+        periodic or ``(2 n_coarse + 1)**dim`` Dirichlet.  Default
+        ``min(n_max, max(seed, 8, n_max // 16))``, which always satisfies
+        the bound.  ``k == n_max`` turns adaptivity off (every function
+        active).
     theta : float
         Source centre on axis 0.  Trainable, bounded to ``(0, 1)``.
     sigma : float
@@ -171,8 +186,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         into the operator: ``ParamSpec(trainable=False)`` and declared
         through :meth:`static_data_deps`.
     sensor : tuple of float, optional
-        Sensor location, one coordinate per axis, snapped to the nearest
-        grid point.  Baked into the sensor row; ``trainable=False``.
+        Sensor location, one coordinate per axis in ``[0, 1]``, snapped
+        to the nearest grid point -- on the circle for a periodic axis,
+        so ``1.0`` is grid point ``0``; among the interior points for a
+        Dirichlet axis, so ``0.0`` and ``1.0`` snap to the points next to
+        the walls.  Baked into the sensor row; ``trainable=False``.
     preconditioner : {"hybrid", "full", "level", "dk"}
         Diagonal scaling; see :mod:`~maddening.nodes.adaptive.wavelets.precond`.
     boundary : {"periodic", "dirichlet"}
@@ -197,7 +215,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     meta: ClassVar[NodeMeta] = NodeMeta(
         algorithm_id="MADD-NODE-010",
-        algorithm_version="1.0.0",
+        algorithm_version="1.0.1",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "Adaptive interpolating-wavelet (Deslauriers-Dubuc) solver for "
@@ -238,9 +256,12 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "mass, boundary) and mass is therefore not trainable",
             "The source is an isotropic Gaussian centred on axis 0 unless "
             "source_field is overridden",
-            "The active-set budget k is at least the coarse-level count "
-            "n_coarse**dim and at most n_max (validated at construction), so "
-            "the CDD seed fits and the gathered solve never truncates the set",
+            "The active-set budget k is at least the CDD seed size -- every "
+            "level-0 function, (2 n_coarse)**dim periodic or (2 n_coarse + 1)**dim "
+            "Dirichlet, counted from the assembled basis -- and at most n_max "
+            "(validated at construction; the default k is sized from it), so the "
+            "seed fits and the gathered solve never truncates the set; an "
+            "oversized mask is refused eagerly and poisoned with NaN under jit",
             "Inherits the AdaptiveNode assumptions: the returned gradient is "
             "exact within an active-set region and ignores the set's "
             "dependence on the parameters (MADD-ANO-003)",
@@ -260,14 +281,21 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "validated range need a matrix-free transform",
             "Each selection runs up to 30 CDD iterations, each with one "
             "gathered k x k solve; the selection cost is O(30 k^3 + 30 nnz), "
-            "paid on every update",
+            "paid on every update.  For k above about n_max / 2 the iteration "
+            "bound is reached before the budget (128-point basis: k = 64 and "
+            "k = 96 both stop at |mask| = 54, sensor-reading error 3e-11); "
+            "selection_diagnostics() reports outer_iterations and budget_reached",
         ),
         references=(
             Reference("DeslauriersDubuc1989", "Interpolating subdivision (the basis)"),
             Reference("CohenDahmenDeVore2001", "Adaptive wavelet methods; bulk chasing"),
             Reference("Doerfler1996", "Bulk marking criterion"),
             Reference("DahmenKunoth1992", "Diagonal (level) preconditioning"),
-            Reference("Blondel2022", "Implicit differentiation through the frozen solve"),
+            Reference("Blondel2022", (
+                "IFT adjoint of the masked-CG frozen solve (frozen_solver='cg', "
+                "through ift_linear_solve); the default gathered solve is plain "
+                "reverse-mode through jnp.linalg.solve"
+            )),
         ),
         hazard_hints=(
             "A gradient step across an active-set change misses a jump in the "
@@ -291,6 +319,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "Frozen solve (masked CG)": "maddening.core.solver_utils.ift_linear_solve",
             "Sensor functional J = u(x_s)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective",
             "Full-basis gradient (dense solve)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.compute_full_basis_gradient",
+            "Selection diagnostics (iterations, budget reached)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.selection_diagnostics",
         },
     )
 
@@ -348,18 +377,31 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
         if boundary == "dirichlet":
             side = _dir.dirichlet_side(n_levels, n_coarse)
+            labels = _dir._level_labels_nd(n_levels, n_coarse, dim)
         else:
             side = _tr.side_length(n_levels, n_coarse)
+            labels = _tr._level_labels_np(n_levels, n_coarse, dim)
         n_max = side ** dim
-        n_coarse_total = n_coarse ** dim
+        # The CDD seed is every function labelled level 0 -- the coarse
+        # block AND the first detail band, (2 n_coarse)**dim periodic or
+        # (2 n_coarse + 1)**dim Dirichlet -- not the n_coarse**dim coarse
+        # block alone.  Counted from the labels the seed itself is built
+        # from (and re-checked against it after assembly), so the bound k
+        # is validated against cannot drift from the seed the node uses.
+        seed_size = int(np.sum(labels == labels.min()))
         if k is None:
-            k = min(n_max, max(8, n_max // 16))
+            k = min(n_max, max(seed_size, 8, n_max // 16))
         k = int(k)
-        if not n_coarse_total <= k <= n_max:
+        if not seed_size <= k <= n_max:
+            band = "(2 n_coarse)" if boundary == "periodic" else "(2 n_coarse + 1)"
             raise ValueError(
-                f"k must satisfy n_coarse**dim = {n_coarse_total} <= k <= n_max = "
-                f"{n_max}, got {k!r}: the CDD seed is the whole coarse level and "
-                f"the gathered frozen solve holds exactly k functions"
+                f"k must satisfy seed <= k <= n_max, got k={k!r} with seed={seed_size} "
+                f"and n_max={n_max} (boundary={boundary!r}, dim={dim}, "
+                f"n_coarse={n_coarse}): the CDD seed is every level-0 function -- "
+                f"the coarse block plus the first detail band, {band}**dim = "
+                f"{seed_size} -- and the gathered frozen solve holds exactly k "
+                f"functions.  Pass k={seed_size} or larger, or leave k unset for "
+                f"the default max(seed, 8, n_max // 16)"
             )
 
         if sensor is None:
@@ -389,7 +431,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._op = op
         self._A = op.A
         self._D = _pc.diagonal_scaling(
-            jnp.diag(op.A), op.levels, preconditioner, dtype=self.dtype,
+            op.diagonal, op.levels, preconditioner, dtype=self.dtype,
         )
         self._Ah = (op.A / self._D[:, None]) / self._D[None, :]
         rows, cols = op.A_sparse.indices[:, 0], op.A_sparse.indices[:, 1]
@@ -398,7 +440,14 @@ class WaveletAdaptiveNode(AdaptiveNode):
             shape=op.A_sparse.shape,
         )
         lev = np.asarray(op.levels)
-        self._coarse = jnp.asarray(lev == lev.min())
+        coarse_np = lev == lev.min()
+        if int(coarse_np.sum()) != seed_size:      # same labels: cannot happen
+            raise RuntimeError(
+                f"WaveletAdaptiveNode: the assembled seed has {int(coarse_np.sum())} "
+                f"functions but k was validated against {seed_size}"
+            )
+        self._coarse = jnp.asarray(coarse_np)
+        self._seed_size = seed_size
         self._h = float(op.h)
 
         # -- grid and sensor row --
@@ -410,7 +459,12 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._grid = tuple(jnp.asarray(m.reshape(-1), dtype=self.dtype) for m in mesh)
         sidx = 0
         for d in range(dim):
-            sidx = sidx * self.side + int(np.argmin(np.abs(coords1d - sensor_t[d])))
+            dist = np.abs(coords1d - sensor_t[d])
+            if boundary == "periodic":
+                # distance on the circle: sensor 1.0 is grid point 0, not
+                # the last point (side - 1) / side
+                dist = np.minimum(dist, 1.0 - dist)
+            sidx = sidx * self.side + int(np.argmin(dist))
         self._sensor_index = int(sidx)
         self._sensor_row = op.Wn[self._sensor_index]
 
@@ -524,7 +578,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
         A function of ``params`` alone: ``state``, ``prev`` and
         ``is_cold_start`` are accepted for the contract and ignored.  The
         coarse level is always in the set (so it is never empty, at a
-        cold start or later), the set never exceeds ``k``, and at
+        cold start or later), the set never exceeds ``k`` (the seed is
+        validated to fit at construction and every marking step is
+        capped at the room left; on the eager path the result is
+        re-checked and an oversized set is refused), and at
         ``k == n_max`` every function is active.  The result is a boolean
         array; the base class commits it under ``stop_gradient``.
         """
@@ -535,7 +592,9 @@ class WaveletAdaptiveNode(AdaptiveNode):
         # gradient on the mask too); stopping it on the input as well is
         # what lets CDD run as a ``while_loop`` under ``jax.grad``.
         b_hat = jax.lax.stop_gradient(self._scaled_rhs(params))
-        return _select_kernel(self._Ah, self._Ah_sparse, self._coarse, b_hat, k=self.k)
+        mask, _ = _select_kernel(self._Ah, self._Ah_sparse, self._coarse, b_hat, k=self.k)
+        self._refuse_oversized_mask(mask, "compute_active_set")
+        return mask
 
     def solve_frozen(self, state: dict, mask: jax.Array, params: dict) -> dict:
         """Solve on the frozen ``mask``; the differentiable half.
@@ -549,6 +608,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         del state
         b_hat = self._scaled_rhs(params)
         if self.params["frozen_solver"] == "gather":
+            self._refuse_oversized_mask(mask, "solve_frozen")
             c_hat = _gather_kernel(self._Ah, mask, b_hat, k=self.k)
         else:
             tight = bool(jnp.finfo(self.dtype).eps < 1e-10)
@@ -562,6 +622,70 @@ class WaveletAdaptiveNode(AdaptiveNode):
         """The sensor reading ``J = u(x_s) = Wn[s] . c``."""
         del params
         return self._sensor_row @ state["c"]
+
+    def _refuse_oversized_mask(self, mask: jax.Array, where: str) -> None:
+        """Refuse a *concrete* mask with more than ``k`` entries.
+
+        The gathered solve holds exactly ``k`` functions.  No mask the
+        node produces is larger -- the seed is validated against ``k``
+        at construction and the selection never grows past it -- so this
+        is the host-side assertion of that proof on every eager path
+        (the cold start, the diagnostics, a direct call), with a message.
+        Under a trace the mask cannot be read and
+        :func:`~maddening.nodes.adaptive.wavelets.operator.gather_solve`
+        poisons an oversized block with ``NaN`` instead.
+        """
+        concrete = self._concrete_mask(mask)
+        if concrete is None:
+            return
+        n_active = int(concrete.sum())
+        if n_active > self.k:
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r}.{where}: the active set has "
+                f"{n_active} functions but the gathered frozen solve holds exactly "
+                f"k = {self.k}; the excess would be dropped, not solved.  A mask "
+                f"the node selects itself never exceeds k (its seed of "
+                f"{self._seed_size} is validated to fit); a mask supplied from "
+                f"outside must fit too, or use frozen_solver='cg', which solves "
+                f"on any mask"
+            )
+
+    def selection_diagnostics(self, params: Optional[dict] = None) -> dict:
+        """How the CDD selection at ``params`` ended: the budget, or the iteration bound.
+
+        A host-side diagnostic returning Python scalars (not traceable),
+        like :meth:`gradient_capture_ratio`.  The selection is a function
+        of the parameters alone, so no state is involved.
+
+        Parameters
+        ----------
+        params : dict, optional
+            Parameter leaves to overlay on the constructor's; ``None``
+            evaluates at the constructor constants.
+
+        Returns
+        -------
+        dict
+            ``active`` (``|mask|``), ``k``, ``outer_iterations`` (the CDD
+            loop count), ``max_outer`` (its bound,
+            :data:`~maddening.nodes.adaptive.wavelets.cdd.MAX_OUTER`) and
+            ``budget_reached`` (``active >= k``).  ``budget_reached`` is
+            ``False`` with ``outer_iterations == max_outer`` when the
+            bound, not the budget, ended the loop -- the documented case
+            for ``k`` above about ``n_max / 2`` -- and the mask is still a
+            valid active set; the budget is a ceiling, not a target.
+        """
+        p = self._merged(params)
+        if self.k >= self.n_max:
+            return {"active": self.n_max, "k": self.k, "outer_iterations": 0,
+                    "max_outer": _cdd.MAX_OUTER, "budget_reached": True}
+        b_hat = jax.lax.stop_gradient(self._scaled_rhs(p))
+        mask, n_outer = _select_kernel(
+            self._Ah, self._Ah_sparse, self._coarse, b_hat, k=self.k,
+        )
+        active = int(np.asarray(mask, dtype=bool).sum())
+        return {"active": active, "k": self.k, "outer_iterations": int(n_outer),
+                "max_outer": _cdd.MAX_OUTER, "budget_reached": active >= self.k}
 
     def compute_full_basis_gradient(self, state: dict, params: Optional[dict] = None) -> dict:
         """``grad J`` with every function active, by a dense solve on ``A``.

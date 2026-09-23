@@ -2165,6 +2165,26 @@ def _run_coupled_block_impl(
         amp = error_amplification(residual, prev_residual, prev2_residual)
         return estimated_error(residual, amp, step_scale), amp
 
+    def _diag_amplification(residual, prev_residual, prev2_residual):
+        """The amplification the ``fori`` diagnostics carry, apart from the criterion's.
+
+        The same number ``_estimate`` computes, but through an
+        ``optimization_barrier``, so XLA cannot share it with the
+        criterion's.  Shared, the amplification had a second user inside
+        the loop body and XLA rewrote the criterion's arithmetic around
+        it: ``est`` moved by an ulp, the criterion latched on a
+        different pass near the float floor, and ``diagnostics=True``
+        returned a *state* one ulp away from ``diagnostics=False`` on
+        4 of 36 chain-5 configurations (every one ``acceleration="none"``;
+        measured on jaxlib 0.11.0 by keeping each diagnostic carry live
+        in turn: the amplification alone moved 2, the iteration count
+        and the residual alone moved none).  The ``ift`` path isolates
+        its diagnostics in a ``lax.cond`` for the same reason.
+        """
+        r, p1, p2 = jax.lax.optimization_barrier(
+            (residual, prev_residual, prev2_residual))
+        return error_amplification(r, p1, p2)
+
     # Convergence threshold depends on norm type
     conv_threshold_value = (
         1.0 if (use_mixed_norm or use_interface_norm)
@@ -2648,7 +2668,8 @@ def _run_coupled_block_impl(
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    amp = _diag_amplification(residual, prev_res, prev_res2)
                     new_converged = converged | (
                         (est <= conv_threshold) & prev_below
                     )
@@ -2722,7 +2743,8 @@ def _run_coupled_block_impl(
                      famp, V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    amp = _diag_amplification(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -2799,7 +2821,8 @@ def _run_coupled_block_impl(
                      famp) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    amp = _diag_amplification(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -2853,7 +2876,8 @@ def _run_coupled_block_impl(
                      famp) = carry
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    amp = _diag_amplification(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
@@ -5459,6 +5483,23 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
+              **``True`` on a stalled float32 iterate.**  When
+              ``(1 - rho) * |x - x*|`` falls below half an ulp a pass
+              changes nothing, the residual is exactly ``0.0``, and
+              ``converged`` -- and ``strict_convergence`` -- report
+              success although the state can be far from its fixed
+              point: 38 348 ulps (a relative distance of 4.2e-3,
+              against a tolerance of 1e-6) on a relay contracting at
+              0.99999, after one pass.  The criterion is deliberately
+              not changed for this (a precision floor in it would make a
+              tight float32 tolerance unreachable); the bound keys below
+              are where it shows -- ``"spectral_error_bound"`` carries
+              the residual's float resolution and
+              ``"precision_limited"`` is ``True`` -- so read them, with
+              ``diagnostics=True``, before trusting ``converged`` on a
+              slow group.  (Planned for 0.5.0, not a promise of this
+              release: ``strict_convergence`` consulting the spectral
+              bound when diagnostics are on.)
             - ``"rho_spectral"`` : float — the spectral radius of
               ``dF/dx`` at the returned state, from eight Arnoldi steps
               on the Jacobian-vector product the IFT adjoint already
@@ -5474,15 +5515,39 @@ class GraphManager:
               otherwise, which ``"spectral_usable"`` reports.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
-              ``max_iterations=1`` (no fixed point was solved) and
-              before the first step.  Costs eight Jacobian-vector
+              ``max_iterations=1`` (no fixed point was solved) and on
+              a non-finite state (a Jacobian there describes nothing).
+              Costs eight Jacobian-vector
               products per group per step, which is why it is gated.
-            - ``"spectral_error_bound"`` : float — ``residual`` times
-              the larger of ``||(I - H)^{-1}||_2`` (the resolvent norm
-              of the Krylov-compressed Jacobian, in the group's own
-              norm) and ``1 / (1 - rho_spectral)`` with a margin for an
-              unresolved Krylov space
+            - ``"spectral_error_bound"`` : float — ``residual`` plus
+              its own float resolution
+              (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`:
+              four units of ``eps * max|field|`` in every entry the norm
+              reads, measured in that norm), times the larger of
+              ``||(I - H)^{-1}||_2`` (the resolvent norm of the
+              Krylov-compressed Jacobian, in the group's own norm) and
+              ``1 / (1 - rho_spectral)`` with a margin for an unresolved
+              Krylov space
               (:func:`~maddening.core.coupling.acceleration.spectral_error_bound`).
+              The resolution is *added*, because a computed residual
+              differs from the exact map's by the map's evaluation
+              error: without it a stalled float32 iterate (see
+              ``"converged"``) read a bound of ``0.0`` thousands of ulps
+              from its fixed point, and with it the bound there is what
+              float32 can resolve about a group that slow.  The Krylov
+              space is continued from the residual itself whenever it
+              breaks down, so the residual the resolvent is applied to
+              provably lies in the invariant space the resolvent was
+              measured on -- a space from one start vector broke down
+              early where an eigenvalue was repeated, and the bound read
+              0.92x the true distance there -- and a dead-banded field
+              keeps a positive weight in the spectrum (``1 / atol``),
+              so a small field on the coupling loop no longer cuts the
+              loop out of it (``rho_spectral`` read 0.0 for a radius of
+              0.9, and the bound 0.15-0.29x the true distance of a field
+              the norm keeps); the dead-banded fields' share of the
+              residual, which ``"residual"`` does not contain, is
+              measured and folded into the factor.
               For a linear ``F`` the error of *any* iterate is
               ``(A - I)^{-1}`` of its residual, whatever the step
               sequence, relaxation or accelerator did -- so this is a
@@ -5503,13 +5568,15 @@ class GraphManager:
               float32 on a log map within ``tolerance`` of its fixed
               point, an estimate far from one; it is in the group's
               norm at the returned state, so the dead band's excluded
-              fields are outside it and the norm's scale drifts with
-              the iterate exactly as it does for ``"residual"``; and
-              it inherits ``"residual"``'s float32 noise floor (a
-              residual of ``0.0`` gives a bound of ``0.0``; on a
-              60,000-entry L2 norm it read 0.991x once).  ``inf``
-              when ``rho_spectral`` (with margin) is at or above one;
-              NaN where ``"rho_spectral"`` is.  It is reported, not
+              fields are outside what it bounds and the norm's scale
+              drifts with the iterate exactly as it does for
+              ``"residual"``; and its float floor is a model of the
+              map's rounding (see
+              :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
+              which a node that cancels catastrophically inside its own
+              update can exceed.  ``inf`` when ``rho_spectral`` (with
+              margin) is at or above one; NaN where ``"rho_spectral"``
+              is, and on a non-finite state.  It is reported, not
               applied: ``"converged"`` and the iteration counts are
               exactly what they were.
             - ``"spectral_usable"`` : bool — the bound above is finite
@@ -5517,10 +5584,12 @@ class GraphManager:
               ``h_{k+1,k}`` is at most 5% of ``1 - rho_spectral``
               (:func:`~maddening.core.coupling.acceleration.spectral_rate_settled`).
               ``False`` where nothing was computed (see
-              ``"rho_spectral"``), where the bound is ``inf``, and for
+              ``"rho_spectral"``), where the bound is ``inf``, for
               a group with more independent interface scalars than the
               eight Krylov steps resolve -- there ``"rho_spectral"``
-              is from below and the bound carries only the margin.
+              is from below and the bound carries only the margin --
+              and where the residual never entered the Krylov space
+              (its outside fraction is reported as unresolved).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -5552,10 +5621,25 @@ class GraphManager:
               and up to 11x for the other, which reads its gap to the
               worst probe; 1.81x for a parameter multiplying the state
               of an affine map; 7-11x for a spring pair's stiffness and
-              mass; 15x on a hidden slow mode.  **Only
+              mass; 15x on a hidden slow mode.  The distance carries the
+              residual's float resolution, as ``"spectral_error_bound"``
+              does, so a stalled iterate no longer reads ``0.0`` (it did,
+              against true errors of 1.5-3% at ``F'(x*) = 0.999``); where
+              the residual is at that resolution and so carries no
+              direction, the curvature is taken along a floor-sized
+              vector's resolvent image instead of the Newton correction.
+              And where the Jacobian moves across the distance by a
+              visible fraction of the gap ``1 - rho`` -- ``theta = amp *
+              ||J(x_k + delta) - J(x_k)|| * distance / ||delta||`` --
+              the bound is multiplied by ``1 / ((1 - theta)(1 - theta /
+              2))`` (the Banach lemma on the resolvent at ``x*``, and the
+              mean-value Jacobian for the distance) and is ``inf`` at
+              ``theta >= 1``: uncorrected it read 0.20-0.96x the true
+              error at ``F'(x*) = 0.99`` with the forward 0.65-4.5% short.
+              ``theta`` is exactly zero on an affine map.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
-              ``max_iterations=1`` and before the first step; ``inf``
+              ``max_iterations=1``; ``inf``
               or NaN where ``"spectral_error_bound"`` is; NaN where the
               fixed point responds to no constant and where the returned
               state is not finite.  Costs
@@ -5574,7 +5658,8 @@ class GraphManager:
               ``"spectral_error_bound"``; the change in the
               linearisation being linear in the distance and along the
               Newton correction (exact for an affine map, leading-order
-              otherwise); and the probes -- a field-valued constant is
+              otherwise, which ``theta`` above measures along ``delta``
+              only); and the probes -- a field-valued constant is
               probed along one random direction, and the bound is
               relative to the tangent's norm in the group's norm, so a
               scalar loss whose gradient nearly cancels across the
@@ -5610,9 +5695,25 @@ class GraphManager:
               are settled on the same condition.  ``False`` where
               nothing was computed, where the bound is ``inf`` or NaN
               (including a group whose Jacobian range the eight-vector
-              basis did not capture).  Like the other flags it reports
-              what the code checked, and not the linearity or probe
-              conditions above.
+              basis did not capture, and one whose Jacobian moved by
+              ``theta >= 1`` across the distance).  Like the other flags
+              it reports what the code checked, and not the linearity
+              or probe conditions above.
+            - ``"precision_limited"`` : bool — the residual is at or
+              below its own float resolution (the floor
+              ``"spectral_error_bound"`` adds): the last pass moved no
+              entry by more than a few ulps of its field's magnitude, so
+              ``"residual"`` and ``"error_estimate"`` are rounding
+              rather than motion, at least half of each bound key is the
+              floor, and neither iterating further nor tightening the
+              tolerance can reduce the bounds by more than half -- only
+              a wider dtype can.  Reported for every group, whatever the
+              solver.  ``False`` for a non-finite residual and for a
+              group whose norm reads no field.  A separate flag rather
+              than a reason to clear ``"spectral_usable"``: the bound
+              with its floor *is* a bound, and a group converged to
+              float32 -- the best a float32 group can do -- would
+              otherwise be reported unusable.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5627,7 +5728,9 @@ class GraphManager:
             to the old residual test and says so through
             ``"ratio_usable"``.  It is strictly stronger than the
             pre-0.4.0 flag in every case and still not a guarantee —
-            do not treat ``converged=True`` as certifying a distance.
+            do not treat ``converged=True`` as certifying a distance,
+            and in particular not on a stalled float32 iterate (see
+            ``"converged"`` above and ``"precision_limited"``).
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value

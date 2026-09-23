@@ -396,3 +396,20 @@ constants (probed at the constant's scale instead of dropping out), the
 arithmetic (`ift_gradient_error_bound` with NaN / 0 / inf conventions),
 the key names and every docstring (the WIP's claimed measurements had
 never been run).
+
+**Mutations** (scratch copies of `src/` on `PYTHONPATH`, the worktree
+untouched; run against `tests/core/test_coupling_gradient_error_bound.py`
+on the final code).  Eight of eight caught:
+
+| mutation | caught by |
+|---|---|
+| curvature term zeroed | both sweeps, the zero-valued probe, the affine multiplicative case, the hidden slow mode (bound 0.0 against 0.16-0.25) |
+| distance from `error_estimate` instead of the spectral bound | the hidden slow mode (3.95e-3 against 0.253, 64x short), plus square's `d/dg`, the affine case and the zero probe |
+| key reported but never computed | six tests, each printing `gradient_relative_error_bound: nan` / `gradient_bound_usable: False` |
+| bound evaluated at the first-pass state `x_0` instead of `x_k` | the ratio pins (14.4 and 24.1 against 1.3 and 3.5), the affine case (6.07), the zero probe, the hidden-slow-mode counterfactual |
+| resolvent factor dropped | four tests (ratios 0.13-0.95) |
+| weights applied before the difference (the FMA regression) | the affine caveat test alone (2.5e-4 against a ceiling of 1e-6) |
+| one combined probe instead of one per constant | four tests |
+| zero-valued constants dropped from the probes | the zero-valued-parameter test alone (0.54 of the true error) |
+
+The last one survived the suite until that test was written for it.

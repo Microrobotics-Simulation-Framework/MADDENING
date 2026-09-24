@@ -105,6 +105,7 @@ tests/core/test_coupling_while_default.py::test_forward_and_reverse_ad_through_p
 tests/core/test_coupling_while_default.py::test_the_passes_run_do_not_scale_with_max_iterations # pending triage: median 9 s, max 14 s
 tests/core/test_phases_5_7_8.py::TestIQNIMVJ::test_imvj_grad_compatible # pending triage: median 3 s, max 8 s
 tests/core/test_phases_5_7_8.py::TestWaveformRelaxation::test_waveform_with_diagnostics # pending triage: median 3 s, max 8 s
+tests/nodes/adaptive/test_wavelet_node.py::test_eager_jit_and_graph_select_the_same_set_where_a_mirror_symmetry_ties_residuals[periodic-2d] # kept: the first test in its file to build a 2-D four-level wavelet node; the ~5 s of eager compiles it pays are reused by the theta sweep after it, so marking it slow only moves them (measured locally: the sweep goes from 5.4 s to 10.9 s)
 tests/property/test_coupling_acceleration_agreement.py::test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration # pending triage: median 66 s, max 79 s
 tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises # pending triage: median 39 s, max 45 s
 tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_converged_group_is_at_its_fixed_point_in_every_field_at_every_scale # pending triage: median 15 s, max 23 s

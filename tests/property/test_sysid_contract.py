@@ -927,6 +927,7 @@ class TestFIMAgainstFiniteDifference:
         assume(scale > 0.0)
         assert np.abs(F - F_fd).max() <= 2e-2 * scale, (F, F_fd)
 
+    @pytest.mark.slow  # shares the slow test above's analytic-residual compiles; alone it paid them (4.6 s -> 11.6 s locally)
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_crb_is_consistent_with_the_matrix_it_came_from(self, problem):

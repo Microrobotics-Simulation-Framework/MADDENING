@@ -923,10 +923,11 @@ def test_at_the_full_budget_near_the_limit_the_capture_check_reads_one_and_blame
 
 _MIRROR_CASES = [
     (dict(dim=2, n_levels=3, boundary="dirichlet", n_coarse=1), 0.25),
-    # 5-7 s on the CI runner (four levels compiled three ways), over the
-    # 5 s test budget: slow lane.  The Dirichlet case keeps the property
-    # on every push.
-    pytest.param(dict(dim=2, n_levels=4), 0.61 + 3e-6, marks=pytest.mark.slow),
+    # 5-7 s on the CI runner, and kept in the default lane on purpose (see
+    # its tests/duration_allowlist.txt entry): it is the first test here to
+    # build a 2-D four-level node, and the eager compiles it pays are
+    # reused by the theta sweep below.  Marked slow, it moved them there.
+    (dict(dim=2, n_levels=4), 0.61 + 3e-6),
 ]
 
 

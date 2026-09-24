@@ -818,10 +818,21 @@ class HeatNode(SimulationNode):
         the interior; ghost cells are passed through unchanged so the
         wrapper can strip them.
 
-        The boundary mode used by the wrapper drives Dirichlet/Neumann
-        semantics at the *global* boundary:
-        ``boundary="zero"`` ↔ Dirichlet T=0,
-        ``boundary="edge"`` ↔ zero-gradient (Neumann).
+        The boundary mode used by the wrapper is the boundary condition at
+        the *global* ends: the ghosts are used as they arrive, and this
+        method applies no end closure of its own.
+        ``boundary="edge"`` (each end cell repeated across the halo) is a
+        zero-gradient end.  At ``stencil_order=2`` its ghost ``T[0]`` is
+        exactly the one :meth:`update` builds for an end with no boundary
+        input, so the sharded rod is the unsharded one.  At
+        ``stencil_order=4`` it is not: :meth:`update` builds both ghosts by
+        cubic extrapolation through the rod end
+        (:func:`_dirichlet_ghosts_4th_order`), which no halo fill can
+        reproduce, and the two differ near the ends (2.5e-3 on a unit ramp
+        after 50 steps at Fourier number 0.25).
+        ``boundary="zero"`` puts T=0 in the ghost cells, i.e. at the ghost
+        centres half a cell outside the rod, not at the rod end where
+        :meth:`update` imposes ``left_temperature``.
         For non-zero Dirichlet temperatures or per-shard BC overrides,
         plug into the coupling system (M8) rather than this primitive.
         Non-uniform grids are not yet supported under sharding.

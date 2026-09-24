@@ -432,12 +432,15 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         replicated on every device; their halos do not need exchange.
     boundary : str
         How the halos at the edges of the *global* grid are filled
-        (``"periodic"``, ``"edge"`` or ``"zero"``); interior halos always
-        come from the neighbouring shard.  Default ``"edge"`` -- replicate
-        the node's own edge cells -- for a node that applies its physical
-        boundary conditions in ``update_padded`` after the exchange.  A
-        node that declares ``halo_boundary()`` must be given exactly that
-        mode (see the note below).
+        (``"periodic"``, ``"edge"`` or ``"zero"``, exactly as
+        :func:`~maddening.cloud.multigpu.halo.halo_exchange` documents);
+        interior halos always come from the neighbouring shard.  The same
+        fill is used on a mesh axis of one device, and on a halo axis
+        ``axis_map`` leaves unsharded.  Default ``"edge"`` -- each edge
+        cell repeated across its halo -- for a node that applies its
+        physical boundary conditions in ``update_padded`` after the
+        exchange.  A node that declares ``halo_boundary()`` must be given
+        exactly that mode (see the note below).
 
     Raises
     ------

@@ -436,12 +436,13 @@ def test_cdd_runs_under_jit_and_under_grad_when_its_input_carries_no_tangent():
 ])
 def test_the_condition_estimate_is_a_tight_lower_bound_on_the_exact_spectrum(kw):
     """``assemble_operator(preconditioner=...)`` estimates kappa(D^-1 A D^-1)
-    within 3% of ``eigvalsh`` and not above it: both extremes are
-    approached from inside the spectrum, so a refusal made on the estimate
-    is never spurious.  "Not above" is up to 1e-5 relative: at the
-    smallest masses the closed-form constant-mode quotient describes the
+    within 3% of ``eigvalsh`` (0.03% measured) and not above it: both
+    extremes are approached from inside the spectrum, so a refusal made on
+    the estimate is never spurious.  "Not above" is up to 1e-5 relative:
+    at small mass the closed-form constant-mode quotient describes the
     exact operator and ``eigvalsh`` the assembled one, and the two differ
-    by the assembly's rounding (measured up to 4e-7)."""
+    by the assembly's rounding (4e-7 here; 1.9% at mass 1e-10, a mass the
+    node refuses)."""
     kw = dict(kw)
     kind = kw.pop("preconditioner", "hybrid")
     nl, nc = kw.pop("n_levels"), kw.pop("n_coarse", 2)

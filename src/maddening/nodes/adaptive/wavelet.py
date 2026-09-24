@@ -7,7 +7,8 @@ subclass with a real basis.  It solves the steady elliptic problem
 
 periodic or with homogeneous Dirichlet walls, for an isotropic Gaussian
 source of width ``sigma`` centred at ``theta`` on axis 0 (the other axes
-centred), and reports the sensor reading ``J = u(x_s)``.  Both
+centred; periodised on a periodic domain), and reports the sensor
+reading ``J = u(x_s)``.  Both
 ``theta`` and ``sigma`` are leaves of the graph parameter pytree, so
 ``jax.grad``, ``sysid.fit`` and ``fim`` reach them through the frozen
 active-set adjoint.
@@ -30,7 +31,18 @@ How the pieces map onto the base class
   parameters alone, never of the previous state, so it never empties
   (level 0 is the seed), never exceeds ``k`` (the seed is validated to
   fit at construction and every marking step is capped at the room
-  left), and does not chatter between steps at fixed parameters.
+  left), and repeats exactly at fixed parameters.  The marking step
+  reads no residual difference below a rounding floor and breaks ties
+  within it by basis index, so the eager diagnostics, a jitted
+  ``update`` and the compiled graph select the same set, and so do a
+  Python float and its array spelling; the set changes only at
+  isolated parameter values where two residual magnitudes cross the
+  floor's width or the Doerfler bulk crosses a cumulative sum.
+* **Conditioning.**  The constructor bounds the relative solve error
+  by ``kappa(A_hat) eps(dtype) + kappa_phys eps(float64)`` and refuses
+  a configuration above :data:`CONDITION_LIMIT` -- in practice a small
+  periodic ``mass``, since the periodic operator's smallest eigenvalue
+  is ``mass``.
 * **Frozen solve** (:meth:`solve_frozen`): the ``k`` active functions
   gathered into a dense ``k x k`` block and solved directly
   (``frozen_solver="gather"``, the default), or the masked full-size
@@ -212,9 +224,13 @@ class WaveletAdaptiveNode(AdaptiveNode):
     sigma : float
         Source width.  Trainable, positive.
     mass : float
-        Coefficient ``m`` of the zeroth-order term.  Positive.  Baked
-        into the operator: ``ParamSpec(trainable=False)`` and declared
-        through :meth:`static_data_deps`.
+        Coefficient ``m`` of the zeroth-order term.  Positive, and large
+        enough for the node's dtype to carry the operator: the periodic
+        operator's smallest eigenvalue is ``m``, and a configuration whose
+        :meth:`solve_error_bound` exceeds :data:`CONDITION_LIMIT` is
+        refused (in float32, a periodic ``m`` below about ``2e-3``).
+        Baked into the operator: ``ParamSpec(trainable=False)`` and
+        declared through :meth:`static_data_deps`.
     sensor : tuple of float, optional
         Sensor location, one coordinate per axis in ``[0, 1]``, snapped
         to the nearest grid point -- on the circle for a periodic axis,
@@ -233,6 +249,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     Notes
     -----
+    The structural counts (``dim``, ``n_levels``, ``n_coarse``, ``order``,
+    ``k``) must be whole numbers: an integral float from a JSON round trip
+    is accepted, ``6.9`` or ``True`` is refused rather than truncated.
+
     Every structural setting above is stored in ``self.params`` so that
     ``cls(name=..., timestep=..., **node.params)`` rebuilds the node --
     the round trip every serialisation path relies on.  ``n_max`` is
@@ -245,7 +265,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     meta: ClassVar[NodeMeta] = NodeMeta(
         algorithm_id="MADD-NODE-010",
-        algorithm_version="1.0.1",
+        algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "Adaptive interpolating-wavelet (Deslauriers-Dubuc) solver for "
@@ -256,9 +276,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
         governing_equations=(
             "(-Laplacian + m) u(x) = f(x; theta, sigma) on [0, 1)^d, periodic or "
             "homogeneous Dirichlet; f = exp(-|x - x_theta|^2 / sigma^2) with "
-            "x_theta = (theta, 1/2, ...); J = u(x_s).  Active set M by CDD "
-            "residual bulk marking (Doerfler theta_D = 0.5) from the coarse "
-            "level to the budget k"
+            "x_theta = (theta, 1/2, ...), summed over its periodic images on a "
+            "periodic domain; J = u(x_s).  Active set M by CDD residual bulk "
+            "marking (Doerfler theta_D = 0.5) from the coarse level to the "
+            "budget k, ties within the rounding floor broken by basis index"
         ),
         discretization=(
             "Second-order central-difference (-Laplacian + m) with lumped mass "
@@ -292,6 +313,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "(validated at construction; the default k is sized from it), so the "
             "seed fits and the gathered solve never truncates the set; an "
             "oversized mask is refused eagerly and poisoned with NaN under jit",
+            "The solve's relative error bound kappa(A_hat) eps(dtype) + "
+            "kappa(-Laplacian_h + m) eps(float64) is at most CONDITION_LIMIT = "
+            "1e-3 (validated at construction; an operator above it is refused, "
+            "naming the dtype and the mass that would work)",
             "Inherits the AdaptiveNode assumptions: the returned gradient is "
             "exact within an active-set region and ignores the set's "
             "dependence on the parameters (MADD-ANO-003)",
@@ -312,9 +337,24 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "Each selection runs up to 30 CDD iterations, each with one "
             "gathered k x k solve; the selection cost is O(30 k^3 + 30 nnz), "
             "paid on every update.  For k above about n_max / 2 the iteration "
-            "bound is reached before the budget (128-point basis: k = 64 and "
-            "k = 96 both stop at |mask| = 54, sensor-reading error 3e-11); "
-            "selection_diagnostics() reports outer_iterations and budget_reached",
+            "bound is reached before the budget in float64 (128-point basis: "
+            "k = 64 and k = 96 both stop at |mask| = 54, sensor-reading error "
+            "3e-11); in float32 the rounding floor usually ends it first, once "
+            "every remaining residual is indistinguishable from round-off.  "
+            "selection_diagnostics() reports outer_iterations, budget_reached "
+            "and resolved",
+            "A periodic mass the dtype cannot carry is refused: the periodic "
+            "operator's smallest eigenvalue is m, so the solve error grows like "
+            "1 / m -- in float32 below about m = 2e-3 (1-D) to 4e-3 (3-D, order "
+            "6), in float64 below about 1e-8 (128 points) to 6e-8 (256 points), "
+            "where the float64 assembly of the Galerkin product is the limit",
+            "The selection is deterministic under rounding but still discrete: "
+            "it changes where two residual magnitudes differ by about the "
+            "rounding floor (16 eps (max|b| + max|c|)) or the Doerfler bulk "
+            "falls on a cumulative sum.  Those are isolated parameter values -- "
+            "no switch in 40 steps of 1e-6 on the mirror-symmetric 2-D problem "
+            "that used to switch on 15 -- and a gradient step across one misses "
+            "a jump (MADD-ANO-003)",
         ),
         references=(
             Reference("DeslauriersDubuc1989", "Interpolating subdivision (the basis)"),
@@ -336,8 +376,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "mass and sensor are baked into constants; changing either on a "
             "built node (rather than rebuilding it) leaves the operator and "
             "sensor row stale, and compile() refuses to train them",
-            "The periodic operator is singular at mass = 0; the constructor "
-            "refuses a non-positive mass",
+            "The periodic operator is singular at mass = 0 and ill-conditioned "
+            "like 1 / mass near it; the constructor refuses a non-positive mass "
+            "and one whose solve error bound exceeds CONDITION_LIMIT, rather than "
+            "returning a finite, wrong reading (float32, 128 points: mass 1e-6 "
+            "used to read J 2.8x too large and mass 1e-8 with the sign flipped)",
         ),
         implementation_map={
             "Basis synthesis u = Wn c": "maddening.nodes.adaptive.wavelets.transform.synthesis",
@@ -345,6 +388,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "Diagonal preconditioning D": "maddening.nodes.adaptive.wavelets.precond.diagonal_scaling",
             "Source f(x; theta, sigma)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.source_field",
             "Active set by CDD bulk chasing": "maddening.nodes.adaptive.wavelets.cdd.cdd_select",
+            "Rounding floor and tie band of the marking step": "maddening.nodes.adaptive.wavelets.cdd.rounding_floor",
+            "Condition number of the preconditioned operator": "maddening.nodes.adaptive.wavelets.operator.condition_estimate",
+            "Condition number of the grid operator": "maddening.nodes.adaptive.wavelets.operator.physical_condition_number",
+            "Solve error bound against CONDITION_LIMIT": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_error_bound",
             "Frozen solve (gathered block)": "maddening.nodes.adaptive.wavelets.operator.gather_solve",
             "Frozen solve (masked CG)": "maddening.core.solver_utils.ift_linear_solve",
             "Sensor functional J = u(x_s)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective",

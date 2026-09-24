@@ -81,12 +81,13 @@ SYMMETRY_TOL: float = 1e-12
 
 #: Lanczos steps :func:`condition_estimate` takes (all of them when the
 #: basis is smaller).  Measured against ``numpy.linalg.eigvalsh`` of the
-#: preconditioned operator over 40 periodic and 8 Dirichlet
-#: configurations -- 48 to 4096 functions, 1-D to 3-D, orders 4 and 6,
-#: mass 1e-12 to 100 -- with 48 steps the estimate was within 3% of the
-#: exact condition number wherever it is above 1e-12 (0.4 s at 4096
-#: functions); 64 adds margin for the extreme eigenvalue that is not
-#: pinned by the closed form.
+#: assembled preconditioned operator over 70 configurations -- periodic
+#: 1-D 128 and 256 points, 2-D 8^2 and 16^2, 3-D 4^3, order 6 on 48;
+#: Dirichlet 1-D 191 and 383, 2-D 23^2, 3-D 7^3; mass 1e-10 to 100 -- the
+#: estimate was never more than 0.03% below the exact value, and above it
+#: only where the float64 assembly itself has moved the smallest
+#: eigenvalue (at most 1.9%, at mass 1e-10, which the node refuses).
+#: 0.6 s at 4096 functions on 4 cores (jaxlib 0.11.0; the product is NumPy).
 LANCZOS_STEPS: int = 64
 
 
@@ -198,9 +199,10 @@ def condition_estimate(A_hat: np.ndarray, *, rayleigh_bound: Optional[float] = N
     one the ``1 / mass`` growth lives in).  Both extremes are therefore
     approached from inside the spectrum and, in exact arithmetic, the
     estimate is a lower bound on the true condition number: a refusal
-    made on it is never spurious.  (Against ``eigvalsh`` of the
-    assembled float64 operator it is within 3% below and at most 4e-7
-    above -- the assembly's own rounding at the smallest masses.)
+    made on it is never spurious.  Against ``eigvalsh`` of the assembled
+    float64 operator it is within 0.03% below, and above only by the
+    assembly's own rounding at the smallest masses (see
+    :data:`LANCZOS_STEPS`).
 
     Parameters
     ----------

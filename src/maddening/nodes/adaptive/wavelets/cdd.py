@@ -19,17 +19,34 @@ Two properties the node's contract with
   room left under the budget, which is what lets the node solve on a
   gathered ``K x K`` block with no risk of silently truncating the set.
 
-The iteration bound is the other exit.  Each marking step adds the
-smallest Doerfler bulk of the *remaining* residual, so once the source
-is resolved the steps shrink and a large budget is approached slowly:
-on the 128-point periodic basis at the node's default source, ``K = 8``
-is reached in a handful of iterations, but ``K = 64`` and ``K = 96``
-both stop at ``|mask| = 54`` when :data:`MAX_OUTER` is hit (200
-iterations reach 64; the sensor-reading error at 54 is 3e-11).  For
-``K`` above about half the basis the bound is therefore the branch
-taken.  The mask is still a valid active set -- the budget is a
-ceiling, not a target -- and :func:`cdd_select_with_iterations` returns
-the count so a caller can see which exit was taken.
+The loop has three exits.  The budget; the iteration bound; and the
+rounding floor.  Each marking step adds the smallest Doerfler bulk of
+the *remaining* residual, so once the source is resolved the steps
+shrink and a large budget is approached slowly: on the 128-point
+periodic basis at the node's default source in float64, ``K = 8`` is
+reached in a handful of iterations, but ``K = 64`` and ``K = 96`` both
+stop at ``|mask| = 54`` when :data:`MAX_OUTER` is hit (200 iterations
+reach 64; the sensor-reading error at 54 is 3e-11).  For ``K`` above
+about half the basis the bound is therefore the branch taken in
+float64.  In float32 the residual reaches round-off sooner, and a step
+that finds nothing above :func:`rounding_floor` to mark ends the loop
+early instead of spending the remaining iterations marking noise.  The
+mask is valid at every exit -- the budget is a ceiling, not a target --
+and :func:`cdd_select_with_iterations` returns the count so a caller
+can see which exit was taken.
+
+Determinism.  A problem with a mirror symmetry -- the node's source is
+centred on every axis but the first -- produces residuals equal up to
+rounding, and a plain ``argsort`` let the last bits of the input decide
+which member of a tied pair was marked.  Differently compiled
+evaluations of the same parameters (eager, jitted, a graph step) round
+differently, so they selected different sets.  The marking step now
+reads no difference below the rounding floor: magnitudes within it of
+the cutoff are tied and taken in ascending basis index order
+(:func:`_doerfler_grow`).  The selection can still change -- it is a
+discrete function of continuous data -- but only where a magnitude gap
+crosses the floor's width or the Doerfler bulk falls on a cumulative
+sum: isolated parameter values rather than every rounding perturbation.
 
 JIT shape: the outer loop is a ``lax.while_loop`` bounded by
 :data:`MAX_OUTER`, so the body is compiled once and the loop exits as
@@ -77,14 +94,16 @@ MAX_OUTER: int = 30
 THETA_D: float = 0.5
 
 #: Margin of :func:`rounding_floor` over the residual's rounding error.
-#: Measured on the 2-D 16x16 periodic problem at theta = 0.61 (jaxlib
-#: 0.11.0): the float32-vs-float64 difference of an inactive residual
-#: magnitude, and the spread of a mirror-symmetric pair within one
-#: evaluation, are at most ``0.2 eps (max|b| + max|c|)`` at mass 1 and
-#: mass 0.01, in both precisions -- so ``16`` leaves a factor of about 80.
-#: It is deliberately not larger: the floor also ends refinement, and in
-#: float32 a larger factor stops the selection on residuals that are
-#: still resolved signal.
+#: Measured on six configurations (1-D 128 points and order 6 on 48, 2-D
+#: 8^2 and 16^2; mass 1 and 5e-3; float32 and float64; jaxlib 0.11.0): the
+#: difference between two evaluations of one inactive residual magnitude
+#: (JAX against a NumPy float64 solve of the same stored operator), and
+#: the spread of a mirror-symmetric pair while the set is symmetric, were
+#: at most ``1.05 eps (max|b| + max|c|)``.  ``16`` is the smallest power of
+#: two with a tenfold margin over that.  The floor also ends refinement
+#: once nothing above it is left; that cost nothing measurable: the float32
+#: sensor reading against the full-basis one moved by at most 1.6e-7 at 16
+#: (3e-6 even at 256), and float64 selections were unchanged.
 NOISE_FACTOR: float = 16.0
 
 
@@ -189,15 +208,21 @@ def cdd_select_with_iterations(
         the marking step guarantees ``|mask| <= K`` throughout.
     theta_d, max_outer
         Doerfler bulk and the iteration bound.
+    noise_factor : float
+        Margin of the rounding floor, :func:`rounding_floor`.  The floor
+        assumes an operator with an ``O(1)`` diagonal, which the
+        symmetric diagonal preconditioning the node applies provides.
 
     Returns
     -------
     (mask, c, n_outer)
         The boolean active set of shape ``(N,)``, the solution on it in
         the caller's coordinates, and the number of outer iterations run
-        (``int32`` scalar; equal to ``max_outer`` when the bound, not the
-        budget, ended the loop).  The mask is a plain array: the node's
-        base class wraps it in ``stop_gradient``.
+        (``int32`` scalar).  It equals ``max_outer`` when the bound ended
+        the loop; below that with ``|mask| < K``, a step found nothing
+        above the rounding floor to mark and the loop stopped there.  The
+        mask is a plain array: the node's base class wraps it in
+        ``stop_gradient``.
     """
     mask0 = jnp.asarray(coarse_mask, dtype=bool)
     c0 = solve_masked(mask0, b)

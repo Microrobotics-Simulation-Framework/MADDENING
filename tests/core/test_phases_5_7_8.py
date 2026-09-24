@@ -469,7 +469,10 @@ class TestIQNIMVJ:
             jacobian_reuse=3,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):
@@ -663,7 +666,10 @@ class TestWaveformRelaxation:
             waveform_iterations=2,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
         init_state = dict(gm._state)
 

@@ -287,6 +287,12 @@ guidance; the itemized changes follow.
 - **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
   `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
   a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.
+- **An inline point reference with no `"dtype"` refuses `np.longdouble` values** instead of rounding them to float64
+  without a word; the error says no reference form keeps extended precision. Add `"dtype": "float64"` to accept the
+  rounding, or convert first (`np.asarray(points, dtype=np.float64).tolist()`); float64 payloads are unaffected
+- **Params contract audit:** one "takes `params`" rule for every probe (`update_padded(**kwargs)` calibratable under `ShardedUnstructuredNode`; duck-typed nodes verified);
+  `params_effective` probes each path and vector element by value; a changed `gm.params` leaf the step cannot read (`initial_*`, `static_data_deps`) is a `ValueError`, never serialised; int-spelled
+  declared constants kept; sharded wrappers forward flux/interface hooks; `run_adaptive*` resolve flux edges. Action: rebuild the node rather than edit such a leaf; fix nodes `params_effective` now fails.
 - **`LBMNode`'s Zou-He pressure faces impose the pressure they are given** (MADD-ANO-020, every release): the face carried
   `p/cs2 + S_K` (+15%), a pressure-driven channel 0.58-0.80 of the imposed drop; pressure-driven results change, re-run them.
   `outlet_pressure_avg` reads the runtime wall mask; `LBMPipeNode` gains non-trainable `initial_rho_liquid`/`initial_rho_gas`.
@@ -569,6 +575,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-021, 022, 023 (open)**: a gradient through a state-triggered branch omits the event time (BallNode's bounce:
+  exactly 0 in the drop height); a mapped edge on a grid derived from a trainable parameter keeps its constructor
+  geometry when that parameter is calibrated; the FMU TCP bridge authenticates no caller. Workarounds in the registry
 - **MADD-ANO-020 is resolved in this release**: `LBMNode`'s pressure BC imposed the wrong face density since 0.1.0 (see `### Fixed`)
 - **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every

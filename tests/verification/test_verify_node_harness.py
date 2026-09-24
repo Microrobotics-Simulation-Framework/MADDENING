@@ -513,3 +513,157 @@ def test_the_constructor_value_probe_restores_the_node():
     before = dict(node.params)
     verify_node(node, bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
     assert node.params == before
+
+
+# ---------------------------------------------------------------------------
+# params_effective: each path on its own, per element, by value
+# ---------------------------------------------------------------------------
+#
+# The release audit planted five nodes on which an injected leaf has no
+# effect (or half its effect) somewhere the graph or an integrator reads it,
+# and one correct node; the previous check passed all five and failed the
+# sixth.  ``_Osc`` is the correct reference every fixture perturbs:
+# dx = v, dv = -k (x - x0) - c v + g, flux F = -k (x - x0).
+
+from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec  # noqa: E402
+
+_OSC_BOUNDS = {"x": (-1.0, 1.0), "v": (-1.0, 1.0)}
+
+
+class _Osc(SimulationNode):
+    def __init__(self, name="n", timestep=1e-2, k=4.0, c=0.3, x0=0.5, g=(1.0, 2.0, 3.0)):
+        super().__init__(name, timestep, k=k, c=c, x0=x0, g=list(g))
+        self._k_cache = k
+
+    def initial_state(self):
+        return {"x": jnp.zeros(3, jnp.float32), "v": jnp.zeros(3, jnp.float32)}
+
+    def _p(self, params):
+        return self.params if params is None else {**self.params, **params}
+
+    def _rhs(self, s, p, k=None, g=None):
+        k = p["k"] if k is None else k
+        g = jnp.asarray(p["g"], jnp.float32) if g is None else g
+        return {"x": s["v"], "v": -k * (s["x"] - p["x0"]) - p["c"] * s["v"] + g}
+
+    def update(self, s, bi, dt, *, params=None):
+        d = self._rhs(s, self._p(params))
+        return {f: s[f] + dt * d[f] for f in s}
+
+    def derivatives(self, s, bi, *, params=None):
+        return self._rhs(s, self._p(params))
+
+    def boundary_flux_spec(self):
+        return {"F": BoundaryFluxSpec(shape=(3,))}
+
+    def compute_boundary_fluxes(self, s, bi, dt, *, params=None):
+        p = self._p(params)
+        return {"F": -p["k"] * (s["x"] - p["x0"])}
+
+
+class _UpdateIgnoresKFluxReadsIt(_Osc):
+    """The flux reads the injected ``k`` and used to mask the dead update."""
+    def update(self, s, bi, dt, *, params=None):
+        d = self._rhs(s, self._p(params), k=self.params["k"])
+        return {f: s[f] + dt * d[f] for f in s}
+
+
+class _DerivativesReadCachedK(_Osc):
+    """A copy made in ``__init__``: varying ``node.params`` cannot see it."""
+    def derivatives(self, s, bi, *, params=None):
+        return self._rhs(s, self._p(params), k=self._k_cache)
+
+
+class _VectorLeafPartlyIgnored(_Osc):
+    """``g[0]`` injected, ``g[1:]`` from ``self.params``: some element acts."""
+    def update(self, s, bi, dt, *, params=None):
+        p = self._p(params)
+        g = jnp.concatenate([jnp.asarray(p["g"], jnp.float32)[:1],
+                             jnp.asarray(self.params["g"][1:], jnp.float32)])
+        d = self._rhs(s, p, g=g)
+        return {f: s[f] + dt * d[f] for f in s}
+
+
+class _HalfAndHalf(_Osc):
+    """Non-zero gradient, half the effect."""
+    def update(self, s, bi, dt, *, params=None):
+        p = self._p(params)
+        d = self._rhs(s, p, k=0.5 * p["k"] + 0.5 * self.params["k"])
+        return {f: s[f] + dt * d[f] for f in s}
+
+
+class _InterfaceCorrectionIgnoresK(_Osc):
+    """The interface correction was never probed."""
+    def interface_dof_indices(self):
+        return {"x_bc": ("x", 0)}
+
+    def boundary_input_spec(self):
+        return {"x_bc": BoundaryInputSpec(shape=())}
+
+    def compute_interface_correction(self, pre, bi, dt, *, params=None):
+        k = self.params["k"]
+        return {"x": [(0, pre["x"][0] + dt * pre["v"][0] - dt * dt * k * pre["x"][0])]}
+
+
+class _ThresholdInDerivatives(_Osc):
+    """CORRECT: ``x0`` reaches ``derivatives`` only through a comparison
+    (a dead zone), so its gradient there is zero -- and the previous check
+    called that a ``self.params`` read."""
+    def derivatives(self, s, bi, *, params=None):
+        p = self._p(params)
+        on = (s["x"] > p["x0"]).astype(jnp.float32)
+        return {"x": s["v"],
+                "v": -p["k"] * s["x"] * on - p["c"] * s["v"] + jnp.asarray(p["g"], jnp.float32)}
+
+
+def _effective(node, **kw):
+    return verify_node(node, _OSC_BOUNDS, checks=["params_consistent", "params_effective"],
+                       max_examples=30, derandomize=True, **kw)
+
+
+def test_the_correct_oscillator_passes_and_every_path_is_named():
+    res = _effective(_Osc())
+    assert res["params_consistent"].passed and res["params_effective"].passed, res
+    assert res["params_effective"].detail.startswith(
+        "paths checked: update, compute_boundary_fluxes, derivatives")
+
+
+@pytest.mark.parametrize("cls, expected", [
+    pytest.param(_UpdateIgnoresKFluxReadsIt, "update() reads ['k'] from self.params",
+                 id="update-dead-masked-by-flux"),
+    pytest.param(_DerivativesReadCachedK, "derivatives() ignores the injected ['k']",
+                 id="cached-in-init"),
+    pytest.param(_VectorLeafPartlyIgnored, "update() reads ['g[1]', 'g[2]'] from self.params",
+                 id="vector-leaf-per-element"),
+    pytest.param(_HalfAndHalf, "update() does not apply the injected ['k']",
+                 id="half-injected-half-self"),
+    pytest.param(_InterfaceCorrectionIgnoresK,
+                 "compute_interface_correction() reads ['k'] from self.params",
+                 id="interface-correction"),
+])
+def test_an_injected_leaf_that_does_not_act_somewhere_is_named(cls, expected):
+    """``params_consistent`` passes every one of them -- at the
+    constructor value both spellings read the same number."""
+    res = _effective(cls())
+    assert res["params_consistent"].passed
+    assert res["params_effective"].failed, res["params_effective"]
+    assert expected in res["params_effective"].detail, res["params_effective"].detail
+
+
+def test_a_leaf_read_only_through_a_comparison_is_not_a_self_params_read():
+    res = _effective(_ThresholdInDerivatives())
+    assert res["params_effective"].passed, res["params_effective"].detail
+
+
+def test_the_half_and_half_verdict_reports_the_fraction_missed():
+    detail = _effective(_HalfAndHalf())["params_effective"].detail
+    assert "0.50 of the perturbation's own effect" in detail
+
+
+def test_the_value_probes_restore_the_node():
+    """Both the in-place swap and the rebuild leave the node as it was."""
+    for cls in (_DerivativesReadCachedK, _VectorLeafPartlyIgnored):
+        node = cls()
+        before = {k: (list(v) if isinstance(v, list) else v) for k, v in node.params.items()}
+        _effective(node)
+        assert node.params == before

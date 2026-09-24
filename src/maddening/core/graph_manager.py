@@ -19,7 +19,6 @@ import math
 import os
 import warnings
 from collections import defaultdict
-import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, Sequence, cast
 
@@ -58,7 +57,7 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import SimulationNode, _signature_takes_params
+from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.core.params import (
     ParamSpec,
     check_bounds as _check_bounds,
@@ -120,17 +119,17 @@ class _StepPlan:
 def _correction_accepts_params(node: SimulationNode) -> bool:
     """Does the graph pass ``params=`` to ``compute_interface_correction``?
 
-    The one signature rule, :func:`~maddening.core.node._signature_takes_params`:
+    The one params rule, :func:`~maddening.core.node._method_accepts_params`:
     an explicit ``params`` keyword *or* a ``**kwargs`` that would forward
-    it.  Until 0.4.0 this probe accepted only the explicit keyword, so a
+    it, asked through the node's own ``accepts_params`` probe when it has
+    one.  Until 0.4.0 this probe accepted only the explicit keyword, so a
     ``def compute_interface_correction(self, *args, **kwargs)`` override
     that forwards to ``super()`` was called without ``params`` and
     corrected the interface cells from the constructor's constants while
     ``update`` used the calibrated ones -- and the verification battery,
     which already read the shared rule, disagreed with the graph.
     """
-    fn = getattr(node, "compute_interface_correction", None)
-    return fn is not None and _signature_takes_params(fn)
+    return _method_accepts_params(node, "compute_interface_correction")
 
 
 def _flux_accepts_params(node: SimulationNode) -> bool:
@@ -140,8 +139,7 @@ def _flux_accepts_params(node: SimulationNode) -> bool:
     ``**kwargs``-forwarding flux producer delivered the constructor's
     flux on every flux edge.
     """
-    fn = getattr(node, "compute_boundary_fluxes", None)
-    return fn is not None and _signature_takes_params(fn)
+    return _method_accepts_params(node, "compute_boundary_fluxes")
 
 
 def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
@@ -154,15 +152,16 @@ def _node_fluxes(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
 
 
 def _update_accepts_params(node: SimulationNode) -> bool:
-    probe = getattr(node, "accepts_params", None)
-    if callable(probe):
-        return bool(probe())
-    # Duck-typed node objects that don't subclass SimulationNode.
-    try:
-        sig = inspect.signature(node.update)
-    except (TypeError, ValueError):
-        return False
-    return "params" in sig.parameters
+    """Does the graph pass ``params=`` to ``update``?
+
+    :func:`~maddening.core.node._method_accepts_params`, like every other
+    params probe.  Its duck-typed fallback used to accept only an
+    explicit ``params`` keyword, so a node object that does not subclass
+    :class:`SimulationNode` and forwards ``**kwargs`` was left out of
+    ``gm.params`` while the verification battery and a wrapped copy of
+    the same node disagreed about it.
+    """
+    return _method_accepts_params(node, "update")
 
 
 def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
@@ -3224,6 +3223,170 @@ def _build_adaptive_scan(
     return jax.jit(adaptive_scan)
 
 
+# ------------------------------------------------------------------
+# Which graph parameters the compiled step reads (structural liveness)
+# ------------------------------------------------------------------
+
+def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
+    """Which inputs of ``jaxpr`` can reach one of its live outputs.
+
+    A backward walk over the equations.  It is *conservative*: an
+    equation whose structure it does not know marks every input live as
+    soon as one output is, and an equation with effects keeps its inputs
+    whatever happens to its outputs.  So an input reported dead is
+    genuinely never read on the way to a live output; an input reported
+    live may still be unused.  The graph uses the dead answer to refuse a
+    write, which is the direction a conservative answer can only make
+    rarer, never wrong.
+
+    The call-like primitives in :data:`_CALL_PRIMITIVES` (``jit`` /
+    ``pjit``, ``closed_call``, ``remat``, ``shard_map``, ...) are followed
+    into 1:1; ``while`` and ``scan`` are solved to a fixed point over their
+    carries; ``cond`` takes the union of its branches; anything else is
+    "every input live".  ``custom_jvp_call`` / ``custom_vjp_call`` are not followed
+    into, because the derivative rule may read an input the primal does
+    not.
+    """
+    from jax.extend.core import Literal
+
+    live = {
+        v for v, keep in zip(jaxpr.outvars, live_out)
+        if keep and not isinstance(v, Literal)
+    }
+    for eqn in reversed(jaxpr.eqns):
+        outs = [o in live for o in eqn.outvars]
+        effectful = bool(eqn.effects)
+        if not any(outs) and not effectful:
+            continue
+        for v, keep in zip(eqn.invars, _live_eqn_inputs(eqn, outs, effectful)):
+            if keep and not isinstance(v, Literal):
+                live.add(v)
+    return [v in live for v in jaxpr.invars]
+
+
+def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
+    """``_live_jaxpr_inputs`` for one equation; see there."""
+    n_in = len(eqn.invars)
+    name = eqn.primitive.name
+    params = eqn.params
+    everything = [True] * n_in
+    if name.startswith("custom_"):
+        return everything
+    try:
+        if name == "while":
+            cond = getattr(params["cond_jaxpr"], "jaxpr", params["cond_jaxpr"])
+            body = getattr(params["body_jaxpr"], "jaxpr", params["body_jaxpr"])
+            cn, bn = params["cond_nconsts"], params["body_nconsts"]
+            cond_in = _live_jaxpr_inputs(cond, [True])
+            carry = [a or b for a, b in zip(outs, cond_in[cn:])]
+            while True:
+                body_in = _live_jaxpr_inputs(body, carry)
+                grown = [a or b for a, b in zip(carry, body_in[bn:])]
+                if grown == carry:
+                    break
+                carry = grown
+            out = cond_in[:cn] + body_in[:bn] + carry
+        elif name == "scan":
+            body = getattr(params["jaxpr"], "jaxpr", params["jaxpr"])
+            if "num_consts" in params:
+                nc, ncar = params["num_consts"], params["num_carry"]
+            else:
+                # jaxlib 0.11 describes the operands as a flat tree of three
+                # groups, (consts, carry, xs); ``len`` of a group is its
+                # number of flat inputs.  Checked against the operand count
+                # so a changed layout falls back to "everything live".
+                groups = getattr(params["ft_in"], "elts", None)
+                if groups is None or len(groups) != 3:
+                    return everything
+                nc, ncar = len(groups[0]), len(groups[1])
+                if nc + ncar + len(groups[2]) != n_in:
+                    return everything
+            carry, ys = list(outs[:ncar]), list(outs[ncar:])
+            while True:
+                body_in = _live_jaxpr_inputs(body, carry + ys)
+                grown = [a or b for a, b in zip(carry, body_in[nc:nc + ncar])]
+                if grown == carry:
+                    break
+                carry = grown
+            out = body_in[:nc] + carry + body_in[nc + ncar:]
+        elif name == "cond":
+            ops = [False] * (n_in - 1)
+            for branch in params["branches"]:
+                branch_in = _live_jaxpr_inputs(getattr(branch, "jaxpr", branch), outs)
+                if len(branch_in) != n_in - 1:
+                    return everything
+                ops = [a or b for a, b in zip(ops, branch_in)]
+            out = [True] + ops
+        elif name in _CALL_PRIMITIVES:
+            subs = [
+                getattr(params[key], "jaxpr", params[key])
+                for key in ("jaxpr", "call_jaxpr", "fun_jaxpr") if key in params
+            ]
+            if len(subs) != 1:
+                return everything
+            sub = subs[0]
+            if len(sub.invars) != n_in or len(sub.outvars) != len(outs):
+                return everything
+            out = _live_jaxpr_inputs(sub, outs)
+        else:
+            return everything
+    except (KeyError, AttributeError, TypeError):
+        return everything
+    return out if len(out) == n_in else everything
+
+
+#: Primitives that call their one sub-jaxpr once, operands in order: the
+#: walk follows them 1:1.  An allow-list, not "any equation with one
+#: sub-jaxpr of matching arity": a loop-like primitive read as a single call
+#: under-approximates what its carries read (a value that reaches a live
+#: output only on the second iteration looks dead), which is the direction
+#: that would refuse a write the step does read.
+_CALL_PRIMITIVES = frozenset({
+    "pjit", "jit", "closed_call", "core_call", "named_call",
+    "remat", "remat2", "checkpoint", "shard_map", "xla_call", "xla_pmap",
+})
+
+
+def _param_leaves_read(step_fn: Callable, state: dict, ext: dict, params: dict) -> set:
+    """``{(owner, key)}`` of ``params["nodes"]`` that ``step_fn`` can read.
+
+    Traces ``step_fn(state, ext, params)`` once (no compile, nothing
+    executed) and runs :func:`_live_jaxpr_inputs` over the result, every
+    output live.  A leaf of a nested pytree entry counts as read when any
+    of its sub-leaves is.
+    """
+    args = (state, ext, params)
+    closed = jax.make_jaxpr(step_fn)(*args)
+    paths = [p for p, _ in jax.tree_util.tree_flatten_with_path(args)[0]]
+    invars = closed.jaxpr.invars
+    if len(paths) != len(invars):
+        raise ValueError("step inputs do not line up with the traced jaxpr")
+    live = _live_jaxpr_inputs(closed.jaxpr, [True] * len(closed.jaxpr.outvars))
+    reads: set = set()
+    for path, keep in zip(paths, live):
+        if (keep and len(path) >= 4 and getattr(path[0], "idx", None) == 2
+                and getattr(path[1], "key", None) == "nodes"):
+            reads.add((path[2].key, path[3].key))
+    return reads
+
+
+def _leaf_values_equal(a, b) -> bool:
+    la, lb = jax.tree.leaves(a), jax.tree.leaves(b)
+    if len(la) != len(lb):
+        return False
+    for x, y in zip(la, lb):
+        xa, ya = np.asarray(x), np.asarray(y)
+        if xa.shape != ya.shape:
+            return False
+        try:
+            if not np.array_equal(xa, ya, equal_nan=True):
+                return False
+        except TypeError:
+            if not np.array_equal(xa, ya):
+                return False
+    return True
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -3275,6 +3438,16 @@ class GraphManager:
         self.params: dict = {"nodes": {}, "mappings": {}}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
+        # The raw (uncounted, unjitted) step of the last compile, for the
+        # one trace ``_params_read_by_step`` takes; leaves of ``params``
+        # already checked by ``_refuse_baked_param_writes``, by identity;
+        # and that trace's answer, keyed by compile generation.
+        self._raw_step_fn: Optional[Callable] = None
+        self._params_verified: dict[str, dict[str, Any]] = {}
+        self._step_reads: Optional[tuple[int, Optional[set]]] = None
+        # Per node: the keys its own hooks read with every declared
+        # boundary input supplied, keyed by compile generation.
+        self._node_reads: dict[str, tuple[int, set]] = {}
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -3398,6 +3571,9 @@ class GraphManager:
         """Discard live/calibrated values: ``gm.params`` becomes the
         constructor snapshot again (no recompile needed)."""
         self.params = self._snapshot_params()
+        self._params_verified = {
+            owner: dict(leaves) for owner, leaves in self.params.get("nodes", {}).items()
+        }
 
     def _params_or_default(self, params) -> dict:
         """``gm.params`` when ``params`` is None; otherwise ``params``
@@ -3410,6 +3586,7 @@ class GraphManager:
             # it; coerce such leaves in place to the leaf dtype recorded
             # at compile time.
             self._coerce_params_leaves(self.params)
+            self._refuse_baked_param_writes(self.params, live=True)
             return self.params
         if not isinstance(params, dict):
             return params                  # let _validate_params complain
@@ -3434,6 +3611,16 @@ class GraphManager:
         for k, v in params.items():
             if k not in ("nodes", "mappings"):
                 out[k] = v
+        # The live leaves this completion carries over are checked as live
+        # ones; the caller's own leaves are not refused (see
+        # _refuse_baked_param_writes for why).
+        self._refuse_baked_param_writes(
+            {"nodes": {o: {k: v for k, v in leaves.items()
+                           if self.params.get("nodes", {}).get(o, {}).get(k) is v}
+                       for o, leaves in out.get("nodes", {}).items()
+                       if isinstance(leaves, dict)}},
+            live=True,
+        )
         return _strong_typed(out)
 
     def _validate_params(self, params: dict) -> None:
@@ -3523,6 +3710,211 @@ class GraphManager:
                     f"{sorted(unknown)}; the mapping exposes {sorted(known)}"
                 )
             self._check_param_shapes("mappings", key, weights)
+
+    # ------------------------------------------------------------------
+    # A write to a leaf the compiled step cannot read is refused
+    # ------------------------------------------------------------------
+
+    def _params_read_by_step(self) -> Optional[set]:
+        """``{(node, key)}`` of ``params["nodes"]`` the compiled step reads,
+        or ``None`` when that cannot be told (no compiled step, a dirty
+        graph, a step that does not trace).
+
+        One trace of the step per compile, taken lazily: only a leaf whose
+        value differs from its node's asks.  See :func:`_param_leaves_read`.
+        """
+        gen = self._compile_generation
+        cached = self._step_reads
+        if cached is not None and cached[0] == gen:
+            return cached[1]
+        reads: Optional[set] = None
+        step_fn = self._raw_step_fn
+        if step_fn is not None and not self._dirty:
+            try:
+                with warnings.catch_warnings():
+                    # A node that warns at trace time warned on the real
+                    # trace already; this one is bookkeeping.
+                    warnings.simplefilter("ignore")
+                    reads = _param_leaves_read(
+                        step_fn, self._state, self._default_external_inputs(),
+                        self.params,
+                    )
+            except Exception:  # noqa: BLE001 - the real step reports it
+                # Not cached: a pytree the step refuses (a stray key) is
+                # the step's to report, and the next check asks again.
+                return None
+        self._step_reads = (gen, reads)
+        return reads
+
+    def _baked_leaf_reason(self, owner: str, key: str) -> Optional[str]:
+        """Why the compiled step cannot read ``params["nodes"][owner][key]``,
+        or ``None`` when it can (or that cannot be told).
+
+        Two sources, declared first: a parameter a
+        :meth:`~maddening.core.node.SimulationNode.static_data_deps` entry
+        names is baked into that static when the node is constructed -- the
+        step reads the static -- and a parameter that neither the traced
+        step nor the node's own hooks (with every declared boundary input
+        supplied) have a path from: an ``initial_*`` entry, which only
+        ``initial_state()`` reads, or geometry a node consumed in
+        ``__init__``.  A parameter only *this* graph does not exercise (a
+        ball's ``elasticity`` without a table edge) is not refused.
+        """
+        spec = self._nodes.get(owner)
+        if spec is None:
+            return None
+        # `Callable[..., Any] | None`, not `Any`: `callable()` narrows a bare
+        # `Any` to `(...) -> object`, whose result has no `.items()`.
+        deps: Callable[..., Any] | None = getattr(spec.node, "static_data_deps", None)
+        declared = (deps() if callable(deps) else None) or {}
+        statics = sorted(s for s, names in declared.items() if key in names)
+        if statics:
+            return (
+                f"{type(spec.node).__name__} bakes it into static_data "
+                f"{statics} when the node is constructed (static_data_deps): "
+                "the compiled step reads the static, not the parameter"
+            )
+        reads = self._params_read_by_step()
+        if reads is None or (owner, key) in reads:
+            return None
+        # Dead in *this* step is not enough: a ball's ``elasticity`` is read
+        # only when a ``table_position`` edge exists, and a value carried in
+        # gm.params for it is latent, not ignored -- add the edge and the
+        # carried value is the one used, which is what to_dict() records.
+        # Refused only when the node's own hooks cannot read it either, with
+        # every boundary input it declares supplied.
+        node_reads = self._node_param_reads(owner)
+        if node_reads is None or key in node_reads:
+            return None
+        return (
+            "the node cannot read it: no operation of the compiled step takes "
+            f"it as an input, and {type(spec.node).__name__}'s own update / "
+            "flux / interface-correction hooks do not either with every "
+            "boundary input they declare supplied (an initial condition, "
+            "which only initial_state() reads, from the node; or a value the "
+            "node consumed when it was constructed)"
+        )
+
+    def _node_param_reads(self, owner: str) -> Optional[set]:
+        """Keys of ``params["nodes"][owner]`` the node's own hooks read.
+
+        One trace of ``update`` (and of ``compute_boundary_fluxes`` /
+        ``compute_interface_correction`` where the graph passes them
+        ``params``) with a zero value for every input
+        ``boundary_input_spec()`` declares, walked like the step (see
+        :func:`_live_jaxpr_inputs`).  ``None`` when the hooks do not trace
+        that way (an input the spec does not declare, say): then nothing
+        is refused on this ground.  Cached per compile.
+        """
+        gen = self._compile_generation
+        cached = self._node_reads.get(owner)
+        if cached is not None and cached[0] == gen:
+            return cached[1]
+        spec = self._nodes[owner]
+        node = spec.node
+
+        def hooks(state, bi, p):
+            outs = [_node_update(spec, state, bi, spec.timestep, p)]
+            if type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes:
+                outs.append(_node_fluxes(spec, state, bi, spec.timestep, p))
+            iface = getattr(node, "interface_dof_indices", None)
+            if callable(iface) and iface() and _correction_accepts_params(node):
+                outs.append(node.compute_interface_correction(
+                    state, bi, spec.timestep, params=p))
+            # Only traced values can depend on an input; an index in a
+            # correction list is a Python int.
+            return [x for x in jax.tree.leaves(outs) if isinstance(x, jax.core.Tracer)]
+
+        try:
+            declared = node.boundary_input_spec() or {}
+            bi = {
+                name: jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32)
+                for name, bspec in declared.items()
+            }
+            leaves = self.params["nodes"][owner]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                args = (self._state[owner], bi, leaves)
+                closed = jax.make_jaxpr(hooks)(*args)
+            paths = [pth for pth, _ in jax.tree_util.tree_flatten_with_path(args)[0]]
+            if len(paths) != len(closed.jaxpr.invars):
+                return None
+            live = _live_jaxpr_inputs(closed.jaxpr, [True] * len(closed.jaxpr.outvars))
+        except Exception:  # noqa: BLE001 - not traceable this way: refuse nothing
+            return None
+        reads = {
+            pth[1].key for pth, keep in zip(paths, live)
+            if keep and len(pth) >= 2 and getattr(pth[0], "idx", None) == 2
+        }
+        self._node_reads[owner] = (gen, reads)
+        return reads
+
+    def _refuse_baked_param_writes(self, tree: Any, *, live: bool) -> None:
+        """Refuse a leaf that differs from its node's value but that the
+        compiled step cannot read.
+
+        Such a write used to be accepted by ``gm.params``, ``check_params``
+        and every run method, ignored by the step, and then serialised by
+        :meth:`to_dict` -- so a reloaded graph ran a different model from
+        the one that produced the numbers (``HeatNode.grid_points``, 0.093 K
+        after one step; ``WaveletAdaptiveNode.mass``; the ``initial_*``
+        leaves).  ``docs/user_guide/parameters.md`` promises the opposite:
+        "not a silently ignored leaf".
+
+        Only leaves of :attr:`params` itself are refused (``live=True``): a
+        leaf that passes is remembered by identity, so a steady run pays one
+        ``is`` per leaf per call and a value is compared only when a new
+        object was written.  A caller's explicit ``params=`` pytree is not
+        refused -- it is never serialised, and a leaf the step ignores may
+        be one the caller's own code consumes (a residual that seeds the
+        initial state from ``initial_velocity``, say); the live leaves a
+        partial pytree is completed from are checked as live ones.  A
+        traced leaf (a fit, an FIM) cannot be compared and is left alone.
+        ``live=False`` checks without remembering.  The reference is the
+        node's own
+        :meth:`~maddening.core.node.SimulationNode.params_pytree`, so a write
+        that also reaches the node (``PUT /graph/params`` writes both) is not
+        refused.
+        """
+        nodes = tree.get("nodes") if isinstance(tree, dict) else None
+        if not isinstance(nodes, dict):
+            return
+        verified = self._params_verified
+        ctor_cache: dict[str, dict] = {}
+        for owner, leaves in nodes.items():
+            spec = self._nodes.get(owner)
+            if spec is None or not spec.accepts_params or not isinstance(leaves, dict):
+                continue            # _validate_params names these
+            seen = verified.get(owner, {})
+            for key, value in leaves.items():
+                if seen.get(key) is value:
+                    continue
+                if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(value)):
+                    continue
+                if owner not in ctor_cache:
+                    ctor_cache[owner] = spec.node.params_pytree()
+                ctor = ctor_cache[owner].get(key)
+                if ctor is None or not _leaf_values_equal(value, ctor):
+                    reason = self._baked_leaf_reason(owner, key)
+                    if reason is not None:
+                        where = "gm.params" if live else "params"
+                        shown = ""
+                        if ctor is not None and np.size(ctor) <= 8:
+                            shown = " " + np.array2string(
+                                np.asarray(ctor), precision=7, separator=", ")
+                        raise ValueError(
+                            f"{where}['nodes'][{owner!r}][{key!r}] differs from "
+                            f"the node's own value{shown}, but {reason}.  The value "
+                            "would be ignored by every run and then written out "
+                            "by to_dict() / save_state(), so a reloaded graph "
+                            "would run a different model from the one that "
+                            "produced these results.  To change it, rebuild the "
+                            "node with the new value (remove_node, then "
+                            "add_node); to drop the edit, restore the leaf or "
+                            "call gm.reset_params()."
+                        )
+                if live:
+                    verified.setdefault(owner, {})[key] = value
 
     # ------------------------------------------------------------------
     # ParamSpec: trainable mask, bounds, reparametrisation
@@ -4633,7 +5025,11 @@ class GraphManager:
         # edge or an external input must not discard a fit); anything
         # that no longer fits is dropped with a warning.  ``reset_params``
         # restores the constructor values on purpose.
-        params = self._merge_live_params(self._snapshot_params(), self.params)
+        fresh = self._snapshot_params()
+        # Which leaves are still the constructor snapshot after the merge:
+        # those need no baked-write check (see _refuse_baked_param_writes).
+        fresh_leaves = {o: dict(v) for o, v in fresh.get("nodes", {}).items()}
+        params = self._merge_live_params(fresh, self.params)
         params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
@@ -4783,6 +5179,14 @@ class GraphManager:
         # (weak types, dtypes, params structure) keeps changing.
         self._n_traces = 0
         self._compiled_step = compiled_step
+        self._raw_step_fn = step_fn
+        self._step_reads = None
+        self._node_reads = {}
+        self._params_verified = {
+            owner: {k: v for k, v in leaves.items()
+                    if fresh_leaves.get(owner, {}).get(k) is v}
+            for owner, leaves in plan.params.get("nodes", {}).items()
+        }
         self._static_data_hashes = static_data_hashes
 
         self._dirty = False
@@ -6411,18 +6815,46 @@ class GraphManager:
 
         params_snapshot = self.params
 
+        from maddening.core.node import SimulationNode as _SimBase
+        flux_producers = {
+            nn for nn, sp in nodes_dict.items()
+            if type(sp.node).compute_boundary_fluxes
+            is not _SimBase.compute_boundary_fluxes
+        }
+
         def _resolve_and_update(node_name, new_state, full_state, ext, dt,
-                                node_params, force_forward_edges=None):
+                                node_params, flux_state,
+                                force_forward_edges=None):
             boundary_inputs: dict[str, Any] = {}
             for edge in edges_by_target[node_name]:
-                if edge in back_edge_set and (
+                back = edge in back_edge_set and (
                     force_forward_edges is None
                     or edge not in force_forward_edges
-                ):
-                    src_state = full_state
+                )
+                src_state = full_state if back else new_state
+                src_dict = src_state.get(edge.source_node, {})
+                if edge.source_field in src_dict:
+                    value = src_dict[edge.source_field]
+                elif (not back and edge.source_field
+                      in flux_state.get(edge.source_node, {})):
+                    # A flux edge, resolved as the fixed-step graph
+                    # resolves it: from the fluxes the source node produced
+                    # earlier in this step.  This used to be a bare
+                    # ``KeyError`` naming the field.
+                    value = flux_state[edge.source_node][edge.source_field]
                 else:
-                    src_state = new_state
-                value = src_state[edge.source_node][edge.source_field]
+                    raise ValueError(
+                        f"run_adaptive / run_adaptive_scan cannot resolve edge "
+                        f"{edge.key!r}: {edge.source_field!r} is not a state "
+                        f"field of {edge.source_node!r}"
+                        + (" and it is a back edge, whose flux would have to "
+                           "come from the previous step's boundary inputs, "
+                           "which the adaptive step does not keep"
+                           if back else
+                           ", nor a flux it produced earlier in the step")
+                        + ".  Use step / run_scan, or feed the node from a "
+                        "state field."
+                    )
                 value = _apply_edge(edge, value, node_params)
                 if edge.additive and edge.target_field in boundary_inputs:
                     boundary_inputs[edge.target_field] = (
@@ -6438,10 +6870,18 @@ class GraphManager:
                         boundary_inputs[ei.target_field] = node_ext[ei.target_field]
 
             spec = nodes_dict[node_name]
-            return _node_update(
+            new_node_state = _node_update(
                 spec, new_state[node_name], boundary_inputs, dt,
                 node_params.nodes.get(node_name),
             )
+            if node_name in flux_producers:
+                fluxes = _node_fluxes(
+                    spec, new_node_state, boundary_inputs, dt,
+                    node_params.nodes.get(node_name),
+                )
+                if fluxes:
+                    flux_state[node_name] = fluxes
+            return new_node_state
 
         def dt_step_fn(state, external_inputs, dt, params=None):
             if params is None:
@@ -6452,6 +6892,8 @@ class GraphManager:
                 params.get("nodes", {}), params.get("mappings", {}),
             )
             new_state = {k: v for k, v in state.items()}
+            # Per call, not per build: a flux is a value of *this* step.
+            flux_state: dict[str, dict] = {}
 
             if has_coupling:
                 for block in blocks:
@@ -6459,7 +6901,7 @@ class GraphManager:
                         nn = block[1]
                         new_state[nn] = _resolve_and_update(
                             nn, new_state, state, external_inputs, dt,
-                            node_params,
+                            node_params, flux_state,
                         )
                     else:
                         _, group, group_schedule = block
@@ -6479,7 +6921,7 @@ class GraphManager:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(
                         nn, new_state, state, external_inputs, dt,
-                        node_params,
+                        node_params, flux_state,
                     )
 
             return new_state
@@ -7190,6 +7632,9 @@ class GraphManager:
         """
         from maddening.core.simulation.checkpoint import save_state
         self._recover_from_escaped_tracers()
+        # A checkpoint stores gm.params: a leaf the step cannot read would
+        # be restored as if it had produced the saved state.
+        self._refuse_baked_param_writes(self.params, live=True)
         return save_state(self, path)
 
     def load_state(self, path) -> None:

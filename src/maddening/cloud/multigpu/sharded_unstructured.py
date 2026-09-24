@@ -37,7 +37,6 @@ in v0.3.0 — surface a breaking change here, not in v0.4.0.
 from __future__ import annotations
 
 import functools
-import inspect
 from typing import Any, Optional
 
 import jax
@@ -56,7 +55,7 @@ from maddening.cloud.multigpu.halo_unstructured import (
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode
+from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.core.static_data import StaticArray
 
 
@@ -201,6 +200,16 @@ class ShardedUnstructuredNode(SimulationNode):
                 f"'ppermute', got {exchange!r}"
             )
         self._inner = node
+        # Graph parameter contract: the wrapper is a params node exactly
+        # when the inner ``update_padded`` -- what the shard_map calls --
+        # would receive ``params``.  The one rule (explicit keyword or
+        # ``**kwargs``, asked through the inner node's own probe), read
+        # once: this probe used to accept only the explicit keyword, so an
+        # inner ``update_padded(..., **kwargs)`` that ``ShardedStencilNode``
+        # calibrates silently left ``gm.params`` here, and
+        # ``step(params=...)`` refused it with a false "takes no 'params'
+        # keyword".
+        self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         self._mesh = mesh
         self._mesh_axis = mesh_axis
         self._layout = layout
@@ -232,6 +241,32 @@ class ShardedUnstructuredNode(SimulationNode):
 
     def boundary_input_spec(self):
         return self._inner.boundary_input_spec()
+
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        """Refuse, by name, an inner node that declares interface DOFs.
+
+        The graph corrects a coupled interface by writing
+        ``state[field].at[index]``; here the state is in partition layout
+        (``n_devices * n_local_max`` rows, cells permuted and padded), so
+        the inner node's global ``index`` names a different cell, and its
+        ``compute_interface_correction`` reads a state it was not written
+        for.  The base-class answer, ``{}``, left the interface silently
+        uncorrected.  An inner node without interface DOFs is unaffected.
+        ``ShardedPointwiseNode`` and ``ShardedStencilNode`` keep the
+        inner node's global view and forward both hooks.
+        """
+        iface = self._inner.interface_dof_indices()
+        if iface:
+            raise NotImplementedError(
+                f"ShardedUnstructuredNode {self.name!r} cannot forward "
+                f"{type(self._inner).__name__}.interface_dof_indices() "
+                f"{sorted(iface)}: its state is in partition layout, where "
+                "the inner node's global cell indices name different cells, "
+                "so the coupled interface correction would be applied to the "
+                "wrong cells.  Couple the unwrapped node, or shard it with "
+                "ShardedStencilNode, which keeps the global view."
+            )
+        return {}
 
     def initial_state(self) -> dict:
         """Materialise the inner node's initial state onto the mesh.
@@ -286,13 +321,13 @@ class ShardedUnstructuredNode(SimulationNode):
     def accepts_params(self, *, method: str = "update") -> bool:
         if method != "update":
             return super().accepts_params(method=method)
-        return "params" in inspect.signature(self._inner.update_padded).parameters
+        return self._inner_accepts_params
 
     def params_pytree(self) -> dict:
-        return self._inner.params_pytree() if self.accepts_params() else {}
+        return self._inner.params_pytree() if self._inner_accepts_params else {}
 
     def param_specs(self) -> dict:
-        return self._inner.param_specs() if self.accepts_params() else {}
+        return self._inner.param_specs() if self._inner_accepts_params else {}
 
     def update(
         self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
@@ -464,7 +499,7 @@ class ShardedUnstructuredNode(SimulationNode):
         integrals = set(inner.domain_integral_fields())
         integral_axes = dict(getattr(inner, 'domain_integral_axes', dict)())
 
-        accepts_params = "params" in inspect.signature(inner.update_padded).parameters
+        accepts_params = self._inner_accepts_params
 
         def _local_update(local_state, local_bi, local_dt, local_static,
                           local_params, *, cell_bi=frozenset()):

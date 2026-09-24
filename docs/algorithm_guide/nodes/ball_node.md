@@ -84,6 +84,7 @@ Recorded as **MADD-ANO-011**.
 4. **No order across a contact**: the restitution law is non-smooth, so the declared order does not apply to a step containing a bounce.
 5. `derivatives()` ignores injected `params` and returns the gravity as float32.
 6. **Scheme/metadata mismatch**: MADD-ANO-011, above.
+7. **Gradients through a bounce omit the contact-time derivative** (MADD-ANO-021). Contact is a per-step branch, so `jax.grad` differentiates the branch the step took and never sees the moment of contact. With $\Delta t = 10^{-3}$, a drop from 1.0 and one bounce before $T = 0.8$ s, $\partial x(T)/\partial h$ is exactly $0$ against the exact $+0.5892$. The clamp pins the position to a constant, and the impact velocity depends on the number of steps the fall took rather than on $h$. $\partial x(T)/\partial |g|$ is $+0.0651$ against $+0.0051$. $\partial x(T)/\partial e$ is right, because the contact time does not depend on $e$. Values are correct to one step of travel ($3 \times 10^{-3}$), and nothing warns. This is a framework limitation shared by every node that branches on its own state (see the node-authoring guide, "Events inside `update()`"). Pinned in `tests/nodes/test_ball_event_gradient.py`.
 
 ## Stability Conditions
 

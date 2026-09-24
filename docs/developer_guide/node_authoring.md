@@ -12,6 +12,54 @@ A MADDENING {term}`node <Node>` is a **{term}`pure function <Pure function>` wra
 - State is **immutable** — return a new dict, don't mutate in place
 - Parameters live in `self.params`, not in state
 
+### Events inside `update()`: what the gradient means
+
+`jnp.where` makes a branch traceable. It does not make it differentiable
+across the switch. If your `update()` tests the node's own state and picks
+a branch — a contact, a threshold, a stick-slip transition, a valve that
+opens, a saturation — then `jax.grad` returns the gradient of the branch
+the step took and **misses the term from the event time**: how the moment
+of the switch moves when a parameter or the initial state moves. Nothing
+warns you. The trajectory looks right, because the values are correct to
+within one step. Only the gradients are wrong. This is a framework
+limitation, recorded as **MADD-ANO-021**, and not a quirk of one node.
+
+What your gradients will do:
+
+- **A clamp gives exactly zero.** If the event sets a state to a constant
+  (pin the position to the surface, zero the velocity on sticking), then
+  everything downstream is flat in the quantities that decided *when* the
+  event happened, within each one-step window, and jumps between windows.
+  `BallNode` is the in-tree instance. The gradient of its post-bounce
+  height with respect to the drop height is exactly `0.0`, against an
+  exact `+0.5892`. A smaller `dt` narrows the windows but does not make
+  the gradient non-zero.
+- **Without a clamp, it is non-zero and wrong.** A parameter that moves
+  the event time gets a gradient that omits that motion. `BallNode`'s
+  gradient with respect to `|gravity|` is about 13 times the exact value.
+- **It is right only for parameters the event time does not depend on.**
+  `BallNode`'s gradient with respect to `elasticity` is correct, because
+  the first contact time does not depend on the restitution coefficient.
+
+A calibration or optimisation through such a node follows these
+gradients: it stalls on a zero, or walks the wrong way. Until event
+localisation lands (an implicit-function-theorem derivative of the event
+time, planned for 0.5.0), do one of the following:
+
+- **Smooth the switch.** Use a penalty or regularised contact force (a
+  stiff spring active below the surface, a `softplus` in place of a hard
+  threshold, a regularised friction law) so that the dynamics are
+  differentiable and the event time is implicit in them. The smoothing
+  length is a modelling choice. Say what it is in the node's `NodeMeta`.
+- **Do not differentiate through the event.** Fit over intervals that
+  contain no switch, or treat the event time as a separate parameter you
+  estimate some other way.
+- **Declare it.** Whichever you choose, add a `NodeMeta.limitations`
+  entry that says what the node's gradients do across its events, and a
+  test that pins it. `tests/nodes/test_ball_event_gradient.py` is the
+  pattern: it has a strict `xfail` against the exact derivative and a
+  plain test that pins today's value.
+
 ## Directory Structure
 
 ```
@@ -618,6 +666,7 @@ python scripts/check_transforms.py
 
 - [ ] `SimulationNode` subclass with `initial_state()` and `update()`
 - [ ] `update()` is JAX-traceable (jit, grad, vmap compatible)
+- [ ] If `update()` branches on the node's own state (contact, threshold, stick-slip), its gradient behaviour across the switch is stated in `NodeMeta.limitations` and pinned by a test ([Events inside `update()`](#events-inside-update-what-the-gradient-means), MADD-ANO-021)
 - [ ] `boundary_input_spec()` overridden (declares expected boundary inputs)
 - [ ] `compute_boundary_fluxes()` overridden if node exposes flux quantities
 - [ ] Additive inputs marked with `coupling_type="additive"` in spec

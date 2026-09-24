@@ -184,10 +184,16 @@ def test_heat_source_sampled_with_declared_shape(args):
 @pytest.mark.parametrize(
     "name, paths, unused",
     [
-        ("spring", "update, derivatives, implicit_residual", None),
-        ("heat", "update, derivatives, implicit_residual", None),
-        ("heat_nonuniform", "update, derivatives, implicit_residual", None),
-        ("heart_pump", "update, derivatives, implicit_residual", None),
+        # Every path is probed on its own: a flux producer's fluxes and a
+        # node with interface DOFs' correction are paths of their own.  The
+        # spring's force has no use for ``mass`` -- reported, not failed.
+        ("spring", "update, compute_boundary_fluxes, derivatives, implicit_residual",
+         "not consumed by compute_boundary_fluxes(): ['mass']"),
+        ("heat", "update, compute_boundary_fluxes, derivatives, implicit_residual, "
+                 "compute_interface_correction", None),
+        ("heat_nonuniform", "update, compute_boundary_fluxes, derivatives, "
+                            "implicit_residual, compute_interface_correction", None),
+        ("heart_pump", "update, compute_boundary_fluxes, derivatives, implicit_residual", None),
         ("rigid_body", "update, derivatives, implicit_residual", None),
         # The collision-free right-hand side has no use for ``elasticity``:
         # reported, not failed -- the case that separates "not consumed"

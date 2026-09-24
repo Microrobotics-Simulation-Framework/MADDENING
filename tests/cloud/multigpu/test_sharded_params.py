@@ -110,6 +110,72 @@ def test_unstructured_wrapper_forwards_params():
                                2 * np.asarray(sharded.gather_global(base)["x"]))
 
 
+def _kwargs_ring_node():
+    from maddening.core.node import SimulationNode
+
+    class KwargsRing(SimulationNode):
+        """``update_padded(**kwargs)`` reading ``params`` out of the kwargs:
+        a spelling the one params rule counts as taking the keyword."""
+
+        def __init__(self, n=16):
+            super().__init__("ring", 0.1, k=2.0)
+            self._n = n
+
+        def initial_state(self):
+            return {"x": jnp.arange(1, self._n + 1, dtype=jnp.float32)}
+
+        def halo_width(self):
+            return {0: 1}
+
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            p = self.params if params is None else {**self.params, **params}
+            return {"x": state["x"] * (1 - dt * p["k"])}
+
+        def update_padded(self, state_padded, boundary_inputs, dt, **kwargs):
+            p = {**self.params, **(kwargs.get("params") or {})}
+            return {"x": state_padded["x"] * (1 - dt * p["k"])}
+
+    return KwargsRing()
+
+
+def _kwargs_ring_wrapped(kind):
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+
+    mesh = create_device_mesh(shape=(4,))
+    if kind == "stencil":
+        return ShardedStencilNode(_kwargs_ring_node(), mesh, {"devices": 0})
+    pa = (np.arange(16) * 4 // 16).astype(np.int32)
+    edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=4)
+    return ShardedUnstructuredNode(_kwargs_ring_node(), mesh, layout)
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("kind", ["stencil", "unstructured"])
+def test_a_var_keyword_update_padded_is_calibratable_under_both_sharded_wrappers(kind):
+    """The same inner node, the same answer under either wrapper.
+
+    ``ShardedUnstructuredNode`` used to accept only an explicit ``params``
+    keyword on ``update_padded``, so this node was calibratable under
+    ``ShardedStencilNode`` and silently absent from ``gm.params`` under the
+    unstructured wrapper, where ``step(params=...)`` then refused it with a
+    false "takes no 'params' keyword".
+    """
+    wrapped = _kwargs_ring_wrapped(kind)
+    gm = GraphManager()
+    gm.add_node(wrapped)
+    gm.compile()
+    assert gm.nodes_without_params() == []
+    assert set(gm.params["nodes"]["ring"]) == {"k"}
+    gm.step(params={"nodes": {"ring": {"k": jnp.asarray(5.0, jnp.float32)}}})
+    x = gm.get_node_state("ring")["x"]
+    if kind == "unstructured":
+        x = wrapped.gather_global({"x": x})["x"]
+    # k = 5, dt = 0.1: every cell halves; the constructor's k = 2 gives 0.8x.
+    np.testing.assert_allclose(np.asarray(x), 0.5 * np.arange(1, 17), rtol=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # The wrapper is the node: whatever surface a user reaches for, it must see
 # the inner node's parameter contract.  ShardedPointwiseNode used to report
@@ -288,3 +354,58 @@ def test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name():
     # A refused write leaves both the live pytree and the node untouched.
     assert float(gm.params["nodes"]["s"]["stiffness"]) == pytest.approx(10.0)
     assert gm._nodes["s"].node.params["stiffness"] == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# The injected value reaches the inner update through each wrapper -- without
+# the node's own params being written (a REST write writes both, so a test
+# through REST cannot tell a wrapper that forwards params from one that
+# does not).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+def test_a_gm_params_write_reaches_a_pointwise_wrapped_update():
+    from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+    from maddening.nodes.spring import SpringDamperNode
+
+    def graph(k):
+        gm = GraphManager()
+        gm.add_node(ShardedPointwiseNode(
+            SpringDamperNode("s", 0.01, stiffness=k, rest_length=0.6, initial_position=2.0),
+            create_device_mesh(shape=(4,)), shard_axes=(0,)))
+        gm.compile()
+        return gm
+
+    gm = graph(10.0)
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(1000.0, jnp.float32)
+    assert gm._nodes["s"].node.params["stiffness"] == 10.0     # only gm.params moved
+    got = gm.run_scan(5)["s"]["position"]
+    np.testing.assert_allclose(np.asarray(got), np.asarray(graph(1000.0).run_scan(5)["s"]["position"]),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(got), np.asarray(graph(10.0).run_scan(5)["s"]["position"]))
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("leaf, value", [("thermal_diffusivity", 0.026), ("length", 1.69)])
+def test_an_injected_heat_constant_reaches_the_sharded_stencil_update(leaf, value):
+    """``update_padded`` reads both trainable constants from the injected
+    params; only the diffusivity used to be exercised on the sharded path,
+    so one reading ``self.params["length"]`` passed."""
+    from maddening.nodes.heat import HeatNode
+
+    mesh = create_device_mesh(shape=(4,))
+    kw = dict(n_cells=16, thermal_diffusivity=0.02, length=1.3,
+              initial_temperature=[300.0 + 3 * i for i in range(16)])
+
+    def wrapped(**over):
+        return ShardedStencilNode(HeatNode("h", 1e-2, **{**kw, **over}), mesh, {"devices": 0})
+
+    w0, w1 = wrapped(), wrapped(**{leaf: value})
+    s = w0.initial_state()
+    injected = w0.update(s, {}, 1e-2, params={**w0.params_pytree(), leaf: jnp.asarray(value, jnp.float32)})
+    built = w1.update(s, {}, 1e-2)
+    base = w0.update(s, {}, 1e-2)
+    np.testing.assert_allclose(np.asarray(injected["temperature"]), np.asarray(built["temperature"]),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(base["temperature"]), np.asarray(built["temperature"]))

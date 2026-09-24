@@ -59,6 +59,32 @@ are **not** in `gm.params`.  `gm.nodes_without_params()` lists them, and
 passing an entry for such a node (or a misspelled key) is a `ValueError`,
 not a silently ignored leaf.
 
+The same holds for a leaf that *is* in `gm.params` but that the compiled
+step cannot read: an `initial_*` entry (only `initial_state()` reads it, from
+the node), a parameter a node bakes into a static when it is constructed
+(`HeatNode`'s `grid_points` on a non-uniform grid, `WaveletAdaptiveNode`'s
+`mass` -- declared by `static_data_deps`), or geometry a node consumed in
+`__init__`.  (A leaf only *this* graph does not exercise -- a ball's
+`elasticity` with no table edge -- is not one of them: the node reads it as
+soon as the input arrives, and the value carried in `gm.params` is then the
+one used, so it is kept and serialised.)  Changing one in `gm.params` is a `ValueError` naming the leaf
+and why, raised by every run method, `check_params`, `to_dict` and
+`save_state`; before 0.4.0 the edit was
+ignored by the step and then written out by `to_dict`, so the saved graph
+reloaded as a different model.  To change such a value, rebuild the node
+with it; `gm.reset_params()` drops the edit.  Whether the step reads a leaf
+is decided from the node's `static_data_deps` declaration and, failing
+that, from one trace of the compiled step and one of the node's own hooks
+with every declared boundary input supplied (both taken only when a leaf
+differs from its node's value, once per compile); a value that also reaches
+the node -- `PUT
+/graph/params` writes both -- is not refused, and a traced leaf (inside a
+fit or an FIM) is never compared.  An explicit `params=` pytree is not
+refused either: it is never serialised, and a leaf the step ignores may be
+one your own code consumes (a residual that seeds the initial state from
+`initial_velocity`); the live leaves a partial pytree is completed from are
+checked as `gm.params`.
+
 A value that carries a floating dtype of its own (an array, a numpy
 scalar) keeps it; a value that carries none (a Python float, a list of
 them) is placed at JAX's canonical float precision — float32, or float64
@@ -424,6 +450,46 @@ A config (`to_dict`, USD) stores the mapping's *recipe* (`MappingSpec`:
 kind, hyper-parameters, point references) and rebuilds the weights on
 load; a checkpoint stores the weights themselves (`_params_mappings/`),
 and when both are loaded the checkpoint's — possibly trained — weights win.
+
+### Calibrating a parameter that a mapped edge's grid derives from
+
+**The weights do not follow a calibrated geometry parameter, and nothing
+tells you (MADD-ANO-022).** A mapping built from a node's coordinates
+(the point reference `{"node": "rod", "field": "grid_x"}`, or the same
+array passed by hand) computes its weights once, from the grid as it was
+constructed. On the default, uniform `HeatNode`, `grid_x` is derived from
+`length`, and `length` is trainable. Calibrating `length` through
+`gm.params` therefore moves the rod and leaves the mapped edge
+interpolating from the old grid. `compile()` accepts the graph, no
+warning is raised, and the reference's recorded hash still matches,
+because the static array itself never changed.
+
+What you would see, measured on an 8-cell rod calibrated from `length`
+1.0 to 1.25 and mapped onto a 16-cell rod:
+
+- the target rod moves by about `4e-4`, where the same graph constructed
+  at 1.25 moves it by about `1.2e-2`;
+- the gradient of the target with respect to `length` has the wrong sign;
+- `fit_lm` on the target's data stops at `length ≈ 0.22` with a small
+  loss (about `1e-5`), so the fit looks successful. The truth is 1.25.
+  The same fit on the source rod's own data recovers 1.25.
+
+Until a fix lands (being scoped for 0.5.0), use one of these:
+
+- **Freeze the parameter** when a mapped edge references a grid it
+  derives: `gm.set_param_spec("rod", "length", ParamSpec(trainable=False))`.
+  The default mask then leaves it alone, and `fit` refuses a mask that
+  tries to widen back onto it.
+- **Give the mapping explicit coordinates**, as an
+  `{"asset": "points.npy"}` or `{"inline": [...]}` reference. The config
+  then states that the mapping's geometry is fixed, and does not imply
+  that it follows the node.
+- **If the geometry has to be calibrated**, fit it from observations of
+  the node itself rather than through the mapped edge. Then rebuild the
+  graph at the fitted value, so the mapping is rebuilt from the new grid.
+
+The same applies to any node whose static data is derived from a
+trainable parameter while its step reads the parameter directly.
 
 ## What is not a parameter
 

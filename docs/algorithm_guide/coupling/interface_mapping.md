@@ -160,6 +160,15 @@ the `label` hyper-parameter.  Reading `describe()` back with
 | `{"asset": "<path>.npy"}`, `{"asset": "<path>.npz", "key": "<member>"}` | a NumPy file, **relative to the directory the config / stage lives in** (`from_dict(..., base_dir=)`; `load_graph_from_usd` defaults to the stage file's directory).  Absolute paths and `..` are refused; the path is then `resolve()`d and the *resolved* file must still lie under the resolved `base_dir`, so a symlink (to a file or to a directory) that leaves it is refused too.  `key` selects an `.npz` member and is an error on a `.npy`. |
 | `{"inline": [...], "dtype": "float64"}` (or a plain list) | the points themselves — at most `INLINE_POINT_LIMIT` (64) points and `INLINE_ELEMENT_LIMIT` (1024) numbers in total, finite, of an accepted dtype (below) |
 
+A node reference is resolved **once**, when the mapping is built. If the
+static it names is derived from a trainable parameter, such as a uniform
+`HeatNode`'s `grid_x`, which is built from `length`, then calibrating
+that parameter through `gm.params` leaves the weights at the
+constructor's geometry. Nothing refuses it or warns. This is
+**MADD-ANO-022**. See
+[Calibrating a parameter that a mapped edge's grid derives from](../../user_guide/parameters.md#calibrating-a-parameter-that-a-mapped-edges-grid-derives-from)
+for what it does to a fit and for the workarounds.
+
 #### Accepted dtypes
 
 Whatever the reference form, a point set must be a bool, integer or float
@@ -184,6 +193,20 @@ source of numerical bugs that are very hard to trace back to their cause
 mapping = rbf_mapping(np.asarray(fluid_pts, dtype=np.float64),
                       np.asarray(solid_pts, dtype=np.float64))
 ```
+
+The same applies to the *values* of an inline reference that names no
+`"dtype"`. Such a payload is read as `float64`. `numpy.longdouble` arrays
+and the `numpy.longdouble` scalars their `tolist()` returns used to be
+rounded to `float64` without a word. They are now refused, and the error
+says what you can do instead. No reference form keeps the extra
+precision, so the points can be at most `float64` whichever route you take:
+
+- convert them first: `np.asarray(points, dtype=np.float64).tolist()`
+  gives plain Python floats;
+- or add `"dtype": "float64"` to the reference to accept the rounding
+  explicitly;
+- or, for a set too large to inline, save the `float64` array with
+  `numpy.save` and pass `{"asset": "<file>.npy"}`.
 
 This is a limit of the *serialised* form, not a judgement about extended
 precision, and it is not a closed door.  If a real interface ever needs

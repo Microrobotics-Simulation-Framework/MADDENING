@@ -280,19 +280,24 @@ true distance` (jaxlib 0.11.0, CPU):
 
 | fixture | `error_estimate` | `spectral_error_bound` |
 |---|---|---|
-| two-mode `(0.999, 0.2)`, gs / none | 0.0082 (the 122x) | 7.95 |
-| two-mode, gs / aitken and gs / iqn-ils | 0.50 and 0.0010 | 1.22 |
-| random normal contractions, n = 2–6, 80 draws, none and fixed ω ≤ 1 | 0.84–240 | 1.0001–228 |
-| heterogeneous, jacobi / aitken, 20 steps | 0.008–0.72 | 1.47–119 |
-| heterogeneous, gs / none | 0.98–2.3 | 0.991–1.93 |
+| two-mode `(0.999, 0.2)`, gs / none | 0.0082 (the 122x) | 8.05 |
+| two-mode, gs / aitken and gs / iqn-ils | 0.50 and 0.0010 | 1.34 and 1.32 |
+| random normal contractions, n = 2–6, 80 draws, none and fixed ω ≤ 1 | 0.92–88 | 1.009–96 |
+| heterogeneous, jacobi / aitken, 20 steps | 0.008–0.71 | 2.9–95 (911 on the one precision-limited step) |
+| heterogeneous, gs / none, 20 steps, all precision-limited | 0.98–2.3 | 3.4–25 |
 
-The 119 is what a rigorous bound on a badly non-normal map costs — the
+The 95 is what a rigorous bound on a badly non-normal map costs — the
 resolvent norm is the worst direction in the space and the residual is
 rarely in it — and it is why the bound is **reported and not applied**:
 `converged`, the iteration counts and the recorded sweep rows are
-exactly what they were.  The table predates the precision floor (the
-0.991 in it was the float32 floor of a 60 000-entry L2 norm, which the
-bound then inherited from `residual`; it now adds that floor).
+exactly what they were.  On the heterogeneous fixture the float floor of
+a 60 000-entry L2 norm, `4 eps √n = 1.2e-4`, is above the tolerance, so
+every step that meets it is precision-limited and the floor is most of
+the bound (the 911, and every gs / none row); the fixture's nodes do not
+declare `update_evaluations()`, so those rows report
+`spectral_usable=False`.  Measured on the final tree (jaxlib 0.11.0,
+the random draws the property test's generator seeded from numpy); the
+earlier recording, 1.47–119 and 0.991–1.93, predated the floor.
 
 Three things make the resolvent term hold where the table's rows did
 not test it:
@@ -384,15 +389,17 @@ construction:
 
 | fixture | `bound / true` |
 |---|---|
-| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.21–1.66 for `d/da`, 6.9–11.4 for `d/dg` |
-| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.17–1.35 for `d/dg`, 3.5 for `d/da` |
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.21–2.37 for `d/da`, 9.4–11.5 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.29–1.36 for `d/dg`, 3.57–3.80 for `d/da` |
 | affine `a + g u`, `d/dg` (`d/da` is exact) | 1.81 at every cap |
 | stiff spring pair, stiffness and mass, caps 2–6 | 7–11 |
-| two-mode, concave slow mode, `converged=True` | 15 (with `error_estimate`'s distance: 60x short) |
+| two-mode, concave slow mode, `converged=True` | 83 (with `error_estimate`'s distance: 12x short) |
 
 The parameter with the larger relative error reads near the product of
 the two conservative factors (the distance 1.1x, the relay's resolvent
-1.22x); the other reads its gap to the worst probe as well.
+1.22x) from cap 4 on, and more at cap 3 (2.37 on the concave map),
+where the Newton–Kantorovich factor below is largest; the other reads
+its gap to the worst probe as well.
 
 **What it is not — read this before using it.**  It is a statement
 about the gradient, not about the solve.  On a map affine in its state
@@ -401,12 +408,13 @@ with additive parameters the IFT gradient is the fixed point's from
 far off: on the two-mode case it is 0.0 while the state sits 1.1e-2
 from the fixed point with `converged=True`, and on the stiff spring pair
 under `iqn-ils` with the interface norm and explicit
-`accelerated_fields` it is 0.0 while the velocities are 1.7% off.  The
+`accelerated_fields` it is 3.1e-7 — zero to float32 — while the
+velocities are 1.7% off.  The
 returned `(value, gradient)` pair is then **mutually inconsistent** —
 the gradient is `d(fixed point)/dθ`, the value is not the fixed point —
 and this key cannot say so.  For the health of the solve read
 `spectral_error_bound`, within its norm: under the interface norm it
-covers the interface fields only and on that spring pair reads 2.3e-3.
+covers the interface fields only and on that spring pair reads 9.0e-3.
 Beyond that: it inherits every condition of `spectral_error_bound`; it
 is leading-order in the distance (the curvature is measured over `δ` and
 extrapolated linearly, and `h` checks the Jacobian's variation along `δ`

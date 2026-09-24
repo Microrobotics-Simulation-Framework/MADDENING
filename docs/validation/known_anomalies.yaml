@@ -362,7 +362,7 @@ anomalies:
       and 1/(1 - rho_spectral).  For a linear F the error of any iterate is
       (A - I)^-1 of its residual whatever the accelerator did, so on the
       two-mode case where error_estimate reads 122x under the true
-      distance the bound reads 7.95x over, 1.22x over under aitken and
+      distance the bound reads 8.05x over, 1.3x over under aitken and
       iqn-ils, and never under on 80 random normal contractions of
       dimension 2-6 with negative and near-1 eigenvalues.  It is reported,
       not applied: converged and the iteration counts are unchanged.
@@ -385,10 +385,10 @@ anomalies:
       distance (a second difference along the Newton correction, one
       probe per floating constant), with gradient_bound_usable beside it.
       It held at every cap of a max_iterations sweep on a concave and a
-      convex map, 1.2-1.7x the true error for the parameter whose error is
+      convex map, 1.2-2.4x the true error for the parameter whose error is
       the larger (up to 11x for the other, which reads its gap to the worst
-      probe), and 15x on a hidden slow mode where error_estimate's distance
-      would have made it 60x short.  It is a statement about the
+      probe), and 83x on a hidden slow mode where error_estimate's distance
+      would have made it 12x short.  It is a statement about the
       gradient, not the solve: on an affine map with additive parameters
       the IFT gradient is exact wherever the forward stops, so it reads
       0.0 while the state is 1.1e-2 from the fixed point with
@@ -508,7 +508,7 @@ anomalies:
       and all read the fast mode.  No function of the residual norms
       separates the two cases; recovering the slow mode needs the
       spectrum itself, and spectral_error_bound is that measurement
-      (7.95x over on the same case).  Second, the step scale is
+      (8.05x over on the same case).  Second, the step scale is
       corrected only where it is constant: under acceleration="fixed"
       the series now accounts for relaxation, having understated by
       1/omega before that landed (0.51x at omega=1.95), but Aitken's
@@ -518,7 +518,7 @@ anomalies:
       first mechanism rather than this one, because a superlinear
       sequence reads rho -> 0.  Neither is corrected in error_estimate;
       the spectral bound needs neither, because it never used the step
-      (1.22x over under both, on the two-mode case).  ratio_usable
+      (1.3x over under both, on the two-mode case).  ratio_usable
       reports a usable *ratio*, not a valid *bound* -- which is what the
       0.4.0 rename is for.
       What the spectral bound leaves open, and why this entry stays
@@ -528,12 +528,14 @@ anomalies:
       on is still error_estimate -- the bound is reported, not applied,
       because on the heterogeneous fixture above (jacobi, aitken) it is
       a rigorous but loose number: the map is far from normal there, the
-      spectral-radius form alone read 30-40x under the true distance on
-      the two steps where Aitken dipped, the resolvent term covers them
-      (1.5x and 3.3x over) and reads up to 119x over on the one step the
-      0.4.0 criterion passes -- correctly, that state is 0.41x the
-      tolerance from the reference -- so a spectral gate would refuse a
-      correct pass.  For a non-linear F it is asymptotic (Ostrowski):
+      spectral-radius form alone read 32x and 42x under the true
+      distance on the two steps where Aitken dipped, the resolvent term
+      covers them (2.9x and 6.5x over) and reads up to 95x over
+      elsewhere, and 911x on the one step the 0.4.0 criterion passes --
+      correctly, that state is 0.50x the tolerance from the reference;
+      the step is precision-limited, the 60 000-entry float floor being
+      the bound there -- so a spectral gate would refuse a correct
+      pass.  For a non-linear F it is asymptotic (Ostrowski):
       exact to float32 on a log map within tolerance of its fixed point,
       an estimate far from one, and nothing checks linearity.  It is
       taken in the group's norm at the returned state, so the dead band's
@@ -559,10 +561,10 @@ anomalies:
       scalar loss whose gradient nearly cancels across the state can carry
       a larger relative error than the tangent does.  And it is exactly as
       blind as the norm: under the interface norm, on the stiff spring pair
-      with iqn-ils and explicit accelerated_fields, it reads 0.0 -- the
+      with iqn-ils and explicit accelerated_fields, it reads 3.1e-7 -- the
       stiffness gradient is exact to float32 -- while the velocities, which
       the norm does not read, are 1.7% off and spectral_error_bound, taken
-      over the interface, reads 2.3e-3.  Evidence: the 2026-09-23 section of
+      over the interface, reads 9.0e-3.  Evidence: the 2026-09-23 section of
       the same memo.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"

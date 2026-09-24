@@ -1049,7 +1049,7 @@ def _fixed_point_while(
        :func:`~maddening.core.coupling.acceleration.spectral_error_bound`
        for the conditions).  On the same two-mode case it reports 8x
        *over* the true distance where ``error_estimate`` reports 122x
-       under, and 1.2x over under ``aitken`` and ``iqn-ils``.  The
+       under, and 1.3x over under ``aitken`` and ``iqn-ils``.  The
        criterion this loop stops on is unchanged; the spectral number
        is reported beside it, not applied.
     3. *A dynamic step scale.*  ``omega`` above is exact for
@@ -6175,16 +6175,17 @@ class GraphManager:
               **bound** on ``||x - x*||`` where ``"error_estimate"`` is
               an estimate, and it needs none of the four conditions
               above: measured 8x *over* the true distance on the
-              two-mode case (``"error_estimate"``: 122x under), 1.2x
+              two-mode case (``"error_estimate"``: 122x under), 1.3x
               over under ``aitken`` and ``iqn-ils`` (2x and 1000x
               under), and never below the true distance on random
               normal contractions of dimension 2-6 with negative and
               near-1 eigenvalues.  The resolvent term is what holds on
               a non-normal Jacobian: the Jacobi map of the heterogeneous
-              benchmark fixture read 30-40x under with
-              ``1/(1 - rho_spectral)`` alone, and 1.5-3.3x over with
+              benchmark fixture read 32-42x under with
+              ``1/(1 - rho_spectral)`` alone, and 2.9-6.5x over with
               it -- at the price of being loose elsewhere on that map
-              (up to 119x over).  **What it still is not**: for a
+              (up to 95x over, and 911x on a precision-limited step
+              whose floor is the bound).  **What it still is not**: for a
               non-linear ``F`` it is asymptotic (Ostrowski) -- exact to
               float32 on a log map within ``tolerance`` of its fixed
               point, an estimate far from one; it is in the group's
@@ -6250,11 +6251,11 @@ class GraphManager:
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
-              1.2-1.7x it for the parameter whose error is the larger
+              1.2-2.4x it for the parameter whose error is the larger
               and up to 11x for the other, which reads its gap to the
               worst probe; 1.81x for a parameter multiplying the state
               of an affine map; 7-11x for a spring pair's stiffness and
-              mass; 15x on a hidden slow mode.  The distance carries the
+              mass; 83x on a hidden slow mode.  The distance carries the
               residual's float resolution, as ``"spectral_error_bound"``
               does, so a stalled iterate no longer reads ``0.0`` (it did,
               against true errors of 1.5-3% at ``F'(x*) = 0.999``); where
@@ -6314,16 +6315,16 @@ class GraphManager:
               point's from *any* iterate, so this truthfully reads
               ``0.0`` while the state is far off: 0.0 on a two-mode
               map sitting 1.1e-2 from its fixed point with
-              ``converged=True``, and 0.0 on the stiff spring pair
-              under ``iqn-ils`` with the interface norm, whose
-              velocities are 1.7% off.  The returned
+              ``converged=True``, and 3.1e-7 -- zero to float32 -- on the
+              stiff spring pair under ``iqn-ils`` with the interface
+              norm, whose velocities are 1.7% off.  The returned
               ``(value, gradient)`` pair is then mutually inconsistent
               -- the gradient is ``d(fixed point)/dtheta`` and the value
               is not the fixed point -- and nothing in this key says
               so.  For the health of the solve read
               ``"spectral_error_bound"``, within its norm (under the
               interface norm it covers the interface fields only: on
-              that spring pair it reads 2.3e-3).  This key answers
+              that spring pair it reads 9.0e-3).  This key answers
               only "how far would tightening the forward move the
               gradient".  It is not ``"gradient_error_estimate"``,
               which is ``"error_estimate"`` under another name.

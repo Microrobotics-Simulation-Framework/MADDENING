@@ -138,6 +138,80 @@ class TestStabilityReport:
         assert "stable" in report
 
 
+_DECORATOR_LINE = re.compile(r"^\s*@stability\(", re.M)
+
+
+def applies_stability(source: str) -> bool:
+    """Does this module source apply ``stability`` to anything, in any form?
+
+    A regex for ``^\\s*@stability(`` saw the decorator form only, so a
+    surface tagged ``fn = stability(StabilityLevel.STABLE)(fn)`` in a module
+    missing from the generator's list was invisible to the coverage test
+    below, and to the report (audit_040_phase3_wave_d, R3).  This walks the
+    AST instead and counts any *call* of the decorator -- ``@stability(...)``
+    is a call in the decorator list, and the call form is the same node:
+
+    * the bare name ``stability``, or any name an import or an assignment
+      binds to it (``import stability as tag``, ``tag = stability``);
+    * any attribute ``<x>.stability(...)`` (``compliance.stability``,
+      ``import ...stability as S; S.stability``).
+
+    Not seen: a decorator reached through ``getattr`` or a container.  A
+    ``@stability(`` in a docstring is prose and does not count; a module
+    that does not parse falls back to the old regex rather than to "no".
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return bool(_DECORATOR_LINE.search(source))
+    names = {"stability"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "stability" and alias.asname:
+                    names.add(alias.asname)
+    for _ in range(3):                  # rebinding chains are short
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in names):
+                names.update(t.id for t in node.targets
+                             if isinstance(t, ast.Name))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in names:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "stability":
+            return True
+    return False
+
+
+class TestApplyStabilityDetection:
+    """The coverage test is only as good as its detector; pin every form."""
+
+    @pytest.mark.parametrize("source", [
+        "@stability(StabilityLevel.STABLE)\ndef f():\n    pass\n",
+        "def f():\n    pass\nf = stability(StabilityLevel.STABLE)(f)\n",
+        "from maddening.core.compliance.stability import stability as tag\n"
+        "@tag(StabilityLevel.EVOLVING)\ndef f():\n    pass\n",
+        "tag = stability\n@tag(StabilityLevel.EVOLVING)\nclass C:\n    pass\n",
+        "import maddening.core.compliance.stability as S\n"
+        "f = S.stability(StabilityLevel.STABLE)(lambda: 1)\n",
+    ])
+    def test_every_way_of_applying_the_decorator_is_seen(self, source):
+        assert applies_stability(source)
+
+    @pytest.mark.parametrize("source", [
+        '"""Example::\n\n    @stability(StabilityLevel.STABLE)\n"""\n',
+        "from maddening.core.compliance.stability import stability\n",
+        "def f():\n    pass\n",
+    ])
+    def test_a_mention_that_applies_nothing_is_not_counted(self, source):
+        assert not applies_stability(source)
+
+
 class TestStabilityReportGeneratorCoverage:
     """``scripts/generate_stability_report.py`` must reach every tagged module.
 
@@ -154,10 +228,9 @@ class TestStabilityReportGeneratorCoverage:
     SRC = REPO_ROOT / "src"
 
     def _modules_using_stability(self) -> set[str]:
-        pattern = re.compile(r"^\s*@stability\(", re.M)
         found = set()
         for path in (self.SRC / "maddening").rglob("*.py"):
-            if pattern.search(path.read_text(encoding="utf-8")):
+            if applies_stability(path.read_text(encoding="utf-8")):
                 rel = path.relative_to(self.SRC).with_suffix("")
                 parts = list(rel.parts)
                 if parts[-1] == "__init__":
@@ -174,12 +247,16 @@ class TestStabilityReportGeneratorCoverage:
         raise AssertionError("STABILITY_MODULES not found in the generator")
 
     def test_generator_module_list_covers_every_module_using_stability(self):
-        """Static check: every module under src/maddening that uses
-        ``@stability(`` is listed in the generator, so a newly tagged
-        module cannot silently drop out of the report.  Static, so it holds
-        in environments without every optional extra."""
+        """Static check: every module under src/maddening that applies
+        ``stability`` -- as a decorator or as a call -- is listed in the
+        generator, so a newly tagged module cannot silently drop out of the
+        report.  Static, so it holds in environments without every optional
+        extra."""
         tagged = self._modules_using_stability()
-        assert "maddening.cloud.resume" in tagged  # sanity: the grep sees the tag
+        assert "maddening.cloud.resume" in tagged  # sanity: the scan sees the tag
+        # An empty or near-empty scan passes the subset check below
+        # vacuously; 57 modules apply the decorator today.
+        assert len(tagged) >= 50, sorted(tagged)
         listed = self._listed_modules()
         # Exact membership, deliberately not a prefix match.  The generator
         # imports exactly the names in STABILITY_MODULES, and importing

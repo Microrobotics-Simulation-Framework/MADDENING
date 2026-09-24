@@ -251,6 +251,136 @@ class TestUpdateAcceptsAnIntendedChange:
         assert path.read_text() == SNAPSHOT.read_text()
 
 
+class TestAnEmptyScopeFails:
+    """A guard with nothing left to guard must not report success.
+
+    With every ``STABLE`` tag demoted and the snapshot emptied, the check
+    printed ``OK: 0 STABLE surface(s), 0 member(s) unchanged`` and exited 0
+    (audit_040_phase3_wave_d, G9).
+    """
+
+    @staticmethod
+    def _demoted(guard, keep=()):
+        from maddening.core.compliance.metadata import StabilityLevel
+
+        registry, _ = guard.load_registry()
+        return {
+            name: (level if name in keep or level is not StabilityLevel.STABLE
+                   else StabilityLevel.EVOLVING)
+            for name, level in registry.items()
+        }
+
+    def test_a_tree_with_no_stable_surface_fails(
+        self, guard, monkeypatch, tmp_path, capsys
+    ):
+        registry = self._demoted(guard)
+        monkeypatch.setattr(guard, "load_registry", lambda: (registry, {}))
+        empty = tmp_path / "stable_api.json"
+        empty.write_text(json.dumps({"format": guard.SNAPSHOT_FORMAT,
+                                     "surfaces": {}}))
+        assert guard.main(["--snapshot", str(empty)]) == 1
+        captured = capsys.readouterr()
+        assert "no @stability(StabilityLevel.STABLE) surface" in captured.err
+        assert "OK:" not in captured.out
+
+    def test_update_refuses_to_write_an_empty_snapshot(
+        self, guard, monkeypatch, tmp_path
+    ):
+        registry = self._demoted(guard)
+        monkeypatch.setattr(guard, "load_registry", lambda: (registry, {}))
+        path = tmp_path / "absent.json"
+        assert guard.main(["--update", "--accept-removal",
+                           "--snapshot", str(path)]) == 1
+        assert not path.exists()
+
+    def test_an_empty_snapshot_against_a_real_tree_fails_naming_the_baseline(
+        self, guard, tmp_path, capsys
+    ):
+        empty = tmp_path / "stable_api.json"
+        empty.write_text(json.dumps({"format": guard.SNAPSHOT_FORMAT,
+                                     "surfaces": {}}))
+        assert guard.main(["--snapshot", str(empty)]) == 1
+        assert "records no STABLE surface" in capsys.readouterr().err
+
+
+class TestARemovalNeedsMoreThanUpdate:
+    """Leaving the STABLE set is a breaking change, not a snapshot refresh.
+
+    ``--update`` used to accept a demotion as silently as an addition, so
+    the documented path for a regenerated snapshot also withdrew promises
+    without anyone having to say so.
+    """
+
+    SURFACE = "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+
+    def test_update_refuses_to_drop_a_demoted_surface(
+        self, guard, monkeypatch, tmp_path, capsys
+    ):
+        registry = dict(TestAnEmptyScopeFails._demoted(
+            guard, keep=set(guard.load_registry()[0]) - {self.SURFACE}))
+        monkeypatch.setattr(guard, "load_registry", lambda: (registry, {}))
+        path = tmp_path / "stable_api.json"
+        shutil.copy(SNAPSHOT, path)
+        before = path.read_text()
+
+        assert guard.main(["--update", "--snapshot", str(path)]) == 1
+        out = capsys.readouterr().out
+        assert "REFUSED" in out and self.SURFACE in out
+        assert "--accept-removal" in out
+        assert path.read_text() == before
+
+        assert guard.main(["--update", "--accept-removal",
+                           "--snapshot", str(path)]) == 0
+        assert self.SURFACE in capsys.readouterr().out
+        assert self.SURFACE not in json.loads(path.read_text())["surfaces"]
+
+    def test_update_refuses_to_drop_a_surface_the_tree_no_longer_defines(
+        self, tmp_path
+    ):
+        def mutate(surfaces):
+            surfaces["maddening.nodes.gone.GhostNode"] = {
+                "kind": "class", "module": "maddening.nodes.gone",
+                "parameters": [], "members": {},
+            }
+
+        path = _mutated_snapshot(tmp_path, mutate)
+        out = _run("--update", "--snapshot", str(path))
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "GhostNode" in out.stdout
+        assert "GhostNode" in path.read_text()
+
+    def test_update_still_accepts_an_addition_without_the_flag(self, tmp_path):
+        """The friction is for removals only."""
+        def mutate(surfaces):
+            surfaces.pop("maddening.nodes.table.TableNode")
+
+        path = _mutated_snapshot(tmp_path, mutate)
+        out = _run("--update", "--snapshot", str(path))
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert "maddening.nodes.table.TableNode" in path.read_text()
+
+    def test_accept_removal_without_update_is_refused(self, guard):
+        with pytest.raises(SystemExit) as excinfo:
+            guard.main(["--accept-removal"])
+        assert excinfo.value.code == 2
+
+    def test_update_with_a_skipped_module_carrying_a_surface_stops(
+        self, guard, monkeypatch, tmp_path, capsys
+    ):
+        """``--update`` in a partial environment must not write the partial
+        tree over the full snapshot."""
+        registry, _ = guard.load_registry()
+        monkeypatch.setattr(
+            guard, "load_registry",
+            lambda: (registry, {"maddening.nodes.ball": "No module named 'nope'"}),
+        )
+        path = tmp_path / "stable_api.json"
+        shutil.copy(SNAPSHOT, path)
+        assert guard.main(["--update", "--snapshot", str(path)]) == 2
+        assert "cannot be trusted" in capsys.readouterr().err
+        assert path.read_text() == SNAPSHOT.read_text()
+
+
 # ---------------------------------------------------------------------------
 # Missing optional dependencies
 # ---------------------------------------------------------------------------

@@ -266,7 +266,7 @@ jobs:
         # Only after a merge (a push to main / release/**), whose run
         # started from an empty cache: the saved cache then holds exactly
         # the base branch's programs.  Pull requests never save.
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.head_ref == 'ci/jax-cache') }}  # TRIAL ONLY: revert before merge
+        if: ${{ !cancelled() && github.event_name == 'push' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/jax-cache

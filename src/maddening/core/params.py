@@ -337,7 +337,8 @@ def _spec_step(node, key):
     if isinstance(key, _POSITIONAL_KEYS):
         if not isinstance(node, (list, tuple)):
             return None, "needs_sequence"
-        i = _path_component(key)
+        i = (key.idx if isinstance(key, jax.tree_util.SequenceKey)
+             else key.key)
         if not 0 <= i < len(node):
             return None, "too_short"
         return node[i], None
@@ -382,7 +383,9 @@ def _spec_for(specs: dict, path) -> ParamSpec:
         if problem is not None:
             return DEFAULT_SPEC
     spec, problem = _leaf_spec(node)
-    return DEFAULT_SPEC if problem is not None else spec
+    if problem is not None or spec is None:
+        return DEFAULT_SPEC
+    return spec
 
 
 def _child_entries(node):

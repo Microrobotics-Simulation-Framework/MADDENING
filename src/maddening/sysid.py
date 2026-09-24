@@ -1605,11 +1605,13 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
         flat, unravel_kept = ravel_pytree(
             [leaf for leaf, k in zip(leaves, keep) if k])
 
-        def unravel(vec):
+        def _unravel_mixed(vec):
             it = iter(unravel_kept(vec))
             return jax.tree.unflatten(
                 treedef, [next(it) if k else leaf
                           for leaf, k in zip(leaves, keep)])
+
+        unravel = _unravel_mixed
 
     def _r(theta):
         full = theta if idx is None else flat.at[idx].set(theta)

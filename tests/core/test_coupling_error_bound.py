@@ -502,13 +502,19 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
         gm = gm if gm is not None else _contracting_graph(tolerance=1e-3)
         return jnp.sum(gm.run_scan(1, params=p)["a"]["x"])
 
-    base = _contracting_graph(tolerance=1e-3).params
+    # The traced evaluation gets a graph of its own (``run_scan`` writes
+    # its result back onto the manager, and a traced one would leave
+    # tracers there); the two untraced ones share one, reset to its
+    # initial state before each, so they share one compiled scan.
+    fd_graph = _contracting_graph(tolerance=1e-3)
+    base = fd_graph.params
     analytic = float(jax.grad(loss)(base)["nodes"]["a"]["bias"])
 
     def shifted(delta):
         p = {"nodes": {n: dict(v) for n, v in base["nodes"].items()}}
         p["nodes"]["a"]["bias"] = base["nodes"]["a"]["bias"] + delta
-        return float(loss(p))
+        fd_graph.reset_state()
+        return float(loss(p, fd_graph))
 
     h = 1e-2
     fd = (shifted(h) - shifted(-h)) / (2 * h)

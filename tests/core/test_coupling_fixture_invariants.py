@@ -146,6 +146,11 @@ def _relative_spread(a, b, nodes):
 # ---------------------------------------------------------------------------
 
 
+# Slow-marked (still run by slow-tests.yml): every fast fixture built and
+# compiled under both iteration modes, 34-50 s on the CI runner.  The
+# fixtures the per-push tests below use are built there anyway; this is the
+# registry-wide smoke test.
+@pytest.mark.slow
 def test_every_registered_fixture_builds_and_steps():
     """Each fast fixture compiles and takes a step under both modes."""
     for name in cf.fixture_names(include_slow=False):
@@ -415,15 +420,24 @@ def _assert_same_fixed_point(fixture, norms, n_steps=25):
     )
 
 
-@pytest.mark.parametrize("fixture", ["stiff-pair-0.5", "heterogeneous-2000"])
+@pytest.mark.parametrize("fixture", [
+    # Slow-marked: six builds and compiles, 5-7 s on the CI runner, and the
+    # slow sweep below covers this fixture under all 24 configurations.
+    pytest.param("stiff-pair-0.5", marks=pytest.mark.slow),
+    "heterogeneous-2000",
+])
 def test_every_l2_configuration_reaches_the_same_fixed_point(fixture):
     """The fast lane of the "same fixed point" invariant.
 
     The full sweep below is slow-marked and the repository default is
     ``-m 'not slow'``, so for as long as it was the only lane the first
     of the five required invariants never ran.  This lane keeps the
-    invariant in the default run at a few seconds: the six L2
-    configurations, on one spring fixture and one grid fixture.
+    invariant in the default run: the six L2 configurations on the grid
+    fixture (the spring fixture's cell is slow-marked, and the sweep
+    covers it).  The grid cell is on the duration allowlist as kept:
+    since the generated-graph property in
+    ``tests/property/test_coupling_acceleration_agreement.py`` moved to
+    the slow lane it is the per-push witness of this invariant.
 
     The grid fixture is the point of including a second shape.  The
     slow lane's three fixtures are all springs, whose nodes share one
@@ -790,6 +804,12 @@ def test_accelerated_fields_must_select_at_least_one_field_in_the_group():
 _MIXED_UNDERCONVERGED = dict(max_iterations=3, tolerance=1e-30)
 
 
+# Slow-marked (still run by slow-tests.yml): three two-group graphs built and
+# compiled, 5-6 s on the CI runner.  Two groups in one graph are exercised on
+# every push by ``test_mixed_mode_graph_steps_deterministically`` below and
+# ``TestDiagnostics::test_diagnostics_multiple_groups`` in
+# ``tests/core/test_coupling_convergence.py``.
+@pytest.mark.slow
 def test_mixed_mode_graph_gives_each_group_its_own_schedule():
     """Each group *honours* its declared mode; reading the field back does not.
 
@@ -852,6 +872,9 @@ def test_mixed_mode_graph_steps_deterministically():
            {k: v["iterations"] for k, v in diag_b.items()}
 
 
+# Slow-marked (still run by slow-tests.yml), with the test above and for the
+# same reason: two two-group graphs, 5-7 s on the CI runner.
+@pytest.mark.slow
 def test_mixed_mode_groups_keep_independent_iteration_counts():
     """Changing one group's problem must not move the other's schedule.
 

@@ -137,6 +137,12 @@ def _grad_through_compiled_step(gm: GraphManager, perturbed_node: str):
     return jax.grad(loss_of_pert)(p0)
 
 
+# Slow-marked (still run by slow-tests.yml): forward and gradient of a 20-node
+# chain under both solvers, 13-16 s on the CI runner, nearly all of it
+# linearising the IFT rule over 40 coupled floats.  The IFT adjoint is held
+# on every push by the analytic-gradient tests below and in
+# ``tests/core/test_coupling_ift_gradient.py``.
+@pytest.mark.slow
 def test_small_chain_backward_parity():
     """N=20 chain: jax.grad through jitted step agrees fori vs ift."""
     n = 20
@@ -299,6 +305,10 @@ def test_bicgstab_known_breakdown_with_function_operator():
         )
 
 
+# Slow-marked (still run by slow-tests.yml), for the reason above: 12-15 s on
+# the CI runner.  ``test_stiff_adjoint_agrees_across_linear_solvers`` keeps
+# dense-vs-gmres agreement on every push on a four-float group.
+@pytest.mark.slow
 def test_dense_matches_gmres_gradient_small_chain():
     """``linear_solver='dense'`` agrees with ``'gmres'`` on a small chain.
 

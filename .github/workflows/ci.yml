@@ -479,6 +479,12 @@ jobs:
       # that filters most of its input searches a fraction of what its
       # max_examples claims and is one unrelated strategy change away from
       # a FailedHealthCheck; see docs/developer_guide/testing_standards.md.
+      #
+      # ``-m "slow or not slow"``: this job exists to search deeper than
+      # the default lane, so it runs the whole directory, including the
+      # properties marked slow to keep the default lane inside its time
+      # budget.  Without it the addopts' ``-m 'not slow'`` would drop them
+      # from the one job that runs them at ``ci`` depth.
       - name: Run hypothesis property tests (with draw-rejection audit)
         env:
           JAX_PLATFORMS: cpu
@@ -487,4 +493,5 @@ jobs:
         run: |
           python scripts/audit_property_rejection.py \
             tests/verification/hypothesis/ \
-            --check --pytest-arg=-v --pytest-arg=--tb=short
+            --check --pytest-arg=-v --pytest-arg=--tb=short \
+            --pytest-arg=-m "--pytest-arg=slow or not slow"

@@ -19,11 +19,16 @@ from __future__ import annotations
 
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core.coupling.acceleration import SPECTRAL_KRYLOV_STEPS
+from maddening.core.coupling.acceleration import (
+    RANGE_CAPTURED_RTOL,
+    SPECTRAL_KRYLOV_STEPS,
+    jacobian_range_basis,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 
@@ -147,3 +152,60 @@ def test_a_resolved_spectrum_is_usable(n):
     d = gm.coupling_diagnostics()["a+b"]
     assert d["spectral_usable"] is True, d
     assert d["gradient_bound_usable"] is True, d
+
+
+def test_a_range_larger_than_the_basis_reports_no_gradient_bound():
+    """Twelve independent interface scalars, eight range vectors: NaN, not a number.
+
+    The gradient bound applies ``(I - J)^{-1}`` through a basis of
+    ``range(J)`` built from eight Jacobian images; with rank twelve the
+    basis cannot hold the range, ``jacobian_range_basis`` reports it
+    uncaptured, and the bound is NaN.  ``gradient_bound_usable`` is
+    False here for a second reason as well (the spectrum is unsettled),
+    so only the value can show whether the capture test ran: with its
+    tolerance at 1.0 -- which every basis passes, a projection never
+    growing a vector -- a number came back.
+    """
+    M, c = _spread_contraction(12, seed=4, radius=0.4)
+    gm = _relay_pair(M, c, max_iterations=40, tolerance=1e-4)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert 12 > SPECTRAL_KRYLOV_STEPS, "fixture premise"
+    assert math.isnan(d["gradient_relative_error_bound"]), d
+    assert d["gradient_bound_usable"] is False
+
+
+def _with_singular_values(sigma, n, seed):
+    """An ``n x n`` matrix with the given non-zero singular values (the rest zero)."""
+    rng = np.random.default_rng(seed)
+    U, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    V, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    s = np.zeros(n)
+    s[:len(sigma)] = sigma
+    return jnp.asarray((U * s) @ V.T, jnp.float32)
+
+
+def test_the_range_capture_threshold_separates_rounding_from_a_missed_direction():
+    """``RANGE_CAPTURED_RTOL`` sits between float32 rounding and a weak missed direction.
+
+    A rank-eight map whose singular values span three decades is
+    captured by eight images -- what is left over is rounding, about
+    1e-6 relative.  A rank-nine map whose ninth direction is 1e-3 of the
+    others is not: eight images leave that direction out, the residual
+    is of its size, and a threshold loose enough to admit it (1e-2, or
+    1.0) would apply a resolvent that ignores a direction the Jacobian
+    has.
+    """
+    n = 16
+    captured = _with_singular_values(np.logspace(0.0, -3.0, SPECTRAL_KRYLOV_STEPS), n, 1)
+    _U, _M, ok = jacobian_range_basis(lambda v: captured @ v, n)
+    assert bool(ok), "a badly scaled but captured range is captured"
+    missed = _with_singular_values(
+        np.r_[np.ones(SPECTRAL_KRYLOV_STEPS), 1e-3], n, 2)
+    U, M, ok = jacobian_range_basis(lambda v: missed @ v, n)
+    JU = jax.vmap(lambda u: missed @ u)(U.T).T
+    fraction = float(jnp.linalg.norm(JU - U @ M) / jnp.linalg.norm(JU))
+    assert RANGE_CAPTURED_RTOL < fraction < 1e-2, (
+        f"fixture premise: the missed direction leaves {fraction:.2e}"
+    )
+    assert not bool(ok), "a direction the basis missed is reported"

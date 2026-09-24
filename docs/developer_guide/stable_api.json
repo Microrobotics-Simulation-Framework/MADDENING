@@ -380,6 +380,11 @@
           ],
           "returns": "dict"
         },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
+        },
         "update_padded": {
           "kind": "method",
           "parameters": [
@@ -659,6 +664,11 @@
             }
           ],
           "returns": "dict"
+        },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
         },
         "update_padded": {
           "kind": "method",
@@ -966,6 +976,11 @@
             }
           ],
           "returns": "dict"
+        },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
         },
         "update_padded": {
           "kind": "method",
@@ -2134,6 +2149,11 @@
           ],
           "returns": "dict"
         },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
+        },
         "update_padded": {
           "kind": "method",
           "parameters": [
@@ -2474,6 +2494,11 @@
           ],
           "returns": "dict"
         },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
+        },
         "update_padded": {
           "kind": "method",
           "parameters": [
@@ -2757,6 +2782,11 @@
             }
           ],
           "returns": "dict"
+        },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
         },
         "update_padded": {
           "kind": "method",
@@ -3063,6 +3093,11 @@
             }
           ],
           "returns": "dict"
+        },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
         },
         "update_padded": {
           "kind": "method",
@@ -3373,6 +3408,11 @@
             }
           ],
           "returns": "dict"
+        },
+        "update_evaluations": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "Optional[float]"
         },
         "update_padded": {
           "kind": "method",

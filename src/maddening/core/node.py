@@ -947,6 +947,53 @@ class SimulationNode(ABC):
     # UQ interface (Section 9.4)
     # ------------------------------------------------------------------
 
+    def update_evaluations(self) -> Optional[float]:
+        """How many evaluations' worth of float rounding one ``update`` carries.
+
+        Read by the coupling diagnostics' float floor
+        (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`).
+        The residual a coupling group measures is ``F~(x) - x`` for the
+        one-pass map *as float arithmetic evaluates it*, and a distance
+        bound built on it has to add the map's evaluation error: once a
+        slow group stalls, that error is the whole bound.  The floor
+        models it as
+        :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`
+        units of ``eps * max|field|`` per evaluation, and an ``update``
+        that sub-steps internally is several evaluations, not one: an
+        explicit Euler update taking ``N`` sub-steps, each moving its
+        field by less than half an ulp, rounds every one of them away,
+        and its evaluation error grows with ``N`` (measured, float32:
+        about 29 units at ``N = 100`` against the 4 a single evaluation
+        is allowed).
+
+        Returns
+        -------
+        float or None
+            * ``N >= 1`` if ``update`` advances its own state through
+              ``N`` sequential sub-steps, or otherwise rounds its outputs
+              as often as that; ``1`` for a single explicit step, a relay,
+              or any update that rounds each output entry a few times.
+              For an internal iterative solve, a count ``N`` for which
+              ``PRECISION_FLOOR_ULPS * N * eps`` covers the solve's
+              relative tolerance.
+            * ``None`` (the default): not declared.  The floor then
+              counts the update as one evaluation, and a coupling group
+              containing the node reports ``spectral_usable=False`` (so
+              ``gradient_bound_usable=False``) wherever its residual is
+              at that floor -- ``precision_limited`` -- because there the
+              unchecked count *is* the bound.  Above the floor the count
+              carries less than half of it, but a long undeclared loop
+              can still exceed it: declare it.
+
+        The framework's own sub-cycling (``subcycling=True``) is counted
+        separately and needs no declaration: a node evaluated ``d``
+        times per coupling pass contributes ``d * update_evaluations()``
+        (see ``GraphManager.coupling_diagnostics``).  Declaring more than
+        the update performs only loosens the bound; declaring less makes
+        it read low.
+        """
+        return None
+
     def uncertainty_spec(self) -> Optional["UncertaintySpec"]:  # type: ignore[name-defined]
         """Return the UQ specification for this node, or None.
 

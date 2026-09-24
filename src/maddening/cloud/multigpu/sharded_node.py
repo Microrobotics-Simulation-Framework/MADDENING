@@ -422,14 +422,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
 
         Spatial axes not appearing as values of ``axis_map`` are
         replicated on every device; their halos do not need exchange.
-    boundary : str or None
+    boundary : str
         How the halos at the edges of the *global* grid are filled
         (``"periodic"``, ``"edge"`` or ``"zero"``); interior halos always
-        come from the neighbouring shard.  ``None`` (the default) uses the
-        mode the node declares through ``halo_boundary()``, and ``"edge"``
-        -- replicate the node's own edge cells -- for a node that declares
-        none, which applies its physical boundary conditions in
-        ``update_padded`` after the exchange.
+        come from the neighbouring shard.  Default ``"edge"`` -- replicate
+        the node's own edge cells -- for a node that applies its physical
+        boundary conditions in ``update_padded`` after the exchange.  A
+        node that declares ``halo_boundary()`` must be given exactly that
+        mode (see the note below).
 
     Raises
     ------
@@ -437,8 +437,8 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         If *node* is pointwise, if ``axis_map`` names a mesh axis the
         mesh does not have or a spatial axis with no declared halo, if a
         sharded extent is not divisible by the devices on its mesh axis
-        (see the note below), or if *boundary* differs from the mode the
-        node declares.
+        (see the note below), or if *boundary* -- the default ``"edge"``
+        included -- differs from the mode the node declares.
 
     Notes
     -----
@@ -448,11 +448,13 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     :class:`~maddening.nodes.lbm.LBMNode` is one -- its unsharded
     ``update`` streams periodically (``jnp.roll``), so its sharded step is
     the same model only with periodic halos.  Such a node defines
-    ``halo_boundary()``, the wrapper uses it by default, and an explicit
-    *boundary* that differs is refused, because it would make the sharded
-    node compute something the unsharded node does not.  (Before 0.4.0 the
-    default was ``"edge"`` for every node, which moved a walled LBM
-    channel's centreline velocity by 0.64% against the unsharded node.)
+    ``halo_boundary()``, and a *boundary* that differs from it -- the
+    default ``"edge"`` included -- is refused at construction, because it
+    would make the sharded node compute something the unsharded node does
+    not.  Wrap an ``LBMNode`` with ``boundary="periodic"``.  (Before 0.4.0
+    an ``LBMNode`` wrapped with the default ``"edge"`` ran, and a walled
+    channel's centreline velocity moved by 0.64% against the unsharded
+    node.)
 
     **Each sharded extent must divide by the devices on its mesh axis.**
     A pencil decomposition gives every device the same slab, so a 17-cell
@@ -469,7 +471,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         node: SimulationNode,
         mesh: Mesh,
         axis_map: dict[str, int],
-        boundary: Optional[str] = None,
+        boundary: str = "edge",
     ) -> None:
         halo = node.halo_width()
         if not halo:
@@ -479,21 +481,20 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             )
 
         # The halo fill at the global edges.  A node that declares one
-        # (``halo_boundary()``) gets it by default and cannot be given a
-        # different one: for such a node the halo is the boundary
-        # condition, and a different fill is a different model.
+        # (``halo_boundary()``) must be given exactly that one -- the
+        # default ``"edge"`` included: for such a node the halo is the
+        # boundary condition, and a different fill is a different model.
+        # A node that declares nothing is wrapped exactly as before.
         declared = _declared_halo_boundary(node)
-        if boundary is None:
-            boundary = declared if declared is not None else "edge"
-        elif declared is not None and boundary != declared:
+        if declared is not None and boundary != declared:
             raise ValueError(
                 f"ShardedStencilNode: {type(node).__name__} {node.name!r} declares "
                 f"halo_boundary() == {declared!r}, the fill of the halos at the "
                 "edges of the global grid under which its update_padded "
-                "reproduces its own update.  boundary="
-                f"{boundary!r} would fill them differently, so the sharded node "
-                "would silently compute a different model from the unsharded "
-                f"one.  Leave boundary unset to use {declared!r}, or pass "
+                f"reproduces its own update, but was given boundary={boundary!r}"
+                f"{' (the default)' if boundary == 'edge' else ''}, which fills "
+                "them differently, so the sharded node would silently compute a "
+                f"different model from the unsharded one.  Pass "
                 f"boundary={declared!r}."
             )
 

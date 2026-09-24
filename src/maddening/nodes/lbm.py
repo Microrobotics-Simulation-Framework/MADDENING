@@ -688,8 +688,10 @@ class LBMNode(SimulationNode):
 
     **Sharding.**  Under
     :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode` the
-    node fills its halos periodically by default (:meth:`halo_boundary`),
-    which is what its unsharded streaming does.  A pressure face must not
+    node must be wrapped with ``boundary="periodic"`` (:meth:`halo_boundary`),
+    which is what its unsharded streaming does; any other fill, the
+    wrapper's default ``"edge"`` included, is refused at construction.  A
+    pressure face must not
     lie on a sharded axis: the first sharded step that imposes a pressure
     on such a face raises, naming the axis to shard instead (see
     :meth:`update_padded`).
@@ -895,12 +897,12 @@ class LBMNode(SimulationNode):
         reproduces :meth:`update` only when the halos at the edges of the
         global grid hold the cells from the opposite edge -- a periodic
         fill.  :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
-        uses this as its default ``boundary`` and refuses a different one.
-        Its historical default, ``"edge"``, copies each edge cell into its
-        own halo: on a walled 16x10 D2Q9 pressure channel sharded across
-        the walls it moved the centreline velocity by 0.64% after 200
-        steps, where ``"periodic"`` matches the unsharded node to float32
-        rounding.
+        refuses at construction any ``boundary`` other than this one,
+        including its own default, ``"edge"``, which copies each edge cell
+        into its own halo: on a walled 16x10 D2Q9 pressure channel sharded
+        across the walls that used to run and moved the centreline
+        velocity by 0.64% after 200 steps, where ``boundary="periodic"``
+        matches the unsharded node to float32 rounding.
         """
         return "periodic"
 

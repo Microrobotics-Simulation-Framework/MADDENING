@@ -14,8 +14,10 @@ from the node it wraps, with no error:
   with ``boundary="edge"`` by default, while the unsharded node streams
   periodically; sharding the same channel across its walls moved the
   centreline velocity by 0.64% after 200 steps.  The node now declares
-  ``halo_boundary() == "periodic"``, the wrapper uses it by default and
-  refuses any other fill.
+  ``halo_boundary() == "periodic"`` and the wrapper refuses any other fill
+  at construction -- its own default ``"edge"`` included (the STABLE
+  signature is unchanged).  Wrap an ``LBMNode`` with
+  ``boundary="periodic"``.
 """
 
 import jax
@@ -50,6 +52,12 @@ def _channel(**kw):
                    lattice="D2Q9", wall_mask=wall, **kw)
 
 
+def _wrap(node, mesh=None, axis=1):
+    """The one accepted way to shard an ``LBMNode``: periodic halos."""
+    return ShardedStencilNode(node, mesh if mesh is not None else _mesh(),
+                              axis_map={"a": axis}, boundary="periodic")
+
+
 def _run(stepper, node, inputs, n_steps):
     st = node.initial_state()
     for _ in range(n_steps):
@@ -61,7 +69,7 @@ def _run(stepper, node, inputs, n_steps):
 
 def test_sharding_the_inlet_outlet_axis_of_a_pressure_channel_is_refused():
     node = _channel()
-    wrapped = ShardedStencilNode(node, _mesh(), axis_map={"a": 0})
+    wrapped = _wrap(node, axis=0)
     with pytest.raises(ValueError) as info:
         wrapped.update(node.initial_state(), PRESSURES, 1.0)
     message = str(info.value)
@@ -75,7 +83,7 @@ def test_sharding_the_inlet_outlet_axis_of_a_pressure_channel_is_refused():
 
 def test_one_imposed_pressure_on_a_sharded_face_axis_is_enough_to_refuse():
     node = _channel()
-    wrapped = ShardedStencilNode(node, _mesh(), axis_map={"a": 0})
+    wrapped = _wrap(node, axis=0)
     for key in PRESSURES:
         with pytest.raises(ValueError, match=f"{key} on face"):
             wrapped.update(node.initial_state(), {key: PRESSURES[key]}, 1.0)
@@ -86,7 +94,7 @@ def test_only_the_faces_actually_imposed_count():
     axis 0 splits no imposed face, runs, and is the unsharded node."""
     node = _channel(outlet_face="y_max")
     inputs = {"outlet_pressure": PRESSURES["outlet_pressure"]}
-    got = _run(ShardedStencilNode(node, _mesh(), axis_map={"a": 0}), node, inputs, 20)
+    got = _run(_wrap(node, axis=0), node, inputs, 20)
     want = _run(node, node, inputs, 20)
     for key in ("f", "density", "velocity"):
         np.testing.assert_allclose(got[key], want[key], rtol=1e-5, atol=1e-6, err_msg=key)
@@ -96,7 +104,7 @@ def test_a_face_axis_held_whole_by_one_device_is_not_a_seam():
     """A one-device mesh axis leaves the face axis in one slab: nothing to
     refuse, and the step is the unsharded one."""
     node = _channel()
-    got = _run(ShardedStencilNode(node, _mesh(1), axis_map={"a": 0}), node, PRESSURES, 20)
+    got = _run(_wrap(node, _mesh(1), axis=0), node, PRESSURES, 20)
     want = _run(node, node, PRESSURES, 20)
     np.testing.assert_allclose(got["velocity"], want["velocity"], rtol=1e-5, atol=1e-6)
 
@@ -107,7 +115,7 @@ def test_a_body_force_driven_node_may_shard_any_axis():
     node = _channel()
     inputs = {"body_force": jnp.asarray([1e-5, 0.0], jnp.float32)}
     for axis in (0, 1):
-        got = _run(ShardedStencilNode(node, _mesh(), axis_map={"a": axis}), node, inputs, 50)
+        got = _run(_wrap(node, axis=axis), node, inputs, 50)
         want = _run(node, node, inputs, 50)
         np.testing.assert_allclose(got["velocity"], want["velocity"], rtol=1e-5, atol=1e-6,
                                    err_msg=f"axis {axis}")
@@ -115,12 +123,13 @@ def test_a_body_force_driven_node_may_shard_any_axis():
 
 # -- the halo fill at the global edges ----------------------------------------
 
-def test_by_default_a_pressure_channel_sharded_across_its_walls_is_the_unsharded_node():
-    """The auditor's layout, 200 steps, the wrapper's default ``boundary``.
-    With the old ``"edge"`` default: centreline 2.517e-2 against 2.534e-2
-    (0.64%), max|du| 4.1e-4.  Now float32 rounding (measured 2.6e-7)."""
+def test_with_periodic_halos_a_pressure_channel_sharded_across_its_walls_is_the_unsharded_node():
+    """The auditor's layout, 200 steps, ``boundary="periodic"``: float32
+    rounding (measured max|du| 2.6e-7).  With the wrapper's default
+    ``"edge"``, which used to run: centreline 2.517e-2 against 2.534e-2
+    (0.64%), max|du| 4.1e-4 -- now refused (below)."""
     node = _channel()
-    wrapped = ShardedStencilNode(node, _mesh(), axis_map={"a": 1})
+    wrapped = _wrap(node, axis=1)
     assert wrapped.to_dict()["boundary"] == "periodic"
     got = _run(wrapped, node, PRESSURES, 200)
     want = _run(node, node, PRESSURES, 200)
@@ -131,34 +140,47 @@ def test_by_default_a_pressure_channel_sharded_across_its_walls_is_the_unsharded
     assert abs(got["velocity"][NX // 2, NY // 2, 0] / centre - 1.0) < 1e-4
 
 
-def test_the_default_and_the_declared_boundary_are_the_same_step():
-    node = _channel()
-    a = _run(ShardedStencilNode(node, _mesh(), axis_map={"a": 1}), node, PRESSURES, 5)
-    b = _run(ShardedStencilNode(node, _mesh(), axis_map={"a": 1}, boundary="periodic"),
-             node, PRESSURES, 5)
-    for key in a:
-        np.testing.assert_array_equal(a[key], b[key], err_msg=key)
+def test_wrapping_an_lbm_node_with_the_default_boundary_is_refused_at_construction():
+    """The wrapper's STABLE default stays ``"edge"``; for a node that
+    declares ``"periodic"`` it is refused before anything is traced, and
+    the message names the node, both fills and what to pass."""
+    with pytest.raises(ValueError) as info:
+        ShardedStencilNode(_channel(), _mesh(), axis_map={"a": 1})
+    message = str(info.value)
+    assert message.startswith("ShardedStencilNode: LBMNode 'lbm' declares "
+                              "halo_boundary() == 'periodic'")
+    assert "was given boundary='edge' (the default)" in message
+    assert "would silently compute a different model from the unsharded one" in message
+    assert message.endswith("Pass boundary='periodic'.")
 
 
 @pytest.mark.parametrize("boundary", ["edge", "zero"])
-def test_a_halo_fill_other_than_the_declared_one_is_refused(boundary):
+def test_an_explicit_halo_fill_other_than_the_declared_one_is_refused(boundary):
     with pytest.raises(ValueError) as info:
         ShardedStencilNode(_channel(), _mesh(), axis_map={"a": 1}, boundary=boundary)
     message = str(info.value)
     assert "halo_boundary() == 'periodic'" in message
-    assert f"boundary={boundary!r} would fill them differently" in message
-    assert "Leave boundary unset" in message
+    assert f"was given boundary={boundary!r}" in message
+    assert ("(the default)" in message) == (boundary == "edge")
+    assert "Pass boundary='periodic'." in message
 
 
-def test_a_node_that_declares_no_halo_boundary_keeps_the_edge_default():
-    """Every other stencil node is unchanged: ``None`` resolves to
-    ``"edge"`` and any valid explicit fill is taken as given."""
+def test_a_node_that_declares_no_halo_boundary_is_wrapped_exactly_as_before():
+    """Every other stencil node is unchanged: the default is ``"edge"``,
+    any valid fill is taken as given, and the default step is the
+    explicit-``"edge"`` step to the bit."""
     heat = HeatNode("h", 1e-4, n_cells=16, thermal_diffusivity=0.1)
     assert not hasattr(heat, "halo_boundary")
-    assert ShardedStencilNode(heat, _mesh(), axis_map={"a": 0}).to_dict()["boundary"] == "edge"
+    default = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0})
+    assert default.to_dict()["boundary"] == "edge"
     for boundary in ("edge", "periodic", "zero"):
         wrapped = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0}, boundary=boundary)
         assert wrapped.to_dict()["boundary"] == boundary
+    explicit = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0}, boundary="edge")
+    a = _run(default, heat, {}, 5)
+    b = _run(explicit, heat, {}, 5)
+    for key in a:
+        np.testing.assert_array_equal(a[key], b[key], err_msg=key)
 
 
 def test_a_declared_halo_boundary_that_is_not_a_mode_is_refused():
@@ -168,4 +190,4 @@ def test_a_declared_halo_boundary_that_is_not_a_mode_is_refused():
 
     node = Declares("d", 1.0, grid_shape=(8, 4), viscosity=0.1, lattice="D2Q9")
     with pytest.raises(ValueError, match=r"halo_boundary\(\) returned 'wrap'"):
-        ShardedStencilNode(node, _mesh(), axis_map={"a": 0})
+        ShardedStencilNode(node, _mesh(), axis_map={"a": 0}, boundary="periodic")

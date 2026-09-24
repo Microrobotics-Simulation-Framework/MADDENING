@@ -461,6 +461,7 @@ linearises, it never steps a parameter.)
   module; pass `allow_import=True` to get that back, and only for a
   stage you trust as much as a script.
 * **FMI**: `build_model_description` exposes every leaf of `gm.params`
+  that the compiled step reads (see below for the rest)
   as a `causality="parameter"`, `variability="tunable"` variable named
   `<node>.params.<key>` (its own namespace, mirroring the pytree path, so
   it never collides with a `<node>.<field>` output), with
@@ -474,7 +475,16 @@ linearises, it never steps a parameter.)
   the declared bounds is rejected before anything is written (the same
   rule as `PUT /graph/params`), and `GetFMUState` / `SetFMUState`
   snapshots carry the parameters.  Directional derivatives with respect to a
-  parameter are the same `jax.jvp` the graph uses everywhere.
+  parameter are the same `jax.jvp` the graph uses everywhere.  A leaf the
+  step cannot read -- an `initial_*` condition, a value a node consumed at
+  construction or declares in `static_data_deps`, one only an unconnected
+  input would read -- is not exported (an FMU's graph is frozen, so it is a
+  knob that does nothing) and is listed with the reason in
+  `md.fixed_parameters`; pass that as `SidecarConfig(fixed_params=...)`
+  (`FmuTcpBridge` applies it to its sidecar either way), and `set_params`,
+  `set_fmu_state` and the bridge's `set_state` refuse a new value for one of
+  them before anything is written.  The sidecar holds only the compiled
+  step, so a standalone sidecar built without `fixed_params` cannot tell.
 
 ## Mapping weights
 

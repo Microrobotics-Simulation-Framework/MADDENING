@@ -140,10 +140,7 @@ tests/nodes/adaptive/test_wavelet_node.py::test_eager_jit_and_graph_select_the_s
 tests/nodes/adaptive/test_wavelet_node.py::test_in_float32_the_rounding_floor_ends_a_large_budget_selection_and_says_so # pending triage: median 2 s, max 6 s
 tests/nodes/adaptive/test_wavelet_node.py::test_other_dimensions_and_the_dirichlet_basis_cold_start_and_differentiate[dirichlet_3d] # pending triage: median 3 s, max 6 s
 tests/nodes/adaptive/test_wavelet_node.py::test_the_default_budget_holds_the_whole_level_zero_seed_so_no_coefficient_is_dropped[dim=2-n_levels=2-n_coarse=3] # pending triage: median 4 s, max 6 s
-tests/nodes/test_heart_pump.py::TestHeartPumpPhysics::test_steady_state_pressure # pending triage: median 40 s, max 62 s
-tests/nodes/test_lbm.py::TestLBMPoiseuille2D::test_poiseuille_profile # pending triage: median 31 s, max 39 s
 tests/nodes/test_lbm_pressure_boundary.py::test_the_node_declares_the_periodic_halo_its_unsharded_streaming_implies # pending triage: median 3 s, max 7 s
-tests/nodes/test_rigid_body.py::TestQuaternion::test_quaternion_stays_normalized # pending triage: median 24 s, max 34 s
 tests/nodes/test_vessel_coupling.py::TestHeartLBMCouplingRuns::test_coupled_graph_runs_20_steps # pending triage: median 9 s, max 11 s
 tests/nodes/test_vessel_coupling.py::TestHeartLBMPressureTransfers::test_heart_pressure_reaches_lbm_inlet # pending triage: median 2 s, max 6 s
 tests/property/test_adaptive_invariants.py::test_a_checkpoint_of_a_graph_with_an_adaptive_node_restores_it_exactly # pending triage: median 8 s, max 12 s

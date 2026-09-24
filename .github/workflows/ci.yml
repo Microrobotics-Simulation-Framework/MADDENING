@@ -163,7 +163,36 @@ jobs:
           # reads is indistinguishable from a test that never existed,
           # and at least one skip here is a *measurement* the log is
           # meant to carry (see the jax-version matrix comment above).
-          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz
+          #
+          # --durations prints every test over 1 s at the end of the log;
+          # the JUnit XML carries every test's time to the budget step
+          # below.  xunit1 is the JUnit family that records file and line.
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
+            --durations=0 --durations-min=1.0 \
+            --junitxml=test-results.xml -o junit_family=xunit1
+
+      - name: Test time budget
+        # Runs after a red test step too: a failing run's durations are
+        # still worth reading.  Puts the band counts, the slowest tests and
+        # the slowest files on the run page, warns on any test over 5 s
+        # that is not on tests/duration_allowlist.txt, and fails on one
+        # over 20 s.  The budget is in docs/developer_guide/testing_standards.md.
+        if: ${{ !cancelled() }}
+        run: |
+          python scripts/report_test_durations.py test-results.xml \
+            --allowlist tests/duration_allowlist.txt \
+            --title "Test durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }})"
+
+      - name: Upload test durations
+        # Kept 90 days so a regression can be traced to the run that
+        # introduced it without re-running anything.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}
+          path: test-results.xml
+          retention-days: 90
+          if-no-files-found: warn
 
   test-usd:
     needs: changes

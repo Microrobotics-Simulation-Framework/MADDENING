@@ -125,11 +125,18 @@ EXAMPLES_COSTLY = max(EXAMPLES_FLOOR, (2 * _PROFILE_EXAMPLES) // 5)
 
 
 def pytest_configure(config):
-    """Per-test JAX trace / lower / compile times, when CI asks for them.
+    """CI-only plugins, each switched on by its environment variable.
 
-    See ``tests/_jax_timing.py``; ``scripts/report_test_durations.py``
-    reads the result from the JUnit XML.
+    ``MADDENING_TEST_SHARD=i/N`` keeps one CI shard's test files
+    (``tests/_sharding.py``).  ``MADDENING_TEST_JAX_TIMING=1`` records each
+    test's JAX trace / lower / compile times into the JUnit XML
+    (``tests/_jax_timing.py``), which ``scripts/report_test_durations.py``
+    reads.
     """
+    spec = os.environ.get("MADDENING_TEST_SHARD")
+    if spec:
+        from tests import _sharding
+        _sharding.register(config, spec)
     if os.environ.get("MADDENING_TEST_JAX_TIMING") == "1":
         from tests import _jax_timing
         _jax_timing.register(config)

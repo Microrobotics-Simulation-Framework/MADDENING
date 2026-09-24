@@ -406,6 +406,29 @@ the runner. The rest is that the first test to compile something pays for
 every later test that reuses it, so moving or marking one test moves
 another's time. Judge a test on more than one run.
 
+### Sharded lanes
+
+Each JAX lane runs as four jobs on four runners, each running its share of
+the suite one test at a time (`MADDENING_TEST_SHARD=i/4`,
+`tests/_sharding.py`). The split is by test file, and it is stable. A file's
+shard is a hash of its path, or an explicit pin in `PINS` for the heaviest
+files, never a function of the test list. So:
+
+- adding or removing tests, or whole files, moves no other file;
+- a file's tests stay together, so its fixtures build once;
+- shard *i* of a pull request holds the same files as shard *i* of the base
+  branch, which is what lets a shard reuse that shard's compilation cache.
+
+Every job still collects the whole suite, so every `conftest.py` runs as
+it would in a single process, and deselects the other shards' files. The
+per-shard `Test time budget` step gates. The `Test durations` job writes
+one summary per lane from all four shards' reports.
+
+To rebalance, edit `PINS`, which moves only the files you pin, and take the
+per-file totals from the lane summary. Changing the job count re-deals
+every file: change `shard:` and `MADDENING_TEST_SHARD` in `ci.yml`, and
+`PINS_FOR`. `tests/compliance/test_ci_sharding.py` checks that they agree.
+
 `pending triage` entries in the allowlist are tests that were already over
 5 s when the budget arrived (2026-09-24). Each one is to be marked slow,
 made faster, or kept with a reason, and the list only shrinks. The summary
@@ -424,10 +447,13 @@ run reads it decides what its times mean:
 | Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
 
 Pull requests never save, so a second push cannot read the first push's
-cache: a new test that takes 25 s cold would otherwise pass at 8 s. The
-cache key includes the runner's CPU model, because XLA compiles for the
-host's instruction set. A run that finds no cache for its model runs cold,
-and the summary says so. Every summary states which kind of run it was.
+cache: a new test that takes 25 s cold would otherwise pass at 8 s. Each
+shard has its own cache, which works because shard *i* holds the same files
+on every branch (see *Sharded lanes*). The cache key also includes the
+runner's CPU model, because XLA compiles for the host's instruction set. A
+shard that finds no cache for its model runs cold. Every lane summary
+states which kind of run it was: `warm`, `cold`, or `mixed` when the shards
+differed.
 A warm run never lists allowlist entries as removable, because a test that
 is only fast when its compile is cached is still slow.
 

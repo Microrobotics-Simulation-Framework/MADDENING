@@ -54,7 +54,8 @@ cache.
 Warm and cold runs
 ------------------
 ``--cache-mode`` says what the run's compilation cache was: ``off`` (none),
-``cold`` (started empty) or ``warm`` (restored from an earlier run).  A
+``cold`` (started empty), ``warm`` (restored from an earlier run), or
+``mixed`` (a lane whose shards differed).  A
 warm run's times are not comparable with a cold run's, so the header says
 which it was, and a warm run does not list allowlist entries as removable
 -- a test that is only fast because its compile was cached is still slow.
@@ -69,6 +70,12 @@ The allowlist
   a reason; the list only shrinks.
 * ``kept: <why>`` -- a deliberate decision that a slow test must run on
   every push.
+
+Listed tests that no longer run in this lane (marked slow, renamed,
+deleted) or now finish under the policy line are reported as removable;
+that is advisory, because one fast run is not proof.  A single shard's
+report is not the lane, so the per-shard gate writes no summary and the
+lane summary passes ``--no-removable`` when a shard's report is missing.
 
 Usage
 -----
@@ -106,7 +113,7 @@ ANNOTATION_LIMIT = 10
 JAX_PROPERTIES = ("jax_trace_s", "jax_lower_s", "jax_compile_s", "jax_cache_read_s",
                   "jax_cache_hits", "jax_cache_misses")
 
-CACHE_MODES = ("off", "cold", "warm")
+CACHE_MODES = ("off", "cold", "warm", "mixed")
 
 
 class TestTime(NamedTuple):
@@ -289,6 +296,9 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
         "warm": ("**Compilation cache: warm** (restored from an earlier run). Compiles of "
                  "unchanged programs were skipped, so these times are lower than a cold "
                  "run's; new and changed programs still compiled."),
+        "mixed": ("**Compilation cache: mixed** -- some shards restored a cache and some ran "
+                  "cold (a shard whose runner CPU model had no cache yet), so these times mix "
+                  "warm and cold."),
     }.get(cache_mode, "**Compilation cache: not stated.**")
     if timed:
         hits = sum(t.jax["jax_cache_hits"] for t in timed)
@@ -342,7 +352,7 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
     for f, (s, n) in sorted(files.items(), key=lambda kv: -kv[1][0])[:15]:
         lines.append(f"| {_fmt(s)} | {n} | {s / n:.2f} s | `{f}` |")
     removable = verdict["allow_absent"] + [t.nodeid for t in verdict["allow_fast"]]
-    if removable and cache_mode == "warm":
+    if removable and cache_mode in ("warm", "mixed"):
         lines += ["", "Allowlist entries are not judged removable on a warm run: a test that "
                   "is only fast because its compile was cached is still slow. See the "
                   "after-merge (cold) runs."]
@@ -389,6 +399,8 @@ def main(argv=None) -> int:
     p.add_argument("--markdown", type=Path,
                    default=Path(os.environ["GITHUB_STEP_SUMMARY"]) if os.environ.get("GITHUB_STEP_SUMMARY") else None,
                    help="append the summary here (default: $GITHUB_STEP_SUMMARY)")
+    p.add_argument("--no-removable", action="store_true",
+                   help="list no allowlist entries as removable (the reports do not cover the whole lane)")
     p.add_argument("--title", default="Test durations")
     p.add_argument("--top", type=int, default=30)
     args = p.parse_args(argv)
@@ -408,6 +420,10 @@ def main(argv=None) -> int:
     fail_over = args.fail_over or float("inf")
     verdict = judge(tests, allow, watch_over=args.watch_over,
                     slow_over=args.slow_over, fail_over=fail_over)
+    if args.no_removable:
+        # An entry absent from a partial view may simply be in the part
+        # that is missing.
+        verdict["allow_absent"], verdict["allow_fast"] = [], []
     md = markdown(verdict, allow, title=args.title, watch_over=args.watch_over,
                   slow_over=args.slow_over, fail_over=fail_over, top=args.top,
                   cache_mode=args.cache_mode)

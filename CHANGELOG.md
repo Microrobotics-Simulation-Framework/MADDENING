@@ -18,7 +18,7 @@ guidance; the itemized changes follow.
   IFT gradient's relative error at an early exit, under `solver="ift"`, `diagnostics=True`.  About the
   gradient, not the solve -- it reads 0.0 on an affine group whose state is far off; read `spectral_error_bound` for that
 - **`coupling_diagnostics()` gains a bound, `spectral_error_bound`** (with `rho_spectral`,
-  `spectral_usable`): eight Arnoldi steps on `dF/dx` under `solver="ift"`, `diagnostics=True`; 7.95x
+  `spectral_usable`): eight Arnoldi steps on `dF/dx` under `solver="ift"`, `diagnostics=True`; 8.05x
   *over* the true distance where `error_estimate` is 122x under.  Reported, not applied; existing keys unchanged
 - **`WaveletAdaptiveNode`** (`maddening.nodes.adaptive`, `EXPERIMENTAL`): the first
   concrete `AdaptiveNode` — an interpolating-wavelet solver for `(-Δ + m) u = f`
@@ -280,6 +280,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling bounds, confirmation audit:** a field below `tiny/eps` (~1e-31 in float32) no longer reads converged on a flushed change; the float floor counts the evaluations a pass rounds like (sub-cycling automatically,
+  internal loops via the new `SimulationNode.update_evaluations()`; an undeclared node's group gets `spectral_usable=False` at the floor); float16-beside-float32 gradient floors, top-of-range spectral weights,
+  `PYTHONHASHSEED`-dependent `_meta` seeds and `reset_state` of a key ending `_spectral` are fixed. Action: a node that sub-steps inside `update` should return its sub-step count from `update_evaluations()`.
 - **`AdaptiveNode.update` refuses an injected `params` key it does not have**, for every subclass: `{"thetta": 0.9}` was merged,
   never read, and returned the constructor answer; fix the key the error names.  MADD-ANO-004 now also records `ShardedStencilNode`
   (0.2.0-0.3.1) and `ShardedUnstructuredNode` (0.3.0-0.3.1) ignoring a REST parameter write: on those releases set it on the inner node.
@@ -587,7 +590,9 @@ guidance; the itemized changes follow.
 - **MADD-ANO-020 is resolved in this release**: `LBMNode`'s pressure BC imposed the wrong face density since 0.1.0 (see `### Fixed`)
 - **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
-  release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`
+  release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`.
+  It also records the legacy `solver="fori"` Aitken carry, which fails under x64 exactly as every other
+  configuration does and adds no failure of its own
 - **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reached
   `update()` and could not reach `derivatives()`, `implicit_residual()` or

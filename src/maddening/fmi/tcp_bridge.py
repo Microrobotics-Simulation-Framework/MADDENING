@@ -478,6 +478,12 @@ class FmuTcpBridge:
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind((host, port))
         self._server.listen(_MAX_CONNECTIONS)
+        # Set here, not at the top of ``_serve``: ``stop()`` may close the
+        # socket before the serve thread's first line runs, and a
+        # ``settimeout`` on a closed socket raises EBADF out of the thread.
+        # ``accept`` on a closed socket raises an OSError the loop already
+        # treats as "stopped".
+        self._server.settimeout(0.2)
         self._host, self._port = self._server.getsockname()[:2]
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -543,7 +549,6 @@ class FmuTcpBridge:
         self.stop()
 
     def _serve(self) -> None:
-        self._server.settimeout(0.2)
         while not self._stop.is_set():
             try:
                 conn, _ = self._server.accept()

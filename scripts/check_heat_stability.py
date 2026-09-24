@@ -52,6 +52,38 @@ A literal ``**{"thermal_diffusivity": 1e3}`` or ``**dict(...)`` splat is
 read like the keywords it spells.  It used to be dropped silently, so the
 rod was judged on the constructor's *defaults* and counted as verified
 while ``HeatNode.__init__`` refused it (audit_040_phase3_wave_d, H5).
+
+A class defined in the same source as a subclass of ``HeatNode`` (or of
+such a subclass, to any depth) is a ``HeatNode`` to this gate: a
+construction through it runs ``HeatNode.__init__`` and its guard, so it
+is judged the same way.  One whose chain defines its own ``__init__`` or
+``__new__`` could map its arguments anywhere, and is reported as not
+evaluated.  ``class Rod(HeatNode): pass; Rod(...)`` used to be invisible
+(audit_040_phase3_confirm, release-record).
+
+Limits, stated rather than implied:
+
+* a subclass *imported from another module* is not recognised -- the gate
+  reads one source at a time and does not resolve imports, so a rod built
+  through such a class is not seen at all (it is neither verified nor
+  counted as unevaluated);
+* a class obtained at run time (``type(...)``, a factory, a registry
+  lookup) is likewise invisible;
+* a call is matched by name, so an unrelated class that happens to be
+  called ``HeatNode`` -- or a local subclass name reused for something
+  else -- is judged as a rod.  The failure that can cause is a spurious
+  refusal, never a spurious pass.
+
+The allowlist exempts named constructions, not files.  The one test file
+on it may plant unstable rods only inside string literals (embedded
+source it writes out as a fixture); a real construction in its code is
+checked like any other.  The archived probes are exempt at the listed
+lines only.  The whole-file exemption used to let a real unstable rod
+appended to the test file pass.  What the gate cannot tell apart is a
+string literal the test file writes out as a fixture and one it
+*executes* (``python -c``, the way the rod this gate exists for hid): in
+that one file, both are exempt, so a test there must not run a rod from
+a string.
 """
 
 from __future__ import annotations
@@ -101,26 +133,55 @@ _POSITIONAL = _positional_order()
 #: ``TestHeatStabilityGate.test_the_allowlisted_file_still_plants_a_defect``
 #: -- if the planted construction ever goes away, the exemption has to
 #: go with it rather than sitting there quietly widening the scope.
+#: Each entry is ``path: (reason, scope)``.  ``scope`` is
+#: :data:`EMBEDDED_ONLY` -- only constructions inside string literals the
+#: file writes out as source are exempt -- or a frozenset of the line
+#: numbers of the exempt constructions.  Anything else in the file is
+#: checked.  ``test_the_allowlisted_file_still_plants_a_defect`` holds each
+#: scope to at least one unstable rod, and each listed line to one.
+EMBEDDED_ONLY = "embedded source only"
+
 _ALLOWED_UNSTABLE = {
-    "tests/compliance/test_gate_scripts.py":
-        "plants unstable rods as fixtures to prove this gate rejects them",
+    "tests/compliance/test_gate_scripts.py": (
+        "plants unstable rods as fixtures, as source text it writes to a "
+        "temporary directory, to prove this gate rejects them",
+        EMBEDDED_ONLY),
     "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
-    "e_genuinely_unstable.py":
+    "e_genuinely_unstable.py": (
         "archived audit probe: the positive control for this gate, a rod the "
         "guard must refuse.  Committed as round-2 evidence, so the gate now "
         "scans it",
+        frozenset({2})),
     "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
-    "c_positional_stencil.py":
+    "c_positional_stencil.py": (
         "archived audit probe: a 4th-order rod whose stencil_order is passed "
         "POSITIONALLY.  It was invisible while _POSITIONAL stopped at five "
         "names; widening it to the full signature made this probe the first "
         "thing the gate caught",
+        frozenset({4})),
     "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
-    "d_attribute_call.py":
+    "d_attribute_call.py": (
         "archived audit probe: the same unstable rod spelled as the "
         "attribute heat.HeatNode.  It was invisible while the gate matched "
         "ast.Name only",
+        frozenset({3})),
 }
+
+#: How ``scan_source`` marks the origin of a construction found inside a
+#: string literal.
+_EMBEDDED = " [embedded source]"
+
+
+def _is_allowed(origin: str, lineno: int) -> bool:
+    """Is this unstable construction one the allowlist names?"""
+    base, embedded = origin.split(_EMBEDDED, 1)[0], _EMBEDDED in origin
+    entry = _ALLOWED_UNSTABLE.get(base)
+    if entry is None:
+        return False
+    scope = entry[1]
+    if scope == EMBEDDED_ONLY:
+        return embedded
+    return not embedded and lineno in scope
 
 #: A ceiling, not a target.  One test file has to plant defects to prove the
 #: gate catches them, and the archived round-2 probes are the positive
@@ -192,7 +253,39 @@ def _local_aliases(tree) -> set:
     return names
 
 
-def _is_heat_node_call(node, aliases) -> bool:
+def _local_subclasses(tree, aliases) -> dict:
+    """Classes defined in this source that are ``HeatNode`` subclasses.
+
+    Maps each name to ``True`` when it (or a local class between it and
+    ``HeatNode``) defines ``__init__`` or ``__new__``, so the constructor
+    arguments may not reach ``HeatNode.__init__`` as written.  Iterated to
+    a fixed point, so a subclass of a subclass is found in any order.
+    """
+    classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    found: dict = {}
+    changed = True
+    while changed:
+        changed = False
+        for cls in classes:
+            if cls.name in found or cls.name in aliases:
+                continue
+            parents = []
+            for base in cls.bases:
+                name = getattr(base, "id", None) or getattr(base, "attr", None)
+                if name in aliases or name == "HeatNode":
+                    parents.append(False)
+                elif name in found:
+                    parents.append(found[name])
+            if not parents:
+                continue
+            own = any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name in ("__init__", "__new__") for n in cls.body)
+            found[cls.name] = own or any(parents)
+            changed = True
+    return found
+
+
+def _is_heat_node_call(node, aliases, subclasses=None) -> bool:
     """Is this call constructing a ``HeatNode``, however it is spelled?
 
     Matching ``ast.Attribute`` can in principle pick up an unrelated
@@ -203,7 +296,8 @@ def _is_heat_node_call(node, aliases) -> bool:
         return False
     if getattr(node.func, "attr", None) == "HeatNode":
         return True
-    return getattr(node.func, "id", None) in aliases
+    name = getattr(node.func, "id", None)
+    return name in aliases or name in (subclasses or {})
 
 
 def _literal_splat(value):
@@ -267,13 +361,21 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
         return
 
     aliases = _local_aliases(tree)
+    subclasses = _local_subclasses(tree, aliases)
     for node in ast.walk(tree):
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and "HeatNode(" in node.value):
-            scan_source(node.value, f"{origin} [embedded source]",
+                and "HeatNode" in node.value and "(" in node.value):
+            scan_source(node.value, f"{origin}{_EMBEDDED}",
                         defaults, unstable, unchecked, seen)
             continue
-        if not _is_heat_node_call(node, aliases):
+        if not _is_heat_node_call(node, aliases, subclasses):
+            continue
+        if subclasses.get(getattr(node.func, "id", None)):
+            unchecked.append((
+                origin, node.lineno,
+                f"a HeatNode subclass ({node.func.id}) that defines its own "
+                f"__init__ or __new__, so its arguments may not reach "
+                f"HeatNode.__init__ as written"))
             continue
 
         # A ``**`` splat used to be dropped (``if kw.arg``), so the rod was
@@ -384,9 +486,17 @@ def main(argv=None) -> int:
             origin = str(path.relative_to(REPO_ROOT))
         except ValueError:
             origin = str(path)
-        if origin in _ALLOWED_UNSTABLE:
-            continue
         scan_source(src, origin, defaults, unstable, unchecked, seen)
+
+    # The allowlist names constructions, not files: everything else in an
+    # allowlisted file was scanned above and is judged like any other rod.
+    # An exempt rod is past its limit, so it is not "verified" either.
+    allowed = [(o, n) for o, n, _why in unstable if _is_allowed(o, n)]
+    unstable = [u for u in unstable if not _is_allowed(u[0], u[1])]
+    # One ``seen`` entry per exempt rod: embedded snippets share an origin
+    # and number their own lines, so (origin, line) is not unique.
+    for key in allowed:
+        seen.remove(key)
 
     if unstable:
         print(f"FAIL: {len(unstable)} HeatNode construction(s) the stability "
@@ -438,8 +548,10 @@ def main(argv=None) -> int:
         if args.list_unevaluated:
             for origin, lineno, why in unchecked:
                 print(f"  {origin}:{lineno}: {why}")
+    exempt = (f"; {len(allowed)} deliberately unstable construction(s) "
+              f"exempt by name (_ALLOWED_UNSTABLE)" if allowed else "")
     print(f"OK: {len(seen)} HeatNode construction(s) verified within their "
-          f"stencil's stability limit{note}")
+          f"stencil's stability limit{note}{exempt}")
     return 0
 
 

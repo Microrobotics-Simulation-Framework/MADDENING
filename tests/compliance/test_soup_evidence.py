@@ -202,6 +202,83 @@ def test_a_test_module_that_registers_a_benchmark_is_wired_into_the_index():
     assert gen._check_benchmark_modules_are_complete() == []
 
 
+_UNWIRED_BENCHMARK = '''\
+from maddening.compliance import BenchmarkType, verification_benchmark
+
+
+@verification_benchmark(
+    benchmark_id={bid},
+    description="a benchmark that registers and runs",
+    node_type="HeatNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria="1 + 1 == 2",
+)
+def test_unwired():
+    assert 1 + 1 == 2
+'''
+
+
+def _unwired_tree(tmp_path, monkeypatch, source, name="test_unwired_benchmark.py"):
+    """A throwaway ``tests/`` holding one module, as the check's scope."""
+    tests = tmp_path / "tests" / "verification"
+    tests.mkdir(parents=True)
+    (tests / name).write_text(source)
+    monkeypatch.setattr(gen, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(gen, "TESTS", tmp_path / "tests")
+
+
+@pytest.mark.parametrize("bid", ["'MADD-VER-017'", '"MADD-VER-017"',
+                                 "'''MADD-VER-017'''"])
+def test_an_unlisted_registration_is_found_however_it_is_quoted(
+    tmp_path, monkeypatch, bid
+):
+    """The check grepped for ``benchmark_id="MADD-VER-``, so a single-quoted
+    ID registered, ran and never reached framework_verification.md
+    (audit_040_phase3_confirm, release-record, A6)."""
+    _unwired_tree(tmp_path, monkeypatch, _UNWIRED_BENCHMARK.format(bid=bid))
+    (message,) = gen._check_benchmark_modules_are_complete()
+    assert "test_unwired_benchmark.py registers MADD-VER-017" in message
+
+
+@pytest.mark.parametrize("source", [
+    # Positional ID.
+    "from maddening.compliance import verification_benchmark\n"
+    "@verification_benchmark('MADD-VER-017', 'd', 'HeatNode', None, 'c')\n"
+    "def test_x():\n    pass\n",
+    # An aliased decorator.
+    "from maddening.compliance import verification_benchmark as vb\n"
+    "@vb(benchmark_id='MADD-VER-017', description='d', node_type='n',\n"
+    "    benchmark_type=None, acceptance_criteria='c')\n"
+    "def test_x():\n    pass\n",
+    # An attribute-spelled decorator.
+    "import maddening.compliance as mc\n"
+    "@mc.verification_benchmark(benchmark_id='MADD-VER-017', description='d',\n"
+    "    node_type='n', benchmark_type=None, acceptance_criteria='c')\n"
+    "def test_x():\n    pass\n",
+])
+def test_every_spelling_of_a_registration_is_found(tmp_path, monkeypatch, source):
+    # A helper module registers on import as well as a test_*.py does.
+    _unwired_tree(tmp_path, monkeypatch, source, name="benchmark_helpers.py")
+    (message,) = gen._check_benchmark_modules_are_complete()
+    assert "registers MADD-VER-017" in message
+
+
+def test_an_id_the_check_cannot_read_must_be_listed(tmp_path, monkeypatch):
+    _unwired_tree(tmp_path, monkeypatch,
+                  _UNWIRED_BENCHMARK.format(bid='"MADD-VER-" + "017"'))
+    (message,) = gen._check_benchmark_modules_are_complete()
+    assert "whose ID is not a string literal" in message
+
+
+def test_a_benchmark_outside_madd_ver_is_not_the_indexs_business(
+    tmp_path, monkeypatch
+):
+    """``TEST-VER-*`` entries register while the compliance tests run."""
+    _unwired_tree(tmp_path, monkeypatch,
+                  _UNWIRED_BENCHMARK.format(bid="'TEST-VER-001'"))
+    assert gen._check_benchmark_modules_are_complete() == []
+
+
 def test_every_test_package_is_described_in_the_organization_table():
     assert gen._check_test_directories_are_described(gen.test_packages()) == []
 
@@ -246,6 +323,7 @@ def test_a_closed_range_is_allowed_once_the_defect_is_gone(status):
     registry = {"maddening_version": "0.4.0.dev0", "anomalies": [{
         "anomaly_id": "MADD-ANO-999",
         "resolution_status": status,
+        "resolution_version": "0.4.0",
         "affected_versions": ">=0.3.0, <0.4.0",
     }]}
     assert gen._check_version_ranges(registry) == []

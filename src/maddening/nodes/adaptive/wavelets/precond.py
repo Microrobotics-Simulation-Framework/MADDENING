@@ -76,6 +76,17 @@ def diagonal_scaling(diag: Any, levels: Any, kind: str = "hybrid", *,
     ValueError
         For a ``kind`` outside :data:`PRECONDITIONERS`.
     """
+    return jnp.asarray(_diagonal_scaling_np(diag, levels, kind, t=t), dtype=dtype)
+
+
+def _diagonal_scaling_np(diag: Any, levels: Any, kind: str = "hybrid", *,
+                         t: float = 1.0) -> np.ndarray:
+    """:func:`diagonal_scaling` as a float64 host array.
+
+    What the operator assembly's condition estimate reads: a NumPy array
+    stays concrete inside a ``jax.jit`` trace, where the public function's
+    ``jnp`` result would be a tracer.
+    """
     if kind not in PRECONDITIONERS:
         raise ValueError(
             f"unknown preconditioner kind {kind!r}; expected one of {PRECONDITIONERS}"
@@ -97,5 +108,4 @@ def diagonal_scaling(diag: Any, levels: Any, kind: str = "hybrid", *,
             else:
                 D[m] = np.sqrt(d[m].mean())     # level mean elsewhere
 
-    D = np.where(D > 0, D, 1.0)
-    return jnp.asarray(D, dtype=dtype)
+    return np.where(D > 0, D, 1.0)

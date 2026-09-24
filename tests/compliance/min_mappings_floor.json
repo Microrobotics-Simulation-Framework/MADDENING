@@ -24,6 +24,7 @@
     "docs/algorithm_guide/nodes/spring_node.md": 9,
     "docs/algorithm_guide/nodes/ball_node.md": 7,
     "docs/algorithm_guide/nodes/rigid_body_2d_node.md": 7,
-    "docs/algorithm_guide/nodes/heart_pump_node.md": 9
+    "docs/algorithm_guide/nodes/heart_pump_node.md": 9,
+    "docs/algorithm_guide/nodes/lbm_node.md": 22
   }
 }

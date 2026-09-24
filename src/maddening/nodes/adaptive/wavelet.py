@@ -7,7 +7,8 @@ subclass with a real basis.  It solves the steady elliptic problem
 
 periodic or with homogeneous Dirichlet walls, for an isotropic Gaussian
 source of width ``sigma`` centred at ``theta`` on axis 0 (the other axes
-centred), and reports the sensor reading ``J = u(x_s)``.  Both
+centred; periodised on a periodic domain), and reports the sensor
+reading ``J = u(x_s)``.  Both
 ``theta`` and ``sigma`` are leaves of the graph parameter pytree, so
 ``jax.grad``, ``sysid.fit`` and ``fim`` reach them through the frozen
 active-set adjoint.
@@ -30,7 +31,18 @@ How the pieces map onto the base class
   parameters alone, never of the previous state, so it never empties
   (level 0 is the seed), never exceeds ``k`` (the seed is validated to
   fit at construction and every marking step is capped at the room
-  left), and does not chatter between steps at fixed parameters.
+  left), and repeats exactly at fixed parameters.  The marking step
+  reads no residual difference below a rounding floor and breaks ties
+  within it by basis index, so the eager diagnostics, a jitted
+  ``update`` and the compiled graph select the same set, and so do a
+  Python float and its array spelling; the set changes only at
+  isolated parameter values where two residual magnitudes cross the
+  floor's width or the Doerfler bulk crosses a cumulative sum.
+* **Conditioning.**  The constructor bounds the relative solve error
+  by ``kappa(A_hat) eps(dtype) + kappa_phys eps(float64)`` and refuses
+  a configuration above :data:`CONDITION_LIMIT` -- in practice a small
+  periodic ``mass``, since the periodic operator's smallest eigenvalue
+  is ``mass``.
 * **Frozen solve** (:meth:`solve_frozen`): the ``k`` active functions
   gathered into a dense ``k x k`` block and solved directly
   (``frozen_solver="gather"``, the default), or the masked full-size
@@ -89,7 +101,7 @@ from maddening.core.compliance.metadata import (
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
 from maddening.core.solver_utils import ift_linear_solve
-from maddening.nodes.adaptive.base import AdaptiveNode
+from maddening.nodes.adaptive.base import AdaptiveNode, _positive_int
 from maddening.nodes.adaptive.wavelets import cdd as _cdd
 from maddening.nodes.adaptive.wavelets import dirichlet as _dir
 from maddening.nodes.adaptive.wavelets import operator as _op
@@ -101,6 +113,36 @@ __all__ = ["WaveletAdaptiveNode"]
 _DEFAULT_SENSOR: dict[int, tuple[float, ...]] = {
     1: (0.30,), 2: (0.30, 0.40), 3: (0.30, 0.40, 0.60),
 }
+
+#: Periodic image offsets summed by the default source on a periodic axis.
+PERIODIC_IMAGES: tuple[int, ...] = (-2, -1, 0, 1, 2)
+
+#: Largest relative solve error the constructor accepts, bounded by
+#:
+#:     kappa(A_hat) * eps(dtype)  +  kappa_phys * eps(float64)
+#:
+#: The first term is the node's own solve: ``kappa(A_hat)`` is
+#: :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
+#: of the preconditioned operator every frozen solve is a block of, and a
+#: backward-stable solve in ``dtype`` is wrong by up to about
+#: ``kappa * eps``.  Measured in float32 against the float64 solve of the
+#: same node (1-D 128 and 256 points, 2-D 8^2, 3-D 4^3, order 6 on 48
+#: points; mass 1 to 1e-5; full and default budget; jaxlib 0.11.0): 0.002
+#: to 0.58 times ``kappa(A_hat) * eps``.  The second is the float64
+#: assembly of the Galerkin product, whose rounding the smallest
+#: eigenvalue divides
+#: (:func:`~maddening.nodes.adaptive.wavelets.operator.physical_condition_number`;
+#: measured 0.005 to 0.25 times the term in float64).  ``1e-3`` keeps the
+#: solver's share an order of magnitude inside the ``1e-2`` truncation
+#: accuracy the node documents at its default budget.
+#:
+#: The periodic operator's smallest eigenvalue is ``mass`` (the constant
+#: function), so both terms grow like ``1 / mass``: in float32 the first
+#: refuses a periodic mass below about ``2e-3`` (1-D) to ``4e-3`` (3-D,
+#: order 6); in float64 the second refuses one below about ``1e-8`` (1-D,
+#: 128 points) to ``6e-8`` (256 points).  The Dirichlet operator is
+#: bounded away from singular and is not affected.
+CONDITION_LIMIT: float = 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +224,13 @@ class WaveletAdaptiveNode(AdaptiveNode):
     sigma : float
         Source width.  Trainable, positive.
     mass : float
-        Coefficient ``m`` of the zeroth-order term.  Positive.  Baked
-        into the operator: ``ParamSpec(trainable=False)`` and declared
-        through :meth:`static_data_deps`.
+        Coefficient ``m`` of the zeroth-order term.  Positive, and large
+        enough for the node's dtype to carry the operator: the periodic
+        operator's smallest eigenvalue is ``m``, and a configuration whose
+        :meth:`solve_error_bound` exceeds :data:`CONDITION_LIMIT` is
+        refused (in float32, a periodic ``m`` below about ``2e-3``).
+        Baked into the operator: ``ParamSpec(trainable=False)`` and
+        declared through :meth:`static_data_deps`.
     sensor : tuple of float, optional
         Sensor location, one coordinate per axis in ``[0, 1]``, snapped
         to the nearest grid point -- on the circle for a periodic axis,
@@ -203,6 +249,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     Notes
     -----
+    The structural counts (``dim``, ``n_levels``, ``n_coarse``, ``order``,
+    ``k``) must be whole numbers: an integral float from a JSON round trip
+    is accepted, ``6.9`` or ``True`` is refused rather than truncated.
+
     Every structural setting above is stored in ``self.params`` so that
     ``cls(name=..., timestep=..., **node.params)`` rebuilds the node --
     the round trip every serialisation path relies on.  ``n_max`` is
@@ -215,7 +265,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
     meta: ClassVar[NodeMeta] = NodeMeta(
         algorithm_id="MADD-NODE-010",
-        algorithm_version="1.0.1",
+        algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,
         description=(
             "Adaptive interpolating-wavelet (Deslauriers-Dubuc) solver for "
@@ -226,9 +276,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
         governing_equations=(
             "(-Laplacian + m) u(x) = f(x; theta, sigma) on [0, 1)^d, periodic or "
             "homogeneous Dirichlet; f = exp(-|x - x_theta|^2 / sigma^2) with "
-            "x_theta = (theta, 1/2, ...); J = u(x_s).  Active set M by CDD "
-            "residual bulk marking (Doerfler theta_D = 0.5) from the coarse "
-            "level to the budget k"
+            "x_theta = (theta, 1/2, ...), summed over its periodic images on a "
+            "periodic domain; J = u(x_s).  Active set M by CDD residual bulk "
+            "marking (Doerfler theta_D = 0.5) from the coarse level to the "
+            "budget k, ties within the rounding floor broken by basis index"
         ),
         discretization=(
             "Second-order central-difference (-Laplacian + m) with lumped mass "
@@ -262,6 +313,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "(validated at construction; the default k is sized from it), so the "
             "seed fits and the gathered solve never truncates the set; an "
             "oversized mask is refused eagerly and poisoned with NaN under jit",
+            "The solve's relative error bound kappa(A_hat) eps(dtype) + "
+            "kappa(-Laplacian_h + m) eps(float64) is at most CONDITION_LIMIT = "
+            "1e-3 (validated at construction; an operator above it is refused, "
+            "naming the dtype and the mass that would work)",
             "Inherits the AdaptiveNode assumptions: the returned gradient is "
             "exact within an active-set region and ignores the set's "
             "dependence on the parameters (MADD-ANO-003)",
@@ -282,9 +337,24 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "Each selection runs up to 30 CDD iterations, each with one "
             "gathered k x k solve; the selection cost is O(30 k^3 + 30 nnz), "
             "paid on every update.  For k above about n_max / 2 the iteration "
-            "bound is reached before the budget (128-point basis: k = 64 and "
-            "k = 96 both stop at |mask| = 54, sensor-reading error 3e-11); "
-            "selection_diagnostics() reports outer_iterations and budget_reached",
+            "bound is reached before the budget in float64 (128-point basis: "
+            "k = 64 and k = 96 both stop at |mask| = 54, sensor-reading error "
+            "3e-11); in float32 the rounding floor usually ends it first, once "
+            "every remaining residual is indistinguishable from round-off.  "
+            "selection_diagnostics() reports outer_iterations, budget_reached "
+            "and resolved",
+            "A periodic mass the dtype cannot carry is refused: the periodic "
+            "operator's smallest eigenvalue is m, so the solve error grows like "
+            "1 / m -- in float32 below about m = 2e-3 (1-D) to 4e-3 (3-D, order "
+            "6), in float64 below about 1e-8 (128 points) to 6e-8 (256 points), "
+            "where the float64 assembly of the Galerkin product is the limit",
+            "The selection is deterministic under rounding but still discrete: "
+            "it changes where two residual magnitudes differ by about the "
+            "rounding floor (16 eps (max|b| + max|c|)) or the Doerfler bulk "
+            "falls on a cumulative sum.  Those are isolated parameter values -- "
+            "no switch in 40 steps of 1e-6 on the mirror-symmetric 2-D problem "
+            "that used to switch on 15 -- and a gradient step across one misses "
+            "a jump (MADD-ANO-003)",
         ),
         references=(
             Reference("DeslauriersDubuc1989", "Interpolating subdivision (the basis)"),
@@ -306,8 +376,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "mass and sensor are baked into constants; changing either on a "
             "built node (rather than rebuilding it) leaves the operator and "
             "sensor row stale, and compile() refuses to train them",
-            "The periodic operator is singular at mass = 0; the constructor "
-            "refuses a non-positive mass",
+            "The periodic operator is singular at mass = 0 and ill-conditioned "
+            "like 1 / mass near it; the constructor refuses a non-positive mass "
+            "and one whose solve error bound exceeds CONDITION_LIMIT, rather than "
+            "returning a finite, wrong reading (float32, 128 points: mass 1e-6 "
+            "used to read J 2.8x too large and mass 1e-8 with the sign flipped)",
         ),
         implementation_map={
             "Basis synthesis u = Wn c": "maddening.nodes.adaptive.wavelets.transform.synthesis",
@@ -315,6 +388,10 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "Diagonal preconditioning D": "maddening.nodes.adaptive.wavelets.precond.diagonal_scaling",
             "Source f(x; theta, sigma)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.source_field",
             "Active set by CDD bulk chasing": "maddening.nodes.adaptive.wavelets.cdd.cdd_select",
+            "Rounding floor and tie band of the marking step": "maddening.nodes.adaptive.wavelets.cdd.rounding_floor",
+            "Condition number of the preconditioned operator": "maddening.nodes.adaptive.wavelets.operator.condition_estimate",
+            "Condition number of the grid operator": "maddening.nodes.adaptive.wavelets.operator.physical_condition_number",
+            "Solve error bound against CONDITION_LIMIT": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_error_bound",
             "Frozen solve (gathered block)": "maddening.nodes.adaptive.wavelets.operator.gather_solve",
             "Frozen solve (masked CG)": "maddening.core.solver_utils.ift_linear_solve",
             "Sensor functional J = u(x_s)": "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective",
@@ -345,14 +422,14 @@ class WaveletAdaptiveNode(AdaptiveNode):
         frozen_solver: str = "gather",
         **kw: Any,
     ):
-        dim = int(dim)
+        # Structural counts are validated, never int()-truncated: n_levels=6.9
+        # used to build a 64-point basis and dim=2.5 a 2-D node, silently.
+        dim = _positive_int(dim, "dim")
         if dim not in (1, 2, 3):
             raise ValueError(f"dim must be 1, 2 or 3, got {dim!r}")
-        n_levels, n_coarse, order = int(n_levels), int(n_coarse), int(order)
-        if n_levels < 1 or n_coarse < 1:
-            raise ValueError(
-                f"n_levels and n_coarse must be positive, got {n_levels!r}, {n_coarse!r}"
-            )
+        n_levels = _positive_int(n_levels, "n_levels")
+        n_coarse = _positive_int(n_coarse, "n_coarse")
+        order = _positive_int(order, "order")
         if order not in _tr.DD_ORDERS:
             raise ValueError(f"order must be one of {_tr.DD_ORDERS}, got {order!r}")
         if boundary not in _op.BOUNDARIES:
@@ -391,7 +468,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
         seed_size = int(np.sum(labels == labels.min()))
         if k is None:
             k = min(n_max, max(seed_size, 8, n_max // 16))
-        k = int(k)
+        k = _positive_int(k, "k")
         if not seed_size <= k <= n_max:
             band = "(2 n_coarse)" if boundary == "periodic" else "(2 n_coarse + 1)"
             raise ValueError(
@@ -422,12 +499,25 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self.dim = dim
         self.side = int(side)
         self.k = k
+        # The numeric parameters, which ``_rhs`` casts to the node's dtype.
+        self._leaf_names = frozenset(self.params_pytree())
 
         # -- operator, preconditioner, coarse seed (structural constants) --
         op = _op.assemble_operator(
             n_levels, n_coarse, order=order, dim=dim, mass=mass,
-            boundary=boundary, dtype=self.dtype,
+            boundary=boundary, dtype=self.dtype, preconditioner=preconditioner,
         )
+        if op.condition_number is None:          # asked for above: cannot happen
+            raise RuntimeError("assemble_operator returned no condition estimate")
+        #: :func:`~maddening.nodes.adaptive.wavelets.operator.condition_estimate`
+        #: of the preconditioned operator every frozen solve is a block of.
+        self.condition_number = float(op.condition_number)
+        #: :func:`~maddening.nodes.adaptive.wavelets.operator.physical_condition_number`
+        #: of the grid operator the Galerkin product is formed from.
+        self.physical_condition_number = _op.physical_condition_number(
+            int(side), dim, mass, boundary,
+        )
+        self._refuse_ill_conditioned(mass=mass, boundary=boundary)
         self._op = op
         self._A = op.A
         self._D = _pc.diagonal_scaling(
@@ -467,6 +557,68 @@ class WaveletAdaptiveNode(AdaptiveNode):
             sidx = sidx * self.side + int(np.argmin(dist))
         self._sensor_index = int(sidx)
         self._sensor_row = op.Wn[self._sensor_index]
+
+    def solve_error_bound(self, dtype: Any = None) -> float:
+        """The relative solve error :data:`CONDITION_LIMIT` is compared with.
+
+        ``condition_number * eps(dtype) + physical_condition_number * eps(float64)``
+        -- the node's solve in ``dtype`` (its own by default) plus the
+        float64 assembly.  The constructor refuses a node whose bound
+        exceeds the limit.
+        """
+        dt = self.dtype if dtype is None else jnp.zeros((), dtype=dtype).dtype
+        eps = float(jnp.finfo(dt).eps)
+        eps64 = float(np.finfo(np.float64).eps)
+        return self.condition_number * eps + self.physical_condition_number * eps64
+
+    def _refuse_ill_conditioned(self, *, mass: float, boundary: str) -> None:
+        """Refuse an operator whose conditioning the node cannot carry.
+
+        See :data:`CONDITION_LIMIT`.  Every frozen solve is on a principal
+        block of ``A_hat``, whose condition number is at most
+        ``kappa(A_hat)`` (eigenvalue interlacing), so this bounds the
+        adaptive solves, the masked-CG path and the full-basis gradient
+        alike.  It used to be unchecked: in float32 on 128 points,
+        ``mass=1e-6`` read ``J = 6.7e5`` against ``1.77e5`` and
+        ``mass=1e-8`` read ``-2.9e16``, with no warning -- or with one
+        blaming the active-set budget at ``k = n_max``.
+        """
+        bound = self.solve_error_bound()
+        if bound <= CONDITION_LIMIT:
+            return
+        eps = float(jnp.finfo(self.dtype).eps)
+        eps64 = float(np.finfo(np.float64).eps)
+        solve_term = self.condition_number * eps
+        assembly_term = self.physical_condition_number * eps64
+        bound64 = self.solve_error_bound(np.float64)
+        if self.dtype != jnp.float64 and bound64 <= CONDITION_LIMIT:
+            dtype_hint = (
+                f"Build the node in float64 (bound {bound64:.1e}): "
+                f"jax.config.update('jax_enable_x64', True) and dtype=jnp.float64."
+            )
+        else:
+            dtype_hint = "No floating dtype carries it: the float64 assembly alone is too coarse."
+        if boundary == "periodic":
+            cause = (
+                "The periodic operator's smallest eigenvalue is mass (its "
+                "eigenvector is the constant function), so both grow like 1 / mass."
+            )
+            mass_hint = (
+                f"  Or raise mass to at least about "
+                f"{mass * bound / CONDITION_LIMIT:.1e} for {self.dtype}."
+            )
+        else:
+            cause, mass_hint = "", ""
+        raise ValueError(
+            f"{type(self).__name__} {self.name!r}: the solve can be wrong by a "
+            f"relative {bound:.1e} (mass={mass!r}, boundary={boundary!r}, "
+            f"n_max={self.n_max}), above CONDITION_LIMIT = {CONDITION_LIMIT:.0e}: "
+            f"the preconditioned operator's condition number is about "
+            f"{self.condition_number:.2e}, which a {self.dtype} solve (eps "
+            f"{eps:.1e}) turns into {solve_term:.1e}, and the grid operator's is "
+            f"{self.physical_condition_number:.2e}, which the float64 assembly "
+            f"turns into {assembly_term:.1e}.  {cause}  {dtype_hint}{mass_hint}"
+        )
 
     # ------------------------------------------------------------------
     # Parameters and static data
@@ -522,11 +674,25 @@ class WaveletAdaptiveNode(AdaptiveNode):
         """The forcing ``f`` sampled on the grid, flattened row-major.
 
         The default is an isotropic Gaussian of width ``params["sigma"]``
-        centred at ``(params["theta"], 1/2, ...)``.  This is the override
-        point for a different forcing -- a manufactured-solution study
-        subclasses the node and returns its source here -- and it must
-        read every parameter it depends on from ``params``, never from
-        ``self.params``, or the graph's injected values are ignored.
+        centred at ``(params["theta"], 1/2, ...)``.  On a periodic domain
+        it is **periodised** -- summed over its periodic images, which for
+        the separable Gaussian is a product over axes of
+        ``sum_n exp(-(d + n)**2 / sigma**2)`` with ``d`` the distance to
+        the centre wrapped into ``[-1/2, 1/2)`` and ``n`` in
+        :data:`PERIODIC_IMAGES` -- so the problem is translation-invariant
+        on the circle, like the operator and the sensor snapping.  The
+        truncated sum omits images at distance ``>= 2.5``, an error below
+        ``2 exp(-6.25 / sigma**2)`` of the peak per axis (under ``1e-16``
+        for ``sigma <= 0.41``).  It used to be the plain Gaussian on
+        ``[0, 1)``: a source near the seam lost the part that should wrap
+        round, and the same problem shifted across the seam read a 28%
+        different ``J``.  With Dirichlet walls the plain Gaussian is used.
+
+        This is the override point for a different forcing -- a
+        manufactured-solution study subclasses the node and returns its
+        source here -- and it must read every parameter it depends on
+        from ``params``, never from ``self.params``, or the graph's
+        injected values are ignored.
 
         Parameters
         ----------
@@ -539,10 +705,21 @@ class WaveletAdaptiveNode(AdaptiveNode):
         jax.Array
             Shape ``(n_max,)``.
         """
-        r2 = (self._grid[0] - params["theta"]) ** 2
-        for d in range(1, self.dim):
-            r2 = r2 + (self._grid[d] - 0.5) ** 2
-        return jnp.exp(-r2 / params["sigma"] ** 2)
+        centre = [params["theta"]] + [0.5] * (self.dim - 1)
+        periodic = self.params["boundary"] == "periodic"
+        factors = []
+        for axis in range(self.dim):
+            d = self._grid[axis] - centre[axis]
+            if periodic:
+                d = d - jnp.round(d)
+                g = sum(jnp.exp(-(d + n) ** 2 / params["sigma"] ** 2) for n in PERIODIC_IMAGES)
+            else:
+                g = jnp.exp(-d ** 2 / params["sigma"] ** 2)
+            factors.append(g)
+        f = factors[0]
+        for g in factors[1:]:
+            f = f * g
+        return f
 
     def field(self, state: dict) -> jax.Array:
         """``u = Wn c`` on the grid, flattened row-major (``reshape(grid_shape)`` for an image)."""
@@ -551,15 +728,23 @@ class WaveletAdaptiveNode(AdaptiveNode):
     def _rhs(self, params: dict) -> jax.Array:
         """Wavelet coefficients of the source, ``h^d Wn^T f``.
 
-        The source is cast to the node's dtype first.  Under
+        Every parameter leaf is cast to the node's dtype *before*
+        :meth:`source_field` sees it, and the source is cast again after.
+        The first cast is what makes the same value in any spelling give
+        the same bits: a Python float ``0.1`` squared on the host is not
+        ``float32(0.1)`` squared, and the ~1e-7 difference in ``b`` used
+        to be enough to change the selected set.  Under
         ``jax_enable_x64`` the graph injects float64 leaves whatever the
-        node was built with, so a float32 node's ``grid - theta`` would
-        otherwise promote and a float64 value would be scattered into the
-        float32 coefficient buffer (a ``FutureWarning`` today, an error in
-        a later JAX).  The cast is differentiable; the tangent comes back
-        in the leaf's own dtype.
+        node was built with, so without the casts a float32 node's
+        ``grid - theta`` would promote and a float64 value would be
+        scattered into the float32 coefficient buffer.  The casts are
+        differentiable; the tangent comes back in the leaf's own dtype.
         """
-        f = jnp.asarray(self.source_field(params), dtype=self.dtype)
+        cast = {
+            key: (jnp.asarray(value, dtype=self.dtype) if key in self._leaf_names else value)
+            for key, value in params.items()
+        }
+        f = jnp.asarray(self.source_field(cast), dtype=self.dtype)
         return (self._h ** self.dim) * (self._op.Wn.T @ f)
 
     def _scaled_rhs(self, params: dict) -> jax.Array:
@@ -650,42 +835,77 @@ class WaveletAdaptiveNode(AdaptiveNode):
                 f"on any mask"
             )
 
+    def _merged(self, params: Optional[dict]) -> dict:
+        """``self.params`` overlaid with ``params``, refusing a key it does not have.
+
+        The base class's diagnostics refuse an unknown key through
+        ``_pytree``, but ``update`` and :meth:`selection_diagnostics`
+        overlay through here, where ``{"thetta": 0.9}`` used to be merged
+        and then never read -- the call silently returned the answer at
+        the constructor's ``theta``.  Keys are static under a trace, so
+        the check costs nothing there.
+        """
+        if params is not None:
+            unknown = sorted(set(params) - set(self.params))
+            if unknown:
+                raise ValueError(
+                    f"{type(self).__name__} {self.name!r}: unknown parameter "
+                    f"key(s) {unknown} -- not constructor parameters "
+                    f"({sorted(self.params)}); the leaves a graph trains are "
+                    f"{sorted(self.params_pytree())}."
+                )
+        return super()._merged(params)
+
     def selection_diagnostics(self, params: Optional[dict] = None) -> dict:
-        """How the CDD selection at ``params`` ended: the budget, or the iteration bound.
+        """How the CDD selection at ``params`` ended: the budget, the rounding floor or the bound.
 
         A host-side diagnostic returning Python scalars (not traceable),
         like :meth:`gradient_capture_ratio`.  The selection is a function
-        of the parameters alone, so no state is involved.
+        of the parameters alone, so no state is involved, and it is the
+        same function the compiled graph runs: ties are broken by a fixed
+        index order (:func:`~maddening.nodes.adaptive.wavelets.cdd.cdd_select_with_iterations`),
+        so this eager evaluation selects the set a jitted ``update`` or a
+        graph step selects at the same parameters.
 
         Parameters
         ----------
         params : dict, optional
             Parameter leaves to overlay on the constructor's; ``None``
-            evaluates at the constructor constants.
+            evaluates at the constructor constants.  An unknown key is
+            refused.
 
         Returns
         -------
         dict
             ``active`` (``|mask|``), ``k``, ``outer_iterations`` (the CDD
             loop count), ``max_outer`` (its bound,
-            :data:`~maddening.nodes.adaptive.wavelets.cdd.MAX_OUTER`) and
-            ``budget_reached`` (``active >= k``).  ``budget_reached`` is
-            ``False`` with ``outer_iterations == max_outer`` when the
-            bound, not the budget, ended the loop -- the documented case
-            for ``k`` above about ``n_max / 2`` -- and the mask is still a
-            valid active set; the budget is a ceiling, not a target.
+            :data:`~maddening.nodes.adaptive.wavelets.cdd.MAX_OUTER`),
+            ``budget_reached`` (``active >= k``) and ``resolved``: ``True``
+            when the loop stopped because no inactive function's residual
+            was above the rounding floor
+            (:func:`~maddening.nodes.adaptive.wavelets.cdd.rounding_floor`)
+            -- nothing distinguishable from round-off was left to mark.
+            ``budget_reached`` and ``resolved`` both ``False`` with
+            ``outer_iterations == max_outer`` means the bound ended the
+            loop -- the documented case for ``k`` above about
+            ``n_max / 2`` in float64.  Every exit leaves a valid active
+            set; the budget is a ceiling, not a target.
         """
         p = self._merged(params)
         if self.k >= self.n_max:
             return {"active": self.n_max, "k": self.k, "outer_iterations": 0,
-                    "max_outer": _cdd.MAX_OUTER, "budget_reached": True}
+                    "max_outer": _cdd.MAX_OUTER, "budget_reached": True,
+                    "resolved": False}
         b_hat = jax.lax.stop_gradient(self._scaled_rhs(p))
         mask, n_outer = _select_kernel(
             self._Ah, self._Ah_sparse, self._coarse, b_hat, k=self.k,
         )
         active = int(np.asarray(mask, dtype=bool).sum())
-        return {"active": active, "k": self.k, "outer_iterations": int(n_outer),
-                "max_outer": _cdd.MAX_OUTER, "budget_reached": active >= self.k}
+        n_outer = int(n_outer)
+        budget = active >= self.k
+        return {"active": active, "k": self.k, "outer_iterations": n_outer,
+                "max_outer": _cdd.MAX_OUTER, "budget_reached": budget,
+                "resolved": (not budget) and n_outer < _cdd.MAX_OUTER}
 
     def compute_full_basis_gradient(self, state: dict, params: Optional[dict] = None) -> dict:
         """``grad J`` with every function active, by a dense solve on ``A``.

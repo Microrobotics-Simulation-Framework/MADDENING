@@ -442,18 +442,46 @@ class LBMPipeNode(SimulationNode):
         Recommended range: -4.2 to -5.0 (higher magnitude = larger
         density ratio, but harder to stabilise).
     rho_liquid : float
-        Initial liquid-phase density (multiphase mode).  Default 1.0.
-        Should be close to the EOS coexistence density for the chosen G
-        (roughly 0.8-1.5 for G in [-4.2, -5.0] with rho_0=1).
+        Liquid-phase density (multiphase mode).  Default 1.0.  Should be
+        close to the EOS coexistence density for the chosen G (roughly
+        0.8-1.5 for G in [-4.2, -5.0] with rho_0=1).  The step reads it
+        as the liquid reference of the phase indicator ``tracer``, and
+        it is a trainable parameter there.  It also supplies the
+        defaults of ``initial_rho_liquid`` and ``rho_wall``, resolved
+        once, here.
     rho_gas : float
-        Initial gas-phase density (multiphase mode).  Default 0.25.
-        Should be close to the EOS coexistence density for the chosen G
-        (roughly 0.15-0.45 for G in [-4.2, -5.0] with rho_0=1).
+        Gas-phase density (multiphase mode).  Default 0.25.  Should be
+        close to the EOS coexistence density for the chosen G (roughly
+        0.15-0.45 for G in [-4.2, -5.0] with rho_0=1).  The gas
+        reference of ``tracer`` (trainable), and the default of
+        ``initial_rho_gas``.
     rho_0 : float
         Pseudopotential reference density.  Default 1.0.
     rho_wall : float or None
         Wall pseudopotential density for wetting control.  ``None``
-        defaults to ``rho_liquid`` (fully wetted / hydrophilic wall).
+        defaults to ``rho_liquid`` (fully wetted / hydrophilic wall).  The
+        default is resolved at construction and stored, so a later change
+        to ``rho_liquid`` through the graph's params does not move it.
+    initial_rho_liquid, initial_rho_gas : float or None
+        The liquid and gas densities of the initial condition (multiphase
+        mode): the two ends of the ``tanh`` fill profile, and the density
+        of wall cells (``initial_rho_gas``).  ``None`` takes
+        ``rho_liquid`` / ``rho_gas``.  Initial conditions, not dynamics
+        constants: ``initial_state`` reads them, the step never does, and
+        they are not trainable.
+
+    Notes
+    -----
+    Why the initial densities are separate leaves.  ``initial_state``
+    runs when the graph compiles, from the constructor's values; a value
+    set later through ``GraphManager.params`` reaches the step only.
+    When ``rho_liquid`` / ``rho_gas`` were both the initial-condition
+    recipe and a trainable step constant, a graph calibrated through
+    ``params`` and the graph its saved config rebuilt started from
+    different initial densities (0.30 apart after three steps, with no
+    warning).  The initial condition now reads only the ``initial_*``
+    leaves, which ``to_dict`` saves alongside the calibrated constants, so
+    the two graphs are the same graph.
     """
 
     meta = NodeMeta(
@@ -513,6 +541,8 @@ class LBMPipeNode(SimulationNode):
         rho_gas: float = 0.25,
         rho_0: float = 1.0,
         rho_wall: float | None = None,
+        initial_rho_liquid: float | None = None,
+        initial_rho_gas: float | None = None,
     ):
         if tau <= 0.5:
             raise ValueError(
@@ -527,14 +557,23 @@ class LBMPipeNode(SimulationNode):
             raise ValueError(
                 f"fill_fraction must be in (0, 1] (got {fill_fraction})."
             )
+        if initial_rho_liquid is None:
+            initial_rho_liquid = rho_liquid
+        if initial_rho_gas is None:
+            initial_rho_gas = rho_gas
         if G != 0.0:
-            if rho_liquid <= rho_gas:
-                raise ValueError(
-                    f"rho_liquid must be > rho_gas "
-                    f"(got {rho_liquid} <= {rho_gas})."
-                )
-            if rho_gas <= 0.0:
-                raise ValueError(f"rho_gas must be > 0 (got {rho_gas}).")
+            for liquid_name, liquid, gas_name, gas in (
+                ("rho_liquid", rho_liquid, "rho_gas", rho_gas),
+                ("initial_rho_liquid", initial_rho_liquid,
+                 "initial_rho_gas", initial_rho_gas),
+            ):
+                if liquid <= gas:
+                    raise ValueError(
+                        f"{liquid_name} must be > {gas_name} "
+                        f"(got {liquid} <= {gas})."
+                    )
+                if gas <= 0.0:
+                    raise ValueError(f"{gas_name} must be > 0 (got {gas}).")
             if rho_0 <= 0.0:
                 raise ValueError(f"rho_0 must be > 0 (got {rho_0}).")
 
@@ -559,6 +598,8 @@ class LBMPipeNode(SimulationNode):
             rho_gas=rho_gas,
             rho_0=rho_0,
             rho_wall=rho_wall,
+            initial_rho_liquid=initial_rho_liquid,
+            initial_rho_gas=initial_rho_gas,
         )
 
         # Pre-compute masks and store as JAX arrays
@@ -574,8 +615,11 @@ class LBMPipeNode(SimulationNode):
         self._gravity = gravity
         self._fill_fraction = fill_fraction
         self._G = G
-        self._rho_liquid = rho_liquid
-        self._rho_gas = rho_gas
+        # The initial condition's densities.  ``rho_liquid`` / ``rho_gas``
+        # themselves are read by the step (from the injected params) and
+        # never by ``initial_state``.
+        self._initial_rho_liquid = initial_rho_liquid
+        self._initial_rho_gas = initial_rho_gas
         self._rho_0 = rho_0
         self._rho_wall = rho_wall
 
@@ -709,19 +753,17 @@ class LBMPipeNode(SimulationNode):
             phase_3d = jnp.broadcast_to(
                 phase[None, None, :], (nx, ny_val, nz_val),
             )
-            density = (
-                self._rho_gas
-                + (self._rho_liquid - self._rho_gas) * phase_3d
-            )
-            # Wall cells: use rho_gas for well-formed bounce-back
-            density = jnp.where(self._wall_mask, self._rho_gas, density)
+            rho_l0, rho_g0 = self._initial_rho_liquid, self._initial_rho_gas
+            density = rho_g0 + (rho_l0 - rho_g0) * phase_3d
+            # Wall cells: use the gas density for well-formed bounce-back
+            density = jnp.where(self._wall_mask, rho_g0, density)
 
             f = _equilibrium(density, velocity)
 
-            # Tracer derived from density
+            # Tracer: the initial phase fraction, from the same recipe (so
+            # the initial state reads no trainable leaf).
             tracer = jnp.clip(
-                (density - self._rho_gas)
-                / (self._rho_liquid - self._rho_gas),
+                (density - rho_g0) / (rho_l0 - rho_g0),
                 0.0, 1.0,
             )
             tracer = jnp.where(self._wall_mask, 0.0, tracer)

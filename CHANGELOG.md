@@ -28,7 +28,8 @@ guidance; the itemized changes follow.
   columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
-  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers
+  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms with
+  `reuse_trace=True` for a pure residual (the default re-traces; see Fixed)
 - **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
   every `>>>` in `src/maddening` now runs, and the gate fails if the
   collection shrinks — an example that stops working is a failing build
@@ -286,6 +287,15 @@ guidance; the itemized changes follow.
 - **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
   `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
   a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.
+- **`LBMNode`'s Zou-He pressure faces impose the pressure they are given** (MADD-ANO-020, every release): the face carried
+  `p/cs2 + S_K` (+15%), a pressure-driven channel 0.58-0.80 of the imposed drop; pressure-driven results change, re-run them.
+  `outlet_pressure_avg` reads the runtime wall mask; `LBMPipeNode` gains non-trainable `initial_rho_liquid`/`initial_rho_gas`.
+- **`fim` no longer reuses a compiled trace across calls unless `reuse_trace=True`** (pure residuals only): the cache
+  froze what the residual read, e.g. `gm.params` (a CRB of 0.41 for a true 44.7).  Specs resolve by one walk (namedtuple
+  levels by field name; `check_bounds` refuses unreadable specs); integer leaves are named, not zeroed; NaN bounds refused
+- **`WaveletAdaptiveNode` refuses a `mass` its dtype cannot carry** (float32 `mass=1e-6` read J 2.8x off, silently) and its
+  active set no longer depends on rounding: eager, jit and graph agree, as do a float and its array spelling. Periodic
+  source periodised; `n_levels=6.9` and unknown keys refused. Build in float64 or raise `mass` if refused.
 - **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
   fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
   run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.
@@ -559,6 +569,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-020 is resolved in this release**: `LBMNode`'s pressure BC imposed the wrong face density since 0.1.0 (see `### Fixed`)
 - **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
   release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`

@@ -1474,7 +1474,7 @@ class AnomalyRecord:
     title: str                          # Short description
     description: str                    # Detailed description
     affected_components: tuple[str, ...]  # e.g., ("HeatNode", "LBMPipeNode")
-    affected_versions: str              # e.g., "0.1.0 – current"
+    affected_versions: str              # PEP 440 specifier set: ">=0.1.0" (open), ">=0.1.0, <0.4.0" (fixed in 0.4.0)
     severity: AnomalySeverity
     safety_relevance: SafetyRelevance
     safety_relevance_rationale: str     # Why this assessment was made
@@ -1488,7 +1488,12 @@ class AnomalyRecord:
 
 ##### YAML Registry Format
 
-The known anomalies registry lives at `docs/validation/known_anomalies.yaml`:
+The known anomalies registry lives at `docs/validation/known_anomalies.yaml`.
+Its `affected_versions` field is a PEP 440 specifier set -- `">=FIRST"` while
+a defect is reachable, `">=FIRST, <FIX"` once a release fixes it, `"none"` for
+a defect no release carried -- as written in that file's header comment and
+enforced by `scripts/check_anomalies.py`.  The example below predates the
+schema's later fields:
 
 ```yaml
 # MADDENING Known Anomalies Registry
@@ -1509,7 +1514,7 @@ anomalies:
       CUDA 12.2 with jaxlib 0.5.1 due to an XLA compilation bug with
       certain einsum patterns. The CPU backend is unaffected.
     affected_components: ["LBMPipeNode"]
-    affected_versions: "0.1.0 – current"
+    affected_versions: ">=0.1.0"   # PEP 440; see the header of the real registry
     severity: "critical"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -1527,7 +1532,7 @@ anomalies:
       satisfies the CFL stability condition dt < dx^2 / (2*alpha).
       Unstable timesteps silently produce incorrect results.
     affected_components: ["HeatNode"]
-    affected_versions: "0.1.0 – current"
+    affected_versions: ">=0.1.0"
     severity: "major"
     safety_relevance: "safety_relevant"
     safety_relevance_rationale: >
@@ -1604,7 +1609,7 @@ body:
     id: affected_versions
     attributes:
       label: Affected versions
-      description: "e.g., 0.1.0 – current"
+      description: "PEP 440 specifier set, e.g. >=0.1.0 (still affected) or >=0.1.0, <0.4.0 (fixed in 0.4.0)"
     validations:
       required: true
   - type: textarea

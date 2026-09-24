@@ -229,7 +229,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-004"
-    title: "ShardedPointwiseNode ignored every parameter write; PUT /graph/params answered 200 without changing the physics"
+    title: "The sharded wrappers ignored a REST parameter write; PUT /graph/params answered 200 without changing the physics"
     description: >
       ShardedPointwiseNode did not proxy the graph parameter contract of the
       node it wraps.  It reported accepts_params() == False while
@@ -244,9 +244,19 @@ anomalies:
       0.01 s steps stayed at 1.98523 (the k=10 trajectory) instead of the
       0.83880 a genuinely k=1000 graph produces.  set_param_spec on such a node
       raised "takes no params", and sysid, FMI parameter variables and
-      checkpointed calibrated constants all skipped it.  The sibling wrappers
-      ShardedStencilNode and ShardedUnstructuredNode proxied the contract
-      correctly and were not affected, though they too copied the params dict.
+      checkpointed calibrated constants all skipped it.  An earlier revision
+      said the sibling wrappers ShardedStencilNode and ShardedUnstructuredNode
+      proxied the contract correctly and were not affected.  That held only
+      in the 0.4.0 development tree, where both already handed the node's
+      entry of GraphManager.params to an inner update_padded that takes
+      params, so a REST write, which updates GraphManager.params as well as
+      the wrapper's dict, reached the inner node through the injected values
+      -- and for ShardedUnstructuredNode only when the inner node named
+      params as a keyword: an update_padded(**kwargs) inner was not
+      recognised as a params node until later in the cycle, and a write to
+      it kept the old trajectory.  At every tagged release that shipped
+      them, neither wrapper had that path, and both had the pointwise
+      wrapper's defect exactly (measured below).
       The version range was re-derived for the 0.4.0 release, and again when
       that re-derivation turned out to have stopped one tag short.  The
       wrapper is older than its name: v0.1.0 ships it as ShardedNode, the only
@@ -261,7 +271,21 @@ anomalies:
       and leaves the wrapper at 0.014767 after five 0.01 s steps -- the k=10
       trajectory -- at v0.1.0 (as ShardedNode), v0.2.0, v0.2.1, v0.3.0 and
       v0.3.1, against 1.161203 for a genuinely k=1000 node; at 0.4.0 the same
-      write moves the wrapper to 1.161203.  The earlier revision started the
+      write moves the wrapper to 1.161203.  ShardedStencilNode (new at v0.2.0)
+      and ShardedUnstructuredNode (new at v0.3.0) are built the same way at
+      every tag -- the constructor copies the inner node's params into the
+      wrapper's own, and update() delegates to the inner node -- and the same
+      drive gives the same answer.  PUT thermal_diffusivity=0.015 on a
+      ShardedStencilNode around a 64-cell HeatNode built at 0.01 (two
+      devices, boundary="zero", recompiled after the write) answers 200 and
+      leaves the sum of squared temperatures after 40 steps at 30.535059, the
+      old trajectory, against 29.828928 for a node built at 0.015, at v0.2.0,
+      v0.2.1, v0.3.0 and v0.3.1.  PUT rate=1.0 on a ShardedUnstructuredNode
+      around an eight-cell decay node built at 0.1 answers 200 and leaves the
+      sum of squares after five steps at 184.493963, the old trajectory,
+      against 71.130383, at v0.3.0 and v0.3.1, whether the inner
+      update_padded names params or not.  At 0.4.0 both writes reach the
+      physics (29.828928 and 71.130383).  One earlier revision started the
       range at v0.2.0 because ShardedPointwiseNode cannot be imported at
       v0.1.0; the defect does not depend on the class's name.  The
       parameter-contract surfaces named above (accepts_params,
@@ -279,26 +303,32 @@ anomalies:
       one the operator believes they configured, and a calibration run over a
       sharded pointwise node optimised a value the step ignored.  Whether that
       is safety relevant depends on whether the downstream product wraps
-      pointwise nodes for multi-device execution and whether it tunes or
-      calibrates their constants at run time rather than at construction;
+      nodes for multi-device execution (pointwise from 0.1.0, stencil from
+      0.2.0, unstructured from 0.3.0) and whether it tunes their constants
+      through the REST API at run time rather than at construction;
       a graph whose parameters are only ever set through the node constructor
       is unaffected, because the constructor value is the one the inner node
       reads.
     affected_components:
       - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
       - "maddening.api.server.SimulationServer"
     affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       On 0.1.0 to 0.3.1, set the parameter on the inner node before wrapping
       it (ShardedPointwiseNode(SpringDamperNode(..., stiffness=1000.0), mesh);
-      ShardedNode on 0.1.0), or write to the inner node's params dict and
-      recompile; do not rely on PUT /graph/params for a pointwise-sharded
-      node.
+      ShardedNode on 0.1.0; likewise ShardedStencilNode from 0.2.0 and
+      ShardedUnstructuredNode from 0.3.0), or write to the inner node's params
+      dict and recompile, which measured at v0.2.0 and v0.3.1 reaches the
+      physics under all three wrappers; do not rely on PUT /graph/params for
+      a sharded node.
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     verification:
       - "tests/cloud/multigpu/test_sharded_params.py::test_every_sharded_wrapper_proxies_the_param_contract_of_its_inner_node"
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_sharded_node_changes_the_trajectory"
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_stencil_or_unstructured_wrapper_changes_the_trajectory"
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name"
 
   - anomaly_id: "MADD-ANO-005"

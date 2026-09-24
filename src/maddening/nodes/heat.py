@@ -357,27 +357,30 @@ def _where_end(at_end, closed, halo_cells):
     return jnp.where(at_end, closed, halo_cells)
 
 
-def _laplacian_4th_order_at_ends(T_padded, dx, at_left, at_right):
-    """:func:`_laplacian_4th_order_uniform` on a block of the rod.
+#: :func:`_dirichlet_ghosts_4th_order` as one small matrix product, for
+#: ``update_padded``.  Rows are the ghosts in the order they sit in the
+#: padded array, columns the three end cells as they sit there, and the
+#: datum weights are separate; divide by 5.  Left end: (far, near) from
+#: ``(T[0], T[1], T[2])``.  Right end: (near, far) from ``(T[-3], T[-2],
+#: T[-1])``, i.e. the left-end weights mirrored in both directions, so the
+#: right end needs no reversal.
+_CUBIC_GHOSTS_LEFT = ((-90.0, 40.0, -9.0), (-15.0, 5.0, -1.0))
+_CUBIC_DATUM_LEFT = (64.0, 16.0)
+_CUBIC_GHOSTS_RIGHT = ((-1.0, 5.0, -15.0), (-9.0, 40.0, -90.0))
+_CUBIC_DATUM_RIGHT = (16.0, 64.0)
 
-    The same stencil -- 5-point, falling back to 3-point at the first and
-    last cell of the *rod* -- where the block's own first and last cells
-    are rod ends only when ``at_left`` / ``at_right`` say so.  On the
-    whole rod it is that function, operation for operation.
+
+def _cubic_ghosts(cells, T_boundary, weights, datum):
+    """Both 4th-order ghosts at one rod end, from its three end cells.
+
+    The same cubic as :func:`_dirichlet_ghosts_4th_order`, written as a
+    ``(2, 3)`` product so the sharded step emits a handful of operations
+    per end instead of one per coefficient; it agrees with that function
+    to float32 rounding, not to the bit (the sum is ordered differently).
     """
-    if at_left is True and at_right is True:
-        return _laplacian_4th_order_uniform(T_padded, dx)
-    n = T_padded.shape[0] - 4
-    lap_4th = _laplacian_4th_order_pure(T_padded, dx)
-    lap_2nd = (
-        T_padded[3:-1] - 2.0 * T_padded[2:-2] + T_padded[1:-3]
-    ) / (dx * dx)
-    idx = jnp.arange(n)
-    use_2nd = jnp.logical_or(
-        jnp.logical_and(at_left, idx == 0),
-        jnp.logical_and(at_right, idx == n - 1),
-    )
-    return jnp.where(use_2nd, lap_2nd, lap_4th)
+    w = jnp.asarray(weights, dtype=cells.dtype)
+    d = jnp.asarray(datum, dtype=cells.dtype)
+    return ((w @ cells + d * T_boundary) / 5.0).astype(cells.dtype)
 
 
 def _laplacian_nonuniform(T_padded, x_padded):
@@ -944,18 +947,15 @@ class HeatNode(SimulationNode):
         T_right = boundary_inputs.get("right_temperature", T_pad[-halo - 1])
         if stencil_order == 4:
             assert halo == 2, "4th-order stencil expects halo=2"
-            far_l, near_l = _dirichlet_ghosts_4th_order(T_pad[halo:halo + 3], T_left)
-            far_r, near_r = _dirichlet_ghosts_4th_order(
-                T_pad[-halo - 3:-halo][::-1], T_right)
-            left = jnp.array([far_l, near_l], dtype=T_pad.dtype)
-            right = jnp.array([near_r, far_r], dtype=T_pad.dtype)
+            left = _cubic_ghosts(T_pad[halo:halo + 3], T_left,
+                                 _CUBIC_GHOSTS_LEFT, _CUBIC_DATUM_LEFT)
+            right = _cubic_ghosts(T_pad[-halo - 3:-halo], T_right,
+                                  _CUBIC_GHOSTS_RIGHT, _CUBIC_DATUM_RIGHT)
         else:
             assert halo == 1, "2nd-order stencil expects halo=1"
-            left = jnp.array([_dirichlet_ghosts_2nd_order(T_pad[halo:], T_left)],
-                             dtype=T_pad.dtype)
-            right = jnp.array(
-                [_dirichlet_ghosts_2nd_order(T_pad[:-halo][::-1], T_right)],
-                dtype=T_pad.dtype)
+            # 2*T_b - T[0]: _dirichlet_ghosts_2nd_order on a length-1 slice.
+            left = (2.0 * T_left - T_pad[halo:halo + 1]).astype(T_pad.dtype)
+            right = (2.0 * T_right - T_pad[-halo - 1:-halo]).astype(T_pad.dtype)
         T_closed = jnp.concatenate([
             _where_end(at_left, left, T_pad[:halo]),
             T_pad[halo:-halo],
@@ -963,7 +963,15 @@ class HeatNode(SimulationNode):
         ])
 
         if stencil_order == 4:
-            lap = _laplacian_4th_order_at_ends(T_closed, dx, at_left, at_right)
+            # With these ghosts the 5-point and 3-point forms are
+            # algebraically identical at the rod's end cells (see
+            # _dirichlet_ghosts_4th_order), so a block only needs update()'s
+            # 3-point fallback when it is the whole rod, where taking it
+            # keeps the two paths operation for operation alike.
+            if at_left is True and at_right is True:
+                lap = _laplacian_4th_order_uniform(T_closed, dx)
+            else:
+                lap = _laplacian_4th_order_pure(T_closed, dx)
         else:
             lap = _laplacian_2nd_order_uniform(T_closed, dx)
 

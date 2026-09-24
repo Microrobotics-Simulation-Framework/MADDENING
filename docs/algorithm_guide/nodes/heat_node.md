@@ -61,7 +61,7 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added as `source * dt` after diffusion step |
 | Time integration ($\partial T / \partial t$) | `maddening.nodes.heat.HeatNode.update` | Forward Euler: `T + alpha * dt * laplacian + source * dt` |
 | Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER` |
-| Rod-end closure on a sharded rod | `maddening.nodes.heat.HeatNode.update_padded` | The block holding a rod end (from `shard_info`) rebuilds its ghosts with the two closures above, from `left_temperature` / `right_temperature`; the 4th-order 3-point fallback is applied at the rod's end cells only (`_laplacian_4th_order_at_ends`) |
+| Rod-end closure on a sharded rod | `maddening.nodes.heat.HeatNode.update_padded` | The block holding a rod end (from `shard_info`) rebuilds its ghosts with the two closures above, from `left_temperature` / `right_temperature`; the 4th-order cubic as one `(2, 3)` product (`_cubic_ghosts`), equal to `update` to float32 rounding |
 | Which halo fill a sharded rod takes | `maddening.nodes.heat.HeatNode.halo_boundary` | `"edge"`; `ShardedStencilNode` refuses `"zero"` and `"periodic"`, which the closure would otherwise ignore |
 
 ## Assumptions and Simplifications

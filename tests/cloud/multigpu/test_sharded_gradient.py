@@ -109,6 +109,6 @@ def test_gradient_matches_the_unsharded_node():
         return jnp.mean(state["temperature"] ** 2)
 
     T0 = jnp.asarray(np.random.default_rng(1).standard_normal(n_cells).astype(np.float32))
-    g_sharded = np.asarray(jax.grad(lambda t: loss(sharded.update, t))(T0))
-    g_unsharded = np.asarray(jax.grad(lambda t: loss(node.update, t))(T0))
+    g_sharded = np.asarray(jax.jit(jax.grad(lambda t: loss(sharded.update, t)))(T0))
+    g_unsharded = np.asarray(jax.jit(jax.grad(lambda t: loss(node.update, t)))(T0))
     np.testing.assert_allclose(g_sharded, g_unsharded, rtol=1e-5, atol=1e-7)

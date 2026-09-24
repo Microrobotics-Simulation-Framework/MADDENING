@@ -154,13 +154,28 @@ def test_an_edge_transform_string_is_found_wherever_the_call_is_written(names):
 def test_a_file_registering_its_own_transforms_satisfies_its_own_references(
     registered, ghost
 ):
-    assume(ghost not in registered)
-    body = "".join(
+    # The gate confirms a local registration by importing the module, so the
+    # fixture has to import.  It used to lack the import and call ``gm`` at
+    # module level: every example raised NameError on import and passed only
+    # because any import failure degraded to "unconfirmed", so this property
+    # never reached the live-registry check it is about.
+    #
+    # The ``local_`` / ``ghost_`` prefixes keep a drawn name off the
+    # built-ins (``identity``, ``negate``, ...) and off each other:
+    # re-registering a built-in is a real conflict that
+    # ``register_transform`` raises on, and a ghost that happened to be a
+    # built-in would resolve.  Neither is what the property is about, and
+    # mapping costs no draw, unlike the ``assume`` it replaces.
+    registered = [f"local_{n}" for n in registered]
+    ghost = f"ghost_{ghost}"
+    body = "from maddening.core.transforms import register_transform\n\n"
+    body += "".join(
         f'@register_transform("{n}")\ndef _f_{n}(x):\n    return x\n\n'
         for n in registered
     )
-    body += "".join(
-        f'gm.add_edge("a", "b", "x", "y", transform="{n}")\n' for n in registered
+    body += "def wire(gm):\n" + "".join(
+        f'    gm.add_edge("a", "b", "x", "y", transform="{n}")\n'
+        for n in registered
     )
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "ok.py").write_text(body)

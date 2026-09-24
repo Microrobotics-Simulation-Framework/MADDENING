@@ -249,16 +249,25 @@ If your node has known failure modes or limitations, add entries to `docs/valida
 - anomaly_id: "MADD-ANO-XXX"
   title: "YourNode: brief description of limitation"
   description: "Full description..."
-  severity: "major"            # critical | major | minor
+  severity: "major"            # critical | major | minor | enhancement
   safety_relevance: "context_dependent"
   safety_relevance_rationale: "..."
-  affected_components: ["YourNode"]
-  affected_versions: ["0.2.0"]
-  status: "open"
+  affected_components: ["maddening.nodes.your_node.YourNode"]
+  affected_versions: ">=0.5.0.dev0"   # PEP 440; see the registry header
+  resolution_status: "open"
   workaround: "..."
 ```
 
-Run `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml` to validate.
+`affected_components` are dotted paths the gate imports.  `affected_versions`
+is a PEP 440 specifier set read against the registry's `maddening_version`:
+`>=FIRST` while the defect is reachable, `>=FIRST, <FIX` once it is
+`resolved`, and a defect first introduced during a development cycle starts
+at that cycle's `.dev0` build, not at the release.  The full convention is in
+the header comment of `docs/validation/known_anomalies.yaml`.
+
+Run `python scripts/check_anomalies.py --prefix MADD-ANO-` to validate — the
+gate CI runs, which adds the version-range and evidence rules to the schema
+check that `python -m maddening.compliance check-anomalies` performs.
 
 ### 8. Run CI Checks
 

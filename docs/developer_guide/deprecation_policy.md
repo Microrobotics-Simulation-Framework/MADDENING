@@ -100,7 +100,7 @@ behaviour actually work are not breaking; say so in the CHANGELOG under
 6. **Record it** in the CHANGELOG (below).
 7. **Remove it** no earlier than two minor releases after the announcement,
    and only in a major release. Removal is a `### Removed` entry and an
-   `--update` of the signature snapshot in the same commit.
+   `--update --accept-removal` of the signature snapshot in the same commit.
 
 `maddening.core.simulation.checkpoint.download_and_load_state` is the worked
 example in the tree: announced in 0.4.0, forwards to
@@ -168,6 +168,18 @@ Either way, accepting the current tree is one command:
 ```console
 $ python scripts/check_stable_signatures.py --update
 ```
+
+except for a **removal**. A surface or member that has left the `stable` set
+-- deleted, renamed, made private or demoted -- withdraws a promise, so
+`--update` refuses to drop it from the snapshot and lists what it would drop.
+Once the removal is intended and its notice period is over, say so:
+
+```console
+$ python scripts/check_stable_signatures.py --update --accept-removal
+```
+
+The guard also fails when there is no `stable` surface at all, in the tree or
+in the snapshot: a guard with nothing to guard is not a pass.
 
 Run it in the **same commit** as the change, and say in the commit message why
 the change is compatible or which major release carries it. `--update` is the

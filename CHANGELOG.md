@@ -167,6 +167,8 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **Coupling group keys are also refused when one plus `_total` spells another's** (a new `_meta` slot, `<key>_total_iterations`): groups keyed
+  `a+b+c` and `a+b+c_total` now fail at `add_coupling_group`, with or without sub-cycling. Rename a node so the keys differ.
 - **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
   `coupling_overhead_se_ms`**: it was clamped at zero, which biased it upward
   and printed `0.00 ms` for an overhead the run could not resolve
@@ -286,6 +288,9 @@ guidance; the itemized changes follow.
 - **Sharded halos at the edges of the global grid**: on a mesh axis of one device `halo_exchange` filled them periodically whatever `boundary` said (a one-device sharded `HeatNode` ran as a ring, 0.40 off),
   and `"edge"` wider than one cell put `r0, r1` before `r0` instead of repeating `r0` (4th-order `HeatNode`, default fill: 4.7e-3). Periodic, and width 1 on two or more devices, are bit-identical.
   Action: re-run sharded results taken on one device or a size-1 mesh axis with a non-periodic `boundary`, and 4th-order sharded `HeatNode` results.
+- **`coupling_diagnostics()` counts every `waveform_iterations` sweep** (since 0.1.0, MADD-ANO-026): `iterations` is the largest sweep's, so `iterations >= max_iterations`
+  is exact again (an earlier sweep at the cap read `iterations=1`); new `total_iterations` is the sum. State unchanged; a one-sweep group reports as before.
+  Action: a cap check on `iterations` needs no change; read `total_iterations` for the work done.
 - **Coupling bounds, confirmation audit:** a field below `tiny/eps` (~1e-31 in float32) no longer reads converged on a flushed change; the float floor counts the evaluations a pass rounds like (sub-cycling automatically,
   internal loops via the new `SimulationNode.update_evaluations()`; an undeclared node's group gets `spectral_usable=False` at the floor); float16-beside-float32 gradient floors, top-of-range spectral weights,
   `PYTHONHASHSEED`-dependent `_meta` seeds and `reset_state` of a key ending `_spectral` are fixed. Action: a node that sub-steps inside `update` should return its sub-step count from `update_evaluations()`.
@@ -589,6 +594,9 @@ guidance; the itemized changes follow.
 ### Known Anomalies
 - **MADD-ANO-028, 029 (new, resolved in this release)**: a sharded stencil node on a mesh axis of one device got periodic global halos under
   `"edge"` and `"zero"`; the `"edge"` fill of a halo two or more cells wide was the shard's first cells, not its edge cell repeated (both since 0.2.0; see `### Fixed`)
+- **MADD-ANO-026 (new, resolved)**: with `waveform_iterations > 1`, `iterations` was the last sweep's count, hiding an earlier sweep at the cap (since 0.1.0).
+  **MADD-ANO-027 (new, open)**: `waveform_iterations > 1` restarts the same solve rather than relaxing a waveform, and sub-step interpolation runs between
+  iterates, so a converged step is the same in every mode (since 0.1.0). The option is now marked experimental; use `waveform_iterations=1`
 - **MADD-ANO-024, 025 (new, resolved in this release)**: `PUT /graph/params` accepted and saved a value a node consumes at
   construction (since 0.1.0); a sharded `LBMNode` imposed its pressure faces at every seam and, by default, filled its global
   halos unlike its periodic streaming (since 0.2.0). Both are refusals now (see `### Fixed`)

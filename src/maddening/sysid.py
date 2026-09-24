@@ -47,8 +47,8 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 
 from maddening.core.coupling.acceleration import (
+    convergence_criterion,
     estimated_error,
-    relaxation_step_scale,
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -185,15 +185,16 @@ def _group_thresholds(gm) -> list[tuple[str, str, float, float]]:
     the step scale (see
     :func:`~maddening.core.coupling.acceleration.relaxation_step_scale`)
     and has to be carried too, or an over-relaxed group would be masked
-    on a different criterion from the one it converged under.
+    on a different criterion from the one it converged under.  Both come
+    from :func:`~maddening.core.coupling.acceleration.convergence_criterion`,
+    which the report and the profiler read as well.
     """
     out = []
     for g in gm._coupling_groups:  # noqa: SLF001
         key = "+".join(sorted(g.nodes))
-        thr = 1.0 if g.convergence_norm in ("mixed", "interface") else float(g.tolerance)
+        thr, scale = convergence_criterion(g)
         out.append((f"coupling_{key}_residual",
-                    f"coupling_{key}_amplification", thr,
-                    relaxation_step_scale(g.acceleration, g.relaxation)))
+                    f"coupling_{key}_amplification", thr, scale))
     return out
 
 

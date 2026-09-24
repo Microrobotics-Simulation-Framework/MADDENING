@@ -555,6 +555,45 @@ def estimated_error(residual, amplification, step_scale=1.0):
     return residual * jnp.maximum(scaled, jnp.ones_like(scaled))
 
 
+def convergence_criterion(group) -> tuple[float, float]:
+    """``(threshold, step_scale)``: what a coupling group's ``converged`` compares.
+
+    A group has converged when
+    ``estimated_error(residual, amplification, step_scale) <= threshold``.
+    ``threshold`` is ``tolerance`` under the L2 norm and ``1.0`` under
+    the mixed and interface norms, whose tolerances are inside the
+    norm.  ``step_scale`` is :func:`relaxation_step_scale`.
+
+    ``GraphManager.coupling_diagnostics()``, the profiler's
+    ``converged_fraction`` and ``sysid.windowed_loss(mask_unconverged=True)``
+    re-derive ``converged`` from a step's ``_meta`` slots, and all three
+    read the criterion from here.  The profiler used to test
+    ``residual * amplification`` without the step scale, so under
+    ``acceleration="fixed"`` it overstated convergence when over-relaxed
+    and understated it when under-relaxed.
+    """
+    threshold = (1.0 if group.convergence_norm in ("mixed", "interface")
+                 else float(group.tolerance))
+    return threshold, relaxation_step_scale(group.acceleration, group.relaxation)
+
+
+def reported_error_estimate(residual: float, amplification: float,
+                            step_scale: float) -> float:
+    """:func:`estimated_error` on a reported ``(residual, amplification)`` pair.
+
+    Host-side arithmetic in Python floats, for readers of a step's
+    ``_meta`` slots.  There ``amplification`` is ``1 / (1 - rho)`` when
+    the contraction ratio was usable and ``0.0`` when it was rejected, so
+    anything below one falls back to the raw residual.  This is the
+    number ``coupling_diagnostics()`` reports as ``"error_estimate"``,
+    and ``<= threshold`` (see :func:`convergence_criterion`) is its
+    ``"converged"``.
+    """
+    if amplification >= 1.0:
+        return residual * max(step_scale * amplification, 1.0)
+    return residual
+
+
 # ------------------------------------------------------------------
 # The spectral bound (``solver="ift"``, ``diagnostics=True``)
 # ------------------------------------------------------------------

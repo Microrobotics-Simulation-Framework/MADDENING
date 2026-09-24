@@ -588,10 +588,11 @@ def _refuse_lossy_values(raw: Any, name: str, dtype: np.dtype, *, implicit: bool
             f"np.stack([np.real(points), np.imag(points)], axis=-1).tolist()."
         )
     if found.kind == "extended":
-        ours = np.finfo(found.dtype)
+        ext = found.dtype if found.dtype is not None else np.dtype(np.longdouble)
+        ours = np.finfo(ext)
         raise PointReferenceError(
             f"{name}: the inline points hold extended-precision values "
-            f"({found.dtype.name}, about {ours.precision} significant digits) and "
+            f"({ext.name}, about {ours.precision} significant digits) and "
             f"the reference names no 'dtype'.  Inline points without a 'dtype' are "
             f"read as float64 (about {f64.precision} digits), so they would be "
             f"rounded without a word; they are refused instead.  Extended precision "

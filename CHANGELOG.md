@@ -290,6 +290,9 @@ guidance; the itemized changes follow.
 - **`fim` no longer reuses a compiled trace across calls unless `reuse_trace=True`** (pure residuals only): the cache
   froze what the residual read, e.g. `gm.params` (a CRB of 0.41 for a true 44.7).  Specs resolve by one walk (namedtuple
   levels by field name; `check_bounds` refuses unreadable specs); integer leaves are named, not zeroed; NaN bounds refused
+- **`WaveletAdaptiveNode` refuses a `mass` its dtype cannot carry** (float32 `mass=1e-6` read J 2.8x off, silently) and its
+  active set no longer depends on rounding: eager, jit and graph agree, as do a float and its array spelling. Periodic
+  source periodised; `n_levels=6.9` and unknown keys refused. Build in float64 or raise `mass` if refused.
 - **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
   fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
   run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.

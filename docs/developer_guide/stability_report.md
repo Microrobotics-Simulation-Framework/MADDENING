@@ -100,12 +100,15 @@ import time.  Levels:
 | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode` | experimental |
 | `maddening.nodes.adaptive.wavelets.cdd.cdd_select` | experimental |
 | `maddening.nodes.adaptive.wavelets.cdd.cdd_select_with_iterations` | experimental |
+| `maddening.nodes.adaptive.wavelets.cdd.rounding_floor` | experimental |
 | `maddening.nodes.adaptive.wavelets.dirichlet.dirichlet_side` | experimental |
 | `maddening.nodes.adaptive.wavelets.dirichlet.synthesis_matrix_dirichlet` | experimental |
 | `maddening.nodes.adaptive.wavelets.operator.WaveletOperator` | experimental |
 | `maddening.nodes.adaptive.wavelets.operator.assemble_operator` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.condition_estimate` | experimental |
 | `maddening.nodes.adaptive.wavelets.operator.gather_solve` | experimental |
 | `maddening.nodes.adaptive.wavelets.operator.make_masked_operator` | experimental |
+| `maddening.nodes.adaptive.wavelets.operator.physical_condition_number` | experimental |
 | `maddening.nodes.adaptive.wavelets.precond.diagonal_scaling` | experimental |
 | `maddening.nodes.adaptive.wavelets.transform.analysis` | experimental |
 | `maddening.nodes.adaptive.wavelets.transform.level_labels` | experimental |
@@ -178,4 +181,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*159 API surfaces registered.*
+*162 API surfaces registered.*

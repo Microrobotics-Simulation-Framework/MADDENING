@@ -129,19 +129,42 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     the other direction: the field holds its full 24 bits and its
     change is perfectly measurable, it is only the product that is not.
     So a field above the dead band whose scale is not a normal number
-    is measured on the rescaled pair ``diff * 2**k / (rtol * (ref *
-    2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same quotient
-    -- a power of two scales exactly -- computed where every operand is
-    normal.  A field whose magnitude is *itself* subnormal is below what
-    the dtype resolves: a flush-to-zero backend (XLA's CPU backend is
-    one) reads it as zero and it leaves the norm as a field at zero
-    does; elsewhere it is rescaled like the rest.  Every other field is
-    multiplied by exactly ``1.0`` on both sides of the quotient, so its
-    value is bit-identical to what it was before either guard existed.
+    is measured on the rescaled pair ``|new * 2**k - old * 2**k| / (rtol
+    * (ref * 2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same
+    quotient -- a power of two scales exactly -- computed where every
+    operand is normal.
+
+    **The change is rescaled before it is taken, not after.**  The
+    *difference* of two normal numbers is subnormal whenever it is below
+    ``finfo.tiny``, which for a field of magnitude ``ref`` is every
+    change of less than ``tiny / ref`` of itself -- one ulp as soon as
+    ``ref < tiny / eps`` (about ``9.9e-32`` in float32), whatever the
+    norm's ``rtol``.  The CPU backend flushes that difference to zero,
+    so rescaling ``|new - old|`` afterwards rescaled a zero: a field at
+    ``1e-35`` read ``residual=0.0, converged=True`` 43 passes into an
+    iteration that takes 126-130 at ``1e-29``, under all three norms and
+    both solvers, and the spectral bound built on that residual read
+    6e-4 of the true distance with ``spectral_usable=True``.  So wherever
+    a one-ulp change of the field is below the normal range the pair is
+    multiplied by ``2**k`` first and the difference is taken between two
+    normal numbers; the norm then says the same thing about a group at
+    ``1e-35`` as about the same group scaled by any power of two into
+    the normal range -- to the bit, pinned by
+    ``test_the_verdict_does_not_change_below_the_change_underflow``.
+
+    A field whose magnitude is *itself* subnormal is below what the
+    dtype resolves: a flush-to-zero backend (XLA's CPU backend is one)
+    reads it as zero and it leaves the norm as a field at zero does;
+    elsewhere it is rescaled like the rest.  Every other field is
+    measured by the expressions the norms always evaluated, selected by a
+    ``where``, so its value -- and the compiled loop it sits in -- is
+    bit-identical to what it was before either guard existed.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
-    tiny = jnp.finfo(jnp.asarray(scale).dtype).tiny
+    dtype = jnp.asarray(scale).dtype
+    info = jnp.finfo(dtype)
+    tiny = info.tiny
     # ``scale * tiny`` is exact (``tiny`` is a power of two) unless it
     # underflows, and an underflow means the scale is small, which is
     # the evaluable side.  Non-finite ``ref`` fails ``isfinite``; an
@@ -150,30 +173,52 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
         jnp.isfinite(ref),
         scale * tiny <= 1.0,
     )
-    # The underflow end: above the caller's dead band (so ``ref > 0``)
-    # but a scale below the smallest normal number (or flushed to zero).
-    # There numerator and denominator are both multiplied by
-    # ``k = 1 / tiny``, a power of two, so the quotient is the same one;
-    # everywhere else ``k`` is exactly ``1.0`` and multiplying by it is
-    # exact, so an in-range field's value is bit-identical.  NaN ``ref``
-    # and ``scale`` compare False, so this is finite-only, and ``diff *
-    # k`` stays below ``2 / rtol`` on the fields it is applied to.
+    # The underflow end of the *scale*: above the caller's dead band (so
+    # ``ref > 0``) but a scale below the smallest normal number (or
+    # flushed to zero).  There numerator and denominator are both
+    # multiplied by ``k = 1 / tiny``, a power of two, so the quotient is
+    # the same one; everywhere else ``k`` is exactly ``1.0`` and
+    # multiplying by it is exact.  NaN ``ref`` and ``scale`` compare
+    # False, so this is finite-only.
+    #
+    # These are the expressions the norms have always evaluated, kept
+    # verbatim -- the L2 norm's two-op form included -- because the
+    # residual shares a compiled loop body with the node updates, and
+    # XLA fuses the two: rewritten in an equivalent form (the pair
+    # rescaled before subtracting, ``k`` exactly 1.0 in range) the
+    # arithmetic of the *node updates* moved by an ulp under
+    # ``solver="ift"`` and the L2 norm, and one group stopped on a
+    # different pass.  So the rescaled pair below is an alternative the
+    # ``where`` selects, not a change to these.
     diff = jnp.abs(new_val - old_val)
+    above = ref > atol
     if isinstance(rtol, (int, float)) and float(rtol) >= 1.0:
         # ``scale >= ref`` here (the L2 norm passes ``rtol=1.0``), so a
-        # field with a normal magnitude has a normal scale and there is no
-        # underflow end to guard; the formula is the one it always was,
-        # and so is its op count.
-        active = jnp.logical_and(ref > atol, scale > 0)
+        # field with a normal magnitude has a normal scale.
+        active = jnp.logical_and(above, scale > 0)
         safe = jnp.where(active, scale, jnp.ones_like(scale))
         scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
     else:
-        above = ref > atol
         underflow = jnp.logical_and(above, scale < tiny)
-        k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(jnp.asarray(scale).dtype)
+        k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(dtype)
         active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
         safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
         scaled = jnp.where(active, (diff * k) / safe, jnp.zeros_like(diff))
+    # The underflow end of the *change*: a field so small that a change
+    # of one ulp of it is subnormal (``ref < tiny / eps``), which the
+    # subtraction above flushes to zero, whatever ``rtol``.  There the
+    # pair is multiplied by ``K = 1 / tiny`` *before* it is subtracted,
+    # so the difference is taken between two normal numbers, and the
+    # scale by the same ``K``: the same quotient, to the bit, as the
+    # same group scaled by a power of two into the normal range.  This
+    # covers the scale's underflow end too wherever ``rtol >= eps``.
+    # ``ref * K`` stays below ``1 / eps`` on the fields it is applied to.
+    small = jnp.logical_and(above, ref < float(tiny) / float(info.eps))
+    big_k = float(1.0 / float(tiny))
+    active = jnp.logical_or(active, small)
+    pair = jnp.abs(new_val * big_k - old_val * big_k)
+    small_safe = jnp.where(small, rtol * (ref * big_k), jnp.ones_like(scale))
+    scaled = jnp.where(small, pair / small_safe, scaled)
     # ``where`` with the finite computation in the *selected* branch:
     # an evaluable field's value, and its gradient, are exactly what
     # they were before this guard existed.
@@ -410,8 +455,9 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     produces.  Nothing computable from the residual norms alone
     separates that from a genuine 0.2 contraction; it needs the
     spectrum.  So a rate this function accepts is an estimate, and
-    ``ratio_usable`` (named ``bound_valid`` before 0.4.0, for exactly
-    this reason) reports a usable *ratio*, not a valid *bound*.  The
+    ``ratio_usable`` (renamed from ``bound_valid`` during 0.4.0's
+    development, for exactly this reason; no release carried the old
+    name) reports a usable *ratio*, not a valid *bound*.  The
     full list of what the estimate rests on is in
     ``graph_manager._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
@@ -794,11 +840,34 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #:   480-cell sweep behind ``tests/core/test_coupling_solver_equivalence.py``):
 #:   at most **0.82**.
 #:
-#: Their sum is 1.54; four units is 2.6x that, which is the room a map
-#: with more roundings per entry than one dense product needs (a
-#: sub-stepped integrator, a flux computed from two iterates).  It is a
-#: model of the map's rounding, not a proof of it: a node whose update
-#: cancels catastrophically -- a small output computed as the
+#: Their sum is 1.54; four units is 2.6x that, room for an evaluation
+#: with a few more roundings per entry than one dense product (a flux
+#: computed from two iterates).
+#:
+#: **It is per evaluation, not per pass.**  A composite map is several
+#: evaluations, and its error grows with their number: explicit Euler
+#: ``x <- x + h (T - x)`` in ``N`` sub-steps, measured the same way,
+#: reaches 1.3 units at ``N = 4``, 2.6 at 10, 5.8 at 20, 15.6 at 50 and
+#: 29.4 at 100 (worst of 2 000 draws each, jaxlib 0.11.0) -- every
+#: sub-step whose increment is below half an ulp of its field is rounded
+#: away.  While the floor was a flat four
+#: units, a stalled relay built on such a node read a bound 0.07-0.96x
+#: its true distance at ``N`` = 15-200 with ``spectral_usable=True``,
+#: whether the node looped inside ``update`` or the framework
+#: sub-cycled it.  So the floor is this constant times the number of
+#: evaluations one coupling pass rounds like: the largest sub-cycling
+#: divider times :meth:`SimulationNode.update_evaluations` in the group
+#: (``GraphManager._group_evaluations``; a pass evaluates no node more
+#: often than that, so it rounds like at most that many single passes),
+#: which is ``4N`` -- 16, 40, 80, 200 and 400 units against those
+#: figures, the same 2.6x-or-more headroom the single evaluation has
+#: and 14x at ``N = 100``, the price of one constant.  A node that loops
+#: inside ``update`` without declaring it is counted as one evaluation,
+#: and ``coupling_diagnostics`` withholds ``spectral_usable`` wherever
+#: the residual is at the floor, where that count carries the bound.
+#:
+#: It is a model of the map's rounding, not a proof of it: a node whose
+#: update cancels catastrophically -- a small output computed as the
 #: difference of two large intermediates -- can exceed any fixed number
 #: of ulps of its *output's* magnitude, and nothing outside the node can
 #: see that.
@@ -807,7 +876,7 @@ PRECISION_FLOOR_ULPS = 4.0
 
 def residual_precision_floor(state, node_names, convergence_norm="l2",
                              atol: float = 0.0, rtol: float = 1.0,
-                             interface_edges=()):
+                             interface_edges=(), evaluations: float = 1.0):
     """The float resolution of a residual the group's norm reports at *state*.
 
     ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
@@ -842,6 +911,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         read by the L2 norm, whose threshold is ``tolerance``).
     interface_edges : iterable of EdgeSpec
         The group's internal edges (read under ``"interface"``).
+    evaluations : float
+        How many evaluations of the map one coupling pass rounds like:
+        the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
+        ``GraphManager.coupling_diagnostics`` passes the largest
+        ``sub-cycling divider * SimulationNode.update_evaluations()`` in
+        the group; ``1.0`` is a pass that evaluates each node once.
 
     Returns
     -------
@@ -860,6 +935,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     4000
     >>> float(residual_precision_floor(s, ["n"], "l2", atol=2.0))   # dead-banded: nothing read
     0.0
+    >>> round(float(residual_precision_floor(s, ["n"], "l2", evaluations=100.0)) / eps)
+    800
     """
     norm = str(convergence_norm)
     use_rtol = 1.0 if norm == "l2" else float(rtol)
@@ -892,7 +969,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         count = count + n
     if norm != "l2":
         sum_sq = sum_sq / jnp.maximum(count, 1.0)
-    return PRECISION_FLOOR_ULPS * jnp.sqrt(sum_sq)
+    return (PRECISION_FLOOR_ULPS * float(evaluations)) * jnp.sqrt(sum_sq)
 
 
 def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,

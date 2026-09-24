@@ -123,6 +123,18 @@ jobs:
         # other.  **Dropping the 0.10.2 lane silently deletes the only
         # coverage that term has.**  Replace the test first.
         jax-version: ["0.10.2", "0.11.2"]
+        # Each lane runs as four jobs, each on its own runner and each
+        # running its share one test at a time.  The split is by test file
+        # and stable (tests/_sharding.py): a file's shard is a hash of its
+        # path, or an explicit pin for the heaviest files, never a function
+        # of the test list -- so shard i of a pull request holds the same
+        # files as shard i of the base branch.  One process per runner
+        # keeps per-test times comparable to the budget and memory at a
+        # quarter of the suite's; xdist on one runner did neither (four
+        # workers stretched every test's wall time, and memory grew to
+        # 14 GB of 16 before a runner died, PR #133).  Changing the count
+        # means changing MADDENING_TEST_SHARD below and PINS_FOR.
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v4
@@ -158,12 +170,76 @@ jobs:
           # extra), so a skip would mean the environment changed and the
           # proof stopped running -- fail instead.
           MADDENING_REQUIRE_PACKAGING_TESTS: "1"
+          # This job's share of the suite (tests/_sharding.py).
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/4"
         run: |
           # -rs prints every skip's reason.  A skip whose reason nobody
           # reads is indistinguishable from a test that never existed,
           # and at least one skip here is a *measurement* the log is
           # meant to carry (see the jax-version matrix comment above).
-          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz
+          #
+          # --durations prints every test over 1 s at the end of the log;
+          # the JUnit XML carries every test's time to the budget step
+          # below.  xunit1 is the JUnit family that records file and line.
+          python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
+            --durations=0 --durations-min=1.0 \
+            --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
+
+      - name: Test time budget
+        # Runs after a red test step too.  The gate half only: warns on any
+        # test over 5 s that is not on tests/duration_allowlist.txt and
+        # fails on one over 20 s.  The summary is written once per lane,
+        # from all four shards, by the "Test durations" job below.  The
+        # budget is in docs/developer_guide/testing_standards.md.
+        if: ${{ !cancelled() }}
+        run: |
+          python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+
+      - name: Upload test durations
+        # Kept 90 days so a regression can be traced to the run that
+        # introduced it without re-running anything.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of4
+          path: test-results-shard${{ matrix.shard }}.xml
+          retention-days: 90
+          if-no-files-found: warn
+
+  test-durations:
+    # One summary per lane from all four shards' JUnit XML: band counts,
+    # slowest tests and files, and allowlist entries that may be
+    # removable -- which only a view of the whole lane can say, since an
+    # entry absent from one shard is simply on another.  Report only; the
+    # shards gate themselves.
+    name: Test durations
+    needs: [changes, test]
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jax-version: ["0.10.2", "0.11.2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-durations-py3.12-jax${{ matrix.jax-version }}-shard*
+          path: results
+          merge-multiple: true
+      - name: Summarise the lane
+        run: |
+          n=$(ls results/test-results-shard*.xml 2>/dev/null | wc -l)
+          extra=""
+          if [ "$n" -ne 4 ]; then
+            echo "::warning title=Test durations::only $n of 4 shard reports for JAX ${{ matrix.jax-version }}; the summary covers those shards and lists no removable allowlist entries"
+            extra="--no-removable"
+          fi
+          [ "$n" -gt 0 ] || exit 0
+          python3 scripts/report_test_durations.py results/test-results-shard*.xml \
+            --allowlist tests/duration_allowlist.txt --fail-over 0 $extra \
+            --title "Test durations (Python 3.12, JAX ${{ matrix.jax-version }}, $n of 4 shards)"
 
   test-usd:
     needs: changes

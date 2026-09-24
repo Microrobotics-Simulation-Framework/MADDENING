@@ -372,6 +372,81 @@ def test_my_node():
 
 Install with `pip install maddening[verify]`.
 
+## Test time budget
+
+Every push runs the default lane (everything not marked
+`@pytest.mark.slow`) twice, once per JAX lane, and it is what everyone waits
+on. Each test's wall-clock on the GitHub runner (setup + call + teardown)
+falls in one of three bands:
+
+| Time on CI | What it means |
+|---|---|
+| up to 1 s | Fine. |
+| 1–5 s | The watch list. Optimise it when you are in the file; usually the cost is JIT compilation (see below). |
+| over 5 s | Mark it `@pytest.mark.slow`, unless it can be made much faster, or it guards something important enough to pay for on every push. In that case, add it to `tests/duration_allowlist.txt` as `<node id> # kept: <why>`. |
+
+Slow tests are not lost: `slow-tests.yml` runs the whole suite, slow tests
+included, on Monday, Wednesday and Friday, and on demand from the Actions
+tab.
+
+CI enforces the budget in the `Test time budget` step of each test lane
+(`scripts/report_test_durations.py`, reading pytest's JUnit XML):
+
+- The run page's summary shows the band counts, the 30 slowest tests and
+  the 15 slowest files. Every test over 1 s is also listed at the end of the
+  log (`--durations=0 --durations-min=1.0`). The XML is uploaded as the
+  `test-durations-*` artifact and kept for 90 days.
+- An unlisted test over **5 s** gets a warning annotation on the run.
+- An unlisted test over **20 s** fails the job.
+
+The hard line is four times the policy line because of runner noise. On
+eight green lane-runs of the same tree, one test's time varied by 1.7x
+between runs at the median and 3x at the 90th percentile. Some of that is
+the runner. The rest is that the first test to compile something pays for
+every later test that reuses it, so moving or marking one test moves
+another's time. Judge a test on more than one run.
+
+### Sharded lanes
+
+Each JAX lane runs as four jobs on four runners, each running its share of
+the suite one test at a time (`MADDENING_TEST_SHARD=i/4`,
+`tests/_sharding.py`). The split is by test file, and it is stable. A file's
+shard is a hash of its path, or an explicit pin in `PINS` for the heaviest
+files, never a function of the test list. So:
+
+- adding or removing tests, or whole files, moves no other file;
+- a file's tests stay together, so its fixtures build once;
+- shard *i* of a pull request holds the same files as shard *i* of the base
+  branch, which is what lets a shard reuse that shard's compilation cache.
+
+Every job still collects the whole suite, so every `conftest.py` runs as
+it would in a single process, and deselects the other shards' files. The
+per-shard `Test time budget` step gates. The `Test durations` job writes
+one summary per lane from all four shards' reports.
+
+To rebalance, edit `PINS`, which moves only the files you pin, and take the
+per-file totals from the lane summary. Changing the job count re-deals
+every file: change `shard:` and `MADDENING_TEST_SHARD` in `ci.yml`, and
+`PINS_FOR`. `tests/compliance/test_ci_sharding.py` checks that they agree.
+
+`pending triage` entries in the allowlist are tests that were already over
+5 s when the budget arrived (2026-09-24). Each one is to be marked slow,
+made faster, or kept with a reason, and the list only shrinks. The summary
+lists entries that may now be removable.
+
+**Where the time usually goes.** When a test here is slow, the first
+suspect is XLA compilation rather than the computation itself. The usual
+fixes:
+
+- Build and `jax.jit` the graph or function once in a module-scoped fixture
+  and reuse it, instead of rebuilding it in every test.
+- In a property test, keep array shapes and static arguments fixed across
+  examples. A new shape or a new Python-level constant is a new compile,
+  so an example that varies them costs a compile each time. Draw values,
+  not shapes, and pass them as traced arguments.
+- Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for properties
+  that compile per example.
+
 ## Test Organization
 
 ```

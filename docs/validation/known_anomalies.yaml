@@ -1772,6 +1772,21 @@ anomalies:
       `benchmarks/results/audit_040_phase3_wave_a/`, a directory that was
       never committed; the tests are the evidence.
 
+      (3) The legacy `solver="fori"` coupling path, recorded so it is not
+      re-reported as a separate defect.  An earlier audit noted that
+      `solver="fori"` with `acceleration="aitken"` raised under x64 because
+      that branch seeds its Aitken carry at canonical precision
+      (`jnp.zeros(n_dof)` and `jnp.array(1.0)` in `GraphManager`'s legacy
+      `fori_loop` branch) against a float32 interface state.  Re-measured on
+      `release/0.4.0` at 741a624 (2026-09-24, CPU, jaxlib 0.11.0) on a
+      two-spring coupling group under x64: `solver="fori"` with
+      `acceleration="aitken"`, `solver="fori"` with `acceleration="none"`,
+      and the default solver with `acceleration="aitken"` all run under
+      `step()`, and all three raise the scan `TypeError` above under
+      `run_scan`.  The path adds no failure of its own, and the fix
+      described below -- a seed state that follows the canonical float
+      dtype -- makes those seeds match as well.
+
       Relationship to MADD-ANO-013, which is adjacent and not the same entry.
       MADD-ANO-013 records nodes that *downcast* a float64 quantity to
       float32 -- a precision floor, plus a carry rejection when a caller

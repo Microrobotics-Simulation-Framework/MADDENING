@@ -706,8 +706,8 @@
           "name": "axis_map"
         },
         {
-          "annotation": "str",
-          "default": "'edge'",
+          "annotation": "Optional[str]",
+          "default": "None",
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "boundary"
         }

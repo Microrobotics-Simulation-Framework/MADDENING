@@ -177,7 +177,7 @@ jobs:
           # turns entry-point loading off.
           # TRIAL ONLY: log memory every 20 s, to tell an out-of-memory
           # runner shutdown from an infrastructure one.
-          ( while true; do echo "$(date -u +%T) $(free -m | awk '/^Mem:/{print "used="$3" avail="$7}') $(free -m | awk '/^Swap:/{print "swap="$3}')"; sleep 20; done ) > "$RUNNER_TEMP/mem.log" 2>&1 &
+          ( while true; do echo "$(date -u +%T) $(free -m | awk '/^Mem:/{print "used="$3" avail="$7}') $(free -m | awk '/^Swap:/{print "swap="$3}')"; sleep 20; done ) 2>&1 | tee "$RUNNER_TEMP/mem.log" | sed -u 's/^/[mem] /' &
           python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
             -p xdist.plugin -n 4 --dist loadfile \
             --durations=0 --durations-min=1.0 \

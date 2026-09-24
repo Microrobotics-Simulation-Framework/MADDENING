@@ -45,7 +45,9 @@ The allowlist
 
 Listed tests that no longer run in this lane (marked slow, renamed,
 deleted) or now finish under the policy line are reported as removable;
-that is advisory, because one fast run is not proof.
+that is advisory, because one fast run is not proof.  A single shard's
+report is not the lane, so the per-shard gate writes no summary and the
+lane summary passes ``--no-removable`` when a shard's report is missing.
 
 Usage
 -----
@@ -262,6 +264,8 @@ def main(argv=None) -> int:
     p.add_argument("--markdown", type=Path,
                    default=Path(os.environ["GITHUB_STEP_SUMMARY"]) if os.environ.get("GITHUB_STEP_SUMMARY") else None,
                    help="append the summary here (default: $GITHUB_STEP_SUMMARY)")
+    p.add_argument("--no-removable", action="store_true",
+                   help="list no allowlist entries as removable (the reports do not cover the whole lane)")
     p.add_argument("--title", default="Test durations")
     p.add_argument("--top", type=int, default=30)
     args = p.parse_args(argv)
@@ -281,6 +285,10 @@ def main(argv=None) -> int:
     fail_over = args.fail_over or float("inf")
     verdict = judge(tests, allow, watch_over=args.watch_over,
                     slow_over=args.slow_over, fail_over=fail_over)
+    if args.no_removable:
+        # An entry absent from a partial view may simply be in the part
+        # that is missing.
+        verdict["allow_absent"], verdict["allow_fast"] = [], []
     md = markdown(verdict, allow, title=args.title, watch_over=args.watch_over,
                   slow_over=args.slow_over, fail_over=fail_over, top=args.top)
     if args.markdown:

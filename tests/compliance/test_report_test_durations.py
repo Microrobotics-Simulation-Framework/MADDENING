@@ -181,5 +181,19 @@ def test_ci_runs_the_budget_on_the_default_lane():
     # The gate is only a gate while CI calls it with the allowlist and feeds
     # it the XML it needs.
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert "--junitxml=test-results.xml -o junit_family=xunit1" in ci
-    assert re.search(r"report_test_durations\.py test-results\.xml\s*\\\s*\n\s*--allowlist tests/duration_allowlist\.txt", ci)
+    assert "--junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1" in ci
+    assert re.search(r"report_test_durations\.py test-results-shard\$\{\{ matrix\.shard \}\}\.xml\s*\\\s*\n"
+                     r"\s*--allowlist tests/duration_allowlist\.txt", ci)
+
+
+def test_a_partial_lane_lists_no_allowlist_entry_as_removable(gate, tmp_path, capsys):
+    # With one shard's report missing, an allowlisted test that is absent
+    # may simply be on that shard.
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_fast", 0.2))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/b/test_y.py::test_elsewhere # pending triage\n")
+    _run(gate, capsys, report, "--allowlist", allow)
+    assert "may be removable" in Path(str(report) + ".md").read_text()
+    Path(str(report) + ".md").unlink()
+    _run(gate, capsys, report, "--allowlist", allow, "--no-removable")
+    assert "may be removable" not in Path(str(report) + ".md").read_text()

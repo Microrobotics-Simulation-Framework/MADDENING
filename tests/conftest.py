@@ -124,6 +124,17 @@ EXAMPLES_STANDARD = _PROFILE_EXAMPLES
 EXAMPLES_COSTLY = max(EXAMPLES_FLOOR, (2 * _PROFILE_EXAMPLES) // 5)
 
 
+def pytest_configure(config):
+    """Keep one CI shard's test files when ``MADDENING_TEST_SHARD`` is set.
+
+    See ``tests/_sharding.py``.
+    """
+    spec = os.environ.get("MADDENING_TEST_SHARD")
+    if spec:
+        from tests import _sharding
+        _sharding.register(config, spec)
+
+
 def pytest_report_header(config):
     """Report the active profile even when the Hypothesis plugin is off.
 

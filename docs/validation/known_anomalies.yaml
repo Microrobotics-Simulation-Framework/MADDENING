@@ -412,10 +412,33 @@ anomalies:
       in it would make tight float32 tolerances unreachable.  The bound
       keys are where a user sees it: spectral_error_bound adds the
       residual's float resolution before amplifying it (4 units of
-      eps * max|field| per entry the norm reads; it read 0.0 on that
-      state and now reads 9.4e-2), the gradient bound's distance carries
-      the same floor, and precision_limited reports that the residual is
-      at it.  Planned 0.5.0 work, not a promise of this release:
+      eps * max|field| per entry the norm reads, each field at its own
+      dtype, per evaluation of the map a coupling pass rounds like; it
+      read 0.0 on that state and now reads 9.4e-2), the gradient bound's
+      distance carries the same floor, and precision_limited reports that
+      the residual is at it.  A confirmation audit of the merged tree
+      found the floor's premise -- that the map's evaluation error is a
+      few ulps -- false for a composite map: a node integrating by
+      explicit Euler in N sub-steps is 5.8 units off the exact map at
+      N=20 and 29.4 at N=100, and a stalled relay built on one read the
+      bound 0.07-0.96x its true distance at N=15-200 with
+      spectral_usable=True, whether the node looped inside update() or
+      the framework sub-cycled it.  The floor is now per evaluation,
+      times the evaluations a pass rounds like: the largest sub-cycling
+      divider times SimulationNode.update_evaluations(), a count a node
+      declares for its own loops (4N covers the measured figures).
+      Nothing outside update() can see an undeclared loop, so where the
+      residual is at the floor -- where that count is the whole bound --
+      a group with an undeclared node reports spectral_usable=False and
+      gradient_bound_usable=False; a group whose nodes all declare keeps
+      them.  The same audit found three more ways a bound read low with
+      its flag set, each fixed: the gradient bound's floor, and its probe
+      step, taken from the promoted dtype, so a float16 field beside a
+      float32 one read 0.0 against a true 3.2% error; the spectral
+      weights 1/max|field| flushed to zero above 1/tiny (8.5e37 in
+      float32), which read rho_spectral 0.0 for a 0.9 map and the bound
+      0.12x; and a subnormal per-pass change flushed before it was
+      rescaled (MADD-ANO-019).  Planned 0.5.0 work, not a promise of this release:
       strict_convergence consulting the spectral bound when diagnostics
       are on.  The reported keys are exactly
       ['amplification', 'converged', 'error_estimate',
@@ -541,8 +564,11 @@ anomalies:
       taken in the group's norm at the returned state, so the dead band's
       excluded fields are outside what it bounds and the interface norm's
       bound is over the interface fields only; its float floor is a model
-      of the map's rounding (PRECISION_FLOOR_ULPS), which a node that
-      cancels catastrophically inside its own update can exceed; and on a
+      of the map's rounding (PRECISION_FLOOR_ULPS, per declared
+      evaluation), which a node that cancels catastrophically inside its
+      own update can exceed, and so can a node that loops inside it
+      without declaring so where the residual is above the floor (at the
+      floor its group is not reported usable); and on a
       stalled float32 iterate it is the floor times the amplification --
       what float32 can resolve about a group that slow -- while converged
       reads True (see the description).  A group with more than eight independent
@@ -590,6 +616,11 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space"
       - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes"
+      - "tests/core/test_coupling_precision_floor.py::test_a_sub_stepped_node_is_floored_per_evaluation"
+      - "tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor"
+      - "tests/core/test_coupling_precision_floor.py::test_the_floor_covers_explicit_euler_per_declared_sub_step"
+      - "tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_spectrum_is_measured_at_the_top_of_the_range"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"

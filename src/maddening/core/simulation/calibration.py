@@ -180,7 +180,10 @@ def tune_coupling_params(
                 trajectory.append(state_metric(state))
                 diag = gm.coupling_diagnostics()
                 for group_key, group_diag in diag.items():
-                    total_iters += group_diag["iterations"]
+                    # The passes the step ran, over every waveform sweep;
+                    # ``iterations`` is the largest sweep's (the cap
+                    # check) and the same number with one sweep.
+                    total_iters += group_diag["total_iterations"]
 
             # Compute max error
             max_error = max(

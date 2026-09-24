@@ -14,6 +14,8 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.simulation.profiler import (
     ProfileReport,
     TraceSummary,
+    _meta_converged,
+    _meta_group_keys,
     _one_iteration_variant,
     profile_graph,
     profile_report_to_perfetto,
@@ -23,7 +25,7 @@ from maddening.nodes.spring import SpringDamperNode
 CAP = 25
 
 
-def _coupled(cap=CAP, tol=1e-8, dt=0.01):
+def _coupled(cap=CAP, tol=1e-8, dt=0.01, **group_kw):
     """Two springs, each the other's anchor.
 
     ``dt`` sets how hard the interface problem is: at the default the
@@ -40,7 +42,7 @@ def _coupled(cap=CAP, tol=1e-8, dt=0.01):
                                  initial_position=3.0))
     gm.add_edge("a", "b", "position", "anchor_position")
     gm.add_edge("b", "a", "position", "anchor_position")
-    gm.add_coupling_group(["a", "b"], max_iterations=cap, tolerance=tol)
+    gm.add_coupling_group(["a", "b"], max_iterations=cap, tolerance=tol, **group_kw)
     gm.compile()
     return gm
 
@@ -298,3 +300,113 @@ def test_profile_multirate_graph_with_coupling():
     assert "a+b" in rep.coupling_iter_stats
     assert "step_count" in gm._state["_meta"]
     gm.step()   # still steps after profiling
+
+
+# ---------------------------------------------------------------------------
+# The iteration statistics read the report's own rules
+# ---------------------------------------------------------------------------
+
+
+def _subcycled_pair(cap):
+    """Springs at timesteps 0.001 and 0.01, sub-cycled: 2-3 passes a step."""
+    gm = GraphManager()
+    for name, dt, x0 in (("fast", 0.001, 0.0), ("slow", 0.01, 3.0)):
+        gm.add_node(SpringDamperNode(name=name, timestep=dt, stiffness=50.0,
+                                     damping=1.0, mass=1.0, rest_length=1.0,
+                                     initial_position=x0))
+    gm.add_edge("fast", "slow", "position", "anchor_position")
+    gm.add_edge("slow", "fast", "position", "anchor_position")
+    gm.add_coupling_group(["fast", "slow"], max_iterations=cap, tolerance=1e-8,
+                          subcycling=True)
+    gm.compile()
+    return gm
+
+
+def test_a_group_one_pass_short_of_its_cap_is_not_at_the_cap():
+    """``iterations`` counts the first pass and equals the cap exactly at the cap.
+
+    The statistic used ``iterations >= cap - 1``, from when the default
+    solver reported one fewer at the cap.  At ``max_iterations=4`` this
+    pair never uses more than three passes, and it was reported at the cap
+    on 60% of steps, with a recommendation to raise it.
+    """
+    rep = profile_graph(_subcycled_pair(cap=4), n_steps=5, n_warmup=1,
+                        measure_coupling=False, counts=False)
+    st = rep.coupling_iter_stats["fast+slow"]
+    assert st["max"] < 4, st
+    assert st["at_cap_fraction"] == 0.0, st
+    assert not any("hit max_iterations" in r for r in rep.recommendations), rep.recommendations
+
+
+def _report_converged_fraction(gm, n_warmup, n_stat):
+    """The share of the profiler's statistics window the report calls converged."""
+    gm.reset_state()
+    for _ in range(n_warmup):
+        gm.step()
+    flags = []
+    for _ in range(n_stat):
+        gm.step()
+        flags.append(gm.coupling_diagnostics()["a+b"]["converged"])
+    return float(np.mean(flags))
+
+
+def test_an_over_relaxed_groups_converged_fraction_is_the_reports():
+    """``acceleration="fixed"``, ``relaxation=1.5``: the report's criterion, not ``residual * amp``.
+
+    The solver and ``coupling_diagnostics()`` test ``residual * omega *
+    amplification``; the profiler left ``omega`` out, so over-relaxed it
+    counted as converged nine of these twelve steps that the report calls
+    unconverged, and read 1.0.
+    """
+    gm = _coupled(cap=3, tol=1e-3, acceleration="fixed", relaxation=1.5)
+    rep = profile_graph(gm, n_steps=5, n_warmup=1, n_stat_steps=12,
+                        measure_coupling=False, counts=False)
+    want = _report_converged_fraction(gm, n_warmup=1, n_stat=12)
+    assert want < 0.5, want            # the case really does separate the two rules
+    assert rep.coupling_iter_stats["a+b"]["converged_fraction"] == want
+
+
+def _relaxed(norm, relaxation, cap, tol):
+    """The ``_coupled`` pair under ``acceleration="fixed"``, in either norm."""
+    kw = dict(acceleration="fixed", relaxation=relaxation, convergence_norm=norm)
+    kw.update({"tolerance": tol} if norm == "l2" else {"rtol": tol})
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("a", 0.01, stiffness=30.0, damping=2.0,
+                                 initial_position=0.0))
+    gm.add_node(SpringDamperNode("b", 0.01, stiffness=30.0, damping=2.0,
+                                 initial_position=3.0))
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.add_edge("b", "a", "position", "anchor_position")
+    gm.add_coupling_group(["a", "b"], max_iterations=cap, **kw)
+    gm.compile()
+    return gm
+
+
+#: Each disagreed with the report on 9 of these 12 steps under the old
+#: ``residual * amplification`` rule, and each has both verdicts in it.
+@pytest.mark.parametrize("norm,relaxation,cap,tol", [
+    ("l2", 1.5, 3, 1e-3),
+    ("l2", 0.5, 5, 1e-4),
+    ("mixed", 1.3, 5, 1e-5),
+], ids=["over-relaxed", "under-relaxed", "mixed-norm"])
+def test_the_profiler_reads_converged_as_the_report_does_on_every_step(
+        norm, relaxation, cap, tol):
+    """Step by step, from the same ``_meta`` slots, the same verdict.
+
+    ``coupling_diagnostics()``, the profiler and ``sysid``'s convergence
+    mask each re-derive ``converged`` from a step's ``_meta``; all three
+    take the threshold and step scale from ``convergence_criterion``.
+    """
+    from maddening.sysid import _group_thresholds
+
+    gm = _relaxed(norm, relaxation, cap, tol)
+    (key, _ik, res_key, amp_key, thr, scale, _cap), = _meta_group_keys(gm)
+    assert scale == relaxation
+    assert _group_thresholds(gm) == [(res_key, amp_key, thr, scale)]
+    verdicts = []
+    for _ in range(12):
+        gm.step()
+        report = gm.coupling_diagnostics()[key]["converged"]
+        verdicts.append(report)
+        assert _meta_converged(gm._state["_meta"], res_key, amp_key, thr, scale) is report
+    assert len(set(verdicts)) == 2, verdicts   # both verdicts occur, so both are compared

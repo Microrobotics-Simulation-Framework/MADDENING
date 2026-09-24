@@ -736,6 +736,18 @@ def test_a_group_whose_key_spells_another_groups_slot_is_refused():
         gm.add_coupling_group(["a", "b+c_spectral"])
 
 
+def test_a_group_whose_key_spells_another_groups_waveform_sum_slot_is_refused():
+    """``a+b+c`` plus ``_total_iterations`` is ``a+b+c_total``'s ``_iterations``.
+
+    The sum of a step's waveform sweeps lives in its own ``_meta`` slot,
+    so its suffix is checked like every other slot's.
+    """
+    gm = _springs("a+b", "c", "a", "b+c_total")
+    gm.add_coupling_group(["a+b", "c"])
+    with pytest.raises(ValueError, match="coupling_a\\+b\\+c_total_iterations"):
+        gm.add_coupling_group(["a", "b+c_total"])
+
+
 def test_auto_couple_refuses_colliding_cycles_and_keeps_the_old_groups():
     gm = _springs("a+b", "c", "a", "b+c", "p", "q")
     _cycle(gm, "p", "q")

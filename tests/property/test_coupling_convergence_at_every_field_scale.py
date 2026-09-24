@@ -35,6 +35,8 @@ field 50% away.
 
 from __future__ import annotations
 
+import functools
+
 import jax.numpy as jnp
 import pytest
 from hypothesis import given, settings
@@ -118,6 +120,39 @@ def _graph(*, big, small, gain, norm, solver, acceleration, threshold):
     return gm
 
 
+@functools.lru_cache(maxsize=None)
+def _compiled_graph(*, norm, solver, acceleration, threshold):
+    """One compiled :func:`_graph` per static configuration.
+
+    ``gain`` and the two biases are node parameters, so they are
+    arguments of the compiled step rather than part of it; only the
+    group's knobs decide the program.  See :func:`_solve`.
+    """
+    return _graph(big=1.0, small=1.0, gain=0.5, norm=norm, solver=solver,
+                  acceleration=acceleration, threshold=threshold)
+
+
+def _solve(*, big, small, gain, **config):
+    """One step of the cached graph for *config*, from its initial state.
+
+    The same step a graph built with these constants would take:
+    ``_TwoScale`` reads ``gain`` and the biases from ``params`` either
+    way, and ``reset_state`` restores the state and every coupling seed
+    ``compile()`` set (``test_reset_state_restores_the_meta_compile_seeds``
+    in ``tests/core/test_coupling_error_bound.py``).  Building a graph per
+    example instead spent 18-22 s on the CI runner compiling copies of
+    three programs.
+    """
+    gm = _compiled_graph(**config)
+    f32 = jnp.float32
+    gm.reset_state()
+    gm.step(params={"nodes": {
+        "a": {"gain": f32(gain), "bias_big": f32(big), "bias_small": f32(small)},
+        "b": {"gain": f32(gain), "bias_big": f32(0.0), "bias_small": f32(0.0)},
+    }})
+    return gm
+
+
 #: Fifteen decades, which is where an absolute dead band becomes
 #: visible: the shipped default was 1e-8, in the middle of this range.
 _MAGNITUDES = st.sampled_from(
@@ -125,6 +160,13 @@ _MAGNITUDES = st.sampled_from(
 )
 
 
+# Slow-marked (still run by slow-tests.yml): the draw spans 36 static group
+# configurations (norm x solver x acceleration x threshold), so nearly every
+# example compiles its own step -- 19-21 s on the CI runner.  The mechanism
+# is held on every push by the property below, which draws values only, and
+# by ``test_a_small_field_far_from_its_fixed_point_is_not_reported_converged``
+# in ``tests/core/test_coupling_error_bound.py``.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
     big=_MAGNITUDES,
@@ -205,9 +247,8 @@ def test_a_small_field_is_not_dropped_merely_for_being_small(
         f"field this property is about"
     )
     threshold = 1e-5
-    gm = _graph(big=1.0, small=small, gain=gain, norm=norm, solver="ift",
+    gm = _solve(big=1.0, small=small, gain=gain, norm=norm, solver="ift",
                 acceleration="none", threshold=threshold)
-    gm.step()
     diag = gm.coupling_diagnostics()["a+b"]
     got = float(gm.get_node_state("a")["small"])
     want = small / (1.0 - gain ** 2)

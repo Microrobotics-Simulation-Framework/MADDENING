@@ -207,7 +207,12 @@ def test_strict_convergence_silent_when_converged():
 
 @pytest.mark.parametrize("cfg", [
     dict(acceleration="none", iteration_mode="jacobi"),
-    dict(acceleration="none", diagnostics=True),
+    # Slow-marked: the diagnostics machinery compiled three times (step,
+    # gradient, JVP), 5-7 s on the CI runner.  Reverse mode through a
+    # diagnostics=True group is checked on every push by
+    # tests/property/test_coupling_adjoint_solve.py.
+    pytest.param(dict(acceleration="none", diagnostics=True),
+                 marks=pytest.mark.slow),
     dict(acceleration="fixed", relaxation=0.7),
     dict(acceleration="iqn-ils"),
     dict(acceleration="iqn-imvj", jacobian_reuse=3),
@@ -232,6 +237,10 @@ def test_forward_and_reverse_ad_through_previously_excluded_configs(cfg):
     assert float(g) != 0.0
 
 
+# Slow-marked (still run by slow-tests.yml): three rigid-body groups compiled
+# for three static caps, 8-10 s on the CI runner.  Early exit itself is
+# checked on every push by ``test_exits_early_and_reports_convergence``.
+@pytest.mark.slow
 def test_the_passes_run_do_not_scale_with_max_iterations():
     """Early exit: raising the cap on an easily converging group must not
     raise the work done (the fori path ran the cap out every step).

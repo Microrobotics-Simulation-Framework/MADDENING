@@ -45,6 +45,7 @@ covers ``"interface"`` by example.
 from __future__ import annotations
 
 import dataclasses
+import functools
 
 import jax.numpy as jnp
 import numpy as np
@@ -290,6 +291,11 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
     assume(checked)
 
 
+# Slow-marked (still run by slow-tests.yml): the recipe *is* the draw, so
+# every example builds and compiles a different graph -- 42-48 s on the CI
+# runner, and no fixed-shape rewrite applies.  The same algebra is pinned
+# on every push by example in ``tests/core/test_coupling_error_bound.py``.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(recipe=_RECIPES)
 def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
@@ -339,6 +345,11 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
             )
 
 
+# Slow-marked (still run by slow-tests.yml): two graphs built and compiled
+# per drawn recipe, 63-73 s on the CI runner.  Solver parity is pinned on
+# every push by ``tests/core/test_coupling_solver_equivalence.py``, including
+# this property's own shrunk counterexample.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(recipe=_RECIPES, solver=st.sampled_from(["ift", "fori"]))
 def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
@@ -447,13 +458,18 @@ from maddening.core.node import (  # noqa: E402
 
 
 class _Affine(SimulationNode):
-    """``x <- gain * u + bias`` on ``n`` independent modes."""
+    """``x <- gain * u + bias`` on ``n`` independent modes.
+
+    ``gain`` and ``bias`` are node parameters, so they reach the compiled
+    step as traced arguments: one compiled graph serves every drawn
+    spectrum of a given size (see :func:`_compiled_affine_cycle`).
+    """
 
     def __init__(self, name, gain, bias):
-        super().__init__(name=name, timestep=1.0)
-        self._gain = jnp.asarray(gain, jnp.float32)
-        self._bias = jnp.asarray(bias, jnp.float32)
-        self._shape = jnp.shape(self._gain)
+        gain = jnp.asarray(gain, jnp.float32)
+        super().__init__(name=name, timestep=1.0, gain=gain,
+                         bias=jnp.asarray(bias, jnp.float32))
+        self._shape = jnp.shape(gain)
 
     def initial_state(self):
         return {"x": jnp.zeros(self._shape, jnp.float32)}
@@ -466,7 +482,8 @@ class _Affine(SimulationNode):
                                        description="u")}
 
     def update(self, state, boundary_inputs, dt, *, params=None):
-        return {"x": self._gain * boundary_inputs["u"] + self._bias}
+        p = self.params if params is None else params
+        return {"x": p["gain"] * boundary_inputs["u"] + p["bias"]}
 
     def update_evaluations(self):
         # One evaluation, declared: the tests below assert the bound and
@@ -491,6 +508,39 @@ def _affine_cycle(gain, bias, **group_kw):
     gm.add_coupling_group(["a", "b"], diagnostics=True, **group_kw)
     gm.compile()
     return gm
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled_affine_cycle(n_modes, **group_kw):
+    """One compiled ``_affine_cycle`` per mode count and group config.
+
+    The two-mode properties below draw ``gain`` and ``bias`` and nothing
+    that is static in the step, so building and compiling a graph per
+    example spent almost all of each example compiling the same program:
+    20 of them took 30 s on the CI runner.  The draws are passed to this
+    one graph as its nodes' parameters instead (:func:`_step_affine`),
+    which is the same compiled program a fresh graph would build --
+    ``_Affine`` reads both from ``params`` either way.
+    """
+    ones = np.ones(n_modes, np.float32)
+    return _affine_cycle(ones * 0.5, ones, **group_kw)
+
+
+def _step_affine(gm, gain, bias):
+    """One step of *gm* from its initial state, with ``a``'s constants set.
+
+    ``reset_state`` puts the state *and* every coupling seed back to what
+    ``compile()`` left (``test_reset_state_restores_the_meta_compile_seeds``
+    in ``tests/core/test_coupling_error_bound.py`` pins that), so the step
+    is the one a freshly built graph would take.  Returns the group's
+    diagnostics.
+    """
+    gm.reset_state()
+    gm.step(params={"nodes": {"a": {
+        "gain": jnp.asarray(gain, jnp.float32),
+        "bias": jnp.asarray(bias, jnp.float32),
+    }}})
+    return gm.coupling_diagnostics()["a+b"]
 
 
 def _exact_distance(gm, gain, bias):
@@ -521,7 +571,17 @@ def _exact_distance(gm, gain, bias):
 #: 1e-4 the residual *ratio* the estimate rests on is reading round-off.
 _ANALYTIC_TOLERANCE = 1e-3
 
+#: The group the two-mode properties solve: one config, so one compile.
+_TWO_MODE_GROUP = dict(max_iterations=60, tolerance=_ANALYTIC_TOLERANCE)
 
+
+# Slow-marked (still run by slow-tests.yml): ``relaxation`` is a static
+# knob of the compiled step, so a drawn ``omega`` is a compile per example
+# (26 s on the CI runner) and no shared graph can take it as an argument.
+# ``test_the_estimate_is_invariant_to_the_relaxation_factor`` in
+# ``tests/core/test_coupling_error_bound.py`` pins the same statement at
+# fixed factors on every push.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
     gain=st.floats(min_value=0.4, max_value=0.95),
@@ -608,10 +668,8 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
     """
     gain = (rho_slow, rho_fast)
     bias = (c_slow, 1.0)
-    gm = _affine_cycle(gain, bias, max_iterations=60,
-                       tolerance=_ANALYTIC_TOLERANCE)
-    gm.step()
-    d = gm.coupling_diagnostics()["a+b"]
+    gm = _compiled_affine_cycle(2, **_TWO_MODE_GROUP)
+    d = _step_affine(gm, gain, bias)
     assume(d["converged"] and d["ratio_usable"])
     distance = _exact_distance(gm, gain, bias)
     assume(distance > 0.0)
@@ -653,10 +711,8 @@ def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
     """
     gain = (rho_slow, rho_fast)
     bias = (c_slow, 1.0)
-    gm = _affine_cycle(gain, bias, max_iterations=60,
-                       tolerance=_ANALYTIC_TOLERANCE)
-    gm.step()
-    d = gm.coupling_diagnostics()["a+b"]
+    gm = _compiled_affine_cycle(2, **_TWO_MODE_GROUP)
+    d = _step_affine(gm, gain, bias)
     distance = _exact_distance(gm, gain, bias)
     note(f"rho={gain} c={bias} distance={distance} {d}")
     assert d["spectral_usable"] is True, d
@@ -761,6 +817,13 @@ def _normal_contractions(draw):
     return A, c, acceleration, relaxation
 
 
+# Slow-marked (still run by slow-tests.yml): the draw varies the mode count
+# (a shape) and, under ``"fixed"``, the static relaxation factor, so most
+# examples are a compile of their own (31-37 s on the CI runner).  The
+# spectral bound is held on every push by the two-mode property above, which
+# compiles once, and by the example tests in
+# ``tests/core/test_coupling_error_bound.py``, relaxation included.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(case=_normal_contractions())
 def test_the_spectral_bound_holds_on_random_normal_contractions(case):

@@ -9,6 +9,7 @@ through the *jitted* step, and all agreeing with the unrolled fori path.
 
 from __future__ import annotations
 
+import functools
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -45,6 +46,22 @@ def _make_gm(solver: str, acceleration: str = "none", **group_kw) -> GraphManage
     return gm
 
 
+def _positions_fn_for(solver: str, acceleration: str = "none"):
+    """``_positions_fn(_make_gm(solver, acceleration))``, once per module.
+
+    The function is pure -- it closes over the compiled step and a copy
+    of the state the warm-up step left -- so the tests that differentiate
+    the same configuration share it instead of each compiling its own
+    warm-up step.
+    """
+    return _cached_positions_fn(solver, acceleration)
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_positions_fn(solver: str, acceleration: str):
+    return _positions_fn(_make_gm(solver, acceleration))
+
+
 def _positions_fn(gm: GraphManager):
     """``(pos_a, pos_b) -> stacked positions after one jitted step``."""
     _ = gm.step()
@@ -67,16 +84,16 @@ V = jnp.array([1.0, -0.5], dtype=jnp.float32)
 
 @pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-imvj"])
 def test_jvp_through_jitted_step_matches_fori(acceleration):
-    f_ift = _positions_fn(_make_gm("ift", acceleration))
-    f_fori = _positions_fn(_make_gm("fori", acceleration))
+    f_ift = _positions_fn_for("ift", acceleration)
+    f_fori = _positions_fn_for("fori", acceleration)
     _, t_ift = jax.jvp(f_ift, (P0,), (V,))
     _, t_fori = jax.jvp(f_fori, (P0,), (V,))
     np.testing.assert_allclose(t_ift, t_fori, rtol=1e-3, atol=1e-4)
 
 
 def test_jacfwd_and_jacrev_agree_and_match_fori():
-    f_ift = _positions_fn(_make_gm("ift"))
-    f_fori = _positions_fn(_make_gm("fori"))
+    f_ift = _positions_fn_for("ift")
+    f_fori = _positions_fn_for("fori")
     J_fwd = jax.jacfwd(f_ift)(P0)
     J_rev = jax.jacrev(f_ift)(P0)
     J_ref = jax.jacfwd(f_fori)(P0)
@@ -86,7 +103,7 @@ def test_jacfwd_and_jacrev_agree_and_match_fori():
 
 def test_forward_reverse_adjoint_identity():
     """<w, J v> == <J^T w, v> through the same custom_jvp definition."""
-    f = _positions_fn(_make_gm("ift"))
+    f = _positions_fn_for("ift")
     w = jnp.array([0.3, -1.2], dtype=jnp.float32)
     _, Jv = jax.jvp(f, (P0,), (V,))
     _, vjp_fn = jax.vjp(f, P0)
@@ -94,9 +111,14 @@ def test_forward_reverse_adjoint_identity():
     np.testing.assert_allclose(jnp.dot(w, Jv), jnp.dot(JTw, V), rtol=1e-4, atol=1e-5)
 
 
+# Slow-marked (still run by slow-tests.yml): a second-order transform of the
+# IFT step, compiled for both solvers -- 8-10 s on the CI runner.  First-order
+# forward and reverse mode through the same step are checked on every push
+# by the two tests above.
+@pytest.mark.slow
 def test_hessian_through_ift_step():
-    f_ift = _positions_fn(_make_gm("ift"))
-    f_fori = _positions_fn(_make_gm("fori"))
+    f_ift = _positions_fn_for("ift")
+    f_fori = _positions_fn_for("fori")
     loss = lambda g: (lambda p: jnp.sum(g(p) ** 2))
     H_ift = jax.hessian(loss(f_ift))(P0)
     H_ref = jax.hessian(loss(f_fori))(P0)
@@ -107,7 +129,7 @@ def test_hessian_through_ift_step():
 @pytest.mark.parametrize("linear_solver", ["gmres", "dense"])
 def test_jvp_linear_solver_backends(linear_solver):
     f = _positions_fn(_make_gm("ift", linear_solver=linear_solver))
-    f_ref = _positions_fn(_make_gm("fori"))
+    f_ref = _positions_fn_for("fori")
     _, t = jax.jvp(f, (P0,), (V,))
     _, t_ref = jax.jvp(f_ref, (P0,), (V,))
     np.testing.assert_allclose(t, t_ref, rtol=1e-3, atol=1e-4)
@@ -117,18 +139,18 @@ class TestFMIDirectionalDerivative:
     """The FMI surface must work in both directions through a coupled step."""
 
     def test_forward_kind_through_ift_step(self):
-        f = _positions_fn(_make_gm("ift"))
+        f = _positions_fn_for("ift")
         out = get_directional_derivative(
             f, kind=DirectionalDerivativeKind.FORWARD, x=P0, v=V,
         )
-        expected = jax.jacfwd(_positions_fn(_make_gm("fori")))(P0) @ V
+        expected = jax.jacfwd(_positions_fn_for("fori"))(P0) @ V
         np.testing.assert_allclose(out, expected, rtol=1e-3, atol=1e-4)
 
     def test_reverse_kind_through_ift_step(self):
-        f = _positions_fn(_make_gm("ift"))
+        f = _positions_fn_for("ift")
         w = jnp.array([0.3, -1.2], dtype=jnp.float32)
         out = get_directional_derivative(
             f, kind=DirectionalDerivativeKind.REVERSE, x=P0, v=w,
         )
-        expected = jax.jacfwd(_positions_fn(_make_gm("fori")))(P0).T @ w
+        expected = jax.jacfwd(_positions_fn_for("fori"))(P0).T @ w
         np.testing.assert_allclose(out, expected, rtol=1e-3, atol=1e-4)

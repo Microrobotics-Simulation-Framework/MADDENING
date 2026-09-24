@@ -224,6 +224,14 @@ _BAND = 2.5
 _SWEEP = (3, 4, 6, 8)
 
 
+# Slow-marked (still run by slow-tests.yml), like the four tests after it:
+# each point of the sweep is a forward graph and a gradient graph compiled
+# for its own static cap, plus two tight reference gradients -- 20-23 s on
+# the CI runner.  The bound's defining claim, "it holds where it is usable",
+# stays on every push in
+# ``test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes``
+# and the NaN-where-not-computed tests.
+@pytest.mark.slow
 @pytest.mark.parametrize("kind", ["log", "square"])
 def test_the_gradient_bound_holds_across_an_early_exit_sweep(kind):
     """``|g_k - g*| <= bound * |g_k|`` at every cap, and the ratio is recorded.
@@ -311,6 +319,9 @@ def _switched_off_graph(**group_kw):
     return gm
 
 
+# Slow-marked: a tight reference gradient and two capped forward/gradient
+# pairs, 11-14 s on the CI runner (see the sweep above).
+@pytest.mark.slow
 def test_a_parameter_that_sits_at_zero_is_still_probed():
     """``h = 0`` still gets a probe, and the bound covers its gradient.
 
@@ -431,6 +442,9 @@ def _two_mode_reference(q):
     return gi
 
 
+# Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
+# on the CI runner (see the sweep above).
+@pytest.mark.slow
 def test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far_off():
     """The docstring caveat, as a test: a tiny bound is not a healthy solve.
 
@@ -472,6 +486,9 @@ def test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far
         f"point's {g_star}")
 
 
+# Slow-marked: two capped forward/gradient pairs, 8-9 s on the CI runner
+# (see the sweep above).
+@pytest.mark.slow
 def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
     """Affine in the state is not enough: ``g`` multiplies it.
 
@@ -509,6 +526,9 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
 _HIDDEN_Q = -0.02
 
 
+# Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
+# on the CI runner (see the sweep above).
+@pytest.mark.slow
 def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
     """On a hidden slow mode the distance is what decides the bound.
 

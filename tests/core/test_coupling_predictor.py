@@ -63,30 +63,41 @@ class TestPredictorCouplingGroup:
         assert group.predictor == "quadratic"
 
 
+#: ``{predictor: (graph, iteration counts so far)}``, see ``_run_with_predictor``.
+_PREDICTOR_RUNS: dict = {}
+
+
 class TestPredictorReducesIterations:
     """Test that predictors reduce coupling iterations."""
 
     def _run_with_predictor(self, predictor, n_steps=50):
-        """Run bidirectional springs with given predictor and return
-        iteration counts."""
-        gm = _make_bidirectional_springs(dt=0.001, k=100.0, c=2.0)
-        gm.add_coupling_group(
-            ["spring_a", "spring_b"],
-            max_iterations=30,
-            tolerance=1e-8,
-            diagnostics=True,
-            predictor=predictor,
-        )
-        gm.compile()
+        """Iteration counts of the first *n_steps* steps under *predictor*.
 
-        iter_counts = []
-        for _ in range(n_steps):
+        Memoised per predictor at module level, graph included: the counts
+        are a pure function of the step sequence, so the first twenty of a
+        forty-step run are a twenty-step run, and the graph is stepped on
+        when a longer run is asked for.  The two tests below share the
+        ``"none"`` graph instead of each compiling one.
+        """
+        if predictor not in _PREDICTOR_RUNS:
+            gm = _make_bidirectional_springs(dt=0.001, k=100.0, c=2.0)
+            gm.add_coupling_group(
+                ["spring_a", "spring_b"],
+                max_iterations=30,
+                tolerance=1e-8,
+                diagnostics=True,
+                predictor=predictor,
+            )
+            gm.compile()
+            _PREDICTOR_RUNS[predictor] = (gm, [])
+        gm, iter_counts = _PREDICTOR_RUNS[predictor]
+        while len(iter_counts) < n_steps:
             gm.step()
             diag = gm.coupling_diagnostics()
             key = "spring_a+spring_b"
             iter_counts.append(diag[key]["iterations"])
 
-        return iter_counts
+        return iter_counts[:n_steps]
 
     def test_predictor_none_works(self):
         """predictor='none' should produce valid iteration counts."""

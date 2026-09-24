@@ -317,7 +317,10 @@ class TestSubcyclingJAX:
             subcycling=True,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         # Use actual initial state (includes _meta for multirate)

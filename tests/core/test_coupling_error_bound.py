@@ -502,20 +502,30 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
         gm = gm if gm is not None else _contracting_graph(tolerance=1e-3)
         return jnp.sum(gm.run_scan(1, params=p)["a"]["x"])
 
-    base = _contracting_graph(tolerance=1e-3).params
-    analytic = float(jax.grad(loss)(base)["nodes"]["a"]["bias"])
+    # The traced evaluation gets a graph of its own (``run_scan`` writes
+    # its result back onto the manager, and a traced one would leave
+    # tracers there); the two untraced ones share one, reset to its
+    # initial state before each, so they share one compiled scan.
+    fd_graph = _contracting_graph(tolerance=1e-3)
+    base = fd_graph.params
+    analytic = float(jax.jit(jax.grad(loss))(base)["nodes"]["a"]["bias"])
 
     def shifted(delta):
         p = {"nodes": {n: dict(v) for n, v in base["nodes"].items()}}
         p["nodes"]["a"]["bias"] = base["nodes"]["a"]["bias"] + delta
-        return float(loss(p))
+        fd_graph.reset_state()
+        return float(loss(p, fd_graph))
 
     h = 1e-2
     fd = (shifted(h) - shifted(-h)) / (2 * h)
 
-    gm = _contracting_graph(tolerance=1e-3)
-    gm.step()
-    d = gm.coupling_diagnostics()["a+b"]
+    # The report for the unshifted one-step solve, read off the same
+    # compiled scan: ``run_scan`` leaves the diagnostics ``step`` would
+    # (the two reports agree key for key on this graph), and a separate
+    # ``step`` program cost a third compile for the same numbers.
+    fd_graph.reset_state()
+    fd_graph.run_scan(1, params=base)
+    d = fd_graph.coupling_diagnostics()["a+b"]
     assert d["ratio_usable"] is True, "fixture premise: a measured contraction"
     assert d["gradient_error_estimate"] == pytest.approx(d["error_estimate"])
     assert abs(analytic - fd) <= max(d["gradient_error_estimate"], 1e-5), (
@@ -1200,6 +1210,40 @@ print(",".join(group.nodes), seed, "scan-ok")
 """
 
 
+#: ``PYTHONHASHSEED`` values tried, in order.  On CPython 3.12 the first two
+#: already iterate ``{"a", "b"}`` in opposite orders (``0``: ``a,b``;
+#: ``2``: ``b,a``); the rest are there for an interpreter whose string hash
+#: deals them differently, and are only started if the first pair leaves an
+#: order unexercised.
+_HASH_SEEDS = ("0", "2", "1", "3", "4", "5")
+
+
+def _probe_under_hash_seeds(seeds):
+    """Run the probe once per seed, concurrently; ``{seed: CompletedProcess}``."""
+    import os
+    import subprocess
+    import sys
+
+    procs = {}
+    for hash_seed in seeds:
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed, JAX_PLATFORMS="cpu")
+        procs[hash_seed] = subprocess.Popen(
+            [sys.executable, "-c", _MIXED_DTYPE_SEED_PROBE],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    runs = {}
+    for hash_seed, proc in procs.items():
+        try:
+            stdout, stderr = proc.communicate(timeout=300)
+        finally:
+            if proc.poll() is None:     # timed out: do not leak the child
+                proc.kill()
+                proc.communicate()
+        runs[hash_seed] = subprocess.CompletedProcess(
+            proc.args, proc.returncode, stdout, stderr)
+    return runs
+
+
 def test_the_meta_seed_dtype_does_not_depend_on_the_string_hash():
     """A float16 field beside a float32 one: seeded float32 in every interpreter.
 
@@ -1210,24 +1254,25 @@ def test_the_meta_seed_dtype_does_not_depend_on_the_string_hash():
     ``TypeError`` under some ``PYTHONHASHSEED`` values and not others.
     Run in subprocesses, because the order is fixed per interpreter; the
     premise assert checks that both orders were actually exercised.
-    """
-    import os
-    import subprocess
-    import sys
 
+    The interpreters run two at a time, and only until both orders have
+    been seen: each is a JAX import and a compile, and six of them one
+    after another took 10-11 s on the CI runner for two distinct orders.
+    Every interpreter that is started is still checked in full.
+    """
     orders = set()
-    for hash_seed in ("0", "1", "2", "3", "4", "5"):
-        env = dict(os.environ, PYTHONHASHSEED=hash_seed, JAX_PLATFORMS="cpu")
-        run = subprocess.run(
-            [sys.executable, "-c", _MIXED_DTYPE_SEED_PROBE],
-            env=env, capture_output=True, text=True, timeout=300,
-        )
-        assert run.returncode == 0, (
-            f"PYTHONHASHSEED={hash_seed}: {run.stderr.strip().splitlines()[-1:]}"
-        )
-        order, seed, verdict = run.stdout.split()[-3:]
-        assert (seed, verdict) == ("float32", "scan-ok"), (hash_seed, run.stdout)
-        orders.add(order)
+    seeds = list(_HASH_SEEDS)
+    while seeds and orders != {"a,b", "b,a"}:
+        batch, seeds = seeds[:2], seeds[2:]
+        for hash_seed, run in _probe_under_hash_seeds(batch).items():
+            assert run.returncode == 0, (
+                f"PYTHONHASHSEED={hash_seed}: "
+                f"{run.stderr.strip().splitlines()[-1:]}"
+            )
+            order, seed, verdict = run.stdout.split()[-3:]
+            assert (seed, verdict) == ("float32", "scan-ok"), (
+                hash_seed, run.stdout)
+            orders.add(order)
     assert orders == {"a,b", "b,a"}, (
         f"fixture premise: both iteration orders exercised, got {orders}"
     )

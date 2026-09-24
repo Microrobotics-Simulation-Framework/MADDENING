@@ -469,7 +469,10 @@ class TestIQNIMVJ:
             jacobian_reuse=3,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
 
         def loss_fn(init_pos):
@@ -663,7 +666,10 @@ class TestWaveformRelaxation:
             waveform_iterations=2,
         )
         gm.compile()
-        step_fn = gm._build_step_fn()
+        # Jitted: stepped in a Python loop under jax.grad, the bare
+        # step was retraced and compiled primitive by primitive on
+        # every pass (over a hundred compiles for one gradient).
+        step_fn = jax.jit(gm._build_step_fn())
         ext = gm._default_external_inputs()
         init_state = dict(gm._state)
 
@@ -675,8 +681,11 @@ class TestWaveformRelaxation:
                 "slow": {"position": jnp.array(3.0),
                           "velocity": jnp.array(0.0)},
             }
-            for _ in range(3):
-                state = step_fn(state, ext)
+            # A traced loop, so the step is linearised once rather than
+            # once per pass: the multirate step's trace is the expensive
+            # part of this gradient.
+            state = jax.lax.fori_loop(
+                0, 3, lambda _i, s: step_fn(s, ext), state)
             return state["fast"]["position"]
 
         g = jax.grad(loss_fn)(jnp.array(0.0))

@@ -49,6 +49,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import functools
 import math
 from types import SimpleNamespace
 
@@ -172,27 +173,47 @@ def _tau(solver, **kw):
             gm.coupling_diagnostics()["flow+struct"])
 
 
+@functools.lru_cache(maxsize=None)
+def _tau_default(solver):
+    """``_tau(solver)`` on the default graph, once per module.
+
+    Four tests below read the same two one-step solves; each rebuilt and
+    recompiled both.  The result is a pure function of the solver, so
+    it is computed once and shared.
+    """
+    return _tau(solver)
+
+
+@functools.lru_cache(maxsize=None)
 def _grad_and_fd(solver, *, h=1e-2, **kw):
     """``(analytic d tau / d gain, central difference of the same)``.
 
-    Each evaluation builds its own ``GraphManager``: ``run_scan`` writes
-    the new state back onto the manager, so reusing one across a traced
-    and an untraced call leaks a tracer out of the trace.  ``h`` is
+    The traced evaluation builds its own ``GraphManager``: ``run_scan``
+    writes the new state back onto the manager, so reusing one across a
+    traced and an untraced call leaks a tracer out of the trace.  The two
+    untraced evaluations share one, reset to its initial state before
+    each (``reset_state`` restores the coupling seeds as well), so the
+    difference is taken with one compiled scan rather than two.  ``h`` is
     large because the map is affine in ``gain`` -- a central difference
     of an affine function is exact for any step, and a large one keeps
     the subtraction well away from float32 round-off.
+
+    Cached per configuration: it is a pure function of its arguments,
+    and two tests ask for the default one.
     """
     def loss(p, gm=None):
         gm = gm if gm is not None else _graph(solver, **kw)
         return jnp.sum(gm.run_scan(1, params=p)["flow"]["tau"])
 
-    base = _graph(solver, **kw).params
-    analytic = float(jax.grad(loss)(base)["nodes"]["flow"]["gain"])
+    fd_graph = _graph(solver, **kw)
+    base = fd_graph.params
+    analytic = float(jax.jit(jax.grad(loss))(base)["nodes"]["flow"]["gain"])
 
     def shifted(delta):
         p = {"nodes": {n: dict(v) for n, v in base["nodes"].items()}}
         p["nodes"]["flow"]["gain"] = base["nodes"]["flow"]["gain"] + delta
-        return float(loss(p))
+        fd_graph.reset_state()
+        return float(loss(p, fd_graph))
 
     return analytic, (shifted(h) - shifted(-h)) / (2 * h)
 
@@ -210,8 +231,8 @@ def test_the_two_solvers_return_the_same_state_on_a_converged_exit():
     from the deprecated ``fori`` to the ``ift`` default cannot move a
     digit.
     """
-    fori, _ = _tau("fori")
-    ift, _ = _tau("ift")
+    fori, _ = _tau_default("fori")
+    ift, _ = _tau_default("ift")
     assert ift == pytest.approx(fori, rel=1e-6)
 
 
@@ -226,7 +247,7 @@ def test_the_state_returned_is_the_one_measured_not_its_successor():
     What the caller gets is ``tau``, and the residual reported alongside
     it is a measurement of ``tau`` itself.
     """
-    ift, diag = _tau("ift")
+    ift, diag = _tau_default("ift")
     successor = 1.0 + _RHO * ift
     assert ift == pytest.approx(1.0, rel=1e-6), "the measured iterate"
     assert successor != pytest.approx(ift, rel=1e-4), (
@@ -251,8 +272,8 @@ def test_both_solvers_report_the_same_verdict_about_the_same_state():
     2.14% apart, which is what made the divergence silent.  The reports
     still agree; now the states they describe do too.
     """
-    fori, d_fori = _tau("fori")
-    ift, d_ift = _tau("ift")
+    fori, d_fori = _tau_default("fori")
+    ift, d_ift = _tau_default("ift")
     assert d_fori["converged"] is True and d_ift["converged"] is True
     assert d_fori["residual"] == pytest.approx(d_ift["residual"], rel=1e-6)
     assert abs(ift - fori) / abs(fori) == pytest.approx(0.0, abs=1e-6)
@@ -391,7 +412,7 @@ def test_the_ift_adjoint_disagrees_with_its_forward_by_about_the_residual():
     assert fori_g == pytest.approx(fori_fd, rel=1e-5), "fori is the control"
 
     ift_g, ift_fd = _grad_and_fd("ift")
-    _tau_value, diag = _tau("ift")
+    _tau_value, diag = _tau_default("ift")
     assert diag["converged"] is True
     assert abs(ift_g - ift_fd) <= 2.0 * diag["residual"], (
         f"analytic {ift_g} vs finite difference {ift_fd}: the adjoint may "
@@ -597,13 +618,36 @@ def _multirate_graph(solver, **overrides):
     return gm
 
 
+#: ``{(solver, knobs): (graph, [(diagnostics, state) after step 1, 2, ...])}``.
+_MULTIRATE_RUNS: dict = {}
+
+
 def _multirate_run(solver, steps=1, **overrides):
-    """``(diagnostics, state)`` for the group after ``steps`` steps."""
-    gm = _multirate_graph(solver, **overrides)
-    for _ in range(steps):
+    """``(diagnostics, state)`` for the group after ``steps`` steps.
+
+    Memoised per solver and effective configuration: the step sequence
+    from the initial state is deterministic, so the state after two
+    steps is the state after one, stepped once more, and the tests below
+    ask for the same configurations many times (the two tests of the
+    counterexample and two cells of the class sweep are one
+    configuration; every sweep cell is asked at one and at two steps).
+    Each distinct configuration used to be rebuilt and retraced per ask,
+    ~2.5 s of tracing per graph on the CI runner.  The graph is kept at
+    the last step it reached and advanced only when a later step is
+    asked for.
+    """
+    knobs = tuple(sorted({**_MULTIRATE_GROUP, **overrides}.items()))
+    key = (solver, knobs)
+    if key not in _MULTIRATE_RUNS:
+        _MULTIRATE_RUNS[key] = (_multirate_graph(solver, **overrides), [])
+    gm, history = _MULTIRATE_RUNS[key]
+    while len(history) < steps:
         gm.step()
-    return (gm.coupling_diagnostics()["node_1+rod"],
-            {n: dict(gm.get_node_state(n)) for n in _MULTIRATE_NODES})
+        history.append((
+            dict(gm.coupling_diagnostics()["node_1+rod"]),
+            {n: dict(gm.get_node_state(n)) for n in _MULTIRATE_NODES},
+        ))
+    return history[steps - 1]
 
 
 #: Floor on the scale a state difference is divided by.  ``rod`` starts at
@@ -693,10 +737,35 @@ def test_the_residual_at_the_fixed_point_is_reported_to_its_own_resolution():
     )
 
 
-@pytest.mark.parametrize("steps", [1, 2])
-@pytest.mark.parametrize("norm", ["mixed", "l2"])
-@pytest.mark.parametrize("waveform_iterations", [1, 2, 3])
-@pytest.mark.parametrize("max_iterations", [2, 3])
+def _multirate_cells():
+    """The sweep's cells, ids as ``max_iterations-waveform-norm-steps``.
+
+    Slow-marked except the cells in the counterexample's own
+    configuration: every other cell is a pair of graphs traced and
+    compiled for it alone, 4-10 s on the CI runner.  Those two run on
+    every push beside the two tests of the counterexample itself, whose
+    solves they share (``_multirate_run``); the rest of the class runs
+    in slow-tests.yml.
+    """
+    own = (_MULTIRATE_GROUP["max_iterations"],
+           _MULTIRATE_GROUP["waveform_iterations"],
+           _MULTIRATE_GROUP["convergence_norm"])
+    for max_iterations in (2, 3):
+        for waveform_iterations in (1, 2, 3):
+            for norm in ("mixed", "l2"):
+                for steps in (1, 2):
+                    marks = (() if (max_iterations, waveform_iterations, norm) == own
+                             else (pytest.mark.slow,))
+                    yield pytest.param(
+                        max_iterations, waveform_iterations, norm, steps,
+                        marks=marks,
+                        id=f"{max_iterations}-{waveform_iterations}-{norm}-{steps}",
+                    )
+
+
+@pytest.mark.parametrize(
+    "max_iterations,waveform_iterations,norm,steps", list(_multirate_cells()),
+)
 def test_the_multirate_solvers_agree_across_the_configuration_class(
     max_iterations, waveform_iterations, norm, steps,
 ):

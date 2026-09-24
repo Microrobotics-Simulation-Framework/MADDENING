@@ -51,6 +51,7 @@ from __future__ import annotations
 import dataclasses
 
 import numpy as np
+import pytest
 from hypothesis import assume, given, note, settings
 from hypothesis import strategies as st
 
@@ -246,6 +247,13 @@ _RECIPES = graph_recipes(
 )
 
 
+# Slow-marked (still run by slow-tests.yml): the recipe is the draw, so each
+# example builds and compiles two different graphs -- 62-74 s on the CI
+# runner, and nothing is shared between examples to compile once.  The same
+# invariant runs on every push over the registry fixtures, in
+# ``test_every_l2_configuration_reaches_the_same_fixed_point`` in
+# ``tests/core/test_coupling_fixture_invariants.py``.
+@pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
     recipe=_RECIPES,

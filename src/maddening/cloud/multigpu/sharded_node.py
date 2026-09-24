@@ -27,7 +27,11 @@ from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from maddening.cloud.multigpu.halo import _BOUNDARY_MODES, halo_exchange
+from maddening.cloud.multigpu.halo import (
+    _BOUNDARY_MODES,
+    _global_edge_halos,
+    halo_exchange,
+)
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
@@ -759,13 +763,12 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 n = out.shape[sa]
                 left = jax.lax.slice_in_dim(out, 0, h, axis=sa)
                 right = jax.lax.slice_in_dim(out, n - h, n, axis=sa)
-                if boundary == "periodic":
-                    left_halo, right_halo = right, left
-                elif boundary == "edge":
-                    left_halo, right_halo = left, right
-                else:  # zero
-                    left_halo = jnp.zeros_like(left)
-                    right_halo = jnp.zeros_like(right)
+                # An unsharded axis is the whole axis, so both its halos
+                # are global halos -- filled exactly as halo_exchange
+                # fills them on a sharded one (the same helper).
+                left_halo, right_halo = _global_edge_halos(
+                    left, right, spatial_axis=sa, halo=h, boundary=boundary,
+                )
                 out = jnp.concatenate([left_halo, out, right_halo], axis=sa)
             return out
 

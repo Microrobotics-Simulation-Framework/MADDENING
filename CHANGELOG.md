@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
+  fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
+  run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.
 - **Every anomaly's `affected_versions` is checked against the registry's own version** (PEP 440; convention in the
   registry header): ANO-016 is open-ended again, ANO-006 closes at 0.4.0, ANO-004 starts at 0.1.0, ANO-018/019 read `none`.
   A `verification:` `path::Class::method` must now name a method of that class; fix any loose node id in your own registry

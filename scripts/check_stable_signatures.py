@@ -31,9 +31,26 @@ and say in the commit message why the change is compatible, or which major
 release carries it.  ``--update`` is the only supported way to move the
 snapshot; hand-editing it is how a break sneaks through.
 
+**A removal needs more than ``--update``.**  A surface or member that leaves
+the ``STABLE`` set -- deleted, renamed, made private, or demoted to a lower
+level -- withdraws a promise callers already rely on, which the deprecation
+policy treats as a breaking change in its own right.  ``--update`` refuses to
+drop one from the snapshot unless ``--accept-removal`` is also given, and
+lists what it would drop either way, so the withdrawal is a decision somebody
+typed rather than a side effect of regenerating a file.  Additions and
+compatible widenings still need only ``--update``.
+
+**An empty ``STABLE`` set fails**, in both modes.  With every tag demoted and
+the snapshot regenerated, this script used to print ``OK: 0 STABLE
+surface(s), 0 member(s) unchanged`` and exit 0 -- a guard with nothing left
+to guard, reporting success (audit_040_phase3_wave_d, G9).  ``--update``
+will not write an empty snapshot either.
+
 Exit codes:
     0 -- every recorded signature still matches
-    1 -- at least one signature changed, was removed, or is unrecorded
+    1 -- at least one signature changed, was removed, or is unrecorded; the
+         tree or the snapshot has no STABLE surface at all; or ``--update``
+         would drop a surface without ``--accept-removal``
     2 -- the check could not be trusted (a module carrying a recorded
          surface could not be imported, or a default does not round-trip)
 """
@@ -468,7 +485,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="accept the current tree and rewrite the snapshot "
                          "(a STABLE signature change also needs a major "
                          "version bump and a CHANGELOG entry)")
+    ap.add_argument("--accept-removal", action="store_true",
+                    help="with --update: also drop surfaces and members that "
+                         "have left the STABLE set.  A removal is a breaking "
+                         "change under docs/developer_guide/"
+                         "deprecation_policy.md; record it under "
+                         "'### Removed' in CHANGELOG.md")
     args = ap.parse_args(argv)
+    if args.accept_removal and not args.update:
+        ap.error("--accept-removal only means something with --update")
 
     registry, skipped = load_registry()
     try:
@@ -477,29 +502,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    if args.update:
-        write_snapshot(current, args.snapshot)
-        print(f"Wrote {args.snapshot}: {_count_line(current)}")
-        return 0
-
-    if not args.snapshot.exists():
-        print(f"FAIL: no snapshot at {args.snapshot}.\n"
-              "Fix: python scripts/check_stable_signatures.py --update",
+    # The floor.  A tree with no STABLE surface has nothing for this guard to
+    # guard; "OK: 0 STABLE surface(s)" is an empty scope reporting success.
+    if not current["surfaces"]:
+        print("FAIL: the tree has no @stability(StabilityLevel.STABLE) "
+              "surface at all, so there is nothing to check.  Every STABLE "
+              "tag has been demoted or the stability report's module list "
+              "has lost them; either is a finding, not a pass.",
               file=sys.stderr)
         return 1
 
-    recorded = json.loads(args.snapshot.read_text())
-    if recorded.get("format") != SNAPSHOT_FORMAT:
-        print(f"FAIL: {args.snapshot} is format {recorded.get('format')!r}, "
-              f"this check speaks format {SNAPSHOT_FORMAT}.\n"
+    recorded: dict[str, Any] | None = None
+    if args.snapshot.exists():
+        recorded = json.loads(args.snapshot.read_text())
+        if recorded.get("format") != SNAPSHOT_FORMAT:
+            if not args.update:
+                print(f"FAIL: {args.snapshot} is format "
+                      f"{recorded.get('format')!r}, this check speaks format "
+                      f"{SNAPSHOT_FORMAT}.\n"
+                      "Fix: python scripts/check_stable_signatures.py --update",
+                      file=sys.stderr)
+                return 1
+            recorded = None                  # a format bump regenerates
+    elif not args.update:
+        print(f"FAIL: no snapshot at {args.snapshot}.\n"
               "Fix: python scripts/check_stable_signatures.py --update",
               file=sys.stderr)
         return 1
 
     # A module that failed to import for a missing optional dependency drops
     # its surfaces from the registry, which would read as a removal.  Only
-    # fail hard when such a module actually carries a recorded surface.
-    if skipped:
+    # fail hard when such a module actually carries a recorded surface --
+    # and in --update too, which would otherwise quietly write the partial
+    # tree over the full snapshot.
+    if skipped and recorded is not None:
         affected = sorted(
             name for name, record in recorded.get("surfaces", {}).items()
             if any(record.get("module", "") == m
@@ -514,6 +550,43 @@ def main(argv: list[str] | None = None) -> int:
                   f"optional extras and re-run:\n  " + "\n  ".join(affected),
                   file=sys.stderr)
             return 2
+
+    if args.update:
+        removed = []
+        if recorded is not None:
+            removed = sorted(set(_flatten(recorded)) - set(_flatten(current)))
+        if removed:
+            verb = "Dropping" if args.accept_removal else "REFUSED: would drop"
+            print(f"{verb} {len(removed)} surface(s)/member(s) that have left "
+                  f"the STABLE set:")
+            for name in removed:
+                print(f"  {name}")
+        if removed and not args.accept_removal:
+            print(
+                "\nRemoving a surface from the STABLE set -- deleting, "
+                "renaming, making private or demoting it -- is a breaking "
+                "change (docs/developer_guide/deprecation_policy.md), not a "
+                "snapshot refresh.  If it is intended and ships in a major "
+                "release after its deprecation period, re-run with\n"
+                "      python scripts/check_stable_signatures.py --update "
+                "--accept-removal\n"
+                "and record it under '### Removed' in CHANGELOG.md.",
+            )
+            return 1
+        write_snapshot(current, args.snapshot)
+        print(f"Wrote {args.snapshot}: {_count_line(current)}")
+        return 0
+
+    assert recorded is not None
+    if not recorded.get("surfaces"):
+        # The tree has surfaces (checked above), so compare() would report
+        # every one as an addition and fail anyway -- but say what is
+        # actually wrong: the baseline itself is empty.
+        print(f"FAIL: {args.snapshot} records no STABLE surface; an empty "
+              f"baseline guards nothing.\n"
+              "Fix: python scripts/check_stable_signatures.py --update",
+              file=sys.stderr)
+        return 1
 
     breaking, compatible, additions = compare(recorded, current)
 

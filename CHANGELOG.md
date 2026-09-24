@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`WaveletAdaptiveNode` refuses a `mass` its dtype cannot carry** (float32 `mass=1e-6` read J 2.8x off, silently) and its
+  active set no longer depends on rounding: eager, jit and graph agree, as do a float and its array spelling. Periodic
+  source periodised; `n_levels=6.9` and unknown keys refused. Build in float64 or raise `mass` if refused.
 - **A coupling iteration that diverged to NaN/inf was reported `residual=0.0, converged=True`** by both
   solvers and all three norms (MADD-ANO-019 resolved); a non-finite field now fails the criterion (`residual=inf`,
   `converged=False`) and `strict_convergence=True` raises naming the non-finite state. No action needed.

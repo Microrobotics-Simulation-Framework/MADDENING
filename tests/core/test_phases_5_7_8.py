@@ -681,8 +681,11 @@ class TestWaveformRelaxation:
                 "slow": {"position": jnp.array(3.0),
                           "velocity": jnp.array(0.0)},
             }
-            for _ in range(3):
-                state = step_fn(state, ext)
+            # A traced loop, so the step is linearised once rather than
+            # once per pass: the multirate step's trace is the expensive
+            # part of this gradient.
+            state = jax.lax.fori_loop(
+                0, 3, lambda _i, s: step_fn(s, ext), state)
             return state["fast"]["position"]
 
         g = jax.grad(loss_fn)(jnp.array(0.0))

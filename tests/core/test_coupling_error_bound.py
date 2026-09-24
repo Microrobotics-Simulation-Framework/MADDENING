@@ -508,7 +508,7 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
     # initial state before each, so they share one compiled scan.
     fd_graph = _contracting_graph(tolerance=1e-3)
     base = fd_graph.params
-    analytic = float(jax.grad(loss)(base)["nodes"]["a"]["bias"])
+    analytic = float(jax.jit(jax.grad(loss))(base)["nodes"]["a"]["bias"])
 
     def shifted(delta):
         p = {"nodes": {n: dict(v) for n, v in base["nodes"].items()}}
@@ -519,9 +519,13 @@ def test_the_gradient_trust_bound_bounds_the_adjoint_finite_difference_gap():
     h = 1e-2
     fd = (shifted(h) - shifted(-h)) / (2 * h)
 
-    gm = _contracting_graph(tolerance=1e-3)
-    gm.step()
-    d = gm.coupling_diagnostics()["a+b"]
+    # The report for the unshifted one-step solve, read off the same
+    # compiled scan: ``run_scan`` leaves the diagnostics ``step`` would
+    # (the two reports agree key for key on this graph), and a separate
+    # ``step`` program cost a third compile for the same numbers.
+    fd_graph.reset_state()
+    fd_graph.run_scan(1, params=base)
+    d = fd_graph.coupling_diagnostics()["a+b"]
     assert d["ratio_usable"] is True, "fixture premise: a measured contraction"
     assert d["gradient_error_estimate"] == pytest.approx(d["error_estimate"])
     assert abs(analytic - fd) <= max(d["gradient_error_estimate"], 1e-5), (

@@ -39,15 +39,22 @@ specific Python/JAX function that implements it. This is mandatory for
 
 | Equation Term | Implementation | Notes |
 |---------------|---------------|-------|
-| $\alpha \nabla^2 T$ (diffusion) | `HeatNode.update()` | 2nd-order central FD stencil |
-| $S$ (source term) | `HeatNode.update()` | Added after diffusion |
-| Time integration ($\partial T / \partial t$) | Forward Euler in `HeatNode.update()` | 1st-order explicit |
+| $\alpha \nabla^2 T$ (diffusion) | `maddening.nodes.heat.HeatNode.update` | 2nd-order central FD stencil |
+| $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added after diffusion |
+| Time integration ($\partial T / \partial t$) | Forward Euler in `maddening.nodes.heat.HeatNode.update` | 1st-order explicit |
 | Boundary conditions | `state.at[0].set(left_T)` | JAX primitive: `jax.numpy.ndarray.at[].set()` |
 
 [If a term is handled by a JAX primitive or third-party function for
 which no explicit MADDENING function exists, document the primitive
 and its calling convention. Every governing equation term must appear
 in this table — silent omissions are not acceptable.]
+
+[Every code span in the Implementation column is a fully qualified
+`maddening.*` name, which `scripts/check_impl_mapping.py` resolves; the
+only exception is a row whose Notes cell begins `JAX primitive` or
+`Third-party`, as in the last row above. A symbol the class inherits
+rather than defines needs a Notes cell that begins
+``Inherited from `BaseClass` ``.]
 
 [Code-driven generation of this table is recommended but not mandated.
 The table may be maintained manually provided it is complete and reviewed

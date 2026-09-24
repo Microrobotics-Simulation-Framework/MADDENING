@@ -54,18 +54,19 @@ Write examples so that a wrong one fails:
   digits happen to match on your machine is not the same thing.
 - **`filterwarnings = ["error"]` applies.** An example that emits a warning
   fails unless `pyproject.toml` already filters it.
-- **Prefer rewriting to `# doctest: +SKIP`.** A skipped example is back to
-  being prose. There are currently none, and the gate is more useful if it
-  stays that way.
+- **`# doctest: +SKIP` fails the gate.** A skipped example is back to
+  being prose that looks like a test. If an example genuinely cannot run,
+  show it as a plain code block instead of behind `>>>`.
 - **Stay inside the `ci` extra.** The `compliance` job installs `[ci,usd]`,
   a superset of what the test matrix installs; an example that needs
   anything further would pass there and fail everyone else.
 
 The gate also fails if the collection *shrinks* — it scans the source for
 docstrings containing examples and requires pytest to have collected a test
-from each such file, on top of a floor on the total. A doctest job that
-silently collects nothing exits 0 and gets counted as coverage. Raise
-`MIN_DOCTESTS` in the script when you add examples.
+from each such file, on top of a floor on the number of `>>>` examples
+actually executed (not docstrings: one docstring can hold many examples). A
+doctest job that silently collects nothing exits 0 and gets counted as
+coverage. Raise `MIN_EXAMPLES` in the script when you add examples.
 
 ## Math in Code
 
@@ -128,6 +129,8 @@ Rules:
 - Every governing equation term must appear — no silent omissions
 - Terms handled by JAX primitives must document the primitive and calling convention
 - CI validates all function names resolve to existing callables (`scripts/check_impl_mapping.py`)
+- Every code span in the Implementation column is a fully qualified `maddening.*` name, except in a row whose Notes cell begins `JAX primitive` or `Third-party`
+- A symbol the named class inherits rather than defines needs a Notes cell that begins ``Inherited from `BaseClass` ``; the gate checks the base and fails the marker once the class overrides the symbol
 
 ## Commit Message Convention
 

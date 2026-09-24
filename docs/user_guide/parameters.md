@@ -64,15 +64,20 @@ step cannot read: an `initial_*` entry (only `initial_state()` reads it, from
 the node), a parameter a node bakes into a static when it is constructed
 (`HeatNode`'s `grid_points` on a non-uniform grid, `WaveletAdaptiveNode`'s
 `mass` -- declared by `static_data_deps`), or geometry a node consumed in
-`__init__`.  Changing one in `gm.params` is a `ValueError` naming the leaf
+`__init__`.  (A leaf only *this* graph does not exercise -- a ball's
+`elasticity` with no table edge -- is not one of them: the node reads it as
+soon as the input arrives, and the value carried in `gm.params` is then the
+one used, so it is kept and serialised.)  Changing one in `gm.params` is a `ValueError` naming the leaf
 and why, raised by every run method, `check_params`, `to_dict` and
 `save_state`; before 0.4.0 the edit was
 ignored by the step and then written out by `to_dict`, so the saved graph
 reloaded as a different model.  To change such a value, rebuild the node
 with it; `gm.reset_params()` drops the edit.  Whether the step reads a leaf
 is decided from the node's `static_data_deps` declaration and, failing
-that, from one trace of the compiled step (taken only when a leaf differs
-from its node's value); a value that also reaches the node -- `PUT
+that, from one trace of the compiled step and one of the node's own hooks
+with every declared boundary input supplied (both taken only when a leaf
+differs from its node's value, once per compile); a value that also reaches
+the node -- `PUT
 /graph/params` writes both -- is not refused, and a traced leaf (inside a
 fit or an FIM) is never compared.  An explicit `params=` pytree is not
 refused either: it is never serialised, and a leaf the step ignores may be

@@ -84,8 +84,39 @@ def test_an_initial_condition_edit_is_refused_as_never_read():
     """No declaration: the traced step has no path from the leaf."""
     gm = _spring()
     gm.params["nodes"]["s"]["initial_position"] = jnp.asarray(0.9, jnp.float32)
-    with pytest.raises(ValueError, match=r"'initial_position'.*never reads it"):
+    with pytest.raises(ValueError, match=r"'initial_position'.*node cannot read it"):
         gm.step()
+
+
+def test_a_leaf_only_this_graph_does_not_exercise_is_carried_not_refused():
+    """A ball reads ``elasticity`` only when a ``table_position`` edge
+    exists.  Without one the step never reads the leaf -- but the value in
+    gm.params is latent, not ignored: the node reads it as soon as the input
+    arrives, and the carried value is then the one used, which is what
+    ``to_dict()`` records.  Refusing it would refuse a calibration of a
+    graph that is merely missing an edge."""
+    from maddening.nodes.ball import BallNode
+    from maddening.nodes.table import TableNode
+
+    def graph(e, edge):
+        gm = GraphManager()
+        gm.add_node(BallNode("b", 0.01, initial_position=0.05, initial_velocity=-2.0,
+                             elasticity=e))
+        gm.add_node(TableNode("t", 0.01, position=0.0))
+        if edge:
+            gm.add_edge("t", "b", "position", "table_position")
+        gm.compile()
+        return gm
+
+    gm = graph(1.0, edge=False)
+    gm.params["nodes"]["b"]["elasticity"] = jnp.asarray(0.5, jnp.float32)
+    gm.run(3)
+    assert [n for n in gm.to_dict()["nodes"] if n["name"] == "b"][0]["params"]["elasticity"] == 0.5
+    gm.add_edge("t", "b", "position", "table_position")
+    gm.reset_state()
+    got = gm.run_scan(5)["b"]["velocity"]
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(graph(0.5, edge=True).run_scan(5)["b"]["velocity"]))
+    assert not np.allclose(np.asarray(got), np.asarray(graph(1.0, edge=True).run_scan(5)["b"]["velocity"]))
 
 
 def test_an_explicit_params_argument_is_not_refused_but_the_live_leaves_under_it_are():

@@ -3167,6 +3167,9 @@ class GraphManager:
         self._raw_step_fn: Optional[Callable] = None
         self._params_verified: dict[str, dict[str, Any]] = {}
         self._step_reads: Optional[tuple[int, Optional[set]]] = None
+        # Per node: the keys its own hooks read with every declared
+        # boundary input supplied, keyed by compile generation.
+        self._node_reads: dict[str, tuple[int, set]] = {}
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -3472,10 +3475,12 @@ class GraphManager:
         Two sources, declared first: a parameter a
         :meth:`~maddening.core.node.SimulationNode.static_data_deps` entry
         names is baked into that static when the node is constructed -- the
-        step reads the static -- and a parameter the traced step has no
-        path from (an ``initial_*`` entry, which only ``initial_state()``
-        reads, or geometry a node consumed in ``__init__``) is read by
-        nothing.
+        step reads the static -- and a parameter that neither the traced
+        step nor the node's own hooks (with every declared boundary input
+        supplied) have a path from: an ``initial_*`` entry, which only
+        ``initial_state()`` reads, or geometry a node consumed in
+        ``__init__``.  A parameter only *this* graph does not exercise (a
+        ball's ``elasticity`` without a table edge) is not refused.
         """
         spec = self._nodes.get(owner)
         if spec is None:
@@ -3492,14 +3497,79 @@ class GraphManager:
                 "the compiled step reads the static, not the parameter"
             )
         reads = self._params_read_by_step()
-        if reads is not None and (owner, key) not in reads:
-            return (
-                "the compiled step never reads it: no operation of the step "
-                "takes it as an input (an initial condition, which only "
-                "initial_state() reads, from the node; or a value the node "
-                "consumed when it was constructed)"
-            )
-        return None
+        if reads is None or (owner, key) in reads:
+            return None
+        # Dead in *this* step is not enough: a ball's ``elasticity`` is read
+        # only when a ``table_position`` edge exists, and a value carried in
+        # gm.params for it is latent, not ignored -- add the edge and the
+        # carried value is the one used, which is what to_dict() records.
+        # Refused only when the node's own hooks cannot read it either, with
+        # every boundary input it declares supplied.
+        node_reads = self._node_param_reads(owner)
+        if node_reads is None or key in node_reads:
+            return None
+        return (
+            "the node cannot read it: no operation of the compiled step takes "
+            f"it as an input, and {type(spec.node).__name__}'s own update / "
+            "flux / interface-correction hooks do not either with every "
+            "boundary input they declare supplied (an initial condition, "
+            "which only initial_state() reads, from the node; or a value the "
+            "node consumed when it was constructed)"
+        )
+
+    def _node_param_reads(self, owner: str) -> Optional[set]:
+        """Keys of ``params["nodes"][owner]`` the node's own hooks read.
+
+        One trace of ``update`` (and of ``compute_boundary_fluxes`` /
+        ``compute_interface_correction`` where the graph passes them
+        ``params``) with a zero value for every input
+        ``boundary_input_spec()`` declares, walked like the step (see
+        :func:`_live_jaxpr_inputs`).  ``None`` when the hooks do not trace
+        that way (an input the spec does not declare, say): then nothing
+        is refused on this ground.  Cached per compile.
+        """
+        gen = self._compile_generation
+        cached = self._node_reads.get(owner)
+        if cached is not None and cached[0] == gen:
+            return cached[1]
+        spec = self._nodes[owner]
+        node = spec.node
+
+        def hooks(state, bi, p):
+            outs = [_node_update(spec, state, bi, spec.timestep, p)]
+            if type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes:
+                outs.append(_node_fluxes(spec, state, bi, spec.timestep, p))
+            iface = getattr(node, "interface_dof_indices", None)
+            if callable(iface) and iface() and _correction_accepts_params(node):
+                outs.append(node.compute_interface_correction(
+                    state, bi, spec.timestep, params=p))
+            # Only traced values can depend on an input; an index in a
+            # correction list is a Python int.
+            return [x for x in jax.tree.leaves(outs) if isinstance(x, jax.core.Tracer)]
+
+        try:
+            declared = node.boundary_input_spec() or {}
+            bi = {
+                name: jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32)
+                for name, bspec in declared.items()
+            }
+            leaves = self.params["nodes"][owner]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                args = (self._state[owner], bi, leaves)
+                closed = jax.make_jaxpr(hooks)(*args)
+            paths = [pth for pth, _ in jax.tree_util.tree_flatten_with_path(args)[0]]
+            if len(paths) != len(closed.jaxpr.invars):
+                return None
+            live = _live_jaxpr_inputs(closed.jaxpr, [True] * len(closed.jaxpr.outvars))
+        except Exception:  # noqa: BLE001 - not traceable this way: refuse nothing
+            return None
+        reads = {
+            pth[1].key for pth, keep in zip(paths, live)
+            if keep and len(pth) >= 2 and getattr(pth[0], "idx", None) == 2
+        }
+        self._node_reads[owner] = (gen, reads)
+        return reads
 
     def _refuse_baked_param_writes(self, tree: Any, *, live: bool) -> None:
         """Refuse a leaf that differs from its node's value but that the
@@ -4831,6 +4901,7 @@ class GraphManager:
         self._compiled_step = compiled_step
         self._raw_step_fn = step_fn
         self._step_reads = None
+        self._node_reads = {}
         self._params_verified = {
             owner: {k: v for k, v in leaves.items()
                     if fresh_leaves.get(owner, {}).get(k) is v}

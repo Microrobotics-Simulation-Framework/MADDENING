@@ -2921,7 +2921,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-026"
-    title: "Under waveform relaxation, coupling_diagnostics() reported only the last sweep's pass count: an earlier sweep stopped at max_iterations read as iterations=1"
+    title: "With waveform_iterations > 1, coupling_diagnostics() reported only the last sweep's pass count: an earlier sweep stopped at max_iterations read as iterations=1"
     description: >
       A coupling group with `subcycling=True`, nodes at different timesteps
       and `waveform_iterations=N > 1` runs N waveform sweeps per step.  Each
@@ -2937,7 +2937,7 @@ anomalies:
       one pass, the report read `iterations=1`.  The released docstrings
       described the field as "coupling iterations used"; the 0.4.0
       development docstring added that `iterations >= max_iterations` is a
-      usable cap check, which under waveform relaxation it was not.  Readers
+      usable cap check, which with several sweeps it was not.  Readers
       of the count inherited it: `tune_coupling_params` ranks
       configurations by the summed count, so it costed a waveform group at
       the last sweep's passes, and `profile_graph`'s at-cap fraction and
@@ -3020,4 +3020,79 @@ anomalies:
       - "tests/core/test_coupling_waveform_report.py::test_the_sum_is_seeded_carried_through_a_scan_and_reset"
       - "tests/core/test_coupling_waveform_report.py::test_a_checkpoint_without_the_sum_reads_it_as_the_largest_sweep"
       - "tests/core/test_coupling_group_validation.py::test_a_group_whose_key_spells_another_groups_waveform_sum_slot_is_refused"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-027"
+    title: "Sub-cycled coupling relaxes no waveform: waveform_iterations > 1 re-solves the same fixed point, and the sub-step interpolation runs between iterates, not across the step"
+    description: >
+      `CouplingGroup.waveform_iterations` is documented as waveform
+      relaxation for a sub-cycling group ("> 1 iterates over entire
+      sub-step windows").  It is not.  Each sweep runs the group's
+      fixed-point solve again, starting from the previous sweep's result
+      and with a freshly started accelerator.  The one-pass map is the
+      same in every sweep, because a pass reads only its incoming iterate
+      and the beginning-of-step state; the second sweep's first residual
+      is, bit for bit, the residual the first sweep reported.  Inside a
+      pass, a sub-cycled node's boundary input is interpolated between
+      the pass's incoming iterate and the in-pass state: two estimates of
+      the end-of-step value, never the beginning-of-step value.  So no
+      sweep sees a boundary waveform over the sub-step window, and
+      `boundary_interpolation="quadratic"` is never given the third value
+      it is documented to use, which makes it `"linear"`.
+      Measured on two `SpringDamperNode`s coupled both ways (CPU, jaxlib
+      0.11.0).  At timesteps 0.001 and 0.005 over 100 macro-steps,
+      `boundary_interpolation` "constant", "linear" and "quadratic", each
+      at `waveform_iterations` 1 and 3, return the same state to the last
+      bit, 4.458e-02 from a uniform-rate reference; the numbers are
+      identical at v0.1.0, v0.3.1 and the 0.4.0 tree.  At timesteps 0.001
+      and 0.01 with `tolerance=1e-8`: when every first sweep converges
+      (`max_iterations=10`), `waveform_iterations` 1, 2 and 3 give
+      bit-identical states over three steps under both solvers.  When the
+      first sweep stops at the cap, the later sweeps continue the same
+      iteration like extra passes: under `acceleration="fixed"`,
+      `relaxation=0.7`, `max_iterations=2`, the states at
+      `waveform_iterations` 2 and 3 are 1.48e-03 (relative) from the one
+      at 1 after three steps, and equal to each other.  v0.1.0 already
+      carries the sweep loop and the interpolation.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No state is wrong: every result is the converged solution of the
+      sub-cycled scheme as it is implemented, which holds the other
+      node's end-of-step value across the fast node's sub-steps, and it
+      is the result `waveform_iterations=1` gives.  What is wrong is a
+      numerical-method claim.  Waveform relaxation and higher-order
+      sub-step interpolation exist to reduce the splitting error of a
+      multi-rate coupling, and a program that chose them for that reason
+      gets none of the reduction and no signal; the extra sweeps cost
+      passes and change nothing once the first sweep converges.  Graded
+      `minor` because the result is the documented single-pass result,
+      and because the error against a uniform-rate reference is the same
+      number as without the option, which a verification run would show.
+      `context_dependent` because whether that matters depends on whether
+      an accuracy argument rests on the method the parameter names.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.waveform_iterations"
+      - "maddening.core.coupling.group.CouplingGroup.boundary_interpolation"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `waveform_iterations=1`: it gives the same result with fewer
+      passes.  When the first sweep stops at `max_iterations`, raise
+      `max_iterations` rather than adding sweeps.  To reduce multi-rate
+      splitting error, reduce the slow node's timestep or couple at a
+      uniform rate; the interpolation mode does not change a converged
+      step.
+    resolution_status: "open"
+    residual_risk: >
+      The parameter is documented as experimental and as the restart it
+      is, in `CouplingGroup` and the coupling guide; its behaviour is
+      unchanged.  Planned 0.5.0 work, not a promise of this release: real
+      waveform relaxation, with the interpolation taken from the
+      beginning-of-step state.  Until then `strict_convergence=True`
+      under `solver="ift"` checks every sweep, so a step whose first
+      sweep stops at the cap raises even when the last sweep converges.
+    verification:
+      - "tests/core/test_coupling_waveform_report.py::test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change"
+      - "tests/core/test_coupling_waveform_report.py::test_a_capped_first_sweep_is_continued_by_the_later_ones"
+      - "tests/core/test_coupling_waveform_report.py::test_the_sub_step_interpolation_modes_coincide_at_a_converged_step"
     github_issue: null

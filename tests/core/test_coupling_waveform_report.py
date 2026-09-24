@@ -54,13 +54,21 @@ def _leaves(tree):
     return {jax.tree_util.keystr(p): np.asarray(v) for p, v in flat}
 
 
+def _hex_state(run):
+    """``float.hex`` of every node-state leaf a recorded run returned."""
+    return {k: float(v).hex() for k, v in run["state"].items()}
+
+
 def _build(max_iterations=10, waveform_iterations=1, solver="ift",
-           diagnostics=False, rates="mixed", subcycling=True):
+           diagnostics=False, rates="mixed", subcycling=True,
+           boundary_interpolation="linear"):
     """Compile, step once, and record what the report and the state say."""
     gm = _springs(dt_fast=0.001 if rates == "mixed" else 0.01)
     kw = dict(max_iterations=max_iterations, tolerance=1e-8,
               subcycling=subcycling, waveform_iterations=waveform_iterations,
               solver=solver, diagnostics=diagnostics)
+    if boundary_interpolation != "linear":
+        kw["boundary_interpolation"] = boundary_interpolation
     if waveform_iterations != 1 and (not subcycling or rates == "same"):
         # A group that does not sub-cycle does not read the knob, and says
         # so: at registration without ``subcycling``, at ``compile()``
@@ -243,8 +251,7 @@ def test_the_returned_state_is_the_state_before_the_fix(
         runs, max_iterations, waveform_iterations):
     run = runs(max_iterations=max_iterations,
                waveform_iterations=waveform_iterations)
-    got = {k: float(v).hex() for k, v in run["state"].items()}
-    assert got == _STATE_BEFORE_THE_FIX[(max_iterations, waveform_iterations)]
+    assert _hex_state(run) == _STATE_BEFORE_THE_FIX[(max_iterations, waveform_iterations)]
 
 
 def test_one_sweep_reports_exactly_what_it_did_before_the_fix(runs):
@@ -273,6 +280,55 @@ def test_the_report_does_not_move_the_state(runs):
     assert set(reported) == set(silent)
     for leaf, value in silent.items():
         np.testing.assert_array_equal(reported[leaf], value, err_msg=leaf)
+
+
+# ---------------------------------------------------------------------------
+# What the sweeps do today: restarts, not waveform relaxation (MADD-ANO-027)
+# ---------------------------------------------------------------------------
+#
+# These pin the behaviour MADD-ANO-027 records, so that the entry is
+# revisited when it changes: 0.5.0 plans real waveform relaxation, and
+# then every assertion below is expected to fail.
+
+
+def test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change(runs):
+    """Every sweep solves the same fixed point, so a converged first one ends it.
+
+    Waveform relaxation would hand each sweep the previous sweep's
+    boundary waveform over the sub-step window and could move the state;
+    a restart from a converged state cannot.
+    """
+    one = runs(max_iterations=10, waveform_iterations=1)
+    three = runs(max_iterations=10, waveform_iterations=3)
+    assert one["report"]["converged"] is True
+    assert _hex_state(three) == _hex_state(one)
+
+
+def test_a_capped_first_sweep_is_continued_by_the_later_ones(runs):
+    """At ``max_iterations=2`` the extra sweeps are extra passes toward the same point.
+
+    One sweep stops short of the fixed point; three sweeps land on the
+    state ten passes of one sweep reach.
+    """
+    capped = runs(max_iterations=2, waveform_iterations=1)
+    swept = runs(max_iterations=2, waveform_iterations=3)
+    converged = runs(max_iterations=10, waveform_iterations=1)
+    assert capped["report"]["converged"] is False
+    assert _hex_state(capped) != _hex_state(converged)
+    assert _hex_state(swept) == _hex_state(converged)
+
+
+def test_the_sub_step_interpolation_modes_coincide_at_a_converged_step(runs):
+    """Both ends of the interpolation are estimates of the end-of-step value.
+
+    So ``"constant"``, ``"linear"`` and ``"quadratic"`` (which is never
+    given its third value) return the same state to the last bit once the
+    step has converged.
+    """
+    states = [_hex_state(runs(boundary_interpolation=mode))
+              for mode in ("constant", "linear", "quadratic")]
+    assert runs()["report"]["converged"] is True
+    assert states[0] == states[1] == states[2]
 
 
 # ---------------------------------------------------------------------------

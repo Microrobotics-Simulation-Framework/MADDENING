@@ -174,14 +174,17 @@ class _Branchy(SimulationNode):
     nothing.  A walk that stopped at any of the four (called every input
     of an unknown equation live) would report ``dead`` read.
 
-    ``e`` is the other direction: it reaches the output only on a loop's
-    *second* iteration, through carries that are themselves discarded
-    (``w -> u -> x``).  A walk that read a loop body as a single call --
-    no fixed point over the carries -- would report ``e`` dead, and the
-    graph would refuse a write the step does read."""
+    ``e_scan`` and ``e_while`` are the other direction: each reaches the
+    output only on its loop's *second* iteration, through carries that are
+    themselves discarded (``w -> u -> x``), and ``k_cond`` is read only by
+    a while loop's condition.  A walk that read a loop body as a single
+    call -- no fixed point over the carries -- or ignored the condition
+    would report them dead, and the graph would refuse a write the step
+    does read.  One parameter per loop, so each loop is pinned alone."""
 
     def __init__(self):
-        super().__init__("n", 0.1, a=1.0, b=2.0, c=3.0, e=5.0, dead=4.0)
+        super().__init__("n", 0.1, a=1.0, b=2.0, c=3.0, e_scan=5.0, e_while=6.0,
+                         k_cond=2.0, dead=4.0)
 
     def initial_state(self):
         return {"x": jnp.asarray(1.0, jnp.float32)}
@@ -197,12 +200,14 @@ class _Branchy(SimulationNode):
         x = jax.lax.scan(lambda carry, _: ((carry[0] + p["c"], carry[1] + 1.0), None),
                          (x, p["dead"]), None, length=2)[0][0]
         x = jax.jit(lambda q, v: v + q["c"])(p, x)
-        x = jax.lax.scan(lambda v, _: ((v[0] + v[1], v[2], v[2]), None),
-                         (x, zero, p["e"]), None, length=2)[0][0]
+        x = jax.lax.scan(lambda v, _: ((v[0] + v[1], v[2] * 1.0, v[2] + 0.0), None),
+                         (x, zero, p["e_scan"]), None, length=2)[0][0]
         x = jax.lax.while_loop(
             lambda v: v[3] < 2,
-            lambda v: (v[0] + v[1], v[2], v[2], v[3] + 1),
-            (x, zero, p["e"] * 0.5, 0))[0]
+            lambda v: (v[0] + v[1], v[2] * 1.0, v[2] + 0.0, v[3] + 1),
+            (x, zero, p["e_while"], 0))[0]
+        x = jax.lax.while_loop(lambda v: v[1] < p["k_cond"],
+                               lambda v: (v[0] * 1.5, v[1] + 1.0), (x, zero))[0]
         return {"x": x}
 
 
@@ -212,4 +217,4 @@ def test_the_structural_walk_follows_loops_and_branches():
     gm.compile()
     reads = gm_mod._param_leaves_read(gm._raw_step_fn, gm._state,
                                       gm._default_external_inputs(), gm.params)
-    assert reads == {("n", "a"), ("n", "b"), ("n", "c"), ("n", "e")}
+    assert reads == {("n", k) for k in ("a", "b", "c", "e_scan", "e_while", "k_cond")}

@@ -908,17 +908,12 @@ class WaveletAdaptiveNode(AdaptiveNode):
                 "resolved": (not budget) and n_outer < _cdd.MAX_OUTER}
 
     def compute_full_basis_gradient(self, state: dict, params: Optional[dict] = None) -> dict:
-        """``grad J`` with every function active, by a dense solve on ``A_hat``.
+        """``grad J`` with every function active, by a dense solve on ``A``.
 
         Overrides the base default, which would run :meth:`solve_frozen`
         with an all-true mask: the gathered frozen solve holds exactly
-        ``k`` functions and would silently truncate the full set.  The
-        solve is the preconditioned one, ``c = D^-1 A_hat^-1 D^-1 b``,
-        like every frozen solve: the unscaled ``A`` is worse conditioned
-        by the spread of its diagonal (about ``4**n_levels``), and in
-        float32 that error alone moved the gradient-capture ratio at
-        ``k = n_max`` -- where the frozen set *is* the full set -- off 1.
-        Same return convention as the base -- the leaves of
+        ``k`` functions and would silently truncate the full set.  Same
+        return convention as the base -- the leaves of
         :meth:`params_pytree`, zero for non-trainable ones.
         """
         del state
@@ -926,7 +921,7 @@ class WaveletAdaptiveNode(AdaptiveNode):
 
         def J(tree: dict) -> jax.Array:
             merged = {**self.params, **tree}
-            c = _dense_solve(self._Ah, self._scaled_rhs(merged)) / self._D
+            c = _dense_solve(self._A, self._rhs(merged))
             return jnp.squeeze(self._sensor_row @ c)
 
         g = jax.grad(J)(pt)

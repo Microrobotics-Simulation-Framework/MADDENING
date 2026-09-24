@@ -901,9 +901,9 @@ def test_every_accepted_mass_reads_the_fft_reference_to_the_conditioning_limit(d
 
 def test_at_the_full_budget_near_the_limit_the_capture_check_reads_one_and_blames_nothing():
     """``kappa * eps = 7.6e-4`` in float32 (accepted).  The frozen set *is* the
-    full set, so the gradient-capture ratio must be 1; it is measured
-    against a full-basis gradient that now solves the preconditioned
-    system, and ``initial_state()`` warns about nothing."""
+    full set, so the gradient-capture ratio must be 1 and
+    ``initial_state()`` warns about nothing -- where, past the limit, the
+    old behaviour warned that the active-set budget was too small."""
     import warnings
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

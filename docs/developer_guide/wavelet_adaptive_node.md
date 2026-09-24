@@ -154,9 +154,10 @@ engine-level `cdd_select_with_iterations` returns the same count.
   saying which term is too large, whether float64 would carry it, and the
   smallest mass that would. In float32 that is a periodic mass below about
   `2e-3`; in float64 about `1e-8` to `6e-8`, where the float64 assembly of
-  the Galerkin product becomes the limit. The full-basis gradient now
-  solves the preconditioned system, so at `k = n_max` the capture ratio is
-  1 where it used to drift in float32.
+  the Galerkin product becomes the limit. The budget warning the old
+  behaviour produced at `k = n_max` (256 points, `mass=1e-6`) cannot arise:
+  that configuration is refused, and just inside the limit the capture
+  ratio at the full budget is 1.
 - **The selection no longer depends on rounding.** The source is centred
   on every axis but the first, so residuals of mirror-image functions tie
   to rounding and the last bits decided which one survived the cap: eager

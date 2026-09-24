@@ -146,11 +146,9 @@ boundary (`MADD-ANO-003`).
   more than $k$ functions cannot be solved in the gathered block: a concrete
   one is refused with a message, a traced one poisons the block with NaN
   rather than silently dropping the excess.
-- **Full-basis gradient.** A dense solve on $\hat A$ (then $c = D^{-1}\hat c$),
-  overriding the base default: the gathered solve holds exactly $k$
-  functions and an all-true mask would be silently truncated. It solves
-  the preconditioned system like every frozen solve -- the unscaled $A$ is
-  worse conditioned by the spread of its diagonal.
+- **Full-basis gradient.** A dense solve on $A$, overriding the base default:
+  the gathered solve holds exactly $k$ functions and an all-true mask would be
+  silently truncated.
 - **Conditioning guard.** The constructor bounds the relative solve error by
   $\kappa(\hat A)\,\varepsilon_{\text{dtype}} + \kappa_h\,\varepsilon_{64}$
   and refuses a configuration above `CONDITION_LIMIT` $= 10^{-3}$, naming
@@ -196,7 +194,7 @@ boundary (`MADD-ANO-003`).
 | Frozen solve (masked CG) | `maddening.nodes.adaptive.wavelets.operator.make_masked_operator`, `maddening.core.solver_utils.ift_linear_solve` | Identity off the mask; `solver="cg"` |
 | $c_j = 0$ for $j \notin M$ | `maddening.nodes.adaptive.base.AdaptiveNode.update` | Inherited: the base class zeroes off the mask after every solve |
 | Sensor functional $J = W_n[s,:]\, c$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective` | Nearest grid point to `sensor` |
-| Full-basis gradient $\nabla J_{\text{full}}$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.compute_full_basis_gradient` | Dense solve on $\hat A$; overrides the base default |
+| Full-basis gradient $\nabla J_{\text{full}}$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.compute_full_basis_gradient` | Dense solve on $A$; overrides the base default |
 | Baked constants and their provenance | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.static_data_deps` | `scaling` from `mass`, `sensor_row` from `sensor`; `compile()` refuses to train either |
 
 ## Assumptions and Simplifications
@@ -376,5 +374,5 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-09-21 | Ported onto the 0.4.0 `AdaptiveNode` API: parameters in the graph pytree, `{c, mask}` state, CDD as a `while_loop`, gathered frozen solve, dense full-basis gradient, declared and measured order 2 |
-| 1.1.0 | 2026-09-24 | Phase-3 audit: conditioning guard (`CONDITION_LIMIT`, `condition_estimate`, `physical_condition_number`); CDD rounding floor and index-order tie-break, a third loop exit and `resolved` in the diagnostics; leaves cast to the dtype before the source; periodised periodic source; full-basis gradient on $\hat A$; non-integral structural counts and unknown keys refused |
+| 1.1.0 | 2026-09-24 | Phase-3 audit: conditioning guard (`CONDITION_LIMIT`, `condition_estimate`, `physical_condition_number`); CDD rounding floor and index-order tie-break, a third loop exit and `resolved` in the diagnostics; leaves cast to the dtype before the source; periodised periodic source; non-integral structural counts and unknown keys refused |
 | 1.0.1 | 2026-09-22 | Merged-tree audit: `k` sized and validated against the real CDD seed (level 0, not the coarse block) -- 16 default configurations were silently truncating the gathered solve; an oversized set is refused / NaN-poisoned; the assembly checks symmetry before symmetrising; construction is legal inside a trace; `selection_diagnostics()`; a periodic sensor at 1.0 snaps to point 0 |

@@ -990,27 +990,6 @@ class WaveletAdaptiveNode(AdaptiveNode):
                 f"on any mask"
             )
 
-    def _merged(self, params: Optional[dict]) -> dict:
-        """``self.params`` overlaid with ``params``, refusing a key it does not have.
-
-        The base class's diagnostics refuse an unknown key through
-        ``_pytree``, but ``update`` and :meth:`selection_diagnostics`
-        overlay through here, where ``{"thetta": 0.9}`` used to be merged
-        and then never read -- the call silently returned the answer at
-        the constructor's ``theta``.  Keys are static under a trace, so
-        the check costs nothing there.
-        """
-        if params is not None:
-            unknown = sorted(set(params) - set(self.params))
-            if unknown:
-                raise ValueError(
-                    f"{type(self).__name__} {self.name!r}: unknown parameter "
-                    f"key(s) {unknown} -- not constructor parameters "
-                    f"({sorted(self.params)}); the leaves a graph trains are "
-                    f"{sorted(self.params_pytree())}."
-                )
-        return super()._merged(params)
-
     def selection_diagnostics(self, params: Optional[dict] = None) -> dict:
         """How the CDD selection at ``params`` ended: the budget, the rounding floor or the bound.
 

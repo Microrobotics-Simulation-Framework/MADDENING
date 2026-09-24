@@ -103,7 +103,7 @@ coupling variable to single precision under any caller precision
 3. **Negative pressures** are reachable with a large $\Delta t$ or a low compliance
 4. **Source sampled at the end of the step**: MADD-ANO-012, above
 5. **`backpressure` truncated to float32**: MADD-ANO-013, above. A float64 convergence study is floored at about $10^{-6}$ relative error, and a weakly typed float64 pressure state is demoted to float32 by the same cast, which makes `lax.scan` reject the carry
-6. `derivatives()` ignores injected `params`
+6. **`derivatives()` leaves `flow_rate` where it started.** It and `implicit_residual()` take the injected `params` by the same `{**self.params, **params}` rule as `update()` (MADD-ANO-018, resolved in 0.4.0), but `derivatives()` returns a zero rate for `flow_rate`, which `update()` recomputes from the phase every step: after 20 steps of 0.01 s from rest, `update()` reports 314.6 and `integrate_node` still 0.0
 7. The inflow waveform is continuous but has a corner at the systole/diastole transition, so it is not $C^1$; higher-order integrators would not recover their order across it
 
 ## Stability Conditions

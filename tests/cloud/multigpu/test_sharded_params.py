@@ -110,7 +110,7 @@ def test_unstructured_wrapper_forwards_params():
                                2 * np.asarray(sharded.gather_global(base)["x"]))
 
 
-def _kwargs_ring_node():
+def _kwargs_ring_node(k=2.0):
     from maddening.core.node import SimulationNode
 
     class KwargsRing(SimulationNode):
@@ -118,7 +118,7 @@ def _kwargs_ring_node():
         a spelling the one params rule counts as taking the keyword."""
 
         def __init__(self, n=16):
-            super().__init__("ring", 0.1, k=2.0)
+            super().__init__("ring", 0.1, k=k)
             self._n = n
 
         def initial_state(self):
@@ -138,17 +138,17 @@ def _kwargs_ring_node():
     return KwargsRing()
 
 
-def _kwargs_ring_wrapped(kind):
+def _kwargs_ring_wrapped(kind, k=2.0):
     from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
     from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
 
     mesh = create_device_mesh(shape=(4,))
     if kind == "stencil":
-        return ShardedStencilNode(_kwargs_ring_node(), mesh, {"devices": 0})
+        return ShardedStencilNode(_kwargs_ring_node(k), mesh, {"devices": 0})
     pa = (np.arange(16) * 4 // 16).astype(np.int32)
     edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
     layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=4)
-    return ShardedUnstructuredNode(_kwargs_ring_node(), mesh, layout)
+    return ShardedUnstructuredNode(_kwargs_ring_node(k), mesh, layout)
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
@@ -324,6 +324,66 @@ def test_a_rest_param_write_to_a_sharded_node_changes_the_trajectory():
     written = _position_after(gm)
     assert written == pytest.approx(_position_after(_sharded_spring_graph(1000.0)))
     assert written != pytest.approx(_position_after(_sharded_spring_graph(10.0)))
+
+
+def _rest_stencil_graph(diffusivity):
+    """``ShardedStencilNode(HeatNode)`` built at ``diffusivity``."""
+    from maddening.nodes.heat import HeatNode
+
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(
+        HeatNode("h", 1e-2, n_cells=16, length=1.3, thermal_diffusivity=diffusivity,
+                 initial_temperature=[300.0 + 3 * i for i in range(16)]),
+        create_device_mesh(shape=(4,)), {"devices": 0}, boundary="zero",
+    ))
+    gm.compile()
+    return gm
+
+
+def _rest_unstructured_graph(k):
+    """``ShardedUnstructuredNode`` around a decaying ring built at ``k``."""
+    gm = GraphManager()
+    gm.add_node(_kwargs_ring_wrapped("unstructured", k))
+    gm.compile()
+    return gm
+
+
+_REST_WRITE_CASES = {
+    # name: (graph builder, node, parameter, old value, new value, state field)
+    "stencil": (_rest_stencil_graph, "h", "thermal_diffusivity", 0.02, 0.026, "temperature"),
+    "unstructured": (_rest_unstructured_graph, "ring", "k", 2.0, 5.0, "x"),
+}
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("case", list(_REST_WRITE_CASES.values()), ids=list(_REST_WRITE_CASES))
+def test_a_rest_param_write_to_a_stencil_or_unstructured_wrapper_changes_the_trajectory(case):
+    """The pointwise wrapper's siblings carried its defect at every tag.
+
+    ``ShardedStencilNode`` (v0.2.0 to v0.3.1) and ``ShardedUnstructuredNode``
+    (v0.3.0, v0.3.1) copied the inner node's params into a dict of their
+    own at construction; ``PUT /graph/params`` wrote that copy and answered
+    200 while the inner update kept reading the constructor value.  Driven
+    through this endpoint against ``git archive`` of each tag, the write
+    left both wrappers on the old trajectory.  The proxy test above pins
+    the shared dict; this pins what a caller of the endpoint observes.
+    """
+    build, node, key, old, new, field = case
+
+    def after(gm, steps=3):
+        gm.reset_state()
+        for _ in range(steps):
+            gm.step()
+        return np.asarray(gm.get_node_state(node)[field])
+
+    gm = build(old)
+    response = _client(gm).put(f"/graph/params/{node}", json={"params": {key: new}})
+    assert response.status_code == 200
+    assert response.json()["params"][key] == pytest.approx(new)
+
+    written = after(gm)
+    np.testing.assert_allclose(written, after(build(new)), rtol=1e-6)
+    assert not np.allclose(written, after(build(old)), rtol=1e-6)
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")

@@ -28,8 +28,8 @@ guidance; the itemized changes follow.
   columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
-  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms with
-  `reuse_trace=True` for a pure residual (the default re-traces; see Fixed)
+  loop.  `fim` itself is fast only with `reuse_trace=True`, for a pure residual:
+  ~1 ms warm against ~0.2 s per default call, which re-traces (see Fixed)
 - **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
   every `>>>` in `src/maddening` now runs, and the gate fails if the
   collection shrinks — an example that stops working is a failing build
@@ -218,7 +218,8 @@ guidance; the itemized changes follow.
 - **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
   timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
 - **`coupling_diagnostics()["residual"]` describes the state the step returned**
-  and no longer depends on `solver`; a group that arrives on its last pass now
+  under either `solver`, agreeing between them only to its float32 noise floor
+  (see Fixed); a group that arrives on its last pass now
   reports `converged=True` instead of raising under `strict_convergence`
 - **The interactive path stops redoing host work**: sharded wrappers place
   their static arrays on device once, not per `update`, and `run_scan` and its
@@ -247,8 +248,9 @@ guidance; the itemized changes follow.
   freeze picks the final levels
 - `AdaptiveNode.blindness_ratio` / `blindness_threshold` are
   `gradient_capture_ratio` / `gradient_capture_threshold`, and the cold-start
-  check warns rather than raising except under `on_blind="raise"` or a
-  confirmed Palais trap
+  check warns rather than raising unless `on_blind="raise"`.  Like `is_trapped_at`
+  and the `bound_valid` / `gradient_error_bound` keys above, these are renames
+  within the 0.4.0 cycle: no release carried the old names, which still warn
 - The `AdaptiveNode` gradient is documented as exact within an active-set
   region and first-order wrong across a switch; the previous "Clarke
   subgradient" claim was false (`MADD-ANO-003`)
@@ -265,10 +267,6 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
-- `coupling_diagnostics()['bound_valid']` and `['gradient_error_bound']` warn on
-  read and are removed in 0.5.0; read `ratio_usable` / `gradient_error_estimate`
-- `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
-  read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and
   `tune_coupling_params` warn and are removed in 0.5.0; use
   `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
@@ -276,8 +274,6 @@ guidance; the itemized changes follow.
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
   removed in 1.0; use `maddening.cloud.download_and_load_state`
-- `AdaptiveNode.blindness_ratio()` and the `blindness_threshold=` keyword warn (reading the
-  attribute does not); use `gradient_capture_ratio` / `gradient_capture_threshold`
 
 ### Removed
 - The stelling formal-verification suite, CI job and `stelling` dependency.
@@ -287,6 +283,9 @@ guidance; the itemized changes follow.
 - **Coupling bounds, confirmation audit:** a field below `tiny/eps` (~1e-31 in float32) no longer reads converged on a flushed change; the float floor counts the evaluations a pass rounds like (sub-cycling automatically,
   internal loops via the new `SimulationNode.update_evaluations()`; an undeclared node's group gets `spectral_usable=False` at the floor); float16-beside-float32 gradient floors, top-of-range spectral weights,
   `PYTHONHASHSEED`-dependent `_meta` seeds and `reset_state` of a key ending `_spectral` are fixed. Action: a node that sub-steps inside `update` should return its sub-step count from `update_evaluations()`.
+- **`AdaptiveNode.update` refuses an injected `params` key it does not have**, for every subclass: `{"thetta": 0.9}` was merged,
+  never read, and returned the constructor answer; fix the key the error names.  MADD-ANO-004 now also records `ShardedStencilNode`
+  (0.2.0-0.3.1) and `ShardedUnstructuredNode` (0.3.0-0.3.1) ignoring a REST parameter write: on those releases set it on the inner node.
 - **`PUT /graph/params` refuses a value the running node cannot use** (400, nothing written; since 0.1.0 it was saved and ignored, e.g. `LBMPipeNode.pipe_radius`): rebuild
   the node. `/checkpoint/load` refuses such a checkpoint; FMUs export only parameters the step reads and refuse the rest (pass `SidecarConfig(fixed_params=md.fixed_parameters)`).
   `params_effective` fails a constant split with an `__init__` copy; a `transform="log"` spec with no lower bound refuses values `<= 0`.
@@ -545,14 +544,9 @@ guidance; the itemized changes follow.
   missing
 - Full MADDENING test suite at `c51cd6a`: **3440 tests collected**, 3413 under
   `-m "not slow"` (27 deselected).  A collection count, not a pass count — see
-  `docs/release_notes/v0.4.0.md` for the last full CI run.  This line
-  previously carried v0.2.1's "1680 passed, 3 skipped"; it is edited in place
-  rather than appended because a false count is not fixed by adding a true one
-- Sharded `StaticArray` acceptance on a 4-device virtual mesh: bit-compatible
-  with the single-device baseline, 50-step convergence, construction-time
-  validation, `shard_info` delivery
-- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py` green, with
-  shape and dtype errors raised in one `ExceptionGroup`
+  `docs/release_notes/v0.4.0.md` for the last full CI run.  v0.2.1's own
+  Verification block, which an edit during this cycle had moved here, is back
+  under [0.2.1] as released
 - Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match
   their dense and `fori` references in both differentiation modes
 
@@ -587,6 +581,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-024, 025 (new, resolved in this release)**: `PUT /graph/params` accepted and saved a value a node consumes at
+  construction (since 0.1.0); a sharded `LBMNode` imposed its pressure faces at every seam and, by default, filled its global
+  halos unlike its periodic streaming (since 0.2.0). Both are refusals now (see `### Fixed`)
 - **MADD-ANO-021, 022, 023 (open)**: a gradient through a state-triggered branch omits the event time (BallNode's bounce:
   exactly 0 in the drop height); a mapped edge on a grid derived from a trainable parameter keeps its constructor
   geometry when that parameter is calibrated; the FMU TCP bridge authenticates no caller. Workarounds in the registry
@@ -857,6 +854,18 @@ change; the aliases are removed in v0.3.
   builtins on Python 3.10.
 
 ### Verification
+- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
+  via `-m "not slow"`).  Slow-marked tests deferred to a longer
+  pre-release pass.
+- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
+  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
+  on the `lax.psum` integral), 50-step multi-step convergence,
+  construction-time validation (`shard_axis` must match the wrapper's
+  spatial axes; nodes with sharded statics must accept `static_padded`
+  on `update_padded`), `shard_info` delivery.
+- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
+  green; aggregation test confirms shape + dtype errors raise in one
+  `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ## [0.2.0] - 2026-05-20
 

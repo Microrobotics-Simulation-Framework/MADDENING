@@ -17,9 +17,9 @@
     "reason belongs in the commit message that lowers both."
   ],
   "floor": {
-    "docs/algorithm_guide/nodes/heat_node.md": 9,
+    "docs/algorithm_guide/nodes/heat_node.md": 11,
     "docs/algorithm_guide/nodes/adaptive_node.md": 12,
-    "docs/algorithm_guide/nodes/wavelet_adaptive_node.md": 14,
+    "docs/algorithm_guide/nodes/wavelet_adaptive_node.md": 20,
     "docs/algorithm_guide/solvers/explicit_integrators.md": 5,
     "docs/algorithm_guide/nodes/spring_node.md": 9,
     "docs/algorithm_guide/nodes/ball_node.md": 7,

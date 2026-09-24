@@ -2919,3 +2919,172 @@ anomalies:
       - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_an_explicit_halo_fill_other_than_the_declared_one_is_refused"
       - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_a_node_that_declares_no_halo_boundary_is_wrapped_exactly_as_before"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-028"
+    title: "A sharded stencil node on a mesh axis of one device ran with periodic global halos whatever `boundary` said"
+    description: >
+      `halo_exchange` fills the halos at the two edges of the global grid
+      from its `boundary` mode, but applied the `"edge"` and `"zero"`
+      fills only when the mesh axis had more than one device (`if boundary
+      != "periodic" and p_size > 1`).  On an axis of one device the
+      exchange's `ppermute` sends the shard's edge slices to itself, so
+      the one shard received its own *opposite* edge in each halo: both
+      global halos came out periodic, under `"edge"` and `"zero"` alike.
+      `ShardedStencilNode` therefore ran a stencil node sharded on one
+      device -- a laptop, a single GPU, a test on one host -- or on a 2-D
+      mesh whose axis over the sharded cells has one device, on a ring,
+      with no error or warning.
+      Measured on `HeatNode` (64 cells, a linear initial ramp from 0 to 1,
+      Fourier number 0.25, 50 steps, CPU, jaxlib 0.11.0, float32), sharded
+      against the unsharded node: on one device 0.405 at
+      `stencil_order=2` and 0.402 at `stencil_order=4`, under `"edge"` and
+      `"zero"` alike, the end cells reading 0.468 / 0.532 against 0.063 /
+      0.937 -- heat had crossed from the hot end to the cold one.  The same
+      run on a (1, 2) pencil mesh with the cells on the size-1 axis gives
+      the same numbers.  On two and four devices the `"edge"` run at
+      `stencil_order=2` is bit-identical to the unsharded rod.  At the
+      primitive, `halo_exchange` of `[1, ..., 8]` with `halo=1,
+      boundary="zero"` returned `[8, 1, ..., 8, 1]` on one device against
+      zeros at both ends on two.
+      Reproduced at v0.2.0 and v0.3.1 (`git archive` of each tag, same
+      environment): the same primitive call returns `[8, 1, ..., 8, 1]`,
+      and a one-device sharded `HeatNode` rod ends at 0.468 / 0.532, the
+      same ring.  The unsharded node treated its ends differently at those
+      tags (MADD-ANO-007), so sharded-against-unsharded numbers there are
+      not comparable with the ones above.  The guard dates from the
+      primitive's first commit.
+      Resolved in 0.4.0: an axis of one device takes the boundary fill on
+      both sides with no exchange, since its one shard owns both global
+      edges, so every mode means the same on any axis size.
+      `boundary="periodic"` on any axis, and `"edge"` / `"zero"` on an axis
+      of two or more devices, are bit-identical to before, forward and
+      adjoint (a before/after dump: 42 such exchange configurations and 33
+      sharded node runs, every one identical to the bit).  The wrapper's local padding of a halo axis `axis_map`
+      leaves unsharded was already right here, and the unstructured
+      exchange has no boundary modes and, on one device, no ghosts.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong physics on a documented configuration: running a
+      sharded model on one device is the ordinary way to develop and test
+      it, and there it computed a different model -- a periodic domain --
+      from both the unsharded node and the same code on two or more
+      devices, with no error or warning.  The error is neither small nor
+      local: the whole field relaxes towards the ring's mean (0.40 on a
+      unit range in 50 steps above).  Graded `major` for that silence and
+      magnitude.  Not `critical`, because the run on several devices was
+      right, and a one-device result checked against it or against the
+      unsharded node disagrees grossly rather than subtly.
+      `context_dependent` because it needs a non-periodic `boundary` and a
+      sharded axis of one device; `boundary="periodic"`, which `LBMNode`
+      requires, is unaffected, and whether a result built on it matters is
+      a property of the program using it.
+    affected_components:
+      - "maddening.cloud.multigpu.halo.halo_exchange"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: run a stencil node whose boundary is not periodic
+      unsharded when it is on one device, and on a pencil mesh do not map
+      a non-periodic sharded axis to a mesh axis of one device.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known in the fill.  The tests hold the exchange, forward and
+      adjoint, to `numpy.pad` on 1-, 2- and 4-device slabs and on 1x1,
+      1x2, 2x1 and 2x2 pencils, and the wrapper to the unsharded node on
+      one device and on a size-1 pencil axis.
+    verification:
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_one_device_zero_fill_is_zero_not_the_opposite_edge"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_slab_exchange_fills_every_halo_slot_as_numpy_pad_does"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_pencil_exchange_fills_every_halo_slot_as_numpy_pad_does"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_the_wrapper_fills_sharded_and_unsharded_halo_axes_alike"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_sharded_second_order_rod_is_the_unsharded_rod"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_sharded_rod_computes_the_host_padded_model_on_every_device_count"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-029"
+    title: "The default `\"edge\"` halo fill copied a halo two or more cells wide from the shard's first cells instead of repeating its edge cell"
+    description: >
+      `halo_exchange`'s `"edge"` mode, the default of both it and
+      `ShardedStencilNode`, is documented as replicating the edge value
+      into the halo.  At the edges of the global grid it placed the
+      shard's own first `h` cells there, in order: a halo two cells wide
+      read `r0, r1` in front of `r0`, and `r(n-2), r(n-1)` after
+      `r(n-1)` -- neither `numpy.pad`'s `"edge"` (`r0, r0`) nor a mirror
+      (`r1, r0`).  At width 1 the three coincide, so no width-1 node or
+      test could see it.  The wrapper's local padding of a halo axis
+      `axis_map` leaves unsharded had the same fill.  The only built-in
+      node with a halo wider than one cell is `HeatNode` at
+      `stencil_order=4`.  On the rod of MADD-ANO-028 (64 cells, a linear
+      ramp, Fourier number 0.25, 50 steps, float32) the default-filled
+      sharded rod on two and four devices ended 4.73e-03 from the
+      unsharded node and 7.28e-03 from the node's own `update_padded` run
+      on the whole rod padded by `numpy.pad` -- the model the
+      documentation describes -- with the end cell at 0.0712 against
+      0.0664 unsharded, 7% at that cell.  The halo cell next to the rod
+      end holding `r1` rather than `r0` gives the end a gradient the
+      `"edge"` mode is meant not to have.
+      Reproduced at v0.2.0 and v0.3.1 (`git archive` of each tag, same
+      environment): a width-2 `"edge"` exchange of `[1, ..., 8]` on two
+      devices returns `[1, 2, 1, 2, ...]` and `[..., 7, 8, 7, 8]`, and the
+      sharded 4th-order rod's end cell reads 0.0712 at both tags, as on
+      the 0.4.0 tree before the fix.  The fill dates from the primitive's
+      first commit.
+      Resolved in 0.4.0: `"edge"` repeats the edge cell across the whole
+      halo at every width (`numpy.pad` `mode="edge"`), in the exchange and
+      in the wrapper's local padding, which now share one helper.  Width 1
+      is bit-identical.  The 4th-order sharded rod is now one model on 1,
+      2 and 4 devices and matches the whole-rod `numpy.pad` run to float32
+      rounding (5.96e-08).
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong physics in the default mode of a public, STABLE
+      wrapper, with no error or warning.  Graded `minor` because it is
+      confined to the cells within a halo width of the global ends, to
+      stencils wider than one cell (in-tree, only the 4th-order
+      `HeatNode`), and is sub-percent of the field's range (4.7e-03 on a
+      unit range), and because the in-tree node carries a boundary
+      difference of the same order that no fill removes (see
+      residual_risk).  The case for `major`: it was the default, the
+      error at the end cell was 7%, and an end temperature is what a
+      coupled neighbour reads.  `context_dependent` because it needs a
+      sharded stencil node with a halo at least two cells wide and a
+      non-periodic `boundary`; whether a result built on it matters is a
+      property of the program using it.
+    affected_components:
+      - "maddening.cloud.multigpu.halo.halo_exchange"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: for a stencil node with a halo wider than one cell,
+      either run it unsharded or apply its end boundary condition inside
+      `update_padded`, overwriting the global halo cells, rather than
+      relying on the `"edge"` fill.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      No halo fill makes a sharded `HeatNode` at `stencil_order=4`
+      reproduce the unsharded `update`.  `update` closes each rod end with
+      a cubic extrapolation through the Dirichlet datum and the three end
+      cells (with no boundary input the datum is `T[0]`), which is not a
+      copy of any cells, and `update_padded` applies no end closure and
+      uses the halo as it arrives.  On the rod above, after the fix, the
+      sharded rod is 2.54e-03 from `update`; a mirror fill would give
+      3.55e-03 and the old fill 4.73e-03.  At `stencil_order=2` the
+      node's own end ghost is the edge cell, and the sharded rod is `update`
+      exactly on 1, 2 and 4 devices.  Closing the 4th-order gap is a change
+      to `HeatNode.update_padded` -- applying the closure at the global
+      ends needs the wrapper's fill mode, which the node is not told --
+      not to the fill; the method's docstring now states the difference.
+      A custom stencil node wider than one cell that was tuned to the old
+      `r0, r1` fill changes.
+    verification:
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_the_reference_pads_the_way_the_documentation_says"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_slab_exchange_fills_every_halo_slot_as_numpy_pad_does"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_pencil_exchange_fills_every_halo_slot_as_numpy_pad_does"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_the_wrapper_fills_sharded_and_unsharded_halo_axes_alike"
+      - "tests/cloud/multigpu/test_halo_global_edge_fill.py::test_a_sharded_rod_computes_the_host_padded_model_on_every_device_count"
+      - "tests/cloud/multigpu/test_run_pod_dry_run.py::test_halo_reference_encodes_the_documented_boundary_fill"
+    github_issue: null

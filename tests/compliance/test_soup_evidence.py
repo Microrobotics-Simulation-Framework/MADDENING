@@ -89,8 +89,13 @@ def test_the_committed_soup_tables_match_a_fresh_generation():
 # what was retired and when.  The number stays spoken for, the high-water mark
 # stays honest, and the retirement is a visible line in the diff instead of a
 # gap nobody can account for.
-_HIGHEST_ANOMALY_ID = 25
-_RETIRED_ANOMALY_IDS: frozenset = frozenset()
+_HIGHEST_ANOMALY_ID = 29
+# NOT RETIRED -- RESERVED.  MADD-ANO-026 and 027 belong to an open pull
+# request (#139, waveform relaxation) that lands them itself; this branch
+# was cut before it and adds 028-029.  Listing them here keeps this tree's
+# ID set exact meanwhile.  When #139 merges, this set goes back to empty:
+# test_a_retired_id_is_recorded_and_not_reused fails until it does.
+_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-026", "MADD-ANO-027"})
 
 _HIGHEST_BENCHMARK_ID = 16
 _RETIRED_BENCHMARK_IDS: frozenset = frozenset()

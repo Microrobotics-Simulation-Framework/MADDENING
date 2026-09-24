@@ -306,6 +306,7 @@ def test_ci_runs_the_budget_on_the_default_lane():
     # ... with the per-test JAX split recorded, and the cache mode stated
     assert 'MADDENING_TEST_JAX_TIMING: "1"' in ci
     assert "--cache-mode" in ci
-    # A cache without a size cap has no file lock, and parallel workers
-    # can read a half-written entry.
-    assert re.search(r'JAX_COMPILATION_CACHE_MAX_SIZE: "[1-9][0-9]*"', ci)
+    # ...and without a size cap: with one, every cache write rescans the
+    # whole directory, quadratic over a cold run (measured: a lane past
+    # 95 minutes).
+    assert "JAX_COMPILATION_CACHE_MAX_SIZE:" not in ci

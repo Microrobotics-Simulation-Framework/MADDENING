@@ -189,10 +189,6 @@ ci = [
     # dependency, so the base install already provides it.)
     # Property-based testing (hypothesis).
     "hypothesis>=6.165,<7",
-    # JAX's compilation cache locks its files with this when a size cap is
-    # set, which the CI test lanes do; skypilot happens to pull it in too,
-    # but the lanes depend on it directly.
-    "filelock>=3.12",
     # The declared build backend, so tests/test_packaging_py_typed.py can
     # build a real wheel and assert the PEP 561 marker is in it without
     # reaching the network for an isolated build.  MADDENING_REQUIRE_PACKAGING_TESTS

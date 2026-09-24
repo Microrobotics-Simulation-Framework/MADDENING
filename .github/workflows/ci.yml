@@ -200,12 +200,14 @@ jobs:
           JAX_COMPILATION_CACHE_DIR: ${{ runner.temp }}/jax-cache
           JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
           JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES: "-1"
-          # A size cap is what turns on JAX's file lock around every cache
-          # read and write.  Without it JAX writes entries in place, a
-          # parallel worker can read one half-written, and the warning JAX
-          # raises fails the test under filterwarnings=error.  4 GiB also
-          # bounds what is saved (least recently used entries go first).
-          JAX_COMPILATION_CACHE_MAX_SIZE: "4294967296"
+          # No JAX_COMPILATION_CACHE_MAX_SIZE, on purpose.  A size cap makes
+          # every cache write glob the whole directory and read one atime
+          # file per entry to decide what to evict -- quadratic over a cold
+          # run of tens of thousands of compiles, and it pushed the first
+          # trial of this lane past 95 minutes.  The cap's other effect is a
+          # file lock, which only matters with several processes writing
+          # the same directory; the lanes run one pytest process.  A cold
+          # run starts empty, so the cache is bounded by one suite's worth.
           # Record each test's JAX trace / lower / compile / cache-read
           # time into the JUnit XML (tests/_jax_timing.py), so the budget
           # step can say why a slow test is slow.

@@ -290,8 +290,9 @@ class TestRobinCoupling:
             state = dict(gm._state)
             state["rod_a"] = {"temperature": jnp.ones(5) * init_temp}
             state["rod_b"] = {"temperature": jnp.zeros(5)}
-            for _ in range(3):
-                state = step_fn(state, ext)
+            # A traced loop, so the step is linearised once, not per pass.
+            state = jax.lax.fori_loop(
+                0, 3, lambda _i, s: step_fn(s, ext), state)
             return jnp.sum(state["rod_a"]["temperature"])
 
         g = jax.grad(loss_fn)(jnp.array(100.0))

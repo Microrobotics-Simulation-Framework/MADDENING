@@ -61,33 +61,57 @@ def _run(gm, n):
     return gm
 
 
+#: ``{config: (graph, [snapshot after step 1, 2, ...])}``.
+_TRAJECTORIES: dict = {}
+
+
+def _after(n, **config):
+    """``(state, diagnostics, meta)`` of ``_graph(**config)`` after ``n`` steps.
+
+    Memoised per configuration: the trajectory from the initial state is
+    deterministic, so the state after eight steps is on the way to the
+    state after ten, and three tests read the same two configurations
+    (each rebuilt and recompiled them).  Each snapshot is a copy, taken
+    when the graph passes that step.
+    """
+    key = tuple(sorted(config.items()))
+    if key not in _TRAJECTORIES:
+        _TRAJECTORIES[key] = (_graph(**config), [])
+    gm, snaps = _TRAJECTORIES[key]
+    while len(snaps) < n:
+        gm.step()
+        snaps.append((
+            {name: dict(gm.get_node_state(name)) for name in ("rod", "spring")},
+            dict(gm.coupling_diagnostics()["rod+spring"]),
+            dict(gm._state["_meta"]),
+        ))
+    return snaps[n - 1]
+
+
 def test_converges_and_warm_starts_across_steps():
-    gm = _run(_graph(), 10)
-    d = gm.coupling_diagnostics()["rod+spring"]
+    _state, d, meta = _after(10)
     assert d["converged"], d
-    meta = gm._state["_meta"]
     vw = [k for k in meta if k.startswith("coupling_rod+spring_") and ("_V" in k or "_W" in k)]
     assert vw, sorted(meta)              # V/W carried in _meta between steps
     assert any(float(jnp.max(jnp.abs(meta[k]))) > 0 for k in vw)
 
 
 def test_matches_fori_reference_and_no_acceleration():
-    ref = _run(_graph(solver="fori"), 10)
-    ift = _run(_graph(), 10)
-    plain = _run(_graph(acceleration="none", jacobian_reuse=0), 10)
+    ref, _, _ = _after(10, solver="fori")
+    ift, _, _ = _after(10)
+    plain, _, _ = _after(10, acceleration="none", jacobian_reuse=0)
     for n in ("rod", "spring"):
-        for f, v in ift.get_node_state(n).items():
-            np.testing.assert_allclose(np.asarray(v), np.asarray(ref.get_node_state(n)[f]),
+        for f, v in ift[n].items():
+            np.testing.assert_allclose(np.asarray(v), np.asarray(ref[n][f]),
                                        rtol=1e-4, atol=1e-4, err_msg=f"{n}.{f} vs fori")
-            np.testing.assert_allclose(np.asarray(v), np.asarray(plain.get_node_state(n)[f]),
+            np.testing.assert_allclose(np.asarray(v), np.asarray(plain[n][f]),
                                        rtol=1e-4, atol=1e-4, err_msg=f"{n}.{f} vs none")
 
 
 def test_imvj_uses_fewer_iterations_than_none():
-    ift = _run(_graph(), 8)
-    plain = _run(_graph(acceleration="none", jacobian_reuse=0), 8)
-    assert ift.coupling_diagnostics()["rod+spring"]["iterations"] <= \
-        plain.coupling_diagnostics()["rod+spring"]["iterations"]
+    _, ift, _ = _after(8)
+    _, plain, _ = _after(8, acceleration="none", jacobian_reuse=0)
+    assert ift["iterations"] <= plain["iterations"]
 
 
 # Slow-marked (still run by slow-tests.yml): a gradient and two

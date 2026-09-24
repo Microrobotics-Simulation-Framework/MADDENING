@@ -258,7 +258,9 @@ def _server_treats_as_params_node(kind, spelling):
                         raise_server_exceptions=False)
     resp = client.put("/graph/params/n", json={"params": {"k": [1.0, 2.0]}})
     assert resp.status_code in (200, 400), resp.text
-    return resp.status_code == 400
+    # The shape refusal is the pytree validation this probe asks about; a
+    # structural write can also be a 400 for a value the node never reads.
+    return resp.status_code == 400 and "expected shape" in resp.json()["detail"]
 
 
 def _node_probe(fn):

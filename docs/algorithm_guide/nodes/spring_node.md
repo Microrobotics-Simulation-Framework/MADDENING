@@ -67,7 +67,7 @@ There is no spatial order — the node integrates an ODE and has no grid. The te
 
 1. **1st-order integration**: the error is $O(\Delta t)$ in both position and velocity
 2. **No stability check**: $k \Delta t^2 / m \gtrsim 4$ makes the undamped scheme unstable, and nothing enforces it at runtime
-3. `derivatives()` and `implicit_residual()` read `self.params` and ignore injected `params`, so a calibrated stiffness does not reach the implicit or `integrate_node` paths
+3. **A calibrated constant reaches `derivatives()` and `implicit_residual()` only when it is passed.** Both take the injected `params` by the same `{**self.params, **params}` rule as `update()` (MADD-ANO-018, resolved in 0.4.0), so hand the node's `gm.params` entry to `integrate_node(..., params=)` or `implicit_euler_step(..., params=)`; called without it, they integrate the constructor constants
 4. No nonlinear spring behaviour, and no contact
 
 ## Stability Conditions

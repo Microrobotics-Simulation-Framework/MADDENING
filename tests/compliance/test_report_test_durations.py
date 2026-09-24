@@ -30,9 +30,14 @@ def gate():
     return module
 
 
-def _case(file, name, seconds, cls="", line=10, extra=""):
+def _case(file, name, seconds, cls="", line=10, extra="", jax=None):
     module = file[:-3].replace("/", ".")
     classname = f"{module}.{cls}" if cls else module
+    if jax is not None:
+        props = {"jax_trace_s": 0, "jax_lower_s": 0, "jax_compile_s": 0,
+                 "jax_cache_read_s": 0, "jax_cache_hits": 0, "jax_cache_misses": 0, **jax}
+        extra += "<properties>" + "".join(
+            f'<property name="{k}" value="{v}"/>' for k, v in props.items()) + "</properties>"
     return (f'<testcase classname="{classname}" name="{name}" file="{file}" '
             f'line="{line}" time="{seconds}">{extra}</testcase>')
 
@@ -177,9 +182,130 @@ def test_the_shipped_allowlist_names_real_tests_with_reasons(gate):
             f"{nodeid}: no `def {func}` in {file}")
 
 
+def test_each_slow_test_is_diagnosed_by_where_its_time_went(gate):
+    # The measured shapes of three real slow tests (2026-09-24 probe).
+    loop = gate.TestTime("t.py::loop", "t.py", 1, 170.0, "passed",
+                         {"jax_trace_s": 0.0, "jax_lower_s": 0.2, "jax_compile_s": 0.6,
+                          "jax_cache_read_s": 0, "jax_cache_hits": 0, "jax_cache_misses": 0})
+    retrace = gate.TestTime("t.py::retrace", "t.py", 1, 100.0, "passed",
+                            {"jax_trace_s": 60.0, "jax_lower_s": 10.0, "jax_compile_s": 28.0,
+                             "jax_cache_read_s": 0, "jax_cache_hits": 0, "jax_cache_misses": 0})
+    compile_ = gate.TestTime("t.py::compile", "t.py", 1, 135.0, "passed",
+                             {"jax_trace_s": 0.7, "jax_lower_s": 34.8, "jax_compile_s": 83.5,
+                              "jax_cache_read_s": 0, "jax_cache_hits": 3, "jax_cache_misses": 12})
+    assert gate.diagnose(loop) == "running 100%: un-jitted loop, heavy compute, or a subprocess"
+    assert gate.diagnose(retrace).startswith("tracing/lowering 70%")
+    assert gate.diagnose(compile_) == "compiling 62%: 12 cache misses"
+    assert loop.uncacheable == pytest.approx(169.4)
+    assert compile_.running == pytest.approx(135.0 - 83.5 - 35.5)
+    # no timing recorded: no diagnosis, and nothing is assumed cacheable
+    bare = gate.TestTime("t.py::bare", "t.py", 1, 9.0, "passed")
+    assert gate.diagnose(bare) == "" and bare.uncacheable == 9.0
+
+
+def test_a_test_slow_without_its_compile_is_listed_as_slow_even_when_warm(gate, tmp_path, capsys):
+    report = _report(
+        tmp_path,
+        # 9 s, 1 s of it compiling: still 8 s with a perfect cache
+        _case("tests/a/test_x.py", "test_loop", 9.0, jax={"jax_compile_s": 1.0}),
+        # 9 s, 8 s compiling: a warm cache brings it to 1 s
+        _case("tests/a/test_x.py", "test_compiles", 9.0, jax={"jax_compile_s": 8.0}),
+    )
+    code, out = _run(gate, capsys, report, "--cache-mode", "cold")
+    md = Path(str(report) + ".md").read_text()
+    warm = md.split("### Slow even with a warm cache (1)")[1].split("###")[0]
+    assert "`tests/a/test_x.py::test_loop`" in warm
+    assert "test_compiles" not in warm
+    assert "**Compilation cache: cold**" in md
+    assert "running 9.0 s, tracing/lowering 0.0 s, XLA compile 9.0 s" in md
+    # "%" is escaped as %25 in a workflow command
+    assert "(running 89%25: un-jitted loop, heavy compute, or a subprocess)" in out
+
+
+def test_a_warm_run_never_calls_an_allowlist_entry_removable(gate, tmp_path, capsys):
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_cached", 0.4,
+                                     jax={"jax_cache_hits": 5}))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/a/test_x.py::test_cached # pending triage\n")
+    for mode, listed in (("warm", False), ("cold", True), ("off", True)):
+        _run(gate, capsys, report, "--allowlist", allow, "--cache-mode", mode)
+        md = Path(str(report) + ".md").read_text().split("## Test durations")[-1]
+        assert ("may be removable" in md) is listed, mode
+        assert ("not judged removable on a warm run" in md) is (not listed), mode
+
+
+def test_the_timing_plugin_attaches_its_properties_before_the_teardown_report():
+    from types import SimpleNamespace
+    from tests import _jax_timing as jt
+
+    timing = jt.JaxTiming()
+    plugin = jt.Plugin(timing)
+    item = SimpleNamespace(user_properties=[])
+    plugin.pytest_runtest_setup(item)
+    timing.on_duration("/jax/core/compile/backend_compile_duration", 2.5)
+    timing.on_duration("/jax/core/compile/backend_compile_duration", 0.5)
+    timing.on_duration("/jax/some/other_duration", 99.0)   # ignored
+    timing.on_event("/jax/compilation_cache/cache_hits")
+    for when in ("setup", "call"):
+        plugin.pytest_runtest_makereport(item, SimpleNamespace(when=when))
+    assert item.user_properties == []
+    plugin.pytest_runtest_makereport(item, SimpleNamespace(when="teardown"))
+    props = dict(item.user_properties)
+    assert set(props) == set(jt.PROPERTIES)
+    assert props["jax_compile_s"] == 3.0 and props["jax_cache_hits"] == 1
+    assert props["jax_trace_s"] == 0
+    # the next test starts from zero
+    plugin.pytest_runtest_setup(item)
+    assert timing.properties() == [(p, 0) for p in jt.PROPERTIES]
+
+
+def test_jax_still_emits_the_events_the_timing_plugin_listens_for():
+    # If JAX renames an event, the plugin would report zero for it and every
+    # slow test would read as "running".  Check the names against the
+    # installed JAX: the compile-pipeline durations by listening to a real
+    # compile, the cache events by their presence in JAX's compiler module
+    # (they only fire with a cache configured).
+    import inspect
+    import jax
+    import jax.numpy as jnp
+    from jax import monitoring
+    from jax._src import compiler, compilation_cache
+    from tests import _jax_timing as jt
+
+    seen, listening = set(), [True]
+
+    def listener(event, secs, **_):
+        if listening[0]:
+            seen.add(event)
+
+    # Switched off rather than unregistered: the unregister API differs
+    # across the JAX versions CI runs, and a listener that ignores every
+    # event costs nothing.
+    monitoring.register_event_duration_secs_listener(listener)
+    try:
+        # A constant no other test uses, so this is a fresh trace and compile.
+        jax.jit(lambda x: x * 1.2345678901 + 0.987654321)(jnp.ones(3)).block_until_ready()
+    finally:
+        listening[0] = False
+    pipeline = [e for e in jt.DURATION_EVENTS if e.startswith("/jax/core/compile/")]
+    assert pipeline and set(pipeline) <= seen, set(pipeline) - seen
+    source = inspect.getsource(compiler) + inspect.getsource(compilation_cache)
+    cache_events = [e for e in [*jt.DURATION_EVENTS, *jt.COUNT_EVENTS]
+                    if e.startswith("/jax/compilation_cache/")]
+    assert len(cache_events) == 3
+    for event in cache_events:
+        assert event in source, f"JAX no longer emits {event!r}"
+
+
 def test_ci_runs_the_budget_on_the_default_lane():
     # The gate is only a gate while CI calls it with the allowlist and feeds
     # it the XML it needs.
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "--junitxml=test-results.xml -o junit_family=xunit1" in ci
     assert re.search(r"report_test_durations\.py test-results\.xml\s*\\\s*\n\s*--allowlist tests/duration_allowlist\.txt", ci)
+    # ... with the per-test JAX split recorded, and the cache mode stated
+    assert 'MADDENING_TEST_JAX_TIMING: "1"' in ci
+    assert "--cache-mode" in ci
+    # A cache without a size cap has no file lock, and parallel workers
+    # can read a half-written entry.
+    assert re.search(r'JAX_COMPILATION_CACHE_MAX_SIZE: "[1-9][0-9]*"', ci)

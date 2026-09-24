@@ -147,11 +147,69 @@ jobs:
         # missing, so this step is what makes CI actually exercise them.
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
 
+      - name: Compilation cache mode
+        # Pull requests run WARM: they restore the base branch's XLA
+        # compilation cache and never save one.  Everything a PR adds or
+        # changes therefore compiles from scratch on every push -- its
+        # programs are not in the base cache -- so the time budget still
+        # sees a new slow test on the PR that introduces it.  (If PRs saved,
+        # a second push would read the first push's cache and a new 25 s
+        # test would pass at 8 s.)  Pushes to main / release/** -- i.e.
+        # after a merge -- run COLD: start empty, report every compile at
+        # full cost, and save the result as the cache the next PRs restore.
+        # `[cold-ci]` in a PR's head commit message forces a cold run, for
+        # before/after numbers when optimising tests.
+        id: cc
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mode=warm
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            mode=cold
+          else
+            msg=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}" --jq .commit.message || true)
+            case "$msg" in *"[cold-ci]"*) mode=cold ;; esac
+          fi
+          # XLA:CPU compiles for the host's instruction set and the runner
+          # pool mixes CPU models, so an executable is only reused on the
+          # model that built it.  A PR landing on a model with no cache yet
+          # just runs cold.
+          model=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs)
+          cpu=$(printf '%s' "$model" | sha256sum | cut -c1-12)
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "key=jaxcc-v1-${{ runner.os }}-$cpu-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}" >> "$GITHUB_OUTPUT"
+          echo "compilation cache: $mode on '$model'"
+
+      - name: Restore compilation cache
+        id: cc-restore
+        if: steps.cc.outputs.mode == 'warm'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/jax-cache
+          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
+          restore-keys: ${{ steps.cc.outputs.key }}-
+
       - name: Run tests
         env:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # Persistent XLA compilation cache (see "Compilation cache mode").
+          # Minimum compile time 0 and no minimum entry size: most of this
+          # suite's compiles are well under JAX's 1 s default threshold.
+          JAX_COMPILATION_CACHE_DIR: ${{ runner.temp }}/jax-cache
+          JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS: "0"
+          JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES: "-1"
+          # A size cap is what turns on JAX's file lock around every cache
+          # read and write.  Without it JAX writes entries in place, a
+          # parallel worker can read one half-written, and the warning JAX
+          # raises fails the test under filterwarnings=error.  4 GiB also
+          # bounds what is saved (least recently used entries go first).
+          JAX_COMPILATION_CACHE_MAX_SIZE: "4294967296"
+          # Record each test's JAX trace / lower / compile / cache-read
+          # time into the JUnit XML (tests/_jax_timing.py), so the budget
+          # step can say why a slow test is slow.
+          MADDENING_TEST_JAX_TIMING: "1"
           # tests/test_packaging_py_typed.py builds a wheel and asserts the
           # PEP 561 marker is in it.  It skips when the build backend is
           # absent; here the backend is installed (`hatchling` in the ci
@@ -181,7 +239,18 @@ jobs:
         run: |
           python scripts/report_test_durations.py test-results.xml \
             --allowlist tests/duration_allowlist.txt \
+            --cache-mode "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
             --title "Test durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }})"
+
+      - name: Save compilation cache
+        # Only after a merge (a push to main / release/**), whose run
+        # started from an empty cache: the saved cache then holds exactly
+        # the base branch's programs.  Pull requests never save.
+        if: ${{ !cancelled() && github.event_name == 'push' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/jax-cache
+          key: ${{ steps.cc.outputs.key }}-${{ github.sha }}
 
       - name: Upload test durations
         # Kept 90 days so a regression can be traced to the run that

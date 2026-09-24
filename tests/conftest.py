@@ -124,6 +124,17 @@ EXAMPLES_STANDARD = _PROFILE_EXAMPLES
 EXAMPLES_COSTLY = max(EXAMPLES_FLOOR, (2 * _PROFILE_EXAMPLES) // 5)
 
 
+def pytest_configure(config):
+    """Per-test JAX trace / lower / compile times, when CI asks for them.
+
+    See ``tests/_jax_timing.py``; ``scripts/report_test_durations.py``
+    reads the result from the JUnit XML.
+    """
+    if os.environ.get("MADDENING_TEST_JAX_TIMING") == "1":
+        from tests import _jax_timing
+        _jax_timing.register(config)
+
+
 def pytest_report_header(config):
     """Report the active profile even when the Hypothesis plugin is off.
 

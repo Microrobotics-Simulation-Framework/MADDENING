@@ -65,6 +65,11 @@ jobs:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # No compilation cache here, on purpose: this run is the
+          # authoritative cold, serial timing of the whole suite, which
+          # triage and allowlist edits are based on.  Per-test JAX trace /
+          # lower / compile times go into the JUnit XML.
+          MADDENING_TEST_JAX_TIMING: "1"
         run: |
           # Wrap pytest with GNU ``timeout`` so we exit with code 124
           # on time-out (instead of GitHub killing the job with a
@@ -98,7 +103,7 @@ jobs:
         if: ${{ !cancelled() && hashFiles('test-results.xml') != '' }}
         run: |
           python scripts/report_test_durations.py test-results.xml \
-            --fail-over 0 \
+            --fail-over 0 --cache-mode off \
             --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }})"
 
       - name: Upload test durations

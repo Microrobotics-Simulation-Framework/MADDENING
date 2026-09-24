@@ -345,11 +345,13 @@ anomalies:
       counts as zero -- rather than a floor under the scale, which made
       every criterion absolute below atol/rtol).  coupling_diagnostics()
       reports error_estimate, amplification, ratio_usable and
-      gradient_error_estimate beside the residual.  0.4.0 renamed the last
-      two from bound_valid and gradient_error_bound, because neither is a
-      bound: the old spellings still read through with a DeprecationWarning
-      and are removed in 0.5.0, and they are deliberately absent from
-      keys(), iteration and len().  That estimate is not a bound; see the
+      gradient_error_estimate beside the residual.  During 0.4.0's
+      development the last two were called bound_valid and
+      gradient_error_bound -- no release carried either name -- and they
+      were renamed because neither is a bound: 0.4.0 still resolves the
+      development spellings with a DeprecationWarning until 0.5.0 removes
+      them, and they are deliberately absent from keys(), iteration and
+      len().  That estimate is not a bound; see the
       residual risk.
       A bound is reported beside it, under solver="ift" with
       diagnostics=True only: eight Arnoldi steps on dF/dx at the returned
@@ -446,10 +448,12 @@ anomalies:
       t/100 and take the difference between the two answers as the error
       at t.  On 0.4.0 the flag carries the amplification itself; read
       coupling_diagnostics()['ratio_usable'] to see whether it did, and
-      treat ratio_usable=False as the old behaviour.  That key was spelled
-      'bound_valid' before 0.4.0 and still resolves under the old spelling,
-      with a DeprecationWarning, until 0.5.0 removes it -- but it is not in
-      keys(), so do not look for it by enumerating the report.
+      treat ratio_usable=False as the old behaviour.  No release before
+      0.4.0 reported it under any name (0.3.x has no such key);
+      'bound_valid' was its name during 0.4.0's development, and 0.4.0
+      still resolves that spelling, with a DeprecationWarning, until 0.5.0
+      removes it -- but it is not in keys(), so do not look for it by
+      enumerating the report.
     resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >

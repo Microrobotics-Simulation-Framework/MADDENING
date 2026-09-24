@@ -847,6 +847,71 @@ def _refuse_colliding_group_keys(groups) -> None:
             slots[slot] = group.nodes
 
 
+def _group_dividers(group, nodes):
+    """Evaluations of each node per coupling pass under ``subcycling=True``, or ``None``.
+
+    ``None`` when the group does not sub-cycle: ``subcycling=False``, or
+    every node shares one timestep.  Otherwise each node is advanced
+    ``round(macro_dt / node_dt)`` times per pass, ``macro_dt`` the
+    largest timestep in the group.
+    """
+    if not group.subcycling:
+        return None
+    names = sorted(group.nodes)
+    steps = sorted({nodes[nn].timestep for nn in names})
+    if len(steps) <= 1:
+        return None
+    macro = max(steps)
+    return {nn: max(round(macro / nodes[nn].timestep), 1) for nn in names}
+
+
+def _declared_evaluations(node):
+    """``node.update_evaluations()``, validated: a finite number ``>= 1``, or ``None``."""
+    own = getattr(node, "update_evaluations", None)
+    value = own() if callable(own) else None
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)) \
+            or not math.isfinite(float(value)) or float(value) < 1.0:
+        raise ValueError(
+            f"node {getattr(node, 'name', node)!r}: update_evaluations() returned "
+            f"{value!r}; it must be None (not declared) or a finite number >= 1 -- "
+            "the number of evaluations' worth of rounding one update carries."
+        )
+    return float(value)
+
+
+def _group_evaluations(group, nodes):
+    """``(evaluations, declared)``: how many evaluations one coupling pass rounds like.
+
+    The float floor of the coupling bound
+    (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`)
+    is ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` *per
+    evaluation* of the one-pass map, a constant calibrated on a pass
+    that evaluates each node once.  A pass evaluates node ``n`` ``d_n``
+    times (its sub-cycling divider, else once), and each evaluation
+    rounds like ``e_n`` (:meth:`SimulationNode.update_evaluations`,
+    undeclared counting as one), so no node is evaluated more than
+    ``max_n d_n * e_n`` times and the pass rounds like at most that many
+    single passes.  That maximum is ``evaluations``; ``declared`` is
+    whether every node declared its ``e_n``.  Measured, float32: a node
+    sub-cycled 100 times per pass (or looping 100 explicit Euler
+    sub-steps inside ``update``) is ~29 units off the exact map, against
+    the 4 the floor allowed before it was counted -- and the bound read
+    0.16x the true distance with ``spectral_usable=True``.
+    """
+    dividers = _group_dividers(group, nodes) or {}
+    worst = 1.0
+    declared = True
+    for nn in sorted(group.nodes):
+        own = _declared_evaluations(nodes[nn].node)
+        if own is None:
+            declared = False
+            own = 1.0
+        worst = max(worst, float(dividers.get(nn, 1)) * own)
+    return worst, declared
+
+
 def _group_residual_dtype(state, node_names):
     """The dtype a group's residual and its ``_meta`` slots are held in.
 
@@ -1701,10 +1766,11 @@ _DIAGNOSTICS_RENAME_REASON = {
 
 
 class _CouplingDiagnostics(dict):
-    """A per-group diagnostics mapping that still answers the 0.3.x names.
+    """A per-group diagnostics mapping that still answers two development-era names.
 
-    ``coupling_diagnostics()`` renamed two fields in 0.4.0, because each
-    called itself a *bound*:
+    ``coupling_diagnostics()`` renamed two fields during 0.4.0's
+    development, because each called itself a *bound* (no release
+    carried the old names; 0.3.x reported neither field):
 
     * ``bound_valid`` -> ``ratio_usable``
     * ``gradient_error_bound`` -> ``gradient_error_estimate``
@@ -2043,23 +2109,15 @@ def _run_coupled_block_impl(
                     boundary_inputs[ei.target_field] = node_ext[ei.target_field]
         return boundary_inputs
 
-    # Compute subcycling rate dividers if needed.
-    use_subcycling = group.subcycling
-    if use_subcycling:
-        group_timesteps_list = sorted(
-            {nodes[nn].timestep for nn in group_node_names}
-        )
-        if len(group_timesteps_list) > 1:
-            group_macro_dt = max(group_timesteps_list)
-            group_dividers = {
-                nn: max(round(group_macro_dt / nodes[nn].timestep), 1)
-                for nn in group_node_names
-            }
-        else:
-            group_dividers = {nn: 1 for nn in group_node_names}
-            use_subcycling = False  # uniform timestep, no subcycling needed
-        use_linear_interp = group.boundary_interpolation == "linear"
-        use_quadratic_interp = group.boundary_interpolation == "quadratic"
+    # Compute subcycling rate dividers if needed (``None``: the group
+    # does not sub-cycle, including ``subcycling=True`` over one timestep).
+    group_dividers = _group_dividers(group, nodes) or {}
+    use_subcycling = bool(group_dividers)
+    use_linear_interp = group.boundary_interpolation == "linear"
+    use_quadratic_interp = group.boundary_interpolation == "quadratic"
+    # How many evaluations one pass rounds like, for the float floor the
+    # diagnostics compare against (see ``_group_evaluations``).
+    pass_evaluations, _declared = _group_evaluations(group, nodes)
 
     def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha,
                                         flux_s=None, s_prev_prev=None):
@@ -2680,8 +2738,9 @@ def _run_coupled_block_impl(
                 )
                 # The residual's float resolution per entry, each field at
                 # its own dtype's eps (``_residual_resolution``), in the
-                # weights' units (so times their common scale).
-                resolution = weight_scale * _residual_resolution(_flatten_full({
+                # weights' units (so times their common scale), for a pass
+                # that rounds like ``pass_evaluations`` single ones.
+                resolution = (weight_scale * pass_evaluations) * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
                         jnp.shape(template_state[nn][fld]),
                         jnp.finfo(template_state[nn][fld].dtype).eps,
@@ -4796,6 +4855,12 @@ class GraphManager:
                 for n in group.nodes
                 if n in self._nodes
             }
+            for n in sorted(group.nodes):
+                if n in self._nodes:
+                    try:
+                        _declared_evaluations(self._nodes[n].node)
+                    except ValueError as exc:
+                        issues.append(f"ERROR: {exc}")
             if len(group_timesteps) > 1 and not group.subcycling:
                 issues.append(
                     f"ERROR: coupling group {set(group.nodes)} has mixed "
@@ -6011,8 +6076,9 @@ class GraphManager:
               to take a ratio of.  The criterion then falls back to the
               raw residual test, which is what ``converged`` reports.
 
-              *Renamed in 0.4.0* from ``"bound_valid"``, which asserted
-              all four conditions while checking one.  The old key is
+              *Renamed during 0.4.0's development* from
+              ``"bound_valid"``, which asserted all four conditions while
+              checking one; no release carried the old name.  It is
               still readable through 0.4.x, warns, and is removed in
               0.5.0.
             - ``"gradient_error_estimate"`` : float — how far the IFT
@@ -6074,7 +6140,10 @@ class GraphManager:
               its own float resolution
               (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`:
               four units of ``eps * max|field|`` in every entry the norm
-              reads, measured in that norm), times the larger of
+              reads *per evaluation* of the map a coupling pass rounds
+              like -- the largest sub-cycling divider times
+              :meth:`~maddening.core.node.SimulationNode.update_evaluations`
+              in the group -- measured in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and
               ``1 / (1 - rho_spectral)`` with a margin for an unresolved
@@ -6126,7 +6195,9 @@ class GraphManager:
               map's rounding (see
               :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
               which a node that cancels catastrophically inside its own
-              update can exceed.  ``inf`` when ``rho_spectral`` (with
+              update can exceed, and so can one that sub-steps inside
+              ``update`` without declaring it -- see
+              ``"spectral_usable"`` for where that is caught.  ``inf`` when ``rho_spectral`` (with
               margin) is at or above one; NaN where ``"rho_spectral"``
               is, and on a non-finite state.  It is reported, not
               applied: ``"converged"`` and the iteration counts are
@@ -6140,8 +6211,18 @@ class GraphManager:
               a group with more independent interface scalars than the
               eight Krylov steps resolve -- there ``"rho_spectral"``
               is from below and the bound carries only the margin --
-              and where the residual never entered the Krylov space
-              (its outside fraction is reported as unresolved).
+              where the residual never entered the Krylov space
+              (its outside fraction is reported as unresolved), and
+              where the residual is at its float floor
+              (``"precision_limited"``) while a node in the group has
+              not declared
+              :meth:`~maddening.core.node.SimulationNode.update_evaluations`.
+              There the floor *is* the bound, and it rests on how many
+              evaluations the pass rounds like, which nothing outside the
+              node can see: a relay whose node takes 15-200 explicit
+              Euler sub-steps inside ``update`` read 0.07-0.96x its true
+              distance with this flag set.  A group whose nodes all
+              declare keeps the flag at float32 convergence.
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -6266,11 +6347,12 @@ class GraphManager:
               tolerance can reduce the bounds by more than half -- only
               a wider dtype can.  Reported for every group, whatever the
               solver.  ``False`` for a non-finite residual and for a
-              group whose norm reads no field.  A separate flag rather
-              than a reason to clear ``"spectral_usable"``: the bound
-              with its floor *is* a bound, and a group converged to
-              float32 -- the best a float32 group can do -- would
-              otherwise be reported unusable.
+              group whose norm reads no field.  It clears
+              ``"spectral_usable"`` only in a group with a node that has
+              not declared its evaluation count (see there); with every
+              count declared the bound with its floor *is* a bound, and
+              a group converged to float32 -- the best a float32 group
+              can do -- stays usable.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -6388,18 +6470,32 @@ class GraphManager:
                 # iterate reads ``residual=0.0`` arbitrarily far from
                 # its fixed point.  Taken from the state the step left,
                 # by the norm's own field rule.
+                # A pass that sub-cycles a node, or whose nodes loop inside
+                # ``update``, rounds like several single ones: the floor is
+                # per evaluation (``_group_evaluations``).
+                evaluations, declared = _group_evaluations(group, self._nodes)
                 floor = float(residual_precision_floor(
                     self._state, sorted(group.nodes), group.convergence_norm,
                     group.atol, group.rtol,
                     [e for e in self._edges
                      if e.source_node in group.nodes and e.target_node in group.nodes],
+                    evaluations=evaluations,
                 ))
                 spectral_bound = float(spectral_error_bound(
                     residual, rho_spec, spec_resid, spec_amp, floor=floor,
                 ))
+                precision_limited = bool(
+                    floor > 0.0 and math.isfinite(residual) and residual <= floor
+                )
+                # Where the residual is at its floor the floor *is* the
+                # bound, and the floor rests on each node's evaluation
+                # count.  Unless every node declared it, that is not
+                # checked, and a node that sub-steps inside ``update``
+                # made the bound read 0.07-0.96x the true distance.
                 spectral_usable = bool(
                     math.isfinite(spectral_bound)
                     and spectral_rate_settled(rho_spec, spec_resid)
+                    and (declared or not precision_limited)
                 )
                 # The gradient's bound is stored ready-made: its
                 # ingredients are vectors the state does not keep.  It
@@ -6425,9 +6521,7 @@ class GraphManager:
                     "gradient_bound_usable": bool(
                         spectral_usable and math.isfinite(grad_bound)
                     ),
-                    "precision_limited": bool(
-                        floor > 0.0 and math.isfinite(residual) and residual <= floor
-                    ),
+                    "precision_limited": precision_limited,
                 })
         return result
 

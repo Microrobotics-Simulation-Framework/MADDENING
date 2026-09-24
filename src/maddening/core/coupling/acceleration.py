@@ -455,8 +455,9 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     produces.  Nothing computable from the residual norms alone
     separates that from a genuine 0.2 contraction; it needs the
     spectrum.  So a rate this function accepts is an estimate, and
-    ``ratio_usable`` (named ``bound_valid`` before 0.4.0, for exactly
-    this reason) reports a usable *ratio*, not a valid *bound*.  The
+    ``ratio_usable`` (renamed from ``bound_valid`` during 0.4.0's
+    development, for exactly this reason; no release carried the old
+    name) reports a usable *ratio*, not a valid *bound*.  The
     full list of what the estimate rests on is in
     ``graph_manager._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
@@ -839,11 +840,34 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #:   480-cell sweep behind ``tests/core/test_coupling_solver_equivalence.py``):
 #:   at most **0.82**.
 #:
-#: Their sum is 1.54; four units is 2.6x that, which is the room a map
-#: with more roundings per entry than one dense product needs (a
-#: sub-stepped integrator, a flux computed from two iterates).  It is a
-#: model of the map's rounding, not a proof of it: a node whose update
-#: cancels catastrophically -- a small output computed as the
+#: Their sum is 1.54; four units is 2.6x that, room for an evaluation
+#: with a few more roundings per entry than one dense product (a flux
+#: computed from two iterates).
+#:
+#: **It is per evaluation, not per pass.**  A composite map is several
+#: evaluations, and its error grows with their number: explicit Euler
+#: ``x <- x + h (T - x)`` in ``N`` sub-steps, measured the same way,
+#: reaches 1.3 units at ``N = 4``, 2.6 at 10, 5.8 at 20, 15.6 at 50 and
+#: 29.4 at 100 (worst of 2 000 draws each, jaxlib 0.11.0) -- every
+#: sub-step whose increment is below half an ulp of its field is rounded
+#: away.  While the floor was a flat four
+#: units, a stalled relay built on such a node read a bound 0.07-0.96x
+#: its true distance at ``N`` = 15-200 with ``spectral_usable=True``,
+#: whether the node looped inside ``update`` or the framework
+#: sub-cycled it.  So the floor is this constant times the number of
+#: evaluations one coupling pass rounds like: the largest sub-cycling
+#: divider times :meth:`SimulationNode.update_evaluations` in the group
+#: (``GraphManager._group_evaluations``; a pass evaluates no node more
+#: often than that, so it rounds like at most that many single passes),
+#: which is ``4N`` -- 16, 40, 80, 200 and 400 units against those
+#: figures, the same 2.6x-or-more headroom the single evaluation has
+#: and 14x at ``N = 100``, the price of one constant.  A node that loops
+#: inside ``update`` without declaring it is counted as one evaluation,
+#: and ``coupling_diagnostics`` withholds ``spectral_usable`` wherever
+#: the residual is at the floor, where that count carries the bound.
+#:
+#: It is a model of the map's rounding, not a proof of it: a node whose
+#: update cancels catastrophically -- a small output computed as the
 #: difference of two large intermediates -- can exceed any fixed number
 #: of ulps of its *output's* magnitude, and nothing outside the node can
 #: see that.
@@ -852,7 +876,7 @@ PRECISION_FLOOR_ULPS = 4.0
 
 def residual_precision_floor(state, node_names, convergence_norm="l2",
                              atol: float = 0.0, rtol: float = 1.0,
-                             interface_edges=()):
+                             interface_edges=(), evaluations: float = 1.0):
     """The float resolution of a residual the group's norm reports at *state*.
 
     ``PRECISION_FLOOR_ULPS`` units of ``eps * max|field|`` in every
@@ -887,6 +911,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         read by the L2 norm, whose threshold is ``tolerance``).
     interface_edges : iterable of EdgeSpec
         The group's internal edges (read under ``"interface"``).
+    evaluations : float
+        How many evaluations of the map one coupling pass rounds like:
+        the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
+        ``GraphManager.coupling_diagnostics`` passes the largest
+        ``sub-cycling divider * SimulationNode.update_evaluations()`` in
+        the group; ``1.0`` is a pass that evaluates each node once.
 
     Returns
     -------
@@ -905,6 +935,8 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     4000
     >>> float(residual_precision_floor(s, ["n"], "l2", atol=2.0))   # dead-banded: nothing read
     0.0
+    >>> round(float(residual_precision_floor(s, ["n"], "l2", evaluations=100.0)) / eps)
+    800
     """
     norm = str(convergence_norm)
     use_rtol = 1.0 if norm == "l2" else float(rtol)
@@ -937,7 +969,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         count = count + n
     if norm != "l2":
         sum_sq = sum_sq / jnp.maximum(count, 1.0)
-    return PRECISION_FLOOR_ULPS * jnp.sqrt(sum_sq)
+    return (PRECISION_FLOOR_ULPS * float(evaluations)) * jnp.sqrt(sum_sq)
 
 
 def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,

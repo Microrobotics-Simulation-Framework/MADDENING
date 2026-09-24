@@ -42,7 +42,13 @@ _EPS = float(np.finfo(np.float32).eps)
 
 
 class _Map(SimulationNode):
-    """``x <- a + g * u`` (``"affine"``) or ``x <- a + g * u**2`` (``"square"``)."""
+    """``x <- a + g * u`` (``"affine"``) or ``x <- a + g * u**2`` (``"square"``).
+
+    One evaluation per update, and it says so (``update_evaluations``):
+    the fixtures here are about the floor's value, and an undeclared
+    node's group is not reported usable at the floor (see
+    ``test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor``).
+    """
 
     def __init__(self, name, kind, a, g, x0):
         super().__init__(name=name, timestep=1.0, a=jnp.float32(a), g=jnp.float32(g))
@@ -64,9 +70,12 @@ class _Map(SimulationNode):
         u = boundary_inputs["u"]
         return {"x": p["a"] + p["g"] * (u if self._kind == "affine" else u * u)}
 
+    def update_evaluations(self):
+        return 1
+
 
 class _Relay(SimulationNode):
-    """``x <- u``."""
+    """``x <- u``; one evaluation, declared."""
 
     def __init__(self, name, x0):
         super().__init__(name=name, timestep=1.0)
@@ -84,6 +93,9 @@ class _Relay(SimulationNode):
 
     def update(self, state, boundary_inputs, dt, *, params=None):
         return {"x": boundary_inputs["u"]}
+
+    def update_evaluations(self):
+        return 1
 
 
 def _relay_graph(kind, a, g, x0, **group_kw):
@@ -292,18 +304,29 @@ def test_the_precision_floor_is_what_each_norm_can_resolve():
         s, ["n", "m"], "interface", rtol=1e-3, interface_edges=())) == 0.0
 
 
+#: The recorded disagreement between two compilations of the same pass,
+#: in units of ``eps * max|field|``: the largest gap between the ``"ift"``
+#: and ``"fori"`` residuals over the 480-cell sweep behind
+#: ``test_coupling_solver_equivalence.py``, as ``PRECISION_FLOOR_ULPS``'s
+#: derivation quotes it.  Too expensive to re-run here.
+_CROSS_COMPILATION_ULPS = 0.82
+
+
 def test_the_floor_has_headroom_over_a_dense_updates_evaluation_error():
-    """The constant is calibrated, not arbitrary: at least twice the measured error.
+    """The constant is calibrated, not arbitrary: twice both things it must cover.
 
     ``PRECISION_FLOOR_ULPS`` is justified by what it must cover -- the
     difference between a residual float32 computes and the exact map's.
-    Measured here the way its docstring states it: a dense update
-    ``A @ u + c`` evaluated in float32 against the same float32 operands
-    in float64, near the fixed point, over random normal contractions of
-    dimension 2-6, in units of ``eps * max|field|`` and in the L2 norm of
-    the relay group (both fields).  The docstring's figure is 0.72; a
-    floor under twice what is measured would be a floor the rounding of
-    one ordinary node already eats half of.
+    Its derivation names two parts: the evaluation error of one
+    evaluation, measured here the way the docstring states it (a dense
+    update ``A @ u + c`` in float32 against the same float32 operands in
+    float64, near the fixed point, over random normal contractions of
+    dimension 2-6, in units of ``eps * max|field|`` and in the L2 norm
+    of the relay group), and the disagreement between two compilations
+    of the same pass (recorded, 0.82).  Twice their *sum* is required:
+    asking only for twice the first let ``PRECISION_FLOOR_ULPS = 1.5``
+    pass -- a floor that one evaluation plus one recompilation already
+    exceeds.
     """
     rng = np.random.default_rng(0)
     worst = 0.0
@@ -320,14 +343,19 @@ def test_the_floor_has_headroom_over_a_dense_updates_evaluation_error():
         err = (f32 - f64) / ref
         worst = max(worst, math.sqrt(2.0 * np.sum(err ** 2)) / (_EPS * math.sqrt(2.0 * n)))
     assert 0.0 < worst < 1.0, f"fixture premise: measured {worst:.3f}"
-    assert PRECISION_FLOOR_ULPS >= 2.0 * worst, (
+    covered = worst + _CROSS_COMPILATION_ULPS
+    assert PRECISION_FLOOR_ULPS >= 2.0 * covered, (
         f"the floor ({PRECISION_FLOOR_ULPS} units) has less than 2x headroom "
-        f"over a dense update's measured evaluation error ({worst:.3f} units)"
+        f"over one evaluation ({worst:.3f} units, measured) plus one "
+        f"recompilation ({_CROSS_COMPILATION_ULPS} units, recorded)"
     )
 
 
 class _Map16(SimulationNode):
-    """``x <- a + g * u`` held in float16, reading a float32 partner."""
+    """``x <- a + g * u`` held in float16, reading a float32 partner; one evaluation, declared."""
+
+    def update_evaluations(self):
+        return 1
 
     def __init__(self, name, a, g, x0):
         super().__init__(name=name, timestep=1.0, a=jnp.float32(a), g=jnp.float32(g))
@@ -400,3 +428,212 @@ def test_a_float16_field_beside_a_float32_one_is_floored_at_float16():
         f"relative error {true_error:.3e} on a float16 field"
     )
     assert d["gradient_bound_usable"] is True, d
+
+
+# ---------------------------------------------------------------------------
+# A composite map: the floor is per evaluation
+# ---------------------------------------------------------------------------
+
+_HALF_ULP_OF_ONE = 2.0 ** -24
+
+
+class _Relax(SimulationNode):
+    """``dx/dt = (G u + C - x) / T`` by explicit Euler in ``substeps`` steps of ``h``.
+
+    ``declare`` is what ``update_evaluations`` returns: ``None`` (not
+    declared), or a count.
+    """
+
+    def __init__(self, name, substeps, h, c, *, timestep=1.0, declare=None):
+        super().__init__(name=name, timestep=timestep, g=jnp.float32(0.5),
+                         c=jnp.float32(c))
+        self._n, self._h, self._declare = substeps, h, declare
+
+    def initial_state(self):
+        return {"x": jnp.float32(1.0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        x = state["x"]
+        target = p["g"] * boundary_inputs["u"] + p["c"]
+        h = jnp.float32(self._h)
+        for _ in range(self._n):
+            x = x + h * (target - x)
+        return {"x": x}
+
+    def update_evaluations(self):
+        return self._declare
+
+
+def _stalled_substep_graph(n, *, framework=False, declare=None):
+    """A relay whose node integrates ``n`` explicit Euler sub-steps, started stalled at 1.0.
+
+    ``h = 1/n`` and ``C`` put every increment ``h (T - x)`` at 0.95 of
+    half an ulp of 1, so each sub-step is rounded away and the float32
+    map returns its input -- while the exact map moves.  ``framework``
+    has the graph sub-cycle a one-step node ``n`` times per pass
+    (``subcycling=True``, node timestep ``1/n`` of its partner's)
+    instead of the node looping inside ``update``.  Returns the graph
+    and the exact fixed point (float64 closed form on the float32
+    constants).
+    """
+    h = float(np.float32(1.0 / n))
+    c = float(np.float32(0.5 + 0.95 * _HALF_ULP_OF_ONE / h))
+    gm = GraphManager()
+    if framework:
+        gm.add_node(_Relax("a", 1, h, c, timestep=1.0 / n, declare=declare))
+        kw = {"subcycling": True}
+    else:
+        gm.add_node(_Relax("a", n, h, c, declare=declare))
+        kw = {}
+    gm.add_node(_Relay("b", 1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, max_iterations=50,
+                          tolerance=1e-6, **kw)
+    gm.compile()
+    alpha = (1.0 - h) ** n
+    x_star = (alpha + (1.0 - alpha) * c) / (1.0 - (1.0 - alpha) * float(np.float32(0.5)))
+    return gm, x_star
+
+
+@pytest.mark.parametrize("framework", (False, True), ids=("internal", "subcycled"))
+@pytest.mark.parametrize("n", (20, 100))
+def test_a_sub_stepped_node_is_floored_per_evaluation(n, framework):
+    """``n`` sub-steps, counted: the bound covers the distance and says it is usable.
+
+    Before the floor was counted per evaluation it was four units
+    whatever the node did, and this group -- residual ``0.0``,
+    ``converged=True`` -- read a bound 0.80x (``n = 20``) and 0.14x
+    (``n = 100``) its true distance with ``spectral_usable=True``.  The
+    framework's sub-cycling is counted without a declaration; a node
+    that loops inside ``update`` declares ``n``.  Both forms here
+    declare, so the flag holds.
+    """
+    gm, x_star = _stalled_substep_graph(n, framework=framework,
+                                        declare=1 if framework else n)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["residual"] == 0.0 and d["iterations"] == 1, f"fixture premise: stalled: {d}"
+    distance = _l2_distance(gm, x_star)
+    flat = PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0) / (1.0 - d["rho_spectral"])
+    assert distance > flat, (
+        f"fixture premise: {distance:.3e} is beyond the bound a flat floor "
+        f"gives ({flat:.3e})"
+    )
+    assert d["precision_limited"] is True
+    assert d["spectral_usable"] is True, d
+    assert d["spectral_error_bound"] >= distance, (
+        f"bound {d['spectral_error_bound']:.3e} under the true distance "
+        f"{distance:.3e} for {n} sub-steps"
+    )
+    # The floor is the per-evaluation one times the count.
+    floor = n * PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0)
+    assert d["spectral_error_bound"] >= floor / (1.0 - d["rho_spectral"]) * (1 - 1e-6)
+
+
+@pytest.mark.parametrize("n", (20, 100))
+def test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor(n):
+    """The same node looping inside ``update`` without saying so: the flag is withheld.
+
+    Nothing outside ``update`` can count its sub-steps, so the floor
+    takes it as one evaluation, and the bound built on that reads below
+    the true distance -- the premise asserted here.  Where the residual
+    is at the floor (``precision_limited``) that unverified count is
+    the whole bound, and neither ``spectral_usable`` nor
+    ``gradient_bound_usable`` may say otherwise.
+    """
+    gm, x_star = _stalled_substep_graph(n)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _l2_distance(gm, x_star)
+    assert d["residual"] == 0.0, "fixture premise: stalled"
+    assert d["spectral_error_bound"] < distance, (
+        "fixture premise: counted as one evaluation, the bound reads low"
+    )
+    assert d["precision_limited"] is True
+    assert d["spectral_usable"] is False, d
+    assert d["gradient_bound_usable"] is False, d
+    # Declared, the same group is covered and usable (the control).
+    declared, _ = _stalled_substep_graph(n, declare=n)
+    declared.step()
+    dd = declared.coupling_diagnostics()["a+b"]
+    assert dd["spectral_usable"] is True
+    assert dd["spectral_error_bound"] >= _l2_distance(declared, x_star)
+
+
+@pytest.mark.parametrize("n", (1, 4, 10, 20, 50, 100))
+def test_the_floor_covers_explicit_euler_per_declared_sub_step(n):
+    """The model behind the count: ``n`` Euler sub-steps stay under ``n`` floors.
+
+    ``x <- x + h (T - x)``, ``h = 1/n``, evaluated in float32 against the
+    same float32 operands in float64, in units of ``eps * max|field|``,
+    over targets from 1e-7 to 1e-3 relative -- including the ones whose
+    every increment rounds away.  The worst case must stay under
+    ``PRECISION_FLOOR_ULPS * n``, and from ``n = 20`` on it exceeds the
+    flat ``PRECISION_FLOOR_ULPS`` the floor used to be.
+    """
+    h = np.float32(1.0 / n)
+    step = jax.jit(lambda x0, t: jax.lax.fori_loop(0, n, lambda i, x: x + h * (t - x), x0))
+    rng = np.random.default_rng(n)
+    worst = 0.0
+    for _ in range(400):
+        x0 = np.float32(rng.uniform(0.5, 2.0))
+        t = np.float32(x0 * (1.0 + rng.choice((-1.0, 1.0)) * 10.0 ** rng.uniform(-7, -3)))
+        got = float(step(jnp.float32(x0), jnp.float32(t)))
+        x = float(x0)
+        for _ in range(n):
+            x = x + float(h) * (float(t) - x)
+        worst = max(worst, abs(got - x) / (_EPS * max(abs(got), abs(x), float(x0))))
+    assert worst <= PRECISION_FLOOR_ULPS * n, (
+        f"{n} sub-steps: {worst:.2f} units, over {PRECISION_FLOOR_ULPS * n:.0f}"
+    )
+    if n >= 20:
+        assert worst > PRECISION_FLOOR_ULPS, (
+            f"premise: {n} sub-steps ({worst:.2f} units) exceed one evaluation's floor"
+        )
+
+
+def test_precision_limited_is_the_residual_at_or_below_the_floor():
+    """The flag's threshold is the floor itself, read on the stored residual.
+
+    The report derives the flag on the host from the residual the step
+    stored.  Rewriting that one number walks it across the threshold:
+    at the floor and at three quarters of it the residual is rounding,
+    just above it it is not.  (Moving the threshold to half the floor
+    went unnoticed by every other test.)
+    """
+    gm = _relay_graph("affine", 1.0, 0.25, 0.0, tolerance=1e-2)
+    gm.step()
+    floor = float(residual_precision_floor(gm._state, ["a", "b"], "l2"))
+    assert floor == pytest.approx(PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0), rel=1e-6)
+    slot = "coupling_a+b_residual"
+    dtype = gm._state["_meta"][slot].dtype
+    for value, limited in ((0.75 * floor, True), (floor, True),
+                           (float(np.nextafter(np.float32(floor), np.float32(1.0))), False),
+                           (2.0 * floor, False)):
+        stored = jnp.asarray(value, dtype)
+        gm._state["_meta"][slot] = stored
+        d = gm.coupling_diagnostics()["a+b"]
+        assert d["residual"] == float(stored)
+        assert d["precision_limited"] is limited, (value / floor, d)
+
+
+@pytest.mark.parametrize("bad", (0.5, 0, float("nan"), float("inf"), True, "2"))
+def test_an_invalid_evaluation_count_is_refused_at_compile(bad):
+    """A count below one would shrink the floor under one evaluation's rounding."""
+    gm = GraphManager()
+    gm.add_node(_Relax("a", 2, 0.5, 0.5, declare=bad))
+    gm.add_node(_Relay("b", 1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, max_iterations=5, tolerance=1e-6)
+    with pytest.raises(RuntimeError, match="update_evaluations"):
+        gm.compile()

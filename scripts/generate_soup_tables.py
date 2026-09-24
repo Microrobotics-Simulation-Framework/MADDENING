@@ -95,9 +95,10 @@ TESTS = REPO_ROOT / "tests"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 #: Test modules whose import populates the verification benchmark
-#: registry.  ``_check_benchmark_modules_are_complete`` scans ``tests/``
-#: for ``benchmark_id="MADD-VER-`` and fails if one is missing here, so
-#: a newly registered benchmark cannot quietly vanish from the index.
+#: registry.  ``_check_benchmark_modules_are_complete`` parses every module
+#: under ``tests/`` for a ``MADD-VER-`` registration and fails if one is
+#: missing here, so a newly registered benchmark cannot quietly vanish
+#: from the index.
 BENCHMARK_MODULES: tuple[str, ...] = (
     "tests.verification.test_heat_analytical",
     "tests.verification.test_mms_order",
@@ -640,19 +641,87 @@ def _check_test_directories_are_described(packages: list[str]) -> list[str]:
     return errors
 
 
+def _registered_benchmark_ids(tree) -> tuple[list[str], list[int]]:
+    """``(ids, unreadable_lines)`` a parsed module registers, read with ast.
+
+    A registration is a call to ``verification_benchmark`` -- by that name,
+    an ``as`` alias of it, or as an attribute (``compliance.verification_
+    benchmark``) -- whose ``benchmark_id`` (keyword or first positional)
+    is the ID; and, as the grep this replaced also caught, any call passing
+    a literal ``benchmark_id=`` keyword.  An ID that is not a string literal
+    goes in ``unreadable_lines``: the module may register a benchmark this
+    check cannot see.
+    """
+    import ast
+
+    names = {"verification_benchmark"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names |= {a.asname for a in node.names
+                      if a.name == "verification_benchmark" and a.asname}
+    ids: list[str] = []
+    unreadable: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        values = [kw.value for kw in node.keywords if kw.arg == "benchmark_id"]
+        if callee in names:
+            if node.args:
+                values.append(node.args[0])
+            elif not values:
+                unreadable.append(node.lineno)
+        for value in values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                ids.append(value.value)
+            elif callee in names:
+                unreadable.append(node.lineno)
+    return ids, unreadable
+
+
 def _check_benchmark_modules_are_complete() -> list[str]:
-    """Every test module registering a MADD-VER benchmark must be listed."""
+    """Every test module registering a MADD-VER benchmark must be listed.
+
+    Parsed, not grepped.  The check used to look for the text
+    ``benchmark_id="MADD-VER-``, so a benchmark registered with
+    ``benchmark_id='MADD-VER-017'`` -- single quotes -- ran, registered
+    and never reached ``framework_verification.md``, with every gate
+    green (audit_040_phase3_confirm, release-record).  Every ``.py`` under
+    ``tests/`` is read, not only ``test_*.py``: a helper module registers
+    on import just the same.  A module whose ID cannot be read statically
+    must be listed too, since it may register one.
+    """
+    import ast
+
     listed = {m.replace(".", "/") + ".py" for m in BENCHMARK_MODULES}
     errors = []
-    for path in sorted(TESTS.rglob("test_*.py")):
-        if 'benchmark_id="' + BENCHMARK_PREFIX not in path.read_text():
-            continue
+    for path in sorted(TESTS.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel not in listed:
+        if rel in listed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "benchmark" not in text:
+            continue
+        try:
+            tree = ast.parse(text, filename=rel)
+        except SyntaxError as exc:
+            errors.append(f"{rel} could not be parsed ({exc}), so whether it "
+                          f"registers a {BENCHMARK_PREFIX} benchmark is unknown")
+            continue
+        ids, unreadable = _registered_benchmark_ids(tree)
+        ours = sorted(i for i in ids if i.startswith(BENCHMARK_PREFIX))
+        if ours:
             errors.append(
-                f"{rel} registers a {BENCHMARK_PREFIX} benchmark but is not in "
+                f"{rel} registers {', '.join(ours)} but is not in "
                 f"BENCHMARK_MODULES in {Path(__file__).name}, so it would be "
                 f"missing from framework_verification.md"
+            )
+        elif unreadable:
+            errors.append(
+                f"{rel}:{unreadable[0]} registers a verification benchmark "
+                f"whose ID is not a string literal, so it may be a "
+                f"{BENCHMARK_PREFIX} benchmark this check cannot see; write "
+                f"the ID out, or list the module in BENCHMARK_MODULES"
             )
     return errors
 

@@ -820,6 +820,186 @@ class TestMinMappingsRatchet:
         assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
 
 
+def _node_guide(tmp_path, title, module, id_lines, name="node_guide.md"):
+    """A guide whose header names a node, followed by one resolvable row."""
+    path = tmp_path / name
+    path.write_text(
+        f"# {title}\n\n**Module**: `{module}`\n" + "".join(id_lines) + "\n"
+        + _TABLE_HEADER
+        + "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n"
+        + "\n## Next Section\n"
+    )
+    return path
+
+
+def _src_tree(tmp_path, **modules):
+    """A throwaway package for the algorithm-ID scan: ``name=source``."""
+    root = tmp_path / "src_pkg"
+    root.mkdir(exist_ok=True)
+    for name, source in modules.items():
+        (root / f"{name}.py").write_text(source)
+    return str(root)
+
+
+class TestNodeAlgorithmIds:
+    """Every node algorithm ID is unique, and a guide's ID is its node's.
+
+    ``LBMNode`` and ``RigidBodyNode`` both carried ``MADD-NODE-007`` from
+    0.1.0 to 0.3.1.  With a second duplicate seeded (``SpringDamperNode``
+    taking ``BallNode``'s ``MADD-NODE-001``) and the heat guide stating
+    ``MADD-NODE-006`` for a node that carries ``MADD-NODE-005``, all seven
+    gates, the SOUP ``--check`` and every compliance test passed
+    (audit_040_phase3_confirm, release-record).
+    """
+
+    def test_the_repository_declares_no_algorithm_id_twice(self, mapping_gate):
+        n_ids, errors = mapping_gate.algorithm_id_errors()
+        assert errors == []
+        # Twelve NodeMeta declarations carry an ID today; a scan that finds
+        # far fewer has lost its scope, not its duplicates.
+        assert n_ids >= 12, n_ids
+
+    def test_rigid_body_keeps_madd_node_007_and_lbm_moved_to_011(self):
+        """The resolution of the duplicate, pinned where it was decided.
+
+        ``RigidBodyNode``'s ID has been pinned by a test shipped in every
+        release since 0.1.0; ``LBMNode``'s was first published in 0.4.0's
+        algorithm guide, so ``LBMNode`` is the one renumbered.
+        """
+        from maddening.nodes.lbm import LBMNode
+        from maddening.nodes.rigid_body import RigidBodyNode
+
+        assert RigidBodyNode.meta.algorithm_id == "MADD-NODE-007"
+        assert LBMNode.meta.algorithm_id == "MADD-NODE-011"
+
+    def test_a_second_node_taking_an_existing_id_fails(self, mapping_gate, tmp_path):
+        """Replays the audit's seeded duplicate: spring takes ball's ID."""
+        root = _src_tree(
+            tmp_path,
+            ball='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            spring='meta = NodeMeta(\n    algorithm_id="MADD-NODE-001",\n)\n',
+        )
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        (message,) = errors
+        assert "MADD-NODE-001 is declared 2 times" in message
+        assert "ball.py:1" in message and "spring.py:2" in message
+
+    def test_the_gate_run_fails_on_a_duplicate_in_its_source_tree(
+        self, mapping_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Through ``main``, whatever guide directory it was pointed at."""
+        root = _src_tree(
+            tmp_path,
+            a='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            b='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+        )
+        monkeypatch.setattr(mapping_gate, "SRC_PACKAGE", root)
+        _guide(tmp_path, "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "MADD-NODE-001 is declared 2 times" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("second", [
+        # NodeMeta's first positional parameter is algorithm_id.
+        'meta = NodeMeta("MADD-NODE-001", "1.0.0")\n',
+        # Any algorithm_id= keyword, not only NodeMeta's.
+        'meta = dataclasses.replace(Base.meta, algorithm_id="MADD-NODE-001")\n',
+        # An attribute-spelled constructor.
+        'meta = compliance.NodeMeta(algorithm_id="MADD-NODE-001")\n',
+    ])
+    def test_every_spelling_of_an_id_is_read(self, mapping_gate, tmp_path, second):
+        root = _src_tree(
+            tmp_path, a='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            b=second)
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert any("MADD-NODE-001 is declared 2 times" in e for e in errors), errors
+
+    @pytest.mark.parametrize("source, reason", [
+        ('meta = NodeMeta(algorithm_id=PREFIX + "001")\n', "not a string literal"),
+        ('meta = NodeMeta(**META_KWARGS)\n', "can hide an algorithm_id"),
+        ('meta = NodeMeta(ID_CONSTANT)\n', "not a string literal"),
+    ])
+    def test_an_id_the_scan_cannot_read_fails(self, mapping_gate, tmp_path,
+                                              source, reason):
+        """An ID nobody can read is an ID nobody checked for uniqueness."""
+        root = _src_tree(tmp_path, a=source,
+                         b='meta = NodeMeta(algorithm_id="MADD-NODE-002")\n')
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert any(reason in e for e in errors), errors
+
+    def test_the_empty_default_claims_no_id(self, mapping_gate, tmp_path):
+        root = _src_tree(tmp_path, a='meta = NodeMeta(algorithm_id="")\n',
+                         b='meta = NodeMeta(algorithm_id="")\n',
+                         c='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n')
+        assert mapping_gate.algorithm_id_errors(root) == (1, [])
+
+    def test_a_scope_with_no_ids_fails(self, mapping_gate, tmp_path):
+        root = _src_tree(tmp_path, a="x = 1\n")
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert errors and "verifies nothing" in errors[0]
+
+    def test_a_guide_stating_another_nodes_id_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """Replays the audit's heat guide: 006 stated, 005 carried."""
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-006`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        err = capsys.readouterr().err
+        assert "states algorithm ID MADD-NODE-006" in err
+        assert "'MADD-NODE-005'" in err
+
+    def test_a_guide_stating_its_nodes_id_passes(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 0
+        assert "1 guide algorithm ID(s) match" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("id_lines, reason", [
+        ([], "states no '**Algorithm ID**"),
+        (["**Algorithm ID**: `MADD-NODE-005`\n",
+          "**Algorithm ID**: `MADD-NODE-005`\n"], "states 2 algorithm IDs"),
+        (["**Algorithm ID**: MADD-NODE-005\n"], "is not written"),
+        (["**Algorithm ID**:`MADD-NODE-005`\n"], "is not written"),
+    ])
+    def test_a_node_guide_whose_id_cannot_be_compared_fails(
+        self, mapping_gate, tmp_path, capsys, id_lines, reason
+    ):
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat", id_lines)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert reason in capsys.readouterr().err
+
+    def test_a_node_id_on_a_guide_that_names_no_node_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "NoSuchNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "does not resolve" in capsys.readouterr().err
+
+    def test_a_node_without_its_own_nodemeta_cannot_own_a_guide_id(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "SimulationNode", "maddening.core.node",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "defines no NodeMeta of its own" in capsys.readouterr().err
+
+    def test_a_non_node_id_needs_no_nodemeta(self, mapping_gate, tmp_path):
+        """``MADD-ALG-INT-001`` documents the integrators, not a node."""
+        _node_guide(tmp_path, "Explicit", "maddening.core",
+                    ["**Algorithm ID**: `MADD-ALG-TEST-001`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    def test_two_guides_stating_one_id_fail(self, mapping_gate, tmp_path, capsys):
+        for name in ("one.md", "two.md"):
+            _node_guide(tmp_path, "Explicit", "maddening.core",
+                        ["**Algorithm ID**: `MADD-ALG-TEST-001`\n"], name=name)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "is stated by 2 guides" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # check_citations.py
 # ---------------------------------------------------------------------------
@@ -1073,6 +1253,7 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    resolution_version: "0.4.0"
     affected_versions: "{versions}"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
@@ -1329,6 +1510,233 @@ def _status_of(aid):
                 if a["anomaly_id"] == aid)["resolution_status"]
 
 
+_PROBE_TESTS = '''\
+import pytest
+
+
+def test_runs():
+    assert True
+
+
+@pytest.mark.skip(reason="fixture: evidence that never runs")
+def test_never_runs():
+    assert True
+
+
+@pytest.mark.skipif(True, reason="fixture")
+def test_sometimes_runs():
+    assert True
+
+
+@pytest.mark.xfail(strict=True, reason="fixture")
+def test_expected_to_fail():
+    assert False
+
+
+def _helper_not_a_test():
+    pass
+
+
+class Helpers:
+    def test_in_a_non_test_class(self):
+        pass
+
+
+class TestWithInit:
+    def __init__(self):
+        pass
+
+    def test_never_collected(self):
+        pass
+
+
+@pytest.mark.skip(reason="fixture")
+class TestSkippedClass:
+    def test_inside(self):
+        pass
+
+
+class TestFine:
+    def test_method(self):
+        pass
+'''
+
+
+def _registry_citing(tmp_path, status, refs, components=None, extra_files=None):
+    """A one-entry registry whose ``verification`` cites ``refs``, beside a
+    throwaway ``tests/`` tree the refs resolve against."""
+    tests = tmp_path / "tests"
+    tests.mkdir(exist_ok=True)
+    (tests / "test_probe.py").write_text(_PROBE_TESTS)
+    for name, text in (extra_files or {}).items():
+        (tests / name).write_text(text)
+    closed = status == "resolved"
+    components = components or ["maddening.nodes.heat.HeatNode"]
+    path = tmp_path / "known_anomalies.yaml"
+    path.write_text(
+        'schema_version: "1.0"\nmaddening_version: "0.4.0.dev0"\n'
+        'generated_date: "2026-03-12"\nanomalies:\n'
+        '  - anomaly_id: "MADD-ANO-001"\n    title: "Test"\n'
+        '    description: "Test"\n    severity: "major"\n'
+        '    safety_relevance: "context_dependent"\n'
+        '    safety_relevance_rationale: "Test"\n'
+        f'    resolution_status: "{status}"\n'
+        + ('    resolution_version: "0.4.0"\n' if closed else "")
+        + f'    affected_versions: "{">=0.1.0, <0.4.0" if closed else ">=0.1.0"}"\n'
+        '    affected_components:\n'
+        + "".join(f'      - "{c}"\n' for c in components)
+        + '    verification:\n'
+        + "".join(f'      - "{r}"\n' for r in refs)
+    )
+    return path
+
+
+class TestAnomalyGateChecksWhatAReferenceIs:
+    """A ``verification`` entry must be a test that runs, listed once.
+
+    The gate resolved each reference to a ``def`` and nothing more, so it
+    accepted a reference listed twice (and counted it twice: 230 against
+    228), a reference to a skip-marked test, and one to a helper pytest
+    never collects (audit_040_phase3_confirm, release-record,
+    repro_gate_verification_markers.py).
+    """
+
+    @staticmethod
+    def _gate(path, repo_root, *extra):
+        return _load("check_anomalies").main(
+            [str(path), "--repo-root", str(repo_root), *extra])
+
+    def test_tests_that_run_pass(self, tmp_path, capsys):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs",
+            "tests/test_probe.py::TestFine::test_method",
+            "tests/test_probe.py::TestFine",
+            "tests/test_probe.py",
+        ])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+        assert "0 verification test(s) skip conditionally" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("ref, reason", [
+        ("tests/test_probe.py::test_never_runs", "skipped unconditionally"),
+        ("tests/test_probe.py::TestSkippedClass::test_inside",
+         "skipped unconditionally"),
+        ("tests/test_probe.py::_helper_not_a_test", "is not a test"),
+        ("tests/test_probe.py::Helpers::test_in_a_non_test_class",
+         "is not collected by pytest"),
+        ("tests/test_probe.py::TestWithInit::test_never_collected",
+         "defines __init__"),
+        ("tests/test_probe.py::test_expected_to_fail", "marked xfail"),
+    ])
+    def test_evidence_that_never_runs_or_passes_fails(
+        self, tmp_path, capsys, ref, reason
+    ):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs", ref])
+        assert self._gate(path, tmp_path) == 1
+        err = capsys.readouterr().err
+        assert reason in err and ref in err, err
+
+    def test_a_strict_xfail_pins_an_open_defect(self, tmp_path, capsys):
+        """How MADD-ANO-011/012/013/021/022 cite their evidence."""
+        path = _registry_citing(tmp_path, "open", [
+            "tests/test_probe.py::test_expected_to_fail"])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+
+    def test_a_conditional_skip_is_reported_not_refused(self, tmp_path, capsys):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs",
+            "tests/test_probe.py::test_sometimes_runs"])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+        out = capsys.readouterr().out
+        assert "test_sometimes_runs': is skipped conditionally" in out
+        assert "1 verification test(s) skip conditionally" in out
+
+    @pytest.mark.parametrize("module, reason", [
+        ('import pytest\npytestmark = pytest.mark.skip(reason="x")\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\npytestmark = [pytest.mark.slow, pytest.mark.skip]\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\npytest.skip("x", allow_module_level=True)\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\nzmq = pytest.importorskip("zmq")\n'
+         "def test_a():\n    pass\n", "skipped conditionally"),
+        ('import pytest\ntry:\n    import zmq\nexcept ImportError:\n'
+         '    pytest.skip("x", allow_module_level=True)\n'
+         "def test_a():\n    pass\n", "skipped conditionally"),
+    ])
+    def test_a_module_level_skip_reaches_every_test_in_it(
+        self, tmp_path, capsys, module, reason
+    ):
+        for ref in ("tests/test_module_mark.py::test_a",
+                    "tests/test_module_mark.py"):
+            path = _registry_citing(tmp_path, "resolved",
+                                    ["tests/test_probe.py::test_runs", ref],
+                                    extra_files={"test_module_mark.py": module})
+            rc = self._gate(path, tmp_path)
+            captured = capsys.readouterr()
+            assert reason in captured.err + captured.out, (ref, captured)
+            assert rc == (1 if "unconditionally" in reason else 0), captured
+
+    @pytest.mark.parametrize("name, text, reason", [
+        ("helpers.py", "def test_a():\n    pass\n", "is not a file pytest collects"),
+        ("test_empty.py", "def helper():\n    pass\n", "holds no test"),
+    ])
+    def test_a_file_that_runs_nothing_is_not_evidence(
+        self, tmp_path, capsys, name, text, reason
+    ):
+        ref = f"tests/{name}" + ("::test_a" if name == "helpers.py" else "")
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/test_probe.py::test_runs", ref],
+                                extra_files={name: text})
+        assert self._gate(path, tmp_path) == 1
+        assert reason in capsys.readouterr().err
+
+    @pytest.mark.parametrize("no_resolve", [False, True])
+    def test_a_reference_listed_twice_fails(self, tmp_path, capsys, no_resolve):
+        """Counted twice in the summary line; structural, so it holds under
+        ``--no-resolve`` too."""
+        ref = "tests/test_probe.py::test_runs"
+        path = _registry_citing(tmp_path, "resolved", [ref, ref])
+        extra = ["--no-resolve"] if no_resolve else []
+        assert self._gate(path, tmp_path, *extra) == 1
+        assert f"verification lists '{ref}' more than once" in (
+            capsys.readouterr().err)
+
+    def test_a_component_listed_twice_fails(self, tmp_path, capsys):
+        comp = "maddening.nodes.heat.HeatNode"
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/test_probe.py::test_runs"],
+                                components=[comp, comp])
+        assert self._gate(path, tmp_path) == 1
+        assert f"affected_components lists '{comp}' more than once" in (
+            capsys.readouterr().err)
+
+    def test_the_audits_duplicates_fail_on_the_shipped_registry(self, tmp_path):
+        def duplicate(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-020")
+            entry["verification"].append(entry["verification"][0])
+            entry["affected_components"].append(entry["affected_components"][0])
+        path = _shipped_registry_with(tmp_path, duplicate)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "verification lists" in result.stderr
+        assert "affected_components lists" in result.stderr
+
+    def test_pytests_collection_rules_are_the_defaults_the_gate_assumes(self):
+        """The gate hard-codes pytest's default ``test_*.py`` / ``Test*`` /
+        ``test*``; configuring others would make it judge by the wrong ones."""
+        import tomllib
+
+        config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+        options = config["tool"]["pytest"]["ini_options"]
+        overridden = {"python_files", "python_classes", "python_functions"} & set(options)
+        assert not overridden, (
+            f"pyproject.toml sets {sorted(overridden)}; update "
+            f"scripts/check_anomalies.py's _TEST_FILE / _TEST_*_PREFIX to match")
+
+
 class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
     """``affected_versions`` is compared with ``maddening_version`` (PEP 440).
 
@@ -1415,6 +1823,13 @@ class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
         assert "MADD-ANO-016" in result.stderr
 
 
+#: MADDENING's releases before 0.4.0, as CHANGELOG.md's dated headings list
+#: them -- the history ``TestTheVersionRangeRule`` is written against, so a
+#: test that describes a registry at another version can say what had been
+#: released by then.
+_RELEASED = ("0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1")
+
+
 class TestTheVersionRangeRule:
     """``version_range_errors`` directly: the PEP 440 edges the convention
     is written around, which the gate runs above only exercise at one
@@ -1444,11 +1859,14 @@ class TestTheVersionRangeRule:
     def test_a_range_closed_at_the_fix_leaves_out_its_dev_builds(
         self, anomalies_gate, version
     ):
-        """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases."""
+        """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases.
+
+        At 0.4.1 the fix is a past release, so the release list says so."""
         registry = self._registry(
             version, ("resolved", ">=0.1.0, <0.4.0",
                       {"resolution_version": "0.4.0"}))
-        assert anomalies_gate.version_range_errors(registry) == []
+        released = _RELEASED + (("0.4.0",) if version == "0.4.1" else ())
+        assert anomalies_gate.version_range_errors(registry, released) == []
 
     def test_a_resolved_range_that_admits_its_resolution_version_fails(self, anomalies_gate):
         registry = self._registry(
@@ -1458,13 +1876,18 @@ class TestTheVersionRangeRule:
         assert any("resolution_version is 0.4.0" in e for e in errors), errors
 
     def test_a_resolved_range_read_by_an_older_registry_is_reachable(self, anomalies_gate):
-        """The same entry, on a registry at 0.3.1, says 0.3.1 is affected."""
-        registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0", {}))
-        (message,) = anomalies_gate.version_range_errors(registry)
-        assert "admits 0.3.1" in message
+        """The same entry, on a registry at 0.3.1, says 0.3.1 is affected.
+
+        (A 0.3.1 registry could not name 0.4.0 as a release either; that
+        refusal is pinned separately, and this one is about the status.)"""
+        registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0",
+                                            {"resolution_version": "0.4.0"}))
+        errors = anomalies_gate.version_range_errors(registry)
+        assert any("admits 0.3.1" in e for e in errors), errors
 
     def test_none_is_the_empty_set(self, anomalies_gate):
-        ok = self._registry("0.4.0.dev0", ("resolved", "none", {}))
+        ok = self._registry("0.4.0.dev0", ("resolved", "none",
+                                           {"resolution_version": "0.4.0"}))
         assert anomalies_gate.version_range_errors(ok) == []
         for status in ("open", "partially_resolved", "wont_fix", "fixed?"):
             bad = self._registry("0.4.0.dev0", (status, "none", {}))
@@ -1579,6 +2002,146 @@ class TestTheVersionRangeRule:
         registry = yaml.safe_load(
             (REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml").read_text())
         assert anomalies_gate.version_range_errors(registry) == []
+
+    # -- FIRST / FIX name real releases, and <FIX is the resolution_version --
+    #
+    # Each case below was accepted until audit_040_phase3_confirm
+    # (release-record, repro_gate_version_range.py).  Setting MADD-ANO-020 to
+    # ">=0.1.0, <0.2.0" while its fix is in 0.4.0 exited 0, and the SOUP
+    # --check then called the regenerated row harmless drift.
+
+    @pytest.mark.parametrize("status, rng, extra, expected", [
+        ("resolved", ">=0.1.0, <0.2.0", {"resolution_version": "0.4.0"},
+         "closes at 0.2.0, but resolution_version says the fix is in 0.4.0"),
+        ("resolved", ">=0.1.0, <0.3.0", {"resolution_version": "0.4.0"},
+         "closes at 0.3.0, but resolution_version says the fix is in 0.4.0"),
+        ("open", ">=0.0.1", {}, "FIRST 0.0.1 is not a version MADDENING released"),
+        ("resolved", ">=0.1.5, <0.4.0", {"resolution_version": "0.4.0"},
+         "FIRST 0.1.5 is not a version MADDENING released"),
+        ("resolved", ">=0.1.0, <0.3.7", {"resolution_version": "0.4.0"},
+         "FIX 0.3.7 is not a version MADDENING released"),
+        ("open", ">=0.3.1.post1", {},
+         "FIRST 0.3.1.post1 is not a version MADDENING released"),
+        # A cycle starts at .dev0, the convention's one spelling of it.
+        ("open", ">=0.3.0.dev3", {},
+         "FIRST 0.3.0.dev3 is not a version MADDENING released"),
+        ("partially_resolved", ">=0.1.0", {"resolution_version": "0.3.7"},
+         "resolution_version 0.3.7 is not a version MADDENING released"),
+        ("resolved", "none", {"resolution_version": "0.3.7"},
+         "resolution_version 0.3.7 is not a version MADDENING released"),
+    ])
+    def test_a_bound_that_names_no_release_or_disagrees_with_the_fix_fails(
+        self, anomalies_gate, status, rng, extra, expected
+    ):
+        registry = self._registry("0.4.0.dev0", (status, rng, extra))
+        errors = anomalies_gate.version_range_errors(registry, _RELEASED)
+        assert any(expected in e for e in errors), errors
+        assert all(e.startswith("MADD-ANO-001: ") for e in errors), errors
+
+    @pytest.mark.parametrize("rng", [">=0.1.0, <0.4.0", "none"])
+    def test_a_resolved_entry_must_say_which_release_fixed_it(
+        self, anomalies_gate, rng
+    ):
+        """Without ``resolution_version`` the ``<FIX`` tie cannot be checked,
+        so dropping the field would be a way round it."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = anomalies_gate.version_range_errors(registry, _RELEASED)
+        assert "no resolution_version" in message
+
+    @pytest.mark.parametrize("version, released, rng", [
+        # A cycle-introduced defect keeps its .dev0 spelling after release.
+        ("0.5.0.dev0", _RELEASED + ("0.4.0",), ">=0.4.0.dev0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.3.0.dev0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.4.0.dev0"),
+        ("0.4.0", _RELEASED, ">=0.4.0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.2.1"),
+    ])
+    def test_a_release_or_a_cycles_first_dev_build_is_a_valid_first(
+        self, anomalies_gate, version, released, rng
+    ):
+        registry = self._registry(version, ("open", rng, {}))
+        assert anomalies_gate.version_range_errors(registry, released) == []
+
+    def test_the_fix_may_be_a_past_release(self, anomalies_gate):
+        registry = self._registry("0.4.0.dev0", (
+            "resolved", ">=0.1.0, <0.3.0", {"resolution_version": "0.3.0"}))
+        assert anomalies_gate.version_range_errors(registry, _RELEASED) == []
+
+    @pytest.mark.parametrize("released", [(), ["zero point one"]])
+    def test_an_unusable_release_list_fails_closed(self, anomalies_gate, released):
+        registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
+        assert anomalies_gate.version_range_errors(registry, released)
+
+    def test_the_release_list_is_the_changelogs_dated_headings(
+        self, anomalies_gate, tmp_path
+    ):
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n"
+            "### [9.9.9] - 2030-01-01\n\n"          # not a section heading
+            "## [0.2.0] - 2026-05-20\n\n- x\n\n"
+            "## [0.1.5]\n\n"                         # no date: not a release
+            "## [0.1.0] - 2025-03-01\n"
+        )
+        assert anomalies_gate.released_versions(str(changelog)) == (
+            ("0.2.0", "0.1.0"), None)
+
+    @pytest.mark.parametrize("text", [None, "# Changelog\n\n## [Unreleased]\n"])
+    def test_a_changelog_without_releases_fails_closed(
+        self, anomalies_gate, tmp_path, text
+    ):
+        changelog = tmp_path / "CHANGELOG.md"
+        if text is not None:
+            changelog.write_text(text)
+        released, problem = anomalies_gate.released_versions(str(changelog))
+        assert released == () and problem
+
+    def test_the_changelog_still_lists_every_release_this_file_assumes(
+        self, anomalies_gate
+    ):
+        """Deleting a release heading would make its version unusable as a
+        bound; this pin lives outside the file it guards."""
+        released, problem = anomalies_gate.released_versions()
+        assert problem is None
+        assert set(_RELEASED) <= set(released), released
+
+    def test_the_changelogs_releases_are_the_release_tags(self, anomalies_gate):
+        """The CHANGELOG is the source because CI's compliance job has no
+        tags; wherever tags *are* present, the two must agree -- a heading
+        with no tag names a release nobody made."""
+        tags = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "tag", "-l", "v[0-9]*"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        if not tags:
+            pytest.skip("this checkout has no v* tags (CI's compliance job "
+                        "checks out without history); the CHANGELOG headings "
+                        "are compared with the tags wherever they exist")
+        released, problem = anomalies_gate.released_versions()
+        assert problem is None
+        assert sorted(released) == sorted(t[1:] for t in tags)
+
+    def test_the_audits_shifted_fix_fails_the_gate_run(self, tmp_path):
+        """MADD-ANO-020 closed at 0.2.0 while its fix is in 0.4.0."""
+        path = _shipped_registry_with(
+            tmp_path, _set_range("MADD-ANO-020", ">=0.1.0, <0.2.0"))
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-020" in result.stderr
+        assert "closes at 0.2.0" in result.stderr
+
+    def test_dropping_the_resolution_version_fails_the_gate_run(self, tmp_path):
+        def drop(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-020")
+            entry.pop("resolution_version")
+        path = _shipped_registry_with(tmp_path, drop)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-020" in result.stderr
+        assert "no resolution_version" in result.stderr
 
 
 class TestTransformGateConstantBinding:
@@ -1858,20 +2421,27 @@ class TestHeatStabilityGate:
         allowlist entry left behind would silently stop checking a real
         file.
         """
-        for relpath in heat_stability_gate._ALLOWED_UNSTABLE:
+        gate = heat_stability_gate
+        for relpath, (_reason, scope) in gate._ALLOWED_UNSTABLE.items():
             path = REPO_ROOT / relpath
-            if not path.is_file():
-                continue
+            assert path.is_file(), (
+                f"{relpath} is allowlisted but does not exist; remove the "
+                f"_ALLOWED_UNSTABLE entry")
             unstable, unchecked, seen = [], [], []
-            heat_stability_gate.scan_source(
+            gate.scan_source(
                 path.read_text(), relpath,
-                heat_stability_gate._defaults(), unstable, unchecked, seen,
+                gate._defaults(), unstable, unchecked, seen,
             )
-            assert unstable, (
+            exempt = [(o, n) for o, n, _why in unstable if gate._is_allowed(o, n)]
+            assert exempt, (
                 f"{relpath} is allowlisted as deliberately containing an "
                 f"unstable HeatNode construction, but no longer does; remove "
                 f"the _ALLOWED_UNSTABLE entry"
             )
+            if scope != gate.EMBEDDED_ONLY:
+                # Every listed line still holds the rod it exempts, so a
+                # line number left behind by an edit cannot exempt another.
+                assert {n for _o, n in exempt} == set(scope), (relpath, exempt)
 
     def test_the_allowlist_does_not_exempt_an_ordinary_file(
         self, heat_stability_gate, tmp_path
@@ -1986,6 +2556,61 @@ class TestHeatStabilityCallForms:
         )
         out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
         assert "rebound.py" in out
+
+    @pytest.mark.parametrize("body", [
+        # The audit's case: a trivial subclass.
+        "class Rod(HeatNode):\n    pass\n\n"
+        'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "        thermal_diffusivity=0.1)\n",
+        # A subclass of a subclass, defined in either order.
+        "class Deep(Rod):\n    pass\n\nclass Rod(HeatNode):\n"
+        "    def update(self, *a, **k):\n        return super().update(*a, **k)\n\n"
+        'n = Deep("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "         thermal_diffusivity=0.1)\n",
+        # A subclass of the attribute spelling.
+        "import maddening.nodes.heat as heat\n\n"
+        "class Rod(heat.HeatNode):\n    pass\n\n"
+        'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "        thermal_diffusivity=0.1)\n",
+    ])
+    def test_a_rod_built_through_a_local_subclass_is_seen(
+        self, heat_stability_gate, tmp_path, capsys, body
+    ):
+        """``HeatNode.__init__`` runs, guard and all, for a subclass that
+        does not override it (audit_040_phase3_confirm, release-record)."""
+        self._with_a_recognised_rod(
+            tmp_path, "subclass_form.py",
+            "from maddening.nodes.heat import HeatNode\n" + body)
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "subclass_form.py" in out
+
+    def test_a_stable_rod_through_a_subclass_is_verified(self, heat_stability_gate):
+        unstable, unchecked, seen = TestHeatStabilityCounts._scan(
+            None, heat_stability_gate,
+            "class Rod(HeatNode):\n    pass\n\n"
+            'Rod("ok", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert len(seen) == 1 and unchecked == [] and unstable == []
+
+    @pytest.mark.parametrize("override", ["__init__", "__new__"])
+    def test_a_subclass_with_its_own_constructor_is_not_evaluated(
+        self, heat_stability_gate, override
+    ):
+        """Its arguments need not reach ``HeatNode.__init__`` as written, so
+        judging them as if they did could pass a rod the guard refuses."""
+        unstable, unchecked, seen = TestHeatStabilityCounts._scan(
+            None, heat_stability_gate,
+            f"class Rod(HeatNode):\n    def {override}(self, *a, **k):\n"
+            f"        pass\n\nclass Deeper(Rod):\n    pass\n\n"
+            'Rod("r", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n"
+            'Deeper("r", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert seen == [] and unstable == []
+        assert len(unchecked) == 2
+        assert all("defines its own __init__ or __new__" in u[2] for u in unchecked)
 
     def test_the_positional_order_is_the_constructor_signature_order(
         self, heat_stability_gate
@@ -2132,16 +2757,66 @@ class TestHeatStabilitySplats:
 
 class TestHeatStabilityAllowlist:
     def test_every_entry_carries_a_reason(self, heat_stability_gate):
-        for path, reason in heat_stability_gate._ALLOWED_UNSTABLE.items():
+        for path, (reason, _scope) in heat_stability_gate._ALLOWED_UNSTABLE.items():
             assert isinstance(reason, str) and reason.strip(), path
+
+    def test_every_entry_names_constructions_not_a_whole_file(
+        self, heat_stability_gate
+    ):
+        """The test file was exempt wholesale, so a real unstable rod
+        appended to it passed (audit_040_phase3_confirm, release-record)."""
+        gate = heat_stability_gate
+        for path, (_reason, scope) in gate._ALLOWED_UNSTABLE.items():
+            assert scope == gate.EMBEDDED_ONLY or (
+                isinstance(scope, frozenset) and scope
+                and all(isinstance(n, int) for n in scope)), (path, scope)
+
+    def test_a_real_construction_in_the_test_file_is_not_exempt(
+        self, heat_stability_gate
+    ):
+        gate = heat_stability_gate
+        test_file = "tests/compliance/test_gate_scripts.py"
+        assert gate._is_allowed(f"{test_file}{gate._EMBEDDED}", 3)
+        assert not gate._is_allowed(test_file, 3)
+        probe = next(p for p, (_r, sc) in gate._ALLOWED_UNSTABLE.items()
+                     if sc != gate.EMBEDDED_ONLY)
+        line = min(gate._ALLOWED_UNSTABLE[probe][1])
+        assert gate._is_allowed(probe, line)
+        assert not gate._is_allowed(probe, line + 100)
+        assert not gate._is_allowed(f"{probe}{gate._EMBEDDED}", line)
+
+    def test_only_the_planted_fixture_in_an_allowlisted_file_is_exempt(
+        self, heat_stability_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Replays the audit: a real rod appended to the exempt file."""
+        gate = heat_stability_gate
+        planted = tmp_path / "planted.py"
+        planted.write_text(
+            "from maddening.nodes.heat import HeatNode\n"
+            "OK = HeatNode('ok', timestep=1e-5, n_cells=10, length=1.0,\n"
+            "              thermal_diffusivity=0.01)\n\n"
+            "FIXTURE = 'HeatNode(\"h\", 0.51, n_cells=10, length=1.0, "
+            "thermal_diffusivity=1.0)'\n"
+        )
+        monkeypatch.setitem(gate._ALLOWED_UNSTABLE, str(planted),
+                            ("the fixture for this test", gate.EMBEDDED_ONLY))
+        assert gate.main([str(tmp_path)]) == 0, capsys.readouterr().out
+        assert "1 deliberately unstable construction(s) exempt" in (
+            capsys.readouterr().out)
+        with planted.open("a") as fh:
+            fh.write("\n\ndef _seeded_real_use():\n"
+                     "    return HeatNode('h', 0.51, n_cells=10, length=1.0,\n"
+                     "                    thermal_diffusivity=1.0)\n")
+        assert gate.main([str(tmp_path)]) == 1
+        assert "planted.py:9: Fourier number" in capsys.readouterr().out
 
     def test_the_allowlist_stays_small(self, heat_stability_gate):
         allowlist = heat_stability_gate._ALLOWED_UNSTABLE
         cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
         assert len(allowlist) <= cap, (
             f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
-            f"whole file this gate stops reading; fix the rod instead of "
-            f"raising the cap."
+            f"file whose planted rods this gate stops refusing; fix the rod "
+            f"instead of raising the cap."
         )
 
 
@@ -2283,7 +2958,7 @@ class TestDoctestGate:
     #: ``min_mappings_floor.json`` gives the mapping pins
     #: (audit_040_r2/gates, finding G6).  Raise both when examples are
     #: added; lowering both belongs in a commit that says why.
-    COMMITTED_EXAMPLE_FLOOR = 98
+    COMMITTED_EXAMPLE_FLOOR = 110
 
     def test_the_floor_is_not_below_its_committed_value(self):
         gate = _load("check_doctests")

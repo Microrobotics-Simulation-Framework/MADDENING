@@ -14,13 +14,13 @@
     },
     "coupled_pair": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 653,
-      "hlo_op_count": 817
+      "jaxpr_primitive_count": 659,
+      "hlo_op_count": 826
     },
     "multirate_coupled": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 738,
-      "hlo_op_count": 888
+      "jaxpr_primitive_count": 744,
+      "hlo_op_count": 897
     },
     "heat_chain": {
       "retrace_count": 1,
@@ -35,6 +35,11 @@
       "retrace_count": 1,
       "jaxpr_primitive_count": 68,
       "hlo_op_count": 70
+    },
+    "coupled_diagnostics": {
+      "retrace_count": 1,
+      "jaxpr_primitive_count": 6467,
+      "hlo_op_count": 4320
     }
   }
 }

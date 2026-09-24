@@ -526,6 +526,7 @@ def test_the_constructor_value_probe_restores_the_node():
 # dx = v, dv = -k (x - x0) - c v + g, flux F = -k (x - x0).
 
 from maddening.core.node import BoundaryFluxSpec, BoundaryInputSpec  # noqa: E402
+from maddening.core.params import ParamSpec  # noqa: E402
 
 _OSC_BOUNDS = {"x": (-1.0, 1.0), "v": (-1.0, 1.0)}
 
@@ -592,6 +593,16 @@ class _HalfAndHalf(_Osc):
         return {f: s[f] + dt * d[f] for f in s}
 
 
+class _SplitWithInitCopy(_Osc):
+    """Half the injected ``k``, half a copy made in ``__init__``: the
+    injected value moves the output (half as far), and the in-place
+    ``node.params`` swap moves nothing, so only a rebuild shows it."""
+    def update(self, s, bi, dt, *, params=None):
+        p = self._p(params)
+        d = self._rhs(s, p, k=0.5 * p["k"] + 0.5 * self._k_cache)
+        return {f: s[f] + dt * d[f] for f in s}
+
+
 class _InterfaceCorrectionIgnoresK(_Osc):
     """The interface correction was never probed."""
     def interface_dof_indices(self):
@@ -637,6 +648,10 @@ def test_the_correct_oscillator_passes_and_every_path_is_named():
                  id="vector-leaf-per-element"),
     pytest.param(_HalfAndHalf, "update() does not apply the injected ['k']",
                  id="half-injected-half-self"),
+    pytest.param(_SplitWithInitCopy,
+                 "update() does not apply the injected ['k'] the way a node "
+                 "constructed with that value does",
+                 id="half-injected-half-init-copy"),
     pytest.param(_InterfaceCorrectionIgnoresK,
                  "compute_interface_correction() reads ['k'] from self.params",
                  id="interface-correction"),
@@ -660,9 +675,44 @@ def test_the_half_and_half_verdict_reports_the_fraction_missed():
     assert "0.50 of the perturbation's own effect" in detail
 
 
+def test_the_split_with_an_init_copy_verdict_reports_the_fraction_missed():
+    detail = _effective(_SplitWithInitCopy())["params_effective"].detail
+    assert "0.50 of the perturbation's own effect" in detail
+
+
+class _SplitCopyAsAudited(SimulationNode):
+    """The confirmation audit's node, verbatim in substance: in a graph an
+    injected ``k=4`` gave ``x(50)=0.218`` against ``0.130`` for a node
+    built with ``k=4``, and ``params_effective`` passed it."""
+
+    def __init__(self, name="n", timestep=0.01, k=2.0, initial_x=1.0):
+        super().__init__(name, timestep, k=k, initial_x=initial_x)
+        self._k0 = float(k)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self.params["initial_x"], jnp.float32)}
+
+    def update(self, state, bi, dt, *, params=None):
+        p = {**self.params, **(params or {})}
+        k_eff = 0.5 * p["k"] + 0.5 * self._k0
+        return {"x": state["x"] - dt * k_eff * state["x"]}
+
+    def param_specs(self):
+        return {**super().param_specs(), "k": ParamSpec(bounds=(0.0, None))}
+
+
+def test_a_constant_split_with_an_init_copy_fails_params_effective():
+    res = verify_node(_SplitCopyAsAudited(), bounds={"x": (-10.0, 10.0)},
+                      checks=["params_consistent", "params_effective"],
+                      max_examples=40, derandomize=True)
+    assert res["params_consistent"].passed
+    assert res["params_effective"].failed, res["params_effective"].detail
+    assert "a copy made at construction" in res["params_effective"].detail
+
+
 def test_the_value_probes_restore_the_node():
     """Both the in-place swap and the rebuild leave the node as it was."""
-    for cls in (_DerivativesReadCachedK, _VectorLeafPartlyIgnored):
+    for cls in (_DerivativesReadCachedK, _VectorLeafPartlyIgnored, _SplitWithInitCopy):
         node = cls()
         before = {k: (list(v) if isinstance(v, list) else v) for k, v in node.params.items()}
         _effective(node)

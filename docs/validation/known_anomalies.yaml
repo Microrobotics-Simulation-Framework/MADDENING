@@ -37,7 +37,7 @@
 #   An empty or unparseable range fails the gate, as does a missing one.
 schema_version: "1.0"
 maddening_version: "0.4.0.dev0"
-generated_date: "2026-09-23"
+generated_date: "2026-09-24"
 
 anomalies:
   - anomaly_id: "MADD-ANO-001"
@@ -2057,4 +2057,141 @@ anomalies:
       - "tests/core/test_coupling_non_finite_state.py::test_the_dead_band_still_drops_a_field_that_is_exactly_zero"
       - "tests/core/test_coupling_non_finite_state.py::test_a_finite_field_is_bit_identical_through_the_guard"
       - "tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-020"
+    title: "LBMNode's Zou-He pressure boundary imposed rho_p + S_K instead of the prescribed density"
+    description: >
+      `LBMNode` takes `inlet_pressure` and `outlet_pressure` as Zou-He
+      pressure (density) boundary conditions on its inlet and outlet faces,
+      and `_zou_he_pressure_face` documented that "the prescribed density is
+      satisfied".  It was not.  The closure computed the face-normal
+      velocity as `u_n = sigma * (1 - (S_T + S_K) / rho_p)`, where Zou and
+      He's closure is `sigma * (1 - (S_T + 2 S_K) / rho_p)` (`S_T`: the
+      tangential and rest populations; `S_K`: the populations streamed out
+      of the interior through the face, which enter the density once and
+      the reflected normal momentum once more).  With the factor missing,
+      the rebuilt face density is exactly `rho_p + S_K`.  The closure also
+      had no transverse-momentum correction, so the face's tangential
+      velocity was not the zero a pressure face imposes.
+      Measured at 0.4.0.dev0 (this machine, jaxlib 0.11.0, CPU, float32):
+      one application from a unit-density rest state imposed p = 0.36 as
+      0.4156 (+15.4%) and p = 0.30 as 0.3556 (+18.5%), on both lattices
+      (D2Q9, D3Q19) and both faces, the face density matching
+      `rho_p + S_K` to four figures.  Through `LBMNode.update` on
+      unwalled 16x6 (D2Q9) and 10x4x4 (D3Q19) domains the two faces, asked
+      for 0.36 and 0.30, both read 0.4014 after 400 steps: the imposed
+      pressure difference was gone.  On the 64x16 walled channel of the
+      in-tree Poiseuille test (p_in = 1.01/3, p_out = 1/3, 2000 steps) the face pressures were
+      0.40295 and 0.40106 against 0.33667 and 0.33333 imposed -- a drop of
+      0.0019 against 0.0033 -- and the centreline velocity was 0.48x the
+      Hagen-Poiseuille value for the imposed drop.  On a steady tau = 1
+      channel ladder the carried drop was 0.80 (H = 8) and 0.65 (H = 16) of
+      the imposed one, getting worse under refinement.
+      `compute_boundary_fluxes()["outlet_pressure_avg"]`, the value a
+      coupled node reads, reported the same wrong face pressure (0.3556
+      for 0.30 after one step), and the sharded `update_padded` calls the
+      same closure.  Nothing warned.  The in-tree test that went through
+      the pressure boundary (`TestLBMPoiseuille2D`) divided each velocity
+      profile by its own maximum before comparing, so it could see the
+      shape of the flow and nothing about its magnitude, and every LBM
+      verification benchmark (MADD-VER-003, MADD-VER-007) was body-force
+      driven.
+      Present since the node was added (commit 98e284b, first tagged in
+      v0.1.0).  The same reproducer run against `git archive` extractions of
+      v0.1.0 and v0.3.1, on the same machine and jaxlib, prints the same
+      numbers to every digit shown: 0.4156 and 0.3556 after one step on
+      both lattices, 0.4014 on both faces after 400 steps, and the 0.48
+      centreline ratio.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because it is a silent wrong answer on a documented
+      public path.  The pressure inputs are two of `LBMNode`'s four
+      boundary inputs, and a flow driven by them had the wrong pressure at
+      the faces, the wrong pressure drop and the wrong flow rate, by tens of
+      percent, with nothing raised or warned.  The flow still looked right
+      -- parabolic, in the right direction, finite -- which is the dangerous
+      shape for a numerical error.  The coupling output inherited the
+      error, so a node driven by `outlet_pressure_avg` (a lumped downstream
+      model's backpressure, say) was fed the same wrong number.
+      Not `critical`, and the case for `critical` is recorded so it can be
+      weighed.  For: every pressure-driven use in every release was
+      affected, not a corner case or a misconfiguration.  Against: the error
+      showed in the node's own output from the first step to anyone who
+      compared the face `pressure` with the input (15% apart); `LBMNode` is
+      `experimental`, and its recorded verification was body-force driven,
+      which the defect does not touch; and it was a wrong physical answer
+      in one node, not a crash, a corruption of other state or a security
+      exposure.  At the resolution the error is removed rather than
+      bounded.
+      Graded `context_dependent` rather than `safety_relevant` because
+      MADDENING is a general simulation library: the defect matters exactly
+      as much as a user's analysis relies on pressure-driven `LBMNode`
+      magnitudes (flow rate, pressure drop, wall shear) or on the reported
+      outlet pressure, which is a property of that analysis.  What raises
+      it above `not_safety_relevant` is that the wrong magnitude was
+      plausible and unflagged.
+    affected_components:
+      - "maddening.nodes.lbm._zou_he_pressure_face"
+      - "maddening.nodes.lbm.LBMNode.update"
+      - "maddening.nodes.lbm.LBMNode.update_padded"
+      - "maddening.nodes.lbm.LBMNode.compute_boundary_fluxes"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      None needed from 0.4.0.  Before 0.4.0 there is no input-side
+      correction, because the error depends on the populations at the face
+      (`rho_p + S_K`) and so on the flow.  Drive the flow with an equivalent
+      `body_force` (`F = dp / L` per unit volume on a periodic domain), which
+      does not pass through the pressure boundary; or read the face
+      `pressure` back after each step and treat the difference from the
+      input as the error it is.  Re-run any pressure-driven `LBMNode`
+      result from an earlier release; body-force-driven results are not
+      affected.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in `_zou_he_pressure_face`, which both `update` and
+      `update_padded` call.  The closure is derived per face from the
+      density and normal-momentum moments, `u_n = sigma * (1 - (S_T + 2 S_K)
+      / rho_p)`, and each incoming population is the non-equilibrium
+      bounce-back of its opposite plus a transverse-momentum correction
+      (Zou and He 1997 for D2Q9; Hecht and Harting 2010 for D3Q19), so the
+      face carries exactly the prescribed density and zero tangential
+      velocity.  The four lattice identities it rests on are checked by
+      `_zou_he_face_closure` at trace time, and a velocity set that fails
+      one is refused rather than run.  Measured after the fix on the same
+      reproducer: 0.3600 and 0.3000 after one step and after 400, on both
+      lattices; the 64x16 channel's face pressures equal the imposed ones;
+      `outlet_pressure_avg` returns the imposed outlet pressure.
+      MADD-VER-016 now drives the node by pressure alone: the face-to-face
+      drop matches to float32 rounding, the mid-channel gradient is dp/L to
+      0.91% (H = 8) and 0.18% (H = 16), the profile matches the equivalent
+      body-force flow to 0.21%, and the centreline velocity's first-order
+      extrapolation from H = 8, 16 is Hagen-Poiseuille to 1e-4 (1.0001;
+      0.396 before the fix).
+      What remains, and why it is not this defect.  (1) Results change for
+      every pressure-driven caller: that is the fix.  (2) At finite
+      resolution a pressure-driven channel is still faster than
+      Hagen-Poiseuille for the nominal width (+20.7% at H = 8, +10.4% at
+      16): the node's bounce-back walls, which collide as well as reflect,
+      put the hydrodynamic wall about 0.1 lattice units from the wall node
+      rather than mid-link.  That is the walls' documented first order, the
+      same under body-force driving, and is now stated in the node's
+      limitations and algorithm guide.  (3) A pressure face reflects
+      acoustic waves, so a pressure-driven flow settles more slowly than
+      its viscous time.  (4) `update_padded` is correct only while the
+      inlet/outlet axis is not sharded, as before.  Separately, in the same
+      change, `outlet_pressure_avg` averages over the runtime wall mask
+      that `update` applies rather than the constructor's.
+    verification:
+      - "tests/verification/test_lbm_pressure_poiseuille.py::test_pressure_driven_poiseuille_converges_to_hagen_poiseuille"
+      - "tests/verification/test_lbm_pressure_poiseuille.py::test_the_channel_carries_the_imposed_pressure_drop"
+      - "tests/verification/test_lbm_pressure_poiseuille.py::test_pressure_driving_and_the_equivalent_body_force_give_the_same_flow"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_the_face_carries_exactly_the_prescribed_density"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_the_face_carries_zero_tangential_velocity"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_d2q9_west_face_matches_zou_and_he_1997_as_published"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_update_leaves_every_fluid_face_cell_at_the_prescribed_pressure"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_update_padded_imposes_the_same_face_pressure"
+      - "tests/nodes/test_lbm_pressure_boundary.py::test_the_reported_outlet_pressure_is_the_imposed_one"
     github_issue: null

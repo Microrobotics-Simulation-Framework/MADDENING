@@ -2631,7 +2631,7 @@ def _run_coupled_block_impl(
                     top = jnp.logical_or(top, ref * jnp.finfo(val.dtype).tiny > 1.0)
                 return jnp.where(top, 16.0, 1.0).astype(x_full.dtype)
 
-            def _norm_weights(x_full, zero_field_weight=None, scale=1.0):
+            def _norm_weights(x_full, zero_field_weight=None, scale: Any = 1.0):
                 """Per-entry factors of the group's norm at ``x_full``.
 
                 Mirrors ``_scaled_change``: a field the norm reads is

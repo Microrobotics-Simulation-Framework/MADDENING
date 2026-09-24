@@ -567,6 +567,12 @@ def test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor(n):
     dd = declared.coupling_diagnostics()["a+b"]
     assert dd["spectral_usable"] is True
     assert dd["spectral_error_bound"] >= _l2_distance(declared, x_star)
+    # With a zero residual both bounds are the floor carried through, so
+    # declaring ``n`` evaluations scales each by exactly ``n`` -- the
+    # gradient bound's floor inside the step as well as the report's.
+    assert dd["spectral_error_bound"] / d["spectral_error_bound"] == pytest.approx(n, rel=1e-5)
+    assert dd["gradient_relative_error_bound"] / d["gradient_relative_error_bound"] == (
+        pytest.approx(n, rel=1e-3))
 
 
 @pytest.mark.parametrize("n", (1, 4, 10, 20, 50, 100))

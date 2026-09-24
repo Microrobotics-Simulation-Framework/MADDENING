@@ -148,8 +148,7 @@ class _ForwardsCouplingHooks:
 
     def update_evaluations(self) -> Optional[float]:
         """The wrapped node's declaration: sharding does not change how often it rounds."""
-        own = getattr(self._inner, "update_evaluations", None)
-        return own() if callable(own) else None
+        return self._inner.update_evaluations()
 
     def compute_interface_correction(
         self,

@@ -2090,10 +2090,24 @@ anomalies:
       at `rtol=1e-6`); flushed to zero it made the field inactive, and a
       field at `1e-33` read `iterations=1, residual=0.0, converged=True`
       at 90% from its fixed point.  Such a field (above the dead band, a
-      normal magnitude) is now measured on the pair rescaled by
+      normal magnitude) is measured on the pair rescaled by
       `1 / finfo.tiny`, an exact power of two -- the same quotient,
-      formed where every operand is normal -- so it converges exactly as
-      the same group three decades larger does.
+      formed where every operand is normal.  The first form of that
+      rescale was applied after the difference, and a confirmation audit
+      of the merged tree found the difference itself flushed: below
+      `tiny / eps` (about `9.9e-32` in float32) every one-ulp change of
+      a normal field is subnormal whatever `rtol` is, so under all three
+      norms and both solvers a group at `x* = 1e-35` reported
+      `residual=0.0, converged=True` after 43 passes, `1.5e-2` from its
+      fixed point under the L2 norm against a tolerance of `1e-6`, where
+      the same group at `1e-29` takes 126-130 passes; at a cap of 60
+      `strict_convergence` raised on the `1e-29` group and not on the
+      `1e-35` one.  The pair is now
+      rescaled *before* it is subtracted, as a separate value a `where`
+      selects beside the expressions the norms always evaluated (which
+      keeps the compiled loop bit-identical in range), so the same group
+      scaled by `2**-10` or `2**-20` reports the residual, the verdict
+      and the pass count of its normal-range control to the bit.
       What remains, and why it is a boundary rather than an instance.
       (1) The range rule is deliberately conservative: a float32 field
       whose magnitude is within a factor of about four of overflow
@@ -2132,6 +2146,7 @@ anomalies:
       - "tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state"
       - "tests/core/test_coupling_non_finite_state.py::test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads"
       - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_change_underflow"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-020"

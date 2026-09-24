@@ -6799,9 +6799,18 @@ class GraphManager:
             physical.  A residual at that floor means "converged to
             float32", and comparing two of them -- across solvers,
             across JAX versions or across backends -- compares rounding.
-            ``converged``, ``iterations`` and the returned state carry
-            no such caveat.  Pinned by
-            ``tests/core/test_coupling_solver_equivalence.py``.
+            Above that floor, ``converged``, ``iterations`` and the
+            returned state agree between the solvers.  Pinned by
+            ``tests/core/test_coupling_solver_equivalence.py``.  **At or
+            below it they can disagree too.**  With a ``tolerance``
+            finer than the norm's float32 resolution, "converged"
+            means exact stationarity, and the two loops' rounding
+            decides which pass reaches it.  Measured: on the
+            mixed-rate spring pair at ``tolerance=1e-8`` (L2 norm,
+            O(1) fields), 14 ``"ift"``/``"fori"`` pairs disagreed on
+            ``converged`` from the third step on, out of 308
+            configurations.  If the two solvers' verdicts must
+            agree, choose a tolerance above the floor.
 
             Reported for every group under ``solver="ift"``; ``"fori"``
             groups only with ``diagnostics=True``.  The three spectral

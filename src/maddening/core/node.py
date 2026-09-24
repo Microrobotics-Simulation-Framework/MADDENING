@@ -560,7 +560,10 @@ class SimulationNode(ABC):
         of ``gm.params``, so a fit or an FIM over the graph never saw them
         and nothing said so.  An integer whose key has no spec, or a spec
         with ``trainable=False`` (``n_cells``, an ``initial_*`` entry),
-        stays structural.  ``bool`` is never promoted.
+        stays structural.  ``bool`` is never promoted.  So a node that
+        declares a spec for a structural integer must declare it
+        ``trainable=False``: the default ``ParamSpec()`` is trainable, and
+        a promoted ``n_cells`` would reach ``update`` as a traced float.
 
         Precision
         ---------

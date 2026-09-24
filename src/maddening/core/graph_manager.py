@@ -3445,7 +3445,9 @@ class GraphManager:
                         self.params,
                     )
             except Exception:  # noqa: BLE001 - the real step reports it
-                reads = None
+                # Not cached: a pytree the step refuses (a stray key) is
+                # the step's to report, and the next check asks again.
+                return None
         self._step_reads = (gen, reads)
         return reads
 

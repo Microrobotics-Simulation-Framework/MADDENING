@@ -91,6 +91,7 @@ def test_switching_input_shapes_recompiles_correctly():
         np.testing.assert_allclose(np.asarray(a["f"]), np.asarray(b["f"]), rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.slow  # a verify_node battery through shard_map: 8-11 s on CI
 def test_verify_node_battery_passes_on_the_sharded_wrapper():
     """``verify_node`` samples every declared boundary input at its
     declared (grid) shape; the wrapper must accept that like the inner."""

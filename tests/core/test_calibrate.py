@@ -139,6 +139,7 @@ class TestCalibrateBasic:
 class TestCalibratePhysics:
     """Calibrate physics parameters from simulation data."""
 
+    @pytest.mark.slow  # hundreds of eager gradient steps: 30-165 s on CI
     def test_recover_gravity(self):
         """Recover gravity from a free-fall trajectory."""
         true_g = -9.81
@@ -173,6 +174,7 @@ class TestCalibratePhysics:
             f"Recovered gravity {recovered_g}, expected {true_g}"
         )
 
+    @pytest.mark.slow  # hundreds of eager gradient steps: 30-165 s on CI
     def test_recover_spring_stiffness(self):
         """Recover spring stiffness from oscillation data."""
         true_k = 50.0
@@ -206,6 +208,7 @@ class TestCalibratePhysics:
             f"Recovered stiffness {recovered_k}, expected {true_k}"
         )
 
+    @pytest.mark.slow  # hundreds of eager gradient steps: 30-165 s on CI
     def test_recover_thermal_diffusivity(self):
         """Recover thermal diffusivity from heat evolution."""
         true_alpha = 0.05

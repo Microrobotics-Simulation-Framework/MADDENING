@@ -297,6 +297,7 @@ def _graph_with(recipe: AdaptiveRecipe) -> GraphManager:
     return gm
 
 
+@pytest.mark.slow  # graphs built and compiled per example: 7-13 s on CI
 @given(recipe=adaptive_recipes(), n_steps=st.integers(min_value=1, max_value=3))
 def test_a_config_round_trip_of_a_graph_with_an_adaptive_node_preserves_behaviour(
     recipe, n_steps,
@@ -317,6 +318,7 @@ def test_a_config_round_trip_of_a_graph_with_an_adaptive_node_preserves_behaviou
                             what="trajectory")
 
 
+@pytest.mark.slow  # graphs built and compiled per example: 7-13 s on CI
 @given(recipe=adaptive_recipes(), n_steps=st.integers(min_value=1, max_value=3))
 def test_a_checkpoint_of_a_graph_with_an_adaptive_node_restores_it_exactly(
     recipe, n_steps,

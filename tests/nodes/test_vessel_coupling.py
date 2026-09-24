@@ -115,6 +115,7 @@ def _build_coupled_graph(grid_shape=SMALL_GRID, vessel_params=SMALL_VESSEL_PARAM
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestHeartLBMCouplingRuns:
+    @pytest.mark.slow  # compiles a coupled heart-LBM group: 5-12 s on CI
     def test_coupled_graph_runs_20_steps(self):
         """Build coupled graph, run 20 steps, verify all values finite."""
         gm, _ = _build_coupled_graph()
@@ -140,6 +141,7 @@ class TestHeartLBMCouplingRuns:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestHeartLBMPressureTransfers:
+    @pytest.mark.slow  # compiles a coupled heart-LBM group: 5-12 s on CI
     def test_heart_pressure_reaches_lbm_inlet(self):
         """HeartPump's arterial pressure should influence LBM inlet."""
         gm, _ = _build_coupled_graph()
@@ -164,6 +166,7 @@ class TestHeartLBMPressureTransfers:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestHeartLBMBidirectional:
+    @pytest.mark.slow  # compiles a coupled heart-LBM group: 5-12 s on CI
     def test_lbm_outlet_pressure_feeds_back(self):
         """LBM's outlet pressure avg should feed back to HeartPump."""
         gm, _ = _build_coupled_graph()

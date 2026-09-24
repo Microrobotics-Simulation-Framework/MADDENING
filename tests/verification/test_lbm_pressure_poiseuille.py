@@ -139,6 +139,7 @@ def _hagen_poiseuille_ratio(run):
     return u_c / (run["dp"] / run["L"] * H**2 / (8.0 * rho_mid * NU))
 
 
+@pytest.mark.slow  # the channels fixture these three share: 6-7 s on CI
 @verification_benchmark(
     benchmark_id="MADD-VER-016",
     description=(
@@ -175,6 +176,7 @@ def test_pressure_driven_poiseuille_converges_to_hagen_poiseuille(channels):
     )
 
 
+@pytest.mark.slow  # the channels fixture these three share: 6-7 s on CI
 @pytest.mark.parametrize("H,gradient_tol", [(8, 0.02), (16, 0.01)])
 def test_the_channel_carries_the_imposed_pressure_drop(channels, H, gradient_tol):
     """The face pressures are the imposed ones to float32 rounding, and the
@@ -193,6 +195,7 @@ def test_the_channel_carries_the_imposed_pressure_drop(channels, H, gradient_tol
     assert -slope * run["L"] / run["dp"] == pytest.approx(1.0, abs=gradient_tol)
 
 
+@pytest.mark.slow  # the channels fixture these three share: 6-7 s on CI
 def test_pressure_driving_and_the_equivalent_body_force_give_the_same_flow(channels):
     """Same walls, same viscosity: a pressure drop dp over L and a body
     force dp / L must drive the same profile.  The wall treatment cancels,

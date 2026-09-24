@@ -6,8 +6,6 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
-
 from maddening.core.simulation import compile_cache as cc
 
 _CHILD = textwrap.dedent("""
@@ -47,11 +45,14 @@ def _child(cache_dir):
     return compile_s, scan_s
 
 
-@pytest.mark.slow
 def _entries(cache_dir):
     return sorted(p.name for p in cache_dir.rglob("*") if p.is_file())
 
 
+# Not slow-marked: two child processes, 4.3 s on the CI runner -- under
+# the 5 s line -- and the only test that proves persistence.  (Its old
+# @pytest.mark.slow sat on ``_entries`` above, where a mark does nothing,
+# after a helper was inserted between it and this test.)
 def test_second_process_hits_the_persistent_cache(tmp_path):
     cold, cold_scan = _child(tmp_path)
     entries = _entries(tmp_path)

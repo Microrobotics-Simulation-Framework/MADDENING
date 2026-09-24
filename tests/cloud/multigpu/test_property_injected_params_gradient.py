@@ -87,6 +87,7 @@ def _loss_fn(node, boundary_inputs, steps: int):
     return loss
 
 
+@pytest.mark.slow  # a sharded vjp compiled per example: 6-10 s on CI
 @given(style=st.sampled_from(sorted(SIGNATURE_STYLES)),
        n_devices=device_counts(), rate=param_values())
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)

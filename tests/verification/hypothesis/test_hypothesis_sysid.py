@@ -186,6 +186,7 @@ def _sum_sq(tree):
 
 class TestWindowedLoss:
 
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st,
            factor=perturb_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -271,6 +272,7 @@ class TestWindowedLoss:
                                 - obs["s"]["position"][1:]) ** 2))
         assert np.isclose(windowed, direct, rtol=1e-5, atol=1e-7), (windowed, direct)
 
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[1] == 1 and t[0] <= 60]),
            factor=perturb_st)
@@ -699,6 +701,7 @@ class TestFIM:
 
 class TestMultipleShooting:
 
+    @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_seeded_window_states_reproduce_teacher_forcing(self, single, truth, init, tiling):
@@ -930,6 +933,7 @@ class TestPrecisionLimitedRank:
         assert not warned
         assert report.rank == n
 
+    @pytest.mark.slow  # 1,350 FIM reports over a fixed population: 6-8 s on CI; still in verify-hypothesis
     def test_the_threshold_still_separates_the_two_populations(self):
         """A calibration gate, not a property: fixed seed, no
         hypothesis.

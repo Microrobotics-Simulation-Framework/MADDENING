@@ -152,10 +152,10 @@ never run.
 | `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
 | `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
 | `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
-| `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed and for a group with more than eight independent interface scalars |
+| `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed, for a group with more than eight independent interface scalars, and where the residual is at its float floor (`precision_limited`) in a group with a node that has not declared `update_evaluations()` — see below |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
 | `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
-| `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group |
+| `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group; clears `spectral_usable` only where a node's evaluation count is undeclared |
 
 ### A stalled float32 iterate reads `converged=True`
 
@@ -178,15 +178,42 @@ release: `strict_convergence` consulting the spectral bound when
 diagnostics are on.
 
 The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
-every entry the norm reads, in the norm's units — `4 eps √n` under
-`"l2"` over its `n` entries, `4 eps / rtol` under `"mixed"` and
-`"interface"` (`residual_precision_floor`).  Four is 2.6x the sum of
-the two measured sources of a residual's rounding: the evaluation
-error of a dense update `A @ u + c` near its fixed point (at most 0.72
-of a unit over 3 000 random contractions) and the disagreement between
-two compilations of the same pass (at most 0.82, the solver-equivalence
-sweep).  It models the map's rounding; a node whose update cancels
-catastrophically inside itself can exceed it.
+every entry the norm reads, **per evaluation**, in the norm's units —
+`4 m eps √n` under `"l2"` over its `n` entries, `4 m eps / rtol` under
+`"mixed"` and `"interface"` (`residual_precision_floor`), each field at
+its own dtype's `eps`.  Four is 2.6x the sum of the two measured
+sources of one evaluation's rounding: the evaluation error of a dense
+update `A @ u + c` near its fixed point (at most 0.72 of a unit over
+3 000 random contractions) and the disagreement between two
+compilations of the same pass (at most 0.82, the solver-equivalence
+sweep).
+
+`m` is how many evaluations one coupling pass rounds like: the largest
+sub-cycling divider times `SimulationNode.update_evaluations()` in the
+group.  A composite map's error grows with its evaluations: explicit
+Euler in `N` sub-steps, each moving its field by less than half an ulp,
+is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and
+while the floor was a flat four units a stalled relay built on such a
+node read a bound 0.07–0.96x its true distance at `N` = 15–200 with
+`spectral_usable=True`.  The framework's own `subcycling=True` is
+counted without help; a node whose `update` loops over its own state
+must say so:
+
+```python
+class SubSteppedNode(SimulationNode):
+    def update_evaluations(self):
+        return self.n_substeps      # N explicit sub-steps per update()
+```
+
+A node that does not declare (`None`, the default) is counted as one
+evaluation, and because nothing outside `update` can check that, a
+group containing it reports `spectral_usable=False` — and so
+`gradient_bound_usable=False` — wherever its residual is at the floor,
+where that count *is* the bound.  Above the floor the count carries
+less than half of the bound, but a long undeclared loop can still
+exceed it; declare it.  The floor models the map's rounding; a node
+whose update cancels catastrophically inside itself can exceed it
+whatever it declares.
 
 ### What `ratio_usable` checks, and what it does not
 

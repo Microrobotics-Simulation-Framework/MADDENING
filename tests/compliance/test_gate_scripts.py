@@ -1510,6 +1510,233 @@ def _status_of(aid):
                 if a["anomaly_id"] == aid)["resolution_status"]
 
 
+_PROBE_TESTS = '''\
+import pytest
+
+
+def test_runs():
+    assert True
+
+
+@pytest.mark.skip(reason="fixture: evidence that never runs")
+def test_never_runs():
+    assert True
+
+
+@pytest.mark.skipif(True, reason="fixture")
+def test_sometimes_runs():
+    assert True
+
+
+@pytest.mark.xfail(strict=True, reason="fixture")
+def test_expected_to_fail():
+    assert False
+
+
+def _helper_not_a_test():
+    pass
+
+
+class Helpers:
+    def test_in_a_non_test_class(self):
+        pass
+
+
+class TestWithInit:
+    def __init__(self):
+        pass
+
+    def test_never_collected(self):
+        pass
+
+
+@pytest.mark.skip(reason="fixture")
+class TestSkippedClass:
+    def test_inside(self):
+        pass
+
+
+class TestFine:
+    def test_method(self):
+        pass
+'''
+
+
+def _registry_citing(tmp_path, status, refs, components=None, extra_files=None):
+    """A one-entry registry whose ``verification`` cites ``refs``, beside a
+    throwaway ``tests/`` tree the refs resolve against."""
+    tests = tmp_path / "tests"
+    tests.mkdir(exist_ok=True)
+    (tests / "test_probe.py").write_text(_PROBE_TESTS)
+    for name, text in (extra_files or {}).items():
+        (tests / name).write_text(text)
+    closed = status == "resolved"
+    components = components or ["maddening.nodes.heat.HeatNode"]
+    path = tmp_path / "known_anomalies.yaml"
+    path.write_text(
+        'schema_version: "1.0"\nmaddening_version: "0.4.0.dev0"\n'
+        'generated_date: "2026-03-12"\nanomalies:\n'
+        '  - anomaly_id: "MADD-ANO-001"\n    title: "Test"\n'
+        '    description: "Test"\n    severity: "major"\n'
+        '    safety_relevance: "context_dependent"\n'
+        '    safety_relevance_rationale: "Test"\n'
+        f'    resolution_status: "{status}"\n'
+        + ('    resolution_version: "0.4.0"\n' if closed else "")
+        + f'    affected_versions: "{">=0.1.0, <0.4.0" if closed else ">=0.1.0"}"\n'
+        '    affected_components:\n'
+        + "".join(f'      - "{c}"\n' for c in components)
+        + '    verification:\n'
+        + "".join(f'      - "{r}"\n' for r in refs)
+    )
+    return path
+
+
+class TestAnomalyGateChecksWhatAReferenceIs:
+    """A ``verification`` entry must be a test that runs, listed once.
+
+    The gate resolved each reference to a ``def`` and nothing more, so it
+    accepted a reference listed twice (and counted it twice: 230 against
+    228), a reference to a skip-marked test, and one to a helper pytest
+    never collects (audit_040_phase3_confirm, release-record,
+    repro_gate_verification_markers.py).
+    """
+
+    @staticmethod
+    def _gate(path, repo_root, *extra):
+        return _load("check_anomalies").main(
+            [str(path), "--repo-root", str(repo_root), *extra])
+
+    def test_tests_that_run_pass(self, tmp_path, capsys):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs",
+            "tests/test_probe.py::TestFine::test_method",
+            "tests/test_probe.py::TestFine",
+            "tests/test_probe.py",
+        ])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+        assert "0 verification test(s) skip conditionally" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("ref, reason", [
+        ("tests/test_probe.py::test_never_runs", "skipped unconditionally"),
+        ("tests/test_probe.py::TestSkippedClass::test_inside",
+         "skipped unconditionally"),
+        ("tests/test_probe.py::_helper_not_a_test", "is not a test"),
+        ("tests/test_probe.py::Helpers::test_in_a_non_test_class",
+         "is not collected by pytest"),
+        ("tests/test_probe.py::TestWithInit::test_never_collected",
+         "defines __init__"),
+        ("tests/test_probe.py::test_expected_to_fail", "marked xfail"),
+    ])
+    def test_evidence_that_never_runs_or_passes_fails(
+        self, tmp_path, capsys, ref, reason
+    ):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs", ref])
+        assert self._gate(path, tmp_path) == 1
+        err = capsys.readouterr().err
+        assert reason in err and ref in err, err
+
+    def test_a_strict_xfail_pins_an_open_defect(self, tmp_path, capsys):
+        """How MADD-ANO-011/012/013/021/022 cite their evidence."""
+        path = _registry_citing(tmp_path, "open", [
+            "tests/test_probe.py::test_expected_to_fail"])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+
+    def test_a_conditional_skip_is_reported_not_refused(self, tmp_path, capsys):
+        path = _registry_citing(tmp_path, "resolved", [
+            "tests/test_probe.py::test_runs",
+            "tests/test_probe.py::test_sometimes_runs"])
+        assert self._gate(path, tmp_path) == 0, capsys.readouterr().err
+        out = capsys.readouterr().out
+        assert "test_sometimes_runs': is skipped conditionally" in out
+        assert "1 verification test(s) skip conditionally" in out
+
+    @pytest.mark.parametrize("module, reason", [
+        ('import pytest\npytestmark = pytest.mark.skip(reason="x")\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\npytestmark = [pytest.mark.slow, pytest.mark.skip]\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\npytest.skip("x", allow_module_level=True)\n'
+         "def test_a():\n    pass\n", "skipped unconditionally"),
+        ('import pytest\nzmq = pytest.importorskip("zmq")\n'
+         "def test_a():\n    pass\n", "skipped conditionally"),
+        ('import pytest\ntry:\n    import zmq\nexcept ImportError:\n'
+         '    pytest.skip("x", allow_module_level=True)\n'
+         "def test_a():\n    pass\n", "skipped conditionally"),
+    ])
+    def test_a_module_level_skip_reaches_every_test_in_it(
+        self, tmp_path, capsys, module, reason
+    ):
+        for ref in ("tests/test_module_mark.py::test_a",
+                    "tests/test_module_mark.py"):
+            path = _registry_citing(tmp_path, "resolved",
+                                    ["tests/test_probe.py::test_runs", ref],
+                                    extra_files={"test_module_mark.py": module})
+            rc = self._gate(path, tmp_path)
+            captured = capsys.readouterr()
+            assert reason in captured.err + captured.out, (ref, captured)
+            assert rc == (1 if "unconditionally" in reason else 0), captured
+
+    @pytest.mark.parametrize("name, text, reason", [
+        ("helpers.py", "def test_a():\n    pass\n", "is not a file pytest collects"),
+        ("test_empty.py", "def helper():\n    pass\n", "holds no test"),
+    ])
+    def test_a_file_that_runs_nothing_is_not_evidence(
+        self, tmp_path, capsys, name, text, reason
+    ):
+        ref = f"tests/{name}" + ("::test_a" if name == "helpers.py" else "")
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/test_probe.py::test_runs", ref],
+                                extra_files={name: text})
+        assert self._gate(path, tmp_path) == 1
+        assert reason in capsys.readouterr().err
+
+    @pytest.mark.parametrize("no_resolve", [False, True])
+    def test_a_reference_listed_twice_fails(self, tmp_path, capsys, no_resolve):
+        """Counted twice in the summary line; structural, so it holds under
+        ``--no-resolve`` too."""
+        ref = "tests/test_probe.py::test_runs"
+        path = _registry_citing(tmp_path, "resolved", [ref, ref])
+        extra = ["--no-resolve"] if no_resolve else []
+        assert self._gate(path, tmp_path, *extra) == 1
+        assert f"verification lists '{ref}' more than once" in (
+            capsys.readouterr().err)
+
+    def test_a_component_listed_twice_fails(self, tmp_path, capsys):
+        comp = "maddening.nodes.heat.HeatNode"
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/test_probe.py::test_runs"],
+                                components=[comp, comp])
+        assert self._gate(path, tmp_path) == 1
+        assert f"affected_components lists '{comp}' more than once" in (
+            capsys.readouterr().err)
+
+    def test_the_audits_duplicates_fail_on_the_shipped_registry(self, tmp_path):
+        def duplicate(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-020")
+            entry["verification"].append(entry["verification"][0])
+            entry["affected_components"].append(entry["affected_components"][0])
+        path = _shipped_registry_with(tmp_path, duplicate)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "verification lists" in result.stderr
+        assert "affected_components lists" in result.stderr
+
+    def test_pytests_collection_rules_are_the_defaults_the_gate_assumes(self):
+        """The gate hard-codes pytest's default ``test_*.py`` / ``Test*`` /
+        ``test*``; configuring others would make it judge by the wrong ones."""
+        import tomllib
+
+        config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+        options = config["tool"]["pytest"]["ini_options"]
+        overridden = {"python_files", "python_classes", "python_functions"} & set(options)
+        assert not overridden, (
+            f"pyproject.toml sets {sorted(overridden)}; update "
+            f"scripts/check_anomalies.py's _TEST_FILE / _TEST_*_PREFIX to match")
+
+
 class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
     """``affected_versions`` is compared with ``maddening_version`` (PEP 440).
 

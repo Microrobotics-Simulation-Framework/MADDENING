@@ -450,6 +450,198 @@ def _evidence_errors(anomalies):
     return errors
 
 
+#: pytest's default collection rules.  ``pyproject.toml`` overrides none of
+#: ``python_files`` / ``python_classes`` / ``python_functions`` (a test in
+#: ``tests/compliance/test_gate_scripts.py`` pins that), so these are the
+#: rules the suite is collected by.
+_TEST_FILE = re.compile(r"(test_.*|.*_test)\.py")
+_TEST_CLASS_PREFIX = "Test"
+_TEST_FUNCTION_PREFIX = "test"
+
+
+def _mark_kinds(expr):
+    """``"skip"`` / ``"skipif"`` / ``"xfail"`` for each pytest mark in ``expr``.
+
+    ``expr`` is a decorator or a ``pytestmark`` value (one mark or a list).
+    """
+    import ast
+
+    items = expr.elts if isinstance(expr, (ast.List, ast.Tuple)) else [expr]
+    kinds = []
+    for item in items:
+        dotted = ast.unparse(item.func if isinstance(item, ast.Call) else item)
+        for kind in ("skip", "skipif", "xfail"):
+            if dotted.endswith(f"mark.{kind}"):
+                kinds.append(kind)
+    return kinds
+
+
+def _module_marks(tree):
+    """Skip / xfail marks a test module applies to everything in it.
+
+    ``pytestmark = ...``; a top-level ``pytest.importorskip(...)`` (a
+    conditional skip); a top-level ``pytest.skip(...)`` (unconditional);
+    and either call inside a top-level ``if`` or ``try`` (conditional).
+    """
+    import ast
+
+    kinds = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "pytestmark" for t in node.targets):
+            kinds += _mark_kinds(node.value)
+            continue
+        guarded = isinstance(node, (ast.If, ast.Try))
+        if not (guarded or isinstance(node, (ast.Assign, ast.Expr))):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            name = ast.unparse(call.func)
+            if name.endswith("importorskip"):
+                kinds.append("skipif")
+            elif name in ("pytest.skip", "skip"):
+                kinds.append("skipif" if guarded else "skip")
+    return kinds
+
+
+def _holds_a_test(body):
+    """Does this module or class body hold a test pytest would collect?"""
+    import ast
+
+    for node in body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith(_TEST_FUNCTION_PREFIX)):
+            return True
+        if (isinstance(node, ast.ClassDef)
+                and node.name.startswith(_TEST_CLASS_PREFIX)
+                and _holds_a_test(node.body)):
+            return True
+    return False
+
+
+def _reference_findings(aid, status, ref, repo_root):
+    """``(errors, conditional)`` for one ``verification`` entry.
+
+    The validator has already said whether the entry *resolves*; this says
+    whether what it resolves to is evidence that runs.  An entry that does
+    not resolve yields nothing here -- the validator reports it.
+
+    * The file must be one pytest collects, and each component a name it
+      collects: a ``Test*`` class without ``__init__``, a ``test*``
+      function.  A module or class entry must hold at least one test.
+    * An unconditional ``skip`` anywhere on the path (the function, a class
+      it sits in, the module) is an error: evidence that never runs.
+    * An ``xfail`` on a ``resolved`` entry's evidence is an error: a
+      resolution is evidenced by a test expected to pass.  On an open entry
+      a strict ``xfail`` is how the defect is pinned, and is accepted.
+    * A conditional skip (``skipif``, ``importorskip``, a guarded
+      ``pytest.skip``) is returned in ``conditional``: it runs where its
+      condition holds, and the gate reports it rather than hiding it.
+    """
+    from maddening.compliance._validate import _defined_in, _member, _parse
+
+    parts = str(ref).split("::")
+    rel = parts[0]
+    where = f"{aid}: verification entry '{ref}'"
+    if not os.path.isfile(os.path.join(repo_root, rel)):
+        return [], []
+    if not _TEST_FILE.fullmatch(os.path.basename(rel)):
+        return [f"{where}: '{rel}' is not a file pytest collects (test_*.py "
+                f"or *_test.py), so nothing in it runs as a test"], []
+    tree = _parse(os.path.join(repo_root, rel))
+    if tree is None:
+        return [], []
+    import ast
+
+    module = _defined_in(tree.body)
+    kinds = _module_marks(tree)
+    node = None
+    for name in parts[1:]:
+        node = module.get(name) if node is None else (
+            _member(node, name, module) if isinstance(node, ast.ClassDef)
+            else None)
+        if node is None:
+            return [], []
+        kinds += [k for d in node.decorator_list for k in _mark_kinds(d)]
+        if isinstance(node, ast.ClassDef):
+            if not node.name.startswith(_TEST_CLASS_PREFIX):
+                return [f"{where}: class {node.name!r} is not collected by "
+                        f"pytest (a test class's name starts with "
+                        f"'{_TEST_CLASS_PREFIX}')"], []
+            if any(isinstance(n, ast.FunctionDef) and n.name == "__init__"
+                   for n in node.body):
+                return [f"{where}: class {node.name!r} defines __init__, so "
+                        f"pytest does not collect it"], []
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign) and any(
+                        getattr(t, "id", None) == "pytestmark"
+                        for t in stmt.targets):
+                    kinds += _mark_kinds(stmt.value)
+        elif not node.name.startswith(_TEST_FUNCTION_PREFIX):
+            return [f"{where}: {node.name!r} is not a test -- pytest collects "
+                    f"a function whose name starts with "
+                    f"'{_TEST_FUNCTION_PREFIX}', so this never runs; cite the "
+                    f"test that calls it"], []
+    if node is None or isinstance(node, ast.ClassDef):
+        body = tree.body if node is None else node.body
+        if not _holds_a_test(body):
+            return [f"{where}: holds no test pytest collects"], []
+
+    errors, conditional = [], []
+    if "skip" in kinds:
+        errors.append(f"{where}: is skipped unconditionally (pytest.mark.skip "
+                      f"or a module-level pytest.skip), so it never runs and "
+                      f"evidences nothing; fix it or cite a test that runs")
+    if "xfail" in kinds and status in _STATUSES_RESOLVED:
+        errors.append(f"{where}: is marked xfail, but the entry is "
+                      f"{status!r}; a resolution is evidenced by a test "
+                      f"expected to pass")
+    if "skipif" in kinds:
+        conditional.append(f"{where}: is skipped conditionally (skipif / "
+                           f"importorskip) -- it evidences the entry only "
+                           f"where its condition lets it run")
+    return errors, conditional
+
+
+def _reference_errors(anomalies, repo_root, resolve=True):
+    """``(errors, conditional)`` over every entry's references.
+
+    A reference listed twice in one entry is refused whether or not
+    references are resolved: it is one piece of evidence counted twice,
+    and the count is what the gate's summary line reports (230 against 228
+    when the audit duplicated one ``verification`` and one
+    ``affected_components`` entry, against a CHANGELOG saying the counts
+    had stopped inflating).  The rest needs the files, so it runs only
+    when references are resolved.
+    """
+    errors, conditional = [], []
+    for a in anomalies:
+        aid = str(a.get("anomaly_id", "<missing>"))
+        for field in _REFERENCE_FIELDS:
+            entries = a.get(field) or []
+            if isinstance(entries, str):
+                entries = [entries]
+            seen = set()
+            for entry in entries:
+                if str(entry) in seen:
+                    errors.append(f"{aid}: {field} lists '{entry}' more than "
+                                  f"once; one reference is one piece of "
+                                  f"evidence, however often it is listed")
+                seen.add(str(entry))
+        if not (resolve and repo_root):
+            continue
+        refs = a.get("verification") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        for ref in dict.fromkeys(str(r) for r in refs):
+            errs, cond = _reference_findings(
+                aid, a.get("resolution_status"), ref, repo_root)
+            errors += errs
+            conditional += cond
+    return errors, conditional
+
+
 def _census(path):
     """``(anomalies, declared references)`` in the registry, without resolving.
 
@@ -525,12 +717,17 @@ def main(argv=None):
     errors = list(errors) + _evidence_errors(anomalies)
     if n_anomalies:
         errors += version_range_errors(data)
+    ref_errors, conditional = _reference_errors(
+        anomalies, repo_root, resolve=not args.no_resolve)
+    errors += ref_errors
 
     # A symbol in an optional subpackage this environment cannot import is
     # unverified, not broken -- but an unverified reference is a hole in the
     # evidence, so say so on stdout rather than passing in silence.
     for n in notes:
         print(f"NOTE: {n}")
+    for c in conditional:
+        print(f"NOTE: {c}")
 
     if errors:
         for e in errors:
@@ -582,7 +779,8 @@ def main(argv=None):
             )
             return 1
         scope = (f"{n_anomalies} anomal(ies), {verified} reference(s) "
-                 f"verified, {len(notes)} not checked")
+                 f"verified, {len(notes)} not checked; {len(conditional)} "
+                 f"verification test(s) skip conditionally")
     else:
         scope = (f"{n_anomalies} anomal(ies), {declared} reference(s) "
                  f"declared and NOT resolved (--no-resolve)")

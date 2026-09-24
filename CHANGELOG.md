@@ -284,6 +284,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`PUT /graph/params` refuses a value the running node cannot use** (400, nothing written) instead of saving one every step ignored (`WaveletAdaptiveNode.mass`,
+  `LBMPipeNode.pipe_radius`; since 0.1.0): rebuild the node to change it. `/checkpoint/load` refuses such a checkpoint rather than fail every later step.
+  `params_effective` fails a constant split with an `__init__` copy; a `transform="log"` spec with no lower bound refuses values `<= 0`.
 - **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
   `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
   a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.

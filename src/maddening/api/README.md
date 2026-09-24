@@ -125,6 +125,20 @@ not loopback; `/healthz` and `/viz/*` never do.
 | GET | `/graph/state/{node_name}` | Get state of one node |
 | PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`) |
 
+### Parameters
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/graph/params/{node_name}` | The node's parameters, live values (`gm.params`) over constructor ones |
+| PUT | `/graph/params/{node_name}` | Update parameters (`{params: {key: value}}`). A leaf the step reads takes effect on the next step; a structural value the node reads when traced marks the graph for recompilation; an initial condition `initial_state()` reads takes effect at the next `POST /sim/reset`. A value the running node cannot use (declared in `static_data_deps`, or consumed when the node was constructed) is a 400 naming it, and nothing in the request is written: rebuild the node (`DELETE` then `POST /graph/nodes`) to change it |
+
+### Checkpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root |
+| POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded |
+
 ### Simulation Control
 
 | Method | Path | Description |

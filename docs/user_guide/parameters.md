@@ -77,9 +77,10 @@ is decided from the node's `static_data_deps` declaration and, failing
 that, from one trace of the compiled step and one of the node's own hooks
 with every declared boundary input supplied (both taken only when a leaf
 differs from its node's value, once per compile); a value that also reaches
-the node -- `PUT
-/graph/params` writes both -- is not refused, and a traced leaf (inside a
-fit or an FIM) is never compared.  An explicit `params=` pytree is not
+the node is not refused here, because the node's own value is the
+reference -- `PUT /graph/params` writes both, so it takes the decision
+itself (see "Writing parameters over REST" below) -- and a traced leaf
+(inside a fit or an FIM) is never compared.  An explicit `params=` pytree is not
 refused either: it is never serialised, and a leaf the step ignores may be
 one your own code consumes (a residual that seeds the initial state from
 `initial_velocity`); the live leaves a partial pytree is completed from are
@@ -111,8 +112,47 @@ trap the 2026-09 audit found; `verify_node` now fails it.
 `verify_node` checks the contract for you: `params_consistent` (injected
 params reproduce the baked step *and* fluxes), `params_gradient_finite`, and
 `params_effective` (every trainable leaf actually influences the outputs,
-fluxes included — the check that catches a constant still read from
-`self.params`).  See [verification](../developer_guide/verification.md).
+fluxes included, the way a constructed value does — the check that catches
+a constant still read from `self.params`, or split between the injected
+value and a copy made in `__init__`, when the node rebuilds from
+`to_dict()`).  See [verification](../developer_guide/verification.md).
+
+### Writing parameters over REST
+
+`PUT /graph/params/{node}` writes a value to the node as well as to
+`gm.params`, and writing `node.params` rebuilds nothing the node derived
+from the value when it was constructed.  So before anything is written the
+server asks the graph whether the running node would use the new value:
+
+* a leaf the compiled step (or the node's own hooks, with every declared
+  boundary input supplied) reads from the injected params takes effect on
+  the next step, without a recompile;
+* a structural value (an int, a bool, a string, or any constant of a node
+  on the 3-argument contract) is accepted when the node's hooks trace
+  differently with it; the graph is marked dirty and the recompile uses it;
+* otherwise, a value `initial_state()` reads -- an `initial_*` condition --
+  is accepted and takes effect at the next `POST /sim/reset`;
+* anything else is a **400** naming the parameter and why: a
+  `static_data_deps` entry (`WaveletAdaptiveNode.mass`), or a value nothing
+  the running node computes reads (`LBMPipeNode.pipe_radius`, baked into
+  the wall mask; `propeller_x`; `initial_rho_liquid`, which `initial_state`
+  reads from a copy).  Nothing in the request is written.  To change such a
+  value, rebuild the node: `DELETE /graph/nodes/{node}`, then
+  `POST /graph/nodes` with the new value.
+
+Before 0.4.0 such a write answered 200, was served by `GET`, was ignored by
+every step (even after `POST /graph/compile`) and was saved by `to_dict()`
+and `save_state()`, so the reloaded graph ran a different model.  The check
+runs the node's code on a shallow copy that reads the new value, never on
+the node itself; when no faithful copy can be made (a node holding a method
+bound to itself) or the code raises, nothing is refused.  It detects "no
+path at all": a value a node consumes at construction *and* reads again
+later passes, so a node that bakes a parameter should declare it in
+`static_data_deps`, which refuses it on every surface.  Likewise
+`POST /checkpoint/load` refuses, and undoes, a checkpoint whose parameters
+include another value of one the node consumed at construction (a
+checkpoint of a pipe built with another radius); before, the load
+succeeded and every later `/sim/step` failed.
 
 ### Live values, recompiles and partial pytrees
 
@@ -146,7 +186,7 @@ Each leaf carries a `ParamSpec` (`maddening.core.params`):
 |-------|---------|
 | `trainable` | may an optimiser move it (default `True`; `initial_*` entries default to `False`) |
 | `bounds` | physical range, `(lo, hi)` with `None` for open |
-| `transform` | `None` (clip to bounds), `"log"` (`p = lo + exp(u)`, strictly positive), `"logit"` (`lo < p < hi`) |
+| `transform` | `None` (clip to bounds), `"log"` (`p = lo + exp(u)`, strictly above `lo`, or above 0 when `lo` is `None` -- `check` refuses anything else), `"logit"` (`lo < p < hi`) |
 
 Nodes declare specs for their own constants in `param_specs()`
 (`SpringDamperNode`: stiffness and mass are `log`-positive, damping is

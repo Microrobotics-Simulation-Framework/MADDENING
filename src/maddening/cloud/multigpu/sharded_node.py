@@ -146,7 +146,7 @@ class _ForwardsCouplingHooks:
     def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
         return self._inner.interface_dof_indices()
 
-    def update_evaluations(self) -> "float | None":
+    def update_evaluations(self) -> Optional[float]:
         """The wrapped node's declaration: sharding does not change how often it rounds."""
         own = getattr(self._inner, "update_evaluations", None)
         return own() if callable(own) else None

@@ -533,14 +533,9 @@ guidance; the itemized changes follow.
   missing
 - Full MADDENING test suite at `c51cd6a`: **3440 tests collected**, 3413 under
   `-m "not slow"` (27 deselected).  A collection count, not a pass count — see
-  `docs/release_notes/v0.4.0.md` for the last full CI run.  This line
-  previously carried v0.2.1's "1680 passed, 3 skipped"; it is edited in place
-  rather than appended because a false count is not fixed by adding a true one
-- Sharded `StaticArray` acceptance on a 4-device virtual mesh: bit-compatible
-  with the single-device baseline, 50-step convergence, construction-time
-  validation, `shard_info` delivery
-- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py` green, with
-  shape and dtype errors raised in one `ExceptionGroup`
+  `docs/release_notes/v0.4.0.md` for the last full CI run.  v0.2.1's own
+  Verification block, which an edit during this cycle had moved here, is back
+  under [0.2.1] as released
 - Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match
   their dense and `fori` references in both differentiation modes
 
@@ -845,6 +840,18 @@ change; the aliases are removed in v0.3.
   builtins on Python 3.10.
 
 ### Verification
+- Full MADDENING test suite: 1680 passed, 3 skipped (1 deselected
+  via `-m "not slow"`).  Slow-marked tests deferred to a longer
+  pre-release pass.
+- Sharded `StaticArray` acceptance: 4-device CPU virtual-device mesh
+  bit-compat with the single-device baseline (atol=0 on state, atol=1e-5
+  on the `lax.psum` integral), 50-step multi-step convergence,
+  construction-time validation (`shard_axis` must match the wrapper's
+  spatial axes; nodes with sharded statics must accept `static_padded`
+  on `update_padded`), `shard_info` delivery.
+- Edge-validation flip: 15/15 `tests/core/test_edge_validation.py`
+  green; aggregation test confirms shape + dtype errors raise in one
+  `ExceptionGroup` alongside a `UnitMismatchWarning`.
 
 ## [0.2.0] - 2026-05-20
 

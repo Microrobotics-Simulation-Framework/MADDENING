@@ -333,6 +333,56 @@ def _laplacian_4th_order_uniform(T_padded, dx):
     return lap
 
 
+def _global_rod_ends(shard_info, n_global):
+    """``(at_left, at_right)``: does this padded block hold the rod's ends?
+
+    ``shard_info`` is what :class:`ShardedStencilNode` passes to
+    ``update_padded`` -- ``{0: (global_offset, local_extent)}`` when the
+    cell axis is sharded, the offset a traced scalar -- so on a sharded
+    rod each flag is a traced boolean.  With no entry for axis 0 (a direct
+    call, or a cell axis the wrapper does not shard) the block is the
+    whole rod and both are the Python constant ``True``.
+    """
+    info = (shard_info or {}).get(0)
+    if info is None:
+        return True, True
+    offset, extent = info
+    return offset == 0, offset + extent == n_global
+
+
+def _where_end(at_end, closed, halo_cells):
+    """``closed`` on the block holding a rod end, the halo cells elsewhere."""
+    if at_end is True:
+        return closed
+    return jnp.where(at_end, closed, halo_cells)
+
+
+#: :func:`_dirichlet_ghosts_4th_order` as one small matrix product, for
+#: ``update_padded``.  Rows are the ghosts in the order they sit in the
+#: padded array, columns the three end cells as they sit there, and the
+#: datum weights are separate; divide by 5.  Left end: (far, near) from
+#: ``(T[0], T[1], T[2])``.  Right end: (near, far) from ``(T[-3], T[-2],
+#: T[-1])``, i.e. the left-end weights mirrored in both directions, so the
+#: right end needs no reversal.
+_CUBIC_GHOSTS_LEFT = ((-90.0, 40.0, -9.0), (-15.0, 5.0, -1.0))
+_CUBIC_DATUM_LEFT = (64.0, 16.0)
+_CUBIC_GHOSTS_RIGHT = ((-1.0, 5.0, -15.0), (-9.0, 40.0, -90.0))
+_CUBIC_DATUM_RIGHT = (16.0, 64.0)
+
+
+def _cubic_ghosts(cells, T_boundary, weights, datum):
+    """Both 4th-order ghosts at one rod end, from its three end cells.
+
+    The same cubic as :func:`_dirichlet_ghosts_4th_order`, written as a
+    ``(2, 3)`` product so the sharded step emits a handful of operations
+    per end instead of one per coefficient; it agrees with that function
+    to float32 rounding, not to the bit (the sum is ordered differently).
+    """
+    w = jnp.asarray(weights, dtype=cells.dtype)
+    d = jnp.asarray(datum, dtype=cells.dtype)
+    return ((w @ cells + d * T_boundary) / 5.0).astype(cells.dtype)
+
+
 def _laplacian_nonuniform(T_padded, x_padded):
     """2nd-order Laplacian on a non-uniform grid.
 
@@ -696,6 +746,39 @@ class HeatNode(SimulationNode):
         radius = 1 if order == 2 else 2
         return {0: radius}
 
+    def halo_boundary(self) -> str:
+        """``"edge"``: the one halo fill ``ShardedStencilNode`` accepts.
+
+        :meth:`update_padded` builds the ghost cells at the rod ends
+        itself, with the closure :meth:`update` uses -- from
+        ``left_temperature`` / ``right_temperature``, or the end cells
+        when they are absent -- so the wrapper's fill of the halos at the
+        global ends never reaches the answer.  Declaring one fill makes
+        the wrapper refuse the others at construction, which would
+        otherwise be ignored without a word: ``boundary="zero"`` was, until
+        0.4.0, how a sharded rod was given cold ends, and
+        ``boundary="periodic"`` made it a ring the unsharded node cannot
+        express.
+        """
+        return "edge"
+
+    def _halo_boundary_hint(self) -> str:
+        """What to do instead of a refused halo fill (for the refusal message).
+
+        Private on purpose: an internal convention between the built-in
+        nodes and ``ShardedStencilNode``'s refusal, not yet part of the node
+        contract.  Promote it (and document it for node authors) only
+        after a release has shown it earns a public, STABLE name.
+        """
+        return (
+            "A HeatNode end held at a temperature is a boundary input, "
+            "exactly as unsharded: pass left_temperature=0.0 / "
+            "right_temperature=0.0 for a Dirichlet T=0 end (in a graph, "
+            "gm.add_external_input(<node>, 'left_temperature') and "
+            "'right_temperature', which default to 0.0).  There is no "
+            "periodic HeatNode."
+        )
+
     @property
     def _is_nonuniform(self) -> bool:
         return self.params.get("grid_points") is not None
@@ -818,12 +901,24 @@ class HeatNode(SimulationNode):
         the interior; ghost cells are passed through unchanged so the
         wrapper can strip them.
 
-        The boundary mode used by the wrapper drives Dirichlet/Neumann
-        semantics at the *global* boundary:
-        ``boundary="zero"`` ↔ Dirichlet T=0,
-        ``boundary="edge"`` ↔ zero-gradient (Neumann).
-        For non-zero Dirichlet temperatures or per-shard BC overrides,
-        plug into the coupling system (M8) rather than this primitive.
+        **The rod ends are closed here, exactly as in** :meth:`update`.
+        On the block that holds a rod end -- ``shard_info`` says which;
+        without it the block is the whole rod -- the ghost cells beyond
+        that end are rebuilt from ``left_temperature`` /
+        ``right_temperature`` (the end cell when absent) with the same
+        closure :meth:`update` uses: ``2*T_b - T[0]`` at
+        ``stencil_order=2``, and the cubic through the rod end
+        (:func:`_dirichlet_ghosts_4th_order`) with the 3-point form at the
+        end cell at ``stencil_order=4``.  Ghosts between two shards are
+        the neighbour's cells, as the exchange delivered them.  So a
+        sharded rod is the unsharded rod for the same boundary inputs, on
+        any number of devices, and the wrapper's fill of the halos at the
+        global ends never reaches the answer; :meth:`halo_boundary`
+        declares ``"edge"`` so the wrapper refuses the fills that would
+        otherwise be ignored.  Until 0.4.0 this method used the halos as
+        they arrived and ignored both temperature inputs
+        (MADD-ANO-030): ``boundary="zero"`` stood in for a cold end, at
+        the ghost centres half a cell outside the rod.
         Non-uniform grids are not yet supported under sharding.
 
         Same params contract as :meth:`update`: ``thermal_diffusivity``
@@ -849,12 +944,42 @@ class HeatNode(SimulationNode):
         dx = L / n_global
         stencil_order = self.params.get("stencil_order", 2)
 
+        # Rebuild the ghosts beyond a rod end with update()'s closure.
+        # The cells it reads are T_pad[halo:halo+3] (left) and their
+        # mirror (right); on a thin shard the inner ones are halo cells
+        # from the neighbour, which is where the rod's cells are.
+        at_left, at_right = _global_rod_ends(shard_info, n_global)
+        T_left = boundary_inputs.get("left_temperature", T_pad[halo])
+        T_right = boundary_inputs.get("right_temperature", T_pad[-halo - 1])
         if stencil_order == 4:
             assert halo == 2, "4th-order stencil expects halo=2"
-            lap = _laplacian_4th_order_pure(T_pad, dx)
+            left = _cubic_ghosts(T_pad[halo:halo + 3], T_left,
+                                 _CUBIC_GHOSTS_LEFT, _CUBIC_DATUM_LEFT)
+            right = _cubic_ghosts(T_pad[-halo - 3:-halo], T_right,
+                                  _CUBIC_GHOSTS_RIGHT, _CUBIC_DATUM_RIGHT)
         else:
             assert halo == 1, "2nd-order stencil expects halo=1"
-            lap = _laplacian_2nd_order_uniform(T_pad, dx)
+            # 2*T_b - T[0]: _dirichlet_ghosts_2nd_order on a length-1 slice.
+            left = (2.0 * T_left - T_pad[halo:halo + 1]).astype(T_pad.dtype)
+            right = (2.0 * T_right - T_pad[-halo - 1:-halo]).astype(T_pad.dtype)
+        T_closed = jnp.concatenate([
+            _where_end(at_left, left, T_pad[:halo]),
+            T_pad[halo:-halo],
+            _where_end(at_right, right, T_pad[-halo:]),
+        ])
+
+        if stencil_order == 4:
+            # With these ghosts the 5-point and 3-point forms are
+            # algebraically identical at the rod's end cells (see
+            # _dirichlet_ghosts_4th_order), so a block only needs update()'s
+            # 3-point fallback when it is the whole rod, where taking it
+            # keeps the two paths operation for operation alike.
+            if at_left is True and at_right is True:
+                lap = _laplacian_4th_order_uniform(T_closed, dx)
+            else:
+                lap = _laplacian_4th_order_pure(T_closed, dx)
+        else:
+            lap = _laplacian_2nd_order_uniform(T_closed, dx)
 
         T_interior = T_pad[halo:-halo]
         n_local = T_interior.shape[0]

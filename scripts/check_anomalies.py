@@ -385,7 +385,65 @@ def version_range_errors(registry, released=None):
     return errors
 
 
-def _evidence_errors(anomalies):
+#: Where a retired ID is recorded -- the file the gap error below names.
+#: The pin lives outside the registry it guards, next to the high-water
+#: mark (``_HIGHEST_ANOMALY_ID``), which is why this gate reads a test
+#: module rather than a field of the YAML.
+_RETIRED_IDS_FILE = os.path.join("tests", "compliance", "test_soup_evidence.py")
+_RETIRED_IDS_NAME = "_RETIRED_ANOMALY_IDS"
+
+
+def retired_anomaly_ids(repo_root):
+    """``(ids, error)``: the retired anomaly IDs recorded under ``repo_root``.
+
+    Reads ``_RETIRED_ANOMALY_IDS`` from ``tests/compliance/
+    test_soup_evidence.py`` without importing it (a test module imports
+    pytest and the package).  Only a literal is accepted --
+    ``frozenset()``, or ``frozenset({...})`` / a set, list or tuple of
+    strings -- because the gate must be able to say exactly which IDs are
+    excused.  Fails closed: a missing file or a missing assignment excuses
+    nothing (``ids`` is empty), and an assignment that is present but not
+    such a literal is returned as ``error`` and excuses nothing either.
+    """
+    import ast
+
+    if not repo_root:
+        return frozenset(), None
+    path = os.path.join(repo_root, _RETIRED_IDS_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=path)
+    except (OSError, SyntaxError):
+        return frozenset(), None
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        else:
+            continue
+        if not any(getattr(t, "id", None) == _RETIRED_IDS_NAME for t in targets):
+            continue
+        bad = (f"{_RETIRED_IDS_FILE}: {_RETIRED_IDS_NAME} is not a literal set "
+               f"of anomaly-ID strings (frozenset() or frozenset({{\"MADD-ANO-"
+               f"NNN\", ...}})), so no gap can be excused by it")
+        if (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "frozenset"
+                and not value.keywords and len(value.args) <= 1):
+            if not value.args:
+                return frozenset(), None
+            value = value.args[0]
+        try:
+            ids = ast.literal_eval(value) if value is not None else None
+        except (ValueError, TypeError, SyntaxError):
+            return frozenset(), bad
+        if not isinstance(ids, (set, frozenset, list, tuple)) or not all(
+                isinstance(i, str) for i in ids):
+            return frozenset(), bad
+        return frozenset(ids), None
+    return frozenset(), None
+
+
+def _evidence_errors(anomalies, retired=frozenset()):
     """Registry-level rules the schema validator does not enforce.
 
     Both fail closed, and both were found missing by the release audit of
@@ -399,10 +457,15 @@ def _evidence_errors(anomalies):
        that is empty or missing, so a resolution could lose its evidence
        and stay green.
     2. Within each ID prefix the numbers run contiguously from 001 to the
-       highest present.  Both registries are contiguous by construction
-       (``tests/compliance/test_soup_evidence.py`` says why), so a gap is
-       a deleted entry.  An entry in this list is IEC 62304 evidence: it
-       is retired by recording the retirement, never by deletion.
+       highest present, except for IDs recorded as retired (``retired``,
+       read by :func:`retired_anomaly_ids`).  Both registries are
+       contiguous by construction (``tests/compliance/test_soup_evidence.py``
+       says why), so an unexplained gap is a deleted entry.  An entry in
+       this list is IEC 62304 evidence: it is retired by recording the
+       retirement, never by deletion.  Until 0.4.0 this rule ignored the
+       record its own message pointed to, so a genuinely retired ID could
+       never pass.  A retired ID that is still in the registry is refused
+       too: the retirement never happened.
 
     What this cannot see is the deletion of the *highest* entry: a pin on
     the high-water mark has to live outside the file it guards, or it is
@@ -432,18 +495,30 @@ def _evidence_errors(anomalies):
         m = re.fullmatch(r"(.*?)(\d+)", aid)
         if m:
             by_prefix.setdefault(m.group(1), {})[int(m.group(2))] = aid
+    present = {aid for numbers in by_prefix.values() for aid in numbers.values()}
+    for rid in sorted(retired & present):
+        errors.append(
+            f"{rid} is recorded as retired in {_RETIRED_IDS_FILE} "
+            f"({_RETIRED_IDS_NAME}) but is still in the registry: the "
+            f"retirement never happened.  Remove one or the other."
+        )
     for prefix, numbers in sorted(by_prefix.items()):
         width = max(len(str(n)) for n in numbers)
         width = max(width, 3)
         highest = max(numbers)
-        missing = sorted(set(range(1, highest + 1)) - set(numbers))
+        excused = set()
+        for rid in retired:
+            m = re.fullmatch(re.escape(prefix) + r"(\d+)", rid)
+            if m:
+                excused.add(int(m.group(1)))
+        missing = sorted(set(range(1, highest + 1)) - set(numbers) - excused)
         if missing:
             names = [f"{prefix}{n:0{width}d}" for n in missing]
             errors.append(
                 f"anomaly ID(s) missing from the contiguous range "
                 f"{prefix}{1:0{width}d}..{prefix}{highest:0{width}d}: {names}.  "
                 f"An entry in this registry is IEC 62304 evidence; restore it, "
-                f"or record the retirement in the _RETIRED_* frozenset in "
+                f"or record the retirement in _RETIRED_ANOMALY_IDS in "
                 f"tests/compliance/test_soup_evidence.py -- never delete it "
                 f"and never reuse the number."
             )
@@ -714,7 +789,10 @@ def main(argv=None):
     # skipped only for an empty registry, which the zero-scope guard below
     # reports in its own words (the function itself fails closed on one,
     # for the SOUP generator's sake).
-    errors = list(errors) + _evidence_errors(anomalies)
+    retired, retired_error = retired_anomaly_ids(repo_root or _REPO_ROOT)
+    errors = list(errors) + _evidence_errors(anomalies, retired)
+    if retired_error:
+        errors.append(retired_error)
     if n_anomalies:
         errors += version_range_errors(data)
     ref_errors, conditional = _reference_errors(

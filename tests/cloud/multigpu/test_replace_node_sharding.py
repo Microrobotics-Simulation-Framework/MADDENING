@@ -55,15 +55,18 @@ def test_replace_unsharded_with_sharded():
     """
     gm = GraphManager()
     gm.add_node(_make_heat("heat"))
+    # Both rod ends held at 0 (external inputs default to zero); they must
+    # survive the swap and reach the sharded node, which until 0.4.0
+    # ignored them (MADD-ANO-030) and ran with its halo fill instead.
+    gm.add_external_input("heat", "left_temperature")
+    gm.add_external_input("heat", "right_temperature")
     gm.compile()
     for _ in range(5):
         gm.step()
 
     inner = _make_heat("heat")
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        inner, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(inner, mesh, axis_map={"devices": 0})
     replace_node(gm, "heat", sharded)
     gm.compile()
     T_just_after_replace = float(jnp.mean(gm._state["heat"]["temperature"]))
@@ -73,7 +76,7 @@ def test_replace_unsharded_with_sharded():
     T_after = float(jnp.mean(gm._state["heat"]["temperature"]))
 
     assert jnp.isfinite(T_after)
-    # Heat diffused away from its initial sin(pi x/L) profile.
+    # Heat leaves through the cold ends: the sharded node read them.
     assert T_after < T_just_after_replace
 
 
@@ -83,33 +86,35 @@ def test_replace_sharded_with_unsharded():
     gm = GraphManager()
     inner = _make_heat("heat")
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        inner, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(inner, mesh, axis_map={"devices": 0})
     gm.add_node(sharded)
     gm.compile()
     for _ in range(5):
         gm.step()
-    T_before = float(jnp.mean(gm._state["heat"]["temperature"]))
-    spread_before = float(jnp.ptp(gm._state["heat"]["temperature"]))
+    sharded_after_5 = np.asarray(gm._state["heat"]["temperature"])
 
-    # Swap back to plain HeatNode.
+    # Swap back to plain HeatNode.  replace_node restarts from the new
+    # node's initial_state(), so the plain node retraces the same five
+    # steps from the same profile.
     plain = _make_heat("heat")
     replace_node(gm, "heat", plain)
     gm.compile()
+    T_start = float(jnp.mean(gm._state["heat"]["temperature"]))
+    spread_start = float(jnp.ptp(gm._state["heat"]["temperature"]))
     for _ in range(5):
         gm.step()
 
     T_after = float(jnp.mean(gm._state["heat"]["temperature"]))
     assert jnp.isfinite(T_after)
-    # The unsharded node is running with no boundary inputs at all, which
-    # since 0.4.0 means a zero-flux end face rather than two frozen end
-    # cells, so it conserves total heat exactly -- the mean cannot fall
-    # and this used to assert that it did, on a leak (MADD-ANO-007).
-    # What diffusion does here is flatten the profile, so that is what
-    # the downgrade path has to keep doing.
-    assert T_after == pytest.approx(T_before, rel=1e-3)
-    assert float(jnp.ptp(gm._state["heat"]["temperature"])) < spread_before
+    # No boundary inputs: since 0.4.0 a zero-flux end face at
+    # stencil_order=2, so total heat is conserved exactly and diffusion
+    # only flattens the profile (MADD-ANO-007).
+    assert T_after == pytest.approx(T_start, rel=1e-3)
+    assert float(jnp.ptp(gm._state["heat"]["temperature"])) < spread_start
+    # And the downgrade is the same model: the sharded rod's five steps
+    # are the plain rod's five steps (MADD-ANO-030).
+    np.testing.assert_allclose(np.asarray(gm._state["heat"]["temperature"]),
+                               sharded_after_5, rtol=0, atol=1e-6)
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")
@@ -140,9 +145,7 @@ def test_replace_sharded_with_pointwise_preserves_edges():
     gm = GraphManager()
     inner = _make_heat("heat")
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        inner, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(inner, mesh, axis_map={"devices": 0})
     gm.add_node(sharded)
     ball = BallNode(name="ball", timestep=0.01,
                     initial_position=5.0, initial_velocity=0.0)

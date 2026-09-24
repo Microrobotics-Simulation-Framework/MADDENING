@@ -1358,6 +1358,59 @@ class TestAnomalyGateFailsClosedOnEvidence:
         assert "MADD-ANO-002" in result.stderr
         assert "contiguous" in result.stderr
 
+    # -- a retired ID is a recorded gap, an unrecorded gap is a deletion --
+    #
+    # The gap rule's message tells the author to record a retirement in
+    # _RETIRED_ANOMALY_IDS; until 0.4.0 the rule never read it, so a
+    # genuinely retired ID could not pass.  Each case below builds a
+    # repository root holding only the file the gate reads.
+
+    @staticmethod
+    def _root_retiring(tmp_path, assignment):
+        root = tmp_path / "root"
+        (root / "tests" / "compliance").mkdir(parents=True)
+        (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
+            f"_HIGHEST_ANOMALY_ID = 3\n{assignment}\n")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        return root, path
+
+    def test_a_gap_recorded_as_retired_passes(self, tmp_path):
+        root, path = self._root_retiring(
+            tmp_path, '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002"})')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("assignment", [
+        "_RETIRED_ANOMALY_IDS: frozenset = frozenset()",
+        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-004"})',
+        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-VER-002"})',
+        '_RETIRED_BENCHMARK_IDS: frozenset = frozenset({"MADD-ANO-002"})',
+        "",
+    ], ids=["empty", "another-id", "another-prefix", "the-benchmark-set", "no-assignment"])
+    def test_a_gap_not_recorded_as_retired_still_fails(self, tmp_path, assignment):
+        root, path = self._root_retiring(tmp_path, assignment)
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "missing from the contiguous range" in result.stderr
+        assert "MADD-ANO-002" in result.stderr
+
+    def test_a_retired_set_the_gate_cannot_read_excuses_nothing(self, tmp_path):
+        root, path = self._root_retiring(
+            tmp_path, '_RETIRED_ANOMALY_IDS = frozenset(_load_ids("MADD-ANO-002"))')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "is not a literal set" in result.stderr
+        assert "missing from the contiguous range" in result.stderr
+
+    def test_a_retired_id_still_in_the_registry_fails(self, tmp_path):
+        root, path = self._root_retiring(
+            tmp_path,
+            '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002", "MADD-ANO-003"})')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-003 is recorded as retired" in result.stderr
+
     @staticmethod
     def _mutated_registry(tmp_path, mutate):
         import yaml

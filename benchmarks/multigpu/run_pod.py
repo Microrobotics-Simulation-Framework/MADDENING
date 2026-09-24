@@ -1288,8 +1288,11 @@ def halo_index_map(n_global: int, n_shards: int, halo: int, boundary: str) -> np
     Slot ``k`` of shard ``d``'s padded block holds global cell
     ``map[d, k]`` after ``halo_exchange``: interior halos are the
     neighbouring shard's cells; at the global edges ``periodic`` wraps,
-    ``edge`` repeats the shard's own ``halo`` outermost cells in order and
-    ``zero`` fills zeros.
+    ``edge`` repeats the outermost cell across the whole halo
+    (``numpy.pad``'s ``mode="edge"``) and ``zero`` fills zeros.  (Until
+    0.4.0 ``edge`` repeated the shard's ``halo`` outermost cells in order,
+    ``r0, r1`` before ``r0`` at width 2, and this reference pinned that;
+    MADD-ANO-029.)
     """
     per = n_global // n_shards
     rows = []
@@ -1298,9 +1301,9 @@ def halo_index_map(n_global: int, n_shards: int, halo: int, boundary: str) -> np
         left = np.arange(d * per - halo, d * per) % n_global
         right = np.arange((d + 1) * per, (d + 1) * per + halo) % n_global
         if d == 0 and boundary != "periodic":
-            left = own[:halo] if boundary == "edge" else np.full(halo, -1)
+            left = np.full(halo, own[0] if boundary == "edge" else -1)
         if d == n_shards - 1 and boundary != "periodic":
-            right = own[-halo:] if boundary == "edge" else np.full(halo, -1)
+            right = np.full(halo, own[-1] if boundary == "edge" else -1)
         rows.append(np.concatenate([left, own, right]))
     return np.stack(rows)
 

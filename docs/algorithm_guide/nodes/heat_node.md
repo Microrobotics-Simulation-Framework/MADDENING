@@ -61,6 +61,8 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added as `source * dt` after diffusion step |
 | Time integration ($\partial T / \partial t$) | `maddening.nodes.heat.HeatNode.update` | Forward Euler: `T + alpha * dt * laplacian + source * dt` |
 | Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER` |
+| Rod-end closure on a sharded rod | `maddening.nodes.heat.HeatNode.update_padded` | The block holding a rod end (from `shard_info`) rebuilds its ghosts with the two closures above, from `left_temperature` / `right_temperature`; the 4th-order cubic as one `(2, 3)` product (`_cubic_ghosts`), equal to `update` to float32 rounding |
+| Which halo fill a sharded rod takes | `maddening.nodes.heat.HeatNode.halo_boundary` | `"edge"`; `ShardedStencilNode` refuses `"zero"` and `"periodic"`, which the closure would otherwise ignore |
 
 ## Assumptions and Simplifications
 
@@ -88,6 +90,8 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 5. **Non-uniform grids are 2nd-order only**: `stencil_order=4` requires a uniform grid
 6. **The reported flux is not the scheme's own face flux**: `compute_boundary_fluxes` returns the physical rod-end flux, reconstructed to $O(\Delta x^{\texttt{stencil\_order}})$, while the conservative update's first row uses the 1st-order face flux $-\alpha (T_0 - T_b)/(\Delta x/2)$. The two agree in the limit but not bit-for-bit, so a discrete energy balance closed against the reported flux carries that difference. Until 0.4.0 the method instead returned $-\alpha (T_1 - T_0)/\Delta x$, the flux at $x = \Delta x$ rather than at the rod end: a 10.6% error at $N = 10$ on $T = e^x$, converging at order 1.005 against the node's own 2.000
 7. **Units**: `boundary_flux_spec` declares `K*m/s`, not `W/m^2`. $-\alpha\,\partial T/\partial x$ is the conductive flux divided by $\rho c_p$, and neither is a parameter of this node
+8. **An end with no boundary input is insulated only at `stencil_order=2`** (MADD-ANO-031). With no `left_temperature` the datum is the end cell, $T_b = T_0$: at 2nd order the ghost is then $T_0$ and the face flux is exactly zero, but the 4th-order cubic through $(0, T_0)$ and the three end cells has a non-zero slope at the rod end, so heat crosses it — the mean of an $x^2$ profile on 64 cells falls from 0.333313 to 0.332048 in 2000 steps (float64), where 2nd order conserves it exactly. Pass explicit end temperatures, or use `stencil_order=2`, for an insulated rod
+9. **Sharding**: `ShardedStencilNode(HeatNode)` is the unsharded node for the same boundary inputs on any number of devices (to float32 rounding; MADD-ANO-030 until 0.4.0). Hold an end at a temperature with `left_temperature` / `right_temperature`, exactly as unsharded; the wrapper's `boundary` must be `"edge"`
 
 ## Stability Conditions
 

@@ -624,9 +624,12 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
                                                            [3, 4, 5, 6, 7, 7]]
     assert rp.halo_index_map(8, 2, 1, "zero").tolist() == [[-1, 0, 1, 2, 3, 4],
                                                            [3, 4, 5, 6, 7, -1]]
-    # width 2: "edge" repeats the shard's own two outermost cells, in order
-    assert rp.halo_index_map(8, 2, 2, "edge").tolist() == [[0, 1, 0, 1, 2, 3, 4, 5],
-                                                           [2, 3, 4, 5, 6, 7, 6, 7]]
+    # width 2: "edge" repeats the outermost cell across the halo, as
+    # numpy.pad(mode="edge") does -- not the two outermost cells in order
+    assert rp.halo_index_map(8, 2, 2, "edge").tolist() == [[0, 0, 0, 1, 2, 3, 4, 5],
+                                                           [2, 3, 4, 5, 6, 7, 7, 7]]
+    assert rp.halo_index_map(8, 2, 2, "zero").tolist() == [[-1, -1, 0, 1, 2, 3, 4, 5],
+                                                           [2, 3, 4, 5, 6, 7, -1, -1]]
     a = np.arange(8, dtype=np.float32).reshape(8, 1) + 1
     rows = rp.halo_index_map(8, 2, 1, "zero")
     padded, grad = rp.halo_reference(a, rows, np.array([[0]]), np.ones((12, 1), np.float32))

@@ -487,17 +487,18 @@ def test_on_the_periodic_basis_the_condition_number_grows_like_one_over_the_mass
 
 def test_the_constant_mode_bound_supplies_the_small_eigenvalue_a_short_lanczos_run_misses():
     """At small mass the constant function's eigenvalue is isolated far
-    below the rest; a few Lanczos steps from a random start do not resolve
-    it, and the closed-form Rayleigh quotient does."""
-    op = OP.assemble_operator(6, 2, mass=1e-8, dtype=jnp.float64)
+    below the rest.  Twelve Lanczos steps from a random start converge the
+    largest eigenvalue but not that one (the estimate is off by orders of
+    magnitude); the closed-form Rayleigh quotient supplies it (measured:
+    3-D 4096 functions at 48 steps read 1.6x low without it)."""
+    op = OP.assemble_operator(3, 2, dim=2, mass=1e-8, dtype=jnp.float64)
     D = PC._diagonal_scaling_np(op.diagonal, op.levels, "hybrid")
     Ah = np.asarray(op.A) / D[:, None] / D[None, :]
     exact = _kappa(Ah)
-    q = OP._constant_mode_rayleigh(np.asarray(op.Wn), D, op.levels, 1e-8, op.h, 1)
+    q = OP._constant_mode_rayleigh(np.asarray(op.Wn), D, op.levels, 1e-8, op.h, 2)
     assert q is not None
-    short = OP.condition_estimate(Ah, steps=4)
-    assert short < 0.5 * exact
-    assert abs(OP.condition_estimate(Ah, steps=4, rayleigh_bound=q) / exact - 1.0) < 0.03
+    assert OP.condition_estimate(Ah, steps=12) < 0.5 * exact
+    assert abs(OP.condition_estimate(Ah, steps=12, rayleigh_bound=q) / exact - 1.0) < 0.03
     wall = OP.assemble_operator(4, 2, mass=1e-8, boundary="dirichlet", dtype=jnp.float64)
     Dw = PC._diagonal_scaling_np(wall.diagonal, wall.levels, "hybrid")
     assert OP._constant_mode_rayleigh(np.asarray(wall.Wn), Dw, wall.levels, 1e-8, wall.h, 1) is None

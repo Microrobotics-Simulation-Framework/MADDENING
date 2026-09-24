@@ -486,6 +486,22 @@ def test_selection_diagnostics_report_whether_the_budget_or_the_iteration_bound_
     assert moved["budget_reached"] and moved["active"] == 8
 
 
+def test_in_float32_the_rounding_floor_ends_a_large_budget_selection_and_says_so():
+    """At ``k = 64`` in float32 with a small mass the residual reaches
+    round-off within the budget and the bound: the loop stops on the
+    third exit and ``resolved`` reports it, instead of marking noise until
+    iteration 30.  The reading is still the full-basis one to float32
+    round-off."""
+    node = _node(k=64, mass=5e-3, dtype=jnp.float32, blindness_gate=False)
+    diag = node.selection_diagnostics()
+    assert diag["resolved"] and not diag["budget_reached"]
+    assert diag["outer_iterations"] < diag["max_outer"] and diag["active"] < 64
+    full = _node(k=128, mass=5e-3, dtype=jnp.float32, blindness_gate=False)
+    J = float(node.objective(node.initial_state(), {}))
+    J_full = float(full.objective(full.initial_state(), {}))
+    assert abs(J - J_full) <= 1e-5 * abs(J_full), (J, J_full)
+
+
 def test_a_periodic_sensor_at_one_snaps_to_its_periodic_image_and_a_dirichlet_one_to_the_wall_neighbour():
     """``x = 1.0`` is ``x = 0.0`` on a periodic axis, so the sensor row is the
     same (it used to snap to the last point ``(side - 1) / side``); on a

@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- Multi-GPU session runner covers the sharding checklist: `run_pod.py --goal checklist` (`indivisible`, `halo`, `coupled`,
+  `stencil`, `hybrid`), each against its unsharded, NumPy or float64 reference; every goal records pass/fail `checks`
+  (schema 3), stops the session on a failure, and `--summarise` says which items a real-GPU run closed
 - **`coupling_diagnostics()` gains `gradient_relative_error_bound`** (and `gradient_bound_usable`): the
   IFT gradient's relative error at an early exit, under `solver="ift"`, `diagnostics=True`.  About the
   gradient, not the solve -- it reads 0.0 on an affine group whose state is far off; read `spectral_error_bound` for that

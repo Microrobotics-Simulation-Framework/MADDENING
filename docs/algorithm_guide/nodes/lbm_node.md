@@ -46,7 +46,7 @@ Lattice units, $\Delta x = \Delta t = 1$; `update` ignores its `dt` argument. On
 
 1. moments $\rho$, $\mathbf{u}$ from $f$ (with the Guo half-force correction);
 2. BGK collision plus the Guo source term $S_q = (1 - \tfrac{1}{2\tau})\,w_q\left[\frac{\mathbf{e}_q - \mathbf{u}}{c_s^2} + \frac{\mathbf{e}_q\cdot\mathbf{u}}{c_s^4}\mathbf{e}_q\right]\cdot\mathbf{F}$;
-3. streaming, periodic on every axis (`jnp.roll`), or across a halo in the sharded path;
+3. streaming, periodic on every axis (`jnp.roll`), or across a halo in the sharded path, whose halos at the edges of the global grid must be filled periodically (`boundary="periodic"`) for it to be the same step (`halo_boundary()`, below);
 4. bounce-back: in every wall cell each population is replaced by its opposite;
 5. the Zou-He closure on the inlet face, then on the outlet face (fluid cells only);
 6. moments of the result, the velocity zeroed in wall cells, $p = c_s^2 \rho$.
@@ -104,7 +104,9 @@ $$
 
 where $N_y$ and $N_z$ sum over the nine tangential populations, the $(0,\pm1,\pm1)$ edges included. This is the D3Q19 on-site closure of Hecht and Harting [@HechtHarting2010] with zero tangential velocity. The other five faces follow by symmetry.
 
-Wall cells on a pressure face keep all of their populations. The closure is also used unchanged by the sharded step `update_padded`, which is valid while the inlet/outlet axis is not sharded.
+Wall cells on a pressure face keep all of their populations. `inlet_face` and `outlet_face` must be different faces: the constructor refuses one face for both, because the outlet closure, applied second, would overwrite the inlet's on every cell and `inlet_pressure` would be silently dropped. Perpendicular faces are allowed; they share the cells along their common edge (one corner cell in 2-D, a line of cells in 3-D), and because the inlet closure runs first and the outlet closure second, **those shared cells carry the outlet pressure**.
+
+The closure is also used unchanged by the sharded step `update_padded`, which is correct only while the inlet/outlet axis is not sharded: it closes the edge plane of its own slab, so on a sharded face axis every seam between shards would be forced to the face pressure too. That is refused -- see limitation 4.
 
 ```{note}
 Before 0.4.0 the closure computed $u_n = \sigma[1 - (S_T + S_K)/\rho_p]$, with the factor 2 on $S_K$ missing, and had no transverse correction. The face density came out as $\rho_p + S_K$: 15.4% high for $p = 0.36$ on a unit-density lattice, on every face of both lattices. The pressure-driven channels measured carried 0.58 to 0.80 of the imposed pressure drop, and `outlet_pressure_avg` reported the wrong pressure. Recorded as **MADD-ANO-020**; MADD-VER-016 is the benchmark that would have caught it.
@@ -121,6 +123,8 @@ Before 0.4.0 the closure computed $u_n = \sigma[1 - (S_T + S_K)/\rho_p]$, with t
 | Guo source term $S_q$ | `maddening.nodes.lbm._guo_forcing` | [@Guo2002] |
 | Streaming, periodic | `maddening.nodes.lbm._stream` | `jnp.roll` along each axis |
 | Streaming across a halo (sharded) | `maddening.nodes.lbm._stream_padded`, `maddening.nodes.lbm.LBMNode.update_padded` | Slicing into halo-exchanged neighbours |
+| Periodic halo fill at the global edges (the sharded step is `update`) | `maddening.nodes.lbm.LBMNode.halo_boundary` | `ShardedStencilNode` refuses any other `boundary`, its default `"edge"` included |
+| Pressure face on a sharded axis refused | `maddening.nodes.lbm.LBMNode._refuse_pressure_face_on_sharded_axis` | At trace time, from `shard_info`; names the axis to shard instead |
 | Bounce-back in wall cells | `maddening.nodes.lbm.LBMNode.update` | `f_streamed[..., opp]` where the runtime wall mask is set |
 | Runtime wall mask | `maddening.nodes.lbm.LBMNode._runtime_wall_mask` | `wall_mask_update`, else the `wall_mask` state field, else the constructor's mask |
 | Opposite-direction map $\bar q$ | `maddening.nodes.lbm._get_opp_map` | $\mathbf{e}_{\bar q} = -\mathbf{e}_q$ |
@@ -156,7 +160,7 @@ Before 0.4.0 the closure computed $u_n = \sigma[1 - (S_T + S_K)/\rho_p]$, with t
 1. **Walls are first order, straight walls included.** Wall cells collide as well as reflect, so the hydrodynamic wall does not sit on the half-way plane. In MADD-VER-016's channel it sits about 0.1 lattice units from the wall node (0.097 at $H = 8$, $\tau = 1$; 0.12 at $\tau = 0.8$) instead of 0.5. The channel is effectively about 0.8 lattice units wider than nominal, and at $H = 8$ the centreline velocity is 20% above Hagen-Poiseuille. The excess halves with each doubling of $H$, and body-force driving shows nearly the same excess (+19.8% at $H = 8$).
 2. **Pressure faces reflect acoustic waves.** A pressure-driven channel settles on a viscous time scale set by the slowest acoustic mode between the two faces, which is longer than the $H^2/\nu$ of the velocity profile.
 3. **Entrance effect of a pressure face.** Near a face the gradient departs from the linear profile. In the middle half of MADD-VER-016's channel it is 0.91% steeper than $\Delta p / L$ at $H = 8$ and 0.18% at $H = 16$.
-4. **Pressure faces and sharding**: `update_padded` applies the closure per shard, which is correct only while the inlet/outlet axis is replicated.
+4. **Pressure faces and sharding.** `update_padded` applies the closure to the edge plane of its own slab, which is correct only while the inlet/outlet axis is not sharded. This is enforced: the first sharded step that imposes a pressure on a face whose axis is split across devices raises, naming the axis to shard instead (measured before the check on a 16x10 D2Q9 channel sharded along its streamwise axis on 2 devices: density 0.990 / 1.010 either side of the seam and a centreline velocity 2.10x the unsharded one, with no error). It fires at the first step rather than at construction because the faces act only when a pressure input arrives; a body-force-driven node may be sharded along any axis. Separately, the halos at the edges of the global grid must be filled periodically, because that is what `update` does: the node declares `halo_boundary() == "periodic"` and `ShardedStencilNode` refuses at construction any other `boundary`, its own default `"edge"` included, saying to pass `boundary="periodic"`. The default used to run and moved that channel's centreline velocity by 0.64% after 200 steps when sharded across its walls; the periodic fill matches the unsharded node to float32 rounding.
 5. Compressibility errors at Mach number above about 0.1; no turbulence model; BGK is less stable than MRT at high Reynolds number.
 
 ## Stability Conditions
@@ -182,7 +186,7 @@ $\tau > \tfrac12$, which the constructor enforces through $\nu > 0$. The equilib
 | `lattice` | str | `"D3Q19"` | — | `"D3Q19"` or `"D2Q9"` |
 | `wall_mask` | bool array or None | None | — | True in wall cells |
 | `inlet_face` | str | `"x_min"` | — | One of `x_min` … `z_max` |
-| `outlet_face` | str | `"x_max"` | — | One of `x_min` … `z_max` |
+| `outlet_face` | str | `"x_max"` | — | One of `x_min` … `z_max`, other than `inlet_face` |
 
 ## Boundary Inputs
 
@@ -211,7 +215,8 @@ $\tau > \tfrac12$, which the constructor enforces through $\nu > 0$. The equilib
 - **MADD-VER-007** — spatial order 2 by manufactured solution (body-forced Kolmogorov flow, periodic): `tests/verification/test_mms_order.py`.
 - **MADD-VER-016** — pressure-driven Poiseuille through the Zou-He faces, in absolute terms, under refinement; also the pressure drop and body-force equivalence checks: `tests/verification/test_lbm_pressure_poiseuille.py`.
 - **MADD-VER-003** — body-force Hagen-Poiseuille in a pipe on the sharded path: `tests/cloud/multigpu/test_lbm_poiseuille.py`.
-- Pressure face, cell by cell (density, tangential momentum, which populations change, fixed point, Zou and He's D2Q9 equations written out, node pressure field, reported outlet pressure, runtime wall mask): `tests/nodes/test_lbm_pressure_boundary.py`.
+- Pressure face, cell by cell (density, tangential momentum, which populations change, fixed point, Zou and He's D2Q9 equations written out, node pressure field, reported outlet pressure, runtime wall mask), the face rules (one face for both refused, shared cells of perpendicular faces at the outlet pressure) and the periodic halo fill: `tests/nodes/test_lbm_pressure_boundary.py`.
+- Sharded pressure channel equal to the unsharded one to float32 rounding under the default halo fill; a pressure face on a sharded axis refused, other halo fills refused, body-force driving unrestricted: `tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py`.
 - Structural battery (finite, deterministic, jit-consistent, differentiable, every trainable parameter effective): `tests/verification/test_builtin_nodes_verified_lbm.py`.
 
 ## Changelog
@@ -219,4 +224,4 @@ $\tau > \tfrac12$, which the constructor enforces through $\nu > 0$. The equilib
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-03-16 | Initial implementation |
-| 1.1.0 | 2026-09-24 | Zou-He closure corrected: the face now carries the prescribed density and zero tangential velocity (MADD-ANO-020). `outlet_pressure_avg` averages over the runtime wall mask |
+| 1.1.0 | 2026-09-24 | Zou-He closure corrected: the face now carries the prescribed density and zero tangential velocity (MADD-ANO-020). `outlet_pressure_avg` averages over the runtime wall mask. `inlet_face == outlet_face`, a pressure face on a sharded axis and a sharding `boundary` other than `"periodic"` (`halo_boundary()`) are refused |

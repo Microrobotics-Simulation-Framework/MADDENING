@@ -547,6 +547,27 @@ under multi-GPU sharding:
   ): ...
   ```
 
+* `halo_boundary()` (optional, duck-typed) — declare it when your
+  `update_padded` imposes no condition at the edges of the global grid,
+  so that what arrives in the halo *is* the boundary condition, and name
+  the fill (`"periodic"`, `"edge"` or `"zero"`) under which the sharded
+  step reproduces your `update` on the whole grid.
+  `ShardedStencilNode` then refuses at construction any `boundary` that
+  differs -- its own default `"edge"` included -- because that would make
+  the sharded node a different model from the unsharded one; the user
+  passes your declared fill explicitly.
+  {meth}`LBMNode.halo_boundary <maddening.nodes.lbm.LBMNode.halo_boundary>`
+  returns `"periodic"`: its `update` streams with `jnp.roll`, and wrapping
+  it with the default `"edge"` used to run and move a walled channel's
+  centreline velocity by 0.64%; it now fails with a message saying to pass
+  `boundary="periodic"`.  A node that applies its own boundary conditions
+  in `update_padded` after the exchange declares nothing and keeps the
+  `"edge"` default, exactly as before.  If a boundary condition of your node cannot be
+  applied on a slab (a condition on a face, applied to whatever edge
+  plane the slab has), refuse the sharded axis it lies on inside
+  `update_padded`, reading `shard_info`, as `LBMNode` does for its
+  pressure faces -- do not rely on a docstring.
+
 * {meth}`domain_integral_fields <maddening.core.node.SimulationNode.domain_integral_fields>` —
   declares output keys that are `jnp.sum`-over-lattice integrals
   (e.g. total drag force on an immersed body).  The wrapper applies

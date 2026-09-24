@@ -176,8 +176,14 @@ class TestStabilityTagging:
 def test_interface_mapping_on_an_edge_leaves_the_model_description_unchanged(
         bouncing_ball_graph):
     """Mapping weights are graph-internal (``params["mappings"]``), not
-    FMU variables: the exported XML is identical with and without one."""
-    plain = build_model_description(bouncing_ball_graph, model_name="m").to_xml()
+    FMU variables: no variable names the edge or its weights, and every
+    other variable is the plain graph's.
+
+    The parameter variables are compared by name set, not as XML: the FMU
+    exports the parameters its step reads, and this mapped graph cannot step
+    at all (a ``[[1.0]]`` matrix on a scalar field fails ``matmul`` at trace
+    time), so its reads cannot be told and every node leaf is exported."""
+    plain_md = build_model_description(bouncing_ball_graph, model_name="m")
 
     gm = GraphManager()
     gm.add_node(BallNode(name="ball", timestep=1e-2,
@@ -187,8 +193,18 @@ def test_interface_mapping_on_an_edge_leaves_the_model_description_unchanged(
                 mapping=matrix_mapping([[1.0]]))
     gm.compile()
     assert gm.params["mappings"]           # the weights exist in the graph...
-    mapped = build_model_description(gm, model_name="m").to_xml()
-    assert mapped == plain                 # ...and never reach the FMU interface
+    mapped = build_model_description(gm, model_name="m")
+    # ...and never reach the FMU interface
+    assert not [v.name for v in mapped.variables
+                if "->" in v.name or v.name.endswith(".H") or "mapping" in v.name]
+    node_leaves = {f"{n}.params.{k}" for n, leaves in gm.params["nodes"].items()
+                   for k in leaves}
+    assert {v.name for v in mapped.variables if v.causality == "parameter"} <= node_leaves
+
+    def interface(md):
+        return [(v.name, v.causality, v.dtype, v.shape)
+                for v in md.variables if v.causality != "parameter"]
+    assert interface(mapped) == interface(plain_md)
 
 
 

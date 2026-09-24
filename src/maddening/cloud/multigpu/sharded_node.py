@@ -27,7 +27,7 @@ from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from maddening.cloud.multigpu.halo import halo_exchange
+from maddening.cloud.multigpu.halo import _BOUNDARY_MODES, halo_exchange
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
@@ -94,6 +94,36 @@ def _check_shard_divisible(
         "ShardedUnstructuredNode, which carries an explicit padded layout "
         "and accepts any (device, cell) pair."
     )
+
+
+def _declared_halo_boundary(node: SimulationNode) -> Optional[str]:
+    """The halo fill ``node`` declares through an optional ``halo_boundary()``.
+
+    A stencil node whose ``update_padded`` reproduces its own ``update``
+    only under one fill of the halos at the edges of the global grid says
+    which by defining ``halo_boundary()`` (e.g.
+    :meth:`~maddening.nodes.lbm.LBMNode.halo_boundary`, ``"periodic"``,
+    because its unsharded streaming wraps).  Duck-typed, like
+    ``domain_integral_axes``: a node without the method declares nothing
+    and returns ``None``.
+
+    Raises
+    ------
+    ValueError
+        When the declared value is not one of the halo-exchange modes.
+    """
+    hook = getattr(node, "halo_boundary", None)
+    if hook is None:
+        return None
+    declared = hook() if callable(hook) else hook
+    if declared is None:
+        return None
+    if declared not in _BOUNDARY_MODES:
+        raise ValueError(
+            f"{type(node).__name__} {node.name!r}.halo_boundary() returned "
+            f"{declared!r}; it must be one of {_BOUNDARY_MODES} or None."
+        )
+    return str(declared)
 
 
 def _accepts_params(node: SimulationNode) -> bool:
@@ -393,20 +423,39 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         Spatial axes not appearing as values of ``axis_map`` are
         replicated on every device; their halos do not need exchange.
     boundary : str
-        Boundary mode for halo exchange (``"periodic"``, ``"edge"``,
-        or ``"zero"``).  Default ``"edge"`` -- replicate own edge.
-        ``update_padded`` applies the physical BCs after the exchange.
+        How the halos at the edges of the *global* grid are filled
+        (``"periodic"``, ``"edge"`` or ``"zero"``); interior halos always
+        come from the neighbouring shard.  Default ``"edge"`` -- replicate
+        the node's own edge cells -- for a node that applies its physical
+        boundary conditions in ``update_padded`` after the exchange.  A
+        node that declares ``halo_boundary()`` must be given exactly that
+        mode (see the note below).
 
     Raises
     ------
     ValueError
         If *node* is pointwise, if ``axis_map`` names a mesh axis the
-        mesh does not have or a spatial axis with no declared halo, or
-        if a sharded extent is not divisible by the devices on its mesh
-        axis (see the note below).
+        mesh does not have or a spatial axis with no declared halo, if a
+        sharded extent is not divisible by the devices on its mesh axis
+        (see the note below), or if *boundary* -- the default ``"edge"``
+        included -- differs from the mode the node declares.
 
     Notes
     -----
+    **A node may declare its halo boundary.**  Some stencil nodes impose
+    no condition at the edges of their grid in ``update_padded``: what
+    arrives from the halo *is* the boundary condition.
+    :class:`~maddening.nodes.lbm.LBMNode` is one -- its unsharded
+    ``update`` streams periodically (``jnp.roll``), so its sharded step is
+    the same model only with periodic halos.  Such a node defines
+    ``halo_boundary()``, and a *boundary* that differs from it -- the
+    default ``"edge"`` included -- is refused at construction, because it
+    would make the sharded node compute something the unsharded node does
+    not.  Wrap an ``LBMNode`` with ``boundary="periodic"``.  (Before 0.4.0
+    an ``LBMNode`` wrapped with the default ``"edge"`` ran, and a walled
+    channel's centreline velocity moved by 0.64% against the unsharded
+    node.)
+
     **Each sharded extent must divide by the devices on its mesh axis.**
     A pencil decomposition gives every device the same slab, so a 17-cell
     axis over 3 devices has no layout; construction refuses it, naming
@@ -429,6 +478,24 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             raise ValueError(
                 f"{type(node).__name__} has empty halo_width() -- use "
                 "ShardedPointwiseNode for pointwise sharding."
+            )
+
+        # The halo fill at the global edges.  A node that declares one
+        # (``halo_boundary()``) must be given exactly that one -- the
+        # default ``"edge"`` included: for such a node the halo is the
+        # boundary condition, and a different fill is a different model.
+        # A node that declares nothing is wrapped exactly as before.
+        declared = _declared_halo_boundary(node)
+        if declared is not None and boundary != declared:
+            raise ValueError(
+                f"ShardedStencilNode: {type(node).__name__} {node.name!r} declares "
+                f"halo_boundary() == {declared!r}, the fill of the halos at the "
+                "edges of the global grid under which its update_padded "
+                f"reproduces its own update, but was given boundary={boundary!r}"
+                f"{' (the default)' if boundary == 'edge' else ''}, which fills "
+                "them differently, so the sharded node would silently compute a "
+                f"different model from the unsharded one.  Pass "
+                f"boundary={declared!r}."
             )
 
         # Validate axis_map keys against the mesh and warn on covered axes

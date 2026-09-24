@@ -328,3 +328,72 @@ def test_the_closure_is_checked_for_both_supported_lattices_on_every_face():
             *_, tang_weight, _ = _zou_he_face_closure(lat.e, lat.w, lat.cs2, axis, side)
             assert set(tang_weight) == {a for a in range(lat.D) if a != axis}
             assert all(v == 0.5 for v in tang_weight.values()), (lat.name, face)
+
+
+@pytest.mark.parametrize("lattice,shape", [("D2Q9", (6, 5)), ("D3Q19", (5, 4, 6))])
+def test_the_inlet_and_the_outlet_cannot_be_the_same_face(lattice, shape):
+    """One face carries one pressure.  With both on ``x_min`` the outlet
+    closure, applied second, overwrote the inlet's on every cell and the
+    face read the outlet's 0.30 where 0.36 was imposed, with no error.
+    The refusal names the face and the opposite one to use instead."""
+    for face, opposite in (("x_min", "x_max"), ("y_max", "y_min")):
+        with pytest.raises(ValueError) as info:
+            LBMNode("l", 1.0, grid_shape=shape, viscosity=0.1, lattice=lattice,
+                    inlet_face=face, outlet_face=face)
+        message = str(info.value)
+        assert f"inlet_face and outlet_face are both {face!r}" in message
+        assert "inlet_pressure would be silently dropped" in message
+        assert f"outlet_face={opposite!r}" in message
+
+
+@pytest.mark.parametrize("lattice,shape,inlet,outlet", [
+    ("D2Q9", (6, 5), "x_min", "y_max"),
+    ("D2Q9", (6, 5), "y_min", "x_max"),
+    ("D3Q19", (5, 4, 6), "x_min", "z_max"),
+])
+def test_cells_shared_by_perpendicular_faces_carry_the_outlet_pressure(
+        lattice, shape, inlet, outlet):
+    """Perpendicular faces are allowed and share the cells along their
+    common edge (one corner in 2-D, a line in 3-D).  The inlet closure runs
+    first and the outlet closure second, so those cells take the outlet
+    pressure -- the documented rule -- and every other cell of each face
+    takes its own face's pressure."""
+    node = LBMNode("l", 1.0, grid_shape=shape, viscosity=0.1, lattice=lattice,
+                   inlet_face=inlet, outlet_face=outlet)
+    p_in, p_out = 0.36, 0.30
+    out = node.update(node.initial_state(),
+                      {"inlet_pressure": jnp.float32(p_in),
+                       "outlet_pressure": jnp.float32(p_out)}, 1.0)
+    p = np.asarray(out["pressure"])
+    nd = len(shape)
+    in_face = np.zeros(shape, bool)
+    in_face[_face_slice(nd, *_FACE_MAP[inlet])] = True
+    out_face = np.zeros(shape, bool)
+    out_face[_face_slice(nd, *_FACE_MAP[outlet])] = True
+    shared = in_face & out_face
+    assert shared.any()                       # the fixture has a shared edge
+    np.testing.assert_allclose(p[shared], p_out, rtol=2e-6)
+    np.testing.assert_allclose(p[in_face & ~shared], p_in, rtol=2e-6)
+    np.testing.assert_allclose(p[out_face & ~shared], p_out, rtol=2e-6)
+
+
+def test_the_node_declares_the_periodic_halo_its_unsharded_streaming_implies():
+    """``update`` streams with ``jnp.roll``; the sharded step reproduces it
+    only with periodic halos, and says so for ``ShardedStencilNode``."""
+    node = LBMNode("l", 1.0, grid_shape=(6, 5), viscosity=0.1, lattice="D2Q9")
+    assert node.halo_boundary() == "periodic"
+    st = node.initial_state()
+    rng = np.random.default_rng(3)
+    st["f"] = st["f"] * jnp.asarray(1 + 0.05 * rng.standard_normal(st["f"].shape),
+                                    jnp.float32)
+    padded = {k: jnp.pad(v, [(1, 1)] * 2 + [(0, 0)] * (v.ndim - 2), mode="wrap")
+              for k, v in st.items()}
+    got = node.update_padded(padded, {}, 1.0)
+    want = node.update(st, {}, 1.0)
+    np.testing.assert_allclose(np.asarray(got["f"])[1:-1, 1:-1],
+                               np.asarray(want["f"]), rtol=1e-6, atol=1e-7)
+    edge = {k: jnp.pad(v, [(1, 1)] * 2 + [(0, 0)] * (v.ndim - 2), mode="edge")
+            for k, v in st.items()}
+    # the fixture can tell the fills apart: an edge fill is a different model
+    assert not np.allclose(np.asarray(node.update_padded(edge, {}, 1.0)["f"])[1:-1, 1:-1],
+                           np.asarray(want["f"]), rtol=1e-6, atol=1e-7)

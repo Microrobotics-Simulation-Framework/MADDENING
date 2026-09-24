@@ -71,7 +71,9 @@ class ParamSpec:
         value to ``-inf`` under ``(0, inf)``).
     transform : {None, "log", "logit"}
         Reparametrisation used by :func:`unconstrain` / :func:`constrain`.
-        ``"log"`` needs ``hi is None``; ``"logit"`` needs both bounds.
+        ``"log"`` needs ``hi is None`` and is measured from ``lo``, or from
+        0 when ``lo`` is ``None``, so :meth:`check` requires a value above
+        it either way; ``"logit"`` needs both bounds.
     description, units : str
         Documentation only (surfaced by FMI ``parameter`` variables).
     """
@@ -247,13 +249,24 @@ class ParamSpec:
 
         NaN compares ``False`` against every bound, so it would pass a
         pure comparison check and only surface as a NaN state later;
-        ``inf`` is likewise never a usable constant.
+        ``inf`` is likewise never a usable constant.  Under
+        ``transform="log"`` a missing lower bound is the 0 the transform is
+        measured from, so a value ``<= 0`` is refused.
         """
         lo, hi = self.bounds
         v = jnp.asarray(p)
         if jnp.issubdtype(v.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(v))):
             raise ValueError(f"{name}={v} is not finite")
         strict = self.transform in ("log", "logit")
+        if lo is None and self.transform == "log":
+            # ``log`` is measured from ``lo``, or from 0 without one
+            # (:meth:`_lo`): 0 and below have no coordinate at all --
+            # ``unconstrain`` returned -inf for 0 and NaN below it, and this
+            # check used to pass both.
+            if bool(jnp.any(v <= 0.0)):
+                raise ValueError(
+                    f"{name}={v} below bound 0.0 (transform='log' without a "
+                    "lower bound is measured from 0, so the value must be > 0)")
         if lo is not None:
             bad = bool(jnp.any(v <= lo)) if strict else bool(jnp.any(v < lo))
             if bad:

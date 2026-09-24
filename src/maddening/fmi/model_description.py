@@ -224,6 +224,12 @@ class ModelDescription:
         timestep.
     default_tolerance : float
         Default tolerance for adaptive solvers.
+    fixed_parameters : dict[str, str]
+        Graph parameters left out of the ``parameter`` variables because
+        the compiled step cannot read them, by FMU name
+        (``"<node>.params.<key>"``) with the reason.  Not part of the XML;
+        the bridge and the sidecar use it to refuse a write that would be
+        reported and never used.
     """
     model_name: str
     instantiation_token: str
@@ -237,6 +243,11 @@ class ModelDescription:
     # ``modelIdentifier`` of the FMU binary (``binaries/<platform>/<id>.so``).
     # ``None`` emits no <CoSimulation> element (description-only FMU).
     co_simulation_model_identifier: Optional[str] = None
+    # ``{"<node>.params.<key>": reason}``: graph parameters *not* exported
+    # because the compiled step cannot read them (not written to the XML).
+    # ``FmuTcpBridge`` and ``SidecarConfig(fixed_params=...)`` refuse a new
+    # value for any of them.
+    fixed_parameters: dict[str, str] = field(default_factory=dict)
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -522,14 +533,22 @@ def build_model_description(
         Default fixed step size for the FMU's experiment block.
         Defaults to the graph's master timestep when available.
     include_parameters : bool, default True
-        Expose every leaf of ``graph_manager.params["nodes"]`` as a
-        ``causality="parameter"``, ``variability="tunable"`` variable
-        named ``<node>.params.<key>`` (same stability filter as outputs), with
-        ``description`` / ``unit`` from the node's
-        :class:`~maddening.core.params.ParamSpec`.  These are backed by
-        the graph parameter pytree, so an importer that sets one changes
-        the next step without a recompile, and the FMU's directional
-        derivatives with respect to them are the real ``jax.jvp``.
+        Expose every leaf of ``graph_manager.params["nodes"]`` that the
+        compiled step reads as a ``causality="parameter"``,
+        ``variability="tunable"`` variable named ``<node>.params.<key>``
+        (same stability filter as outputs), with ``description`` /
+        ``unit`` from the node's :class:`~maddening.core.params.ParamSpec`.
+        These are backed by the graph parameter pytree, so an importer that
+        sets one changes the next step without a recompile, and the FMU's
+        directional derivatives with respect to them are the real
+        ``jax.jvp``.  A leaf the step cannot read -- an ``initial_*``
+        condition (the FMU's initial state is already built), a value a
+        node consumed when it was constructed (``LBMPipeNode.pipe_radius``)
+        or declares in ``static_data_deps`` (``WaveletAdaptiveNode.mass``),
+        or one only an unconnected input would read -- is **not** exported:
+        setting it would change nothing the FMU computes.  Those are listed
+        with the reason in :attr:`ModelDescription.fixed_parameters`, which
+        the bridge enforces.
     multi_clock : bool, default False
         Emit one FMI 3.0 ``<Clock>`` (``intervalVariability="constant"``)
         per distinct node timestep among the exported nodes, and tag every
@@ -734,6 +753,7 @@ def build_model_description(
             next_vr += 1
 
     # ----- Parameters (graph parameter pytree) -----
+    fixed_parameters: dict[str, str] = {}
     if include_parameters:
         used = {v.name for v in variables}
         node_params = getattr(graph_manager, "params", {}) or {}
@@ -743,11 +763,24 @@ def build_model_description(
         specs_fn: Callable[..., Any] | None = getattr(
             graph_manager, "param_specs", None)
         all_specs = specs_fn().get("nodes", {}) if callable(specs_fn) else {}
+        # A knob the running step never reads is not advertised: an
+        # importer would set it, read it back and see its value, and the
+        # FMU would keep computing with the old one.
+        unread_fn: Callable[..., Any] | None = getattr(
+            graph_manager, "_param_leaves_the_step_cannot_read", None)
+        unread = unread_fn() if callable(unread_fn) else {}
         for node_name, leaves in node_params.items():
             node_spec = nodes.get(node_name)
             node = getattr(node_spec, "node", node_spec)
             node_class_name = f"{type(node).__module__}.{type(node).__name__}"
             if not _ensure_stable_only_or_opt_in(node_class_name, include_evolving):
+                for key in leaves:
+                    fixed_parameters[f"{node_name}.params.{key}"] = (
+                        f"{type(node).__name__} is not a stability level this "
+                        "FMU exports (STABLE, or EVOLVING / PROVISIONAL with "
+                        "include_evolving=True), so none of its variables are "
+                        "part of the FMU"
+                    )
                 continue
             node_specs = all_specs.get(node_name, {})
             for key, leaf in leaves.items():
@@ -756,6 +789,9 @@ def build_model_description(
                 # node's initial position, say) and must not clash with
                 # the "<node>.<field>" output.
                 name = f"{node_name}.params.{key}"
+                if (node_name, key) in unread:
+                    fixed_parameters[name] = unread[(node_name, key)]
+                    continue
                 if name in used:  # pragma: no cover - defensive
                     raise ValueError(f"FMU variable name clash: {name!r}")
                 used.add(name)
@@ -819,6 +855,7 @@ def build_model_description(
         variables=variables,
         default_step_size=default_step_size,
         co_simulation_model_identifier=model_identifier,
+        fixed_parameters=fixed_parameters,
     )
 
 

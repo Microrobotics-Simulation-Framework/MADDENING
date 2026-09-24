@@ -251,3 +251,51 @@ def test_the_structural_walk_follows_loops_and_branches():
     reads = gm_mod._param_leaves_read(gm._raw_step_fn, gm._state,
                                       gm._default_external_inputs(), gm.params)
     assert reads == {("n", k) for k in ("a", "b", "c", "e_scan", "e_while", "k_cond")}
+
+
+@jax.custom_jvp
+def _primal_ignores_p(x, p):
+    return x * 1.0
+
+
+@_primal_ignores_p.defjvp
+def _tangent_reads_p(primals, tangents):
+    x, p = primals
+    dx, _ = tangents
+    return _primal_ignores_p(x, p), dx * p
+
+
+class _CustomJvpReader(SimulationNode):
+    """``slope`` reaches the step only through a custom JVP rule: the primal
+    ignores it, every derivative of the step reads it."""
+
+    def __init__(self):
+        super().__init__("n", 0.1, slope=2.0, initial_x=1.0)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self.params["initial_x"], jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = {**self.params, **(params or {})}
+        return {"x": _primal_ignores_p(state["x"], p["slope"]) + dt}
+
+
+def test_the_structural_walk_does_not_follow_a_custom_jvp_into_its_primal():
+    """``custom_jvp_call`` / ``custom_vjp_call`` are not followed into: the
+    derivative rule may read an input the primal does not, so following the
+    primal alone would call ``slope`` dead and refuse a write that changes
+    every gradient of the step (a calibration of ``slope`` would be refused
+    outright)."""
+    gm = GraphManager()
+    gm.add_node(_CustomJvpReader())
+    gm.compile()
+    assert ("n", "slope") in gm._params_read_by_step()
+    gm.params["nodes"]["n"]["slope"] = jnp.asarray(3.5, jnp.float32)
+    gm.step()                                   # not refused
+    # ... and the leaf the walk kept is one the step's derivatives read.
+    x0 = {"x": jnp.asarray(1.0, jnp.float32)}
+    node = gm._nodes["n"].node
+    _, tangent = jax.jvp(
+        lambda s: node.update(s, {}, 0.1, params=gm.params["nodes"]["n"]),
+        (x0,), ({"x": jnp.asarray(1.0, jnp.float32)},))
+    assert float(tangent["x"]) == pytest.approx(3.5)

@@ -21,6 +21,7 @@ from maddening.fmi.model_description import build_model_description
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+from maddening.nodes.table import TableNode
 
 F32 = np.finfo(np.float32)
 
@@ -28,8 +29,13 @@ F32 = np.finfo(np.float32)
 @pytest.fixture
 def gm():
     g = GraphManager()
+    # A table edge, so the ball's step reads ``elasticity``: the FMU exports
+    # only parameters its step reads, and without a table ``elasticity`` is
+    # a knob that does nothing.
+    g.add_node(TableNode(name="table", timestep=1e-2))
     g.add_node(BallNode(name="ball", timestep=1e-2, initial_position=1.0, elasticity=0.7))
     g.add_node(SpringDamperNode(name="s", timestep=1e-2, stiffness=30.0, damping=2.0))
+    g.add_edge("table", "ball", "position", "table_position")
     g.compile()
     return g
 

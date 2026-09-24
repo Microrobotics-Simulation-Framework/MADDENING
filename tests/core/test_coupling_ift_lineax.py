@@ -354,6 +354,43 @@ def test_dense_matches_gmres_gradient_small_chain():
 # small fixtures where the empirical bug wouldn't be detectable.
 
 
+def _make_wide_cycle(width: int) -> GraphManager:
+    """Two nodes, ``2 * width`` coupled floats: ``x <- 0.5 * y + 1``, ``y <- x``.
+
+    Default ``solver`` and ``linear_solver``, compiled but not stepped.
+    """
+    from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+    class _Half(SimulationNode):
+        def initial_state(self):
+            return {"x": jnp.zeros(width)}
+
+        def boundary_input_spec(self):
+            return {"u": BoundaryInputSpec(shape=(width,), description="u")}
+
+        def update(self, state, bi, dt):
+            return {"x": 0.5 * bi.get("u", jnp.zeros(width)) + 1.0}
+
+    class _Relay(SimulationNode):
+        def initial_state(self):
+            return {"y": jnp.zeros(width)}
+
+        def boundary_input_spec(self):
+            return {"v": BoundaryInputSpec(shape=(width,), description="v")}
+
+        def update(self, state, bi, dt):
+            return {"y": bi.get("v", jnp.zeros(width))}
+
+    gm = GraphManager()
+    gm.add_node(_Half("a", 0.01))
+    gm.add_node(_Relay("b", 0.01))
+    gm.add_edge("a", "b", "x", "v")
+    gm.add_edge("b", "a", "y", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=30, tolerance=1e-8)
+    gm.compile()
+    return gm
+
+
 def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
     """Production IFT backward must call ``lx.GMRES`` with
     ``restart >= min(N, 50)``, not the lineax default of 20.
@@ -374,36 +411,42 @@ def test_gmres_call_uses_explicit_restart_at_least_minN50(monkeypatch):
 
     monkeypatch.setattr(lx, "GMRES", _spy_gmres)
 
-    # N=60 chain ⇒ group state size 120 floats, well above the
-    # lineax default restart of 20.  We expect the production code
-    # to pass restart=50 (= min(120, 50)).
-    n = 60
-    gm = _make_chain_gm(n, "ift")
-    _ = gm.step()
+    # A group state of 60 floats, well above the lineax default restart
+    # of 20 and above the cap, so the production code must pass
+    # restart=50 (= min(60, 50)).  GMRES is sized by the *flat* group
+    # state, not the node count, so two nodes carrying 30-float fields
+    # reach the same construction a 30-node spring chain does, and the
+    # adjoint of two nodes traces in a second where the chain took ten.
+    width = 30
+    n_state = 2 * width
+    gm = _make_wide_cycle(width)
     compiled = gm._compiled_step
     initial_state = gm._state
-    names = [k for k in initial_state.keys() if k != "_meta"]
 
-    # Force the backward to be traced by computing a gradient.
-    def loss_fn(pos):
+    # Force the backward to be traced.  The solver is constructed while
+    # the adjoint is traced, which is all the spy needs, so the gradient
+    # is traced (``make_jaxpr``) and never compiled or run: compiling and
+    # running the forward step and the gradient of a 60-node chain made
+    # this 30 s on the CI runner for a check on two constructor arguments.
+    def loss_fn(x0):
         state = {
             k: dict(v) if isinstance(v, dict) else v
             for k, v in initial_state.items()
         }
-        state["s0"] = dict(state["s0"])
-        state["s0"]["position"] = pos
+        state["a"] = dict(state["a"])
+        state["a"]["x"] = x0
         new_state = compiled(state, {})
-        return _loss_chain(new_state, names)
+        return jnp.sum(new_state["a"]["x"] ** 2) + jnp.sum(new_state["b"]["y"] ** 2)
 
-    _ = jax.grad(loss_fn)(initial_state["s0"]["position"])
+    jax.make_jaxpr(jax.grad(loss_fn))(initial_state["a"]["x"])
 
     assert seen_kwargs, (
         "lx.GMRES was never called during the IFT backward — the spy "
         "is not reaching the production solver."
     )
     # All calls (there may be more than one if the bwd is re-traced)
-    # must use restart >= min(2*N, 50) = 50.
-    expected_min_restart = min(2 * n, 50)
+    # must use restart >= min(n_state, 50) = 50.
+    expected_min_restart = min(n_state, 50)
     for kw in seen_kwargs:
         restart = kw.get("restart")
         assert restart is not None, (

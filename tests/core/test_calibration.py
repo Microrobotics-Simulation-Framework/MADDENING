@@ -7,6 +7,8 @@ Verifies that tune_coupling_params:
 4. Handles edge cases (all fail, single config)
 """
 
+import warnings
+
 import jax.numpy as jnp
 import pytest
 
@@ -46,27 +48,58 @@ class TestTuneCouplingParamsDeprecation:
 
     def test_calling_tune_coupling_params_warns_and_names_its_replacement(self):
         """A caller who finds the grid search first is told, at the call
-        site, which tool replaces it and when this one goes away."""
-        with pytest.warns(DeprecationWarning) as record:
-            result = tune_coupling_params(
-                build_graph_fn=_build_springs,
-                param_grid={"tolerance": [1e-6], "max_iterations": [5]},
-                n_steps=2,
-            )
+        site, which tool replaces it and when this one goes away.
 
-        message = str(record[0].message)
+        The warning is issued before anything is built, so the graph
+        builder here stops the search at its first call: running the
+        grid compiled two graphs for a check that needs none (4 s on the
+        CI runner).  That the deprecated search still runs is
+        :class:`TestTuneCouplingParams`'s to show.
+        """
+        class _Stop(Exception):
+            pass
+
+        def _stop(**_group_kw):
+            raise _Stop
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            with pytest.raises(_Stop):
+                tune_coupling_params(
+                    build_graph_fn=_stop,
+                    param_grid={"tolerance": [1e-6], "max_iterations": [5]},
+                    n_steps=2,
+                )
+
+        deprecations = [w for w in record
+                        if issubclass(w.category, DeprecationWarning)]
+        assert deprecations, "tune_coupling_params no longer warns"
+        message = str(deprecations[0].message)
         assert "maddening.sysid.fit" in message
         assert "0.5.0" in message
-        # Deprecated is not broken: it still searches the grid.
-        assert isinstance(result, TuneResult)
-        assert len(result.all_trials) == 1
 
     def test_tune_coupling_params_is_tagged_deprecated_in_the_registry(self):
         assert tune_coupling_params._stability_level is StabilityLevel.DEPRECATED
 
 
+# Slow-marked (still run by slow-tests.yml): every test runs a grid search,
+# i.e. builds and compiles a graph per configuration plus a reference -- up
+# to 15 s each on the CI runner -- over an API deprecated for removal in
+# 0.5.0.  The deprecation warning itself is checked on every push above.
+@pytest.mark.slow
 class TestTuneCouplingParams:
     """Tests for the tune_coupling_params utility."""
+
+    def test_the_deprecated_grid_search_still_runs(self):
+        """Deprecated is not broken: it still searches the grid."""
+        with pytest.warns(DeprecationWarning, match="maddening.sysid.fit"):
+            result = tune_coupling_params(
+                build_graph_fn=_build_springs,
+                param_grid={"tolerance": [1e-6], "max_iterations": [5]},
+                n_steps=2,
+            )
+        assert isinstance(result, TuneResult)
+        assert len(result.all_trials) == 1
 
     def test_returns_tune_result(self):
         """Should return a TuneResult dataclass."""

@@ -52,12 +52,17 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-# ``_spec_for`` is the one place that resolves a params path to its
-# ParamSpec (the same walk ``trainable_mask`` / ``constrain`` use);
-# duplicating it here would be a second definition of "which spec
-# governs this leaf".  ``_validate_specs_mirror`` is its strict
-# companion: it refuses a ``specs`` tree that reaches nothing.
-from maddening.core.params import _spec_for, _validate_specs_mirror
+# ``_resolve_specs`` is the one walk that decides which ParamSpec governs
+# each params leaf -- the walk ``trainable_mask`` / ``constrain`` /
+# ``check_bounds`` use -- and ``_validate_specs_mirror`` is the same walk
+# refusing, in addition, an entry that reaches no leaf.  Duplicating
+# either here would be a second definition of "which spec governs this
+# leaf", which is how a namedtuple level once resolved two ways.
+from maddening.core.params import (
+    DEFAULT_SPEC,
+    _resolve_specs,
+    _validate_specs_mirror,
+)
 from maddening.warnings import PrecisionLimitWarning
 
 _META_KEY = "_meta"
@@ -474,6 +479,15 @@ class FIMReport:
     value-scaled column that is also at zero appears in ``zero_scaled``
     too.  Empty under every other scale.  The policy is tabulated in
     :func:`fim`.
+
+    ``integer_excluded`` names the leaves of integer or boolean dtype
+    that are **not** in the matrix -- one entry per leaf, by its key
+    path, since none of their entries is a column.  There is no
+    derivative with respect to an integer; left in, such a leaf became a
+    zero column and read as unidentifiable whatever the data said (an
+    integer ``matrix_mapping`` reported rank 0 of 16).  Only ``mask=None``
+    leaves one out; a ``mask`` that selects one is refused.  Store a
+    leaf as floating-point to analyse it.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -484,6 +498,7 @@ class FIMReport:
     param_names: tuple[str, ...]
     zero_scaled: tuple[str, ...] = ()
     value_scaled: tuple[str, ...] = ()
+    integer_excluded: tuple[str, ...] = ()
 
     def least_identifiable(self) -> tuple[str, float]:
         """Name and weight of the largest component of the weakest direction."""
@@ -511,15 +526,37 @@ def _leaf_size(leaf) -> int:
     return int(math.prod(np.shape(leaf)))
 
 
-def _param_names(params) -> tuple[str, ...]:
+def _is_differentiable(leaf) -> bool:
+    """Whether a params leaf has a derivative to take: a floating (or
+    complex) dtype.  Read from the dtype, which the host already has, so
+    it transfers nothing and works on a tracer."""
+    return bool(jnp.issubdtype(jnp.result_type(leaf), jnp.inexact))
+
+
+def _param_names(params, *, differentiable_only: bool = False) -> tuple[str, ...]:
+    """One name per column, in ``ravel_pytree`` order.
+
+    A leaf of one entry is named by its key path; a 1-D leaf's entries
+    as ``path[i]``; an N-D leaf's as ``path[i, j, ...]``, the NumPy index
+    of the element in the leaf.  Row-major flattening is what orders the
+    columns, but a flat position is not an index into the leaf: labelled
+    ``['H'][5]``, the unobserved element ``H[0, 5]`` of a 6x6 matrix
+    read, as the NumPy index it looks like, as the whole of row 5.
+    """
     names: list[str] = []
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+        if differentiable_only and not _is_differentiable(leaf):
+            continue
         base = jax.tree_util.keystr(path)
+        shape = tuple(np.shape(leaf))
         n = _leaf_size(leaf)
         if n == 1:
             names.append(base)
-        else:
+        elif len(shape) <= 1:
             names.extend(f"{base}[{i}]" for i in range(n))
+        else:
+            names.extend(f"{base}[{', '.join(str(int(k)) for k in ix)}]"
+                         for ix in np.ndindex(*shape))
     return tuple(names)
 
 
@@ -584,7 +621,101 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
         offset += n
     if not idx:
         raise ValueError("mask selects no parameters")
-    return np.asarray(idx)
+    return np.asarray(idx, dtype=np.intp)
+
+
+def _fim_indices(params: dict, mask: Optional[dict]):
+    """``(idx, integer_excluded)`` for :func:`fim` / :func:`fim_core`.
+
+    ``idx`` indexes the flat vector of the **differentiable** leaves only
+    (:func:`_is_differentiable`), in flatten order -- the vector
+    :func:`_fim_jacobian` differentiates -- and is ``None`` when every one
+    of them is a column.  An integer or boolean leaf has no derivative:
+    ``ravel_pytree`` used to promote it into the float vector and cast it
+    back on the way out, JAX's derivative through that cast is
+    identically zero, and the leaf came back as a zero column -- "the
+    data cannot determine this", however well they do, with nothing in
+    the report to say otherwise.  An integer ``matrix_mapping`` read as
+    rank 0 of 16.
+
+    So an integer leaf is never a column.  With ``mask=None`` -- "every
+    leaf", implicitly -- it is left out and named in
+    ``integer_excluded``; a ``mask`` that selects one *explicitly* asks
+    for a derivative that does not exist and is refused, naming it.
+    """
+    entries = jax.tree_util.tree_flatten_with_path(params)[0]
+    keep = [_is_differentiable(leaf) for _, leaf in entries]
+    n_diff = sum(_leaf_size(leaf) for (_, leaf), k in zip(entries, keep) if k)
+    if mask is None:
+        excluded = tuple(jax.tree_util.keystr(path)
+                         for (path, _), k in zip(entries, keep) if not k)
+        if n_diff == 0:
+            raise ValueError(
+                "params has no floating-point leaf, so there is nothing to "
+                "differentiate: integer and boolean leaves have no derivative "
+                f"(the leaves are {list(excluded)[:6]}"
+                f"{' ...' if len(excluded) > 6 else ''}). Store the "
+                "parameters as floating-point arrays.")
+        return None, excluded
+    flags = _mask_flags(params, mask)
+    asked = [jax.tree_util.keystr(path)
+             for (path, leaf), k, flag in zip(entries, keep, flags)
+             if bool(flag) and not k]
+    if asked:
+        dtypes = sorted({str(jnp.result_type(leaf))
+                         for (_, leaf), k, flag in zip(entries, keep, flags)
+                         if bool(flag) and not k})
+        raise ValueError(
+            f"mask selects {len(asked)} leaf/leaves of integer or boolean "
+            f"dtype ({', '.join(dtypes)}): {asked[:6]}"
+            f"{' ...' if len(asked) > 6 else ''}. A derivative with respect "
+            "to an integer does not exist -- JAX's is identically zero -- so "
+            "its column of J would be zero and the leaf would read as "
+            "unidentifiable whatever the data say. Store it as a "
+            "floating-point array if it is a parameter to analyse, or leave "
+            "it out of mask.")
+    idx, offset = [], 0
+    for (_, leaf), k, flag in zip(entries, keep, flags):
+        if not k:
+            continue
+        n = _leaf_size(leaf)
+        if bool(flag):
+            idx.extend(range(offset, offset + n))
+        offset += n
+    if not idx:
+        raise ValueError("mask selects no parameters")
+    return np.asarray(idx, dtype=np.intp), ()
+
+
+def _refuse_integer_trainable(params: dict, mask: dict) -> None:
+    """Refuse a fit whose trainable set holds an integer or boolean leaf.
+
+    The optimisers move a float vector; an integer leaf rides along
+    promoted to float, its gradient is identically zero, and the fit
+    returned it bit-for-bit unchanged -- with a finite loss, an
+    ``excited_rank`` that quietly counted it as undetermined, and no
+    word about why.  ``params_pytree()`` never produces such a leaf for
+    a node constant, so the one way to get here is to have asked: a
+    ``set_param_spec(..., ParamSpec())`` on an integer mapping weight,
+    a hand-built ``params``, or a ``mask``.
+    """
+    entries = jax.tree_util.tree_flatten_with_path(params)[0]
+    bad = [(path, leaf) for (path, leaf), flag in zip(entries, _mask_flags(params, mask))
+           if bool(flag) and not _is_differentiable(leaf)]
+    if not bad:
+        return
+    listed = "\n".join(
+        f"  - {_leaf_location(path)}  (params{jax.tree_util.keystr(path)}, "
+        f"dtype {jnp.result_type(leaf)})" for path, leaf in bad)
+    raise ValueError(
+        f"the trainable set holds {len(bad)} leaf/leaves of integer or "
+        f"boolean dtype:\n{listed}\nAn optimiser cannot move an integer: "
+        "its gradient is identically zero, so the fit would hand it back "
+        "unchanged while reporting a loss as if it had been fitted. Store it "
+        "as a floating-point array (e.g. matrix_mapping(H.astype(float))) if "
+        "it is a parameter to fit, or keep it out of the trainable set -- "
+        "ParamSpec(trainable=False), the default for mapping weights, or a "
+        "mask that leaves it out.")
 
 
 def _leaf_location(path) -> str:
@@ -619,16 +750,20 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
         are read in flatten order, so different keys fit a different
         parameter), or if it marks a leaf whose ``ParamSpec`` declares
         ``trainable=False`` -- naming every such leaf and the spec change
-        that would make it fittable.
+        that would make it fittable -- or if the resolved trainable set,
+        the graph's own included, holds a leaf of integer or boolean
+        dtype, which no optimiser can move (its gradient is identically
+        zero, and the fit used to hand it back unchanged in silence).
     """
     if mask is None:
-        return gm.trainable_mask(params)
+        resolved = gm.trainable_mask(params)
+        _refuse_integer_trainable(params, resolved)
+        return resolved
     entries = jax.tree_util.tree_flatten_with_path(params)[0]
     flags = _mask_flags(params, mask)
-    specs = gm.param_specs()
+    per_leaf = _resolve_specs(params, gm.param_specs())
     frozen = []
-    for (path, _), flag in zip(entries, flags):
-        spec = _spec_for(specs, path)
+    for (path, _), flag, spec in zip(entries, flags, per_leaf):
         if bool(flag) and not spec.trainable:
             frozen.append((path, spec))
     if frozen:
@@ -657,6 +792,7 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
             "mask may only narrow the trainable set, never widen it; drop the "
             "leaf from the mask to leave it frozen."
         )
+    _refuse_integer_trainable(params, mask)
     return mask
 
 
@@ -1141,6 +1277,10 @@ class FIMCore:
         no finite width.  Decided from ``specs`` on the host at trace
         time, so it is metadata and not a mask -- nothing about it is
         read back.  Empty under every other scale.
+    integer_excluded : tuple of str
+        Static.  :attr:`FIMReport.integer_excluded`: the integer and
+        boolean leaves left out of the matrix, decided from dtypes on the
+        host at trace time.
     """
     fim: jnp.ndarray
     eigvals: jnp.ndarray
@@ -1156,6 +1296,7 @@ class FIMCore:
     n_residual: int
     rank_rtol: float
     value_scaled: tuple[str, ...] = ()
+    integer_excluded: tuple[str, ...] = ()
 
 
 jax.tree_util.register_dataclass(
@@ -1163,7 +1304,8 @@ jax.tree_util.register_dataclass(
     data_fields=["fim", "eigvals", "eigvecs", "rank", "cond", "crb",
                  "finite", "zero_scaled", "precision_limited",
                  "deciding_ratio"],
-    meta_fields=["param_names", "n_residual", "rank_rtol", "value_scaled"],
+    meta_fields=["param_names", "n_residual", "rank_rtol", "value_scaled",
+                 "integer_excluded"],
 )
 
 
@@ -1258,6 +1400,45 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
 _SCALES = ("relative", "nominal", None)
 
 
+def _nominal_entry(spec) -> tuple[Optional[float], float]:
+    """``(width, offset)`` -- the column record ``scale="nominal"`` gives a
+    leaf governed by ``spec``: the width ``hi - lo`` of two finite bounds,
+    else no width and the offset the value is measured from (a ``"log"``
+    spec's lower bound, the transform's own gain ``dp/du = p - lo``; ``0``
+    otherwise).  The policy table in :func:`fim`, as code, in one place.
+    """
+    # An infinite bound is accepted by ``ParamSpec`` only where it means
+    # "unbounded" and is read that way here: a width needs two *finite*
+    # bounds, as the table in :func:`fim` says.  (A ``"log"`` spec cannot
+    # carry an infinite lower bound at all.)
+    lo, hi = spec.bounds
+    lo = None if lo is None or math.isinf(lo) else float(lo)
+    hi = None if hi is None or math.isinf(hi) else float(hi)
+    if lo is not None and hi is not None:
+        return hi - lo, 0.0
+    if spec.transform == "log":
+        return None, 0.0 if lo is None else lo
+    return None, 0.0
+
+
+def _changes_no_column(spec) -> bool:
+    """Whether ``spec`` gives a column exactly the record the default spec
+    gives it -- so that a ``specs`` entry holding it cannot have changed a
+    nominal report, whichever leaf it was meant for.
+
+    This is what lets a key that matches no parameter through
+    :func:`_resolve_nominal` when, and only when, it is harmless:
+    ``gm.param_specs()`` declares a spec for every constant a node knows,
+    including those ``params_pytree()`` leaves out (a uniform
+    ``HeatNode``'s ``grid_points=None``, a constant given as a Python
+    ``int``), and refusing those refused the documented
+    ``specs=gm.param_specs()`` for every such graph.  A misspelt key that
+    carries a width or a ``"log"`` offset is still refused, because
+    there the report would differ.
+    """
+    return _nominal_entry(spec) == _nominal_entry(DEFAULT_SPEC)
+
+
 def _resolve_nominal(params, specs, idx, scale):
     """The static per-column record ``scale="nominal"`` multiplies by,
     or ``None`` under any other scale.
@@ -1268,8 +1449,9 @@ def _resolve_nominal(params, specs, idx, scale):
     the column is scaled by ``theta - offset`` -- ``offset`` being the
     lower bound of a ``transform="log"`` spec (the transform's own gain
     ``dp/du = p - lo``) and ``0.0`` otherwise, i.e. plain relative
-    scaling.  The policy :func:`fim` tabulates lives here and in
-    :func:`_nominal_column_vector` and nowhere else.
+    scaling.  The policy :func:`fim` tabulates lives in
+    :func:`_nominal_entry` and :func:`_nominal_column_vector` and
+    nowhere else.
 
     Everything here is host Python over ``specs`` and the *structure*
     of ``params``; no leaf value is read, so it costs no transfer and
@@ -1284,11 +1466,15 @@ def _resolve_nominal(params, specs, idx, scale):
     produces a report that names every column in ``value_scaled``.
     The same principle refuses a ``specs`` that does not mirror
     ``params`` (:func:`~maddening.core.params._validate_specs_mirror`):
-    ``_spec_for`` answers the default spec for every leaf it cannot
-    reach, so a mis-nested tree, a ``ParamSpec.to_dict()`` entry, a
-    misspelt key or a non-dict ``specs`` would otherwise yield a report
-    bit-identical to ``scale="relative"`` and indistinguishable from
-    the honest ``specs={}``.
+    a mis-nested tree, a ``ParamSpec.to_dict()`` entry, a misspelt key
+    or a non-dict ``specs`` would otherwise yield a report bit-identical
+    to ``scale="relative"`` and indistinguishable from the honest
+    ``specs={}``.  One exemption, by :func:`_changes_no_column`: a key
+    that matches no parameter is accepted when its spec would give any
+    column the default record, so ``gm.param_specs()`` -- which declares
+    specs for constants ``params_pytree()`` leaves out -- is accepted
+    for the graph it came from while a misspelt key carrying a width is
+    not.
     """
     if scale != "nominal":
         if specs is not None:
@@ -1304,21 +1490,15 @@ def _resolve_nominal(params, specs, idx, scale):
             "tree, or a dict of ParamSpec mirroring params. Pass {} to say "
             "explicitly that no leaf has a declared width; every column is "
             "then value-scaled and FIMReport.value_scaled names them all.")
-    _validate_specs_mirror(params, specs)
-    names = _param_names(params)
-    per_leaf: list[tuple[Optional[float], float]] = []
-    sizes: list[int] = []
-    for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
-        spec = _spec_for(specs, path)
-        lo, hi = spec.bounds
-        if lo is not None and hi is not None:
-            per_leaf.append((float(hi) - float(lo), 0.0))
-        elif spec.transform == "log":
-            per_leaf.append((None, 0.0 if lo is None else float(lo)))
-        else:
-            per_leaf.append((None, 0.0))
-        sizes.append(_leaf_size(leaf))
-    cols = [entry for entry, n in zip(per_leaf, sizes) for _ in range(n)]
+    leaf_specs = _validate_specs_mirror(
+        params, specs, unmatched_ok=_changes_no_column)
+    # Columns exist for the differentiable leaves only (:func:`_fim_indices`),
+    # so the record is built over exactly those, in the same order.
+    names = _param_names(params, differentiable_only=True)
+    kept = [(spec, leaf) for spec, leaf in zip(leaf_specs, jax.tree.leaves(params))
+            if _is_differentiable(leaf)]
+    cols = [_nominal_entry(spec) for spec, leaf in kept
+            for _ in range(_leaf_size(leaf))]
     if idx is not None:
         cols = [cols[int(i)] for i in idx]
         names = tuple(names[int(i)] for i in idx)
@@ -1394,8 +1574,10 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     ``J`` is ``O(n*m)`` and ``O(n**3)`` on a handful of parameters and
     costs well under a millisecond however it is scheduled.
 
-    Split out so that :func:`fim` can jit *this* and leave the rest
-    eager.  That is not squeamishness: ``J`` is bit-for-bit the same
+    Split out so that :func:`fim` can jit *this* -- under
+    ``reuse_trace=True``, the only case where a compiled Jacobian is kept
+    between calls and so the only case where compiling it pays -- and
+    leave the rest eager.  That is not squeamishness: ``J`` is bit-for-bit the same
     jitted or not, but ``F = J.T @ J`` is not -- ``jax.jit`` folds the
     transpose into the dot's dimension numbers instead of materialising
     it, which accumulates in a different order and moves ``F`` by up to
@@ -1410,7 +1592,26 @@ def _fim_jacobian(residual_fn, params, *, scale, idx, inv_sigma,
     ``rank`` from 3 to 2.  :func:`fim` is the reporting path and its
     numbers do not move; :func:`fim_core` jits the lot and says so.
     """
-    flat, unravel = ravel_pytree(params)
+    leaves, treedef = jax.tree.flatten(params)
+    keep = [_is_differentiable(leaf) for leaf in leaves]
+    if all(keep):
+        flat, unravel = ravel_pytree(params)
+    else:
+        # Integer and boolean leaves are not columns (:func:`_fim_indices`)
+        # and do not go into the vector at all: promoted to float and cast
+        # back they would have a zero derivative, and an integer above
+        # 2**24 would not even survive the round trip in float32.  They
+        # reach ``residual_fn`` as the objects they are.
+        flat, unravel_kept = ravel_pytree(
+            [leaf for leaf, k in zip(leaves, keep) if k])
+
+        def _unravel_mixed(vec):
+            it = iter(unravel_kept(vec))
+            return jax.tree.unflatten(
+                treedef, [next(it) if k else leaf
+                          for leaf, k in zip(leaves, keep)])
+
+        unravel = _unravel_mixed
 
     def _r(theta):
         full = theta if idx is None else flat.at[idx].set(theta)
@@ -1464,7 +1665,8 @@ def _value_scaled_names(nominal) -> tuple[str, ...]:
 
 
 def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
-                     rank_rtol, nominal=None) -> FIMCore:
+                     rank_rtol, nominal=None,
+                     integer_excluded: tuple[str, ...] = ()) -> FIMCore:
     """The whole of :func:`fim`'s computation, with nothing read back."""
     J, zero_scaled = _fim_jacobian(residual_fn, params, scale=scale, idx=idx,
                                    inv_sigma=inv_sigma, nominal=nominal)
@@ -1478,7 +1680,7 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     positive = lo > 0.0
     cond = jnp.where(positive, hi / jnp.where(positive, lo, jnp.ones_like(lo)),
                      jnp.inf)
-    names = _param_names(params)
+    names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     # The residual length ``J`` was summed over.  ``_r`` ravels its output,
@@ -1504,39 +1706,52 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
         precision_limited=limited, deciding_ratio=ratio,
         param_names=names, n_residual=n_residual, rank_rtol=rtol,
         value_scaled=_value_scaled_names(nominal),
+        integer_excluded=integer_excluded,
     )
 
 
 #: Distinct ``(residual_fn, scale, mask, nominal)`` signatures whose traced
-#: Jacobian :func:`fim` keeps compiled.  Bounded because each entry
-#: holds a strong reference to the caller's ``residual_fn`` and to
-#: everything it closes over -- a graph, a window of observations -- and
-#: an unbounded cache keyed on user callables is a leak.  ``jax.jit``
-#: caches on the same principle.
+#: Jacobian :func:`fim` keeps compiled under ``reuse_trace=True``.
+#: Bounded because each entry holds a strong reference to the caller's
+#: ``residual_fn`` and to everything it closes over -- a graph, a window
+#: of observations -- and an unbounded cache keyed on user callables is a
+#: leak.  ``jax.jit`` caches on the same principle.  Nothing is stored
+#: here by a default call.
 _FIM_JACOBIAN_CACHE_SIZE = 32
 
 
 @functools.lru_cache(maxsize=_FIM_JACOBIAN_CACHE_SIZE)
 def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
-    """The jitted :func:`_fim_jacobian` for one static signature.
+    """The jitted :func:`_fim_jacobian` for one static signature --
+    consulted only by ``fim(..., reuse_trace=True)``.
 
     ``nominal`` is the :func:`_resolve_nominal` record -- a hashable
     tuple of Python floats and names, or ``None`` -- and is part of the
     key because two ``specs`` with different widths compile to
     different constants in the same shape.
 
-    ``fim`` used to re-trace the whole rollout on every call, and to
-    call ``residual_fn`` twice per call while doing it.  Tracing and
-    compiling costs the same 60-70 ms that eager ``jacfwd`` costs, so
-    the win is entirely in *not paying it again*: a caller that holds
-    its ``residual_fn`` across calls -- which is what a control loop
-    does -- pays the trace once and 14-64 us thereafter.
+    **What the key cannot see is why this is opt-in.**  Tracing reads
+    every value ``residual_fn`` takes from anywhere but its argument --
+    the ``params`` of a :class:`GraphManager` it closes over, an
+    attribute of the object it is a bound method of, a module global --
+    and bakes it into the program as a constant.  The key is
+    ``residual_fn`` itself (by equality: a bound method compares equal
+    across attribute accesses), so a later call after that state changed
+    hits this entry and gets the *first* call's Fisher matrix, rank and
+    bounds, with no warning.  Measured before this was made opt-in: a
+    spring's stiffness bound reported as 0.41 against a true 44.7 after
+    its damping moved from 2 to 20 in ``gm.params``, and rank 2 against a
+    true rank 1 after a bound method's excitation changed.  No key can
+    be derived from the callable that changes when the state it reads
+    does, so the default re-traces and only a caller who asserts the
+    residual is pure (``reuse_trace=True``) gets this entry.
 
-    A caller that builds a fresh closure per call misses the cache
-    every time and is no worse off than before, because compile and
-    eager measure the same; it gets no benefit either, so the one thing
-    a loop must do is hoist ``residual_fn`` out of it.
-    :func:`fim_core` is the direct way to say that.
+    What reuse buys, for that caller: tracing and compiling the rollout
+    costs about what eager ``jacfwd`` costs (the scan is compiled either
+    way), so the win is entirely in *not paying it again* -- a 200-step
+    spring-damper rollout measured ~230 ms per default call against ~1 ms
+    warm here, on four pinned cores.  A fresh closure per call misses the
+    cache and gains nothing.
 
     ``inv_sigma`` is an *argument* of the returned function rather than
     part of the key, so a noise model does not have to be hashable to
@@ -1553,7 +1768,7 @@ def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
     return run
 
 
-def _resolved_noise(residual_fn, params, noise_std):
+def _resolved_noise(residual_fn, params, noise_std, *, reuse_trace=False):
     """``1 / sigma``, or ``None``, without evaluating the residual.
 
     ``jax.eval_shape`` traces ``residual_fn`` for its output structure
@@ -1564,10 +1779,19 @@ def _resolved_noise(residual_fn, params, noise_std):
     ``None`` and never looks at it.  That is the common case and the
     rollout was pure waste; now nothing is traced at all unless a noise
     model was given.
+
+    ``jax.eval_shape`` is itself cached by JAX on the function it is
+    handed, which is the same trap :func:`_fim_jacobian_compiled` is
+    opt-in for: a residual whose output *structure* depends on state it
+    reads (a window length held on ``self``) would be given the first
+    call's.  So unless the caller asserted purity with ``reuse_trace``,
+    the residual goes in wrapped in a closure made for this call, which
+    no cache entry can match.
     """
     if noise_std is None:
         return None
-    return _inverse_noise_std(noise_std, jax.eval_shape(residual_fn, params))
+    shape_fn = residual_fn if reuse_trace else (lambda p: residual_fn(p))
+    return _inverse_noise_std(noise_std, jax.eval_shape(shape_fn, params))
 
 
 @stability(StabilityLevel.EXPERIMENTAL)
@@ -1602,6 +1826,19 @@ def fim_core(
         core_fn = jax.jit(functools.partial(fim_core, residual_fn))
         core = core_fn(params)              # device arrays, no sync
         ok = core.finite & (core.crb[0] < tol) & ~core.precision_limited
+
+    **Static means frozen at trace time, including what ``residual_fn``
+    reads.**  ``fim_core`` keeps no cache of its own -- called eagerly it
+    re-traces every time -- but under your ``jax.jit`` the compiled
+    ``core_fn`` holds every value ``residual_fn`` took from anywhere
+    other than its argument (the ``params`` of a graph it closes over, an
+    attribute of ``self``, a global) as the constant it was when
+    ``core_fn`` was first traced.  That is ``jax.jit``'s contract for any
+    function, stated here because the natural residual closes over a
+    ``GraphManager`` whose ``params`` a calibration loop changes: pass
+    the changing values in through ``params``, or build a new
+    ``core_fn`` when they change.  :func:`fim` re-traces on every call by
+    default for exactly this reason (see its ``reuse_trace``).
 
     ``params`` and ``noise_std`` may be traced, with one restriction:
     ``noise_std`` is validated on the host (a sigma that is zero,
@@ -1645,12 +1882,13 @@ def fim_core(
     if scale not in _SCALES:
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
-    idx = _masked_indices(params, mask)
+    idx, integer_excluded = _fim_indices(params, mask)
     return _fim_core_traced(
         residual_fn, params, scale=scale, idx=idx,
         inv_sigma=_resolved_noise(residual_fn, params, noise_std),
         rank_rtol=rank_rtol,
         nominal=_resolve_nominal(params, specs, idx, scale),
+        integer_excluded=integer_excluded,
     )
 
 
@@ -1664,6 +1902,7 @@ def fim(
     noise_std: Optional[Any] = None,
     rank_rtol: Optional[float] = None,
     specs: Optional[dict] = None,
+    reuse_trace: bool = False,
 ) -> FIMReport:
     """Fisher information matrix ``J^T J`` of ``residual_fn`` at ``params``.
 
@@ -1736,6 +1975,10 @@ def fim(
         Same structure as ``params``; only leaves marked ``True`` are
         treated as parameters (``GraphManager.trainable_mask()``).  The
         report's ``param_names`` / matrix are restricted accordingly.
+        ``None`` means every *differentiable* leaf: an integer or boolean
+        leaf has no derivative, so it is left out and named in
+        :attr:`FIMReport.integer_excluded`, and a mask that selects one
+        is a ``ValueError``.
         Unlike the fitters' ``mask`` this one is free to name a leaf the
         specs freeze: ``fim`` only linearises, it never steps a
         parameter, and the sensitivity of a frozen constant is a
@@ -1759,11 +2002,18 @@ def fim(
         carried.  A leaf without an entry gets the default (unbounded)
         spec and is therefore value-scaled and named; ``{}`` is the
         explicit way to say no leaf has a width.  The tree must mirror
-        ``params``, though: a key that matches no parameter, a dict
-        where a leaf needs a ``ParamSpec`` (``to_dict()`` output), a
-        ``ParamSpec`` above a dict level or a non-dict ``specs`` is a
-        ``ValueError`` naming the key path, because a spec that reaches
-        nothing would otherwise produce ``"relative"`` in disguise.  A
+        ``params``, though: a dict where a leaf needs a ``ParamSpec``
+        (``to_dict()`` output), a ``ParamSpec`` above a dict or record
+        level, a list of specs for a namedtuple or dataclass (address
+        its fields by name, with a dict), a non-dict ``specs``, or a key
+        that matches no parameter *and could have changed a column* (its
+        spec has a finite width, or a ``"log"`` offset from a non-zero
+        lower bound) is a ``ValueError`` naming the key path, because a
+        spec that reaches nothing would otherwise produce ``"relative"``
+        in disguise.  A stray key whose spec gives the default column
+        record is accepted -- the report is identical either way -- so
+        ``gm.param_specs()``, which declares specs for constants
+        ``params_pytree()`` leaves out, is accepted for its own graph.  A
         list/tuple of leaves takes a list/tuple of specs by position or
         one ``ParamSpec`` covering every position.  Static: the column
         scales are derived from it on the host once and baked into the
@@ -1791,6 +2041,30 @@ def fim(
         Verdicts move only for ``m > n**2``, and only ever toward
         "unresolved"; pass ``rank_rtol=n * eps`` explicitly to keep the
         old cutoff.
+    reuse_trace : bool
+        Reuse the Jacobian compiled by an earlier call with an equal
+        ``residual_fn`` (same ``scale``, ``mask`` and ``specs`` record)
+        instead of tracing it afresh.  **Off by default, and only correct
+        for a pure residual.**  Tracing reads every value ``residual_fn``
+        takes from anywhere but its argument -- the ``params`` of a
+        ``GraphManager`` it closes over, an attribute of the object it is
+        a bound method of, a module global -- and bakes it into the
+        compiled program; a reused program keeps those values.  With
+        ``reuse_trace=True``, a residual that reads the graph's
+        ``params`` for the leaves it does not take as arguments reports
+        the *first* call's matrix after those leaves change, silently,
+        and a bound method (which compares equal across attribute
+        accesses) does the same after its object changes.  So pass it
+        only when the output depends on ``params`` and on nothing that
+        can change between calls.
+
+        What it buys is the trace and compile: a 200-step spring-damper
+        rollout measured ~230 ms per default call against ~1 ms warm
+        with reuse (four pinned CPU cores).  A fresh closure per call
+        misses the cache and gains nothing; an unhashable
+        ``residual_fn`` cannot key it and is traced afresh.  For a loop
+        that needs no host-side report, :func:`fim_core` under your own
+        ``jax.jit`` is the faster path and states the same contract.
 
     Returns
     -------
@@ -1846,7 +2120,8 @@ def fim(
         ``specs`` given without ``scale="nominal"`` or withheld with it,
         or a ``specs`` tree that does not mirror ``params``; a bounds
         width that is not positive and finite once squared at the
-        parameters' precision).
+        parameters' precision; a ``mask`` selecting an integer or
+        boolean leaf, or a ``params`` with no floating-point leaf).
     FloatingPointError
         If ``F`` comes out non-finite -- a diverged rollout, an
         overflowing Jacobian, a residual holding a ``NaN``.  There is no
@@ -1856,18 +2131,28 @@ def fim(
     if scale not in _SCALES:
         raise ValueError(
             f"scale must be 'relative', 'nominal' or None, got {scale!r}")
-    idx = _masked_indices(params, mask)
+    _check_flag("reuse_trace", reuse_trace)
+    idx, integer_excluded = _fim_indices(params, mask)
     nominal = _resolve_nominal(params, specs, idx, scale)
-    inv_sigma = _resolved_noise(residual_fn, params, noise_std)
-    idx_key = None if idx is None else tuple(int(i) for i in idx)
-    try:
-        run = _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal)
-    except TypeError:
-        # An unhashable ``residual_fn`` (a callable object that defines
-        # ``__eq__`` without ``__hash__``) cannot key the cache.  That is
-        # a reason to skip the cache, not to refuse the call: build the
-        # Jacobian eagerly, exactly as this function did before it was
-        # jitted at all.
+    inv_sigma = _resolved_noise(residual_fn, params, noise_std,
+                                reuse_trace=reuse_trace)
+    run = None
+    if reuse_trace:
+        idx_key = None if idx is None else tuple(int(i) for i in idx)
+        try:
+            run = _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal)
+        except TypeError:
+            # An unhashable ``residual_fn`` (a callable object that
+            # defines ``__eq__`` without ``__hash__``) cannot key the
+            # cache.  That is a reason to skip the cache, not to refuse
+            # the call.
+            run = None
+    if run is None:
+        # The default, and deliberately not jitted-and-cached: this
+        # traces ``residual_fn`` now, so everything it reads from outside
+        # its argument is read as it stands at this call.  ``J`` is
+        # bit-for-bit the jitted one (see :func:`_fim_jacobian`), so the
+        # report does not depend on which branch built it.
         J, zero_mask = _fim_jacobian(residual_fn, params, scale=scale,
                                      idx=idx, inv_sigma=inv_sigma,
                                      nominal=nominal)
@@ -1897,7 +2182,7 @@ def fim(
             "diverged rollout), that its Jacobian does not overflow, and that "
             "noise_std is not so small that r / sigma does."
         )
-    names = _param_names(params)
+    names = _param_names(params, differentiable_only=True)
     if idx is not None:
         names = tuple(names[i] for i in idx)
     zero_scaled: tuple[str, ...] = tuple(
@@ -1970,6 +2255,7 @@ def fim(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,
         value_scaled=_value_scaled_names(nominal),
+        integer_excluded=integer_excluded,
     )
 
 
@@ -2142,20 +2428,29 @@ class _ExcitationTracker:
         return rank, basis @ basis.T
 
 
+def _check_flag(name: str, value) -> None:
+    """Refuse a non-bool switch.
+
+    A truthy non-bool (``"no"``, ``0.0``, an array) would silently pick a
+    branch the caller did not mean, and for both switches that use this
+    the branch decides whether the answer can be trusted:
+    ``hold_undetermined`` whether the returned parameters are
+    reproducible, ``reuse_trace`` whether ``fim`` may answer from an
+    earlier call's trace.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a bool, got {value!r}")
+
+
 def _check_hold_undetermined(value) -> None:
     """Refuse a non-bool ``hold_undetermined``.
 
-    A truthy non-bool (``"no"``, ``0.0``, an array) would silently pick a
-    branch the caller did not mean, and the branch it picks decides whether
-    the returned parameters are reproducible.  Called at the top of each
-    fitter, with the rest of the hyper-parameter checks, so an argument
-    error is raised before any model evaluation -- and again inside
-    :func:`_make_excitation_tracker`, so no caller of that can skip it.
+    Called at the top of each fitter, with the rest of the
+    hyper-parameter checks, so an argument error is raised before any
+    model evaluation -- and again inside :func:`_make_excitation_tracker`,
+    so no caller of that can skip it.  See :func:`_check_flag`.
     """
-    if not isinstance(value, bool):
-        raise ValueError(
-            f"hold_undetermined must be a bool, got {value!r}"
-        )
+    _check_flag("hold_undetermined", value)
 
 
 def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationTracker]:
@@ -2340,6 +2635,9 @@ def fit(
         ``unconstrain`` transform and clip a leaf only when its spec
         says trainable — make the parameter trainable in the spec
         instead, which is what activates its bounds and transform.
+        A trainable set (the default one included) holding an integer or
+        boolean leaf is refused the same way: its gradient is identically
+        zero, so the fit could only hand it back unchanged.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
         at or below it.

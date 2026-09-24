@@ -28,7 +28,8 @@ guidance; the itemized changes follow.
   columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
-  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms, same numbers
+  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms with
+  `reuse_trace=True` for a pure residual (the default re-traces; see Fixed)
 - **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
   every `>>>` in `src/maddening` now runs, and the gate fails if the
   collection shrinks — an example that stops working is a failing build
@@ -286,6 +287,9 @@ guidance; the itemized changes follow.
 - **`LBMNode`'s Zou-He pressure faces impose the pressure they are given** (MADD-ANO-020, every release): the face carried
   `p/cs2 + S_K` (+15%), a pressure-driven channel 0.58-0.80 of the imposed drop; pressure-driven results change, re-run them.
   `outlet_pressure_avg` reads the runtime wall mask; `LBMPipeNode` gains non-trainable `initial_rho_liquid`/`initial_rho_gas`.
+- **`fim` no longer reuses a compiled trace across calls unless `reuse_trace=True`** (pure residuals only): the cache
+  froze what the residual read, e.g. `gm.params` (a CRB of 0.41 for a true 44.7).  Specs resolve by one walk (namedtuple
+  levels by field name; `check_bounds` refuses unreadable specs); integer leaves are named, not zeroed; NaN bounds refused
 - **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
   fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
   run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.

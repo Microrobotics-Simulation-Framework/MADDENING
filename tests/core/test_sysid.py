@@ -391,3 +391,29 @@ def test_fit_progress_events_reach_observers(spring):
     fit_lm(gm, _full_residual(gm, obs), n_iter=2)
     gm._observers.clear()  # noqa: SLF001
     assert seen == ["lm", "lm"]
+
+
+def test_an_nd_leaf_is_labelled_by_the_index_of_the_element():
+    """A 6x6 leaf whose only unobserved element is ``H[0, 5]``.  The
+    label used to be the flat position, ``['H'][5]`` -- which, read as
+    the NumPy index it looks like, is the whole of row 5.  Each label
+    must now *be* the index of its element, in the row-major order the
+    columns are in."""
+    H = jnp.ones((6, 6), jnp.float32)
+    W = jnp.ones((6, 6)).at[0, 5].set(0.0)
+    X = jnp.asarray(np.random.default_rng(0).standard_normal((36, 50)),
+                    jnp.float32)
+    rep = fim(lambda p: (p["H"] * W).reshape(-1) @ X, {"H": H}, scale=None)
+    name, weight = rep.least_identifiable()
+    assert name == "['H'][0, 5]"
+    assert weight == pytest.approx(1.0)
+    assert rep.param_names[:7] == tuple(
+        f"['H'][0, {j}]" for j in range(6)) + ("['H'][1, 0]",)
+    assert len(set(rep.param_names)) == 36
+    # A 3-D leaf and a 1-D one side by side: every label is the index.
+    params = {"T": jnp.zeros((2, 1, 2)), "v": jnp.zeros(3)}
+    rep = fim(lambda p: jnp.concatenate([p["T"].reshape(-1), p["v"]]) * 2.0,
+              params, scale=None)
+    assert rep.param_names == (
+        "['T'][0, 0, 0]", "['T'][0, 0, 1]", "['T'][1, 0, 0]", "['T'][1, 0, 1]",
+        "['v'][0]", "['v'][1]", "['v'][2]")

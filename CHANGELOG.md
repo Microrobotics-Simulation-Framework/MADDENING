@@ -283,6 +283,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
+  `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
+  a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.
 - **Compliance gates no longer pass an empty or unreadable scope**: `check_transforms` / `check_stable_signatures`
   fail when nothing is verified; `check_doctests` floors executed examples and fails a `+SKIP`. Without the extras,
   run `check_transforms.py --allow-missing-optional`; drop a STABLE surface with `--update --accept-removal`.

@@ -109,7 +109,7 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
-from maddening.fmi.sidecar import FmuSidecar, not_tunable_error
+from maddening.fmi.sidecar import FmuSidecar, _not_tunable_error
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
 
@@ -1095,7 +1095,7 @@ class FmuTcpBridge:
                 current = np.asarray(live_nodes[owner][key])
                 restored = np.asarray(new_params["nodes"][owner][key])
                 if restored.shape != current.shape or not np.array_equal(restored, current):
-                    raise not_tunable_error(name, reason, current)
+                    raise _not_tunable_error(name, reason, current)
             # The bounds the model description advertises, applied to the
             # archive exactly as ``set`` applies them through
             # ``FmuSidecar.set_params``.  Without this an importer could

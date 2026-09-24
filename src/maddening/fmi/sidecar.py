@@ -86,7 +86,7 @@ def _copy_tree(tree: Any) -> Any:
     return tree
 
 
-def not_tunable_error(name: str, reason: str, current: Any) -> ValueError:
+def _not_tunable_error(name: str, reason: str, current: Any) -> ValueError:
     """The refusal for a new value of a parameter the step cannot read.
 
     Shared by :meth:`FmuSidecar.set_params`, :meth:`FmuSidecar.set_fmu_state`
@@ -275,7 +275,7 @@ class FmuSidecar:
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",
                 )
             if name in self._fixed and not _same_leaf(new, current):
-                raise not_tunable_error(name, self._fixed[name], current)
+                raise _not_tunable_error(name, self._fixed[name], current)
             spec = spec_nodes.get(node, {}).get(key)
             if spec is not None:
                 spec.check(new, name=name)
@@ -325,7 +325,7 @@ class FmuSidecar:
                 current = live_nodes[node][key]
                 restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
                 if not _same_leaf(restored, current):
-                    raise not_tunable_error(name, reason, current)
+                    raise _not_tunable_error(name, reason, current)
         self._state = state
         if new_params is not None:
             self._params = new_params

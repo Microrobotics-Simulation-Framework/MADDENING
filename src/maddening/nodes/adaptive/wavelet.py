@@ -95,6 +95,9 @@ from functools import partial
 from typing import Any, ClassVar, Optional
 
 import jax
+# `jax.core` is not re-exported by `jax/__init__.py`; import it so the
+# attribute `jax.core.Tracer` resolves (at runtime and for pyright).
+import jax.core
 import jax.experimental.sparse as jsparse
 import jax.numpy as jnp
 import numpy as np

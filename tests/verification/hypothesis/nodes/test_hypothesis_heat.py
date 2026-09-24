@@ -17,6 +17,7 @@ from tests.conftest import EXAMPLES_COSTLY
 class TestHeatConservation:
     """Total heat should be conserved with Neumann (zero-flux) BCs."""
 
+    @pytest.mark.slow  # a fresh rod size per example: 5-8 s on CI; still in verify-hypothesis
     @given(
         n_cells=st.integers(min_value=10, max_value=50),
         diffusivity=st.floats(min_value=0.001, max_value=0.1,

@@ -27,6 +27,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -148,6 +149,7 @@ def test_a_sharded_static_array_survives_partitioning(
                    f"reversed mask on {n_devices} devices")
 
 
+@pytest.mark.slow  # a sharded vjp compiled per example: 12-17 s on CI
 @given(label=wrapper_labels(), n_devices=device_counts(),
        cells_per_shard=st.integers(min_value=1, max_value=3),
        steps=st.integers(min_value=1, max_value=3), rate=param_values())

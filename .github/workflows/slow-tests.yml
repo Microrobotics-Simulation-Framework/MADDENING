@@ -65,6 +65,14 @@ jobs:
           pip install "jax==${{ matrix.jax-version }}" "jaxlib==${{ matrix.jax-version }}"
           pip install -e ".[ci]"
 
+      - name: Install C toolchain for the FMU wrapper tests
+        # As in ci.yml: valgrind is not on ubuntu-latest, and the valgrind
+        # and libFuzzer runs of tests/fmi/test_c_unit.py are slow-marked,
+        # so this lane is the only one that runs them.  Each self-skips
+        # when its tool is missing; without this step the valgrind run
+        # would skip here silently and run nowhere.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
+
       - name: Run full suite (slow lane)
         id: pytest
         continue-on-error: true

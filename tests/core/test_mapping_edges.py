@@ -204,6 +204,7 @@ from hypothesis import strategies as st  # noqa: E402
 from tests.conftest import EXAMPLES_COSTLY  # noqa: E402
 
 
+@pytest.mark.slow  # two graphs compiled per example: 8-16 s on CI
 @given(seed=st.integers(0, 2**31), n_c=st.integers(3, 10), n_f=st.integers(3, 14),
        kernel=st.sampled_from(["gaussian", "thin_plate_spline", "multiquadric"]),
        coupled=st.booleans())

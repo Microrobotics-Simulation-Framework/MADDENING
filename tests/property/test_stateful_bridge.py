@@ -414,6 +414,7 @@ def encode_binary_list() -> bytes:
     return _HEADER.pack(len(header)) + header + b""
 
 
+@pytest.mark.slow  # a state machine over the FMU bridge: 11 s on CI
 def test_arbitrary_sidecar_sequences_keep_the_bridge_and_the_model_in_step():
     """Any frame sequence: the wire agrees with the model, malformed or not.
 

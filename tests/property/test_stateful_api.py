@@ -534,6 +534,7 @@ class SimulationServerMachine(RuleBasedStateMachine):
             self._send("GET", "/graph/state").json())
 
 
+@pytest.mark.slow  # a state machine over the REST server: 8-19 s on CI
 def test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step():
     """Any sequence of REST calls: no 5xx, no partial write, model agreement.
 

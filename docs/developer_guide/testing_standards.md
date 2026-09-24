@@ -387,7 +387,12 @@ falls in one of three bands:
 
 Slow tests are not lost: `slow-tests.yml` runs the whole suite, slow tests
 included, on Monday, Wednesday and Friday, and on demand from the Actions
-tab.
+tab. A property under `tests/verification/hypothesis/` that is marked slow
+also still runs on every push, at the `ci` profile's depth, in the
+`verify-hypothesis` job, which selects `-m "slow or not slow"`. A slow test
+that needs a tool the default lane installs (valgrind, for
+`tests/fmi/test_c_unit.py`) needs `slow-tests.yml` to install it too, or it
+skips there and runs nowhere.
 
 CI enforces the budget in the `Test time budget` step of each test lane
 (`scripts/report_test_durations.py`, reading pytest's JUnit XML):
@@ -484,7 +489,9 @@ The usual fixes:
   dispatches every step op by op. Measured 2026-09-24:
   `test_heart_pump.py::test_steady_state_pressure` (16,660 eager steps) and
   `test_rigid_body.py::test_quaternion_stays_normalized` (10,000) spent
-  over 99% of their time this way.
+  over 99% of their time this way. Both now step in a `fori_loop` and take
+  under a second, with the same results (the heart pump's mean pressure
+  is bit-identical).
 - **Tracing/lowering**: build the graph or function once, in a
   module-scoped fixture, and reuse it rather than rebuilding it per test
   or per example.

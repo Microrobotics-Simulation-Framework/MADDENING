@@ -97,9 +97,12 @@ CASES = {
 MIGRATED = {"lbm_d2q9", "lbm_d3q19", "lbm_pipe", "lbm_pipe_multiphase", "surrogate"}
 
 
-# D3Q19 dominates the wall-clock (~3 min on CPU): slow lane.
+# Every lattice battery is over the 5 s test budget on the CI runner --
+# D3Q19 dominates (~3 min on CPU), D2Q9 and the pipe nodes take 26-41 s
+# each: slow lane.  The surrogate keeps a battery here on every push.
+_SLOW_CASES = {"lbm_d2q9", "lbm_d3q19", "lbm_pipe", "lbm_pipe_multiphase"}
 _PARAMS = [
-    pytest.param(n, marks=pytest.mark.slow) if n == "lbm_d3q19" else n
+    pytest.param(n, marks=pytest.mark.slow) if n in _SLOW_CASES else n
     for n in sorted(CASES)
 ]
 

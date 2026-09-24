@@ -179,6 +179,26 @@ def test_only_a_lineax_convergence_failure_is_translated(monkeypatch):
         node.initial_state()
 
 
+def test_an_error_that_surfaces_only_when_the_result_is_awaited_is_still_translated(
+        monkeypatch):
+    """JAX dispatches asynchronously: lineax's runtime error can surface when
+    the result is awaited rather than at the call (on this CPU build it
+    surfaces at the call, so nothing else here can tell the difference).
+    The eager path blocks on the result inside the catch, so a late error
+    is translated too, not raised later from wherever ``c`` is next read."""
+    node = _node(jnp.float32, 5, 1.0, "cg")
+    real_block = jax.block_until_ready
+
+    def late_failure(x):
+        real_block(x)
+        raise RuntimeError("_EquinoxRuntimeError: The maximum number of solver steps "
+                           "was reached. Try increasing `max_steps`.")
+
+    monkeypatch.setattr(jax, "block_until_ready", late_failure)
+    with pytest.raises(ValueError, match="ran out of steps"):
+        node.initial_state()
+
+
 def test_under_a_trace_the_cg_solve_is_not_blocked_on():
     """Under ``jit`` the solve has not run when ``solve_frozen`` returns, so
     there is nothing to catch and nothing may be forced: the traced update

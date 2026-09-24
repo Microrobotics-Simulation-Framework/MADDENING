@@ -33,7 +33,7 @@
     },
     "sharded_heat": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 68,
+      "jaxpr_primitive_count": 96,
       "hlo_op_count": 70
     }
   }

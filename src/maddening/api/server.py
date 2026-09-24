@@ -1124,7 +1124,13 @@ class SimulationServer:
             # params node against its own pytree so the same request gets
             # the same answer one compile() earlier or later.
             probe_only = False
-            if not live and getattr(node, "accepts_params", lambda: False)():
+            # The graph's own answer, recorded by ``add_node`` from the one
+            # params rule (``maddening.core.node._method_accepts_params``).
+            # This used to read ``node.accepts_params`` and treat a node
+            # object without that method as taking no params, which the
+            # graph -- and so the ``live`` branch one compile later -- did
+            # not.
+            if not live and self.gm._nodes[node_name].accepts_params:
                 live = dict(node.params_pytree())
                 probe_only = True
             # A key is addressable if it is a constructor param *or* a leaf

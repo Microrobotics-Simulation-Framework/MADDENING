@@ -20,14 +20,21 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from maddening.core.node import SimulationNode, _signature_takes_params
+from maddening.core.node import (
+    SimulationNode,
+    _method_accepts_params,
+    _signature_takes_params,
+)
 
 
 def _accepts_params(fn) -> bool:
-    """Would ``fn(..., params=x)`` deliver ``x``?  The shared rule
-    (:func:`~maddening.core.node._signature_takes_params`), so a wrapped
-    node whose hook forwards ``**kwargs`` gets its params through the
-    hybrid exactly as it would unwrapped."""
+    """Would ``fn(..., params=x)`` deliver ``x``?  The callable half of the
+    shared rule (:func:`~maddening.core.node._signature_takes_params`), so
+    a wrapped node whose hook forwards ``**kwargs`` gets its params through
+    the hybrid exactly as it would unwrapped.  :class:`HybridNode` itself
+    asks the node half, :func:`~maddening.core.node._method_accepts_params`,
+    so a physics node that is itself a wrapper answering for what it wraps
+    is asked, not read past."""
     return _signature_takes_params(fn)
 
 
@@ -71,7 +78,7 @@ class HybridNode(SimulationNode):
     def accepts_params(self, *, method: str = "update") -> bool:
         if method != "update":
             return super().accepts_params(method=method)
-        return _accepts_params(self.physics_node.update)
+        return _method_accepts_params(self.physics_node, "update")
 
     def params_pytree(self) -> dict:
         return self.physics_node.params_pytree()
@@ -82,8 +89,8 @@ class HybridNode(SimulationNode):
     def update(self, state: dict, boundary_inputs: dict, dt: float, *, params=None) -> dict:
         """Physics update + additive correction (``params`` reaches the
         physics node when it takes them, so a hybrid stays calibratable)."""
-        if params is not None and _accepts_params(self.physics_node.update):
-            # `_accepts_params` above proved this node takes the keyword;
+        if params is not None and _method_accepts_params(self.physics_node, "update"):
+            # `_method_accepts_params` above proved this node takes the keyword;
             # the `SimulationNode.update` contract does not declare it.
             physics_result = self.physics_node.update(
                 state, boundary_inputs, dt,
@@ -106,7 +113,8 @@ class HybridNode(SimulationNode):
         return self.physics_node.boundary_input_spec()
 
     def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
-        if params is not None and _accepts_params(self.physics_node.compute_boundary_fluxes):
+        if params is not None and _method_accepts_params(
+                self.physics_node, "compute_boundary_fluxes"):
             return self.physics_node.compute_boundary_fluxes(
                 state, boundary_inputs, dt, params=params,
             )
@@ -118,7 +126,8 @@ class HybridNode(SimulationNode):
         return self.physics_node.interface_dof_indices()
 
     def compute_interface_correction(self, pre_state, boundary_inputs, dt, *, params=None):
-        if params is not None and _accepts_params(self.physics_node.compute_interface_correction):
+        if params is not None and _method_accepts_params(
+                self.physics_node, "compute_interface_correction"):
             return self.physics_node.compute_interface_correction(
                 pre_state, boundary_inputs, dt, params=params,
             )

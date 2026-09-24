@@ -15,7 +15,11 @@ the very first candidate, "any declared dependency on a parameter with
 deriving a static from an ``int`` such as ``n_cells``.  What makes a
 parameter dangerous is that the graph *differentiates* it: it has to be
 a leaf of :meth:`~maddening.core.node.SimulationNode.params_pytree` as
-well as trainable.  The generated nodes mix ``float`` and ``int``
+well as trainable.  Since 0.4.0 an ``int`` whose node declares it
+trainable *is* such a leaf -- ``params_pytree`` promotes it, because
+``stiffness=100`` is a stiffness and not a grid size -- so the ``int``
+that stays structural is the one declared frozen (or not declared at
+all, like ``n_cells``).  The generated nodes mix ``float`` and ``int``
 parameters, trainable and frozen, with dependency declarations that also
 name parameters the node does not have, so both halves of the condition
 are searched rather than asserted.
@@ -122,14 +126,17 @@ def _forbidden(kinds, trainable, deps) -> set[tuple[str, str]]:
     """``(static_key, param_key)`` pairs the rule must refuse.
 
     Spelled out independently of the implementation: a dependency is
-    forbidden when the parameter is a float the graph differentiates
-    *and* nothing has frozen it.
+    forbidden when the parameter is one the graph differentiates *and*
+    nothing has frozen it.  Every generated parameter carries a declared
+    spec, so a trainable one is differentiated whether it is spelled as a
+    float or as an int (``params_pytree`` promotes the int spelling of a
+    declared-trainable constant); a frozen int stays structural.
     """
     return {
         (static_key, param_key)
         for static_key, param_keys in deps.items()
         for param_key in param_keys
-        if kinds.get(param_key) == "float" and trainable.get(param_key, True)
+        if kinds.get(param_key) in ("float", "int") and trainable.get(param_key, True)
     }
 
 
@@ -227,9 +234,11 @@ def _recipes_with_overrides(draw):
     """A recipe plus the graph-level ``set_param_spec`` calls over it."""
     recipe = draw(_recipes())
     kinds = recipe[0]
-    # ``set_param_spec`` reaches the leaves of ``params_pytree()`` only,
-    # which is the float parameters: an ``int`` such as ``n_cells`` is
-    # structural and has no spec to override.
+    # ``set_param_spec`` reaches the leaves of ``params_pytree()`` only.
+    # A float always is one; an int is one only while its node declares it
+    # trainable, and an override freezing it would take it back out of the
+    # pytree the override was validated against -- so the overrides stay
+    # on the floats.
     overrides = {
         name: draw(st.booleans())
         for name, kind in kinds.items()

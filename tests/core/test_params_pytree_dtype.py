@@ -167,3 +167,80 @@ def test_a_value_survives_params_pytree_at_the_working_precision(value, enabled)
         expected = np.asarray(value).astype(working).item()
         for leaf in leaves:
             assert np.asarray(leaf).reshape(-1)[0].item() == expected
+
+
+# ---------------------------------------------------------------------------
+# An integer spelling of a declared constant is the constant, not a shape
+# ---------------------------------------------------------------------------
+
+
+class _Declared(_Probe):
+    """``gain`` declared a trainable constant, ``cells`` a frozen one."""
+
+    def param_specs(self):
+        from maddening.core.params import ParamSpec
+        return {**super().param_specs(), "gain": ParamSpec(bounds=(0.0, None)),
+                "cells": ParamSpec(trainable=False)}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("spelled, expected", [
+    pytest.param(3, [3.0], id="python int"),
+    pytest.param(np.int64(3), [3.0], id="np.int64 scalar"),
+    pytest.param((1, 2, 3), [1.0, 2.0, 3.0], id="tuple of ints"),
+    pytest.param([4, 5], [4.0, 5.0], id="list of ints"),
+    pytest.param(np.array([6, 7], dtype=np.int32), [6.0, 7.0], id="int32 array"),
+])
+def test_an_integer_spelling_of_a_declared_trainable_constant_is_promoted(spelled, expected, enabled):
+    """``stiffness=100`` is a stiffness, not a grid size.  It reaches the
+    pytree at the working precision, the value the float spelling gives."""
+    with x64(enabled):
+        leaf = _Declared("n", 0.01, gain=spelled).params_pytree()["gain"]
+        assert leaf.dtype == np.dtype("float64" if enabled else "float32")
+        np.testing.assert_array_equal(np.asarray(leaf).reshape(-1), expected)
+
+
+def test_an_integer_without_a_trainable_spec_stays_structural():
+    """No spec, a ``trainable=False`` spec, or a ``bool``: still structural."""
+    node = _Declared("n", 0.01, gain=True, cells=8, n_cells=16, initial_x=0)
+    assert node.params_pytree() == {}
+
+
+def test_an_int_spelled_constant_is_in_gm_params_and_fitted_like_the_float_one():
+    """The audit's reproducer: ``SpringDamperNode(stiffness=100, mass=2)``
+    and ``RigidBodyNode(inertia=(1, 2, 3))`` silently lost their declared
+    trainable constants from ``gm.params``, so a sensitivity or a fit over
+    the graph simply never saw them."""
+    from maddening.nodes import RigidBodyNode
+
+    def grads(**kw):
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", 0.01, rest_length=0.5, **kw))
+        gm.compile()
+        assert all(gm.trainable_mask()["nodes"]["s"][k] for k in ("stiffness", "mass"))
+        g = jax.grad(lambda p: gm.run_scan(20, params=p)["s"]["position"])(gm.params)
+        return {k: float(v) for k, v in g["nodes"]["s"].items()}
+
+    as_int, as_float = grads(stiffness=100, mass=2), grads(stiffness=100.0, mass=2.0)
+    assert as_int == as_float
+    assert as_int["stiffness"] != 0.0 and as_int["mass"] != 0.0
+
+    gm = GraphManager()
+    gm.add_node(RigidBodyNode("r", 0.01, inertia=(1, 2, 3)))
+    gm.compile()
+    np.testing.assert_array_equal(np.asarray(gm.params["nodes"]["r"]["inertia"]), [1.0, 2.0, 3.0])
+    assert gm.trainable_mask()["nodes"]["r"]["inertia"] is True
+
+
+def test_an_unchanged_int_spelled_constant_serialises_as_it_was_given():
+    """Promotion is the pytree's business: ``to_dict`` still writes the
+    constructor's own ``100`` for an uncalibrated leaf, and a calibrated
+    one as its value."""
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=100, mass=2))
+    gm.compile()
+    params = [n for n in gm.to_dict()["nodes"] if n["name"] == "s"][0]["params"]
+    assert params["stiffness"] == 100 and isinstance(params["stiffness"], int)
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(150.0, jnp.float32)
+    params = [n for n in gm.to_dict()["nodes"] if n["name"] == "s"][0]["params"]
+    assert params["stiffness"] == 150.0

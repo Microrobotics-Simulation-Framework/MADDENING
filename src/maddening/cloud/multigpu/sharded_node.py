@@ -18,7 +18,6 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 from __future__ import annotations
 
 import functools
-import inspect
 import warnings
 from typing import Any, Optional
 
@@ -31,7 +30,12 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maddening.cloud.multigpu.halo import halo_exchange
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.node import SimulationNode
+from maddening.core.node import (
+    BoundaryFluxSpec,  # noqa: F401 - named by boundary_flux_spec's annotation
+    SimulationNode,
+    _method_accepts_params,
+    _signature_takes_keyword,
+)
 from maddening.core.static_data import StaticArray, coerce_static_data_value
 
 #: Mesh axis :class:`ShardedPointwiseNode` shards over (the 1-D default
@@ -93,24 +97,73 @@ def _check_shard_divisible(
 
 
 def _accepts_params(node: SimulationNode) -> bool:
-    """True when ``node.update`` declares a ``params`` keyword.
+    """True when ``node.update(..., params=x)`` would deliver ``x``.
 
-    Uses the node's own :meth:`SimulationNode.accepts_params` when it has
-    one and falls back to signature inspection for duck-typed nodes, so
+    :func:`~maddening.core.node._method_accepts_params`, the one params
+    rule: the node's own :meth:`SimulationNode.accepts_params` when it has
+    one, the signature (explicit keyword or ``**kwargs``) otherwise, so
     the wrapper answers exactly what the graph would have answered for
-    the unwrapped node.
+    the unwrapped node.  The duck-typed fallback here used to accept only
+    the explicit keyword.
     """
-    probe = getattr(node, "accepts_params", None)
-    if callable(probe):
-        return bool(probe())
-    try:
-        return "params" in inspect.signature(node.update).parameters
-    except (TypeError, ValueError):
-        return False
+    return _method_accepts_params(node, "update")
+
+
+class _ForwardsCouplingHooks:
+    """The flux and interface-correction hooks, forwarded to ``self._inner``.
+
+    Both wrappers that use this keep the graph-level state in the inner
+    node's own global view -- each field is the inner node's array, placed
+    with a ``NamedSharding`` -- so the inner node's
+    ``compute_boundary_fluxes`` and ``compute_interface_correction`` read
+    it exactly as they would unwrapped, and an index from
+    ``interface_dof_indices`` names the same cell.  Without the
+    forwarding a wrapped node published no fluxes (a flux edge from it
+    failed to compile) and no interface DOFs (a coupled interface was
+    silently left uncorrected).  ``params`` reaches the inner hook under
+    the one params rule, as in
+    :class:`~maddening.core.simulation.hybrid_node.HybridNode`.
+
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+    does not use it: its state is in partition layout, where the inner
+    node's global indices name different cells.
+    """
+
+    _inner: SimulationNode
+
+    def boundary_flux_spec(self) -> dict[str, "BoundaryFluxSpec"]:
+        return self._inner.boundary_flux_spec()
+
+    def compute_boundary_fluxes(
+        self, state: dict, boundary_inputs: dict, dt: float, *, params=None,
+    ) -> dict:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_boundary_fluxes"):
+            return self._inner.compute_boundary_fluxes(
+                state, boundary_inputs, dt, params=params)
+        return self._inner.compute_boundary_fluxes(state, boundary_inputs, dt)
+
+    def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
+        return self._inner.interface_dof_indices()
+
+    def compute_interface_correction(
+        self,
+        pre_state: dict,
+        boundary_inputs: dict,
+        dt: float,
+        *,
+        params=None,
+    ) -> dict[str, list[tuple[int, Any]]]:
+        if params is not None and _method_accepts_params(
+                self._inner, "compute_interface_correction"):
+            return self._inner.compute_interface_correction(
+                pre_state, boundary_inputs, dt, params=params)
+        return self._inner.compute_interface_correction(
+            pre_state, boundary_inputs, dt)
 
 
 @stability(StabilityLevel.STABLE)
-class ShardedPointwiseNode(SimulationNode):
+class ShardedPointwiseNode(_ForwardsCouplingHooks, SimulationNode):
     """Data-parallel wrapper for a pointwise :class:`SimulationNode`.
 
     Only nodes with empty ``halo_width()`` can be wrapped; stencil nodes
@@ -315,7 +368,7 @@ def _params_signature(params) -> tuple:
 
 
 @stability(StabilityLevel.STABLE)
-class ShardedStencilNode(SimulationNode):
+class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     """Pencil-decomposition wrapper for a stencil :class:`SimulationNode`.
 
     On each step, every state field listed in the node's
@@ -439,27 +492,22 @@ class ShardedStencilNode(SimulationNode):
         # its signature does not accept `static_padded`, that is a
         # contract violation and we raise here rather than at first
         # trace.
-        sig = inspect.signature(node.update_padded)
-        params = sig.parameters
-        has_var_kw = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        self._inner_accepts_static_padded = _signature_takes_keyword(
+            node.update_padded, "static_padded",
         )
-        self._inner_accepts_static_padded = (
-            "static_padded" in params or has_var_kw
-        )
-        self._inner_accepts_shard_info = (
-            "shard_info" in params or has_var_kw
+        self._inner_accepts_shard_info = _signature_takes_keyword(
+            node.update_padded, "shard_info",
         )
         # Graph parameter contract on the sharded path: an inner
         # ``update_padded(..., params=None)`` receives the node's entry of
         # ``GraphManager.params`` (replicated across shards).
         #
-        # ``or has_var_kw`` for the same reason as the two probes above,
-        # and it matters more here: a ``**kwargs`` node that did not get
-        # ``params`` silently fell back to its constructor constant, so
-        # the injected leaf never entered the trace and d(loss)/d(param)
-        # came back exactly 0.0 with no error anywhere.
-        self._inner_accepts_params = "params" in params or has_var_kw
+        # The one params rule (explicit keyword or ``**kwargs``), asked
+        # through the inner node's own probe.  A ``**kwargs`` node that
+        # did not get ``params`` silently fell back to its constructor
+        # constant, so the injected leaf never entered the trace and
+        # d(loss)/d(param) came back exactly 0.0 with no error anywhere.
+        self._inner_accepts_params = _method_accepts_params(node, "update_padded")
         if self._sharded_static and not self._inner_accepts_static_padded:
             raise ValueError(
                 f"{type(node).__name__} declares sharded static_data "

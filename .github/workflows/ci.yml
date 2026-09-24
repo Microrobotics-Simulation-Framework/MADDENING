@@ -167,7 +167,16 @@ jobs:
           # --durations prints every test over 1 s at the end of the log;
           # the JUnit XML carries every test's time to the budget step
           # below.  xunit1 is the JUnit family that records file and line.
+          #
+          # Four xdist workers, one per runner vCPU.  Most of a slow test's
+          # time is XLA compilation, which is largely single-threaded, so a
+          # serial run leaves most of the runner idle.  --dist loadfile keeps
+          # each file on one worker: module- and class-scoped fixtures build
+          # once, and the fixed-port cloud tests never share a port.  The
+          # plugin is named explicitly because PYTEST_DISABLE_PLUGIN_AUTOLOAD
+          # turns entry-point loading off.
           python -m pytest tests/ -v -rs --tb=short --ignore=tests/viz \
+            -p xdist.plugin -n 4 --dist loadfile \
             --durations=0 --durations-min=1.0 \
             --junitxml=test-results.xml -o junit_family=xunit1
 

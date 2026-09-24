@@ -284,6 +284,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A sharded `LBMNode` is the unsharded node or refuses**: a pressure face on a sharded axis raises at the first step; `ShardedStencilNode(boundary=None)` takes a node's `halo_boundary()` (LBM periodic, others `"edge"`) and refuses another; `inlet_face == outlet_face` is refused.
+  `WaveletAdaptiveNode(frozen_solver="cg")` is bounded by `kappa * rtol` and a non-converging eager solve says why; inline points refuse complex values (any width), and without a `"dtype"` ints beyond 2**53 and inexact `Decimal`s.
+  Action: shard an axis with no pressure face and drop `boundary="edge"` for LBM; use `frozen_solver="gather"`; add an explicit `"dtype"` (e.g. `"int64"`) to inline points.
 - **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
   `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
   a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.

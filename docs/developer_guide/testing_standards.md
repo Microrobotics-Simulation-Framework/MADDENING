@@ -387,7 +387,12 @@ falls in one of three bands:
 
 Slow tests are not lost: `slow-tests.yml` runs the whole suite, slow tests
 included, on Monday, Wednesday and Friday, and on demand from the Actions
-tab.
+tab. A property under `tests/verification/hypothesis/` that is marked slow
+also still runs on every push, at the `ci` profile's depth, in the
+`verify-hypothesis` job, which selects `-m "slow or not slow"`. A slow test
+that needs a tool the default lane installs (valgrind, for
+`tests/fmi/test_c_unit.py`) needs `slow-tests.yml` to install it too, or it
+skips there and runs nowhere.
 
 CI enforces the budget in the `Test time budget` step of each test lane
 (`scripts/report_test_durations.py`, reading pytest's JUnit XML):
@@ -446,6 +451,12 @@ fixes:
   not shapes, and pass them as traced arguments.
 - Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for properties
   that compile per example.
+
+The other usual cost is eager dispatch. A Python `for` loop over
+`node.update` runs every operation one at a time, and thousands of steps
+of it take minutes. Run the same updates through `jax.lax.fori_loop` or
+`jax.lax.scan`: the heart-pump steady-state test went from 170 s on CI to
+under a second that way, with a bit-identical result.
 
 ## Test Organization
 

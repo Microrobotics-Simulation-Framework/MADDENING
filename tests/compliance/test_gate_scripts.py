@@ -2421,20 +2421,27 @@ class TestHeatStabilityGate:
         allowlist entry left behind would silently stop checking a real
         file.
         """
-        for relpath in heat_stability_gate._ALLOWED_UNSTABLE:
+        gate = heat_stability_gate
+        for relpath, (_reason, scope) in gate._ALLOWED_UNSTABLE.items():
             path = REPO_ROOT / relpath
-            if not path.is_file():
-                continue
+            assert path.is_file(), (
+                f"{relpath} is allowlisted but does not exist; remove the "
+                f"_ALLOWED_UNSTABLE entry")
             unstable, unchecked, seen = [], [], []
-            heat_stability_gate.scan_source(
+            gate.scan_source(
                 path.read_text(), relpath,
-                heat_stability_gate._defaults(), unstable, unchecked, seen,
+                gate._defaults(), unstable, unchecked, seen,
             )
-            assert unstable, (
+            exempt = [(o, n) for o, n, _why in unstable if gate._is_allowed(o, n)]
+            assert exempt, (
                 f"{relpath} is allowlisted as deliberately containing an "
                 f"unstable HeatNode construction, but no longer does; remove "
                 f"the _ALLOWED_UNSTABLE entry"
             )
+            if scope != gate.EMBEDDED_ONLY:
+                # Every listed line still holds the rod it exempts, so a
+                # line number left behind by an edit cannot exempt another.
+                assert {n for _o, n in exempt} == set(scope), (relpath, exempt)
 
     def test_the_allowlist_does_not_exempt_an_ordinary_file(
         self, heat_stability_gate, tmp_path
@@ -2549,6 +2556,61 @@ class TestHeatStabilityCallForms:
         )
         out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
         assert "rebound.py" in out
+
+    @pytest.mark.parametrize("body", [
+        # The audit's case: a trivial subclass.
+        "class Rod(HeatNode):\n    pass\n\n"
+        'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "        thermal_diffusivity=0.1)\n",
+        # A subclass of a subclass, defined in either order.
+        "class Deep(Rod):\n    pass\n\nclass Rod(HeatNode):\n"
+        "    def update(self, *a, **k):\n        return super().update(*a, **k)\n\n"
+        'n = Deep("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "         thermal_diffusivity=0.1)\n",
+        # A subclass of the attribute spelling.
+        "import maddening.nodes.heat as heat\n\n"
+        "class Rod(heat.HeatNode):\n    pass\n\n"
+        'n = Rod("r", timestep=1e-4, n_cells=257, length=1.0,\n'
+        "        thermal_diffusivity=0.1)\n",
+    ])
+    def test_a_rod_built_through_a_local_subclass_is_seen(
+        self, heat_stability_gate, tmp_path, capsys, body
+    ):
+        """``HeatNode.__init__`` runs, guard and all, for a subclass that
+        does not override it (audit_040_phase3_confirm, release-record)."""
+        self._with_a_recognised_rod(
+            tmp_path, "subclass_form.py",
+            "from maddening.nodes.heat import HeatNode\n" + body)
+        out = self._fails_naming_the_rod(heat_stability_gate, tmp_path, capsys)
+        assert "subclass_form.py" in out
+
+    def test_a_stable_rod_through_a_subclass_is_verified(self, heat_stability_gate):
+        unstable, unchecked, seen = TestHeatStabilityCounts._scan(
+            None, heat_stability_gate,
+            "class Rod(HeatNode):\n    pass\n\n"
+            'Rod("ok", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert len(seen) == 1 and unchecked == [] and unstable == []
+
+    @pytest.mark.parametrize("override", ["__init__", "__new__"])
+    def test_a_subclass_with_its_own_constructor_is_not_evaluated(
+        self, heat_stability_gate, override
+    ):
+        """Its arguments need not reach ``HeatNode.__init__`` as written, so
+        judging them as if they did could pass a rod the guard refuses."""
+        unstable, unchecked, seen = TestHeatStabilityCounts._scan(
+            None, heat_stability_gate,
+            f"class Rod(HeatNode):\n    def {override}(self, *a, **k):\n"
+            f"        pass\n\nclass Deeper(Rod):\n    pass\n\n"
+            'Rod("r", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n"
+            'Deeper("r", timestep=1e-5, n_cells=10, length=1.0,'
+            " thermal_diffusivity=0.01)\n",
+        )
+        assert seen == [] and unstable == []
+        assert len(unchecked) == 2
+        assert all("defines its own __init__ or __new__" in u[2] for u in unchecked)
 
     def test_the_positional_order_is_the_constructor_signature_order(
         self, heat_stability_gate
@@ -2695,16 +2757,66 @@ class TestHeatStabilitySplats:
 
 class TestHeatStabilityAllowlist:
     def test_every_entry_carries_a_reason(self, heat_stability_gate):
-        for path, reason in heat_stability_gate._ALLOWED_UNSTABLE.items():
+        for path, (reason, _scope) in heat_stability_gate._ALLOWED_UNSTABLE.items():
             assert isinstance(reason, str) and reason.strip(), path
+
+    def test_every_entry_names_constructions_not_a_whole_file(
+        self, heat_stability_gate
+    ):
+        """The test file was exempt wholesale, so a real unstable rod
+        appended to it passed (audit_040_phase3_confirm, release-record)."""
+        gate = heat_stability_gate
+        for path, (_reason, scope) in gate._ALLOWED_UNSTABLE.items():
+            assert scope == gate.EMBEDDED_ONLY or (
+                isinstance(scope, frozenset) and scope
+                and all(isinstance(n, int) for n in scope)), (path, scope)
+
+    def test_a_real_construction_in_the_test_file_is_not_exempt(
+        self, heat_stability_gate
+    ):
+        gate = heat_stability_gate
+        test_file = "tests/compliance/test_gate_scripts.py"
+        assert gate._is_allowed(f"{test_file}{gate._EMBEDDED}", 3)
+        assert not gate._is_allowed(test_file, 3)
+        probe = next(p for p, (_r, sc) in gate._ALLOWED_UNSTABLE.items()
+                     if sc != gate.EMBEDDED_ONLY)
+        line = min(gate._ALLOWED_UNSTABLE[probe][1])
+        assert gate._is_allowed(probe, line)
+        assert not gate._is_allowed(probe, line + 100)
+        assert not gate._is_allowed(f"{probe}{gate._EMBEDDED}", line)
+
+    def test_only_the_planted_fixture_in_an_allowlisted_file_is_exempt(
+        self, heat_stability_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Replays the audit: a real rod appended to the exempt file."""
+        gate = heat_stability_gate
+        planted = tmp_path / "planted.py"
+        planted.write_text(
+            "from maddening.nodes.heat import HeatNode\n"
+            "OK = HeatNode('ok', timestep=1e-5, n_cells=10, length=1.0,\n"
+            "              thermal_diffusivity=0.01)\n\n"
+            "FIXTURE = 'HeatNode(\"h\", 0.51, n_cells=10, length=1.0, "
+            "thermal_diffusivity=1.0)'\n"
+        )
+        monkeypatch.setitem(gate._ALLOWED_UNSTABLE, str(planted),
+                            ("the fixture for this test", gate.EMBEDDED_ONLY))
+        assert gate.main([str(tmp_path)]) == 0, capsys.readouterr().out
+        assert "1 deliberately unstable construction(s) exempt" in (
+            capsys.readouterr().out)
+        with planted.open("a") as fh:
+            fh.write("\n\ndef _seeded_real_use():\n"
+                     "    return HeatNode('h', 0.51, n_cells=10, length=1.0,\n"
+                     "                    thermal_diffusivity=1.0)\n")
+        assert gate.main([str(tmp_path)]) == 1
+        assert "planted.py:9: Fourier number" in capsys.readouterr().out
 
     def test_the_allowlist_stays_small(self, heat_stability_gate):
         allowlist = heat_stability_gate._ALLOWED_UNSTABLE
         cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
         assert len(allowlist) <= cap, (
             f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
-            f"whole file this gate stops reading; fix the rod instead of "
-            f"raising the cap."
+            f"file whose planted rods this gate stops refusing; fix the rod "
+            f"instead of raising the cap."
         )
 
 

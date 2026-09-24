@@ -247,8 +247,9 @@ guidance; the itemized changes follow.
   freeze picks the final levels
 - `AdaptiveNode.blindness_ratio` / `blindness_threshold` are
   `gradient_capture_ratio` / `gradient_capture_threshold`, and the cold-start
-  check warns rather than raising except under `on_blind="raise"` or a
-  confirmed Palais trap
+  check warns rather than raising unless `on_blind="raise"`.  Like `is_trapped_at`
+  and the `bound_valid` / `gradient_error_bound` keys above, these are renames
+  within the 0.4.0 cycle: no release carried the old names, which still warn
 - The `AdaptiveNode` gradient is documented as exact within an active-set
   region and first-order wrong across a switch; the previous "Clarke
   subgradient" claim was false (`MADD-ANO-003`)
@@ -265,10 +266,6 @@ guidance; the itemized changes follow.
   `docs/developer_guide/testing_standards.md`
 
 ### Deprecated
-- `coupling_diagnostics()['bound_valid']` and `['gradient_error_bound']` warn on
-  read and are removed in 0.5.0; read `ratio_usable` / `gradient_error_estimate`
-- `AdaptiveNode.is_trapped_at` warns; use `frozen_gradient_vanishes_at` and
-  read a `False` as "not a trap" rather than a `True` as "trap"
 - `maddening.core.simulation.calibration.calibrate` and
   `tune_coupling_params` warn and are removed in 0.5.0; use
   `maddening.sysid.fit`, which has `ParamSpec` bounds and a trainable mask
@@ -276,8 +273,6 @@ guidance; the itemized changes follow.
   next minor release
 - `maddening.core.simulation.checkpoint.download_and_load_state` warns and is
   removed in 1.0; use `maddening.cloud.download_and_load_state`
-- `AdaptiveNode.blindness_ratio()` and the `blindness_threshold=` keyword warn (reading the
-  attribute does not); use `gradient_capture_ratio` / `gradient_capture_threshold`
 
 ### Removed
 - The stelling formal-verification suite, CI job and `stelling` dependency.

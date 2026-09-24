@@ -621,7 +621,7 @@ def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
         offset += n
     if not idx:
         raise ValueError("mask selects no parameters")
-    return np.asarray(idx)
+    return np.asarray(idx, dtype=np.intp)
 
 
 def _fim_indices(params: dict, mask: Optional[dict]):
@@ -684,7 +684,7 @@ def _fim_indices(params: dict, mask: Optional[dict]):
         offset += n
     if not idx:
         raise ValueError("mask selects no parameters")
-    return np.asarray(idx), ()
+    return np.asarray(idx, dtype=np.intp), ()
 
 
 def _refuse_integer_trainable(params: dict, mask: dict) -> None:

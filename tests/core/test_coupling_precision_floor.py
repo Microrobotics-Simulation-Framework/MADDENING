@@ -324,3 +324,79 @@ def test_the_floor_has_headroom_over_a_dense_updates_evaluation_error():
         f"the floor ({PRECISION_FLOOR_ULPS} units) has less than 2x headroom "
         f"over a dense update's measured evaluation error ({worst:.3f} units)"
     )
+
+
+class _Map16(SimulationNode):
+    """``x <- a + g * u`` held in float16, reading a float32 partner."""
+
+    def __init__(self, name, a, g, x0):
+        super().__init__(name=name, timestep=1.0, a=jnp.float32(a), g=jnp.float32(g))
+        self._x0 = x0
+
+    def initial_state(self):
+        return {"x": jnp.float16(self._x0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": (p["a"] + p["g"] * boundary_inputs["u"]).astype(jnp.float16)}
+
+
+def _mixed_dtype_graph(x0):
+    gm = GraphManager()
+    gm.add_node(_Map16("a", 1.0, 0.99, x0))
+    gm.add_node(_Relay("b", x0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u",
+                transform=lambda v: v.astype(jnp.float32))
+    gm.add_coupling_group(["a", "b"], diagnostics=True, max_iterations=50,
+                          tolerance=1e-6)
+    gm.compile()
+    return gm
+
+
+def test_a_float16_field_beside_a_float32_one_is_floored_at_float16():
+    """The gradient bound's floor, and the step it probes across, at each field's own resolution.
+
+    ``x_a`` (float16) ``<- 1 + 0.99 u``, ``x_b`` (float32) ``<- x_a``,
+    started at the lowest float16 value the map leaves where it is:
+    3.1% short of ``x* = 100``, so the IFT gradient ``d x*/dg`` it
+    returns, ``x_b / (1 - g)``, is 3.2% off ``a / (1 - g)**2``.  The
+    flat fixed-point vector is float32, and the gradient bound took its
+    floor from float32's eps -- 8192 times finer than the float16
+    field's -- and probed the curvature across a step no float16 output
+    could register: it read ``0.0`` with ``gradient_bound_usable=True``.
+    The spectral bound beside it, whose floor is taken field by field,
+    was right all along and is the control.
+    """
+    g32, a32 = float(np.float32(0.99)), 1.0
+    x_star = a32 / (1.0 - g32)
+    stalled = [
+        float(v) for v in (np.nextafter(np.float16(x_star), np.float16(0))
+                           - np.float16(0.0625) * np.float16(k) for k in range(64))
+        if np.float16(np.float32(a32 + g32 * float(v))) == v
+    ]
+    x0 = min(stalled)
+    gm = _mixed_dtype_graph(x0)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["residual"] == 0.0 and d["iterations"] == 1, f"fixture premise: stalled: {d}"
+    assert (x_star - x0) / x_star > 0.03, f"fixture premise: {x0} is 3% short"
+    distance = _l2_distance(gm, x_star)
+    assert d["spectral_error_bound"] >= distance, "the control: per-field floor"
+    x_b = float(gm.get_node_state("b")["x"])
+    ift = x_b / (1.0 - g32)                   # the IFT tangent at the returned iterate
+    exact = a32 / (1.0 - g32) ** 2            # d x*/dg at the fixed point
+    true_error = abs(ift - exact) / abs(ift)
+    assert true_error > 0.03, "fixture premise: the gradient is 3% off"
+    assert d["gradient_relative_error_bound"] >= true_error, (
+        f"gradient bound {d['gradient_relative_error_bound']:.3e} under the true "
+        f"relative error {true_error:.3e} on a float16 field"
+    )
+    assert d["gradient_bound_usable"] is True, d

@@ -334,7 +334,8 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
-def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None):
+def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
+                      resolution=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
 
     ``weights`` is the flat vector of per-entry factors the group's
@@ -391,9 +392,13 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None)
     estimate is forward-only bookkeeping like the rest of the
     diagnostics: under ``jax.grad`` nothing here is linearised, and the
     adjoint of the step is unchanged by its presence.
+
+    ``resolution`` is the residual's float resolution per entry in the
+    weighted coordinates (:func:`_residual_resolution`); it defaults to
+    ``PRECISION_FLOOR_ULPS * eps`` of the flat vector's dtype, which is
+    the right number only for a group whose fields all share that dtype.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        PRECISION_FLOOR_ULPS,
         SPECTRAL_MARGIN,
         arnoldi_spectral_radius,
     )
@@ -403,9 +408,11 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None)
     d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
     dw = d if spectral_weights is None else jax.lax.stop_gradient(
         jnp.asarray(spectral_weights, x_sg.dtype))
+    res = jax.lax.stop_gradient(_default_resolution(x_sg) if resolution is None
+                                else jnp.asarray(resolution, x_sg.dtype))
 
     def spectrum(operands):
-        xx, cc, dd, ww = operands
+        xx, cc, dd, ww, rr = operands
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
 
@@ -423,8 +430,7 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None)
         kept = dd > 0
         r_kept = jnp.linalg.norm(jnp.where(kept, r_w, 0.0))
         r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_w))
-        floor = PRECISION_FLOOR_ULPS * jnp.finfo(xx.dtype).eps * jnp.sqrt(
-            jnp.sum(kept.astype(xx.dtype)))
+        floor = _floor_of(rr, kept)
         denom = jnp.maximum(r_kept, floor)
         unread = r_unread > 0
         share = jnp.where(unread, r_unread / jnp.where(denom > 0, denom, 1.0), 0.0)
@@ -446,8 +452,50 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None)
     # forward and so cannot move the state it diagnoses.
     return jax.lax.cond(
         jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
-        (x_sg, consts_sg, d, dw),
+        (x_sg, consts_sg, d, dw, res),
     )
+
+
+def _default_resolution(x):
+    """``PRECISION_FLOOR_ULPS * eps`` per entry, in ``x``'s own dtype."""
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
+    )
+    return jnp.full(x.shape, PRECISION_FLOOR_ULPS * jnp.finfo(x.dtype).eps, x.dtype)
+
+
+def _floor_of(resolution, mask):
+    """The L2 norm of ``resolution`` over the entries ``mask`` selects.
+
+    ``sqrt(sum(mask * resolution**2))``: for a uniform resolution
+    ``C * eps`` (``C`` and ``eps`` powers of two) this is exactly
+    ``C * eps * sqrt(sum(mask))``, the form it replaces, so a group
+    whose fields share one dtype gets the same bits as before.
+    """
+    return jnp.sqrt(jnp.sum(mask.astype(resolution.dtype) * (resolution * resolution)))
+
+
+def _residual_resolution(fields_eps):
+    """The residual's float resolution per entry of the weighted flat vector.
+
+    ``fields_eps`` is the flat vector of each entry's *own* field's
+    ``finfo(dtype).eps`` -- not the flat vector's, which is the promoted
+    dtype of every field in the group.  In coordinates where each field
+    is divided by its magnitude one unit of ``eps * max|field|`` is
+    ``eps`` of that field's dtype, so this is ``PRECISION_FLOOR_ULPS``
+    of those, the quantity
+    :func:`~maddening.core.coupling.acceleration.residual_precision_floor`
+    reports in the group's own norm.  A float16 field beside a float32
+    one rounds 8192 times more coarsely than the promoted float32 eps
+    says; taken from the promoted dtype, the gradient bound's floor and
+    its floor-sized probe step were below float16 resolution, and the
+    bound read ``0.0`` with ``gradient_bound_usable=True`` against a true
+    error of 3.2%.
+    """
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
+    )
+    return PRECISION_FLOOR_ULPS * fields_eps
 
 
 def _probe_direction(c, key):
@@ -465,7 +513,7 @@ def _probe_direction(c, key):
 
 
 def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
-                             arnoldi_residual, amplification):
+                             arnoldi_residual, amplification, resolution=None):
     """A bound on the relative error of the IFT tangent at the returned iterate.
 
     The IFT rule (:func:`_ift_solve_jvp`) solves
@@ -535,12 +583,16 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     coordinates scaled by the norm weights where those are non-zero (a
     similarity, so every solution is the same vector) so fields of
     unlike magnitude do not swamp the orthogonalisation; every norm is
-    the group's, over the fields its norm reads.
+    the group's, over the fields its norm reads.  ``resolution`` is the
+    residual's float resolution per entry, as :func:`_spectral_rate_at`
+    takes it.
     """
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
     dtype = x_sg.dtype
     d = jax.lax.stop_gradient(jnp.asarray(weights, dtype))
+    res = jax.lax.stop_gradient(_default_resolution(x_sg) if resolution is None
+                                else jnp.asarray(resolution, dtype))
     nan = jnp.full((), jnp.nan, dtype)
 
     probed = [
@@ -567,15 +619,14 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     # runtime one.
     return jax.lax.cond(
         jnp.all(jnp.isfinite(x_sg)), bound, lambda _operands: nan,
-        (x_sg, consts_sg, d, rho, arnoldi_residual, amplification),
+        (x_sg, consts_sg, d, rho, arnoldi_residual, amplification, res),
     )
 
 
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
-                               arnoldi_residual, amplification):
+                               arnoldi_residual, amplification, res):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        PRECISION_FLOOR_ULPS,
         ift_gradient_error_bound,
         jacobian_range_basis,
         resolvent_apply,
@@ -626,8 +677,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 
     # The residual's float resolution in the norm used below: ``C`` units
     # of ``eps * max|field|`` per live entry, which the scaling ``s``
-    # makes ``C * eps`` each (see ``residual_precision_floor``, which is
-    # the same quantity in the group's own norm).  It enters twice.  The
+    # makes ``C * eps`` each, ``eps`` the entry's *own* field's (``res``;
+    # see ``residual_precision_floor``, which is the same quantity in the
+    # group's own norm).  It enters twice.  The
     # distance carries it, so a stalled float32 iterate -- ``F(x) == x``
     # bitwise, residual ``0.0`` -- is not reported at the fixed point.
     # And where the residual is not above it, the residual carries no
@@ -635,11 +687,22 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # zero), so a fixed-seed floor-sized vector stands in: its resolvent
     # image is dominated by the slowest mode, which is where an error the
     # rounding left behind is amplified to.
-    floor = PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps * jnp.sqrt(jnp.sum(live))
-    floor_dir = (PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps) * live * jax.random.rademacher(
+    #
+    # The *step* the curvature is taken across is sized by the coarsest
+    # field's resolution, not entry by entry: the secant is a difference
+    # of ``G``, and ``G`` is rounded in each *output* field's dtype, so a
+    # step that moves a float32 input by a float32-sized amount changes a
+    # float16 output that reads it by less than the float16 output can
+    # hold.  Sized entry by entry the secant read exactly ``0.0`` on a
+    # float16 field beside a float32 one and the bound ``0.0``, usable,
+    # against a true error of 3.2%.  In a group whose fields share one
+    # dtype ``coarse`` is that dtype's and nothing changes.
+    floor = _floor_of(res, live)
+    coarse = jnp.max(jnp.where(live > 0, res, jnp.zeros_like(res)))
+    floor_dir = coarse * live * jax.random.rademacher(
         jax.random.PRNGKey(3), x_sg.shape, dtype,
     )
-    resolved = norm(r_s) > floor
+    resolved = norm(r_s) > _floor_of(jnp.full_like(res, coarse), live)
     r_dir = jnp.where(resolved, r_s, floor_dir)
     delta_s = resolvent_apply(U, M, r_dir, matvec(r_dir))
     t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
@@ -2554,8 +2617,19 @@ def _run_coupled_block_impl(
                     jax.lax.stop_gradient(x_star_full),
                     zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
                 )
+                # The residual's float resolution per entry, each field at
+                # its own dtype's eps (``_residual_resolution``).
+                resolution = _residual_resolution(_flatten_full({
+                    nn: {fld: jnp.full(
+                        jnp.shape(template_state[nn][fld]),
+                        jnp.finfo(template_state[nn][fld].dtype).eps,
+                        template_state[nn][fld].dtype)
+                        for fld in float_fields[nn]}
+                    for nn in group_node_names
+                }))
                 rho_spec, spec_resid, spec_amp = _spectral_rate_at(
                     step_pure, x_star_full, consts, weights, spec_weights,
+                    resolution=resolution,
                 )
                 # Its distance is the spectral bound and its resolvent
                 # factor the one that bound applies; the curvature is a
@@ -2564,7 +2638,7 @@ def _run_coupled_block_impl(
                 # constants (see ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
-                    rho_spec, spec_resid, spec_amp,
+                    rho_spec, spec_resid, spec_amp, resolution=resolution,
                 )
             else:
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)

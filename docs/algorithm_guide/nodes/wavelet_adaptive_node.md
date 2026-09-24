@@ -173,6 +173,34 @@ boundary (`MADD-ANO-003`).
   128 points read $J = 6.7 \times 10^5$ against $1.77 \times 10^5$ at
   $m = 10^{-6}$ and $-2.9 \times 10^{16}$ at $m = 10^{-8}$, silently.
 
+  *What the bound covers.* $\kappa\varepsilon$ models a direct solve --
+  the gathered block and the dense full-basis gradient. The masked CG
+  (`frozen_solver="cg"`) stops at a relative residual of `rtol`
+  ($10^{-6}$ in float32, $10^{-10}$ in float64), which $\kappa$ amplifies
+  in the same way, so on that path the first term is
+  $\kappa(\hat A)\max(\varepsilon, \texttt{rtol})$: float32 refuses a
+  periodic $m$ below about $2 \times 10^{-2}$, float64 below about
+  $2 \times 10^{-6}$. That bounds the accuracy of a CG solve that
+  *converges*; it does not say whether CG converges. Measured on the 1-D
+  periodic node at the full budget (jaxlib 0.11.0; lineax 0.0.7 and
+  0.1.1 alike), CG stagnates or breaks down below its tolerance at
+  conditionings the bound accepts -- float32 at 256 points already at
+  $m = 0.3$ ($\kappa = 65$), at 64 or 128 points at $3 \times 10^{-2}$;
+  float64 at 128 or 256 points at $10^{-5}$ -- and 4x or 16x the step
+  budget does not help, so no condition-number-versus-`max_steps` bound
+  predicts it. The failure is loud, never a wrong number: on an eager
+  call (the cold start in `initial_state`, a diagnostic) the node
+  re-raises it as a `ValueError` naming $\kappa$, the tolerance, the
+  budget and the fixes (`frozen_solver="gather"`, float64, a larger
+  mass); under a trace it surfaces from lineax when the step executes.
+  The bound is also conservative for the `"level"` and `"dk"`
+  preconditioners: periodic $m = 3 \times 10^{-3}$ in float32 is refused
+  under both (bound $1.4$ – $1.9 \times 10^{-3}$) while the full-basis
+  solve is measured $1.5 \times 10^{-4}$ (`"level"`) and
+  $8 \times 10^{-5}$ (`"dk"`) off, about 12x inside the limit; the
+  default `"hybrid"` accepts it (bound $7.7 \times 10^{-4}$). The limit
+  is not loosened per preconditioner on three measured points.
+
 ## Implementation Mapping
 
 | Equation Term | Implementation | Notes |
@@ -188,10 +216,11 @@ boundary (`MADD-ANO-003`).
 | Rounding floor $\tau$ and the index-order tie band | `maddening.nodes.adaptive.wavelets.cdd.rounding_floor` | $16\,\varepsilon(\max|\hat b| + \max|\hat c|)$; applied in the marking step `_doerfler_grow` |
 | $\kappa(\hat A)$ | `maddening.nodes.adaptive.wavelets.operator.condition_estimate` | Lanczos (64 steps, full reorthogonalisation) plus the periodic constant-mode Rayleigh quotient; computed by `assemble_operator(preconditioner=...)` on the float64 operator |
 | $\kappa_h$ of the grid operator | `maddening.nodes.adaptive.wavelets.operator.physical_condition_number` | Closed form of the central-difference spectrum |
-| Solve error bound vs `CONDITION_LIMIT` | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_error_bound` | $\kappa(\hat A)\varepsilon_{\text{dtype}} + \kappa_h\varepsilon_{64}$; the constructor refuses above $10^{-3}$ |
+| Solve error bound vs `CONDITION_LIMIT` | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_error_bound` | $\kappa(\hat A)\varepsilon_{\text{dtype}} + \kappa_h\varepsilon_{64}$, with $\max(\varepsilon, \texttt{rtol})$ on the masked-CG path; the constructor refuses above $10^{-3}$ |
 | Frozen solve $A_M c_M = b_M$ (gathered) | `maddening.nodes.adaptive.wavelets.operator.gather_solve`, `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.solve_frozen` | Dense $k \times k$ block; JAX primitive `jnp.linalg.solve`; requires $\lvert M \rvert \le k$ -- an oversized concrete mask is refused, a traced one is NaN-poisoned |
 | Selection diagnostics (iterations, budget reached) | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.selection_diagnostics`, `maddening.nodes.adaptive.wavelets.cdd.cdd_select_with_iterations` | Host-side; `outer_iterations`, `max_outer`, `active`, `k`, `budget_reached`, `resolved`; the same set the graph selects |
 | Frozen solve (masked CG) | `maddening.nodes.adaptive.wavelets.operator.make_masked_operator`, `maddening.core.solver_utils.ift_linear_solve` | Identity off the mask; `solver="cg"` |
+| Non-converging masked CG named | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode._cg_solve`, `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode._cg_failure_message` | Eager calls only: lineax's error re-raised as a `ValueError` with $\kappa$, the tolerance and the fixes |
 | $c_j = 0$ for $j \notin M$ | `maddening.nodes.adaptive.base.AdaptiveNode.update` | Inherited: the base class zeroes off the mask after every solve |
 | Sensor functional $J = W_n[s,:]\, c$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.objective` | Nearest grid point to `sensor` |
 | Full-basis gradient $\nabla J_{\text{full}}$ | `maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode.compute_full_basis_gradient` | Dense solve on $A$; overrides the base default |
@@ -217,8 +246,11 @@ boundary (`MADD-ANO-003`).
    (`MADD-ANO-003`); the objective is a scalar function of $c$.
 5. The sensor is read at the nearest grid point, not interpolated.
 6. The solve's relative error bound
-   $\kappa(\hat A)\varepsilon_{\text{dtype}} + \kappa_h\varepsilon_{64}$ is at
-   most `CONDITION_LIMIT` $= 10^{-3}$, validated at construction.
+   $\kappa(\hat A)\varepsilon_{\text{dtype}} + \kappa_h\varepsilon_{64}$
+   ($\max(\varepsilon, \texttt{rtol})$ in place of $\varepsilon$ on the
+   masked-CG path) is at most `CONDITION_LIMIT` $= 10^{-3}$, validated at
+   construction. It bounds a solve that completes, not whether the masked
+   CG converges (see *Discretization*).
 7. Structural counts (`dim`, `n_levels`, `n_coarse`, `order`, `k`) are whole
    numbers -- an integral float from a JSON round trip is accepted, `6.9` or
    `True` is refused -- and `update` / `selection_diagnostics` refuse a
@@ -274,7 +306,14 @@ boundary (`MADD-ANO-003`).
    The node never produces one (the seed is validated, the marking is
    capped); one supplied from outside is refused eagerly and NaN-poisoned
    under `jit`. `frozen_solver="cg"` accepts any mask.
-10. **The selection is deterministic under rounding but still discrete.**
+10. **The masked CG may not converge where the bound accepts.** In float32
+    it stagnates at 256 points from $m = 0.3$, and at 64 or 128 points at
+    $3 \times 10^{-2}$; in float64 at 128 or 256 points at $10^{-5}$ (full
+    budget, periodic). More steps do not help. An eager solve raises a
+    `ValueError` naming the conditioning and the fixes; under a trace the
+    error comes from lineax. `frozen_solver="gather"` (the default) carries
+    every configuration the bound accepts.
+11. **The selection is deterministic under rounding but still discrete.**
     It changes where two residual magnitudes differ by about the rounding
     floor or the Dörfler bulk falls on a cumulative sum -- isolated
     parameter values, not every rounding perturbation -- and a gradient
@@ -311,7 +350,7 @@ active set.
 | `k` | int | `min(n_max, max(seed, 8, n_max // 16))` | — | Active-set budget (structural); `seed` is the level-0 count, $(2 n_c)^d$ periodic / $(2 n_c + 1)^d$ Dirichlet; `k < seed` is refused |
 | `theta` | float | 0.42 | — | Source centre on axis 0; **trainable**, bounds $(0, 1)$, logit |
 | `sigma` | float | 0.10 | — | Source width; **trainable**, positive, log |
-| `mass` | float | 1.0 | — | $m > 0$; `trainable=False`, baked into the operator; refused when the solve error bound exceeds `CONDITION_LIMIT` (float32: periodic $m \gtrsim 2 \times 10^{-3}$) |
+| `mass` | float | 1.0 | — | $m > 0$; `trainable=False`, baked into the operator; refused when the solve error bound exceeds `CONDITION_LIMIT` (float32: periodic $m \gtrsim 2 \times 10^{-3}$, $2 \times 10^{-2}$ with `frozen_solver="cg"`) |
 | `sensor` | tuple of float | `(0.30,)`, `(0.30, 0.40)`, `(0.30, 0.40, 0.60)` | — | Sensor location, snapped to the nearest grid point -- on the circle for a periodic axis (`1.0` is point 0), among the interior points for a Dirichlet axis; `trainable=False`, baked into the sensor row |
 | `preconditioner` | str | `"hybrid"` | — | `"hybrid"`, `"full"`, `"level"`, `"dk"` |
 | `boundary` | str | `"periodic"` | — | `"periodic"` or `"dirichlet"` |
@@ -368,11 +407,16 @@ Every entry is stored in `self.params`, so `cls(name=..., timestep=...,
   bits and sets; the periodic source is translation-invariant across the
   seam; index-order ties at the cap; non-integral counts and unknown keys
   refused; `selection_diagnostics` honours its `params`.
+- Masked-CG conditioning (`test_wavelet_cg_conditioning.py`): the CG
+  bound uses the CG tolerance and refuses what it cannot carry while the
+  gathered solve accepts it; a converged CG reading is within the bound;
+  a non-converging eager CG solve is refused with the node's message
+  (never lineax's), and only lineax's convergence errors are translated.
 
 ## Changelog
 
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-09-21 | Ported onto the 0.4.0 `AdaptiveNode` API: parameters in the graph pytree, `{c, mask}` state, CDD as a `while_loop`, gathered frozen solve, dense full-basis gradient, declared and measured order 2 |
-| 1.1.0 | 2026-09-24 | Phase-3 audit: conditioning guard (`CONDITION_LIMIT`, `condition_estimate`, `physical_condition_number`); CDD rounding floor and index-order tie-break, a third loop exit and `resolved` in the diagnostics; leaves cast to the dtype before the source; periodised periodic source; non-integral structural counts and unknown keys refused |
+| 1.1.0 | 2026-09-24 | Phase-3 audit: conditioning guard (`CONDITION_LIMIT`, `condition_estimate`, `physical_condition_number`); CDD rounding floor and index-order tie-break, a third loop exit and `resolved` in the diagnostics; leaves cast to the dtype before the source; periodised periodic source; non-integral structural counts and unknown keys refused. The masked-CG path is bounded with its stopping tolerance, and a non-converging eager CG solve is named rather than surfacing as lineax's error |
 | 1.0.1 | 2026-09-22 | Merged-tree audit: `k` sized and validated against the real CDD seed (level 0, not the coarse block) -- 16 default configurations were silently truncating the gathered solve; an oversized set is refused / NaN-poisoned; the assembly checks symmetry before symmetrising; construction is legal inside a trace; `selection_diagnostics()`; a periodic sensor at 1.0 snaps to point 0 |

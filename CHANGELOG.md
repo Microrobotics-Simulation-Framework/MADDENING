@@ -287,6 +287,9 @@ guidance; the itemized changes follow.
 - **`LBMNode`'s algorithm ID is `MADD-NODE-011`** (it shared `MADD-NODE-007` with `RigidBodyNode`, which keeps it): update anything keyed on the old ID.
   The gates now refuse a duplicate node ID, a guide ID that differs from its `NodeMeta`, a `<FIX` that is not the entry's `resolution_version` or not a real release,
   a duplicated / skipped / uncollected `verification:` test, and a rod built through a local `HeatNode` subclass; the doctest and mapping floors sit at the current counts.
+- **A sharded `LBMNode` is the unsharded node or refuses**: a pressure face on a sharded axis raises at the first step; `ShardedStencilNode` refuses a `boundary` other than a node's declared `halo_boundary()` (LBM: `"periodic"`), its default `"edge"` included; `inlet_face == outlet_face` is refused.
+  `WaveletAdaptiveNode(frozen_solver="cg")` is bounded by `kappa * rtol` and a non-converging eager solve says why; inline points refuse complex values (any width), and without a `"dtype"` ints beyond 2**53 and inexact `Decimal`s.
+  Action: wrap `LBMNode` with `boundary="periodic"` and shard an axis with no pressure face; use `frozen_solver="gather"`; add an explicit `"dtype"` (e.g. `"int64"`) to inline points.
 - **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
   `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
   a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.

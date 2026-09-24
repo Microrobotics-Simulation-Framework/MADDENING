@@ -36,22 +36,26 @@ ENV_VAR = "MADDENING_TEST_SHARD"
 
 #: ``{test file path relative to the repository root: shard}``.
 #:
-#: The eight heaviest files, placed longest first onto the lightest shard,
-#: from the per-file medians of eight green lane-runs (2026-09-24).  Plain
-#: hashing alone put the four shards at 17.7 / 17.0 / 11.7 / 19.7 minutes
-#: (slowest 19% over the mean); with these pins 16.5 / 16.5 / 16.5 / 16.8
-#: (1.4%).  Pinning ten balanced worse (4.4%).  Recompute after the slow-test
-#: triage, which shrinks several of these files, from the per-shard totals
-#: in the "Test durations" summary job.
+#: The eleven heaviest files, placed longest first onto the lightest shard,
+#: from the per-file times of the first CI run after the slow-test triage
+#: (PR #147's cold run, 2026-09-24, both JAX lanes, the slower lane per
+#: file).  The previous eight pins, set before the triage moved about 180
+#: tests to the slow lane, had drifted to 11.3 / 6.0 / 7.7 / 9.8 minutes
+#: (slowest 30% over the mean); these give 8.8 / 8.8 / 8.8 / 8.5 (1.3%).
+#: Recompute from the "Test durations" lane summary when a shard runs
+#: persistently long; moving a pin moves only that file.
 PINS: dict[str, int] = {
-    "tests/property/test_coupling_error_bound.py": 3,              # 4.5 min
-    "tests/core/test_calibrate.py": 2,                             # 4.2 min
-    "tests/property/test_sysid_contract.py": 1,                    # 2.9 min
-    "tests/property/test_round_trips.py": 4,                       # 2.7 min
-    "tests/core/test_coupling_solver_equivalence.py": 3,           # 2.7 min
-    "tests/verification/test_builtin_nodes_verified_lbm.py": 2,    # 2.5 min
-    "tests/nodes/adaptive/test_wavelet_node.py": 1,                # 2.0 min
-    "tests/verification/hypothesis/test_hypothesis_sysid.py": 4,   # 2.0 min
+    "tests/nodes/adaptive/test_wavelet_node.py": 3,                 # 2.4 min
+    "tests/core/test_coupling_convergence_reporting.py": 2,         # 1.8 min
+    "tests/property/test_coupling_error_bound.py": 1,               # 1.8 min
+    "tests/compliance/test_gate_scripts.py": 4,                     # 1.5 min
+    "tests/core/test_coupling_error_bound.py": 2,                   # 1.3 min
+    "tests/core/test_coupling_solver_equivalence.py": 1,            # 1.2 min
+    "tests/core/test_coupling_non_finite_state.py": 3,              # 0.9 min
+    "tests/verification/test_verify_node_harness.py": 4,            # 0.9 min
+    "tests/nodes/adaptive/test_wavelet_engine.py": 3,               # 0.7 min
+    "tests/core/test_coupling_while_default.py": 1,                 # 0.6 min
+    "tests/core/test_coupling_precision_floor.py": 2,               # 0.6 min
 }
 #: The job count the pins were balanced for.
 PINS_FOR = 4

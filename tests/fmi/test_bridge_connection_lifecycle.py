@@ -126,6 +126,20 @@ def test_a_connection_that_announces_a_frame_it_never_sends_holds_nothing():
             stalled.close()
 
 
+def test_a_stop_that_lands_before_the_serve_thread_runs_is_quiet():
+    """``stop()`` can close the listening socket before the serve thread's
+    first line runs -- ``start()`` then ``stop()`` on a loaded machine; seen
+    under four xdist workers, where the thread died with EBADF from
+    ``settimeout`` on the closed socket.  Stopping first and starting after
+    is that ordering made deterministic: the thread must exit on its own,
+    with no exception for pytest to report."""
+    _, bridge = _bridge(_shared_graph())
+    bridge.stop()
+    bridge.start()
+    bridge._thread.join(timeout=5.0)
+    assert not bridge._thread.is_alive()
+
+
 def test_a_silent_peer_is_dropped_and_leaks_no_thread(fast_timeouts):
     with _bridge(_shared_graph())[1] as bridge:
         before = len(_conn_threads())

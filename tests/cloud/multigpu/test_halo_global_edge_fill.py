@@ -326,6 +326,9 @@ def test_the_wrapper_refuses_an_unknown_boundary_at_construction(boundary):
     message = str(info.value)
     assert "('periodic', 'edge', 'zero')" in message
     assert repr(boundary) in message
+    if not isinstance(boundary, str):
+        # one mode for every axis: say so, rather than call a dict a mode
+        assert "must be one mode for every axis" in message
 
 
 def test_every_mode_is_accepted_by_a_node_that_declares_none():

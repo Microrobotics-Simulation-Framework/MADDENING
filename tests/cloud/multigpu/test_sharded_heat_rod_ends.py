@@ -53,7 +53,7 @@ _DT = 0.25 * _DX * _DX / _ALPHA
 _X = np.linspace(_DX / 2, _LENGTH - _DX / 2, _N_CELLS)
 _T0 = (_X + 0.3 * np.sin(3 * np.pi * _X)).astype(np.float32)
 #: float32 rounding on O(1) temperatures.  Measured: 0 at stencil_order=2,
-#: <= 1.2e-7 at 4.  Every defect this file pins is >= 1e-3.
+#: <= 2.4e-7 at 4.  Every defect this file pins is >= 1e-3.
 _ATOL = 1e-6
 
 _INPUTS = {
@@ -118,14 +118,17 @@ def test_a_thin_shard_closes_its_rod_end_through_the_halo():
                                rtol=0, atol=_ATOL)
 
 
+@pytest.mark.parametrize("inputs", ["no-inputs", "ends-at-0.2-and-1.3"])
 @pytest.mark.parametrize("order", (2, 4))
-def test_the_fill_at_the_rod_ends_never_reaches_the_answer(order):
+def test_the_fill_at_the_rod_ends_never_reaches_the_answer(order, inputs):
     """``update_padded`` on the whole rod, called directly (no
-    ``shard_info``), is ``update`` whatever sits in the end halos."""
+    ``shard_info``), is ``update`` whatever sits in the end halos -- with
+    no inputs too, where the datum must come from the end cell and not
+    from the halo beside it."""
     node = _heat(order)
     h = node.halo_width()[0]
     T = jnp.asarray(_T0)
-    bi = _INPUTS["ends-at-0.2-and-1.3"]
+    bi = _INPUTS[inputs]
     want = np.asarray(node.update({"temperature": T}, bi, _DT)["temperature"])
     for fill in (jnp.pad(T, h, mode="edge"), jnp.pad(T, h),
                  jnp.pad(T, h, constant_values=99.0)):

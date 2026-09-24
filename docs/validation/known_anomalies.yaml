@@ -3219,7 +3219,7 @@ anomalies:
       2.54e-03 from `update`, because no fill can express `update`'s cubic
       end closure.  MADD-ANO-030's fix closes that: `update_padded` now
       builds the ghosts beyond each rod end itself, and the sharded rod is
-      `update` to float32 rounding (<= 1.2e-07) at both orders, with and
+      `update` to float32 rounding (<= 2.4e-07) at both orders, with and
       without boundary inputs, on 1, 2 and 4 devices.
     severity: "minor"
     safety_relevance: "context_dependent"
@@ -3304,7 +3304,7 @@ anomalies:
       form at the end cell at order 4, reading the end cells through the
       halo on a shard thinner than the stencil.  The sharded rod is
       `update` for the same inputs on 1, 2, 4 and 8 devices and on a
-      size-1 pencil axis: 0 at order 2, <= 1.2e-07 at order 4.  Because
+      size-1 pencil axis: 0 at order 2, <= 2.4e-07 at order 4.  Because
       the fill at the global ends can no longer reach the answer,
       `HeatNode` declares `halo_boundary() == "edge"` and
       `ShardedStencilNode` refuses `boundary="zero"` and

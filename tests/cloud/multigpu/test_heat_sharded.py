@@ -40,7 +40,7 @@ _HAS_16 = len(jax.devices()) >= 16
 _COLD_ENDS = {"left_temperature": jnp.float32(0.0),
               "right_temperature": jnp.float32(0.0)}
 
-#: float32 rounding on O(1) temperatures (measured <= 1.2e-7).
+#: float32 rounding on O(1) temperatures (measured <= 2.4e-7).
 _ATOL = 1e-6
 
 

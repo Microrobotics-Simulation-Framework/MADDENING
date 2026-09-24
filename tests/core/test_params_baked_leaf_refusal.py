@@ -172,16 +172,23 @@ class _Branchy(SimulationNode):
     a discarded while carry, a discarded scan carry, a cond operand no
     branch reads, a jitted function's unused argument -- and so read by
     nothing.  A walk that stopped at any of the four (called every input
-    of an unknown equation live) would report ``dead`` read."""
+    of an unknown equation live) would report ``dead`` read.
+
+    ``e`` is the other direction: it reaches the output only on a loop's
+    *second* iteration, through carries that are themselves discarded
+    (``w -> u -> x``).  A walk that read a loop body as a single call --
+    no fixed point over the carries -- would report ``e`` dead, and the
+    graph would refuse a write the step does read."""
 
     def __init__(self):
-        super().__init__("n", 0.1, a=1.0, b=2.0, c=3.0, dead=4.0)
+        super().__init__("n", 0.1, a=1.0, b=2.0, c=3.0, e=5.0, dead=4.0)
 
     def initial_state(self):
         return {"x": jnp.asarray(1.0, jnp.float32)}
 
     def update(self, state, bi, dt, *, params=None):
         p = {**self.params, **(params or {})}
+        zero = jnp.zeros((), jnp.float32)
         x = jax.lax.while_loop(
             lambda v: v[1] < 3,
             lambda v: (v[0] * p["a"], v[1] + 1, v[2] * 2.0),
@@ -190,6 +197,12 @@ class _Branchy(SimulationNode):
         x = jax.lax.scan(lambda carry, _: ((carry[0] + p["c"], carry[1] + 1.0), None),
                          (x, p["dead"]), None, length=2)[0][0]
         x = jax.jit(lambda q, v: v + q["c"])(p, x)
+        x = jax.lax.scan(lambda v, _: ((v[0] + v[1], v[2], v[2]), None),
+                         (x, zero, p["e"]), None, length=2)[0][0]
+        x = jax.lax.while_loop(
+            lambda v: v[3] < 2,
+            lambda v: (v[0] + v[1], v[2], v[2], v[3] + 1),
+            (x, zero, p["e"] * 0.5, 0))[0]
         return {"x": x}
 
 
@@ -199,4 +212,4 @@ def test_the_structural_walk_follows_loops_and_branches():
     gm.compile()
     reads = gm_mod._param_leaves_read(gm._raw_step_fn, gm._state,
                                       gm._default_external_inputs(), gm.params)
-    assert reads == {("n", "a"), ("n", "b"), ("n", "c")}
+    assert reads == {("n", "a"), ("n", "b"), ("n", "c"), ("n", "e")}

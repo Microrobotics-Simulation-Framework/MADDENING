@@ -2961,11 +2961,11 @@ def _live_jaxpr_inputs(jaxpr, live_out: Sequence[bool]) -> list[bool]:
     write, which is the direction a conservative answer can only make
     rarer, never wrong.
 
-    ``pjit`` / ``closed_call`` / ``remat`` / ``shard_map`` and any other
-    equation carrying one sub-jaxpr whose inputs and outputs line up with
-    its own are followed into; ``while`` and ``scan`` are solved to a
-    fixed point over their carries; ``cond`` takes the union of its
-    branches.  ``custom_jvp_call`` / ``custom_vjp_call`` are not followed
+    The call-like primitives in :data:`_CALL_PRIMITIVES` (``jit`` /
+    ``pjit``, ``closed_call``, ``remat``, ``shard_map``, ...) are followed
+    into 1:1; ``while`` and ``scan`` are solved to a fixed point over their
+    carries; ``cond`` takes the union of its branches; anything else is
+    "every input live".  ``custom_jvp_call`` / ``custom_vjp_call`` are not followed
     into, because the derivative rule may read an input the primal does
     not.
     """
@@ -3039,7 +3039,7 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
                     return everything
                 ops = [a or b for a, b in zip(ops, branch_in)]
             out = [True] + ops
-        else:
+        elif name in _CALL_PRIMITIVES:
             subs = [
                 getattr(params[key], "jaxpr", params[key])
                 for key in ("jaxpr", "call_jaxpr", "fun_jaxpr") if key in params
@@ -3050,9 +3050,23 @@ def _live_eqn_inputs(eqn, outs: list[bool], effectful: bool) -> list[bool]:
             if len(sub.invars) != n_in or len(sub.outvars) != len(outs):
                 return everything
             out = _live_jaxpr_inputs(sub, outs)
+        else:
+            return everything
     except (KeyError, AttributeError, TypeError):
         return everything
     return out if len(out) == n_in else everything
+
+
+#: Primitives that call their one sub-jaxpr once, operands in order: the
+#: walk follows them 1:1.  An allow-list, not "any equation with one
+#: sub-jaxpr of matching arity": a loop-like primitive read as a single call
+#: under-approximates what its carries read (a value that reaches a live
+#: output only on the second iteration looks dead), which is the direction
+#: that would refuse a write the step does read.
+_CALL_PRIMITIVES = frozenset({
+    "pjit", "jit", "closed_call", "core_call", "named_call",
+    "remat", "remat2", "checkpoint", "shard_map", "xla_call", "xla_pmap",
+})
 
 
 def _param_leaves_read(step_fn: Callable, state: dict, ext: dict, params: dict) -> set:

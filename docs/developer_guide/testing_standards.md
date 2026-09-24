@@ -419,6 +419,9 @@ files, never a function of the test list. So:
 - shard *i* of a pull request holds the same files as shard *i* of the base
   branch, which is what lets a shard reuse that shard's compilation cache.
 
+`slow-tests.yml` is split the same way, four runners per lane, which takes
+the whole-suite run from about three hours to under one.
+
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
 per-shard `Test time budget` step gates. The `Test durations` job writes

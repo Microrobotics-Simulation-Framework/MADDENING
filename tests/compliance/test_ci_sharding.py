@@ -70,11 +70,12 @@ def test_the_shards_partition_the_tests_and_keep_files_together():
     assert all(len(s) == 1 for s in by_file.values()), "a file was split across shards"
 
 
-def test_ci_runs_the_job_count_the_pins_were_balanced_for():
-    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+@pytest.mark.parametrize("workflow", ["ci.yml", "slow-tests.yml"])
+def test_ci_runs_the_job_count_the_pins_were_balanced_for(workflow):
+    ci = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
     shards = re.search(r"^\s*shard:\s*\[([0-9, ]+)\]", ci, re.M)
-    assert shards, "the test matrix has no shard axis"
+    assert shards, f"{workflow}: the test matrix has no shard axis"
     listed = [int(x) for x in shards.group(1).split(",")]
     n = _sharding.PINS_FOR
-    assert listed == list(range(1, n + 1))
-    assert f'MADDENING_TEST_SHARD: "${{{{ matrix.shard }}}}/{n}"' in ci
+    assert listed == list(range(1, n + 1)), workflow
+    assert f'MADDENING_TEST_SHARD: "${{{{ matrix.shard }}}}/{n}"' in ci, workflow

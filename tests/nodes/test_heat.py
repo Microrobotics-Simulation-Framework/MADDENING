@@ -336,3 +336,37 @@ def test_the_uniform_rod_end_flux_reads_the_injected_length(stencil_order):
         # the fixture can express the fault: the constructor's length differs
         base = injected.compute_boundary_fluxes(state, bi, 1e-3)
         assert float(base["left_heat_flux"]) != pytest.approx(float(want["left_heat_flux"]), rel=1e-3)
+
+
+def _mean_drift_with_no_boundary_input(stencil_order, steps=500):
+    """Relative change of the mean temperature, both rod ends unconnected.
+
+    64 cells, an ``x**2`` profile (curved at both ends, and not symmetric),
+    Fourier number 0.25, stepped under ``jax.lax.fori_loop``.
+    """
+    n, alpha = 64, 0.01
+    dx = 1.0 / n
+    dt = 0.25 * dx * dx / alpha
+    x = (np.arange(n) + 0.5) * dx
+    rod = HeatNode(name="rod", timestep=dt, n_cells=n, length=1.0,
+                   thermal_diffusivity=alpha, initial_temperature=(x ** 2).tolist(),
+                   stencil_order=stencil_order)
+    T0 = rod.initial_state()["temperature"]
+    step = jax.jit(lambda i, T: rod.update({"temperature": T}, {}, dt)["temperature"])
+    T = jax.lax.fori_loop(0, steps, step, T0)
+    return abs(float(jnp.mean(T)) - float(jnp.mean(T0))) / float(jnp.mean(T0))
+
+
+def test_an_unconnected_second_order_end_is_insulated():
+    """No boundary input at ``stencil_order=2``: the ghost is the end cell,
+    the face flux is exactly zero, and total heat is conserved."""
+    assert _mean_drift_with_no_boundary_input(2) < 1e-5
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "MADD-ANO-031 (open): with no boundary input the datum is the end cell, "
+    "and at stencil_order=4 the cubic ghost closure through it has a "
+    "non-zero slope at the rod end, so heat crosses an unconnected end "
+    "(the mean of this profile moves 3.1e-3 in 500 steps).  Scheduled for 0.5.0."))
+def test_an_unconnected_fourth_order_end_is_insulated():
+    assert _mean_drift_with_no_boundary_input(4) < 1e-5

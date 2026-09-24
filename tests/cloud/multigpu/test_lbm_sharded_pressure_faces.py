@@ -27,8 +27,8 @@ import pytest
 from jax.sharding import Mesh
 
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
-from maddening.nodes.heat import HeatNode
 from maddening.nodes.lbm import LBMNode
+from tests.cloud.multigpu.property_support import StencilDiffusion1D
 
 _HAS_4 = len(jax.devices()) >= 4
 pytestmark = pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
@@ -170,17 +170,20 @@ def test_an_explicit_halo_fill_other_than_the_declared_one_is_refused(boundary):
 def test_a_node_that_declares_no_halo_boundary_is_wrapped_exactly_as_before():
     """Every other stencil node is unchanged: the default is ``"edge"``,
     any valid fill is taken as given, and the default step is the
-    explicit-``"edge"`` step to the bit."""
-    heat = HeatNode("h", 1e-4, n_cells=16, thermal_diffusivity=0.1)
-    assert not hasattr(heat, "halo_boundary")
-    default = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0})
+    explicit-``"edge"`` step to the bit.  (This used ``HeatNode``, which
+    since 0.4.0 closes its own rod ends and declares ``"edge"``;
+    MADD-ANO-030.  The node here is a test-only 1-D diffusion that
+    declares nothing.)"""
+    node = StencilDiffusion1D(name="d", n_cells=16)
+    assert not hasattr(node, "halo_boundary")
+    default = ShardedStencilNode(node, _mesh(), axis_map={"a": 0})
     assert default.to_dict()["boundary"] == "edge"
     for boundary in ("edge", "periodic", "zero"):
-        wrapped = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0}, boundary=boundary)
+        wrapped = ShardedStencilNode(node, _mesh(), axis_map={"a": 0}, boundary=boundary)
         assert wrapped.to_dict()["boundary"] == boundary
-    explicit = ShardedStencilNode(heat, _mesh(), axis_map={"a": 0}, boundary="edge")
-    a = _run(default, heat, {}, 5)
-    b = _run(explicit, heat, {}, 5)
+    explicit = ShardedStencilNode(node, _mesh(), axis_map={"a": 0}, boundary="edge")
+    a = _run(default, node, {}, 5)
+    b = _run(explicit, node, {}, 5)
     for key in a:
         np.testing.assert_array_equal(a[key], b[key], err_msg=key)
 

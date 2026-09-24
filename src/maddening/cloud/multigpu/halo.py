@@ -11,10 +11,22 @@ This is the building block ``ShardedStencilNode`` uses to feed
 
 Boundary modes
 --------------
-- ``"periodic"`` -- wrap; ghost on shard 0 comes from shard P-1.
-- ``"edge"``     -- replicate own edge values (the default; BCs apply
-                    in ``update_padded`` after the exchange).
+Halos between two shards always hold the neighbouring shard's cells.
+The mode decides only the halos at the two edges of the *global* grid,
+for a halo ``h`` cells wide and a global row ``r0, r1, ..., r(n-1)``:
+
+- ``"periodic"`` -- wrap: the left halo is ``r(n-h), ..., r(n-1)`` and
+                    the right halo ``r0, ..., r(h-1)``.
+- ``"edge"``     -- replicate the outermost cell into every halo cell:
+                    ``r0`` repeated ``h`` times on the left, ``r(n-1)``
+                    repeated ``h`` times on the right (``numpy.pad``'s
+                    ``mode="edge"``).  The default; a node applies its
+                    physical boundary conditions in ``update_padded``
+                    after the exchange.
 - ``"zero"``     -- zero-fill ghosts at the global boundary.
+
+These hold for every mesh-axis size, one device included: a mesh axis
+of size 1 has a single shard that owns both global edges.
 
 Differentiability
 -----------------
@@ -32,6 +44,52 @@ from jax import lax
 from jax.sharding import Mesh
 
 _BOUNDARY_MODES = ("periodic", "edge", "zero")
+
+
+def _global_edge_halos(
+    left_slice: jax.Array,
+    right_slice: jax.Array,
+    *,
+    spatial_axis: int,
+    halo: int,
+    boundary: str,
+) -> tuple[jax.Array, jax.Array]:
+    """The ``(left, right)`` halos at the edges of the global grid.
+
+    ``left_slice`` and ``right_slice`` are a block's first and last
+    ``halo`` cells along ``spatial_axis`` -- the block being the shard
+    that owns that global edge (or, for an axis that is not sharded, the
+    whole axis).  Shared by :func:`halo_exchange` and the local padding
+    of unsharded halo axes in
+    :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`,
+    so the two cannot fill differently.
+
+    ``"periodic"`` wraps the block onto itself, which is right only when
+    the block is the whole axis; :func:`halo_exchange` fetches periodic
+    halos from the opposite shard instead of calling this.
+    """
+    if boundary == "periodic":
+        return right_slice, left_slice
+    if boundary == "zero":
+        zeros = jnp.zeros_like(left_slice)
+        return zeros, zeros
+    if boundary != "edge":
+        raise ValueError(
+            f"halo_exchange: unknown boundary mode {boundary!r}; "
+            f"expected one of {_BOUNDARY_MODES}"
+        )
+    # "edge": every halo cell is the outermost cell (numpy.pad "edge").
+    # At halo == 1 the slices *are* the outermost cells.  Before 0.4.0
+    # the slices were used at every width, which put ``r0, r1`` before
+    # ``r0`` -- a copy of the block, not a replication of its edge.
+    if halo == 1:
+        return left_slice, right_slice
+    first = lax.slice_in_dim(left_slice, 0, 1, axis=spatial_axis)
+    last = lax.slice_in_dim(right_slice, halo - 1, halo, axis=spatial_axis)
+    return (
+        jnp.broadcast_to(first, left_slice.shape),
+        jnp.broadcast_to(last, right_slice.shape),
+    )
 
 
 def _exchange_axis(
@@ -62,6 +120,20 @@ def _exchange_axis(
         local, n_local - halo, n_local, axis=spatial_axis
     )
 
+    if boundary != "periodic" and p_size == 1:
+        # One shard on this mesh axis: it is both the left and the right
+        # global boundary, so both halos are the boundary fill and there
+        # is nothing to exchange.  Before 0.4.0 this case went through
+        # the ppermute below, which on one device hands the shard its
+        # own opposite edge -- periodic halos whatever ``boundary`` said.
+        left_halo, right_halo = _global_edge_halos(
+            left_slice, right_slice,
+            spatial_axis=spatial_axis, halo=halo, boundary=boundary,
+        )
+        return jnp.concatenate(
+            [left_halo, local, right_halo], axis=spatial_axis
+        )
+
     # ppermute(x, axis_name, perm) -- pair (src, dst) means rank `dst`
     # receives `x` from rank `src`. Forward shift puts rank r-1's right
     # edge into rank r's left halo slot.
@@ -71,19 +143,16 @@ def _exchange_axis(
     left_halo = lax.ppermute(right_slice, mesh_axis, perm_forward)
     right_halo = lax.ppermute(left_slice, mesh_axis, perm_backward)
 
-    if boundary != "periodic" and p_size > 1:
+    if boundary != "periodic":
         rank = lax.axis_index(mesh_axis)
         on_left_global = rank == 0
         on_right_global = rank == p_size - 1
-
-        if boundary == "edge":
-            # Replicate own edge at the global boundary.
-            left_halo = jnp.where(on_left_global, left_slice, left_halo)
-            right_halo = jnp.where(on_right_global, right_slice, right_halo)
-        else:  # "zero"
-            zeros = jnp.zeros_like(left_halo)
-            left_halo = jnp.where(on_left_global, zeros, left_halo)
-            right_halo = jnp.where(on_right_global, zeros, right_halo)
+        left_fill, right_fill = _global_edge_halos(
+            left_slice, right_slice,
+            spatial_axis=spatial_axis, halo=halo, boundary=boundary,
+        )
+        left_halo = jnp.where(on_left_global, left_fill, left_halo)
+        right_halo = jnp.where(on_right_global, right_fill, right_halo)
 
     return jnp.concatenate(
         [left_halo, local, right_halo], axis=spatial_axis
@@ -131,7 +200,23 @@ def halo_exchange(
         Equivalent to ``axes=[(mesh_axis, spatial_axis, halo)]``.
     boundary : str or dict[str, str]
         Either a single mode applied to all axes, or a per-mesh-axis
-        dict.  Modes: ``"periodic"``, ``"edge"`` (default), ``"zero"``.
+        dict (an axis it does not name gets ``"edge"``).  The mode fills
+        only the halos at the two edges of the global grid; a halo
+        between two shards always holds the neighbouring shard's cells.
+        For a halo ``h`` cells wide along a global row ``r0, ...,
+        r(n-1)``:
+
+        - ``"periodic"``: left halo ``r(n-h), ..., r(n-1)``, right halo
+          ``r0, ..., r(h-1)``.
+        - ``"edge"`` (default): left halo ``r0`` repeated ``h`` times,
+          right halo ``r(n-1)`` repeated ``h`` times -- ``numpy.pad``'s
+          ``mode="edge"``.  At ``h == 1`` this is also the mirror image
+          of the edge cell.
+        - ``"zero"``: ``h`` zeros on each side.
+
+        Every mode means the same on a mesh axis of any size; with one
+        device on an axis, that device's halos along it are both global
+        halos.
 
     Returns
     -------

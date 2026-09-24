@@ -1,25 +1,22 @@
 """Sharded HeatNode vs Fourier-series analytic solution.
 
-Covers M5 of the v0.2 halo-exchange roadmap: HeatNode now exposes
+Covers M5 of the v0.2 halo-exchange roadmap: HeatNode exposes
 ``update_padded``; wrap it with :class:`ShardedStencilNode` and verify
 that the sharded result matches the analytical solution to the same
 order as the unsharded reference, on multiple shard counts including
 the thin-shard regime (8 cells per shard on a 16-device mesh).
 
-For ``T(x,0) = sin(pi x/L)`` with Dirichlet ``T(0,t)=T(L,t)=0`` the
-sharded path uses ``boundary="zero"`` for halo exchange: the global
-ghost cells are filled with zero.
-
-That is not quite the closure the unsharded path uses.  Since 0.4.0
-``update`` imposes the datum at the rod *end* through the ghost value
-``2*T_b - T[0]``, which for ``T_b = 0`` is ``-T[0]``, not ``0``
-(MADD-ANO-007 -- the analytical test used to cite MADD-ANO-002 here,
-which is about CFL enforcement).  A zero ghost is instead the datum
-imposed at the ghost cell centre, half a cell outside the rod.  Both
-converge; they are not the same scheme at the global boundary, which
-is what ``test_sharded_close_to_unsharded`` bounds rather than
-asserting equality.  Per-shard Dirichlet data is a coupling-system
-job, as ``update_padded`` documents.
+For ``T(x,0) = sin(pi x/L)`` with Dirichlet ``T(0,t)=T(L,t)=0`` both
+paths take the end temperatures as boundary inputs,
+``left_temperature=0`` / ``right_temperature=0``.  Until 0.4.0 the
+sharded path could not: ``update_padded`` never read those inputs
+(MADD-ANO-030), and these tests wrapped the rod with the ``"zero"``
+halo fill to put 0 in the ghost cells instead -- the datum at the ghost
+centres, half a cell outside the rod, not at the rod end where
+``update`` imposes it -- and could only bound the sharded run against
+the unsharded one.  Now ``update_padded`` closes the rod ends exactly
+as ``update`` does, the wrapper refuses ``"zero"`` for a HeatNode, and
+the comparisons below are parity to float32 rounding.
 """
 
 from __future__ import annotations
@@ -36,6 +33,15 @@ from maddening.nodes.heat import HeatNode
 _HAS_4 = len(jax.devices()) >= 4
 _HAS_8 = len(jax.devices()) >= 8
 _HAS_16 = len(jax.devices()) >= 16
+
+
+#: Both rod ends held at 0 -- the same inputs for the sharded and the
+#: unsharded node.
+_COLD_ENDS = {"left_temperature": jnp.float32(0.0),
+              "right_temperature": jnp.float32(0.0)}
+
+#: float32 rounding on O(1) temperatures (measured <= 2.4e-7).
+_ATOL = 1e-6
 
 
 def _heat_analytical(x: np.ndarray, t: float, L: float, alpha: float) -> np.ndarray:
@@ -70,14 +76,12 @@ def test_sharded_matches_fourier_analytic_2nd_order(n_devices, n_cells):
 
     node, dx, dt, x = _build(n_cells)
     mesh = create_device_mesh(shape=(n_devices,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
 
     state = node.initial_state()
     n_steps = 100
     for _ in range(n_steps):
-        state = sharded.update(state, {}, dt)
+        state = sharded.update(state, _COLD_ENDS, dt)
     t_final = n_steps * dt
 
     T_num = np.asarray(state["temperature"])
@@ -97,12 +101,10 @@ def test_sharded_thin_shards_16_devices():
     """8 cells per shard exercises the boundary case where halo dominates."""
     node, dx, dt, x = _build(n_cells=128)
     mesh = create_device_mesh(shape=(16,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
     state = node.initial_state()
     for _ in range(100):
-        state = sharded.update(state, {}, dt)
+        state = sharded.update(state, _COLD_ENDS, dt)
     t_final = 100 * dt
     T_num = np.asarray(state["temperature"])
     T_exact = _heat_analytical(x, t_final, 1.0, 0.01)
@@ -120,58 +122,53 @@ def test_sharded_4th_order():
     node, dx, dt, x = _build(n_cells=64, stencil_order=4)
     assert node.halo_width() == {0: 2}
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
     state = node.initial_state()
     for _ in range(100):
-        state = sharded.update(state, {}, dt)
+        state = sharded.update(state, _COLD_ENDS, dt)
     t_final = 100 * dt
     T_num = np.asarray(state["temperature"])
+
+    # The sharded 4th-order rod is the unsharded one: the cubic end
+    # closure is applied on the shards holding the rod ends.
+    state_u = node.initial_state()
+    for _ in range(100):
+        state_u = node.update(state_u, _COLD_ENDS, dt)
+    np.testing.assert_allclose(T_num, np.asarray(state_u["temperature"]),
+                               rtol=0, atol=_ATOL)
+
     T_exact = _heat_analytical(x, t_final, 1.0, 0.01)
     l2 = np.sqrt(np.sum((T_num - T_exact) ** 2) / np.sum(T_exact ** 2))
-    # 4th-order interior + halo=2 Dirichlet handling should be at least as
-    # accurate as 2nd-order; we keep the same 5% threshold.
     assert l2 < 0.05, f"4th-order sharded L2 error {l2:.4f}"
 
 
 # ---------------------------------------------------------------------------
-# Bit-exact-ish vs unsharded (boundary handling differs, so just close)
+# Sharded equals unsharded, same Dirichlet inputs
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")
 def test_sharded_close_to_unsharded():
-    """Sharded "zero" boundary ≈ unsharded Dirichlet BCs.
+    """Sharded Dirichlet ends are the unsharded Dirichlet ends.
 
-    They are not bit-exact because the two paths place the Dirichlet
-    datum differently at the *global* boundary: the unsharded path puts
-    it on the rod end via the ghost ``2*T_b - T[0]``, the sharded path
-    fills the global ghost with ``T_b`` itself.  Both converge to the
-    analytic solution; the difference is half a cell of boundary
-    placement, and stays inside 3% at n=64.
+    Both runs get ``left_temperature=0`` / ``right_temperature=0``.  Until
+    0.4.0 the sharded one ignored them and this test could only bound the
+    difference against the ``"zero"`` fill (under 3% at n=64); now the two
+    are equal to float32 rounding.
     """
     node, dx, dt, x = _build(n_cells=64)
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
 
     state_u = node.initial_state()
     state_s = node.initial_state()
     for _ in range(100):
-        state_u = node.update(
-            state_u,
-            {"left_temperature": jnp.float32(0.0),
-             "right_temperature": jnp.float32(0.0)},
-            dt,
-        )
-        state_s = sharded.update(state_s, {}, dt)
+        state_u = node.update(state_u, _COLD_ENDS, dt)
+        state_s = sharded.update(state_s, _COLD_ENDS, dt)
 
-    T_u = np.asarray(state_u["temperature"])
-    T_s = np.asarray(state_s["temperature"])
-    diff = np.sqrt(np.sum((T_s - T_u) ** 2) / np.sum(T_u ** 2))
-    assert diff < 0.03, f"sharded/unsharded diff {diff:.4f} unexpectedly large"
+    np.testing.assert_allclose(np.asarray(state_s["temperature"]),
+                               np.asarray(state_u["temperature"]),
+                               rtol=0, atol=_ATOL)
 
 
 # Gradient through ppermute / sharded HeatNode is covered by the

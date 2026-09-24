@@ -1539,7 +1539,10 @@ anomalies:
       -- has used the client-server API since v0.1.0 across fourteen call
       sites and works: `cloud/launcher.py` is byte-identical from v0.1.0 to
       v0.3.1.  (An earlier revision said "since v0.2.0".)  `CloudSession` is the only importer of `_skypilot.py`
-      (`cloud/session.py:329, 408-410`), and that path was plausibly never
+      (`CloudSession.teardown` imports `teardown_vm`, and
+      `CloudSession._launch_worker` imports `launch_vm` and
+      `monitor_preemption`; cited by symbol because the line numbers an
+      earlier revision gave had already moved), and that path was plausibly never
       exercised against a real provider.  The test suite could not see it
       either: `tests/cloud/test_skypilot_ports.py` substituted a fake `sky`
       whose `launch(self, task, cluster_name, detach_run=True)` mirrored the

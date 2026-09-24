@@ -28,8 +28,8 @@ guidance; the itemized changes follow.
   columns with no finite width stay value-scaled and `FIMReport.value_scaled` names them
 - **`sysid.fim_core` / `FIMCore`: the Fisher information with no host round
   trip** — jittable, zero device syncs, device-array verdicts for a control
-  loop.  `fim` itself drops from ~100 ms per call to ~0.3 ms with
-  `reuse_trace=True` for a pure residual (the default re-traces; see Fixed)
+  loop.  `fim` itself is fast only with `reuse_trace=True`, for a pure residual:
+  ~1 ms warm against ~0.2 s per default call, which re-traces (see Fixed)
 - **Docstring examples are executed in CI** (`scripts/check_doctests.py`):
   every `>>>` in `src/maddening` now runs, and the gate fails if the
   collection shrinks — an example that stops working is a failing build
@@ -218,7 +218,8 @@ guidance; the itemized changes follow.
 - **Recorded `aitken` and `iqn-*` trajectories move**: Aitken's first pass of a
   timestep relaxes with the `omega` it was seeded with, not the clip floor 0.01
 - **`coupling_diagnostics()["residual"]` describes the state the step returned**
-  and no longer depends on `solver`; a group that arrives on its last pass now
+  under either `solver`, agreeing between them only to its float32 noise floor
+  (see Fixed); a group that arrives on its last pass now
   reports `converged=True` instead of raising under `strict_convergence`
 - **The interactive path stops redoing host work**: sharded wrappers place
   their static arrays on device once, not per `update`, and `run_scan` and its

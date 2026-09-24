@@ -59,10 +59,12 @@ def _wrap(node, mesh=None, axis=1):
 
 
 def _run(stepper, node, inputs, n_steps):
-    st = node.initial_state()
-    for _ in range(n_steps):
-        st = stepper.update(st, inputs, 1.0)
-    return {k: np.asarray(v) for k, v in st.items()}
+    """``n_steps`` of ``stepper`` from the node's initial state, as one
+    compiled loop -- an eager Python loop spent seconds per test on
+    op-by-op dispatch, and a graph jits its step anyway."""
+    run = jax.jit(lambda st: jax.lax.fori_loop(
+        0, n_steps, lambda _, s: stepper.update(s, inputs, 1.0), st))
+    return {k: np.asarray(v) for k, v in run(node.initial_state()).items()}
 
 
 # -- the pressure-face axis ---------------------------------------------------

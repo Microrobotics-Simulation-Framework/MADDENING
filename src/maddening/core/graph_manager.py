@@ -7353,6 +7353,53 @@ class GraphManager:
             self._state_traced = True
         self._state[name] = state
 
+    def _meta_reset_seeds(self, fresh: dict) -> dict:
+        """``{slot: value -> seed}`` for every ``_meta`` slot ``compile()`` seeds.
+
+        Keyed by the exact slot name each group owns (see
+        ``_GROUP_META_SUFFIXES``; ``_refuse_colliding_group_keys`` makes
+        the names unambiguous), so :meth:`reset_state` reproduces the
+        seeds value for value: NaN for the spectral triple and the
+        gradient bound ("not computed" -- zero would read as a spectral
+        radius of 0 and a gradient exact to float32), zero for the
+        counters, the residual, the amplification and the IQN-IMVJ warm
+        start, and the flattened *fresh* state for the predictor history,
+        which is what ``compile()`` seeds it with.
+        """
+        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+            flatten_coupled_state,
+        )
+
+        def zeros(value):
+            return jnp.zeros_like(value)
+
+        def nan(value):
+            return jnp.full_like(value, jnp.nan)
+
+        seeds: dict = {"step_count": zeros, "sub_step": zeros}
+        for group in self._coupling_groups:
+            key = "+".join(sorted(group.nodes))
+            for suffix in ("rho_spectral", "spectral_residual",
+                           "spectral_amplification", "gradient_relative_error_bound"):
+                seeds[f"coupling_{key}_{suffix}"] = nan
+            for suffix in ("iterations", "residual", "amplification",
+                           "pred_count", "V", "W"):
+                seeds[f"coupling_{key}_{suffix}"] = zeros
+            if group.predictor != "none":
+                names = list(group.nodes)      # the order ``compile()`` flattens in
+                flat0 = flatten_coupled_state(
+                    fresh, names, fields=float_fields_of(fresh, names),
+                )
+
+                def history(value, flat0=flat0):
+                    if flat0.shape != jnp.shape(value):
+                        return jnp.zeros_like(value)
+                    return jnp.asarray(flat0, jnp.asarray(value).dtype)
+
+                for pi in range(3):
+                    seeds[f"coupling_{key}_pred_{pi}"] = history
+        return seeds
+
     def reset_state(self) -> None:
         """Reset every node to its ``initial_state()`` and the internal
         counters in ``_meta`` to zero, keeping the compiled step valid.
@@ -7378,31 +7425,18 @@ class GraphManager:
         fresh_meta = None
         if live_meta is not None:
             fresh_meta = dict(live_meta)
+            seeds = self._meta_reset_seeds(fresh)
             for key, value in live_meta.items():
-                # The spectral suffixes first: ``_spectral_residual``
-                # also ends in ``_residual``, and matched there it was
-                # zeroed instead of put back to NaN.  The target is the
-                # ``_meta`` ``compile()`` seeds, value for value.
-                if key.endswith("_rho_spectral") or key.endswith(
-                    "_spectral_residual"
-                ) or key.endswith("_spectral_amplification") or key.endswith(
-                    "_gradient_relative_error_bound"
-                ):
-                    # NaN, not zero: zero would read as a computed
-                    # spectral radius of 0 and a bound equal to the
-                    # residual (or a gradient exact to float32).
-                    fresh_meta[key] = jnp.full_like(value, jnp.nan)
-                elif key in ("step_count", "sub_step") or key.endswith("_iterations") \
-                        or key.endswith("_pred_count"):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_residual") or key.endswith(
-                    "_amplification"
-                ):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                # IQN V/W and predictor histories are warm-start caches:
-                # zeroing them restarts cleanly too.
-                elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:
-                    fresh_meta[key] = jnp.zeros_like(value)
+                # By exact slot name, never by suffix: a group whose key
+                # itself ends in ``_spectral`` (a node named
+                # ``probe_spectral``) owns ``coupling_<key>_residual``,
+                # which *ends* in ``_spectral_residual``, and matched by
+                # suffix it was put back to NaN where ``compile()`` seeds
+                # 0.0.  The target is the ``_meta`` ``compile()`` seeds,
+                # value for value; a key no group owns is left alone.
+                seed = seeds.get(key)
+                if seed is not None:
+                    fresh_meta[key] = seed(value)
 
         self._state.update(fresh)
         if live_meta is not None and fresh_meta is not None:

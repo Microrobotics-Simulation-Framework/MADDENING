@@ -1116,6 +1116,55 @@ def test_reset_state_restores_the_meta_compile_seeds(label, group_kw):
         np.testing.assert_array_equal(got, want, err_msg=f"{label}: {key}")
 
 
+def _named_graph(partner, x0=0.0, **group_kw):
+    """The ``rho = 0.25`` cycle between ``a`` and a node called *partner*."""
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain=0.5, bias=1.0, x0=x0))
+    gm.add_node(_Affine(partner, gain=0.5, bias=0.0, x0=-x0))
+    gm.add_edge(source=partner, target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target=partner, source_field="x", target_field="u")
+    kw = dict(diagnostics=True, max_iterations=20, tolerance=1e-4)
+    kw.update(group_kw)
+    gm.add_coupling_group(["a", partner], **kw)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("partner,x0,group_kw", [
+    ("probe_spectral", 0.0, dict(diagnostics=False)),
+    ("probe_spectral", 0.0, dict(diagnostics=True)),
+    ("probe_spectral", 0.0, dict(solver="fori", diagnostics=True)),
+    ("b", 3.0, dict(predictor="quadratic")),
+    ("probe_spectral", 3.0, dict(predictor="linear", diagnostics=True)),
+])
+def test_reset_state_restores_the_seeds_by_exact_slot_name(partner, x0, group_kw):
+    """A group key ending in ``_spectral``, and a predictor started off zero.
+
+    The reset classified slots by suffix, spectral suffixes first, so
+    the group ``a+probe_spectral`` -- whose ``coupling_<key>_residual``
+    *ends* in ``_spectral_residual`` -- had its residual and
+    amplification put back to NaN where ``compile()`` seeds 0.0.  And
+    the predictor history, which ``compile()`` seeds with the flattened
+    initial state, was zeroed, which only matches on a fixture that
+    starts at zero (as the test above does).
+    """
+    fresh = _named_graph(partner, x0, **group_kw)
+    seeds = _meta_snapshot(fresh)
+    gm = _named_graph(partner, x0, **group_kw)
+    gm.step()
+    gm.step()
+    gm.reset_state()
+    after = _meta_snapshot(gm)
+    assert set(after) == set(seeds)
+    if group_kw.get("predictor"):
+        key = "+".join(sorted(["a", partner]))
+        assert np.any(seeds[f"coupling_{key}_pred_0"] != 0.0), "fixture premise"
+    for key, want in seeds.items():
+        got = after[key]
+        assert got.dtype == want.dtype and got.shape == want.shape, key
+        np.testing.assert_array_equal(got, want, err_msg=key)
+
+
 #: A group holding a float16 field beside a float32 one, compiled and
 #: scanned in a fresh interpreter; prints the iteration order of the
 #: group's node set, the residual seed's dtype and the scan's verdict.

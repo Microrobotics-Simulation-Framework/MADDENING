@@ -167,6 +167,8 @@ guidance; the itemized changes follow.
   and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
+- **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
+  Action: drop the argument and hold an end at 0 with `left_temperature=0.0` / `right_temperature=0.0` (in a graph, `gm.add_external_input(...)`), exactly as unsharded.
 - **Coupling group keys are also refused when one plus `_total` spells another's** (a new `_meta` slot, `<key>_total_iterations`): groups keyed
   `a+b+c` and `a+b+c_total` now fail at `add_coupling_group`, with or without sub-cycling. Rename a node so the keys differ.
 - **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new
@@ -285,9 +287,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Sharded halos at the edges of the global grid**: on a mesh axis of one device `halo_exchange` filled them periodically whatever `boundary` said (a one-device sharded `HeatNode` ran as a ring, 0.40 off),
-  and `"edge"` wider than one cell put `r0, r1` before `r0` instead of repeating `r0` (4th-order `HeatNode`, default fill: 4.7e-3). Periodic, and width 1 on two or more devices, are bit-identical.
-  Action: re-run sharded results taken on one device or a size-1 mesh axis with a non-periodic `boundary`, and 4th-order sharded `HeatNode` results.
+- **Sharded stencils at the edges of the global grid**: a size-1 mesh axis got periodic halos whatever `boundary` said (a one-device `HeatNode` ran as a ring, 0.40 off); `"edge"` wider than one cell put `r0, r1` before `r0`;
+  a sharded `HeatNode` ignored `left_temperature`/`right_temperature` (0.87 off with both ends at 0) and now closes its rod ends exactly as unsharded; `ShardedStencilNode` refuses an unknown `boundary` at construction.
+  Action: re-run sharded results taken on one device or a size-1 mesh axis, and every sharded `HeatNode` result with end temperatures or `stencil_order=4`.
 - **`coupling_diagnostics()` counts every `waveform_iterations` sweep** (since 0.1.0, MADD-ANO-026): `iterations` is the largest sweep's, so `iterations >= max_iterations`
   is exact again (an earlier sweep at the cap read `iterations=1`); new `total_iterations` is the sum. State unchanged; a one-sweep group reports as before.
   Action: a cap check on `iterations` needs no change; read `total_iterations` for the work done.
@@ -592,8 +594,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
-- **MADD-ANO-028, 029 (new, resolved in this release)**: a sharded stencil node on a mesh axis of one device got periodic global halos under
-  `"edge"` and `"zero"`; the `"edge"` fill of a halo two or more cells wide was the shard's first cells, not its edge cell repeated (both since 0.2.0; see `### Fixed`)
+- **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;
+  a sharded `HeatNode` that ignored its end temperatures (all since 0.2.0; see `### Fixed`).  **MADD-ANO-031 (new, open)**: at `stencil_order=4` an end with no
+  boundary input is not insulated (order 2 is); give it a temperature or use `stencil_order=2`
 - **MADD-ANO-026 (new, resolved)**: with `waveform_iterations > 1`, `iterations` was the last sweep's count, hiding an earlier sweep at the cap (since 0.1.0).
   **MADD-ANO-027 (new, open)**: `waveform_iterations > 1` restarts the same solve rather than relaxing a waveform, and sub-step interpolation runs between
   iterates, so a converged step is the same in every mode (since 0.1.0). The option is now marked experimental; use `waveform_iterations=1`

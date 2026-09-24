@@ -560,9 +560,19 @@ under multi-GPU sharding:
   returns `"periodic"`: its `update` streams with `jnp.roll`, and wrapping
   it with the default `"edge"` used to run and move a walled channel's
   centreline velocity by 0.64%; it now fails with a message saying to pass
-  `boundary="periodic"`.  A node that applies its own boundary conditions
-  in `update_padded` after the exchange declares nothing and keeps the
-  `"edge"` default, exactly as before.  If a boundary condition of your node cannot be
+  `boundary="periodic"`.  Declare it too when your `update_padded` builds
+  its own ghosts at the global edges, so that no fill reaches the answer:
+  {meth}`HeatNode.halo_boundary <maddening.nodes.heat.HeatNode.halo_boundary>`
+  returns `"edge"` because `update_padded` closes the rod ends from
+  `left_temperature` / `right_temperature` exactly as `update` does, and
+  the declaration makes the wrapper refuse `"zero"` and `"periodic"`
+  rather than ignore them.  An optional `halo_boundary_hint()` returning a
+  sentence is appended to the refusal -- say there what the user should
+  do instead (HeatNode's names the inputs that hold an end at 0).  A node
+  that declares nothing keeps the `"edge"` default and takes any of the
+  three fills as given, exactly as before; the wrapper refuses a
+  `boundary` that is not one of the three, as a string, at construction.
+  If a boundary condition of your node cannot be
   applied on a slab (a condition on a face, applied to whatever edge
   plane the slab has), refuse the sharded axis it lies on inside
   `update_padded`, reading `shard_info`, as `LBMNode` does for its

@@ -18,19 +18,11 @@ reference derived without the implementation:
 
 The primitive reference is the global array padded by ``numpy.pad`` and
 cut into the shards' padded blocks; the adjoint reference scatters a
-cotangent back through the same index map.  The node-level tests hold
-:class:`ShardedStencilNode` to the unsharded node on 1, 2 and 4 devices.
-
-What "the unsharded node" means for ``HeatNode``.  At ``stencil_order=2``
-the node's own ghost for an end with no boundary input is ``T[0]``, the
-``"edge"`` fill, so the sharded rod is compared with ``update`` itself.
-At ``stencil_order=4`` no halo fill reproduces ``update``: its ghosts are
-a cubic Dirichlet closure through the three end cells, which
-``update_padded`` does not apply, so the reference there is the same
-node's ``update_padded`` on the whole rod padded on one host -- the model
-the sharded path computes, on every device count.  ``"zero"`` is compared
-the same way: it is a different boundary condition from the node's
-default, chosen by the caller.
+cotangent back through the same index map.  The wrapper tests use a
+test-only stencil that every halo slot reaches, so a wrong fill cannot
+hide behind a node that overwrites it; ``HeatNode``, which since 0.4.0
+builds its own ghosts at the rod ends, is held to the unsharded node in
+``test_sharded_heat_rod_ends.py``.
 
 Each configuration is compiled once: the primitive cases of one mesh run
 as a single jitted program, and each node configuration is a single
@@ -50,20 +42,12 @@ from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.halo import halo_exchange
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
 from maddening.core.node import SimulationNode
-from maddening.nodes.heat import HeatNode
 
 _N_AVAILABLE = len(jax.devices())
 
 #: ``numpy.pad`` spelling of each boundary mode.
 _NP_MODE = {"periodic": "wrap", "edge": "edge", "zero": "constant"}
 _MODES = ("periodic", "edge", "zero")
-
-
-def _needs(n_devices: int):
-    return pytest.mark.skipif(
-        _N_AVAILABLE < n_devices,
-        reason=f"needs >= {n_devices} JAX devices (the multigpu conftest forces 16 on CPU)",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -324,83 +308,28 @@ def test_the_wrapper_fills_sharded_and_unsharded_halo_axes_alike(mesh_shape, axi
     np.testing.assert_array_equal(got, want, err_msg=f"mesh {mesh_shape} {axis_map}, halo {h}, {mode}")
 
 
-# ---------------------------------------------------------------------------
-# HeatNode: sharded against unsharded on 1, 2 and 4 devices
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("boundary", [
+    "Edge", "reflect", "", None,
+    {"devices": "edge"},
+], ids=["wrong-case", "numpy-mode", "empty", "none", "per-axis-dict"])
+def test_the_wrapper_refuses_an_unknown_boundary_at_construction(boundary):
+    """One of the three modes, as one string, or a ``ValueError`` naming them.
 
-_N_CELLS, _LENGTH, _ALPHA, _STEPS = 64, 1.0, 0.01, 20
-_DX = _LENGTH / _N_CELLS
-_DT = 0.25 * _DX * _DX / _ALPHA
-#: A ramp -- cold left end, hot right end -- plus a wiggle, so that heat
-#: flowing round a ring, a mirrored ghost and a shifted ghost all move the
-#: end cells within the first step.
-_X = np.linspace(_DX / 2, _LENGTH - _DX / 2, _N_CELLS)
-_T0 = (_X + 0.3 * np.sin(3 * np.pi * _X)).astype(np.float32)
-#: float32 rounding on O(1) temperatures; every defect here is >= 1e-3.
-_ATOL = 1e-6
-
-
-def _heat(order: int) -> HeatNode:
-    return HeatNode("heat", timestep=_DT, n_cells=_N_CELLS, length=_LENGTH,
-                    thermal_diffusivity=_ALPHA, initial_temperature=_T0,
-                    stencil_order=order)
-
-
-def _run(node, steps=_STEPS):
-    state = node.initial_state()
-    for _ in range(steps):
-        state = node.update(state, {}, _DT)
-    return np.asarray(state["temperature"])
-
-
-def _run_host_padded(order: int, mode: str) -> np.ndarray:
-    """The unsharded node's ``update_padded`` on the whole rod, padded here."""
-    node = _heat(order)
-    h = node.halo_width()[0]
-    step = jax.jit(lambda T: node.update_padded(
-        {"temperature": jnp.pad(T, h, mode=_NP_MODE[mode])}, {}, _DT)["temperature"][h:-h])
-    T = jnp.asarray(_T0)
-    for _ in range(_STEPS):
-        T = step(T)
-    return np.asarray(T)
-
-
-def _sharded(order: int, mode: str, mesh_shape, axis_map=None) -> np.ndarray:
-    axis_map = axis_map or {"devices": 0}
-    return _run(ShardedStencilNode(_heat(order), create_device_mesh(shape=mesh_shape),
-                                   axis_map=axis_map, boundary=mode))
-
-
-_HEAT_MESHES = (
-    pytest.param((1,), None, id="1dev"),
-    pytest.param((2,), None, id="2dev", marks=_needs(2)),
-    pytest.param((4,), None, id="4dev", marks=_needs(4)),
-    pytest.param((1, 2), {"spatial_y": 0}, id="mesh1x2-cells-on-the-size-1-axis", marks=_needs(2)),
-)
-
-
-@pytest.mark.parametrize("mesh_shape,axis_map", _HEAT_MESHES)
-def test_a_sharded_second_order_rod_is_the_unsharded_rod(mesh_shape, axis_map):
-    """Default ``"edge"``: the node's own end ghost, so ``update`` is the reference.
-
-    On one device this was 0.40 away after 50 steps -- both ends drifting
-    to the mean, heat crossing from the hot end to the cold one.
+    Until 0.4.0 nothing checked: an unknown string failed at the first
+    trace, inside the exchange, and on a halo axis ``axis_map`` leaves
+    unsharded anything but ``"periodic"`` / ``"edge"`` -- a typo, or a
+    per-axis dict -- was silently filled with zeros.
     """
-    np.testing.assert_allclose(_sharded(2, "edge", mesh_shape, axis_map), _run(_heat(2)),
-                               rtol=0, atol=_ATOL)
+    with pytest.raises(ValueError) as info:
+        ShardedStencilNode(_WideStencil2D("w", 1), create_device_mesh(shape=(1,)),
+                           axis_map={"devices": 0}, boundary=boundary)
+    message = str(info.value)
+    assert "('periodic', 'edge', 'zero')" in message
+    assert repr(boundary) in message
 
 
-@pytest.mark.parametrize("order", (2, 4))
-@pytest.mark.parametrize("mode", ("edge", "zero"))
-@pytest.mark.parametrize("mesh_shape,axis_map", _HEAT_MESHES)
-def test_a_sharded_rod_computes_the_host_padded_model_on_every_device_count(
-        mesh_shape, axis_map, mode, order):
-    """Every order and mode: the answer does not depend on the device count.
-
-    The reference is the node's ``update_padded`` on the whole rod padded
-    by ``numpy.pad`` -- one host, no exchange.  At ``stencil_order=4`` with
-    the default fill this was 7.3e-03 away on two and four devices (the
-    ``r0, r1`` halo) and 0.40 on one (the ring).
-    """
-    np.testing.assert_allclose(_sharded(order, mode, mesh_shape, axis_map),
-                               _run_host_padded(order, mode), rtol=0, atol=_ATOL)
+def test_every_mode_is_accepted_by_a_node_that_declares_none():
+    for boundary in ("periodic", "edge", "zero"):
+        wrapped = ShardedStencilNode(_WideStencil2D("w", 1), create_device_mesh(shape=(1,)),
+                                     axis_map={"devices": 0}, boundary=boundary)
+        assert wrapped.to_dict()["boundary"] == boundary

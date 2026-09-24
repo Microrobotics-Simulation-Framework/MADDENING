@@ -26,6 +26,10 @@ from maddening.nodes.heat import HeatNode
 
 _HAS_4 = len(jax.devices()) >= 4
 
+#: Both rod ends held at 0, as boundary inputs (the same for either path).
+_COLD_ENDS = {"left_temperature": jnp.float32(0.0),
+              "right_temperature": jnp.float32(0.0)}
+
 
 def _build_sharded(n_cells, alpha=0.01):
     L = 1.0
@@ -37,9 +41,7 @@ def _build_sharded(n_cells, alpha=0.01):
         initial_temperature=np.zeros(n_cells, dtype=np.float32),
     )
     mesh = create_device_mesh(shape=(4,))
-    sharded = ShardedStencilNode(
-        node, mesh, axis_map={"devices": 0}, boundary="zero",
-    )
+    sharded = ShardedStencilNode(node, mesh, axis_map={"devices": 0})
     return node, sharded, dt
 
 
@@ -52,7 +54,7 @@ def test_gradient_through_5_steps_matches_fd():
     def loss(T0):
         state = {"temperature": T0}
         for _ in range(5):
-            state = sharded.update(state, {}, dt)
+            state = sharded.update(state, _COLD_ENDS, dt)
         return jnp.mean(state["temperature"] ** 2)
 
     rng = np.random.default_rng(0)
@@ -79,7 +81,7 @@ def test_gradient_finite_through_long_rollout():
     def loss(T0):
         state = {"temperature": T0}
         for _ in range(50):
-            state = sharded.update(state, {}, dt)
+            state = sharded.update(state, _COLD_ENDS, dt)
         return jnp.mean(state["temperature"] ** 2)
 
     T0 = jnp.linspace(0.0, 1.0, n_cells, dtype=jnp.float32)
@@ -87,7 +89,26 @@ def test_gradient_finite_through_long_rollout():
     assert bool(jnp.all(jnp.isfinite(g)))
 
 
-# Note: sharded gradients vs unsharded gradients are NOT expected to
-# match because the boundary handling differs (unsharded path overwrites
-# boundary cells per MADD-ANO-002, sharded uses ghost=0 implicitly via
-# boundary="zero").  The FD reference above is the meaningful check.
+@pytest.mark.skipif(not _HAS_4, reason="needs >=4 virtual devices")
+def test_gradient_matches_the_unsharded_node():
+    """The sharded gradient is the unsharded one, for the same end inputs.
+
+    Until 0.4.0 the two could not be compared: the sharded path ignored
+    ``left_temperature`` / ``right_temperature`` and ran on the ``"zero"``
+    halo fill instead (MADD-ANO-030).  Since ``update_padded`` closes the
+    rod ends as ``update`` does, the adjoint goes through the same
+    closure.
+    """
+    n_cells = 16
+    node, sharded, dt = _build_sharded(n_cells)
+
+    def loss(step, T0):
+        state = {"temperature": T0}
+        for _ in range(5):
+            state = step(state, _COLD_ENDS, dt)
+        return jnp.mean(state["temperature"] ** 2)
+
+    T0 = jnp.asarray(np.random.default_rng(1).standard_normal(n_cells).astype(np.float32))
+    g_sharded = np.asarray(jax.grad(lambda t: loss(sharded.update, t))(T0))
+    g_unsharded = np.asarray(jax.grad(lambda t: loss(node.update, t))(T0))
+    np.testing.assert_allclose(g_sharded, g_unsharded, rtol=1e-5, atol=1e-7)

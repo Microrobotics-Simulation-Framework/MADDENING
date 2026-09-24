@@ -334,7 +334,7 @@ def _rest_stencil_graph(diffusivity):
     gm.add_node(ShardedStencilNode(
         HeatNode("h", 1e-2, n_cells=16, length=1.3, thermal_diffusivity=diffusivity,
                  initial_temperature=[300.0 + 3 * i for i in range(16)]),
-        create_device_mesh(shape=(4,)), {"devices": 0}, boundary="zero",
+        create_device_mesh(shape=(4,)), {"devices": 0},
     ))
     gm.compile()
     return gm

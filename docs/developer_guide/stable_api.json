@@ -2671,6 +2671,16 @@
           "parameters": [],
           "returns": "set[str]"
         },
+        "halo_boundary": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "str"
+        },
+        "halo_boundary_hint": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "str"
+        },
         "halo_width": {
           "kind": "method",
           "parameters": [],

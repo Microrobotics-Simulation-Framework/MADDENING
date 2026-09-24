@@ -1291,12 +1291,36 @@ class SimulationServer:
             target = _checkpoint_path(path)
             if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
                 raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
+            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                _restore_state_and_params,
+                _state_and_params_snapshot,
+            )
             try:
+                # load_state compiles a dirty graph before it reads anything;
+                # done first here so the undo below starts after it.
+                if self.gm._dirty or self.gm._compiled_step is None:
+                    self.gm.compile()
+                undo = _state_and_params_snapshot(self.gm)
                 self.gm.load_state(str(target))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             except Exception:  # noqa: BLE001 - do not leak file/parse internals
                 raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
+            # A checkpoint of a graph whose node was built with another value
+            # of a parameter it consumes at construction carries that value
+            # in gm.params.  The graph refuses such a leaf at the next step,
+            # and this API has no reset_params: every later /sim/step would
+            # be a 500 while GET /graph/params served the checkpoint's value.
+            # Refused here instead, with the load undone.
+            try:
+                self.gm._refuse_baked_param_writes(self.gm.params, live=False)
+            except ValueError as exc:
+                _restore_state_and_params(self.gm, undo)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"checkpoint {path!r} does not fit this graph, nothing "
+                           f"was loaded: {exc}",
+                )
             return {"status": "ok", "state": self._state_json()}
 
         # -- simulation control endpoints -----------------------------------

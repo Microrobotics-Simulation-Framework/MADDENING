@@ -60,7 +60,7 @@ from __future__ import annotations
 import pickle
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import jax.numpy as jnp
 import numpy as np
@@ -84,6 +84,26 @@ def _copy_tree(tree: Any) -> Any:
     if isinstance(tree, dict):
         return {k: _copy_tree(v) for k, v in tree.items()}
     return tree
+
+
+def _not_tunable_error(name: str, reason: str, current: Any) -> ValueError:
+    """The refusal for a new value of a parameter the step cannot read.
+
+    Shared by :meth:`FmuSidecar.set_params`, :meth:`FmuSidecar.set_fmu_state`
+    and the bridge's ``set_state``, so every door into the parameter tree
+    says the same thing.
+    """
+    return ValueError(
+        f"parameter {name!r} is not tunable: {reason}.  The FMU would report "
+        f"the new value while every step kept computing with "
+        f"{np.array2string(np.asarray(current), threshold=8)}; nothing was "
+        "written"
+    )
+
+
+def _same_leaf(a: Any, b: Any) -> bool:
+    x, y = np.asarray(a), np.asarray(b)
+    return x.shape == y.shape and bool(np.array_equal(x, y))
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -123,6 +143,17 @@ class SidecarConfig:
         :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks against the
         same declarations, so neither door into the parameter tree is
         wider than the other.
+    fixed_params : mapping of str to str, optional
+        ``{"<node>.params.<key>": reason}`` for parameters the compiled step
+        cannot read -- pass :attr:`ModelDescription.fixed_parameters
+        <maddening.fmi.model_description.ModelDescription.fixed_parameters>`.
+        :meth:`FmuSidecar.set_params` and :meth:`FmuSidecar.set_fmu_state`
+        refuse a *new* value for any of them (re-setting the current value
+        is accepted): it would be reported by :meth:`FmuSidecar.get_params`
+        and ignored by every step.  A sidecar holds only the compiled step,
+        so it cannot work this out alone; :class:`FmuTcpBridge
+        <maddening.fmi.tcp_bridge.FmuTcpBridge>` fills it from the model
+        description it serves, whatever was passed here.
     allow_pickle_rpc : bool, default False
         Let :meth:`FmuSidecar.handle` serve the pickled RPC protocol.
         Unpickling a request runs arbitrary code from whoever supplied
@@ -135,6 +166,7 @@ class SidecarConfig:
     unknown_fn: Optional[Callable[[Any], Any]] = None
     params: Optional[dict] = None
     param_specs: Optional[dict] = None
+    fixed_params: Optional[Mapping[str, str]] = None
     allow_pickle_rpc: bool = False
 
 
@@ -154,6 +186,18 @@ class FmuSidecar:
         self._params = (
             None if config.params is None else _copy_tree(config.params)
         )
+        self._fixed: dict[str, str] = dict(config.fixed_params or {})
+
+    def _refuse_new_values_for(self, fixed: Mapping[str, str]) -> None:
+        """Add ``{"<node>.params.<key>": reason}`` to the parameters whose
+        new values are refused (the bridge's model-description contract)."""
+        for name, reason in fixed.items():
+            self._fixed.setdefault(name, reason)
+
+    @property
+    def fixed_params(self) -> dict[str, str]:
+        """The parameters this sidecar refuses a new value for, with why."""
+        return dict(self._fixed)
 
     @property
     def state(self) -> dict[str, dict[str, Any]]:
@@ -203,8 +247,9 @@ class FmuSidecar:
         parameter value reference) into the pytree the next step uses.
 
         Keys are ``"<node>.params.<key>"``; an unknown name, a shape
-        that differs from the current leaf, or a value outside the
-        leaf's ``ParamSpec.bounds`` (when the config carries
+        that differs from the current leaf, a new value for a parameter the
+        step cannot read (``SidecarConfig.fixed_params``), or a value
+        outside the leaf's ``ParamSpec.bounds`` (when the config carries
         ``param_specs``) is an error, so an importer cannot silently
         tune a constant the step never reads or declares invalid.  The
         call is atomic: nothing is written unless every update is valid.
@@ -229,6 +274,8 @@ class FmuSidecar:
                 raise ValueError(
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",
                 )
+            if name in self._fixed and not _same_leaf(new, current):
+                raise _not_tunable_error(name, self._fixed[name], current)
             spec = spec_nodes.get(node, {}).get(key)
             if spec is not None:
                 spec.check(new, name=name)
@@ -260,13 +307,28 @@ class FmuSidecar:
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
-        self._state = state
+        new_params = None
         if params is not None and self._params is not None:
-            self._params = {
+            new_params = {
                 k: ({n: {kk: jnp.asarray(vv) for kk, vv in leaves.items()}
                      for n, leaves in v.items()} if isinstance(v, dict) else v)
                 for k, v in params.items()
             }
+            # A snapshot is a door into the parameter tree like set_params:
+            # it may not install a new value for a parameter the step cannot
+            # read.  Checked before anything is committed.
+            live_nodes = self._params.get("nodes", {})
+            for name, reason in self._fixed.items():
+                node, _, key = name.partition(".params.")
+                if key not in live_nodes.get(node, {}):
+                    continue
+                current = live_nodes[node][key]
+                restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
+                if not _same_leaf(restored, current):
+                    raise _not_tunable_error(name, reason, current)
+        self._state = state
+        if new_params is not None:
+            self._params = new_params
 
     # -- Wire-level RPC -----------------------------------------------------
 

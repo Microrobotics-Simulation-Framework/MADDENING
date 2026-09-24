@@ -26,15 +26,21 @@ from maddening.fmi.model_description import build_model_description
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
+from maddening.nodes.table import TableNode
 
 
 @pytest.fixture
 def gm():
     g = GraphManager()
+    # A table edge, so the ball's step reads ``elasticity``: the FMU exports
+    # only parameters its step reads, and without a table ``elasticity`` is
+    # a knob that does nothing.
+    g.add_node(TableNode(name="table", timestep=1e-2))
     g.add_node(BallNode(name="ball", timestep=1e-2, initial_position=1.0,
                         elasticity=0.7))
     g.add_node(SpringDamperNode(name="spring", timestep=1e-2, stiffness=30.0,
                                 damping=2.0, mass=1.5))
+    g.add_edge("table", "ball", "position", "table_position")
     g.compile()
     return g
 
@@ -59,16 +65,25 @@ def _sidecar(gm, *, allow_pickle_rpc=False):
 
 class TestModelDescription:
 
-    def test_every_params_leaf_is_a_tunable_parameter(self, gm):
+    def test_every_params_leaf_the_step_reads_is_a_tunable_parameter(self, gm):
+        """And no other: an ``initial_*`` condition (the FMU's initial state
+        is already built) or the table's ``position`` (read by its initial
+        state only) would be a knob that does nothing."""
         md = build_model_description(gm, model_name="m")
         params = {v.name: v for v in md.variables if v.causality == "parameter"}
+        reads = gm._params_read_by_step()
         expected = {f"{n}.params.{k}" for n, leaves in gm.params["nodes"].items()
-                    for k in leaves}
+                    for k in leaves if (n, k) in reads}
         assert set(params) == expected
+        every = {f"{n}.params.{k}" for n, leaves in gm.params["nodes"].items()
+                 for k in leaves}
+        assert set(md.fixed_parameters) == every - expected
+        assert {"spring.params.initial_position", "ball.params.initial_velocity",
+                "table.params.position"} <= set(md.fixed_parameters)
         assert all(v.variability == "tunable" for v in params.values())
         assert params["spring.params.stiffness"].unit == "N/m"
         assert params["spring.params.mass"].unit == "kg"
-        assert params["spring.params.initial_position"].description == "initial condition"
+        assert params["ball.params.elasticity"].description
         assert params["ball.params.gravity"].dtype == "float32"
         # FMI 3.0: parameters carry a start value (fmpy validates this)
         assert params["spring.params.stiffness"].start == "30.0"

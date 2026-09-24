@@ -16,7 +16,9 @@ Originally written from the independent audit of 2026-09-16 (round 1; report and
 reproducers under ``benchmarks/results/audit1/``).
 """
 
+import dataclasses
 import os
+from collections import namedtuple
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -336,3 +338,68 @@ def test_an_outward_infinity_means_exactly_none():
     assert _nominal_entry(spec) == _nominal_entry(ParamSpec()) == (None, 0.0)
     assert _nominal_entry(ParamSpec(bounds=(2.0, inf))) == (None, 0.0)
     assert _changes_no_column(spec)
+
+
+# ---------------------------------------------------------------------------
+# transform="log" without a lower bound is measured from 0
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [-1.0, 0.0, -1e-30], ids=["negative", "zero", "tiny_negative"])
+def test_a_log_spec_without_a_lower_bound_refuses_a_value_at_or_below_zero(bad):
+    """``log`` is measured from 0 when ``lo`` is ``None``: ``unconstrain``
+    returned ``-inf`` for 0 and ``NaN`` below it, and ``check`` /
+    ``check_bounds`` passed both."""
+    spec = ParamSpec(transform="log")
+    with pytest.raises(ValueError, match=r"k=.* below bound 0\.0 \(transform='log'"):
+        spec.check(jnp.float32(bad), name="k")
+    with pytest.raises(ValueError, match=r"below bound 0\.0"):
+        check_bounds({"k": jnp.float32(bad)}, {"k": spec})
+    with pytest.raises(ValueError, match=r"below bound 0\.0"):
+        check_bounds({"k": jnp.asarray([1.0, bad], jnp.float32)}, {"k": spec})
+
+
+def test_a_log_spec_without_a_lower_bound_accepts_what_it_can_unconstrain():
+    spec = ParamSpec(transform="log")
+    # Not a subnormal: XLA's CPU backend flushes them to zero, where log is
+    # -inf, so refusing one is the right answer (and what check() gives).
+    for value in (2.0, float(np.finfo(np.float32).tiny)):
+        leaf = {"k": jnp.float32(value)}
+        check_bounds(leaf, {"k": spec})
+        u = unconstrain(leaf, {"k": spec})["k"]
+        assert np.isfinite(float(u)), (value, float(u))
+    # An explicit lower bound keeps its own rule.
+    ParamSpec(bounds=(-2.0, None), transform="log").check(jnp.float32(-1.0))
+
+
+# ---------------------------------------------------------------------------
+# A ParamSpec over a record (namedtuple / dataclass) level
+# ---------------------------------------------------------------------------
+
+_Rec = namedtuple("_Rec", ["a", "b"])
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass
+class _RecDC:
+    a: jax.Array
+    b: jax.Array
+
+
+@pytest.mark.parametrize("record", [
+    _Rec(a=jnp.float32(7.0), b=jnp.float32(8.0)),
+    _RecDC(a=jnp.float32(7.0), b=jnp.float32(8.0)),
+], ids=["namedtuple", "dataclass"])
+def test_a_spec_above_a_record_level_is_refused_by_the_maps(record):
+    """A record's fields are named parameters, each needing its own entry:
+    a ``ParamSpec`` covers a list/tuple level and nothing else.  Documented
+    in ``check_bounds`` and in ``_spec_step``; covering a record would give
+    ``b`` the bounds written for a vector and pass ``7.0`` against
+    ``(0, 1)`` on nobody's say-so."""
+    params = {"outer": record}
+    specs = {"outer": ParamSpec(trainable=False, bounds=(0.0, 1.0))}
+    refusal = (r"specs\['outer'\] is a ParamSpec but params\['outer'\] is a "
+               r"\w+ record with fields \['a', 'b'\]")
+    for tree_map in (trainable_mask, unconstrain, constrain, check_bounds):
+        with pytest.raises(ValueError, match=refusal):
+            tree_map(params, specs)

@@ -82,7 +82,7 @@ from maddening.api.auth import (
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.graph_manager import GraphManager
+from maddening.core.graph_manager import GraphManager, _leaf_values_equal
 from maddening.core.node import SimulationNode
 from maddening.viz.relay import StateRelay
 from maddening.viz.runner import RealtimeRunner
@@ -290,6 +290,21 @@ def _non_finite_param(value: Any, path: str = "") -> Optional[str]:
             if found is not None:
                 return found
     return None
+
+
+def _same_param_value(old: Any, new: Any) -> bool:
+    """Is a JSON *new* value for a structural parameter the value it has?
+
+    Strict on purpose: ``5`` and ``5.0`` differ (the write would turn an
+    integer constant into a float one), and anything that does not compare
+    cleanly counts as changed.  "Changed" only means the write is checked.
+    """
+    if type(old) is not type(new):
+        return False
+    try:
+        return bool(old == new)
+    except Exception:  # noqa: BLE001 - an array-valued entry, say
+        return False
 
 
 def _state_elements(state: Any) -> int:
@@ -1113,7 +1128,15 @@ class SimulationServer:
             Float parameters of nodes that accept injected params are
             written to ``gm.params`` and take effect on the next step
             without recompiling; anything else (structural values, nodes
-            on the legacy contract) marks the graph dirty as before.
+            on the legacy contract) marks the graph dirty as before.  An
+            initial condition the node reads in ``initial_state()`` takes
+            effect at the next ``POST /sim/reset``.
+
+            A value the running node cannot use -- one it consumed when it
+            was constructed (declared in ``static_data_deps``, or read by
+            neither the step, its hooks nor ``initial_state()``) -- is a
+            400 naming the parameter and why, and nothing in the request
+            is written: rebuild the node to change it.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
@@ -1187,6 +1210,40 @@ class SimulationServer:
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc))
                 staged[key] = new
+            # A value the node consumed when it was constructed (a wall
+            # mask, an assembled operator, a copy of an initial condition)
+            # is not rebuilt by writing node.params: the write would be
+            # echoed, served by GET, written out by to_dict() /
+            # save_state(), and ignored by every step.  Refused here, still
+            # before anything is written, by the graph's own decision
+            # (``GraphManager._unused_node_write_reason``), which is the
+            # one that refuses the same leaf written into gm.params alone.
+            ctor = node.params_pytree() if staged else {}
+            for key, value in req.params.items():
+                if key in staged:
+                    ref = ctor.get(key, live.get(key))
+                    if ref is not None and _leaf_values_equal(staged[key], ref):
+                        continue            # unchanged: nothing to refuse
+                    node_value = np.asarray(staged[key]).tolist()
+                else:
+                    if key in node.params and _same_param_value(node.params[key], value):
+                        continue
+                    node_value = value
+                reason = self.gm._unused_node_write_reason(node_name, key, node_value)
+                if reason is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{key}: node '{node_name}' cannot take a new value "
+                            f"for this parameter while it runs: {reason}.  The "
+                            "write would be reported, and saved by to_dict() / "
+                            "save_state(), while every step kept the value the "
+                            "node was built with.  Nothing was written; to "
+                            "change it, rebuild the node (DELETE "
+                            f"/graph/nodes/{node_name}, then POST /graph/nodes "
+                            "with the new value)."
+                        ),
+                    )
             for key, value in req.params.items():
                 if key in staged:
                     # After a compile ``live`` *is* gm.params' leaf dict and
@@ -1234,12 +1291,36 @@ class SimulationServer:
             target = _checkpoint_path(path)
             if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
                 raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
+            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                _restore_state_and_params,
+                _state_and_params_snapshot,
+            )
             try:
+                # load_state compiles a dirty graph before it reads anything;
+                # done first here so the undo below starts after it.
+                if self.gm._dirty or self.gm._compiled_step is None:
+                    self.gm.compile()
+                undo = _state_and_params_snapshot(self.gm)
                 self.gm.load_state(str(target))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             except Exception:  # noqa: BLE001 - do not leak file/parse internals
                 raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
+            # A checkpoint of a graph whose node was built with another value
+            # of a parameter it consumes at construction carries that value
+            # in gm.params.  The graph refuses such a leaf at the next step,
+            # and this API has no reset_params: every later /sim/step would
+            # be a 500 while GET /graph/params served the checkpoint's value.
+            # Refused here instead, with the load undone.
+            try:
+                self.gm._refuse_baked_param_writes(self.gm.params, live=False)
+            except ValueError as exc:
+                _restore_state_and_params(self.gm, undo)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"checkpoint {path!r} does not fit this graph, nothing "
+                           f"was loaded: {exc}",
+                )
             return {"status": "ok", "state": self._state_json()}
 
         # -- simulation control endpoints -----------------------------------

@@ -284,6 +284,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`PUT /graph/params` refuses a value the running node cannot use** (400, nothing written; since 0.1.0 it was saved and ignored, e.g. `LBMPipeNode.pipe_radius`): rebuild
+  the node. `/checkpoint/load` refuses such a checkpoint; FMUs export only parameters the step reads and refuse the rest (pass `SidecarConfig(fixed_params=md.fixed_parameters)`).
+  `params_effective` fails a constant split with an `__init__` copy; a `transform="log"` spec with no lower bound refuses values `<= 0`.
 - **`LBMNode`'s algorithm ID is `MADD-NODE-011`** (it shared `MADD-NODE-007` with `RigidBodyNode`, which keeps it): update anything keyed on the old ID.
   The gates now refuse a duplicate node ID, a guide ID that differs from its `NodeMeta`, a `<FIX` that is not the entry's `resolution_version` or not a real release,
   a duplicated / skipped / uncollected `verification:` test, and a rod built through a local `HeatNode` subclass; the doctest and mapping floors sit at the current counts.

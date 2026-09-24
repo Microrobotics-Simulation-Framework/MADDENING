@@ -258,7 +258,9 @@ def _server_treats_as_params_node(kind, spelling):
                         raise_server_exceptions=False)
     resp = client.put("/graph/params/n", json={"params": {"k": [1.0, 2.0]}})
     assert resp.status_code in (200, 400), resp.text
-    return resp.status_code == 400
+    # The shape refusal is the pytree validation this probe asks about; a
+    # structural write can also be a 400 for a value the node never reads.
+    return resp.status_code == 400 and "expected shape" in resp.json()["detail"]
 
 
 def _node_probe(fn):
@@ -409,3 +411,42 @@ def test_only_the_shared_helper_reads_a_signature():
     reads = _signature_reads()
     assert set(reads) <= _ALLOWED, sorted(set(reads) - _ALLOWED)
     assert ("core/node.py", "_signature_takes_keyword") in reads
+
+
+class _OldStyleProbe(SimulationNode):
+    """A third-party node written against the pre-0.4 probe: its
+    ``accepts_params(self)`` override has no ``method`` keyword, and its
+    ``update`` forwards ``**kwargs`` (so the signature alone says "takes
+    params")."""
+
+    def __init__(self, answer, name="n"):
+        super().__init__(name, 0.1, k=2.0)
+        self._answer = answer
+
+    def accepts_params(self):  # pyright: ignore[reportIncompatibleMethodOverride]
+        return self._answer
+
+    def initial_state(self):
+        return {"x": jnp.zeros(3, jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, **kwargs):
+        return dict(state)
+
+    def derivatives(self, state, boundary_inputs):
+        return {"x": jnp.zeros(3, jnp.float32)}
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_an_old_accepts_params_override_is_asked_the_update_question(answer):
+    """``_method_accepts_params`` calls ``accepts_params(method=...)``; an
+    override without the keyword raises ``TypeError`` there and is then
+    asked the ``"update"`` question it was written for -- its answer, not
+    the signature of ``update``, which forwards ``**kwargs`` and would say
+    ``True`` either way.  Any other method is read off its own signature,
+    so the old override cannot switch the integrators' refusal off."""
+    node = _OldStyleProbe(answer)
+    assert _method_accepts_params(node, "update") is answer
+    assert _method_accepts_params(node, "derivatives") is False
+    gm = GraphManager()
+    gm.add_node(node)
+    assert gm._nodes["n"].accepts_params is answer

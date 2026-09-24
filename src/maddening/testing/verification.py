@@ -709,19 +709,28 @@ def node_params_effective(
       read, and ``0.5 * p["k"] + 0.5 * self.params["k"]`` -- non-zero
       gradient, half the effect -- is not mistaken for a correct read.
 
-    After the run, an element that moved nothing on a path through
-    either spelling, while it acts on another path, is probed once more
-    against a node **rebuilt** from ``to_dict()`` with the perturbed
-    value (when the node rebuilds, and a rebuild with no override
-    reproduces it): a path that moves for the rebuilt node but never for
-    the injected value reads a copy made at construction.
+    After the run, every probed element is compared once more, on each
+    path and on the first ``_KEPT_EXAMPLES`` samples, against a node
+    **rebuilt** from ``to_dict()`` with the perturbed value (when the node
+    rebuilds, and a rebuild with no override reproduces it on that path):
+    wherever the rebuilt node's output moves, the injected value must move
+    it to the same place.  A path that moves for the rebuilt node and
+    never for the injected value reads a copy made at construction; one
+    that moves, but elsewhere, splits the value between the injected
+    params and such a copy (``0.5 * p["k"] + 0.5 * self._k0``, which the
+    in-place ``node.params`` swap cannot see).  Until 0.4.0 shipped only
+    the first kind was probed, and only for an element that moved nothing
+    on the path.  Cost: one extra construction per element and two
+    evaluations per path, element and kept sample -- at most
+    ``_KEPT_EXAMPLES / _VALUE_PROBE_EXAMPLES`` of the value test's own.
 
     Verdicts
     --------
     ``FAIL`` for: a path that reads an element from ``self.params``
     (constructed value moves it, injected never does); a path that
     applies the injected value differently from a constructed one; a
-    path that reads a copy made at construction (rebuild probe); a
+    path that reads a copy made at construction, wholly or in part
+    (rebuild probe); a
     trainable leaf that moved nothing on any path on any sample (read
     nowhere -- or declare it ``ParamSpec(trainable=False)`` -- or the
     sampled envelope never exercises it); and, failing closed, a non-
@@ -737,8 +746,11 @@ def node_params_effective(
     release audit planted.  Still open, and documented rather than
     guessed at: a copy made at construction is caught only when the node
     rebuilds faithfully from ``to_dict()`` (a node that cannot is
-    reported "not consumed" on that path, as before); the value test runs
-    on the first ``_VALUE_PROBE_EXAMPLES`` samples only, so a split read
+    reported "not consumed" on that path, as before), and only for a leaf
+    with a plain constructor spelling (a ``node.params`` entry whose
+    container type :func:`_as_constructor_value` can reproduce); the
+    rebuild comparison runs on the first ``_KEPT_EXAMPLES`` samples and the
+    value test on the first ``_VALUE_PROBE_EXAMPLES``, so a split read
     confined to a region of the envelope those samples miss can pass; and
     a leaf larger than ``_MAX_PROBED_ELEMENTS`` is value-probed on that
     many evenly spaced elements (the gradient screen still sees all of
@@ -859,9 +871,16 @@ def node_params_effective(
         k, i = el
         return bool(grad_any[name][k][i]) or el in inj_moved[name] or el in ref_moved[name]
 
-    # Post-run: the rebuild probe, for an element that moved nothing on a
-    # path through either spelling while it acts on another one.
+    # Post-run: the rebuild probe.  Every probed element with a constructor
+    # spelling is compared, on each path, between the injected value and a
+    # node rebuilt from to_dict() with that value.  Until 0.4.0 shipped it
+    # ran only for an element that moved nothing on the path, so a node
+    # splitting a constant between the injected params and a copy made in
+    # __init__ (``0.5 * p["k"] + 0.5 * self._k0``) passed: the injected value
+    # moves the output (half as far) and the in-place node.params swap
+    # moves nothing, so neither the value test nor the old probe objected.
     rebuilt_moved: dict[str, set] = {name: set() for name in paths}
+    rebuilt_split: dict[str, dict] = {name: {} for name in paths}
     build = _rebuilder(node)
     rebuilt0 = None
     faithful: dict[str, bool] = {}
@@ -875,15 +894,15 @@ def node_params_effective(
         fn = paths[name]
         candidates = [
             el for el in elements
-            if not acts(name, el) and ctor_value[el] is not None
-            and any(acts(other, el) for other in checked if other != name)
+            if ctor_value[el] is not None and el not in mismatch[name]
         ]
         if not candidates or rebuilt0 is None or build is None:
             continue
         try:
+            reference = [fn(rebuilt0, s, bi, dt, None) for s, bi, dt in kept]
             faithful[name] = all(
-                _all_close(fn(rebuilt0, s, bi, dt, None), fn(node, s, bi, dt, None), rtol, atol)
-                for s, bi, dt in kept
+                _all_close(ref0, fn(node, s, bi, dt, None), rtol, atol)
+                for ref0, (s, bi, dt) in zip(reference, kept)
             )
         except Exception:  # noqa: BLE001 - the rebuilt node cannot run this path
             faithful[name] = False
@@ -898,12 +917,28 @@ def node_params_effective(
             rebuilt1 = rebuilt_for[el]
             if rebuilt1 is None:
                 continue
+            moved = False
+            miss, effect = 0.0, 0.0
             try:
-                if any(not _all_same(fn(rebuilt1, s, bi, dt, None), fn(rebuilt0, s, bi, dt, None))
-                       for s, bi, dt in kept):
-                    rebuilt_moved[name].add(el)
+                for ref0, (s, bi, dt) in zip(reference, kept):
+                    ref1 = fn(rebuilt1, s, bi, dt, None)
+                    if _all_same(ref1, ref0):
+                        continue
+                    moved = True
+                    inj = fn(node, s, bi, dt, injected_for[el])
+                    if not _all_close(inj, ref1, rtol, atol):
+                        miss = max(miss, _max_diff(inj, ref1))
+                        effect = max(effect, _max_diff(ref0, ref1))
             except Exception:  # noqa: BLE001 - a different value broke it: it reads it
+                if not acts(name, el):
+                    rebuilt_moved[name].add(el)
+                continue
+            if not moved:
+                continue
+            if not acts(name, el):
                 rebuilt_moved[name].add(el)
+            elif miss > 0.0:
+                rebuilt_split[name][el] = (miss, effect)
 
     def names(els) -> list[str]:
         return [labels[el] for el in sorted(els, key=lambda e: (trainable.index(e[0]), e[1]))]
@@ -944,6 +979,20 @@ def node_params_effective(
                 "the injected value never does -- it reads a copy made at "
                 "construction.  Read them from {**self.params, **params} at call "
                 "time."
+            )
+        if rebuilt_split[name]:
+            els = rebuilt_split[name]
+            worst = max(
+                (miss / effect for miss, effect in els.values() if effect > 0),
+                default=float("nan"),
+            )
+            problems.append(
+                f"{where} does not apply the injected {names(els)} the way a node "
+                "constructed with that value does: at a perturbed value the "
+                "injected output misses the rebuilt node's by up to "
+                f"{worst:.2f} of the perturbation's own effect (a read split "
+                "between the injected params and a copy made at construction?), "
+                "so " + _CONSEQUENCE[name] + "."
             )
         if name != "update":
             blind = [

@@ -290,3 +290,37 @@ def test_the_precision_floor_is_what_each_norm_can_resolve():
         c / 1e-3, rel=1e-6)
     assert float(residual_precision_floor(
         s, ["n", "m"], "interface", rtol=1e-3, interface_edges=())) == 0.0
+
+
+def test_the_floor_has_headroom_over_a_dense_updates_evaluation_error():
+    """The constant is calibrated, not arbitrary: at least twice the measured error.
+
+    ``PRECISION_FLOOR_ULPS`` is justified by what it must cover -- the
+    difference between a residual float32 computes and the exact map's.
+    Measured here the way its docstring states it: a dense update
+    ``A @ u + c`` evaluated in float32 against the same float32 operands
+    in float64, near the fixed point, over random normal contractions of
+    dimension 2-6, in units of ``eps * max|field|`` and in the L2 norm of
+    the relay group (both fields).  The docstring's figure is 0.72; a
+    floor under twice what is measured would be a floor the rounding of
+    one ordinary node already eats half of.
+    """
+    rng = np.random.default_rng(0)
+    worst = 0.0
+    for _ in range(500):
+        n = int(rng.integers(2, 7))
+        Q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+        A = ((Q * rng.uniform(-0.98, 0.98, n)) @ Q.T).astype(np.float32)
+        c = rng.uniform(-2.0, 2.0, n).astype(np.float32)
+        x_star = np.linalg.solve(np.eye(n) - A.astype(np.float64), c.astype(np.float64))
+        u = (x_star * (1.0 + 1e-6 * rng.normal(size=n))).astype(np.float32)
+        f32 = np.asarray(jnp.asarray(A) @ jnp.asarray(u) + jnp.asarray(c), np.float64)
+        f64 = A.astype(np.float64) @ u.astype(np.float64) + c.astype(np.float64)
+        ref = max(np.max(np.abs(f32)), np.max(np.abs(u)))
+        err = (f32 - f64) / ref
+        worst = max(worst, math.sqrt(2.0 * np.sum(err ** 2)) / (_EPS * math.sqrt(2.0 * n)))
+    assert 0.0 < worst < 1.0, f"fixture premise: measured {worst:.3f}"
+    assert PRECISION_FLOOR_ULPS >= 2.0 * worst, (
+        f"the floor ({PRECISION_FLOOR_ULPS} units) has less than 2x headroom "
+        f"over a dense update's measured evaluation error ({worst:.3f} units)"
+    )

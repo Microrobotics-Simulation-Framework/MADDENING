@@ -187,3 +187,33 @@ def test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum(norm, knob, cap):
         f"bound {d['spectral_error_bound']:.4e} under the kept field's true "
         f"distance {distance:.4e}"
     )
+
+
+def test_a_loop_the_dead_band_hides_from_the_residual_is_seen_by_the_bound():
+    """Jacobi from rest: the residual reads zero, the kept field is 90% off.
+
+    The first two Jacobi passes leave ``x_a`` at 1 (``x_b`` was 0 in
+    both), and ``x_b``'s move from 0 to ``1e-9`` is inside the dead
+    band, so the group's residual is exactly zero and it reports
+    converged -- the dead band's documented blindness, which no
+    ``tolerance`` can contradict.  The spectral bound cannot rescue it
+    through the resolvent alone (the residual it multiplies is zero);
+    it sees it because the dead-banded field's share of the residual,
+    which ``residual`` does not contain, is measured and folded into its
+    factor.  Without that share it read 4.3e-4 against a distance of 0.9.
+    """
+    gm = _pair(_G, [1.0], _H, [0.0], iteration_mode="jacobi", max_iterations=3,
+               tolerance=1e-6, atol=1e-7)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    x_star = 1.0 / (1.0 - _G * _H)
+    xa = float(gm.get_node_state("a")["x"][0])
+    distance = abs(xa - x_star) / max(abs(xa), x_star)
+    assert d["converged"] is True and d["error_estimate"] < 1e-6, (
+        f"fixture premise: the residual cannot see the loop: {d}"
+    )
+    assert distance > 0.5, "fixture premise: the kept field is far off"
+    assert d["spectral_error_bound"] >= distance, (
+        f"bound {d['spectral_error_bound']:.3e} under the kept field's true "
+        f"distance {distance:.3e}"
+    )

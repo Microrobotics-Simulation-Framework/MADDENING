@@ -180,6 +180,12 @@ LIMITS = {
     "coupled_gradient_fori": 1e-5,
     # sharded_cg gradient and jvp: unchanged from schema 2.
     "krylov": 1e-3,
+    # The coupled group's gradient against central differences of the
+    # float64 model: the IFT adjoint is exact at the fixed point up to its
+    # GMRES tolerance (1.2e-5) and "fori" differentiates the returned
+    # iterate, which the group's tolerance (1e-7) keeps next to it.  The
+    # float64 differences themselves are good to ~1e-9.
+    "model_gradient": 1e-4,
 }
 
 #: Coupling group of the ``coupled`` goal.
@@ -1226,11 +1232,6 @@ def run_indivisible(args, out: dict) -> dict:
                    _names_both(msg, ny_bad, D)),
     ]
 
-    # Informational: what the backend says when nothing validates first.
-    kind, msg = _refusal(lambda: jax.block_until_ready(jax.device_put(
-        np.zeros((ny_bad, nx), np.float32), NamedSharding(mesh, P(MESH_AXIS)))))
-    entry["unvalidated_device_put"] = {"raised": kind, "message": msg[:300]}
-
     if D >= 4 and D % 2 == 0:
         # A pencil mesh: the refusal names the axis that does not divide.
         nz = D // 2
@@ -1674,8 +1675,49 @@ def _device0_pins(lowered) -> int:
                if "maximal" in line and "sdy.mesh" not in line)
 
 
+def coupled_model(field, theta, steps: int, u0: float) -> tuple:
+    """``(f, u, loss)`` of the coupled group's rollout in float64 NumPy.
+
+    Independent of the graph machinery: at convergence each step solves
+    both members' updates at once, each reading the other's *new* value --
+    ``f' = f + dt (D mask lap f + h (u' - f))`` and
+    ``u' = u + dt c (mean f' - u)``.  ``mean f'`` and ``u'`` satisfy a 2x2
+    linear system (``mean(mask lap f)`` is known from ``f``), and ``f'``
+    follows.  ``theta = (D, c, h)``; the field's own float32 initial state
+    and mask are widened exactly.
+    """
+    d, c, h = (float(t) for t in theta)
+    dt = float(np.float32(field.delta_t))
+    f = np.asarray(field.initial_state()["f"], np.float64)
+    mask = np.asarray(field.static_data["mask"].value, np.float64)
+    u = float(np.float32(u0))
+    for _ in range(steps):
+        lap = (np.roll(f, 1, 0) + np.roll(f, -1, 0) + np.roll(f, 1, 1)
+               + np.roll(f, -1, 1) - 4.0 * f)
+        m, mean_lap = f.mean(), (mask * lap).mean()
+        m_new, u_new = np.linalg.solve(
+            np.array([[1.0, -dt * h], [-dt * c, 1.0]]),
+            np.array([m + dt * d * mean_lap - dt * h * m, u - dt * c * u]))
+        f = f + dt * (d * mask * lap + h * (u_new - f))
+        u = float(u_new)
+    return f, u, float(np.mean(f ** 2) + u ** 2)
+
+
+def coupled_model_gradient(field, theta, steps: int, u0: float) -> np.ndarray:
+    """Central differences of :func:`coupled_model`'s loss (relative step 1e-6)."""
+    theta = np.asarray(theta, np.float64)
+    grad = np.zeros_like(theta)
+    for i in range(theta.size):
+        step = np.zeros_like(theta)
+        step[i] = 1e-6 * theta[i]
+        grad[i] = (coupled_model(field, theta + step, steps, u0)[2]
+                   - coupled_model(field, theta - step, steps, u0)[2]) / (2 * step[i])
+    return grad
+
+
 def run_coupled(args, out: dict) -> dict:
-    """Checklist 6: forward and adjoint of the group, sharded vs unsharded."""
+    """Checklist 6: forward and adjoint of the group, sharded vs unsharded,
+    and both against the float64 model of the coupled step."""
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
@@ -1693,6 +1735,14 @@ def run_coupled(args, out: dict) -> dict:
                  "coupled_dof": ny * nx + 1, "max_iterations": COUPLED_MAX_ITERATIONS,
                  "tolerance": COUPLED_TOLERANCE, "parameters": [f"{n}.{k}" for n, k in writes],
                  "solvers": {}}
+        t0 = time.perf_counter()
+        model_field = Field2D("field", ny, nx, exchange=0.8)
+        u0 = float(FarField("far").initial_state()["u"])
+        theta64 = np.asarray(theta, np.float64)             # the float32 values, widened
+        f_model, u_model, loss_model = coupled_model(model_field, theta64, args.grad_steps, u0)
+        grad_model = coupled_model_gradient(model_field, theta64, args.grad_steps, u0)
+        entry["model"] = {"loss": loss_model, "grad": grad_model.tolist(),
+                          "wall_s": time.perf_counter() - t0}
         for solver in COUPLED_SOLVERS:
             got, sol = {}, {}
             for label, m in (("unsharded", None), ("sharded", mesh)):
@@ -1720,8 +1770,23 @@ def run_coupled(args, out: dict) -> dict:
             sol["parity_u"] = _rel_each(u_s, u_u)
             sol["parity_loss"] = _rel_each(l_s, l_u)
             sol["parity_grad"] = _rel_each(g_s, g_u)
+            sol["model"] = {
+                label: {"f": _diff(got[label][0], f_model),
+                        "u": _rel_each(got[label][1], u_model),
+                        "loss": _rel_each(got[label][2], loss_model),
+                        "grad": _rel_each(got[label][3], grad_model)}
+                for label in ("sharded", "unsharded")}
             entry["solvers"][solver] = sol
             prefix = f"{ny}x{nx} {solver}"
+            for label, vs in sol["model"].items():
+                checks += [
+                    check(f"{prefix} {label} field vs float64 model max_rel", vs["f"]["max_rel"],
+                          LIMITS["forward"]),
+                    check(f"{prefix} {label} far field and loss vs float64 model rel",
+                          max(vs["u"], vs["loss"]), LIMITS["forward"]),
+                    check(f"{prefix} {label} gradient vs float64 model differences rel",
+                          vs["grad"], LIMITS["model_gradient"]),
+                ]
             checks += [
                 check_that(f"{prefix}: the field member is partitioned over {D} devices",
                            sol["sharded"]["partitioned"]),
@@ -1744,7 +1809,8 @@ def run_coupled(args, out: dict) -> dict:
                     "on both paths",
                     all(i is not None and 2 <= i < COUPLED_MAX_ITERATIONS for i in its), str(its)))
             print(f"[coupled] {prefix:>16} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
-                  f"{sol['parity_u']:.1e}  grad {sol['parity_grad']:.1e}  value+grad "
+                  f"{sol['parity_u']:.1e}  grad {sol['parity_grad']:.1e}  vs model grad "
+                  f"{max(v['grad'] for v in sol['model'].values()):.1e}  value+grad "
                   f"{sol['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
                   f"{sol['unsharded']['value_and_grad']['median_ms']:8.2f})  compile "
                   f"{sol['sharded']['compile_s']:5.1f} s  pinned ops "
@@ -1938,8 +2004,7 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
             pencil = r.get("pencil") or {}
             print(f"\nIndivisible grid: stencil {r['stencil']['shape']} -> "
                   f"{r['stencil']['raised']}, pointwise -> {r['pointwise']['raised']}, pencil "
-                  f"{pencil.get('shape', '-')} -> {pencil.get('raised', '-')}; unvalidated "
-                  f"device_put -> {r['unvalidated_device_put']['raised']}; unstructured "
+                  f"{pencil.get('shape', '-')} -> {pencil.get('raised', '-')}; unstructured "
                   f"{un['cells']} cells {un['cells_per_device']} max_rel "
                   f"{un['parity_x']['max_rel']:.1e}")
     for doc in docs_by_goal.get("halo", []):
@@ -1955,10 +2020,11 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
                   + ", ".join(f"{m} {v['forward_max_abs']:.1e}/{v['adjoint_max_abs']:.1e}"
                               for m, v in un["methods"].items()))
     if docs_by_goal.get("coupled"):
-        print("\nCoupled group, sharded vs unsharded (max-rel; value+grad = one differentiated "
-              "rollout)")
+        print("\nCoupled group, sharded vs unsharded (max-rel; model = worst gradient against "
+              "the float64 model; value+grad = one differentiated rollout)")
         print(f"{'shape':>11} {'solver':<6} {'field':>8} {'far':>8} {'grad':>8} {'limit':>8} "
-              f"{'sh ms':>9} {'unsh ms':>9} {'compile':>8} {'passes':>7} {'pinned':>6}")
+              f"{'model':>8} {'sh ms':>9} {'unsh ms':>9} {'compile':>8} {'passes':>7} "
+              f"{'pinned':>6}")
         for doc in docs_by_goal["coupled"]:
             for r in doc["results"]:
                 shape = f"{r['shape'][0]}x{r['shape'][1]}"
@@ -1969,6 +2035,7 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
                     print(f"{shape:>11} {solver:<6} {sol['parity_f']['max_rel']:8.1e} "
                           f"{sol['parity_u']:8.1e} {sol['parity_grad']:8.1e} "
                           f"{LIMITS['coupled_gradient_' + solver]:8.0e} "
+                          f"{max(v['grad'] for v in sol['model'].values()):8.1e} "
                           f"{sol['sharded']['value_and_grad']['median_ms']:9.2f} "
                           f"{sol['unsharded']['value_and_grad']['median_ms']:9.2f} "
                           f"{sol['sharded']['compile_s']:7.1f}s {its:>7} "

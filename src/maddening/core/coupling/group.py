@@ -148,21 +148,39 @@ class CouplingGroup:
         Read **only** when ``subcycling=True``; setting it away from
         its default otherwise is inert and warns (``UserWarning``).
         ``"constant"`` holds values constant, ``"linear"`` linearly
-        interpolates between previous and current iteration values,
-        ``"quadratic"`` uses quadratic Lagrange interpolation through
-        three successive iteration values (falls back to linear on
-        the first iteration).
+        interpolates between previous and current iteration values.
+        Both ends are estimates of the *end*-of-step value -- the pass's
+        incoming iterate and the in-pass state -- and never the
+        beginning-of-step value, so at a converged step the three modes
+        coincide: bit-identical over 100 steps of a sub-cycled spring
+        pair (MADD-ANO-027).
+        ``"quadratic"`` is meant to use three successive iteration
+        values, but no third value is ever supplied, so it is
+        ``"linear"``.
     jacobian_reuse : int
         For ``"iqn-imvj"``: number of V/W columns retained from the
         previous timestep.  ``0`` means no reuse (same as IQN-ILS).
         Read **only** under that acceleration; setting it away from its
         default under any other is inert and warns (``UserWarning``).
     waveform_iterations : int
-        For subcycling groups: number of waveform relaxation
-        iterations.  ``1`` is current behaviour (single pass),
-        ``> 1`` iterates over entire sub-step windows.  Read **only**
-        when ``subcycling=True``; setting it away from its default
-        otherwise is inert and warns (``UserWarning``).
+        **Experimental.**  For sub-cycling groups: how many times the
+        group's fixed-point solve runs per step.  It is **not** waveform
+        relaxation (MADD-ANO-027): each sweep re-solves the same fixed
+        point, from where the previous sweep stopped and with a freshly
+        started accelerator, and no sweep sees a boundary waveform over
+        the sub-step window (see ``boundary_interpolation``).  With a
+        converged first sweep the result equals ``waveform_iterations=1``;
+        when the first sweep stops at ``max_iterations`` the later sweeps
+        act as extra iterations, so raise ``max_iterations`` instead.
+        ``1`` (the default) runs the solve once.  Read **only** when
+        ``subcycling=True``; setting it away from its default otherwise
+        is inert and warns (``UserWarning``).  Each sweep has a budget of
+        ``max_iterations`` passes of its own;
+        ``GraphManager.coupling_diagnostics()`` reports the largest
+        sweep's count as ``"iterations"`` (so the cap check
+        ``iterations >= max_iterations`` sees every sweep) and the sum
+        as ``"total_iterations"``.  Real waveform relaxation is planned
+        for 0.5.0, not promised by this release.
     predictor : str
         Extrapolation of the coupling initial guess from previous
         converged states.  ``"none"`` uses the current state (default),
@@ -210,7 +228,13 @@ class CouplingGroup:
         ``diagnostics=True``.  Recommended True for training and
         calibration runs.  Read **only** under ``solver="ift"``;
         setting it True under ``"fori"`` is inert and warns
-        (``UserWarning``).
+        (``UserWarning``).  With ``waveform_iterations > 1`` on a
+        sub-cycling group every sweep is checked, so a step raises when
+        an earlier sweep stops at ``max_iterations`` unconverged even if
+        the last sweep -- and so the returned state and its gradient --
+        converges; ``coupling_diagnostics()["converged"]`` is the last
+        sweep's verdict.  Which of the two is right is to be decided in
+        0.5.0.
     linear_solver : {"gmres", "dense"}
         Backend used by the ``"ift"`` derivative rule to solve the
         tangent system ``(I - dF/dx) x_dot = rhs`` (and, transposed,

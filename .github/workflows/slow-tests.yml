@@ -42,6 +42,13 @@ jobs:
         # two pins is exactly the kind CI's shorter lane would miss.
         python-version: ["3.12"]
         jax-version: ["0.10.2", "0.11.2"]
+        # Four runners per lane, split by test file exactly as ci.yml
+        # splits the default lane (tests/_sharding.py): one pytest process
+        # per runner, so per-test times stay the uncontended numbers the
+        # time budget is judged on, and the lane takes about a quarter of
+        # the serial wall time.  The timeout/OOM classification below
+        # applies per shard.
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +80,14 @@ jobs:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # No compilation cache here, on purpose: this run is the
+          # authoritative cold timing of the whole suite (one process per
+          # shard, so uncontended), which triage and allowlist edits are
+          # based on.  Per-test JAX trace / lower / compile times go into
+          # the JUnit XML.
+          MADDENING_TEST_JAX_TIMING: "1"
+          # This job's share of the suite (tests/_sharding.py).
+          MADDENING_TEST_SHARD: "${{ matrix.shard }}/4"
         run: |
           # Wrap pytest with GNU ``timeout`` so we exit with code 124
           # on time-out (instead of GitHub killing the job with a
@@ -93,7 +108,7 @@ jobs:
           timeout --kill-after=60s 175m python -m pytest tests/ \
               -m 'slow or not slow' -v -rs --tb=short --ignore=tests/viz \
               --durations=0 --durations-min=1.0 \
-              --junitxml=test-results.xml -o junit_family=xunit1
+              --junitxml=test-results-shard${{ matrix.shard }}.xml -o junit_family=xunit1
           code=$?
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           echo "elapsed_sec=$(( SECONDS - start ))" >> "$GITHUB_OUTPUT"
@@ -103,18 +118,19 @@ jobs:
         # meant to be.  The table still shows which of them cost the most,
         # and how close the lane is to its 175-minute wrapper timeout.
         # pytest writes no XML when the timeout kills it, hence the guard.
-        if: ${{ !cancelled() && hashFiles('test-results.xml') != '' }}
+        if: ${{ !cancelled() && hashFiles('test-results-shard*.xml') != '' }}
         run: |
-          python scripts/report_test_durations.py test-results.xml \
-            --fail-over 0 \
-            --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }})"
+          python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
+            --fail-over 0 --cache-mode off \
+            --no-removable \
+            --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }}, shard ${{ matrix.shard }} of 4)"
 
       - name: Upload test durations
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: slow-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}
-          path: test-results.xml
+          name: slow-durations-py${{ matrix.python-version }}-jax${{ matrix.jax-version }}-shard${{ matrix.shard }}of4
+          path: test-results-shard${{ matrix.shard }}.xml
           retention-days: 90
           if-no-files-found: warn
 
@@ -127,6 +143,7 @@ jobs:
             const elapsed = Number('${{ steps.pytest.outputs.elapsed_sec }}');
             const py = '${{ matrix.python-version }}';
             const jaxv = '${{ matrix.jax-version }}';
+            const shard = '${{ matrix.shard }}';
             const sha = context.sha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
@@ -146,7 +163,7 @@ jobs:
 
             let title, body;
             if (isTimeout) {
-              title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} @ ${sha}`;
+              title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} / shard ${shard}/4 @ ${sha}`;
               body = [
                 `The scheduled slow-tests workflow hit the 175-minute wrapper timeout`,
                 `(the job-level \`timeout-minutes\` is 180; the inner \`timeout 175m\`,`,
@@ -162,7 +179,7 @@ jobs:
                 `   \`timeout 175m\` (keep ~5 min headroom between them).`,
               ];
             } else if (isOom) {
-              title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} @ ${sha}`;
+              title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} / shard ${shard}/4 @ ${sha}`;
               body = [
                 `The scheduled slow-tests workflow was killed by the OS while running`,
                 `pytest (exit ${code}${code === '137' ? ', SIGKILL — the Linux OOM-killer signature' : ', SIGABRT — typically C++ std::bad_alloc'}; killed after ${Math.round(elapsed / 60)} min,`,

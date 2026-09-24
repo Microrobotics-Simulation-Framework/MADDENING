@@ -52,6 +52,10 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.acceleration import (
+    convergence_criterion,
+    reported_error_estimate,
+)
 
 
 @dataclass
@@ -553,21 +557,37 @@ def compile_counts(
     return counts
 
 
-def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, int]]:
-    """``(group_key, iter_key, res_key, amp_key, threshold, cap)``.
+def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, float, int]]:
+    """``(group_key, iter_key, res_key, amp_key, threshold, step_scale, cap)``.
 
     ``amp_key`` carries the amplification ``1/(1 - rho)`` the
-    convergence flag is built from: ``converged_fraction`` has to test
-    the same estimated distance to the fixed point that
-    ``coupling_diagnostics()`` does, not the raw residual.
+    convergence flag is built from, and ``(threshold, step_scale)`` is
+    the group's criterion from
+    :func:`~maddening.core.coupling.acceleration.convergence_criterion`:
+    ``converged_fraction`` has to test the same estimated distance to the
+    fixed point that ``coupling_diagnostics()`` does, not the raw
+    residual and not the residual without the relaxation factor.
     """
     out = []
     for g in gm._coupling_groups:
         key = "+".join(sorted(g.nodes))
-        thr = 1.0 if g.convergence_norm in ("mixed", "interface") else float(g.tolerance)
+        thr, scale = convergence_criterion(g)
         out.append((key, f"coupling_{key}_iterations", f"coupling_{key}_residual",
-                    f"coupling_{key}_amplification", thr, int(g.max_iterations)))
+                    f"coupling_{key}_amplification", thr, scale, int(g.max_iterations)))
     return out
+
+
+def _meta_converged(meta: dict, res_key: str, amp_key: str,
+                    threshold: float, step_scale: float) -> bool:
+    """One group's ``converged`` for the step whose ``_meta`` this is.
+
+    Read from the slots by the arithmetic ``coupling_diagnostics()``
+    uses (:func:`~maddening.core.coupling.acceleration.reported_error_estimate`),
+    so ``converged_fraction`` counts exactly the steps the report calls
+    converged.
+    """
+    amp = float(meta.get(amp_key, 0.0))
+    return reported_error_estimate(float(meta[res_key]), amp, step_scale) <= threshold
 
 
 def _time_steps(gm, external_inputs, n: int) -> np.ndarray:
@@ -892,21 +912,23 @@ def profile_graph(
         for _ in range(n_stat):
             gm.step(external_inputs)
             meta = gm._state.get("_meta", {})
-            for key, iter_key, res_key, amp_key, thr, cap in group_keys:
+            for key, iter_key, res_key, amp_key, thr, scale, cap in group_keys:
                 if iter_key in meta:
                     iters[key].append(int(meta[iter_key]))
-                    amp = float(meta.get(amp_key, 0.0))
-                    est = float(meta[res_key]) * (amp if amp >= 1.0 else 1.0)
-                    conv[key].append(est <= thr)
-        for key, _ik, _rk, _ak, _thr, cap in group_keys:
+                    conv[key].append(_meta_converged(meta, res_key, amp_key, thr, scale))
+        for key, _ik, _rk, _ak, _thr, _scale, cap in group_keys:
             if iters[key]:
                 a = np.asarray(iters[key])
                 report.coupling_iter_stats[key] = {
                     "mean": float(a.mean()), "min": int(a.min()), "max": int(a.max()),
                     "cap": cap,
-                    # ``iterations`` counts body iterations after the
-                    # first pass, so the cap is reached at cap - 1.
-                    "at_cap_fraction": float(np.mean(a >= cap - 1)),
+                    # ``iterations`` counts the passes that produced the
+                    # returned state, the first staggered one included,
+                    # and equals ``max_iterations`` exactly when the
+                    # group exhausted its budget (with
+                    # ``waveform_iterations > 1``: when some sweep did)
+                    # -- see ``coupling_diagnostics()``.
+                    "at_cap_fraction": float(np.mean(a >= cap)),
                     "converged_fraction": float(np.mean(conv[key])),
                     "n": int(a.size),
                 }

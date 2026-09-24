@@ -48,8 +48,9 @@ if TYPE_CHECKING:
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    convergence_criterion,
     float_fields_of,
-    relaxation_step_scale,
+    reported_error_estimate,
     residual_precision_floor,
     spectral_error_bound,
     spectral_rate_settled,
@@ -794,7 +795,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 #: Every ``_meta`` slot a coupling group can own, as the suffix after
 #: ``coupling_<group key>_``.  Read by :func:`_refuse_colliding_group_keys`.
 _GROUP_META_SUFFIXES = (
-    "iterations", "residual", "amplification", "rho_spectral",
+    "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
     "gradient_relative_error_bound", "V", "W", "pred_count",
     "pred_0", "pred_1", "pred_2",
@@ -864,6 +865,20 @@ def _group_dividers(group, nodes):
         return None
     macro = max(steps)
     return {nn: max(round(macro / nodes[nn].timestep), 1) for nn in names}
+
+
+def _group_waveform_sweeps(group, nodes) -> int:
+    """How many waveform sweeps one step of *group* runs.
+
+    ``waveform_iterations`` for a group that sub-cycles, and ``1`` for
+    every other group whatever ``waveform_iterations`` says (see
+    :func:`_group_dividers`).  Each sweep is a whole fixed-point solve of
+    up to ``max_iterations`` passes, so a step that runs more than one
+    reports the largest sweep's count as ``"iterations"`` and their sum
+    as ``"total_iterations"`` -- the sum carried in a ``_meta`` slot that
+    only a group running more than one sweep owns.
+    """
+    return int(group.waveform_iterations) if _group_dividers(group, nodes) else 1
 
 
 def _declared_evaluations(node):
@@ -1954,7 +1969,8 @@ def _run_coupled_block_impl(
     convergence norms (L2, mixed, interface), acceleration methods
     (Aitken, fixed relaxation, IQN-ILS, IQN-IMVJ), additive edges,
     flux-based coupling, subcycling with linear/quadratic/constant
-    interpolation, and waveform relaxation.
+    interpolation, and repeated waveform sweeps (restarts of the same
+    solve, not waveform relaxation: MADD-ANO-027).
 
     This is the shared implementation used by both ``_build_step_fn``
     and ``_build_dt_step_fn``.
@@ -2346,18 +2362,24 @@ def _run_coupled_block_impl(
         return result
 
     # ------------------------------------------------------------------
-    # Waveform relaxation wrapper
+    # Waveform sweeps (``waveform_iterations``; restarts, see below)
     # ------------------------------------------------------------------
-    n_waveform = group.waveform_iterations if use_subcycling else 1
+    n_waveform = _group_waveform_sweeps(group, nodes)
 
     def _run_coupling_inner(new_state_inner):
-        """Run the core coupling iteration (may be called multiple times
-        for waveform relaxation).
+        """Run the core coupling iteration once: one waveform sweep.
 
         ``initial_node_states`` (the beginning-of-timestep state that
-        nodes integrate FROM) is never changed by waveform re-runs.
-        Only ``new_state_inner`` (used for boundary resolution) is
-        updated between waveform passes.
+        nodes integrate FROM) is never changed by a sweep.
+        ``new_state_inner`` is only the iteration's starting guess (and
+        carries the nodes outside the group): ``one_pass`` reads its
+        input iterate and ``initial_node_states`` and nothing else a
+        sweep changes, so every sweep iterates the same map and a later
+        sweep resumes the fixed-point solve where the previous one
+        stopped, with its accelerator started afresh.  That is a restart,
+        not waveform relaxation, and the sub-step interpolation runs
+        between the incoming iterate and the in-pass state, never from
+        the beginning-of-step value (MADD-ANO-027).
         """
 
         # Run first iteration
@@ -3220,14 +3242,29 @@ def _run_coupled_block_impl(
                     new_state[nn] = predicted[nn]
 
     # ------------------------------------------------------------------
-    # Run coupling (with waveform relaxation wrapper)
+    # Run coupling (``waveform_iterations`` sweeps of it)
     # ------------------------------------------------------------------
     current_state = new_state
     diag_data = None
     vw_data = None
+    # Every sweep's pass count, when the step runs more than one sweep.
+    # Each sweep iterates the same one-pass map from where the previous
+    # one stopped (``one_pass`` reads its argument and the pre-step
+    # state, nothing a sweep changes), so the last sweep's residual,
+    # amplification and spectral keys describe the returned state and
+    # are what the report keeps.  Its pass count is not the step's,
+    # though: an earlier sweep can exhaust ``max_iterations`` and leave
+    # the last one a single pass from the fixed point, which read
+    # ``iterations=1`` at a cap.  The counts are only read off the
+    # sweeps' outputs and reduced after the loop -- nothing here feeds a
+    # sweep -- and with one sweep this list stays empty and the step is
+    # the program it always was.
+    sweep_counts = []
 
     for _wf in range(n_waveform):
         current_state, diag_data, vw_data = _run_coupling_inner(current_state)
+        if n_waveform > 1 and diag_data is not None:
+            sweep_counts.append(jnp.array(diag_data[0], dtype=jnp.int32))
 
     result = current_state
 
@@ -3277,12 +3314,23 @@ def _run_coupled_block_impl(
         seeded = full_state.get(_META_KEY, {}).get(f"coupling_{group_key}_residual")
         res_dtype = (jnp.asarray(seeded).dtype if seeded is not None
                      else jnp.asarray(final_res).dtype)
+        iterations = jnp.array(iter_count, dtype=jnp.int32)
+        sweep_meta = {}
+        if sweep_counts:
+            # ``iterations`` is the largest sweep's count, so
+            # ``iterations >= max_iterations`` holds exactly when some
+            # sweep exhausted its budget -- the documented cap check --
+            # and ``total_iterations`` is every pass the step ran.
+            iterations = total = sweep_counts[0]
+            for count in sweep_counts[1:]:
+                iterations = jnp.maximum(iterations, count)
+                total = total + count
+            sweep_meta[f"coupling_{group_key}_total_iterations"] = total
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
-            f"coupling_{group_key}_iterations": jnp.array(
-                iter_count, dtype=jnp.int32
-            ),
+            f"coupling_{group_key}_iterations": iterations,
+            **sweep_meta,
             f"coupling_{group_key}_residual": jnp.asarray(final_res, dtype=res_dtype),
             f"coupling_{group_key}_amplification": jnp.asarray(
                 final_amp, dtype=res_dtype
@@ -5381,6 +5429,14 @@ class GraphManager:
                     meta[f"coupling_{key}_iterations"] = jnp.array(
                         0, dtype=jnp.int32
                     )
+                    if _group_waveform_sweeps(g, self._nodes) > 1:
+                        # Passes summed over the step's waveform sweeps;
+                        # a group running one sweep has no such slot and
+                        # reports ``iterations`` for it.  Same condition
+                        # as the write in ``_run_coupled_block_impl``.
+                        meta[f"coupling_{key}_total_iterations"] = jnp.array(
+                            0, dtype=jnp.int32
+                        )
                     # Seed in the dtype the residual is computed in (the
                     # group's floating state), so a float64 graph under
                     # x64 keeps a stable scan carry / trace signature.
@@ -6335,6 +6391,26 @@ class GraphManager:
               staggered pass.  Equal to ``max_iterations`` exactly when
               the group exhausted its budget, whichever solver ran, so
               ``iterations >= max_iterations`` is a usable cap check.
+              With ``waveform_iterations > 1`` on a group that
+              sub-cycles, every sweep is a fixed-point solve with a
+              budget of ``max_iterations`` of its own (the sweeps are
+              restarts of one solve, MADD-ANO-027), and
+              this is the **largest** sweep's count, so the same check
+              reads "some sweep exhausted its budget", exactly.  The
+              passes the step ran in all are ``"total_iterations"``.
+              (Before 0.4.0 it was the last sweep's count, which read
+              ``1`` beside an earlier sweep stopped at the cap:
+              MADD-ANO-026.)
+            - ``"total_iterations"`` : int — coupling passes the step
+              ran, summed over its waveform sweeps: the work done, where
+              ``"iterations"`` is the cap check.  Equal to
+              ``"iterations"`` for a group that runs one sweep -- every
+              group that does not sub-cycle, and
+              ``waveform_iterations=1`` -- and at most
+              ``waveform_iterations * max_iterations``.  Like
+              ``"iterations"`` it counts the passes that produced the
+              state, not the one extra evaluation a sweep stopped at the
+              cap spends measuring its residual.
             - ``"residual"`` : float — ``||F(x) - x||`` in the group's
               convergence norm for the state ``x`` this step returned.
               At ``max_iterations=1`` it is the distance the single
@@ -6411,6 +6487,15 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
+              With ``waveform_iterations > 1`` it is the **last** sweep's
+              verdict, which is the verdict on the returned state: every
+              sweep iterates the same one-pass map from where the one
+              before it stopped, and the ``"ift"`` gradient is the last
+              sweep's (the implicit-function derivative does not depend
+              on the initial guess).  An earlier sweep stopped at the
+              cap shows in ``"iterations"``, not here.
+              ``strict_convergence=True`` under ``solver="ift"`` checks
+              every sweep, so such a step raises instead.
               **``True`` on a stalled float32 iterate.**  When
               ``(1 - rho) * |x - x*|`` falls below half an ulp a pass
               changes nothing, the residual is exactly ``0.0``, and
@@ -6741,6 +6826,19 @@ class GraphManager:
             # carry's structure, not to be read: reported, they said
             # ``converged=True`` about a group that had never run.
             if iter_key in meta and int(meta[iter_key]) > 0:
+                iterations = int(meta[iter_key])
+                # Only a group running more than one waveform sweep owns
+                # the sum's slot; with one sweep the sum *is* the count.
+                # It is never below the largest sweep's count, which it
+                # contains: a slot still at its seed beside a counter that
+                # is not -- seeded after the counter was written, by a
+                # recompile that turned on ``waveform_iterations`` or a
+                # checkpoint from before the slot existed, and read before
+                # the next step -- reads as that count.
+                total_iterations = max(
+                    int(meta.get(f"coupling_{key}_total_iterations", iterations)),
+                    iterations,
+                )
                 residual = float(meta[res_key])
                 amp = float(meta.get(amp_key, 0.0))
                 # A valid amplification is ``1/(1 - rho)`` with
@@ -6751,17 +6849,10 @@ class GraphManager:
                 # takes, which are ``relaxation`` times the residual
                 # that is measured under ``acceleration="fixed"``.
                 # Both solvers apply the same factor to the same
-                # criterion, so this reproduces their ``converged``.
-                scale = relaxation_step_scale(
-                    group.acceleration, group.relaxation,
-                )
-                error_estimate = (
-                    residual * max(scale * amp, 1.0) if valid else residual
-                )
-                threshold = (
-                    1.0 if group.convergence_norm in ("mixed", "interface")
-                    else group.tolerance
-                )
+                # criterion, so this reproduces their ``converged``; the
+                # profiler and ``sysid`` read the same criterion.
+                threshold, scale = convergence_criterion(group)
+                error_estimate = reported_error_estimate(residual, amp, scale)
                 # The spectral triple (Ritz radius, Arnoldi residual,
                 # resolvent norm) is present only under solver="ift"
                 # with diagnostics=True,
@@ -6817,7 +6908,8 @@ class GraphManager:
                 grad_bound = float(meta.get(
                     f"coupling_{key}_gradient_relative_error_bound", float("nan")))
                 result[key] = _CouplingDiagnostics({
-                    "iterations": int(meta[iter_key]),
+                    "iterations": iterations,
+                    "total_iterations": total_iterations,
                     "residual": residual,
                     "amplification": amp if valid else float("nan"),
                     "error_estimate": error_estimate,
@@ -7826,8 +7918,8 @@ class GraphManager:
             for suffix in ("rho_spectral", "spectral_residual",
                            "spectral_amplification", "gradient_relative_error_bound"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
-            for suffix in ("iterations", "residual", "amplification",
-                           "pred_count", "V", "W"):
+            for suffix in ("iterations", "total_iterations", "residual",
+                           "amplification", "pred_count", "V", "W"):
                 seeds[f"coupling_{key}_{suffix}"] = zeros
             if group.predictor != "none":
                 names = list(group.nodes)      # the order ``compile()`` flattens in

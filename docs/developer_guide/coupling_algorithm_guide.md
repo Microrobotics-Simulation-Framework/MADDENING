@@ -131,9 +131,9 @@ Three settings that are nearly always right and are not in the table:
 
 ## Reading `coupling_diagnostics()`
 
-Each group reports thirteen fields: eight for every group, and five --
+Each group reports fourteen fields: nine for every group, and five --
 three spectral, two about the gradient -- that carry a value only under
-`solver="ift"` with `diagnostics=True`.  Three of the eight need
+`solver="ift"` with `diagnostics=True`.  Three of the nine need
 reading carefully, and one of them was renamed in 0.4.0 because its old
 name said more than it checks.  A group that has not taken a step yet
 (before the first `step()`, and after `reset_state()`) has no entry at
@@ -143,7 +143,8 @@ never run.
 
 | field | what it is |
 |---|---|
-| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget |
+| `iterations` | passes used, counting the first staggered one.  Equal to `max_iterations` exactly when the group exhausted its budget.  With `waveform_iterations > 1` on a sub-cycling group each sweep has a budget of its own and this is the largest sweep's count, so `iterations >= max_iterations` still reads "some sweep hit the cap" — see below |
+| `total_iterations` | passes the step ran, summed over its `waveform_iterations` sweeps: the work done.  Equal to `iterations` for a group that runs one sweep |
 | `residual` | `\|F(x) - x\|` in the group's norm, for the state the step returned.  Carries a float32 noise floor |
 | `amplification` | the estimated `1 / (1 - rho)` of the mode the residual sequence reveals.  `nan` when the ratio was rejected |
 | `error_estimate` | `residual · max(ω · amplification, 1)` — **an estimate** of the distance to the fixed point, not of the last step.  Falls back to `residual` when the ratio was rejected |
@@ -426,6 +427,71 @@ settled spectrum, not those conditions.  It is not spelled
 `gradient_error_bound`: that spelling is the deprecated alias of
 `gradient_error_estimate` (below), and code written against 0.3.x
 would read a new meaning under it as the old number.
+
+### `waveform_iterations`: what the sweeps are, and which one each field describes
+
+**Experimental, and not waveform relaxation (MADD-ANO-027).**  A
+sub-cycling group with `waveform_iterations=N` runs its fixed-point
+solve `N` times per step, each sweep with a budget of `max_iterations`
+passes of its own and a freshly started accelerator.  Every sweep
+iterates the same one-pass map, starting from where the sweep before it
+stopped: a pass reads only its incoming iterate and the
+beginning-of-step state, and the residual the second sweep measures on
+its first pass is, bit for bit, the residual the first sweep reported
+for the state it handed on.  Inside a pass, a sub-cycled node's boundary
+input is interpolated between the incoming iterate and the in-pass state
+-- two estimates of the *end*-of-step value, never the beginning-of-step
+one -- so no sweep sees a waveform over the sub-step window, and
+`boundary_interpolation="quadratic"` is never given its third value.
+What that means in practice:
+
+- With a converged first sweep, the later sweeps change nothing: `N` = 1,
+  2 and 3 return bit-identical states on the spring pair below.  When
+  the first sweep stops at the cap, the later sweeps act as extra
+  passes toward the same fixed point, so raising `max_iterations` does
+  the same job for less.  Use `waveform_iterations=1`.
+- At a converged step `boundary_interpolation` "constant", "linear" and
+  "quadratic" coincide: bit-identical over 100 macro-steps of the pair
+  at timesteps 0.001 / 0.005, and 4.458e-02 from a uniform-rate
+  reference in every mode, at v0.1.0, v0.3.1 and this release.
+
+Real waveform relaxation is planned for 0.5.0, not promised by this
+release.  The report reads the sweeps as follows:
+
+- `iterations` is the **largest** sweep's count and `total_iterations`
+  the sum.  The cap check `iterations >= max_iterations` is exact: true
+  when, and only when, some sweep exhausted its budget.
+- Every other field is the **last** sweep's, which produced the
+  returned state: `residual` recomputed on that state reproduces it, and
+  `converged` is the verdict on it.  Under `solver="ift"` the gradient
+  is the last sweep's too, because the implicit-function derivative
+  ignores the initial guess.  An earlier sweep that stopped at the cap
+  shows in `iterations`, not in `converged`.
+- **`strict_convergence=True` under `solver="ift"` checks every sweep**,
+  so a step raises when an earlier sweep stops at the cap unconverged,
+  even if the last sweep -- and so the returned state and its gradient --
+  converges.  `converged` and `strict_convergence` therefore disagree on
+  such a step; which of them is right is to be decided in 0.5.0.
+
+Measured on the sub-cycled spring pair of
+`tests/core/test_phases_5_7_8.py` (timesteps 0.001 / 0.01,
+`tolerance=1e-8`, `waveform_iterations=3`), first step, jaxlib 0.11.0,
+CPU; both solvers give the same numbers:
+
+| `max_iterations` | acceleration | passes per sweep (converged) | `iterations` before the fix | `iterations` / `total_iterations` |
+|---|---|---|---|---|
+| 10 | none | 3 (yes) · 1 (yes) · 1 (yes) | 1 | 3 / 5 |
+| 2 | none | 2 (no) · 1 (yes) · 1 (yes) | 1 | 2 / 4 |
+| 10 | fixed, `relaxation=0.7` | 10 (no) · 1 (yes) · 1 (yes) | 1 | 10 / 12 |
+
+Before 0.4.0 `iterations` was the last sweep's count, which is the
+fourth column (MADD-ANO-026).  Under `strict_convergence=True` the
+second and third rows raise.  A `tolerance` of 1e-8 is below the L2
+norm's float32 resolution for these O(1) fields, so this fixture
+converges only by exact stationarity, and on later steps the two solvers
+can round to different verdicts: see the note on `residual` agreement
+between the solvers in `coupling_diagnostics()`.  The table is the
+first step, where they agree.
 
 ### The old names
 

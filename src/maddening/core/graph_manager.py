@@ -48,8 +48,9 @@ if TYPE_CHECKING:
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
+    convergence_criterion,
     float_fields_of,
-    relaxation_step_scale,
+    reported_error_estimate,
     residual_precision_floor,
     spectral_error_bound,
     spectral_rate_settled,
@@ -1968,7 +1969,8 @@ def _run_coupled_block_impl(
     convergence norms (L2, mixed, interface), acceleration methods
     (Aitken, fixed relaxation, IQN-ILS, IQN-IMVJ), additive edges,
     flux-based coupling, subcycling with linear/quadratic/constant
-    interpolation, and waveform relaxation.
+    interpolation, and repeated waveform sweeps (restarts of the same
+    solve, not waveform relaxation: MADD-ANO-027).
 
     This is the shared implementation used by both ``_build_step_fn``
     and ``_build_dt_step_fn``.
@@ -2360,18 +2362,24 @@ def _run_coupled_block_impl(
         return result
 
     # ------------------------------------------------------------------
-    # Waveform relaxation wrapper
+    # Waveform sweeps (``waveform_iterations``; restarts, see below)
     # ------------------------------------------------------------------
     n_waveform = _group_waveform_sweeps(group, nodes)
 
     def _run_coupling_inner(new_state_inner):
-        """Run the core coupling iteration (may be called multiple times
-        for waveform relaxation).
+        """Run the core coupling iteration once: one waveform sweep.
 
         ``initial_node_states`` (the beginning-of-timestep state that
-        nodes integrate FROM) is never changed by waveform re-runs.
-        Only ``new_state_inner`` (used for boundary resolution) is
-        updated between waveform passes.
+        nodes integrate FROM) is never changed by a sweep.
+        ``new_state_inner`` is only the iteration's starting guess (and
+        carries the nodes outside the group): ``one_pass`` reads its
+        input iterate and ``initial_node_states`` and nothing else a
+        sweep changes, so every sweep iterates the same map and a later
+        sweep resumes the fixed-point solve where the previous one
+        stopped, with its accelerator started afresh.  That is a restart,
+        not waveform relaxation, and the sub-step interpolation runs
+        between the incoming iterate and the in-pass state, never from
+        the beginning-of-step value (MADD-ANO-027).
         """
 
         # Run first iteration
@@ -3234,7 +3242,7 @@ def _run_coupled_block_impl(
                     new_state[nn] = predicted[nn]
 
     # ------------------------------------------------------------------
-    # Run coupling (with waveform relaxation wrapper)
+    # Run coupling (``waveform_iterations`` sweeps of it)
     # ------------------------------------------------------------------
     current_state = new_state
     diag_data = None
@@ -6383,9 +6391,10 @@ class GraphManager:
               staggered pass.  Equal to ``max_iterations`` exactly when
               the group exhausted its budget, whichever solver ran, so
               ``iterations >= max_iterations`` is a usable cap check.
-              Under waveform relaxation (a group that sub-cycles, with
-              ``waveform_iterations > 1``) every sweep is a fixed-point
-              solve with a budget of ``max_iterations`` of its own, and
+              With ``waveform_iterations > 1`` on a group that
+              sub-cycles, every sweep is a fixed-point solve with a
+              budget of ``max_iterations`` of its own (the sweeps are
+              restarts of one solve, MADD-ANO-027), and
               this is the **largest** sweep's count, so the same check
               reads "some sweep exhausted its budget", exactly.  The
               passes the step ran in all are ``"total_iterations"``.
@@ -6478,7 +6487,7 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
-              Under waveform relaxation it is the **last** sweep's
+              With ``waveform_iterations > 1`` it is the **last** sweep's
               verdict, which is the verdict on the returned state: every
               sweep iterates the same one-pass map from where the one
               before it stopped, and the ``"ift"`` gradient is the last
@@ -6823,7 +6832,7 @@ class GraphManager:
                 # It is never below the largest sweep's count, which it
                 # contains: a slot still at its seed beside a counter that
                 # is not -- seeded after the counter was written, by a
-                # recompile that turned waveform relaxation on or a
+                # recompile that turned on ``waveform_iterations`` or a
                 # checkpoint from before the slot existed, and read before
                 # the next step -- reads as that count.
                 total_iterations = max(
@@ -6840,17 +6849,10 @@ class GraphManager:
                 # takes, which are ``relaxation`` times the residual
                 # that is measured under ``acceleration="fixed"``.
                 # Both solvers apply the same factor to the same
-                # criterion, so this reproduces their ``converged``.
-                scale = relaxation_step_scale(
-                    group.acceleration, group.relaxation,
-                )
-                error_estimate = (
-                    residual * max(scale * amp, 1.0) if valid else residual
-                )
-                threshold = (
-                    1.0 if group.convergence_norm in ("mixed", "interface")
-                    else group.tolerance
-                )
+                # criterion, so this reproduces their ``converged``; the
+                # profiler and ``sysid`` read the same criterion.
+                threshold, scale = convergence_criterion(group)
+                error_estimate = reported_error_estimate(residual, amp, scale)
                 # The spectral triple (Ritz radius, Arnoldi residual,
                 # resolvent norm) is present only under solver="ift"
                 # with diagnostics=True,

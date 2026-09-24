@@ -4148,8 +4148,9 @@ class GraphManager:
         ``live=False`` checks without remembering.  The reference is the
         node's own
         :meth:`~maddening.core.node.SimulationNode.params_pytree`, so a write
-        that also reaches the node (``PUT /graph/params`` writes both) is not
-        refused.
+        that also reaches the node is not refused here: ``PUT
+        /graph/params`` writes both, and asks
+        :meth:`_unused_node_write_reason` first, before writing anything.
         """
         nodes = tree.get("nodes") if isinstance(tree, dict) else None
         if not isinstance(nodes, dict):

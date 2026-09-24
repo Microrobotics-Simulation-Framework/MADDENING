@@ -1455,14 +1455,15 @@ class SafetyRelevance(Enum):
 
 
 class ResolutionStatus(Enum):
-    OPEN = "open"
-    WORKAROUND_AVAILABLE = "workaround"
-    FIXED = "fixed"
-    WONT_FIX = "wont_fix"          # By design or out of scope
-    DEFERRED = "deferred"
+    OPEN = "open"                      # Reachable; no fix yet
+    RESOLVED = "resolved"              # Fixed; affected_versions must exclude this version
+    PARTIALLY_RESOLVED = "partially_resolved"  # A fix landed that does not cover the whole
+                                       # defect; still reachable, residual_risk says which part
+    WONT_FIX = "wont_fix"              # By design or out of scope; still reachable
+    DUPLICATE = "duplicate"            # Its range lives on the entry it duplicates
 
 
-@dataclass
+@dataclass(frozen=True)
 class AnomalyRecord:
     """A known anomaly in MADDENING.
 
@@ -1473,18 +1474,40 @@ class AnomalyRecord:
     anomaly_id: str                     # e.g., "MADD-ANO-001"
     title: str                          # Short description
     description: str                    # Detailed description
-    affected_components: tuple[str, ...]  # e.g., ("HeatNode", "LBMPipeNode")
-    affected_versions: str              # PEP 440 specifier set: ">=0.1.0" (open), ">=0.1.0, <0.4.0" (fixed in 0.4.0)
     severity: AnomalySeverity
     safety_relevance: SafetyRelevance
     safety_relevance_rationale: str     # Why this assessment was made
+    affected_components: tuple[str, ...] = ()  # e.g., ("HeatNode", "LBMPipeNode")
+    affected_versions: str = ""         # PEP 440 specifier set: ">=0.1.0" (open), ">=0.1.0, <0.4.0" (fixed in 0.4.0)
     workaround: str = ""                # If available
     resolution_status: ResolutionStatus = ResolutionStatus.OPEN
-    resolved_in_version: Optional[str] = None
+    resolution_version: str = ""        # The release that fixed it, e.g. "0.4.0"
     github_issue: Optional[str] = None  # e.g., "#42"
-    date_reported: Optional[str] = None # ISO 8601 date
-    date_resolved: Optional[str] = None
 ```
+
+The block above is `src/maddening/core/compliance/anomaly.py`; the code is
+the source of truth.  Until the 0.4.0 documentation pass this section
+described a `ResolutionStatus` with `WORKAROUND_AVAILABLE`, `FIXED` and
+`DEFERRED` members that the implementation never had: a workaround is
+recorded in the `workaround` field, not in the status.
+
+`OPEN`, `PARTIALLY_RESOLVED` and `WONT_FIX` all count as *reachable* in the
+version the registry describes; `RESOLVED` and `DUPLICATE` do not.
+`scripts/check_anomalies.py` and `scripts/generate_soup_tables.py` share
+that one set, so the gate and the SOUP package's "reachable in this version"
+count cannot disagree.  A status nobody has enumerated counts as reachable,
+so a misspelling can never close a range by accident.
+
+The YAML registry carries two fields beyond the dataclass:
+
+- `verification`: the tests and documents that evidence the entry. It is
+  required, by `scripts/check_anomalies.py`, for `resolved` and
+  `partially_resolved` entries.
+- `residual_risk`: what a partial resolution leaves reachable, and why.
+
+The registry validator in `maddening.compliance` accepts both as known
+optional fields and refuses unknown ones.  `scripts/check_anomalies.py`
+resolves every `verification` reference against the tree.
 
 ##### YAML Registry Format
 
@@ -1521,7 +1544,7 @@ anomalies:
       Only affects GPU execution path. CPU execution produces correct
       results. Downstream tools must verify their execution platform.
     workaround: "Use CPU backend (JAX_PLATFORMS=cpu) or jaxlib >= 0.5.2"
-    resolution_status: "workaround"
+    resolution_status: "open"      # the workaround lives in `workaround`, not the status
     github_issue: null
     date_reported: "2025-01-15"
 

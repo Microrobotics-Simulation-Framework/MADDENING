@@ -590,7 +590,9 @@ guidance; the itemized changes follow.
 - **MADD-ANO-020 is resolved in this release**: `LBMNode`'s pressure BC imposed the wrong face density since 0.1.0 (see `### Fixed`)
 - **MADD-ANO-019 is resolved in this release**: a diverged coupling state can no longer read as converged (see `### Fixed`)
 - **MADD-ANO-017** now also names `implicit_euler_step` (a float32 state under x64 is refused, in every
-  release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`
+  release) and the `update`/`integrate_node` dtype divergence; `affected_versions` widens to `>=0.1.0`.
+  It also records the legacy `solver="fori"` Aitken carry, which fails under x64 exactly as every other
+  configuration does and adds no failure of its own
 - **MADD-ANO-018 is resolved in this release**: `params` reaches every solver path (see `### Fixed`)
 - **MADD-ANO-018**: a parameter calibrated through `gm.params` or `fit` reached
   `update()` and could not reach `derivatives()`, `implicit_residual()` or

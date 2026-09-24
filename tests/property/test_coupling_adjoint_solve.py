@@ -40,43 +40,53 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from tests.conftest import EXAMPLES_COSTLY
 
 
-def _build(rho: tuple[float, ...], c: tuple[float, ...]) -> GraphManager:
+#: Modes in the generated spectrum: one stiff, one fast.
+_N = 2
+
+
+class _Contract(SimulationNode):
+    """``x <- rho * u + gain * c``, every constant a node parameter.
+
+    ``rho`` and ``c`` are parameters (not closure constants) so the
+    compiled gradient below serves every drawn spectrum: they reach the
+    step as traced arguments, like ``gain`` always did.
+    """
+
+    def __init__(self, name, dt):
+        super().__init__(name, dt, gain=1.0,
+                         rho=jnp.zeros(_N), c=jnp.zeros(_N))
+
+    def initial_state(self):
+        return {"x": jnp.zeros(_N)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(_N,), description="u")}
+
+    def update(self, state, bi, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": p["rho"] * bi.get("u", jnp.zeros(_N)) + p["gain"] * p["c"]}
+
+
+class _Relay(SimulationNode):
+    def initial_state(self):
+        return {"y": jnp.zeros(_N)}
+
+    def boundary_input_spec(self):
+        return {"v": BoundaryInputSpec(shape=(_N,), description="v")}
+
+    def update(self, state, bi, dt, *, params=None):
+        return {"y": bi.get("v", jnp.zeros(_N))}
+
+
+def _build() -> GraphManager:
     """A two-node cycle carrying a diagonal contraction ``diag(rho)``.
 
     ``a`` maps its boundary input ``u`` to ``rho * u + gain * c`` and
     ``b`` relays it back, so one Gauss-Seidel sweep of the group is the
     affine map ``x -> rho * x + gain * c`` and the fixed point is
     ``gain * c / (1 - rho)`` per mode.  The flat group state is
-    ``2 * len(rho)`` floats.
+    ``2 * _N`` floats.
     """
-    n = len(rho)
-    rho_a = jnp.asarray(rho)
-    c_a = jnp.asarray(c)
-
-    class _Contract(SimulationNode):
-        def __init__(self, name, dt, gain=1.0):
-            super().__init__(name, dt, gain=gain)
-
-        def initial_state(self):
-            return {"x": jnp.zeros(n)}
-
-        def boundary_input_spec(self):
-            return {"u": BoundaryInputSpec(shape=(n,), description="u")}
-
-        def update(self, state, bi, dt, *, params=None):
-            p = self.params if params is None else {**self.params, **params}
-            return {"x": rho_a * bi.get("u", jnp.zeros(n)) + p["gain"] * c_a}
-
-    class _Relay(SimulationNode):
-        def initial_state(self):
-            return {"y": jnp.zeros(n)}
-
-        def boundary_input_spec(self):
-            return {"v": BoundaryInputSpec(shape=(n,), description="v")}
-
-        def update(self, state, bi, dt, *, params=None):
-            return {"y": bi.get("v", jnp.zeros(n))}
-
     gm = GraphManager()
     gm.add_node(_Contract("a", 0.01))
     gm.add_node(_Relay("b", 0.01))
@@ -89,6 +99,26 @@ def _build(rho: tuple[float, ...], c: tuple[float, ...]) -> GraphManager:
     )
     gm.compile()
     return gm
+
+
+@jax.jit
+def _gain_gradient(rho, c, w):
+    """``d sum(w * x_a) / d gain`` after one step, at ``gain = 1``.
+
+    Compiled once for the module.  Every draw below changes values only
+    -- the spectrum, the forcing and the loss weights -- so they are
+    arguments here and parameters of the graph, and the draws share one
+    program.  When each example built its own graph (the spectrum a
+    closure constant) the property spent 45 s on the CI runner
+    compiling twenty copies of it.  The graph is built inside the trace:
+    ``run_scan`` writes its result back onto the manager, and a manager
+    that outlived the trace would be left holding tracers.
+    """
+    def loss(gain):
+        p = {"nodes": {"a": {"gain": gain, "rho": rho, "c": c}}}
+        return jnp.sum(w * _build().run_scan(1, params=p)["a"]["x"])
+
+    return jax.grad(loss)(jnp.float32(1.0))
 
 
 #: The stiff mode's spectral gap, ``1 - rho``.  Bounded below at 1e-4:
@@ -140,13 +170,9 @@ def test_grad_through_the_default_coupling_solver_never_raises(
     rho = (1.0 - gap, fast)
     c = (forcing, 1.0)
     weights = (w_slow, w_fast)
-    w = jnp.asarray(weights)
-
-    def loss(p):
-        return jnp.sum(w * _build(rho, c).run_scan(1, params=p)["a"]["x"])
-
-    base = _build(rho, c).params
-    grad = jax.grad(loss)(base)["nodes"]["a"]["gain"]
+    grad = _gain_gradient(jnp.asarray(rho, jnp.float32),
+                          jnp.asarray(c, jnp.float32),
+                          jnp.asarray(weights, jnp.float32))
     exact = sum(
         wi * ci / (1.0 - ri) for wi, ci, ri in zip(weights, c, rho)
     )

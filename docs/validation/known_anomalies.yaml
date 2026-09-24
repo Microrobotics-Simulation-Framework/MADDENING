@@ -481,7 +481,7 @@ anomalies:
       'gradient_bound_usable', 'gradient_error_estimate',
       'gradient_relative_error_bound', 'iterations', 'precision_limited',
       'ratio_usable', 'residual', 'rho_spectral', 'spectral_error_bound',
-      'spectral_usable'].
+      'spectral_usable', 'total_iterations'].
     severity: "minor"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -2903,4 +2903,95 @@ anomalies:
       - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_wrapping_an_lbm_node_with_the_default_boundary_is_refused_at_construction"
       - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_an_explicit_halo_fill_other_than_the_declared_one_is_refused"
       - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_a_node_that_declares_no_halo_boundary_is_wrapped_exactly_as_before"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-026"
+    title: "Under waveform relaxation, coupling_diagnostics() reported only the last sweep's pass count: an earlier sweep stopped at max_iterations read as iterations=1"
+    description: >
+      A coupling group with `subcycling=True`, nodes at different timesteps
+      and `waveform_iterations=N > 1` runs N waveform sweeps per step.  Each
+      sweep is a fixed-point solve with its own `max_iterations` budget, and
+      each iterates the same one-pass map from where the sweep before it
+      stopped (the second sweep's first residual is, bit for bit, the
+      residual the first sweep reported).  `coupling_diagnostics()` kept
+      only the last sweep's pass count as `iterations`.  The first sweep
+      usually does the work and the later ones start at or near the fixed
+      point, so the report under-counted the passes a step ran, and a sweep
+      that exhausted `max_iterations` was invisible whenever a later one
+      converged: with the first sweep at the cap and the last converging in
+      one pass, the report read `iterations=1`.  The released docstrings
+      described the field as "coupling iterations used"; the 0.4.0
+      development docstring added that `iterations >= max_iterations` is a
+      usable cap check, which under waveform relaxation it was not.  Readers
+      of the count inherited it: `tune_coupling_params` ranks
+      configurations by the summed count, so it costed a waveform group at
+      the last sweep's passes, and `profile_graph`'s at-cap fraction and
+      mean iterations read the same `_meta` slot.
+      Reproduced at v0.1.0, v0.2.0 and v0.3.1 (`git archive` of each tag,
+      CPU, jaxlib 0.11.0) on two `SpringDamperNode`s at timesteps 0.001 and
+      0.01 coupled both ways, `tolerance=1e-8`, `diagnostics=True`, first
+      step, with identical numbers at all three tags.  At
+      `max_iterations=10`, `waveform_iterations` 1 / 2 / 3 report
+      `iterations` 3 / 1 / 1.  At `max_iterations=2` they report 2 / 1 / 1,
+      the first sweep having stopped at the cap in every case.  Under
+      `acceleration="fixed"` with `relaxation=0.7` at `max_iterations=10`
+      they report 10 / 1 / 1, the first sweep again at the cap.  The 0.4.0
+      development tree before the fix (741a624) gives the same counts under
+      both solvers and with every acceleration, beside `converged=True` in
+      each capped case.  v0.1.0 already carries the waveform loop.
+      Resolved in 0.4.0.  `iterations` is the largest sweep's count, so
+      `iterations >= max_iterations` holds exactly when some sweep exhausted
+      its budget.  A new key, `total_iterations`, is the sum over the sweeps,
+      and equals `iterations` for a group that runs one sweep.  `residual`,
+      `converged` and every other key stay the last sweep's: that sweep
+      produced the returned state, and they describe it.  The returned state
+      is unchanged bit for bit, and a group that runs one sweep (every group
+      that does not sub-cycle, and `waveform_iterations=1`) reports
+      exactly what it did before.  `tune_coupling_params` sums
+      `total_iterations`.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      No simulated value depends on it.  The returned state and every
+      reported value that describes it (`residual`, the error estimate,
+      `converged`, the bounds) come from the last sweep and were right.  A
+      cap reached by an earlier sweep does not make the returned state less
+      converged: the later sweeps continue the same iteration, and the last
+      sweep's own count and verdict were the ones reported, so reading
+      `iterations == max_iterations` as "the returned state may not have
+      converged" gave the right answer about the state.  What was wrong is a
+      count: the passes a step ran and the budget an earlier sweep ran out
+      of.  A program that ranks configurations by cost
+      (`tune_coupling_params`) or budgets by the at-cap fraction got a
+      wrong answer silently, but not a wrong state; graded `minor` for that.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.group.CouplingGroup.waveform_iterations"
+      - "maddening.core.simulation.calibration.tune_coupling_params"
+      - "maddening.core.simulation.profiler.profile_graph"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0 the other sweeps' counts were kept nowhere.  The first k
+      sweeps of a step are the same computation whatever N is (measured
+      identical on the reproducer above), so re-running a step from a saved
+      state (`save_state` / `load_state`) with `waveform_iterations=k`
+      reports sweep k's count; k = 1 is the sweep that usually does the
+      work.  From 0.4.0 a script using `iterations` as
+      a cap check needs no change, and one using it as the work done should
+      read `total_iterations`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `converged` stays the last sweep's verdict, so
+      `iterations >= max_iterations` beside `converged=True` is now a
+      possible report: an earlier sweep ran out and the last converged.
+      That is the conservative direction for a cap check, and the returned
+      state is the converged one; read `converged` for the state and
+      `iterations` for the budget.  `strict_convergence=True` under
+      `solver="ift"` checks every sweep, so such a step raises there, as it
+      did before.  The per-sweep counts are not reported one by one.  A
+      checkpoint written before 0.4.0 carries no sum; restored into a
+      waveform group, `total_iterations` reads as `iterations` until the
+      next step.
+    verification: []
     github_issue: null

@@ -280,6 +280,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Waveform relaxation's `coupling_diagnostics()` counts every sweep** (since 0.1.0, MADD-ANO-026): `iterations` is the largest sweep's, so `iterations >= max_iterations`
+  is exact again (an earlier sweep at the cap read `iterations=1`); new `total_iterations` is the sum. State unchanged; a one-sweep group reports as before.
+  Action: a cap check on `iterations` needs no change; read `total_iterations` for the work done.
 - **Coupling bounds, confirmation audit:** a field below `tiny/eps` (~1e-31 in float32) no longer reads converged on a flushed change; the float floor counts the evaluations a pass rounds like (sub-cycling automatically,
   internal loops via the new `SimulationNode.update_evaluations()`; an undeclared node's group gets `spectral_usable=False` at the floor); float16-beside-float32 gradient floors, top-of-range spectral weights,
   `PYTHONHASHSEED`-dependent `_meta` seeds and `reset_state` of a key ending `_spectral` are fixed. Action: a node that sub-steps inside `update` should return its sub-step count from `update_evaluations()`.
@@ -581,6 +584,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-026 (new, resolved in this release)**: under waveform relaxation `iterations` was the last sweep's pass count, hiding an earlier sweep
+  that hit `max_iterations` (since 0.1.0; see `### Fixed`)
 - **MADD-ANO-024, 025 (new, resolved in this release)**: `PUT /graph/params` accepted and saved a value a node consumes at
   construction (since 0.1.0); a sharded `LBMNode` imposed its pressure faces at every seam and, by default, filled its global
   halos unlike its periodic streaming (since 0.2.0). Both are refusals now (see `### Fixed`)

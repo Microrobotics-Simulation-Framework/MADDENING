@@ -162,7 +162,13 @@ class CouplingGroup:
         iterations.  ``1`` is current behaviour (single pass),
         ``> 1`` iterates over entire sub-step windows.  Read **only**
         when ``subcycling=True``; setting it away from its default
-        otherwise is inert and warns (``UserWarning``).
+        otherwise is inert and warns (``UserWarning``).  Each sweep is
+        a fixed-point solve with a budget of ``max_iterations`` passes
+        of its own, started from where the previous sweep stopped;
+        ``GraphManager.coupling_diagnostics()`` reports the largest
+        sweep's count as ``"iterations"`` (so the cap check
+        ``iterations >= max_iterations`` sees every sweep) and the sum
+        as ``"total_iterations"``.
     predictor : str
         Extrapolation of the coupling initial guess from previous
         converged states.  ``"none"`` uses the current state (default),

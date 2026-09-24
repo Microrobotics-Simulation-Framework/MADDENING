@@ -1390,7 +1390,7 @@ def test_the_diagnostics_report_the_0_4_0_field_names():
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
     assert set(d) == {
-        "iterations", "residual", "amplification", "error_estimate",
+        "iterations", "total_iterations", "residual", "amplification", "error_estimate",
         "ratio_usable", "gradient_error_estimate", "converged",
         "rho_spectral", "spectral_error_bound", "spectral_usable",
         "gradient_relative_error_bound", "gradient_bound_usable",

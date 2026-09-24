@@ -896,7 +896,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
 
 
 def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
-                         margin: float = SPECTRAL_MARGIN, floor=0.0):
+                         margin: float = SPECTRAL_MARGIN, floor: Any = 0.0):
     """The distance to the fixed point, from the spectrum of ``dF/dx``.
 
     ``(residual + floor) * max(amplification, 1 / (1 - rho_safe))``,

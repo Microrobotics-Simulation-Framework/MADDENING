@@ -419,6 +419,9 @@ files, never a function of the test list. So:
 - shard *i* of a pull request holds the same files as shard *i* of the base
   branch, which is what lets a shard reuse that shard's compilation cache.
 
+`slow-tests.yml` is split the same way, four runners per lane, which takes
+the whole-suite run from about three hours to under one.
+
 Every job still collects the whole suite, so every `conftest.py` runs as
 it would in a single process, and deselects the other shards' files. The
 per-shard `Test time budget` step gates. The `Test durations` job writes
@@ -443,7 +446,7 @@ run reads it decides what its times mean:
 |---|---|---|
 | Pull request | **warm**: restores the base branch's cache, never saves one | Fast. Anything the PR adds or changes still compiles from scratch, because its programs are not in the base cache, so a new slow test is still caught on the PR that adds it. |
 | Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: every compile is paid in full. |
-| `slow-tests.yml` (Mon/Wed/Fri) | **off**, serial | The authoritative timing of the whole suite. Triage and allowlist edits are based on these runs. |
+| `slow-tests.yml` (Mon/Wed/Fri) | **off**, one process per shard | The authoritative timing of the whole suite. Triage and allowlist edits are based on these runs. |
 | Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
 
 Pull requests never save, so a second push cannot read the first push's

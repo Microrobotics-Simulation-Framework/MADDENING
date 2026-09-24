@@ -1116,6 +1116,74 @@ def test_reset_state_restores_the_meta_compile_seeds(label, group_kw):
         np.testing.assert_array_equal(got, want, err_msg=f"{label}: {key}")
 
 
+#: A group holding a float16 field beside a float32 one, compiled and
+#: scanned in a fresh interpreter; prints the iteration order of the
+#: group's node set, the residual seed's dtype and the scan's verdict.
+_MIXED_DTYPE_SEED_PROBE = """
+import jax.numpy as jnp
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+class Node(SimulationNode):
+    def __init__(self, name, dtype):
+        super().__init__(name=name, timestep=1.0)
+        self._dtype = dtype
+    def initial_state(self):
+        return {"x": jnp.asarray(1.0, self._dtype)}
+    def state_fields(self):
+        return ["x"]
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+    def update(self, state, bi, dt):
+        return {"x": (0.5 + 0.5 * bi["u"]).astype(self._dtype)}
+
+gm = GraphManager()
+gm.add_node(Node("a", jnp.float16))
+gm.add_node(Node("b", jnp.float32))
+gm.add_edge("b", "a", "x", "u")
+gm.add_edge("a", "b", "x", "u", transform=lambda v: v.astype(jnp.float32))
+group = gm.add_coupling_group(["a", "b"], max_iterations=10, diagnostics=True)
+gm.compile()
+seed = gm._state["_meta"]["coupling_a+b_residual"].dtype
+gm.run_scan(2)
+print(",".join(group.nodes), seed, "scan-ok")
+"""
+
+
+def test_the_meta_seed_dtype_does_not_depend_on_the_string_hash():
+    """A float16 field beside a float32 one: seeded float32 in every interpreter.
+
+    ``compile()`` took the seed's dtype from the first floating leaf it
+    met iterating ``group.nodes`` -- a frozenset, ordered by the
+    per-process string hash -- while the step writes the promoted
+    residual (float32).  So ``run_scan`` raised a scan-carry dtype
+    ``TypeError`` under some ``PYTHONHASHSEED`` values and not others.
+    Run in subprocesses, because the order is fixed per interpreter; the
+    premise assert checks that both orders were actually exercised.
+    """
+    import os
+    import subprocess
+    import sys
+
+    orders = set()
+    for hash_seed in ("0", "1", "2", "3", "4", "5"):
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed, JAX_PLATFORMS="cpu")
+        run = subprocess.run(
+            [sys.executable, "-c", _MIXED_DTYPE_SEED_PROBE],
+            env=env, capture_output=True, text=True, timeout=300,
+        )
+        assert run.returncode == 0, (
+            f"PYTHONHASHSEED={hash_seed}: {run.stderr.strip().splitlines()[-1:]}"
+        )
+        order, seed, verdict = run.stdout.split()[-3:]
+        assert (seed, verdict) == ("float32", "scan-ok"), (hash_seed, run.stdout)
+        orders.add(order)
+    assert orders == {"a,b", "b,a"}, (
+        f"fixture premise: both iteration orders exercised, got {orders}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The numerics behind the key, on matrices whose spectrum is known
 # ---------------------------------------------------------------------------

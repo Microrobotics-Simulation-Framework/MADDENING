@@ -847,6 +847,30 @@ def _refuse_colliding_group_keys(groups) -> None:
             slots[slot] = group.nodes
 
 
+def _group_residual_dtype(state, node_names):
+    """The dtype a group's residual and its ``_meta`` slots are held in.
+
+    The promotion of every floating field of the group's nodes -- the
+    dtype of the fixed-point vector both solvers iterate on and of the
+    norm computed from it -- taken over the nodes in sorted order.
+    ``jnp.result_type`` is order-independent, but the loop it replaced
+    was not: it took the dtype of the *first* floating leaf it met
+    iterating ``group.nodes``, a frozenset whose order follows the
+    per-process string hash, so a group with a float16 field beside a
+    float32 one was seeded float16 or float32 depending on
+    ``PYTHONHASHSEED``, and ``run_scan`` raised a scan-carry dtype
+    ``TypeError`` in some processes and not in others.  ``float32`` for
+    a group with no floating field.
+    """
+    dtypes = [
+        jnp.asarray(leaf).dtype
+        for nn in sorted(node_names)
+        for leaf in state.get(nn, {}).values()
+        if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+    ]
+    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
+
+
 def _group_state_finite(state, node_names):
     """Whether every floating field of the group's nodes is finite."""
     ok = jnp.array(True)
@@ -3146,14 +3170,22 @@ def _run_coupled_block_impl(
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
          grad_bound) = diag_data
-        res_dtype = jnp.asarray(final_res).dtype
+        # Written in the dtype ``compile()`` seeded the slot with, so the
+        # scan carry keeps its type whatever the residual was computed
+        # in (the seed is the promotion of the group's floating fields,
+        # which is what the residual is computed in, so this is a no-op
+        # wherever the two already agreed).  A hand-built state with no
+        # seed keeps the residual's own dtype.
+        seeded = full_state.get(_META_KEY, {}).get(f"coupling_{group_key}_residual")
+        res_dtype = (jnp.asarray(seeded).dtype if seeded is not None
+                     else jnp.asarray(final_res).dtype)
         result.setdefault(_META_KEY, {})
         result[_META_KEY] = {
             **result.get(_META_KEY, {}),
             f"coupling_{group_key}_iterations": jnp.array(
                 iter_count, dtype=jnp.int32
             ),
-            f"coupling_{group_key}_residual": final_res,
+            f"coupling_{group_key}_residual": jnp.asarray(final_res, dtype=res_dtype),
             f"coupling_{group_key}_amplification": jnp.asarray(
                 final_amp, dtype=res_dtype
             ),
@@ -4938,15 +4970,7 @@ class GraphManager:
                     # Seed in the dtype the residual is computed in (the
                     # group's floating state), so a float64 graph under
                     # x64 keeps a stable scan carry / trace signature.
-                    res_dtype = jnp.float32
-                    for nn_ in g.nodes:
-                        for leaf in self._state.get(nn_, {}).values():
-                            if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating):
-                                res_dtype = jnp.asarray(leaf).dtype
-                                break
-                        else:
-                            continue
-                        break
+                    res_dtype = _group_residual_dtype(self._state, g.nodes)
                     meta[f"coupling_{key}_residual"] = jnp.array(0.0, dtype=res_dtype)
                     # The amplification 1/(1-rho) the error bound is
                     # built from; 0.0 reads as "no usable estimate".

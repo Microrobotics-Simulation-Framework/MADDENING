@@ -1739,9 +1739,11 @@ def _fim_jacobian_compiled(residual_fn, scale, idx_key, nominal=None):
     across attribute accesses), so a later call after that state changed
     hits this entry and gets the *first* call's Fisher matrix, rank and
     bounds, with no warning.  Measured before this was made opt-in: a
-    spring's stiffness bound reported as 0.41 against a true 44.7 after
-    its damping moved from 2 to 20 in ``gm.params``, and rank 2 against a
-    true rank 1 after a bound method's excitation changed.  No key can
+    spring's relative bound on ``mass`` reported as 0.41 against a true
+    44.7 -- 109x too tight -- after its damping moved from 2 to 20 in
+    ``gm.params`` (its ``stiffness`` bound, 0.362 against a true 0.238,
+    erred the other way), and rank 2 against a true rank 1 after a bound
+    method's excitation changed.  No key can
     be derived from the callable that changes when the state it reads
     does, so the default re-traces and only a caller who asserts the
     residual is pure (``reuse_trace=True``) gets this entry.

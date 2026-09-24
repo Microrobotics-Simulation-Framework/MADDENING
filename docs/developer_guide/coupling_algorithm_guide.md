@@ -273,7 +273,7 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `9 + k + 4 n_c` Jacobian-vector products per group per step
+the cost is `11 + k + 4 n_c` Jacobian-vector products per group per step
 (`k ≤ 8`, `n_c` the floating constants) beside the spectral bound's
 eight — which is why it shares its gate.
 

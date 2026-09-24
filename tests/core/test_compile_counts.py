@@ -11,7 +11,7 @@ a count.
 So the gate counts things.  ``CompileCounts`` reports retraces (XLA
 compilations of the step), jaxpr primitives and lowered StableHLO ops --
 integers that reproduce exactly on any machine, under any load.
-``scripts/compile_counts.py`` measures five workloads and compares them
+``scripts/compile_counts.py`` measures six workloads and compares them
 to ``benchmarks/compile_counts_baseline.json``.
 
 Half of this module tests the counts.  The other half tests **that the

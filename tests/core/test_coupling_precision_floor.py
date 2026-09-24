@@ -193,14 +193,19 @@ def _square_fixed_point(a32, g32):
 
 
 @pytest.mark.parametrize("offset", (-6e-5, 3e-5))
-def test_a_stalled_nonlinear_iterate_bounds_its_gradient_error(offset):
-    """``x_a <- a + g u**2`` with ``F'(x*) = 0.999``: 1.5-3% off, bound ``0.0`` before.
+def test_a_stalled_nonlinear_iterate_does_not_read_its_gradient_as_exact(offset):
+    """``x_a <- a + g u**2`` with ``F'(x*) = 0.999``: 1.5-3% off, and the bound read ``0.0``.
 
-    Here the IFT gradient is off because the *slope* differs between
-    the iterate and the fixed point, and the slope is amplified a
-    thousandfold.  With no residual to take the curvature along, the
-    bound takes it along a floor-sized direction's resolvent image --
-    the slow mode, which is where a rounding error is amplified to.
+    Here the IFT gradient is off because the *slope* differs between the
+    iterate and the fixed point, and the slope is amplified a
+    thousandfold.  The honest answer at float32 is that no bound exists:
+    the distance float32 can resolve about a group this slow (the
+    floor times the amplification, ~9e-4) is a distance over which the
+    Jacobian moves by about the gap ``1 - F'`` itself, so the
+    Newton-Kantorovich check fails (``h`` near 1) and nothing measured
+    at the returned iterate bounds the resolvent at the fixed point.
+    The bound reads ``inf`` and is unusable -- where it read ``0.0``,
+    usable, before.
     """
     slope, g = 0.999, 0.25
     a = (1.0 - (1.0 - slope) ** 2) / (4.0 * g)
@@ -219,13 +224,12 @@ def test_a_stalled_nonlinear_iterate_bounds_its_gradient_error(offset):
     got = float(jax.grad(fixed_point_of)(params)["nodes"]["a"]["a"])
     exact = 1.0 / (1.0 - 2.0 * g32 * x_star)
     true_error = abs(got - exact) / abs(got)
-    assert true_error > 1e-2, "fixture premise"
+    assert true_error > 1e-2, "fixture premise: the gradient is percent-off"
     assert d["precision_limited"] is True
-    assert d["gradient_bound_usable"] is True
-    assert d["gradient_relative_error_bound"] >= true_error, (
-        f"gradient bound {d['gradient_relative_error_bound']:.3e} under the "
-        f"true relative error {true_error:.3e}"
-    )
+    assert d["spectral_error_bound"] > 0.0
+    assert d["gradient_relative_error_bound"] != 0.0
+    assert math.isinf(d["gradient_relative_error_bound"]), d
+    assert d["gradient_bound_usable"] is False, d
 
 
 def test_a_residual_above_the_floor_is_not_precision_limited():

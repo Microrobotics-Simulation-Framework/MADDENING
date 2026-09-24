@@ -343,9 +343,10 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None)
     ``1 / max|field|`` on a field the norm reads, ``0`` on one it does
     not (dead band, or off the interface under the interface norm).
     ``spectral_weights`` is the same vector with the *dead-banded* fields
-    the norm would otherwise read given a positive weight
-    (``1 / atol``, the caller's declared noise floor) instead of zero;
-    it defaults to ``weights``.  The Arnoldi iteration runs on
+    the norm would otherwise read given a positive weight instead of
+    zero -- ``1 / max|field|``, their own magnitude's, as if there were
+    no dead band (``1 / atol`` for a field that is exactly zero); it
+    defaults to ``weights``.  The Arnoldi iteration runs on
     ``D' J D'^{-1}`` for those weights, so the resolvent norm it reports
     is in a norm that agrees with the group's on every field the group
     reads, and the spectral radius is the map's own wherever the weights
@@ -525,8 +526,9 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        / (||delta|| * ||t_i||)``, and the reported value is the largest
        over the probes the fixed point responds to (``||t_i|| > 0``).
 
-    ``9 + k + 4 n_c`` Jacobian-vector products in all (at most
-    ``17 + 4 n_c``), ``n_c`` the number of floating constants, which is
+    ``11 + k + 4 n_c`` Jacobian-vector products in all (at most
+    ``19 + 4 n_c``, two of them for the Kantorovich check), ``n_c``
+    the number of floating constants, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
     ``stop_gradient``-ed: forward-only bookkeeping, and the adjoint of
@@ -691,36 +693,38 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     worst = jnp.where(jnp.any(responds), worst, nan)
 
     # **Where the leading-order term is not the whole story.**  The bound
-    # above uses the resolvent and the distance taken at ``x_k``; the
-    # exact error needs the resolvent at ``x*`` and the distance under
-    # the Jacobian *between* the two.  Both are within a checkable
-    # factor of the ``x_k`` values while the Jacobian does not move
-    # much across the distance, measured against the gap the resolvent
-    # divides by: ``theta = amp * ||J(x_k + delta) - J(x_k)|| * distance
-    # / ||delta||``, the directional change taken along ``delta``
-    # (Jacobian-linear along it) and scaled to the distance.  The
-    # Banach lemma then gives ``||(I - J(x*))^{-1}|| <= amp / (1 -
-    # theta)``, and the mean-value Jacobian over the segment -- half the
-    # endpoint change -- ``distance / (1 - theta / 2)``; so the bound is
-    # multiplied by ``1 / ((1 - theta) (1 - theta / 2))``, and is
-    # ``inf`` at ``theta >= 1``, where nothing bounds the resolvent at
-    # the fixed point.  ``theta`` is exactly zero on a map whose
-    # Jacobian does not depend on the point (the secant row is then
-    # bit-identical zero), so an affine group's bound is untouched.
-    # Measured on ``x <- a + g u**2`` at ``F'(x*) = 0.99`` with the
-    # forward 0.65-4.5% short of its fixed point: theta 0.47-0.99, and
-    # the uncorrected bound read 0.20-0.96x the true relative error.
+    # above takes the resolvent and the distance at ``x_k``; the exact
+    # error needs the resolvent at ``x*``, and a distance that holds for
+    # a map whose Jacobian moves.  Newton-Kantorovich supplies both from
+    # what is already measured.  With ``beta = amp`` (the resolvent at
+    # ``x_k``), ``eta = ||delta||`` (the Newton correction) and ``L`` the
+    # Jacobian's Lipschitz constant -- estimated along ``delta`` from
+    # the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| / ||delta||**2``
+    # -- the check is ``h = beta L eta < 1/2``.  Where it holds a fixed
+    # point exists within ``t* = eta (1 - sqrt(1 - 2h)) / h`` of ``x_k``
+    # and ``||(I - J(x*))^{-1}|| <= amp / sqrt(1 - 2h)``, so the bound is
+    # multiplied by ``1 / sqrt(1 - 2h)`` and its distance is the larger
+    # of the spectral bound and ``t*``.  Where it fails, nothing measured
+    # at ``x_k`` bounds the resolvent at the fixed point, and the bound
+    # is ``inf`` -- ``gradient_bound_usable`` False.  ``h`` is exactly
+    # zero on a map whose Jacobian does not depend on the point (the
+    # extra row's secant is then bit-identical zero), so an affine
+    # group's bound is untouched.  Measured on ``x <- a + g u**2`` at
+    # ``F'(x*) = 0.99`` with the forward 0.65-4.5% short of its fixed
+    # point, the uncorrected bound read 0.20-0.96x the true relative
+    # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
-    theta = jnp.where(
-        step > 0,
-        amp * norm(jac_secant_s) * distance / jnp.where(step > 0, step * step, 1.0),
-        0.0,
+    h = jnp.where(
+        step > 0, amp * norm(jac_secant_s) / jnp.where(step > 0, step, 1.0), 0.0,
     )
-    held = theta < 1
-    factor = jnp.where(
-        held, 1.0 / jnp.where(held, (1.0 - theta) * (1.0 - 0.5 * theta), 1.0), jnp.inf,
-    )
-    worst = jnp.where(worst == 0, worst, worst * factor)
+    certified = h < 0.5
+    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
+    t_star = jnp.where(h > 0, step * (1.0 - root) / jnp.where(h > 0, h, 1.0), step)
+    stretch = jnp.where(distance > 0,
+                        jnp.maximum(distance, t_star) / jnp.where(distance > 0, distance, 1.0),
+                        1.0)
+    factor = stretch / jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
+    worst = jnp.where(certified, worst * factor, jnp.full_like(worst, jnp.inf))
     return jnp.where(captured, worst, nan)
 
 
@@ -2468,7 +2472,7 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
-            def _norm_weights(x_full, dead_band_weight=0.0):
+            def _norm_weights(x_full, zero_field_weight=None):
                 """Per-entry factors of the group's norm at ``x_full``.
 
                 Mirrors ``_scaled_change``: a field the norm reads is
@@ -2477,9 +2481,13 @@ def _run_coupled_block_impl(
                 only edge-source fields are read.  A constant factor
                 (``rtol``, the mixed norm's ``1/count``) is left out --
                 the resolvent norm the weights feed is invariant to it.
-                ``dead_band_weight`` is what a read field inside the dead
-                band gets instead: ``0.0`` for the norm itself, positive
-                for the spectrum (see ``_spectral_rate_at``).
+                With ``zero_field_weight`` given, the weights are the
+                *spectrum's* instead (see ``_spectral_rate_at``): a read
+                field inside the dead band keeps its own magnitude's
+                weight rather than zero -- the dead band takes a field
+                out of the residual, not out of the coupling loop -- and
+                a read field whose magnitude is exactly zero (or below
+                the dtype's normal range) gets ``zero_field_weight``.
                 """
                 s_star = _embed(x_full)
                 read = {(e.source_node, e.source_field) for e in group_internal_list}
@@ -2492,9 +2500,13 @@ def _run_coupled_block_impl(
                             w[nn][fld] = jnp.zeros_like(val)
                             continue
                         ref = _field_reference(val, val)
-                        active = jnp.logical_and(ref > group.atol, ref > 0)
-                        inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0),
-                                        dead_band_weight)
+                        if zero_field_weight is None:
+                            active = jnp.logical_and(ref > group.atol, ref > 0)
+                            inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
+                        else:
+                            scaled = ref >= jnp.finfo(val.dtype).tiny
+                            inv = jnp.where(scaled, 1.0 / jnp.where(scaled, ref, 1.0),
+                                            zero_field_weight)
                         w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
@@ -2554,13 +2566,14 @@ def _run_coupled_block_impl(
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 weights = _norm_weights(jax.lax.stop_gradient(x_star_full))
-                # A dead-banded field is at zero *within the caller's
-                # atol*, which is therefore its natural unit; with no
-                # dead band declared only an exactly-zero field lands
-                # here, and any positive weight keeps it on the loop.
+                # A dead-banded field keeps its own magnitude's weight in
+                # the spectrum; one that is exactly zero has no magnitude,
+                # and gets the caller's atol (the declared unit of "zero")
+                # or, with no dead band declared, 1 -- any positive weight
+                # keeps it on the loop.
                 spec_weights = _norm_weights(
                     jax.lax.stop_gradient(x_star_full),
-                    dead_band_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
+                    zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
                 )
                 rho_spec, spec_resid, spec_amp = _spectral_rate_at(
                     step_pure, x_star_full, consts, weights, spec_weights,
@@ -2568,7 +2581,7 @@ def _run_coupled_block_impl(
                 # Its distance is the spectral bound and its resolvent
                 # factor the one that bound applies; the curvature is a
                 # second difference of the adjoint's own matvec.
-                # ``9 + k + 4 n_c`` more JVPs, ``n_c`` the floating
+                # ``11 + k + 4 n_c`` more JVPs, ``n_c`` the floating
                 # constants (see ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
@@ -5541,8 +5554,9 @@ class GraphManager:
               measured on -- a space from one start vector broke down
               early where an eigenvalue was repeated, and the bound read
               0.92x the true distance there -- and a dead-banded field
-              keeps a positive weight in the spectrum (``1 / atol``),
-              so a small field on the coupling loop no longer cuts the
+              keeps a positive weight in the spectrum (its own
+              magnitude's), so a small field on the coupling loop no
+              longer cuts the
               loop out of it (``rho_spectral`` read 0.0 for a radius of
               0.9, and the bound 0.15-0.29x the true distance of a field
               the norm keeps); the dead-banded fields' share of the
@@ -5628,22 +5642,27 @@ class GraphManager:
               the residual is at that resolution and so carries no
               direction, the curvature is taken along a floor-sized
               vector's resolvent image instead of the Newton correction.
-              And where the Jacobian moves across the distance by a
-              visible fraction of the gap ``1 - rho`` -- ``theta = amp *
-              ||J(x_k + delta) - J(x_k)|| * distance / ||delta||`` --
-              the bound is multiplied by ``1 / ((1 - theta)(1 - theta /
-              2))`` (the Banach lemma on the resolvent at ``x*``, and the
-              mean-value Jacobian for the distance) and is ``inf`` at
-              ``theta >= 1``: uncorrected it read 0.20-0.96x the true
-              error at ``F'(x*) = 0.99`` with the forward 0.65-4.5% short.
-              ``theta`` is exactly zero on an affine map.  **Only
+              And it carries a Newton-Kantorovich check on how far the
+              linearisation at ``x_k`` can be trusted at ``x*``: with
+              ``h = amp * L * ||delta||``, ``L`` the Jacobian's change
+              along the Newton correction ``delta`` per unit length
+              squared (one more pair of Jacobian-vector products), the
+              bound is multiplied by ``1 / sqrt(1 - 2h)`` (the resolvent
+              at the fixed point) with its distance at least
+              Kantorovich's radius, and is ``inf`` -- unusable -- at
+              ``h >= 1/2``, where nothing measured at ``x_k`` bounds the
+              resolvent at ``x*``.  Uncorrected it read 0.20-0.96x the
+              true error, flag ``True``, at ``F'(x*) = 0.99`` with the
+              forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
+              of those four now read ``inf`` and two hold at 3.0-3.5x.
+              ``h`` is exactly zero on an affine map.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1``; ``inf``
               or NaN where ``"spectral_error_bound"`` is; NaN where the
               fixed point responds to no constant and where the returned
               state is not finite.  Costs
-              ``9 + k + 4 n_c`` Jacobian-vector products per group per
+              ``11 + k + 4 n_c`` Jacobian-vector products per group per
               step beside the spectral bound's eight, ``k <= 8`` and
               ``n_c`` the number of floating constants (see
               ``_gradient_error_bound_at``).
@@ -5658,7 +5677,7 @@ class GraphManager:
               ``"spectral_error_bound"``; the change in the
               linearisation being linear in the distance and along the
               Newton correction (exact for an affine map, leading-order
-              otherwise, which ``theta`` above measures along ``delta``
+              otherwise, which ``h`` above measures along ``delta``
               only); and the probes -- a field-valued constant is
               probed along one random direction, and the bound is
               relative to the tangent's norm in the group's norm, so a
@@ -5695,8 +5714,8 @@ class GraphManager:
               are settled on the same condition.  ``False`` where
               nothing was computed, where the bound is ``inf`` or NaN
               (including a group whose Jacobian range the eight-vector
-              basis did not capture, and one whose Jacobian moved by
-              ``theta >= 1`` across the distance).  Like the other flags
+              basis did not capture, and one that fails the
+              Kantorovich check, ``h >= 1/2``).  Like the other flags
               it reports what the code checked, and not the linearity
               or probe conditions above.
             - ``"precision_limited"`` : bool — the residual is at or

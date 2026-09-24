@@ -79,7 +79,11 @@ on it may plant unstable rods only inside string literals (embedded
 source it writes out as a fixture); a real construction in its code is
 checked like any other.  The archived probes are exempt at the listed
 lines only.  The whole-file exemption used to let a real unstable rod
-appended to the test file pass.
+appended to the test file pass.  What the gate cannot tell apart is a
+string literal the test file writes out as a fixture and one it
+*executes* (``python -c``, the way the rod this gate exists for hid): in
+that one file, both are exempt, so a test there must not run a rod from
+a string.
 """
 
 from __future__ import annotations

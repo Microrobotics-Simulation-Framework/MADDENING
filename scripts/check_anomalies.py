@@ -39,6 +39,24 @@ function, so the SOUP package and this gate cannot disagree about it.
   ``>=0.4.0.dev0, <0.4.0``, which such entries used to carry, admits no
   version at all and fails here.  The description says which builds had it.
 * ``duplicate``: parsed, not compared; its range lives on the other entry.
+* ``FIRST`` and ``FIX`` are versions MADDENING has actually released, or
+  the current cycle's own versions: ``FIRST`` may also be the first
+  development build of a released or the current cycle (``X.Y.Z.dev0``),
+  and ``FIX`` the release the current cycle is building towards
+  (``0.4.0`` while ``maddening_version`` is ``0.4.0.dev0``).  ``>=0.1.5``,
+  ``<0.3.7`` and ``>=0.3.1.post1`` name versions nobody could install.
+* ``resolution_version``, where given, is such a release too, and a
+  ``resolved`` entry must give it: it is the version whose fix the entry
+  claims.  A ``resolved`` range's ``<FIX`` must *be* that version --
+  ``>=0.1.0, <0.2.0`` on an entry fixed in 0.4.0 says 0.2.0 to 0.3.1 were
+  never affected, and the SOUP table printed it as harmless drift.
+
+The released versions are the dated section headings of ``CHANGELOG.md``
+(``## [0.3.1] - 2026-06-22``), read by :func:`released_versions`.  Not
+``git tag``: CI's compliance job checks out without tags, and a rule that
+silently loosened there would verify less on the one machine whose result
+is cited.  ``tests/compliance/test_gate_scripts.py`` holds the headings to
+the ``v*`` tags wherever the tags are present.
 
 An empty or missing range, an unparseable one, a missing or non-PEP 440
 ``maddening_version``, a registry with no anomalies and an unimportable
@@ -49,6 +67,7 @@ because pytest (``packaging>=22``) and matplotlib depend on it.
 
 import argparse
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -107,16 +126,79 @@ _RANGE_OPERATORS = (">=", "<")
 _CONVENTION = ("see the affected_versions convention in the header of "
                "docs/validation/known_anomalies.yaml")
 
+#: The release record the released versions are read from.
+CHANGELOG = os.path.join(_REPO_ROOT, "CHANGELOG.md")
 
-def _range_errors_for(aid, status, text, current, resolved_in, sp):
+#: A released version's section heading: ``## [0.3.1] - 2026-06-22``.
+#: ``## [Unreleased]`` carries no date and is not a release.
+_RELEASE_HEADING = re.compile(
+    r"^## \[(?P<version>[^\]]+)\] - (?P<date>\d{4}-\d{2}-\d{2})\s*$", re.M)
+
+
+def released_versions(changelog=CHANGELOG):
+    """The versions MADDENING has released, from ``CHANGELOG.md``.
+
+    Returns ``(versions, error)``: the version strings of every dated
+    ``## [X.Y.Z] - YYYY-MM-DD`` heading, newest first as the file lists
+    them, and ``None`` -- or ``((), message)`` when the file cannot be read
+    or holds no dated heading, which callers must treat as a failure: an
+    empty release list would refuse every range, and a missing one must
+    not be read as "anything goes".
+    """
+    try:
+        with open(changelog, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return (), (f"the released versions cannot be read from {changelog} "
+                    f"({exc}), so no affected_versions bound can be checked "
+                    f"against them")
+    found = tuple(m.group("version") for m in _RELEASE_HEADING.finditer(text))
+    if not found:
+        return (), (f"{changelog} has no dated '## [X.Y.Z] - YYYY-MM-DD' "
+                    f"release heading, so no affected_versions bound can be "
+                    f"checked against a released version")
+    return found, None
+
+
+def _range_errors_for(aid, status, text, current, resolved_in, sp, released):
     """Every way one entry's ``affected_versions`` breaks the convention.
 
     ``sp`` is ``(SpecifierSet, InvalidSpecifier, Version, InvalidVersion)``
     from ``packaging``, passed in so the import happens -- and fails
-    closed -- in exactly one place.
+    closed -- in exactly one place.  ``released`` is the set of released
+    :class:`~packaging.version.Version` objects (:func:`released_versions`).
     """
     SpecifierSet, InvalidSpecifier, Version, InvalidVersion = sp
 
+    # The versions a bound may name.  FIX: a release, or the one this cycle
+    # is building towards.  FIRST: those, or the first development build of
+    # any of them -- a defect introduced during a cycle starts at X.Y.Z.dev0,
+    # and keeps that spelling after X.Y.Z ships.
+    cycle = Version(current.base_version)
+    fix_ok = frozenset(released) | {cycle}
+    first_ok = fix_ok | {Version(f"{v.base_version}.dev0") for v in fix_ok}
+    listed = ", ".join(str(v) for v in sorted(released))
+
+    def not_a_release(role, version, allowed):
+        return (f"{aid}: {role} {version} is not a version MADDENING released "
+                f"({listed}, from CHANGELOG.md's dated headings) nor {allowed}; "
+                f"a bound names a version somebody could install; "
+                f"{_CONVENTION}")
+
+    fixed = None
+    errors = []
+    if resolved_in not in (None, ""):
+        try:
+            fixed = Version(str(resolved_in))
+        except InvalidVersion:
+            return [f"{aid}: resolution_version {resolved_in!r} is not a PEP "
+                    f"440 version"]
+        if fixed not in fix_ok:
+            errors.append(not_a_release(
+                "resolution_version", fixed,
+                f"{cycle}, the release this cycle is building towards"))
+
+    fix = None
     if text == EMPTY_RANGE:
         def admits(_version):
             return False
@@ -157,6 +239,20 @@ def _range_errors_for(aid, status, text, current, resolved_in, sp):
                     f"('>={Version(first.base_version)}.dev0'), which PEP 440 "
                     f"orders before every pre-release of {first.base_version}; "
                     f"{_CONVENTION}"]
+        # Reported beside, not instead of, the status rules below: a bound
+        # that names no release is one defect, and the range can still
+        # disagree with its status as well.
+        if first not in first_ok:
+            errors.append(not_a_release(
+                "affected_versions FIRST", first,
+                f"the first development build of one or of this cycle "
+                f"('X.Y.Z.dev0', e.g. '{cycle}.dev0')"))
+        if by_op.get("<"):
+            fix = Version(by_op["<"][0].version)
+            if fix not in fix_ok:
+                errors.append(not_a_release(
+                    "affected_versions FIX", fix,
+                    f"{cycle}, the release this cycle is building towards"))
 
         def admits(version):
             return spec.contains(version, prereleases=True)
@@ -164,9 +260,8 @@ def _range_errors_for(aid, status, text, current, resolved_in, sp):
         shown = repr(text)
 
     if status in _STATUSES_NOT_COMPARED:
-        return []
+        return errors
 
-    errors = []
     if status in _STATUSES_RESOLVED:
         if admits(current):
             errors.append(
@@ -175,17 +270,23 @@ def _range_errors_for(aid, status, text, current, resolved_in, sp):
                 f"describes -- the range says the defect is still here.  Close "
                 f"it at the release that carries the fix ('>=FIRST, <FIX'), or "
                 f"reopen the entry; {_CONVENTION}")
-        if resolved_in not in (None, ""):
-            try:
-                fixed = Version(str(resolved_in))
-            except InvalidVersion:
-                errors.append(f"{aid}: resolution_version {resolved_in!r} is "
-                              f"not a PEP 440 version")
-            else:
-                if admits(fixed):
-                    errors.append(
-                        f"{aid}: resolution_version is {fixed}, but "
-                        f"affected_versions {shown} admits {fixed}")
+        if fixed is None:
+            errors.append(
+                f"{aid}: resolution_status is {status!r} but no "
+                f"resolution_version says which release carries the fix, so "
+                f"the range's '<FIX' cannot be checked against it; add it")
+        else:
+            if admits(fixed):
+                errors.append(
+                    f"{aid}: resolution_version is {fixed}, but "
+                    f"affected_versions {shown} admits {fixed}")
+            if fix is not None and fix != fixed:
+                errors.append(
+                    f"{aid}: affected_versions {shown} closes at {fix}, but "
+                    f"resolution_version says the fix is in {fixed}.  '<FIX' "
+                    f"is the release that carries the fix, so the two are one "
+                    f"version; a range closing early says the releases in "
+                    f"between were never affected; {_CONVENTION}")
         return errors
 
     if not admits(current):
@@ -199,7 +300,7 @@ def _range_errors_for(aid, status, text, current, resolved_in, sp):
     return errors
 
 
-def version_range_errors(registry):
+def version_range_errors(registry, released=None):
     """Check every ``affected_versions`` against the registry's own version.
 
     The one implementation of the convention in this module's docstring;
@@ -215,6 +316,12 @@ def version_range_errors(registry):
     empty registry, a missing or non-PEP 440 ``maddening_version``, a
     missing or unparseable range, or an unimportable ``packaging`` is an
     error, never a pass.
+
+    ``released`` is the list of version strings MADDENING has released;
+    ``None`` reads it from ``CHANGELOG.md`` (:func:`released_versions`),
+    which is what both callers do.  Tests pass it to describe a registry
+    at another point in the project's history.  An unreadable or empty
+    list fails closed.
     """
     try:
         from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -224,6 +331,19 @@ def version_range_errors(registry):
                 f"library is not importable ({exc}).  Install it; do not "
                 f"skip the check."]
     sp = (SpecifierSet, InvalidSpecifier, Version, InvalidVersion)
+
+    if released is None:
+        released, problem = released_versions()
+        if problem:
+            return [problem]
+    if not released:
+        return ["no released versions were given, so no affected_versions "
+                "bound can be checked against a released version"]
+    try:
+        released_set = frozenset(Version(str(v)) for v in released)
+    except InvalidVersion as exc:
+        return [f"a released version is not a PEP 440 version ({exc}); fix "
+                f"the CHANGELOG.md heading it came from"]
 
     if not isinstance(registry, dict):
         return ["the registry is not a YAML mapping, so no affected_versions "
@@ -260,7 +380,7 @@ def version_range_errors(registry):
             continue
         errors += _range_errors_for(
             aid, a.get("resolution_status"), raw.strip(), current,
-            a.get("resolution_version"), sp,
+            a.get("resolution_version"), sp, released_set,
         )
     return errors
 

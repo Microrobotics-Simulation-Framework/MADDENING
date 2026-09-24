@@ -246,6 +246,7 @@ def test_a_closed_range_is_allowed_once_the_defect_is_gone(status):
     registry = {"maddening_version": "0.4.0.dev0", "anomalies": [{
         "anomaly_id": "MADD-ANO-999",
         "resolution_status": status,
+        "resolution_version": "0.4.0",
         "affected_versions": ">=0.3.0, <0.4.0",
     }]}
     assert gen._check_version_ranges(registry) == []

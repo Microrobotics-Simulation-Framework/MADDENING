@@ -1253,6 +1253,7 @@ anomalies:
     safety_relevance: "context_dependent"
     safety_relevance_rationale: "Test"
     resolution_status: "{status}"
+    resolution_version: "0.4.0"
     affected_versions: "{versions}"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
@@ -1595,6 +1596,13 @@ class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
         assert "MADD-ANO-016" in result.stderr
 
 
+#: MADDENING's releases before 0.4.0, as CHANGELOG.md's dated headings list
+#: them -- the history ``TestTheVersionRangeRule`` is written against, so a
+#: test that describes a registry at another version can say what had been
+#: released by then.
+_RELEASED = ("0.1.0", "0.2.0", "0.2.1", "0.3.0", "0.3.1")
+
+
 class TestTheVersionRangeRule:
     """``version_range_errors`` directly: the PEP 440 edges the convention
     is written around, which the gate runs above only exercise at one
@@ -1624,11 +1632,14 @@ class TestTheVersionRangeRule:
     def test_a_range_closed_at_the_fix_leaves_out_its_dev_builds(
         self, anomalies_gate, version
     ):
-        """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases."""
+        """PEP 440: ``<0.4.0`` excludes 0.4.0's own pre-releases.
+
+        At 0.4.1 the fix is a past release, so the release list says so."""
         registry = self._registry(
             version, ("resolved", ">=0.1.0, <0.4.0",
                       {"resolution_version": "0.4.0"}))
-        assert anomalies_gate.version_range_errors(registry) == []
+        released = _RELEASED + (("0.4.0",) if version == "0.4.1" else ())
+        assert anomalies_gate.version_range_errors(registry, released) == []
 
     def test_a_resolved_range_that_admits_its_resolution_version_fails(self, anomalies_gate):
         registry = self._registry(
@@ -1638,13 +1649,18 @@ class TestTheVersionRangeRule:
         assert any("resolution_version is 0.4.0" in e for e in errors), errors
 
     def test_a_resolved_range_read_by_an_older_registry_is_reachable(self, anomalies_gate):
-        """The same entry, on a registry at 0.3.1, says 0.3.1 is affected."""
-        registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0", {}))
-        (message,) = anomalies_gate.version_range_errors(registry)
-        assert "admits 0.3.1" in message
+        """The same entry, on a registry at 0.3.1, says 0.3.1 is affected.
+
+        (A 0.3.1 registry could not name 0.4.0 as a release either; that
+        refusal is pinned separately, and this one is about the status.)"""
+        registry = self._registry("0.3.1", ("resolved", ">=0.1.0, <0.4.0",
+                                            {"resolution_version": "0.4.0"}))
+        errors = anomalies_gate.version_range_errors(registry)
+        assert any("admits 0.3.1" in e for e in errors), errors
 
     def test_none_is_the_empty_set(self, anomalies_gate):
-        ok = self._registry("0.4.0.dev0", ("resolved", "none", {}))
+        ok = self._registry("0.4.0.dev0", ("resolved", "none",
+                                           {"resolution_version": "0.4.0"}))
         assert anomalies_gate.version_range_errors(ok) == []
         for status in ("open", "partially_resolved", "wont_fix", "fixed?"):
             bad = self._registry("0.4.0.dev0", (status, "none", {}))
@@ -1759,6 +1775,146 @@ class TestTheVersionRangeRule:
         registry = yaml.safe_load(
             (REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml").read_text())
         assert anomalies_gate.version_range_errors(registry) == []
+
+    # -- FIRST / FIX name real releases, and <FIX is the resolution_version --
+    #
+    # Each case below was accepted until audit_040_phase3_confirm
+    # (release-record, repro_gate_version_range.py).  Setting MADD-ANO-020 to
+    # ">=0.1.0, <0.2.0" while its fix is in 0.4.0 exited 0, and the SOUP
+    # --check then called the regenerated row harmless drift.
+
+    @pytest.mark.parametrize("status, rng, extra, expected", [
+        ("resolved", ">=0.1.0, <0.2.0", {"resolution_version": "0.4.0"},
+         "closes at 0.2.0, but resolution_version says the fix is in 0.4.0"),
+        ("resolved", ">=0.1.0, <0.3.0", {"resolution_version": "0.4.0"},
+         "closes at 0.3.0, but resolution_version says the fix is in 0.4.0"),
+        ("open", ">=0.0.1", {}, "FIRST 0.0.1 is not a version MADDENING released"),
+        ("resolved", ">=0.1.5, <0.4.0", {"resolution_version": "0.4.0"},
+         "FIRST 0.1.5 is not a version MADDENING released"),
+        ("resolved", ">=0.1.0, <0.3.7", {"resolution_version": "0.4.0"},
+         "FIX 0.3.7 is not a version MADDENING released"),
+        ("open", ">=0.3.1.post1", {},
+         "FIRST 0.3.1.post1 is not a version MADDENING released"),
+        # A cycle starts at .dev0, the convention's one spelling of it.
+        ("open", ">=0.3.0.dev3", {},
+         "FIRST 0.3.0.dev3 is not a version MADDENING released"),
+        ("partially_resolved", ">=0.1.0", {"resolution_version": "0.3.7"},
+         "resolution_version 0.3.7 is not a version MADDENING released"),
+        ("resolved", "none", {"resolution_version": "0.3.7"},
+         "resolution_version 0.3.7 is not a version MADDENING released"),
+    ])
+    def test_a_bound_that_names_no_release_or_disagrees_with_the_fix_fails(
+        self, anomalies_gate, status, rng, extra, expected
+    ):
+        registry = self._registry("0.4.0.dev0", (status, rng, extra))
+        errors = anomalies_gate.version_range_errors(registry, _RELEASED)
+        assert any(expected in e for e in errors), errors
+        assert all(e.startswith("MADD-ANO-001: ") for e in errors), errors
+
+    @pytest.mark.parametrize("rng", [">=0.1.0, <0.4.0", "none"])
+    def test_a_resolved_entry_must_say_which_release_fixed_it(
+        self, anomalies_gate, rng
+    ):
+        """Without ``resolution_version`` the ``<FIX`` tie cannot be checked,
+        so dropping the field would be a way round it."""
+        registry = self._registry("0.4.0.dev0", ("resolved", rng, {}))
+        (message,) = anomalies_gate.version_range_errors(registry, _RELEASED)
+        assert "no resolution_version" in message
+
+    @pytest.mark.parametrize("version, released, rng", [
+        # A cycle-introduced defect keeps its .dev0 spelling after release.
+        ("0.5.0.dev0", _RELEASED + ("0.4.0",), ">=0.4.0.dev0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.3.0.dev0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.4.0.dev0"),
+        ("0.4.0", _RELEASED, ">=0.4.0"),
+        ("0.4.0.dev0", _RELEASED, ">=0.2.1"),
+    ])
+    def test_a_release_or_a_cycles_first_dev_build_is_a_valid_first(
+        self, anomalies_gate, version, released, rng
+    ):
+        registry = self._registry(version, ("open", rng, {}))
+        assert anomalies_gate.version_range_errors(registry, released) == []
+
+    def test_the_fix_may_be_a_past_release(self, anomalies_gate):
+        registry = self._registry("0.4.0.dev0", (
+            "resolved", ">=0.1.0, <0.3.0", {"resolution_version": "0.3.0"}))
+        assert anomalies_gate.version_range_errors(registry, _RELEASED) == []
+
+    @pytest.mark.parametrize("released", [(), ["zero point one"]])
+    def test_an_unusable_release_list_fails_closed(self, anomalies_gate, released):
+        registry = self._registry("0.4.0.dev0", ("open", ">=0.1.0", {}))
+        assert anomalies_gate.version_range_errors(registry, released)
+
+    def test_the_release_list_is_the_changelogs_dated_headings(
+        self, anomalies_gate, tmp_path
+    ):
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n"
+            "### [9.9.9] - 2030-01-01\n\n"          # not a section heading
+            "## [0.2.0] - 2026-05-20\n\n- x\n\n"
+            "## [0.1.5]\n\n"                         # no date: not a release
+            "## [0.1.0] - 2025-03-01\n"
+        )
+        assert anomalies_gate.released_versions(str(changelog)) == (
+            ("0.2.0", "0.1.0"), None)
+
+    @pytest.mark.parametrize("text", [None, "# Changelog\n\n## [Unreleased]\n"])
+    def test_a_changelog_without_releases_fails_closed(
+        self, anomalies_gate, tmp_path, text
+    ):
+        changelog = tmp_path / "CHANGELOG.md"
+        if text is not None:
+            changelog.write_text(text)
+        released, problem = anomalies_gate.released_versions(str(changelog))
+        assert released == () and problem
+
+    def test_the_changelog_still_lists_every_release_this_file_assumes(
+        self, anomalies_gate
+    ):
+        """Deleting a release heading would make its version unusable as a
+        bound; this pin lives outside the file it guards."""
+        released, problem = anomalies_gate.released_versions()
+        assert problem is None
+        assert set(_RELEASED) <= set(released), released
+
+    def test_the_changelogs_releases_are_the_release_tags(self, anomalies_gate):
+        """The CHANGELOG is the source because CI's compliance job has no
+        tags; wherever tags *are* present, the two must agree -- a heading
+        with no tag names a release nobody made."""
+        tags = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "tag", "-l", "v[0-9]*"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        if not tags:
+            pytest.skip("this checkout has no v* tags (CI's compliance job "
+                        "checks out without history); the CHANGELOG headings "
+                        "are compared with the tags wherever they exist")
+        released, problem = anomalies_gate.released_versions()
+        assert problem is None
+        assert sorted(released) == sorted(t[1:] for t in tags)
+
+    def test_the_audits_shifted_fix_fails_the_gate_run(self, tmp_path):
+        """MADD-ANO-020 closed at 0.2.0 while its fix is in 0.4.0."""
+        path = _shipped_registry_with(
+            tmp_path, _set_range("MADD-ANO-020", ">=0.1.0, <0.2.0"))
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-020" in result.stderr
+        assert "closes at 0.2.0" in result.stderr
+
+    def test_dropping_the_resolution_version_fails_the_gate_run(self, tmp_path):
+        def drop(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-020")
+            entry.pop("resolution_version")
+        path = _shipped_registry_with(tmp_path, drop)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT), "--no-resolve")
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-020" in result.stderr
+        assert "no resolution_version" in result.stderr
 
 
 class TestTransformGateConstantBinding:

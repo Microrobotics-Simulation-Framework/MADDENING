@@ -176,8 +176,8 @@ class _Branchy(SimulationNode):
 
     ``e_scan`` and ``e_while`` are the other direction: each reaches the
     output only on its loop's *second* iteration, through carries that are
-    themselves discarded (``w -> u -> x``), and ``k_cond`` is read only by
-    a while loop's condition.  A walk that read a loop body as a single
+    themselves discarded (``w -> u -> x``), and ``k_cond`` rides a while
+    carry that only the loop's condition reads.  A walk that read a loop body as a single
     call -- no fixed point over the carries -- or ignored the condition
     would report them dead, and the graph would refuse a write the step
     does read.  One parameter per loop, so each loop is pinned alone."""
@@ -206,8 +206,10 @@ class _Branchy(SimulationNode):
             lambda v: v[3] < 2,
             lambda v: (v[0] + v[1], v[2] * 1.0, v[2] + 0.0, v[3] + 1),
             (x, zero, p["e_while"], 0))[0]
-        x = jax.lax.while_loop(lambda v: v[1] < p["k_cond"],
-                               lambda v: (v[0] * 1.5, v[1] + 1.0), (x, zero))[0]
+        # ``k_cond`` rides a carry that only the condition reads.
+        x = jax.lax.while_loop(lambda v: v[1] < v[2],
+                               lambda v: (v[0] * 1.5, v[1] + 1.0, v[2] * 1.0),
+                               (x, zero, p["k_cond"]))[0]
         return {"x": x}
 
 

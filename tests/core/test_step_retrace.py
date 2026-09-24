@@ -145,7 +145,12 @@ def test_reset_state_zeroes_coupling_diagnostics_and_warm_start():
     gm.reset_state()
     meta = gm._state["_meta"]
     assert all(float(jnp.max(jnp.abs(meta[k]))) == 0 for k in meta if k.endswith("_V"))
-    assert gm.coupling_diagnostics()["a+b"]["iterations"] == 0
+    # The counter is zeroed -- the slot is kept, so the scan carry keeps
+    # its structure -- and a group that has not stepped since the reset
+    # has no entry in the report (``coupling_diagnostics`` documents an
+    # empty dict until something has run).
+    assert int(meta["coupling_a+b_iterations"]) == 0
+    assert "a+b" not in gm.coupling_diagnostics()
     for _ in range(3):
         gm.step()
     assert _cache_size(gm) == 1 and gm.coupling_diagnostics()["a+b"]["converged"]

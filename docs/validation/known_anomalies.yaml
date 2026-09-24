@@ -33,6 +33,11 @@
 #     (">=0.4.0.dev0, <0.4.0", which two entries used to carry for this,
 #     admits no version at all -- it read as a window and was empty.)
 #   * duplicate: parsed but not compared; the range lives on the other entry.
+#   * FIRST, FIX and resolution_version name versions somebody could install:
+#     a release (a dated "## [X.Y.Z] - YYYY-MM-DD" heading in CHANGELOG.md),
+#     or this cycle's own release ("0.4.0" at 0.4.0.dev0).  FIRST may also be
+#     the first development build of either (">=0.4.0.dev0").
+#   * resolved: resolution_version is required, and "<FIX" is that version.
 #
 #   An empty or unparseable range fails the gate, as does a missing one.
 schema_version: "1.0"
@@ -85,6 +90,7 @@ anomalies:
     affected_versions: ">=0.1.0, <0.4.0"
     workaround: "Use CPU backend: set JAX_PLATFORMS=cpu environment variable"
     resolution_status: "resolved"
+    resolution_version: "0.4.0"
     verification:
       # The resolution is the dependency floor, so the evidence is the
       # pin on the floor: lowering jax/jaxlib back over 0.5.1 fails the

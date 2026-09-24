@@ -3981,6 +3981,41 @@ class GraphManager:
         self._node_reads[owner] = (gen, node, reads)
         return reads
 
+    def _param_leaves_the_step_cannot_read(self) -> dict[tuple[str, str], str]:
+        """``{(node, key): reason}`` for every leaf of ``params["nodes"]``
+        that a write to the pytree alone could not change the step for.
+
+        A leaf a ``static_data_deps`` entry names (the step reads the static
+        built from it), and -- when the compiled step can be traced -- a
+        leaf no operation of the compiled step takes as an input.  Unlike
+        :meth:`_baked_leaf_reason` this does *not* spare a latent leaf the
+        node's own hooks would read with an input this graph does not
+        connect (a ball's ``elasticity`` without a table edge): it answers
+        for a frozen graph, which is what an exported FMU is -- no edge can
+        be added to one, so such a leaf is a knob that does nothing.  Used
+        by :func:`maddening.fmi.model_description.build_model_description`
+        and the FMI sidecar, which write the pytree and nothing else.
+        """
+        reads = self._params_read_by_step()
+        out: dict[tuple[str, str], str] = {}
+        for owner, leaves in (self.params.get("nodes") or {}).items():
+            spec = self._nodes.get(owner)
+            if spec is None or not spec.accepts_params or not isinstance(leaves, dict):
+                continue
+            for key in leaves:
+                reason = _static_deps_reason(spec.node, key)
+                if reason is None and reads is not None and (owner, key) not in reads:
+                    reason = (
+                        "no operation of the compiled step takes it as an "
+                        "input (an initial condition, which only "
+                        "initial_state() reads; a value the node consumed "
+                        "when it was constructed; or one only an input this "
+                        "graph does not connect would read)"
+                    )
+                if reason is not None:
+                    out[(owner, key)] = reason
+        return out
+
     def _unused_node_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
         """Why a write of ``params[key] = value`` to node ``owner`` that
         reaches the node itself -- ``node.params`` and, for a leaf of the

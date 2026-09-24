@@ -70,13 +70,14 @@ WRITABLE: dict[str, tuple[float, float]] = {
     "spring.anchor_position": (-3.0, 3.0),
     # parameters; the ranges respect the ParamSpec bounds the sidecar
     # enforces and keep the explicit integrator stable at DT
-    "table.params.position": (-5.0, 5.0),
     "spring.params.stiffness": (0.5, 100.0),
     "spring.params.damping": (0.0, 5.0),
     "spring.params.mass": (0.5, 10.0),
     "spring.params.rest_length": (0.0, 3.0),
-    "spring.params.initial_position": (-2.0, 2.0),
-    "spring.params.initial_velocity": (-2.0, 2.0),
+    # Not ``table.params.position`` or ``spring.params.initial_*``: the step
+    # never reads them (the initial state is built already), so the FMU does
+    # not export them -- an importer could not tell that the value it set
+    # and read back was never used.
 }
 
 READ_ONLY = ("time", "table.position", "spring.position", "spring.velocity")

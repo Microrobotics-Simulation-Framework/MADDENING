@@ -109,7 +109,7 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
-from maddening.fmi.sidecar import FmuSidecar
+from maddening.fmi.sidecar import FmuSidecar, not_tunable_error
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
 
@@ -455,6 +455,24 @@ class FmuTcpBridge:
         self._time = 0.0
         self._initial_state = _copy_tree(sidecar.state)
         self._initial_params = _copy_tree(sidecar.params)
+        # The description is the FMU's contract: a graph parameter it does
+        # not export as a tunable variable is one the step cannot read (see
+        # ModelDescription.fixed_parameters), and no door into the sidecar's
+        # parameter tree -- set, set_state, or the sidecar's own set_params
+        # -- may install a new value for it.  Applied to the sidecar here,
+        # however it was configured, so an FMU never reports a value it
+        # does not compute with.
+        exported = {v.name for v in model_description.variables
+                    if v.causality == "parameter"}
+        fixed = dict(getattr(model_description, "fixed_parameters", {}) or {})
+        for owner, leaves in ((sidecar.params or {}).get("nodes") or {}).items():
+            for key in leaves:
+                name = f"{owner}.params.{key}"
+                if name not in exported:
+                    fixed.setdefault(
+                        name, "it is not a tunable parameter variable of this "
+                              "FMU's model description")
+        sidecar._refuse_new_values_for(fixed)             # noqa: SLF001
         self._busy = threading.Lock()                     # one instance per bridge
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1066,6 +1084,18 @@ class FmuTcpBridge:
             if not np.isfinite(t):
                 raise ValueError("FMU state carries a non-finite time")
         if new_params is not None:
+            # A parameter the step cannot read may not change through the
+            # archive either (``set`` cannot address it at all).
+            fixed = self._sidecar.fixed_params
+            live_nodes = (self._sidecar.params or {}).get("nodes", {})
+            for name, reason in fixed.items():
+                owner, _, key = name.partition(".params.")
+                if key not in live_nodes.get(owner, {}):
+                    continue
+                current = np.asarray(live_nodes[owner][key])
+                restored = np.asarray(new_params["nodes"][owner][key])
+                if restored.shape != current.shape or not np.array_equal(restored, current):
+                    raise not_tunable_error(name, reason, current)
             # The bounds the model description advertises, applied to the
             # archive exactly as ``set`` applies them through
             # ``FmuSidecar.set_params``.  Without this an importer could

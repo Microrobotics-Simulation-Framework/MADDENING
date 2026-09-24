@@ -366,7 +366,15 @@ anomalies:
       not applied: converged and the iteration counts are unchanged.
       spectral_usable says whether the bound is finite and the Krylov space
       had settled; fori, diagnostics=False and max_iterations=1 report NaN
-      and False, never a number.
+      and False, never a number.  Before release a context-free audit of
+      the key found it could read below the distance it bounds with
+      spectral_usable=True in three ways, each fixed and pinned: a residual
+      the Krylov space did not contain (a repeated eigenvalue broke the
+      one-vector space down early; the space now continues from the
+      residual, 0.92x -> 1.05x); a dead-banded field on the coupling loop,
+      weighted zero, which cut the loop out of the spectrum (rho_spectral
+      0.000 for 0.9; it now keeps its own magnitude's weight, 0.15x ->
+      2.8x); and the float32 floor, below.
       Under the same gate gradient_relative_error_bound bounds the relative
       error of the IFT gradient that comes from the forward stopping at the
       returned iterate instead of the fixed point: spectral_error_bound's
@@ -384,11 +392,34 @@ anomalies:
       0.0 while the state is 1.1e-2 from the fixed point with
       converged=True, and the returned value and gradient are then
       mutually inconsistent -- spectral_error_bound, not this key, is what
-      reports the solve.  The reported keys are exactly
+      reports the solve.  Beyond the leading-order regime a
+      Newton-Kantorovich check scales it by 1/sqrt(1 - 2h) and makes it
+      inf, unusable, at h >= 1/2 (at F'(x*) = 0.99 and 0.65-4.5% from the
+      fixed point it had read 0.20-0.96x the true error).
+      A stalled float32 iterate is the case converged cannot see, and it
+      is a statement about the criterion, not only about the bound: when
+      (1 - rho)|x - x*| falls below half an ulp, a pass changes nothing,
+      F(x) == x bitwise, the residual is exactly 0.0, and converged --
+      and strict_convergence -- report success although the state can be
+      far from the fixed point.  Measured (jaxlib 0.11.0, float32, a
+      fresh graph through gm.step()): a relay contracting at 0.99999,
+      started 0.3% short of its fixed point, stops after one pass with
+      residual=0.0 and converged=True at 38 348 ulps, a relative distance
+      of 4.2e-3 against a tolerance of 1e-6, its IFT gradient 3.0e-3 off.
+      The criterion is deliberately unchanged, because a precision floor
+      in it would make tight float32 tolerances unreachable.  The bound
+      keys are where a user sees it: spectral_error_bound adds the
+      residual's float resolution before amplifying it (4 units of
+      eps * max|field| per entry the norm reads; it read 0.0 on that
+      state and now reads 9.4e-2), the gradient bound's distance carries
+      the same floor, and precision_limited reports that the residual is
+      at it.  Planned 0.5.0 work, not a promise of this release:
+      strict_convergence consulting the spectral bound when diagnostics
+      are on.  The reported keys are exactly
       ['amplification', 'converged', 'error_estimate',
       'gradient_bound_usable', 'gradient_error_estimate',
-      'gradient_relative_error_bound', 'iterations', 'ratio_usable',
-      'residual', 'rho_spectral', 'spectral_error_bound',
+      'gradient_relative_error_bound', 'iterations', 'precision_limited',
+      'ratio_usable', 'residual', 'rho_spectral', 'spectral_error_bound',
       'spectral_usable'].
     severity: "minor"
     safety_relevance: "context_dependent"
@@ -502,10 +533,13 @@ anomalies:
       exact to float32 on a log map within tolerance of its fixed point,
       an estimate far from one, and nothing checks linearity.  It is
       taken in the group's norm at the returned state, so the dead band's
-      excluded fields are outside it, the interface norm's bound is over
-      the interface fields only, and it inherits residual's float32
-      floor (0.991x once on a 60 000-entry L2 norm; a residual of 0.0
-      gives a bound of 0.0).  A group with more than eight independent
+      excluded fields are outside what it bounds and the interface norm's
+      bound is over the interface fields only; its float floor is a model
+      of the map's rounding (PRECISION_FLOOR_ULPS), which a node that
+      cancels catastrophically inside its own update can exceed; and on a
+      stalled float32 iterate it is the floor times the amplification --
+      what float32 can resolve about a group that slow -- while converged
+      reads True (see the description).  A group with more than eight independent
       interface scalars gets rho_spectral from below, a margin of twice
       the Arnoldi residual on it, and spectral_usable=False.  Evidence:
       the 2026-09-22 section of
@@ -513,7 +547,9 @@ anomalies:
       gradient_relative_error_bound inherits all of that and adds three
       conditions of its own.  It is leading-order in the distance: the
       curvature is measured over the Newton correction and extrapolated
-      linearly to spectral_error_bound's distance.  It is relative to the
+      linearly to spectral_error_bound's distance, and the
+      Newton-Kantorovich check that scales it or declares it unusable
+      estimates the Jacobian's variation along that one direction only.  It is relative to the
       norm of the tangent for one probe per floating constant, so a
       field-valued constant is probed along one random direction, and a
       scalar loss whose gradient nearly cancels across the state can carry
@@ -543,6 +579,11 @@ anomalies:
       - "tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_anomaly_registry_quotes_the_reported_keys_exactly"
+      - "tests/core/test_coupling_precision_floor.py::test_a_stalled_float32_iterate_is_not_reported_at_its_fixed_point"
+      - "tests/core/test_coupling_report_flags_read_their_conditions.py::test_converged_reads_the_error_estimate_not_the_residual"
+      - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space"
+      - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"
@@ -2028,6 +2069,27 @@ anomalies:
       the `expensive-pair` fixture baseline pass without modification,
       and a field that is exactly zero still leaves the dead band as
       before.
+      Two further routes to the same verdict were found by the
+      pre-release audit and are closed.  A norm only sees the fields it
+      reads, so under `convergence_norm="interface"` a `NaN` or `inf` in
+      a field no edge reads -- entering from the initial state, a
+      parameter or an external input -- left the residual finite:
+      `converged=True`, `strict_convergence` silent, `spectral_usable`
+      True, on a state that was not finite.  The verdict is now taken
+      over every floating field of the returned state, on both solvers
+      and at `max_iterations=1`: a non-finite one makes the residual
+      `inf` and rejects the ratio, as the norms already did for a field
+      they read, and all three routes now read `converged=False` and
+      raise under `strict_convergence`.  And at the *underflow* end of
+      the range the `mixed` and `interface` scale `rtol * max|v|` is
+      subnormal for a field below `finfo.tiny / rtol` (about `1.2e-32`
+      at `rtol=1e-6`); flushed to zero it made the field inactive, and a
+      field at `1e-33` read `iterations=1, residual=0.0, converged=True`
+      at 90% from its fixed point.  Such a field (above the dead band, a
+      normal magnitude) is now measured on the pair rescaled by
+      `1 / finfo.tiny`, an exact power of two -- the same quotient,
+      formed where every operand is normal -- so it converges exactly as
+      the same group three decades larger does.
       What remains, and why it is a boundary rather than an instance.
       (1) The range rule is deliberately conservative: a float32 field
       whose magnitude is within a factor of about four of overflow
@@ -2035,14 +2097,21 @@ anomalies:
       constant.  No simulation state lives there on purpose, and the
       alternative -- depending on how each backend lowers a divide --
       is what produced the defect.  In float64 the threshold is
-      `4.5e307`.  (2) `strict_convergence` is documented as read only
+      `4.5e307`.  At the other end a field whose magnitude is itself
+      subnormal (below `1.18e-38` in float32) is below what the dtype
+      resolves, reads as zero on a flush-to-zero backend, and leaves the
+      norm as a field at zero does.  (2) `strict_convergence` is documented as read only
       under `solver="ift"`; under `"fori"` it is inert and warns, as
       before, so a `fori` group reports the divergence through
-      `coupling_diagnostics()` only.  (3) The IFT spectral diagnostics'
-      per-field weights (`_norm_weights`) still give a non-finite field
-      weight zero; the spectral keys are already `NaN` and
-      `spectral_usable=False` on such a step, and they describe a
-      Jacobian at a state that no longer exists.  (4) The dead band's
+      `coupling_diagnostics()` only.  (3) On a non-finite state the IFT
+      spectral triple and the gradient bound are not computed: both sit
+      behind a `lax.cond` on the state's finiteness and read `NaN`, with
+      `spectral_usable=False` and `gradient_bound_usable=False`.  Until
+      the audit this text said the spectral keys were "already NaN"; they
+      were not -- `rho_spectral` read `0.0` on this entry's own diverging
+      reproducer (a radius that reads as "contracts instantly") and `0.5`
+      with a single NaN field -- only `spectral_error_bound` was NaN,
+      through the residual.  (4) The dead band's
       semantics for finite fields are exactly as MADD-ANO-005 left them:
       a field inside `atol` is at zero and leaves the norm; the caller
       still owns that number.  No tagged release carried the defect: it
@@ -2056,6 +2125,9 @@ anomalies:
       - "tests/core/test_coupling_non_finite_state.py::test_the_dead_band_still_drops_a_field_that_is_exactly_zero"
       - "tests/core/test_coupling_non_finite_state.py::test_a_finite_field_is_bit_identical_through_the_guard"
       - "tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf"
+      - "tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state"
+      - "tests/core/test_coupling_non_finite_state.py::test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-020"

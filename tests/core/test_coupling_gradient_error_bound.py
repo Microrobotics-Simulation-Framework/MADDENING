@@ -543,6 +543,101 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
 
 
 # ---------------------------------------------------------------------------
+# Outside the leading-order regime: the Kantorovich check
+# ---------------------------------------------------------------------------
+
+
+class _StartedSquare(SimulationNode):
+    """``x <- a + g u**2`` (or the relay ``x <- u``) started at ``x0``."""
+
+    def __init__(self, name, a, g, x0, relay=False):
+        super().__init__(name=name, timestep=1.0, a=jnp.float32(a), g=jnp.float32(g))
+        self._x0 = x0
+        self._relay = relay
+
+    def initial_state(self):
+        return {"x": jnp.float32(self._x0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        u = boundary_inputs["u"]
+        return {"x": u if self._relay else p["a"] + p["g"] * u * u}
+
+
+#: ``F'(x*) = 0.99``: the gap ``1 - F'`` is 0.01 at the fixed point and
+#: 0.055 at 4.5% short of it, so the resolvent the adjoint uses there is
+#: 5.5x smaller than the fixed point's -- the leading-order term is not
+#: the whole error, and the uncorrected bound read 0.20-0.96x it.
+_STIFF_SLOPE, _STIFF_G = 0.99, 0.25
+_STIFF_A = (1.0 - (1.0 - _STIFF_SLOPE) ** 2) / (4.0 * _STIFF_G)
+
+
+def _stiff_graph(x0, cap):
+    gm = GraphManager()
+    gm.add_node(_StartedSquare("a", _STIFF_A, _STIFF_G, x0))
+    gm.add_node(_StartedSquare("b", _STIFF_A, _STIFF_G, x0, relay=True))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], diagnostics=True, max_iterations=cap, tolerance=1e-9)
+    gm.compile()
+    return gm
+
+
+def _stiff_fixed_point():
+    a32, g32 = float(jnp.float32(_STIFF_A)), float(jnp.float32(_STIFF_G))
+    x = (1.0 - math.sqrt(1.0 - 4.0 * g32 * a32)) / (2.0 * g32)
+    for _ in range(50):
+        x -= (a32 + g32 * x * x - x) / (2.0 * g32 * x - 1.0)
+    den = 1.0 - 2.0 * g32 * x
+    return x, {"a": 1.0 / den, "g": x * x / den}
+
+
+@pytest.mark.parametrize("start,cap,certified", [
+    (-0.05, 3, False),      # 4.5% short: h ~ 0.58
+    (-0.01, 3, False),      # 1.0% short: h ~ 0.55
+    (-0.05, 100, True),     # 0.70% short: h ~ 0.49
+    (-0.01, 30, True),      # 0.65% short: h ~ 0.48
+])
+def test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes(
+    start, cap, certified,
+):
+    """``h = amp * L * ||delta|| < 1/2``, or no bound.
+
+    Newton-Kantorovich is the check that the linearisation at the
+    returned iterate says anything about the fixed point: below one half
+    it bounds the resolvent there (``amp / sqrt(1 - 2h)``) and the
+    distance, above it nothing measured at ``x_k`` does.  So the bound
+    is ``inf`` and unusable where it fails, and where it passes it holds
+    -- on the four points where the uncorrected bound read 0.20-0.96x
+    the true relative error with the flag ``True``.
+    """
+    x_star, exact = _stiff_fixed_point()
+    x0 = float(jnp.float32(x_star * (1.0 + start)))
+    gm = _stiff_graph(x0, cap)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    if not certified:
+        assert math.isinf(d["gradient_relative_error_bound"]), d
+        assert d["gradient_bound_usable"] is False, d
+        return
+    assert d["gradient_bound_usable"] is True, d
+    g_k = _gradients(functools.partial(_stiff_graph, x0, cap))
+    true = max(abs(float(g_k[p]) - exact[p]) / abs(float(g_k[p])) for p in ("a", "g"))
+    assert true > 0.1, "fixture premise: the gradient is visibly off"
+    assert d["gradient_relative_error_bound"] >= true, (
+        f"bound {d['gradient_relative_error_bound']:.3f} under the true "
+        f"relative error {true:.3f}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Where nothing was computed
 # ---------------------------------------------------------------------------
 
@@ -571,17 +666,20 @@ def test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed(
 
 
 def test_before_a_step_and_after_reset_state_the_gradient_bound_is_nan():
-    """Seeded NaN by ``compile()``, and put back to NaN, not 0.0, by a reset."""
+    """Seeded NaN by ``compile()``, and put back to NaN, not 0.0, by a reset.
+
+    Neither is reported -- a group that has not stepped has no entry --
+    so the slot is read where the next step's carry will find it.
+    """
     gm = _curved_graph("log", max_iterations=4)
-    d = gm.coupling_diagnostics()["a+b"]
-    assert math.isnan(d["gradient_relative_error_bound"]), d
-    assert d["gradient_bound_usable"] is False
+    slot = "coupling_a+b_gradient_relative_error_bound"
+    assert "a+b" not in gm.coupling_diagnostics()
+    assert math.isnan(float(gm._state["_meta"][slot]))
     gm.step()
     assert gm.coupling_diagnostics()["a+b"]["gradient_bound_usable"] is True
     gm.reset_state()
-    d = gm.coupling_diagnostics()["a+b"]
-    assert math.isnan(d["gradient_relative_error_bound"]), d
-    assert d["gradient_bound_usable"] is False
+    assert "a+b" not in gm.coupling_diagnostics()
+    assert math.isnan(float(gm._state["_meta"][slot]))
 
 
 # ---------------------------------------------------------------------------

@@ -692,3 +692,64 @@ def test_the_accelerated_fields_gate_runs_before_the_imvj_warm_start_is_sized():
         accel_mod.flatten_coupled_state = original
 
     assert seen == [], f"the warm start was sized before the gate ran: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Two groups must not share a report key or a ``_meta`` slot
+#
+# A group is keyed by its sorted node names joined with "+", and node
+# names may contain "+".  {"a+b", "c"} and {"a", "b+c"} are both
+# "a+b+c": one ``coupling_diagnostics()`` entry stood for two groups,
+# their carries overwrote each other, and two IQN-IMVJ groups of
+# different interface sizes failed inside the step with a broadcasting
+# ValueError.  Refused at registration.
+# ---------------------------------------------------------------------------
+
+
+def _springs(*names):
+    gm = GraphManager()
+    for name in names:
+        gm.add_node(SpringDamperNode(name, timestep=0.01))
+    return gm
+
+
+def _cycle(gm, p, q):
+    gm.add_edge(source=p, target=q, source_field="position", target_field="anchor_position")
+    gm.add_edge(source=q, target=p, source_field="position", target_field="anchor_position")
+
+
+def test_two_groups_that_would_share_a_diagnostics_key_are_refused():
+    gm = _springs("a+b", "c", "a", "b+c")
+    gm.add_coupling_group(["a+b", "c"])
+    with pytest.raises(ValueError, match=r"would share the diagnostics key 'a\+b\+c'"):
+        gm.add_coupling_group(["a", "b+c"])
+    assert [sorted(g.nodes) for g in gm._coupling_groups] == [["a+b", "c"]], (
+        "a refused group must not be registered"
+    )
+
+
+def test_a_group_whose_key_spells_another_groups_slot_is_refused():
+    """``a+b+c`` plus ``_spectral_residual`` is ``a+b+c_spectral``'s ``_residual``."""
+    gm = _springs("a+b", "c", "a", "b+c_spectral")
+    gm.add_coupling_group(["a+b", "c"])
+    with pytest.raises(ValueError, match="would share the internal state slot"):
+        gm.add_coupling_group(["a", "b+c_spectral"])
+
+
+def test_auto_couple_refuses_colliding_cycles_and_keeps_the_old_groups():
+    gm = _springs("a+b", "c", "a", "b+c", "p", "q")
+    _cycle(gm, "p", "q")
+    gm.add_coupling_group(["p", "q"])
+    _cycle(gm, "a+b", "c")
+    _cycle(gm, "a", "b+c")
+    with pytest.raises(ValueError, match="would share the diagnostics key"):
+        gm.auto_couple()
+    assert [sorted(g.nodes) for g in gm._coupling_groups] == [["p", "q"]]
+
+
+def test_plus_in_a_node_name_is_fine_when_the_keys_differ():
+    """The refusal is about collisions, not about the character."""
+    gm = _springs("a+b", "c", "d", "e")
+    gm.add_coupling_group(["a+b", "c"])
+    gm.add_coupling_group(["d", "e"])
+    assert len(gm._coupling_groups) == 2

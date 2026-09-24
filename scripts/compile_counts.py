@@ -77,6 +77,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 
 # Must precede any JAX import -- see "Pinned environment" above.
@@ -146,7 +147,7 @@ REGENERATE = "python scripts/compile_counts.py"
 # Workloads
 # ---------------------------------------------------------------------------
 #
-# Five shapes, chosen so that each one is the *only* member of the set
+# Six shapes, chosen so that each one is the *only* member of the set
 # that can see some class of regression:
 #
 #   single_spring     the step machinery with essentially no physics in
@@ -169,13 +170,26 @@ REGENERATE = "python scripts/compile_counts.py"
 #                     the halo exchange and its collectives.  A retrace
 #                     or an extra collective here is expensive and
 #                     invisible in the other four.
+#   coupled_diagnostics
+#                     two coupling groups with ``diagnostics=True``, one
+#                     per solver: the ``ift`` group's spectral and
+#                     gradient bounds (Arnoldi, the range basis, the
+#                     per-constant probes) and the ``fori`` group's
+#                     diagnostic carry.  Every other workload runs with
+#                     ``diagnostics=False``, so none of them could see a
+#                     retrace on every diagnostics graph (a ``_meta``
+#                     slot seeded under a different condition from the
+#                     one that writes it, or a counter whose dtype
+#                     drifts on the ``fori`` path) or the Krylov space
+#                     quadrupling in size -- the audit seeded all three
+#                     and the gate passed them.
 #
 # Deliberately not more.  Every change to the coupling solver moves
 # coupled_pair, multirate_coupled and sharded_heat at once, so the
 # baseline already churns on the busiest area of the code; near-duplicate
 # shapes would multiply that churn without covering anything new, and a
 # baseline people regenerate without reading is a baseline that gates
-# nothing.  Deliberately not fewer: drop any one of the five and a whole
+# nothing.  Deliberately not fewer: drop any one of the six and a whole
 # code path -- plumbing, coupling, multi-rate, scan, sharding -- stops
 # being measured.
 
@@ -229,6 +243,28 @@ def _heat_chain() -> GraphManager:
     return gm
 
 
+def _coupled_diagnostics() -> GraphManager:
+    gm = GraphManager()
+    for name, x0 in (("a", 0.0), ("b", 3.0), ("c", 0.0), ("d", 2.0)):
+        gm.add_node(SpringDamperNode(
+            name, 0.01, stiffness=30.0, damping=2.0, initial_position=x0,
+        ))
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.add_edge("b", "a", "position", "anchor_position")
+    gm.add_edge("c", "d", "position", "anchor_position")
+    gm.add_edge("d", "c", "position", "anchor_position")
+    gm.add_coupling_group(["a", "b"], max_iterations=25, tolerance=1e-8,
+                          diagnostics=True)
+    # ``solver="fori"`` is deprecated and says so; it is measured here
+    # precisely because it still ships, so the warning is expected.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        gm.add_coupling_group(["c", "d"], max_iterations=25, tolerance=1e-8,
+                              diagnostics=True, solver="fori")
+    gm.compile()
+    return gm
+
+
 def _sharded_heat() -> GraphManager:
     gm = GraphManager()
     gm.add_node(ShardedStencilNode(
@@ -251,6 +287,7 @@ WORKLOADS: dict[str, tuple] = {
     "multirate_coupled": (_multirate_coupled, 0),
     "heat_chain": (_heat_chain, 16),
     "sharded_heat": (_sharded_heat, 0),
+    "coupled_diagnostics": (_coupled_diagnostics, 0),
 }
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ from maddening.core.coupling.acceleration import (
     _field_reference,
     float_fields_of,
     relaxation_step_scale,
+    residual_precision_floor,
     spectral_error_bound,
     spectral_rate_settled,
     state_float_image,
@@ -333,55 +334,120 @@ def _F_dispatch(step_pure, x, consts):
     return step_pure(x, *consts)[0]
 
 
-def _spectral_rate_at(step_pure, x_star, consts, weights):
+def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
 
     ``weights`` is the flat vector of per-entry factors the group's
     convergence norm multiplies a state change by at ``x_star`` --
     ``1 / max|field|`` on a field the norm reads, ``0`` on one it does
-    not (dead band, or off the interface under the interface norm) --
-    so the Arnoldi iteration runs on ``D J D^+`` and the resolvent norm
-    it reports is the one in the norm the residual is quoted in.  The
-    spectral radius is unchanged by that similarity wherever the
-    weights are non-zero.
+    not (dead band, or off the interface under the interface norm).
+    ``spectral_weights`` is the same vector with the *dead-banded* fields
+    the norm would otherwise read given a positive weight instead of
+    zero -- ``1 / max|field|``, their own magnitude's, as if there were
+    no dead band (``1 / atol`` for a field that is exactly zero); it
+    defaults to ``weights``.  The Arnoldi iteration runs on
+    ``D' J D'^{-1}`` for those weights, so the resolvent norm it reports
+    is in a norm that agrees with the group's on every field the group
+    reads, and the spectral radius is the map's own wherever the weights
+    are positive.
+
+    **Why the dead band does not get weight zero here.**  A field inside
+    the dead band leaves the *residual*; it does not leave the *loop*.
+    Weighted zero, a dead-banded field on the coupling loop -- a small
+    displacement feeding a large stiffness -- zeroed its row and column
+    of ``D J D^+`` and cut the loop out of the spectrum: ``rho_spectral``
+    read ``0.000`` for a map whose spectral radius is ``0.9``, and the
+    bound read 0.15-0.29x the true distance of a field the norm *keeps*
+    with ``spectral_usable=True``.  A positive weight keeps the loop.
+    The bound is still on the group's own norm: ``||e||_{D'} >=
+    ||e_kept||_D`` because the weights agree on the kept fields, and
+    ``||e||_{D'} <= resolvent * ||D' r||``, whose dead-banded part the
+    group's residual does not contain -- so that share is measured here
+    (one evaluation of ``F`` at ``x_star``) and folded in: where it is
+    non-zero the returned ``amplification`` is the factor the bound
+    applies, ``max(resolvent, 1 / (1 - rho_safe)) * sqrt(1 + share**2)``,
+    with ``share`` the dead-banded part of ``D' r`` over the kept part
+    (or over the residual's float floor, where the kept part is below
+    it).  Where it is zero -- no dead-banded field, the usual case --
+    ``amplification`` is the resolvent norm exactly as before.
+
+    **Why the residual is passed into the Krylov space.**  The resolvent
+    norm bounds ``(I - J)^{-1} r`` only for an ``r`` in the invariant
+    space it was computed on, and a space grown from one start vector
+    need not contain the residual (a repeated eigenvalue breaks it down
+    early; a relaxed iterate's residual is not a Jacobian image at all).
+    So ``D' r`` is handed to
+    :func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`
+    as ``v_extra``: the space continues from it at every breakdown and
+    the part it never absorbed is reported as unresolved.  The start
+    vector is still a fixed-seed normal draw, which has a component in
+    every mode, so ``rho`` is the spectral radius of the whole map and
+    not only of the residual's cyclic subspace.
 
     The matvec is the same ``jax.jvp`` of the one-pass map the IFT
     tangent rule builds (see ``_ift_solve_jvp``); it is applied
-    ``SPECTRAL_KRYLOV_STEPS`` times by
-    :func:`~maddening.core.coupling.acceleration.arnoldi_spectral_radius`,
-    which is the whole cost.  The inputs are ``stop_gradient``-ed so
-    the estimate is forward-only bookkeeping like the rest of the
-    diagnostics: under ``jax.grad`` nothing here is linearised, and
-    the adjoint of the step is unchanged by its presence.
-
-    The start vector is a fixed-seed normal draw rather than the
-    residual direction.  It costs no extra evaluation of ``F`` and has
-    a component in every mode, so what is estimated is the spectral
-    radius of the whole map -- an upper bound on the rate of any mode
-    the error happens to live in, which is the conservative side.  A
-    map whose Jacobian has rank ``m`` (the usual coupling case: rank
-    at most the number of boundary scalars crossing the group's
-    edges) has its whole range inside an ``m``-step Krylov space, so
-    a large state does not slow the estimate down or blur it.
+    ``SPECTRAL_KRYLOV_STEPS`` times, which with the one evaluation of
+    ``F`` is the whole cost.  The inputs are ``stop_gradient``-ed so the
+    estimate is forward-only bookkeeping like the rest of the
+    diagnostics: under ``jax.grad`` nothing here is linearised, and the
+    adjoint of the step is unchanged by its presence.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
+        SPECTRAL_MARGIN,
         arnoldi_spectral_radius,
     )
 
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
     d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
-    live = d > 0
-    d_inv = jnp.where(live, 1.0 / jnp.where(live, d, 1.0), 0.0)
+    dw = d if spectral_weights is None else jax.lax.stop_gradient(
+        jnp.asarray(spectral_weights, x_sg.dtype))
 
-    def matvec(v):
-        _, Jv = jax.jvp(
-            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (v * d_inv,)
-        )
-        return d * Jv
+    def spectrum(operands):
+        xx, cc, dd, ww = operands
+        live = ww > 0
+        w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
 
-    v0 = jax.random.normal(jax.random.PRNGKey(0), x_sg.shape, x_sg.dtype)
-    return arnoldi_spectral_radius(matvec, v0)
+        def matvec(v):
+            _, Jv = jax.jvp(
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,), (v * w_inv,)
+            )
+            return ww * Jv
+
+        r_w = ww * (_F_dispatch(step_pure, xx, cc) - xx)
+        v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, xx.dtype)
+        rho, resid, amp = arnoldi_spectral_radius(matvec, v0, v_extra=r_w)
+        # The share of ``D' r`` the group's residual does not see: the
+        # dead-banded fields (weight 0 in ``dd``, positive in ``ww``).
+        kept = dd > 0
+        r_kept = jnp.linalg.norm(jnp.where(kept, r_w, 0.0))
+        r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_w))
+        floor = PRECISION_FLOOR_ULPS * jnp.finfo(xx.dtype).eps * jnp.sqrt(
+            jnp.sum(kept.astype(xx.dtype)))
+        denom = jnp.maximum(r_kept, floor)
+        unread = r_unread > 0
+        share = jnp.where(unread, r_unread / jnp.where(denom > 0, denom, 1.0), 0.0)
+        share = jnp.where(jnp.logical_and(unread, denom <= 0), jnp.inf, share)
+        rho_safe = rho + SPECTRAL_MARGIN * resid
+        contracting = rho_safe < 1
+        radius = jnp.where(contracting, 1.0 / jnp.where(contracting, 1.0 - rho_safe, 1.0),
+                           jnp.inf)
+        folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
+        return rho, resid, jnp.where(unread, folded, amp)
+
+    nan = jnp.full((), jnp.nan, x_sg.dtype)
+    # A Jacobian at a state that has left float range describes nothing
+    # (a spectral radius of 0.0 read there as "contracts instantly"), so
+    # a non-finite state reports the triple as NaN -- "not computed" --
+    # like the gradient bound beside it.  In a branch of its own for the
+    # same reason that one is: compiled as a separate computation, the
+    # Jacobian-vector products cannot share subexpressions with the
+    # forward and so cannot move the state it diagnoses.
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
+        (x_sg, consts_sg, d, dw),
+    )
 
 
 def _probe_direction(c, key):
@@ -459,8 +525,9 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        / (||delta|| * ||t_i||)``, and the reported value is the largest
        over the probes the fixed point responds to (``||t_i|| > 0``).
 
-    ``9 + k + 4 n_c`` Jacobian-vector products in all (at most
-    ``17 + 4 n_c``), ``n_c`` the number of floating constants, which is
+    ``11 + k + 4 n_c`` Jacobian-vector products in all (at most
+    ``19 + 4 n_c``, two of them for the Kantorovich check), ``n_c``
+    the number of floating constants, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
     ``stop_gradient``-ed: forward-only bookkeeping, and the adjoint of
@@ -508,6 +575,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        PRECISION_FLOOR_ULPS,
         ift_gradient_error_bound,
         jacobian_range_basis,
         resolvent_apply,
@@ -552,7 +620,28 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     rows = jnp.arange(len(probed))
     f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
     r_s = s * (f_k[0] - x_sg)
-    delta_s = resolvent_apply(U, M, r_s, matvec(r_s))
+
+    def norm(v):
+        return jnp.linalg.norm(live * v, axis=-1)
+
+    # The residual's float resolution in the norm used below: ``C`` units
+    # of ``eps * max|field|`` per live entry, which the scaling ``s``
+    # makes ``C * eps`` each (see ``residual_precision_floor``, which is
+    # the same quantity in the group's own norm).  It enters twice.  The
+    # distance carries it, so a stalled float32 iterate -- ``F(x) == x``
+    # bitwise, residual ``0.0`` -- is not reported at the fixed point.
+    # And where the residual is not above it, the residual carries no
+    # direction to take the curvature along (it is rounding, or exactly
+    # zero), so a fixed-seed floor-sized vector stands in: its resolvent
+    # image is dominated by the slowest mode, which is where an error the
+    # rounding left behind is amplified to.
+    floor = PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps * jnp.sqrt(jnp.sum(live))
+    floor_dir = (PRECISION_FLOOR_ULPS * jnp.finfo(dtype).eps) * live * jax.random.rademacher(
+        jax.random.PRNGKey(3), x_sg.shape, dtype,
+    )
+    resolved = norm(r_s) > floor
+    r_dir = jnp.where(resolved, r_s, floor_dir)
+    delta_s = resolvent_apply(U, M, r_dir, matvec(r_dir))
     t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
 
     def linearisation(xx, row, ts):
@@ -574,17 +663,23 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # resolvent then amplified into a bound of 2.5e-4 where the true
     # error is exactly zero.
     points = jnp.stack([x_sg, x_sg + delta_s * s_inv])
+    # One extra row beside the probes: the tangent ``delta`` itself with
+    # no constant moved, so its ``G`` is ``J(x) delta`` and the secant of
+    # that row is how much the *Jacobian* changes across the step (see
+    # the leading-order check below).  ``tangent_for`` of an index past
+    # the probes moves no constant.
+    rows_ext = jnp.arange(len(probed) + 1)
+    ts_ext = jnp.concatenate([t_s, delta_s[None]], axis=0)
     G = jax.vmap(
-        lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows, t_s)
+        lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows_ext, ts_ext)
     )(points)
     G = jax.lax.optimization_barrier(G)
-    secant_s = s * (G[1] - G[0])
-
-    def norm(v):
-        return jnp.linalg.norm(live * v, axis=-1)
+    secant_ext = s * (G[1] - G[0])
+    secant_s, jac_secant_s = secant_ext[:-1], secant_ext[-1]
 
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
-    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification)
+    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification,
+                                    floor=floor)
     per_probe = ift_gradient_error_bound(
         amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
     )
@@ -595,7 +690,133 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     responds = norm(t_s) > 0
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
+
+    # **Where the leading-order term is not the whole story.**  The bound
+    # above takes the resolvent and the distance at ``x_k``; the exact
+    # error needs the resolvent at ``x*``, and a distance that holds for
+    # a map whose Jacobian moves.  Newton-Kantorovich supplies both from
+    # what is already measured.  With ``beta = amp`` (the resolvent at
+    # ``x_k``), ``eta = ||delta||`` (the Newton correction) and ``L`` the
+    # Jacobian's Lipschitz constant -- estimated along ``delta`` from
+    # the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| / ||delta||**2``
+    # -- the check is ``h = beta L eta < 1/2``.  Where it holds a fixed
+    # point exists within ``t* = eta (1 - sqrt(1 - 2h)) / h`` of ``x_k``
+    # and ``||(I - J(x*))^{-1}|| <= amp / sqrt(1 - 2h)``, so the bound is
+    # multiplied by ``1 / sqrt(1 - 2h)`` and its distance is the larger
+    # of the spectral bound and ``t*``.  Where it fails, nothing measured
+    # at ``x_k`` bounds the resolvent at the fixed point, and the bound
+    # is ``inf`` -- ``gradient_bound_usable`` False.  ``h`` is exactly
+    # zero on a map whose Jacobian does not depend on the point (the
+    # extra row's secant is then bit-identical zero), so an affine
+    # group's bound is untouched.  Measured on ``x <- a + g u**2`` at
+    # ``F'(x*) = 0.99`` with the forward 0.65-4.5% short of its fixed
+    # point, the uncorrected bound read 0.20-0.96x the true relative
+    # error with the flag True; ``h`` there is 0.48-0.58.
+    step = norm(delta_s)
+    h = jnp.where(
+        step > 0, amp * norm(jac_secant_s) / jnp.where(step > 0, step, 1.0), 0.0,
+    )
+    certified = h < 0.5
+    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
+    t_star = jnp.where(h > 0, step * (1.0 - root) / jnp.where(h > 0, h, 1.0), step)
+    stretch = jnp.where(distance > 0,
+                        jnp.maximum(distance, t_star) / jnp.where(distance > 0, distance, 1.0),
+                        1.0)
+    factor = stretch / jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
+    worst = jnp.where(certified, worst * factor, jnp.full_like(worst, jnp.inf))
     return jnp.where(captured, worst, nan)
+
+
+#: Every ``_meta`` slot a coupling group can own, as the suffix after
+#: ``coupling_<group key>_``.  Read by :func:`_refuse_colliding_group_keys`.
+_GROUP_META_SUFFIXES = (
+    "iterations", "residual", "amplification", "rho_spectral",
+    "spectral_residual", "spectral_amplification",
+    "gradient_relative_error_bound", "V", "W", "pred_count",
+    "pred_0", "pred_1", "pred_2",
+)
+
+
+def _refuse_colliding_group_keys(groups) -> None:
+    """Raise if two coupling groups would share a report key or a ``_meta`` slot.
+
+    A group is keyed by its sorted node names joined with ``"+"`` -- the
+    key ``coupling_diagnostics()`` reports it under, and the prefix of
+    every ``_meta`` slot it owns (diagnostics, IQN-IMVJ warm starts,
+    predictor history).  Node names may themselves contain ``"+"`` (and
+    ``"_"``), so two different groups can produce the same key --
+    ``{"a+b", "c"}`` and ``{"a", "b+c"}`` are both ``a+b+c`` -- or one
+    group's key plus a suffix can spell another's slot (a group keyed
+    ``a+b_spectral`` owns ``coupling_a+b_spectral_residual``, which is
+    ``a+b``'s ``spectral_residual``).  Either way one report stood for
+    two groups and their carries overwrote each other; IQN-IMVJ warm
+    starts of different sizes failed with a broadcasting ``ValueError``
+    deep inside the step.
+
+    Refused here, at registration, rather than keyed differently: every
+    existing report key stays what it was, and the only graphs affected
+    are those that could not have been reported correctly anyway.
+    """
+    seen: dict[str, frozenset] = {}
+    slots: dict[str, frozenset] = {}
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        other = seen.get(key)
+        if other is not None and other != group.nodes:
+            raise ValueError(
+                f"Coupling groups {sorted(other)} and {sorted(group.nodes)} "
+                f"would share the diagnostics key {key!r}: a group is keyed "
+                "by its sorted node names joined with '+', and node names "
+                "may contain '+'.  Rename a node so the two keys differ."
+            )
+        seen[key] = group.nodes
+        for suffix in _GROUP_META_SUFFIXES:
+            slot = f"coupling_{key}_{suffix}"
+            owner = slots.get(slot)
+            if owner is not None and owner != group.nodes:
+                raise ValueError(
+                    f"Coupling groups {sorted(owner)} and {sorted(group.nodes)} "
+                    f"would share the internal state slot {slot!r}: a group's "
+                    "slots are named from its sorted node names joined with "
+                    "'+', and one group's name plus a suffix spells the "
+                    "other's.  Rename a node so the two keys differ."
+                )
+            slots[slot] = group.nodes
+
+
+def _group_state_finite(state, node_names):
+    """Whether every floating field of the group's nodes is finite."""
+    ok = jnp.array(True)
+    for nn in node_names:
+        for v in state[nn].values():
+            v = jnp.asarray(v)
+            if jnp.issubdtype(v.dtype, jnp.floating) and v.size > 0:
+                ok = jnp.logical_and(ok, jnp.all(jnp.isfinite(v)))
+    return ok
+
+
+def _non_finite_reads_as_diverged(state_finite, residual, amplification):
+    """``(residual, amplification)``, reported as diverged on a non-finite state.
+
+    Every norm reports ``inf`` for a field it cannot evaluate
+    (MADD-ANO-019), but a norm only sees the fields it reads: under
+    ``convergence_norm="interface"`` a ``NaN`` in a field no edge reads
+    -- from the initial state, a parameter or an external input -- left
+    the residual finite, and the group was reported ``converged=True``,
+    ``strict_convergence`` did not raise and ``spectral_usable`` was
+    ``True`` on a state that was not finite.  The verdict is about the
+    state the step returns, so it is taken over every floating field of
+    it: a non-finite one makes the residual ``inf`` and rejects the
+    amplification, which is exactly what the norms report for a field
+    they read.  A finite state takes the selected branch of a ``where``
+    and is reported bit-identically.
+    """
+    residual = jnp.asarray(residual)
+    amplification = jnp.asarray(amplification)
+    return (
+        jnp.where(state_finite, residual, jnp.full_like(residual, jnp.inf)),
+        jnp.where(state_finite, amplification, jnp.zeros_like(amplification)),
+    )
 
 
 #: Accelerations that may not *stop iterating* on a single pass at or
@@ -2031,6 +2252,10 @@ def _run_coupled_block_impl(
             # raw residual test.  A caller who wants the bound has to
             # allow the group a second pass.
             single_amp = jnp.zeros_like(single_r)
+            single_r, single_amp = _non_finite_reads_as_diverged(
+                _group_state_finite(state_after_first, group_node_names),
+                single_r, single_amp,
+            )
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
                 import equinox as eqx  # noqa: PLC0415
@@ -2226,7 +2451,7 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
-            def _norm_weights(x_full):
+            def _norm_weights(x_full, zero_field_weight=None):
                 """Per-entry factors of the group's norm at ``x_full``.
 
                 Mirrors ``_scaled_change``: a field the norm reads is
@@ -2235,6 +2460,13 @@ def _run_coupled_block_impl(
                 only edge-source fields are read.  A constant factor
                 (``rtol``, the mixed norm's ``1/count``) is left out --
                 the resolvent norm the weights feed is invariant to it.
+                With ``zero_field_weight`` given, the weights are the
+                *spectrum's* instead (see ``_spectral_rate_at``): a read
+                field inside the dead band keeps its own magnitude's
+                weight rather than zero -- the dead band takes a field
+                out of the residual, not out of the coupling loop -- and
+                a read field whose magnitude is exactly zero (or below
+                the dtype's normal range) gets ``zero_field_weight``.
                 """
                 s_star = _embed(x_full)
                 read = {(e.source_node, e.source_field) for e in group_internal_list}
@@ -2247,8 +2479,13 @@ def _run_coupled_block_impl(
                             w[nn][fld] = jnp.zeros_like(val)
                             continue
                         ref = _field_reference(val, val)
-                        active = jnp.logical_and(ref > group.atol, ref > 0)
-                        inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
+                        if zero_field_weight is None:
+                            active = jnp.logical_and(ref > group.atol, ref > 0)
+                            inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
+                        else:
+                            scaled = ref >= jnp.finfo(val.dtype).tiny
+                            inv = jnp.where(scaled, 1.0 / jnp.where(scaled, ref, 1.0),
+                                            zero_field_weight)
                         w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
@@ -2290,6 +2527,12 @@ def _run_coupled_block_impl(
                 sub_idx,
                 str(group.linear_solver),
             )
+            # The verdict on a non-finite state is taken over *every*
+            # floating field of the group, not only the ones the norm
+            # reads (see ``_non_finite_reads_as_diverged``).
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                jnp.all(jnp.isfinite(x_star_full)), final_res, final_amp,
+            )
             # The spectral bound's ingredients, at the state being
             # returned (``x_star_full`` before the strict guard, whose
             # value it is).  Only with ``diagnostics=True``: it costs
@@ -2302,13 +2545,22 @@ def _run_coupled_block_impl(
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
                 weights = _norm_weights(jax.lax.stop_gradient(x_star_full))
+                # A dead-banded field keeps its own magnitude's weight in
+                # the spectrum; one that is exactly zero has no magnitude,
+                # and gets the caller's atol (the declared unit of "zero")
+                # or, with no dead band declared, 1 -- any positive weight
+                # keeps it on the loop.
+                spec_weights = _norm_weights(
+                    jax.lax.stop_gradient(x_star_full),
+                    zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
+                )
                 rho_spec, spec_resid, spec_amp = _spectral_rate_at(
-                    step_pure, x_star_full, consts, weights,
+                    step_pure, x_star_full, consts, weights, spec_weights,
                 )
                 # Its distance is the spectral bound and its resolvent
                 # factor the one that bound applies; the curvature is a
                 # second difference of the adjoint's own matvec.
-                # ``9 + k + 4 n_c`` more JVPs, ``n_c`` the floating
+                # ``11 + k + 4 n_c`` more JVPs, ``n_c`` the floating
                 # constants (see ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
@@ -2404,11 +2656,11 @@ def _run_coupled_block_impl(
             if track_diag:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
-                     icount, fres, famp, omega, prev_r) = carry
+                     icount, fres, fprev, omega, prev_r) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
                     below = residual <= conv_threshold
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (
                         (est <= conv_threshold) & prev_below
                     )
@@ -2422,15 +2674,16 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    new_amp = jnp.where(converged, famp, amp)
+                    new_prev = (jnp.where(converged, fprev[0], prev_res),
+                                jnp.where(converged, fprev[1], prev_res2))
                     return (s_merged, new_converged, below, residual,
-                            prev_res, new_count, new_res, new_amp,
+                            prev_res, new_count, new_res, new_prev,
                             new_omega, cur_r)
 
                 init_carry = (
                     state_after_first, jnp.array(False), first_below,
                     first_r, first_r,
-                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
+                    jnp.array(1.0), first_r, (first_r, first_r),
                     jnp.array(1.0), jnp.zeros(n_dof),
                 )
                 final_carry = jax.lax.fori_loop(
@@ -2438,7 +2691,7 @@ def _run_coupled_block_impl(
                 )
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[5], final_carry[6]
-                final_amp, prev_loop_res = final_carry[7], final_carry[4]
+                frozen_prev, prev_loop_res = final_carry[7], final_carry[4]
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_below, prev_res, prev_res2,
@@ -2479,10 +2732,10 @@ def _run_coupled_block_impl(
             if track_diag:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
-                     famp, V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
+                     fprev, V, W, nc, prev_r, prev_s, omega, prev_ra) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -2497,14 +2750,15 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    new_amp = jnp.where(converged, famp, amp)
+                    new_prev = (jnp.where(converged, fprev[0], prev_res),
+                                jnp.where(converged, fprev[1], prev_res2))
                     return (s_merged, new_converged, residual, prev_res,
-                            new_count, new_res, new_amp,
+                            new_count, new_res, new_prev,
                             nV, nW, nnc, cur_r, cur_s, n_omega, cur_ra)
 
                 init_carry = (
                     state_after_first, jnp.array(False), first_r, first_r,
-                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
+                    jnp.array(1.0), first_r, (first_r, first_r),
                     init_V, init_W, init_ncols,
                     jnp.zeros(n_dof), init_flat,
                     jnp.array(1.0), jnp.zeros(n_dof),
@@ -2514,7 +2768,7 @@ def _run_coupled_block_impl(
                 )
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[4], final_carry[5]
-                final_amp, prev_loop_res = final_carry[6], final_carry[3]
+                frozen_prev, prev_loop_res = final_carry[6], final_carry[3]
                 final_V, final_W = final_carry[7], final_carry[8]
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
@@ -2556,10 +2810,10 @@ def _run_coupled_block_impl(
             if track_diag:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
-                     famp) = carry
+                     fprev) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -2569,20 +2823,21 @@ def _run_coupled_block_impl(
                     s_merged = _merge(s_cur, s_accel, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    new_amp = jnp.where(converged, famp, amp)
+                    new_prev = (jnp.where(converged, fprev[0], prev_res),
+                                jnp.where(converged, fprev[1], prev_res2))
                     return (s_merged, new_converged, residual, prev_res,
-                            new_count, new_res, new_amp)
+                            new_count, new_res, new_prev)
 
                 init_carry = (
                     state_after_first, jnp.array(False), first_r, first_r,
-                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
+                    jnp.array(1.0), first_r, (first_r, first_r),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[4], final_carry[5]
-                final_amp, prev_loop_res = final_carry[6], final_carry[3]
+                frozen_prev, prev_loop_res = final_carry[6], final_carry[3]
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
@@ -2610,28 +2865,29 @@ def _run_coupled_block_impl(
             if track_diag:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
-                     famp) = carry
+                     fprev) = carry
                     s_new = one_pass(s_cur)
                     residual = _compute_residual(s_new, s_cur)
-                    est, amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
                     s_merged = _merge(s_cur, s_new, new_converged)
                     new_count = icount + jnp.where(new_converged, 0.0, 1.0)
                     new_res = jnp.where(converged, fres, residual)
-                    new_amp = jnp.where(converged, famp, amp)
+                    new_prev = (jnp.where(converged, fprev[0], prev_res),
+                                jnp.where(converged, fprev[1], prev_res2))
                     return (s_merged, new_converged, residual, prev_res,
-                            new_count, new_res, new_amp)
+                            new_count, new_res, new_prev)
 
                 init_carry = (
                     state_after_first, jnp.array(False), first_r, first_r,
-                    jnp.array(1.0), first_r, jnp.zeros_like(first_r),
+                    jnp.array(1.0), first_r, (first_r, first_r),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[4], final_carry[5]
-                final_amp, prev_loop_res = final_carry[6], final_carry[3]
+                frozen_prev, prev_loop_res = final_carry[6], final_carry[3]
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     s_cur, converged, prev_res, prev_res2 = carry
@@ -2665,11 +2921,33 @@ def _run_coupled_block_impl(
                 r = _compute_residual(one_pass(_s), _s)
                 return r, error_amplification(r, loop_res, prev_loop_res)
 
+            def _at_latch(_s):
+                # The amplification the criterion used on the latching
+                # pass, from the residual triple the loop froze there.
+                # Computed here, after the loop and in a branch of its own,
+                # and never inside the loop body: an amplification carried
+                # through the loop was a second computation of the
+                # criterion's own arithmetic, XLA rewrote the criterion
+                # around it, ``est`` moved by an ulp near the float floor,
+                # the latch fell on a different pass, and
+                # ``diagnostics=True`` returned a state one ulp away from
+                # ``diagnostics=False`` (chain-5, 4 of 36 configurations on
+                # jaxlib 0.11.0; an ``optimization_barrier`` around it held
+                # on 0.11.0 and not on 0.11.2).  The loop now carries only
+                # *selects* of residuals it already computes, which leave
+                # the forward bit-identical on 0.10.2, 0.11.0 and 0.11.2.
+                return loop_res, error_amplification(
+                    loop_res, frozen_prev[0], frozen_prev[1])
+
             final_res, final_amp = jax.lax.cond(
                 final_carry[1],
-                lambda _s: (loop_res, final_amp),
+                _at_latch,
                 _measure_at_cap,
                 final_state,
+            )
+            final_res, final_amp = _non_finite_reads_as_diverged(
+                _group_state_finite(final_state, group_node_names),
+                final_res, final_amp,
             )
 
         # Merge coupled nodes back into the full state
@@ -4125,6 +4403,7 @@ class GraphManager:
         group = self._make_coupling_group(
             nodes, max_iterations, tolerance, **kwargs
         )
+        _refuse_colliding_group_keys([*self._coupling_groups, group])
         self._coupling_groups.append(group)
         self._dirty = True
         return group
@@ -4205,6 +4484,7 @@ class GraphManager:
             self._make_coupling_group(scc, max_iterations, tolerance, **kwargs)
             for scc in sccs
         ]
+        _refuse_colliding_group_keys(groups)
         self._coupling_groups[:] = groups
         self._dirty = True
         return groups
@@ -5618,6 +5898,23 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
+              **``True`` on a stalled float32 iterate.**  When
+              ``(1 - rho) * |x - x*|`` falls below half an ulp a pass
+              changes nothing, the residual is exactly ``0.0``, and
+              ``converged`` -- and ``strict_convergence`` -- report
+              success although the state can be far from its fixed
+              point: 38 348 ulps (a relative distance of 4.2e-3,
+              against a tolerance of 1e-6) on a relay contracting at
+              0.99999, after one pass.  The criterion is deliberately
+              not changed for this (a precision floor in it would make a
+              tight float32 tolerance unreachable); the bound keys below
+              are where it shows -- ``"spectral_error_bound"`` carries
+              the residual's float resolution and
+              ``"precision_limited"`` is ``True`` -- so read them, with
+              ``diagnostics=True``, before trusting ``converged`` on a
+              slow group.  (Planned for 0.5.0, not a promise of this
+              release: ``strict_convergence`` consulting the spectral
+              bound when diagnostics are on.)
             - ``"rho_spectral"`` : float — the spectral radius of
               ``dF/dx`` at the returned state, from eight Arnoldi steps
               on the Jacobian-vector product the IFT adjoint already
@@ -5633,15 +5930,40 @@ class GraphManager:
               otherwise, which ``"spectral_usable"`` reports.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
-              ``max_iterations=1`` (no fixed point was solved) and
-              before the first step.  Costs eight Jacobian-vector
+              ``max_iterations=1`` (no fixed point was solved) and on
+              a non-finite state (a Jacobian there describes nothing).
+              Costs eight Jacobian-vector
               products per group per step, which is why it is gated.
-            - ``"spectral_error_bound"`` : float — ``residual`` times
-              the larger of ``||(I - H)^{-1}||_2`` (the resolvent norm
-              of the Krylov-compressed Jacobian, in the group's own
-              norm) and ``1 / (1 - rho_spectral)`` with a margin for an
-              unresolved Krylov space
+            - ``"spectral_error_bound"`` : float — ``residual`` plus
+              its own float resolution
+              (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`:
+              four units of ``eps * max|field|`` in every entry the norm
+              reads, measured in that norm), times the larger of
+              ``||(I - H)^{-1}||_2`` (the resolvent norm of the
+              Krylov-compressed Jacobian, in the group's own norm) and
+              ``1 / (1 - rho_spectral)`` with a margin for an unresolved
+              Krylov space
               (:func:`~maddening.core.coupling.acceleration.spectral_error_bound`).
+              The resolution is *added*, because a computed residual
+              differs from the exact map's by the map's evaluation
+              error: without it a stalled float32 iterate (see
+              ``"converged"``) read a bound of ``0.0`` thousands of ulps
+              from its fixed point, and with it the bound there is what
+              float32 can resolve about a group that slow.  The Krylov
+              space is continued from the residual itself whenever it
+              breaks down, so the residual the resolvent is applied to
+              provably lies in the invariant space the resolvent was
+              measured on -- a space from one start vector broke down
+              early where an eigenvalue was repeated, and the bound read
+              0.92x the true distance there -- and a dead-banded field
+              keeps a positive weight in the spectrum (its own
+              magnitude's), so a small field on the coupling loop no
+              longer cuts the
+              loop out of it (``rho_spectral`` read 0.0 for a radius of
+              0.9, and the bound 0.15-0.29x the true distance of a field
+              the norm keeps); the dead-banded fields' share of the
+              residual, which ``"residual"`` does not contain, is
+              measured and folded into the factor.
               For a linear ``F`` the error of *any* iterate is
               ``(A - I)^{-1}`` of its residual, whatever the step
               sequence, relaxation or accelerator did -- so this is a
@@ -5662,13 +5984,15 @@ class GraphManager:
               float32 on a log map within ``tolerance`` of its fixed
               point, an estimate far from one; it is in the group's
               norm at the returned state, so the dead band's excluded
-              fields are outside it and the norm's scale drifts with
-              the iterate exactly as it does for ``"residual"``; and
-              it inherits ``"residual"``'s float32 noise floor (a
-              residual of ``0.0`` gives a bound of ``0.0``; on a
-              60,000-entry L2 norm it read 0.991x once).  ``inf``
-              when ``rho_spectral`` (with margin) is at or above one;
-              NaN where ``"rho_spectral"`` is.  It is reported, not
+              fields are outside what it bounds and the norm's scale
+              drifts with the iterate exactly as it does for
+              ``"residual"``; and its float floor is a model of the
+              map's rounding (see
+              :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
+              which a node that cancels catastrophically inside its own
+              update can exceed.  ``inf`` when ``rho_spectral`` (with
+              margin) is at or above one; NaN where ``"rho_spectral"``
+              is, and on a non-finite state.  It is reported, not
               applied: ``"converged"`` and the iteration counts are
               exactly what they were.
             - ``"spectral_usable"`` : bool — the bound above is finite
@@ -5676,10 +6000,12 @@ class GraphManager:
               ``h_{k+1,k}`` is at most 5% of ``1 - rho_spectral``
               (:func:`~maddening.core.coupling.acceleration.spectral_rate_settled`).
               ``False`` where nothing was computed (see
-              ``"rho_spectral"``), where the bound is ``inf``, and for
+              ``"rho_spectral"``), where the bound is ``inf``, for
               a group with more independent interface scalars than the
               eight Krylov steps resolve -- there ``"rho_spectral"``
-              is from below and the bound carries only the margin.
+              is from below and the bound carries only the margin --
+              and where the residual never entered the Krylov space
+              (its outside fraction is reported as unresolved).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -5711,14 +6037,34 @@ class GraphManager:
               and up to 11x for the other, which reads its gap to the
               worst probe; 1.81x for a parameter multiplying the state
               of an affine map; 7-11x for a spring pair's stiffness and
-              mass; 15x on a hidden slow mode.  **Only
+              mass; 15x on a hidden slow mode.  The distance carries the
+              residual's float resolution, as ``"spectral_error_bound"``
+              does, so a stalled iterate no longer reads ``0.0`` (it did,
+              against true errors of 1.5-3% at ``F'(x*) = 0.999``); where
+              the residual is at that resolution and so carries no
+              direction, the curvature is taken along a floor-sized
+              vector's resolvent image instead of the Newton correction.
+              And it carries a Newton-Kantorovich check on how far the
+              linearisation at ``x_k`` can be trusted at ``x*``: with
+              ``h = amp * L * ||delta||``, ``L`` the Jacobian's change
+              along the Newton correction ``delta`` per unit length
+              squared (one more pair of Jacobian-vector products), the
+              bound is multiplied by ``1 / sqrt(1 - 2h)`` (the resolvent
+              at the fixed point) with its distance at least
+              Kantorovich's radius, and is ``inf`` -- unusable -- at
+              ``h >= 1/2``, where nothing measured at ``x_k`` bounds the
+              resolvent at ``x*``.  Uncorrected it read 0.20-0.96x the
+              true error, flag ``True``, at ``F'(x*) = 0.99`` with the
+              forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
+              of those four now read ``inf`` and two hold at 3.0-3.5x.
+              ``h`` is exactly zero on an affine map.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
-              ``max_iterations=1`` and before the first step; ``inf``
+              ``max_iterations=1``; ``inf``
               or NaN where ``"spectral_error_bound"`` is; NaN where the
               fixed point responds to no constant and where the returned
               state is not finite.  Costs
-              ``9 + k + 4 n_c`` Jacobian-vector products per group per
+              ``11 + k + 4 n_c`` Jacobian-vector products per group per
               step beside the spectral bound's eight, ``k <= 8`` and
               ``n_c`` the number of floating constants (see
               ``_gradient_error_bound_at``).
@@ -5733,7 +6079,8 @@ class GraphManager:
               ``"spectral_error_bound"``; the change in the
               linearisation being linear in the distance and along the
               Newton correction (exact for an affine map, leading-order
-              otherwise); and the probes -- a field-valued constant is
+              otherwise, which ``h`` above measures along ``delta``
+              only); and the probes -- a field-valued constant is
               probed along one random direction, and the bound is
               relative to the tangent's norm in the group's norm, so a
               scalar loss whose gradient nearly cancels across the
@@ -5769,9 +6116,25 @@ class GraphManager:
               are settled on the same condition.  ``False`` where
               nothing was computed, where the bound is ``inf`` or NaN
               (including a group whose Jacobian range the eight-vector
-              basis did not capture).  Like the other flags it reports
-              what the code checked, and not the linearity or probe
-              conditions above.
+              basis did not capture, and one that fails the
+              Kantorovich check, ``h >= 1/2``).  Like the other flags
+              it reports what the code checked, and not the linearity
+              or probe conditions above.
+            - ``"precision_limited"`` : bool — the residual is at or
+              below its own float resolution (the floor
+              ``"spectral_error_bound"`` adds): the last pass moved no
+              entry by more than a few ulps of its field's magnitude, so
+              ``"residual"`` and ``"error_estimate"`` are rounding
+              rather than motion, at least half of each bound key is the
+              floor, and neither iterating further nor tightening the
+              tolerance can reduce the bounds by more than half -- only
+              a wider dtype can.  Reported for every group, whatever the
+              solver.  ``False`` for a non-finite residual and for a
+              group whose norm reads no field.  A separate flag rather
+              than a reason to clear ``"spectral_usable"``: the bound
+              with its floor *is* a bound, and a group converged to
+              float32 -- the best a float32 group can do -- would
+              otherwise be reported unusable.
 
             ``converged=True`` is a statement about the state this step
             returned: both solvers stop on the iterate whose residual
@@ -5786,7 +6149,9 @@ class GraphManager:
             to the old residual test and says so through
             ``"ratio_usable"``.  It is strictly stronger than the
             pre-0.4.0 flag in every case and still not a guarantee —
-            do not treat ``converged=True`` as certifying a distance.
+            do not treat ``converged=True`` as certifying a distance,
+            and in particular not on a stalled float32 iterate (see
+            ``"converged"`` above and ``"precision_limited"``).
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
@@ -5827,8 +6192,10 @@ class GraphManager:
             groups only with ``diagnostics=True``.  The three spectral
             keys and the two gradient-bound keys are present for every
             group and carry a value only under ``solver="ift"`` with
-            ``diagnostics=True``.  Empty dict if no step has been taken
-            yet.
+            ``diagnostics=True``.  A group that has not taken a step
+            yet -- before the first ``step()``, and again after
+            ``reset_state()`` -- has no entry, so the dict is empty
+            until something has run.
         """
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
@@ -5837,7 +6204,13 @@ class GraphManager:
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
             amp_key = f"coupling_{key}_amplification"
-            if iter_key in meta:
+            # ``compile()`` and ``reset_state()`` seed the counter at 0
+            # and every coupled step reports at least one pass, so 0 is
+            # "no step taken yet".  The seeds beside it (a residual of
+            # 0.0, a rejected amplification) are there to keep the scan
+            # carry's structure, not to be read: reported, they said
+            # ``converged=True`` about a group that had never run.
+            if iter_key in meta and int(meta[iter_key]) > 0:
                 residual = float(meta[res_key])
                 amp = float(meta.get(amp_key, 0.0))
                 # A valid amplification is ``1/(1 - rho)`` with
@@ -5872,8 +6245,21 @@ class GraphManager:
                     f"coupling_{key}_spectral_residual", float("nan")))
                 spec_amp = float(meta.get(
                     f"coupling_{key}_spectral_amplification", float("nan")))
+                # The residual's own float resolution at the returned
+                # state: a computed residual differs from the exact
+                # ``F(x) - x`` by the map's evaluation error, so a
+                # distance bound has to add it -- a stalled float32
+                # iterate reads ``residual=0.0`` arbitrarily far from
+                # its fixed point.  Taken from the state the step left,
+                # by the norm's own field rule.
+                floor = float(residual_precision_floor(
+                    self._state, sorted(group.nodes), group.convergence_norm,
+                    group.atol, group.rtol,
+                    [e for e in self._edges
+                     if e.source_node in group.nodes and e.target_node in group.nodes],
+                ))
                 spectral_bound = float(spectral_error_bound(
-                    residual, rho_spec, spec_resid, spec_amp,
+                    residual, rho_spec, spec_resid, spec_amp, floor=floor,
                 ))
                 spectral_usable = bool(
                     math.isfinite(spectral_bound)
@@ -5902,6 +6288,9 @@ class GraphManager:
                     "gradient_relative_error_bound": grad_bound,
                     "gradient_bound_usable": bool(
                         spectral_usable and math.isfinite(grad_bound)
+                    ),
+                    "precision_limited": bool(
+                        floor > 0.0 and math.isfinite(residual) and residual <= floor
                     ),
                 })
         return result
@@ -6892,14 +7281,11 @@ class GraphManager:
         if live_meta is not None:
             fresh_meta = dict(live_meta)
             for key, value in live_meta.items():
-                if key in ("step_count", "sub_step") or key.endswith("_iterations") \
-                        or key.endswith("_pred_count"):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_residual") or key.endswith(
-                    "_amplification"
-                ):
-                    fresh_meta[key] = jnp.zeros_like(value)
-                elif key.endswith("_rho_spectral") or key.endswith(
+                # The spectral suffixes first: ``_spectral_residual``
+                # also ends in ``_residual``, and matched there it was
+                # zeroed instead of put back to NaN.  The target is the
+                # ``_meta`` ``compile()`` seeds, value for value.
+                if key.endswith("_rho_spectral") or key.endswith(
                     "_spectral_residual"
                 ) or key.endswith("_spectral_amplification") or key.endswith(
                     "_gradient_relative_error_bound"
@@ -6908,6 +7294,13 @@ class GraphManager:
                     # spectral radius of 0 and a bound equal to the
                     # residual (or a gradient exact to float32).
                     fresh_meta[key] = jnp.full_like(value, jnp.nan)
+                elif key in ("step_count", "sub_step") or key.endswith("_iterations") \
+                        or key.endswith("_pred_count"):
+                    fresh_meta[key] = jnp.zeros_like(value)
+                elif key.endswith("_residual") or key.endswith(
+                    "_amplification"
+                ):
+                    fresh_meta[key] = jnp.zeros_like(value)
                 # IQN V/W and predictor histories are warm-start caches:
                 # zeroing them restarts cleanly too.
                 elif key.endswith("_V") or key.endswith("_W") or "_pred_" in key:

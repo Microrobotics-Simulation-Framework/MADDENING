@@ -284,6 +284,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling bound keys no longer under-read**: `spectral_error_bound` adds the residual's float floor (new `precision_limited`); the gradient bound is `inf` where Newton-Kantorovich fails.
+  `converged` still reads `True` on a stalled float32 iterate: read those keys with `diagnostics=True`. A NaN no edge reads, or an underflowing scale, no longer reads converged;
+  a group with no step yet has no report; colliding group keys (node names containing `+`) are refused.
 - **An inline point reference with no `"dtype"` refuses `np.longdouble` values** instead of rounding them to float64
   without a word; the error says no reference form keeps extended precision. Add `"dtype": "float64"` to accept the
   rounding, or convert first (`np.asarray(points, dtype=np.float64).tolist()`); float64 payloads are unaffected

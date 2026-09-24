@@ -247,3 +247,246 @@ def test_every_norm_reads_a_non_finite_field_as_inf(value):
     assert bool(jnp.isposinf(coupling_residual_l2(s_new, s_old, ["a"])))
     assert bool(jnp.isposinf(coupling_residual_mixed(s_new, s_old, ["a"], 0.0, 1e-6)))
     assert bool(jnp.isposinf(coupling_residual_interface(s_new, s_old, [edge], 0.0, 1e-6)))
+
+
+# ---------------------------------------------------------------------------
+# A non-finite field the norm does not read
+#
+# The rule above lives in the norm, and a norm only sees the fields it
+# reads.  ``convergence_norm="interface"`` reads edge sources, so a NaN
+# in an internal field -- one no edge reads -- left the residual finite:
+# ``converged=True``, ``strict_convergence`` silent, ``spectral_usable``
+# True, on a state that was not finite.  The verdict is now taken over
+# every floating field of the returned state.
+# ---------------------------------------------------------------------------
+
+
+class _WithInternal(SimulationNode):
+    """``x <- 0.5 u + c`` (read by the relay) beside ``z <- z_pre + k + w`` (read by nothing)."""
+
+    def __init__(self, name, z0=0.0, k=0.1):
+        super().__init__(name=name, timestep=1.0, c=jnp.float32(1.0), k=jnp.float32(k))
+        self._z0 = z0
+
+    def initial_state(self):
+        return {"x": jnp.float32(1.0), "z": jnp.float32(self._z0)}
+
+    def state_fields(self):
+        return ["x", "z"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0)),
+                "w": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": 0.5 * boundary_inputs["u"] + p["c"],
+                "z": state["z"] + p["k"] + boundary_inputs["w"]}
+
+
+class _ScalarRelay(SimulationNode):
+    def initial_state(self):
+        return {"x": jnp.float32(1.0)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32, default=jnp.float32(0))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": boundary_inputs["u"]}
+
+
+_ROUTES = ("initial state", "parameter", "external input", "none")
+
+
+def _internal_field_graph(route, norm, solver="ift", strict=False):
+    gm = GraphManager()
+    gm.add_node(_WithInternal("a", z0=np.nan if route == "initial state" else 0.0,
+                              k=np.nan if route == "parameter" else 0.1))
+    gm.add_node(_ScalarRelay("b", timestep=1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_external_input("a", "w", shape=(), dtype=jnp.float32)
+    kw = dict(tolerance=1e-4) if norm == "l2" else dict(rtol=1e-3)
+    if solver == "ift":
+        kw["strict_convergence"] = strict
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
+                          max_iterations=40, solver=solver, **kw)
+    gm.compile()
+    ext = ({"a": {"w": jnp.float32(np.inf)}} if route == "external input"
+           else {"a": {"w": jnp.float32(0.0)}})
+    return gm, ext
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("norm", NORMS)
+@pytest.mark.parametrize("route", _ROUTES[:3])
+def test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state(route, norm, solver):
+    """Initial state, parameter or external input; every norm, both solvers.
+
+    ``interface`` is the norm that used to miss it (``l2`` and
+    ``mixed`` read every float field); the other two are here so the
+    three agree by construction rather than by coincidence.
+    """
+    gm, ext = _internal_field_graph(route, norm, solver)
+    gm.step(ext)
+    z = float(gm.get_node_state("a")["z"])
+    assert not math.isfinite(z), "fixture premise: z is non-finite"
+    assert math.isfinite(float(gm.get_node_state("a")["x"])), (
+        "fixture premise: the interface field is finite, so only the "
+        "all-fields rule can see the non-finite state"
+    )
+    d = gm.coupling_diagnostics()["a+b"]
+    _assert_reported_as_diverged(d, f"{route}/{norm}/{solver}")
+    assert d["spectral_usable"] is False, d
+    assert d["gradient_bound_usable"] is False, d
+    if solver == "ift":
+        # A Jacobian at a destroyed state describes nothing: NaN, never
+        # a radius that reads as "contracts at 0.5".
+        assert math.isnan(d["rho_spectral"]), d
+
+
+@pytest.mark.parametrize("norm", NORMS)
+@pytest.mark.parametrize("route", _ROUTES[:3])
+def test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads(route, norm):
+    """The strict guard reads the same verdict, so it names the non-finite state."""
+    gm, ext = _internal_field_graph(route, norm, strict=True)
+    with pytest.raises(Exception, match="state is non-finite"):
+        gm.step(ext)
+        jax.block_until_ready(gm.get_node_state("a")["x"])
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_a_single_pass_reads_a_non_finite_field_no_edge_reads(solver):
+    """``max_iterations=1`` takes the same verdict, through its own path.
+
+    One pass has its own reporting branch (no loop, no ratio); the
+    interface residual of that pass is finite and far inside a loose
+    ``rtol``, so only the all-fields rule can say the state is not.
+    """
+    gm = GraphManager()
+    gm.add_node(_WithInternal("a", z0=np.nan))
+    gm.add_node(_ScalarRelay("b", timestep=1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_external_input("a", "w", shape=(), dtype=jnp.float32)
+    gm.add_coupling_group(["a", "b"], convergence_norm="interface", rtol=10.0,
+                          diagnostics=True, max_iterations=1, solver=solver)
+    gm.compile()
+    gm.step({"a": {"w": jnp.float32(0.0)}})
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["iterations"] == 1
+    _assert_reported_as_diverged(d, f"max_iterations=1/{solver}")
+
+
+@pytest.mark.parametrize("norm", NORMS)
+def test_a_finite_internal_field_leaves_the_verdict_alone(norm):
+    """The control: the same graph with every field finite converges as before."""
+    gm, ext = _internal_field_graph("none", norm)
+    gm.step(ext)
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["converged"] is True, d
+    assert math.isfinite(d["residual"]) and d["ratio_usable"] is True, d
+    assert d["spectral_usable"] is True, d
+
+
+# ---------------------------------------------------------------------------
+# The underflow end of the range rule
+#
+# Under "mixed" and "interface" the scale is ``rtol * max|v|``.  Below
+# ``finfo.tiny / rtol`` (~1.2e-32 at the default rtol) that product is
+# subnormal, the CPU backend flushes it to zero, and the field used to go
+# *inactive* -- a dead band the caller never declared: ``iterations=1,
+# residual=0.0, converged=True`` on a field 90% from its fixed point.
+# The field itself is a normal float32 with all its bits, so it is
+# measured on a rescaled pair instead of being excluded or failed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("magnitude", (1e-31, 1e-33, 1e-36))
+def test_a_field_whose_scale_underflows_is_still_measured(magnitude):
+    """A 100% change reads ``1 / rtol`` at every normal magnitude.
+
+    Against the float64 closed form, not bit-for-bit: the rescaled
+    quotient is exact in real arithmetic but rounds on its own path.
+    """
+    rtol = 1e-6
+    old = jnp.array([magnitude, 0.5 * magnitude], jnp.float32)
+    new = 2.0 * old
+    if magnitude < 1e-32:
+        assert 2.0 * magnitude * rtol < float(np.finfo(np.float32).tiny), (
+            "fixture premise: the scale is subnormal"
+        )
+    got, active = _scaled_change(new, old, 0.0, rtol)
+    assert bool(active)
+    o64, n64 = np.asarray(old, np.float64), np.asarray(new, np.float64)
+    want = np.abs(n64 - o64) / (rtol * np.max(np.abs(n64)))
+    np.testing.assert_allclose(np.asarray(got, np.float64), want, rtol=1e-6)
+    s_old = {"n": {"x": old}}
+    s_new = {"n": {"x": new}}
+    edge = EdgeSpec(source_node="n", target_node="n", source_field="x", target_field="u")
+    assert float(coupling_residual_mixed(s_new, s_old, ["n"], 0.0, rtol)) > 1e5
+    assert float(coupling_residual_interface(s_new, s_old, [edge], 0.0, rtol)) > 1e5
+
+
+def test_the_dead_band_still_wins_at_the_underflow_end():
+    """A caller who declared the field noise still gets it excluded."""
+    old = jnp.array([1e-33], jnp.float32)
+    got, active = _scaled_change(2.0 * old, old, 1e-30, 1e-6)
+    assert not bool(active)
+    assert float(got[0]) == 0.0
+
+
+class _TinyLinear(SimulationNode):
+    """``x <- g u + c`` on a length-1 field, for fixed points at any magnitude."""
+
+    def __init__(self, name, g, c):
+        super().__init__(name=name, timestep=1.0)
+        self._g, self._c = g, c
+
+    def initial_state(self):
+        return {"x": jnp.zeros(1, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(1,), dtype=jnp.float32,
+                                       default=jnp.zeros(1, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._g * boundary_inputs["u"] + self._c}
+
+
+def _tiny_graph(norm, c):
+    gm = GraphManager()
+    gm.add_node(_TinyLinear("a", 0.9, c))
+    gm.add_node(_TinyLinear("b", 1.0, 0.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
+                          max_iterations=20)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("norm", ("mixed", "interface"))
+def test_the_verdict_does_not_change_below_the_scale_underflow(norm):
+    """``x* = 10 c``: the same group at ``c = 1e-30`` and ``c = 1e-33``.
+
+    The criterion is a ratio, so moving every quantity by three decades
+    must not move the verdict or the pass count.  At 1e-33 the scale
+    ``rtol * max|x|`` is subnormal; before the fix that group reported
+    one pass and ``converged=True``.
+    """
+    ref = _tiny_graph(norm, 1e-30)
+    ref.step()
+    want = ref.coupling_diagnostics()["a+b"]
+    gm = _tiny_graph(norm, 1e-33)
+    gm.step()
+    got = gm.coupling_diagnostics()["a+b"]
+    assert got["iterations"] == want["iterations"], (got, want)
+    assert got["converged"] is want["converged"] is False, (got, want)
+    assert got["residual"] == pytest.approx(want["residual"], rel=1e-4)

@@ -488,10 +488,18 @@ def _affine_cycle(gain, bias, **group_kw):
 
 
 def _exact_distance(gm, gain, bias):
-    """Distance to the analytic fixed point, in the group's own L2 norm."""
-    exact = [b / (1.0 - g) for g, b in zip(jnp.atleast_1d(jnp.asarray(gain)),
-                                           jnp.atleast_1d(jnp.asarray(bias)))]
-    exact = [float(v) for v in exact]
+    """Distance to the analytic fixed point, in the group's own L2 norm.
+
+    The fixed point of the map the graph *evaluates*: ``_Affine`` holds
+    its gain and bias in float32, so they are rounded to float32 first
+    and the fixed point is then taken in float64.  Taking it from the
+    unrounded draws measured the parameters' rounding as well -- at a
+    gain of 0.9999 a one-ulp change in the gain moves the fixed point by
+    6e-4 of itself, which is the same order as the bound being checked.
+    """
+    gains = np.atleast_1d(np.asarray(gain, np.float32)).astype(np.float64)
+    biases = np.atleast_1d(np.asarray(bias, np.float32)).astype(np.float64)
+    exact = [float(b / (1.0 - g)) for g, b in zip(gains, biases)]
     total = 0.0
     for node in ("a", "b"):
         got = [float(v) for v in jnp.atleast_1d(gm.get_node_state(node)["x"])]
@@ -608,19 +616,6 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
     )
 
 
-def _spectral_noise(d, n_entries):
-    """The bound's own float32 uncertainty, in the units it is quoted in.
-
-    ``spectral_error_bound`` is the residual times an amplification of
-    at least ``1 / (1 - rho)``, so the residual's noise floor (one ulp
-    per float entry, summed in quadrature by the L2 norm) is amplified
-    by at least that factor.  The assertions below allow four of those
-    -- a fixed fraction would either be slack at ``rho = 0.5`` or fail
-    at ``rho = 0.98`` for no reason but rounding.
-    """
-    return 4.0 * residual_noise_floor("l2", 1.0, n_entries) / (1.0 - d["rho_spectral"])
-
-
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
     rho_slow=st.floats(min_value=0.99, max_value=0.9999),
@@ -641,6 +636,14 @@ def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
     map the error is ``(A - I)^{-1}`` of the residual whatever the
     iteration did, so the bound holds wherever the residual is above
     its own noise.
+
+    That noise is the key's own business, not this test's:
+    ``spectral_error_bound`` adds the residual's float resolution
+    (``residual_precision_floor``) before amplifying it, so the
+    comparison below is bare.  It used to add ``4 * 8 * eps * sqrt(n) /
+    (1 - rho)`` to the key first -- exactly the margin the key lacked,
+    which is how a stalled float32 iterate reading a bound of ``0.0``
+    thousands of ulps from its fixed point went unnoticed.
     """
     gain = (rho_slow, rho_fast)
     bias = (c_slow, 1.0)
@@ -652,7 +655,7 @@ def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
     note(f"rho={gain} c={bias} distance={distance} {d}")
     assert d["spectral_usable"] is True, d
     assert d["rho_spectral"] == pytest.approx(rho_slow, abs=1e-4)
-    assert d["spectral_error_bound"] + _spectral_noise(d, 4) >= distance, (
+    assert d["spectral_error_bound"] >= distance, (
         f"reported {d['spectral_error_bound']:.4e} for a true distance of "
         f"{distance:.4e} ({distance / d['spectral_error_bound']:.2f}x)"
     )
@@ -770,7 +773,11 @@ def test_the_spectral_bound_holds_on_random_normal_contractions(case):
                        tolerance=_ANALYTIC_TOLERANCE, **kw)
     gm.step()
     d = gm.coupling_diagnostics()["a+b"]
-    x_star = np.linalg.solve(np.eye(len(c)) - A, c)
+    # The fixed point of the float32 map the graph evaluates (see
+    # ``_exact_distance``), taken in float64.
+    A32 = np.asarray(A, np.float32).astype(np.float64)
+    c32 = np.asarray(c, np.float32).astype(np.float64)
+    x_star = np.linalg.solve(np.eye(len(c)) - A32, c32)
     distance = _distance_to(gm, x_star)
     rho = float(np.max(np.abs(np.linalg.eigvalsh(A))))
     note(f"rho={rho} {acceleration} omega={relaxation} distance={distance} {d}")
@@ -778,7 +785,9 @@ def test_the_spectral_bound_holds_on_random_normal_contractions(case):
     assert d["rho_spectral"] == pytest.approx(rho, abs=1e-4), (
         f"rho_spectral={d['rho_spectral']} for a spectral radius of {rho}"
     )
-    assert d["spectral_error_bound"] + _spectral_noise(d, 2 * len(c)) >= distance, (
+    # Bare: the key carries its own float resolution (see the two-mode
+    # property above).
+    assert d["spectral_error_bound"] >= distance, (
         f"{acceleration} omega={relaxation}: bound {d['spectral_error_bound']:.4e} "
         f"below the true distance {distance:.4e} at rho={rho:.4f}"
     )

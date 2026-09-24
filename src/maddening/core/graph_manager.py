@@ -2538,7 +2538,42 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
-            def _norm_weights(x_full, zero_field_weight=None):
+            def _read_fields(s_star):
+                """``(node, field, value)`` for every field the norm reads."""
+                read = {(e.source_node, e.source_field) for e in group_internal_list}
+                for nn in group_node_names:
+                    for fld in float_fields[nn]:
+                        if use_interface_norm and (nn, fld) not in read:
+                            continue
+                        yield nn, fld, jnp.asarray(s_star[nn][fld])
+
+            def _weight_scale(x_full):
+                """A common power-of-two factor for the weights: 1.0 in range.
+
+                A weight is ``1 / max|field|``, and above ``1 / tiny``
+                (about ``8.5e37`` in float32 -- which the mixed and
+                interface norms still evaluate, their scale being
+                ``rtol * max|field|``) that reciprocal is subnormal and
+                XLA's CPU backend flushes it to zero.  A zero weight cuts
+                the field out of the spectrum -- the dead-band failure at
+                the other end of the range -- and ``rho_spectral`` read
+                0.0 for a map contracting at 0.9, with the bound 0.12x the
+                true distance and ``spectral_usable=True``.  Every weight
+                is therefore multiplied by 16 when any read field is up
+                there: ``max|field| < 4 / tiny`` in every IEEE format, so
+                ``16 / max|field|`` is at least four times ``tiny``.  A
+                common factor changes nothing the weights feed -- the
+                Arnoldi runs on a similarity, and the floors the helpers
+                compare against are scaled by the same factor -- and in
+                range it is exactly 1.0, so nothing moves by a bit.
+                """
+                top = jnp.array(False)
+                for _nn, _fld, val in _read_fields(_embed(x_full)):
+                    ref = _field_reference(val, val)
+                    top = jnp.logical_or(top, ref * jnp.finfo(val.dtype).tiny > 1.0)
+                return jnp.where(top, 16.0, 1.0).astype(x_full.dtype)
+
+            def _norm_weights(x_full, zero_field_weight=None, scale=1.0):
                 """Per-entry factors of the group's norm at ``x_full``.
 
                 Mirrors ``_scaled_change``: a field the norm reads is
@@ -2554,26 +2589,25 @@ def _run_coupled_block_impl(
                 out of the residual, not out of the coupling loop -- and
                 a read field whose magnitude is exactly zero (or below
                 the dtype's normal range) gets ``zero_field_weight``.
+                Every weight is multiplied by ``scale``
+                (:func:`_weight_scale`) before it is rounded, so a
+                reciprocal that would be subnormal never is.
                 """
                 s_star = _embed(x_full)
-                read = {(e.source_node, e.source_field) for e in group_internal_list}
-                w = {}
-                for nn in group_node_names:
-                    w[nn] = {}
-                    for fld in float_fields[nn]:
-                        val = jnp.asarray(s_star[nn][fld])
-                        if use_interface_norm and (nn, fld) not in read:
-                            w[nn][fld] = jnp.zeros_like(val)
-                            continue
-                        ref = _field_reference(val, val)
-                        if zero_field_weight is None:
-                            active = jnp.logical_and(ref > group.atol, ref > 0)
-                            inv = jnp.where(active, 1.0 / jnp.where(active, ref, 1.0), 0.0)
-                        else:
-                            scaled = ref >= jnp.finfo(val.dtype).tiny
-                            inv = jnp.where(scaled, 1.0 / jnp.where(scaled, ref, 1.0),
-                                            zero_field_weight)
-                        w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
+                w = {nn: {fld: jnp.zeros_like(jnp.asarray(s_star[nn][fld]))
+                          for fld in float_fields[nn]}
+                     for nn in group_node_names}
+                for nn, fld, val in _read_fields(s_star):
+                    ref = _field_reference(val, val)
+                    k = jnp.asarray(scale, val.dtype)
+                    if zero_field_weight is None:
+                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
+                    else:
+                        scaled = ref >= jnp.finfo(val.dtype).tiny
+                        inv = jnp.where(scaled, k / jnp.where(scaled, ref, 1.0),
+                                        zero_field_weight * k)
+                    w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
             if accel_fields is not None:
@@ -2631,7 +2665,9 @@ def _run_coupled_block_impl(
             # triple, so it has the same gate and the same NaN.
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
-                weights = _norm_weights(jax.lax.stop_gradient(x_star_full))
+                weight_scale = _weight_scale(jax.lax.stop_gradient(x_star_full))
+                weights = _norm_weights(jax.lax.stop_gradient(x_star_full),
+                                        scale=weight_scale)
                 # A dead-banded field keeps its own magnitude's weight in
                 # the spectrum; one that is exactly zero has no magnitude,
                 # and gets the caller's atol (the declared unit of "zero")
@@ -2640,10 +2676,12 @@ def _run_coupled_block_impl(
                 spec_weights = _norm_weights(
                     jax.lax.stop_gradient(x_star_full),
                     zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0,
+                    scale=weight_scale,
                 )
                 # The residual's float resolution per entry, each field at
-                # its own dtype's eps (``_residual_resolution``).
-                resolution = _residual_resolution(_flatten_full({
+                # its own dtype's eps (``_residual_resolution``), in the
+                # weights' units (so times their common scale).
+                resolution = weight_scale * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
                         jnp.shape(template_state[nn][fld]),
                         jnp.finfo(template_state[nn][fld].dtype).eps,

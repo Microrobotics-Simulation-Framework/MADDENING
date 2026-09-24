@@ -226,20 +226,35 @@ from the value, and a value-scaled zero still appears in `zero_scaled`.
 Nothing falls back to an absolute `1.0`, which would put units back into
 `cond` unannounced.  The `fim` docstring tabulates the policy per spec.
 
-`specs` must mirror `params`: a nested dict for every dict level, a
-`ParamSpec` at each leaf (one spec covers a list/tuple of leaves, or
-give a list of specs by position).  A key that matches no parameter, a
-dict where a leaf needs a `ParamSpec` (`ParamSpec.to_dict()` output), a
-`ParamSpec` above a dict level, or a `specs` that is not a dict is a
-`ValueError` naming the key path — a spec that reaches nothing would
-otherwise be `scale="relative"` under a `"nominal"` label,
-indistinguishable from the honest `specs={}`.  So when you slice
-`params` to a sub-tree, slice the specs the same way
-(`{k: gm.param_specs()["nodes"]["spring"][k] for k in sub}`): the
-node's whole spec dict is a superset and its unreached entries are
-refused, not ignored.  A leaf *without* an entry still gets the default
-spec and is named in `value_scaled`; `{}` remains the explicit "no leaf
-has a declared width".
+`specs` must mirror `params`: a nested dict for every dict level — and
+for every namedtuple or dataclass level, keyed by field name, since
+that is how JAX addresses a field — a `ParamSpec` at each leaf, and for
+a list/tuple level either a list of specs by position or one `ParamSpec`
+covering every position.  A dict where a leaf needs a `ParamSpec`
+(`ParamSpec.to_dict()` output), a `ParamSpec` above a dict or record
+level, a list of specs for a namedtuple, or a `specs` that is not a dict
+is a `ValueError` naming the key path, and not only in `fim`:
+`trainable_mask`, `unconstrain`, `constrain` and `check_bounds` read
+`specs` through the same walk and refuse the same entries, where they
+used to hand the leaf the default (trainable, unbounded) spec.
+
+A key that matches *no* parameter is where the two differ.  The tree
+maps ignore it, because `gm.param_specs()` declares specs for constants
+that are not leaves of `gm.params` — a uniform `HeatNode`'s
+`grid_points=None`, any constant spelled as a Python `int` — and
+`gm.check_params` hands them exactly that tree; a misspelt key is
+therefore not caught there.  `fim(scale="nominal")` refuses one whenever
+it could have changed the report: a stray spec carrying a finite width
+or a `"log"` offset from a non-zero lower bound is a `ValueError`, while
+a stray spec whose column record is the default's (unbounded,
+one-sided, `(0, None)` under `"log"`) is accepted, because the report
+is bit-identical with or without it.  That is what lets
+`specs=gm.param_specs()` through for the graph it came from, and it is
+also why slicing `params` to a sub-tree usually needs no matching slice
+of the specs: the node's whole spec dict works unless an entry the
+sub-tree does not reach carries a width.  A leaf *without* an entry
+still gets the default spec and is named in `value_scaled`; `{}` remains
+the explicit "no leaf has a declared width".
 
 ### Asking the same question inside a loop
 
@@ -255,12 +270,26 @@ core = core_fn(params)                       # no host sync at all
 ok = core.finite & ~core.precision_limited & (core.crb[i] < tol)
 ```
 
-Hoist `residual_fn` out of the loop either way.  `fim` caches the traced
-Jacobian on the residual function, the scale, the masked column set and
-the nominal record (the per-column widths `specs` reduces to), so a
-fresh closure per iteration re-traces the whole rollout — which is what made `fim` cost a
-flat ~100 ms per call whatever the problem size, against ~0.3 ms warm
-and ~0.04 ms for `fim_core`.
+**Tracing freezes what the residual reads.**  A residual usually takes a
+few leaves as its argument and reads the rest of the model from outside
+it — `gm.params` for the leaves it does not fit, an attribute of `self`,
+a window of data.  Tracing reads those values once and compiles them in
+as constants.  So `fim` re-traces on every call by default, and every
+call answers for the residual as it stands then; a 200-step
+spring-damper rollout measured ~230 ms per call that way on four pinned
+CPU cores.  `fim(..., reuse_trace=True)` keeps the compiled Jacobian
+across calls with an equal residual function (plus the same scale,
+column set and nominal record) and costs ~1 ms warm — but it is only
+correct for a *pure* residual, one that depends on its argument and
+on nothing that can change between calls.  With it on, a residual that
+reads `gm.params` reports the first call's matrix after those leaves
+change, and a bound method (equal across attribute accesses) reports
+the first call's matrix after its object changes.  Both are silent.
+
+The same is true of `fim_core` under your own `jax.jit`: `core_fn`
+holds what `residual_fn` read when it was first traced.  Pass anything
+that changes through the argument, or build a new `core_fn` when it
+changes.
 
 `FIMCore` carries the same verdicts as `FIMReport` — `rank`, `cond`,
 `crb`, `zero_scaled`, `value_scaled` — plus `finite`, which is what `fim` raises on, and

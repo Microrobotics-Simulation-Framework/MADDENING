@@ -29,7 +29,9 @@ from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import (
+    DEFAULT_SPEC,
     ParamSpec,
+    _spec_for,
     check_bounds,
     constrain,
     trainable_mask,
@@ -255,12 +257,82 @@ def test_check_bounds_refuses_an_out_of_range_list_leaf():
     check_bounds({"v": (jnp.float32(0.0), jnp.float32(0.5))}, _LIST_SPEC)
 
 
-def test_a_spec_above_a_dict_level_still_means_the_default_for_the_maps():
-    """``_spec_for`` stays lenient for the tree maps: a ``ParamSpec``
-    placed above a *dict* level covers nothing (only sequence levels
-    are covered), so the leaves below get the default spec -- the
-    documented "missing entry" outcome, not an error.  ``fim`` is the
-    caller that refuses this shape, on top of the same walk."""
-    params = {"outer": {"a": jnp.float32(0.5)}}
-    specs = {"outer": ParamSpec(trainable=False)}
-    assert trainable_mask(params, specs) == {"outer": {"a": True}}
+def test_a_spec_above_a_dict_level_is_refused_by_the_maps():
+    """A ``ParamSpec`` placed above a *dict* level covers nothing (only
+    sequence levels are covered).  The tree maps used to read that as
+    "missing entry" and give the leaves below the default spec, which
+    for ``check_bounds`` -- a safety check -- meant passing a value its
+    author had bounded, and for ``trainable_mask`` marking a leaf its
+    author had frozen.  They share ``fim``'s walk now and refuse it by
+    key path.  ``_spec_for``, the per-path reader, stays lenient; the
+    maps no longer go through it alone."""
+    params = {"outer": {"a": jnp.float32(7.0)}}
+    specs = {"outer": ParamSpec(trainable=False, bounds=(0.0, 1.0))}
+    refusal = r"specs\['outer'\] is a ParamSpec but params\['outer'\] is a dict"
+    for tree_map in (trainable_mask, unconstrain, constrain, check_bounds):
+        with pytest.raises(ValueError, match=refusal):
+            tree_map(params, specs)
+    assert _spec_for(specs, jax.tree_util.tree_flatten_with_path(params)[0][0][0]) \
+        is DEFAULT_SPEC
+
+
+# ---------------------------------------------------------------------------
+# Non-finite bounds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bounds", [
+    (float("nan"), None), (None, float("nan")), (float("nan"), 1.0),
+    (0.0, float("nan")),
+], ids=["nan_lo", "nan_hi", "nan_lo_both", "nan_hi_both"])
+def test_a_nan_bound_is_refused(bounds):
+    """A one-sided ``NaN`` used to be accepted -- the ``lo < hi`` check
+    only runs with both sides set -- and every comparison with ``NaN``
+    is False: ``check_bounds`` passed ``-1e30`` and ``constrain``
+    returned ``NaN``."""
+    with pytest.raises(ValueError, match="NaN"):
+        ParamSpec(bounds=bounds)
+
+
+@pytest.mark.parametrize("bounds", [(float("inf"), None), (None, -float("inf"))],
+                         ids=["plus_inf_lo", "minus_inf_hi"])
+def test_an_infinity_pointing_inward_is_refused(bounds):
+    with pytest.raises(ValueError, match="admits no value"):
+        ParamSpec(bounds=bounds)
+
+
+@pytest.mark.parametrize("transform, bounds", [
+    ("logit", (0.0, float("inf"))),
+    ("logit", (-float("inf"), 1.0)),
+    ("log", (-float("inf"), None)),
+])
+def test_an_infinite_bound_under_a_transform_is_refused(transform, bounds):
+    """``(0, inf)`` under ``"logit"`` mapped every value to ``u = -inf``
+    and ``constrain(0)`` to ``NaN``."""
+    with pytest.raises(ValueError, match="needs a finite"):
+        ParamSpec(bounds=bounds, transform=transform)
+
+
+@pytest.mark.parametrize("bad", ["1.0", True, [0.0]], ids=["string", "bool", "list"])
+def test_a_bound_that_is_not_a_real_number_is_refused(bad):
+    with pytest.raises(ValueError, match="not a real number"):
+        ParamSpec(bounds=(bad, None))
+
+
+def test_an_outward_infinity_means_exactly_none():
+    """``(-inf, inf)`` is what serialised documents already hold for an
+    unbounded spec, so it stays accepted and stays as given (the round
+    trip keeps it) -- and every reader treats it as ``None``."""
+    inf = float("inf")
+    spec = ParamSpec(bounds=(-inf, inf))
+    assert spec.bounds == (-inf, inf)
+    assert ParamSpec.from_dict(spec.to_dict()).bounds == (-inf, inf)
+    big = jnp.float32(3e38)
+    spec.check(big)
+    spec.check(-big)
+    assert float(spec.to_constrained(big)) == float(big)
+    ParamSpec(bounds=(0.0, inf), transform=None).check(jnp.float32(1e30))
+    from maddening.sysid import _changes_no_column, _nominal_entry
+    assert _nominal_entry(spec) == _nominal_entry(ParamSpec()) == (None, 0.0)
+    assert _nominal_entry(ParamSpec(bounds=(2.0, inf))) == (None, 0.0)
+    assert _changes_no_column(spec)

@@ -123,13 +123,17 @@ host floats and cannot run traced. Pinned by
 
 ```python
 node.selection_diagnostics()
-# {'active': 8, 'k': 8, 'outer_iterations': 4, 'max_outer': 30, 'budget_reached': True}
+# {'active': 8, 'k': 8, 'outer_iterations': 4, 'max_outer': 30,
+#  'budget_reached': True, 'resolved': False}
 WaveletAdaptiveNode("w", 1.0, n_levels=6, k=64, blindness_gate=False).selection_diagnostics()
-# {'active': 54, 'k': 64, 'outer_iterations': 30, 'max_outer': 30, 'budget_reached': False}
+# float64: {'active': 54, 'k': 64, 'outer_iterations': 30, 'max_outer': 30,
+#           'budget_reached': False, 'resolved': False}
 ```
 
-The CDD loop has two exits, the budget and the 30-iteration bound, and for
-`k` above about `n_max / 2` the bound is the one taken: each Dörfler step
+The CDD loop has three exits: the budget, the 30-iteration bound, and a
+step that finds nothing above the rounding floor to mark (`resolved`). For
+`k` above about `n_max / 2` the bound is the one taken in float64, and in
+float32 the floor usually comes first: each Dörfler step
 marks a fixed fraction of the *remaining* residual, so the steps shrink once
 the source is resolved. Measured on 128 points at the default source:
 `k = 64` and `k = 96` both stop at `|mask| = 54` (200 iterations reach 64;
@@ -138,12 +142,51 @@ The bound is deliberately not raised -- every iteration is a `k x k` solve
 on every update. If reaching the budget matters, read `budget_reached`; the
 engine-level `cdd_select_with_iterations` returns the same count.
 
+## What the phase-3 audit changed (1.1.0)
+
+- **Conditioning is checked.** A small positive `mass` used to give a
+  finite, wrong reading in the default float32 (128 points: `mass=1e-6`
+  read `J = 6.7e5` against an FFT reference of `1.77e5`, `mass=1e-8`
+  `-2.9e16`), silently, or with a warning blaming the active-set budget at
+  `k = n_max`. The constructor now bounds the solve's relative error by
+  `condition_number * eps(dtype) + physical_condition_number * eps(float64)`
+  (`node.solve_error_bound()`) and refuses above `CONDITION_LIMIT = 1e-3`,
+  saying which term is too large, whether float64 would carry it, and the
+  smallest mass that would. In float32 that is a periodic mass below about
+  `2e-3`; in float64 about `1e-8` to `6e-8`, where the float64 assembly of
+  the Galerkin product becomes the limit. The budget warning the old
+  behaviour produced at `k = n_max` (256 points, `mass=1e-6`) cannot arise:
+  that configuration is refused, and just inside the limit the capture
+  ratio at the full budget is 1.
+- **The selection no longer depends on rounding.** The source is centred
+  on every axis but the first, so residuals of mirror-image functions tie
+  to rounding and the last bits decided which one survived the cap: eager
+  and compiled evaluations, and a Python float and its float32-array
+  spelling, selected different sets at the same parameters, and a 1e-6
+  sweep of `theta` switched set on 15 of 39 steps (a finite difference
+  across one read -4.57 against `grad` -0.0101). The marking step now
+  never marks a residual at or below `rounding_floor` and breaks ties
+  within it by basis index, and parameter leaves are cast to the node's
+  dtype before the source reads them. The diagnostics therefore describe
+  the solve the graph runs. The set still changes at genuine crossings --
+  isolated parameter values -- and a gradient step across one still
+  misses a jump.
+- **The periodic source is periodised**, so a source near the seam no
+  longer loses the part that should wrap round (the same problem shifted
+  across the seam read 28% low, with `dJ/dtheta` of the wrong sign).
+- **Structural counts are validated, not truncated** (`n_levels=6.9` used
+  to build 64 points), and `update` / `selection_diagnostics` refuse an
+  unknown parameter key (`{"thetta": 0.9}` used to return the
+  constructor-theta answer).
+
 ## Using a different source: `source_field`
 
 Override `source_field(params)` to solve for another forcing. It must read
 every parameter it depends on from `params` (never `self.params`), return
 the forcing sampled on `grid_coordinates()` flattened row-major, and stay
-traceable. The MMS study is exactly this: a subclass returning the
+traceable. The leaves it receives are already cast to the node's dtype. On
+a periodic domain it should be periodic itself: the default one sums the
+Gaussian's periodic images. The MMS study is exactly this: a subclass returning the
 manufactured source, with `blindness_gate=False` because its source ignores
 `theta` and `sigma` and the base class would (correctly) warn that their
 full-basis gradient is bitwise zero.

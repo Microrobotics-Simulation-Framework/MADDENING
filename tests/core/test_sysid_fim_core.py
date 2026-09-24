@@ -662,11 +662,24 @@ class TestNoHostSyncs:
     def test_fim_performs_exactly_four_transfers(self, problems):
         """``eigvals``, ``eigvecs``, the finiteness flag and the
         zero-scaled mask, in one ``jax.device_get``.  Everything the
-        host verdict layer does afterwards is numpy on numpy."""
+        host verdict layer does afterwards is numpy on numpy.
+
+        This is the default call, which builds ``J`` eagerly every time
+        (it keeps no trace between calls); the eager ``jacfwd`` reads
+        nothing back either, so the count is the same four."""
         fn, params, kw = problems["kcm_null_direction"]
-        _quiet(fim, fn, params, **kw)                # warm the jit cache
+        _quiet(fim, fn, params, **kw)                # warm JAX's own caches
         with _CountTransfers() as counter:
             _quiet(fim, fn, params, **kw)
+        assert counter.count == 4, counter.by_kind
+
+    def test_fim_reusing_its_trace_performs_the_same_four(self, problems):
+        """``reuse_trace=True`` swaps the eager Jacobian for a cached
+        compiled one; the host side, and so the count, is unchanged."""
+        fn, params, kw = problems["kcm_null_direction"]
+        _quiet(fim, fn, params, reuse_trace=True, **kw)   # compile
+        with _CountTransfers() as counter:
+            _quiet(fim, fn, params, reuse_trace=True, **kw)
         assert counter.count == 4, counter.by_kind
 
     def test_a_nominal_scale_costs_no_extra_transfer(self, problems):
@@ -844,7 +857,13 @@ class TestTheCounterItself:
 
 
 class TestTracedOnce:
-    """The rollout is traced once per signature, not once per call."""
+    """Under ``reuse_trace=True`` the rollout is traced once per
+    signature, not once per call.
+
+    Opt-in since the cache was found to freeze the Python state a
+    residual reads (:class:`TestTheDefaultReadsTheResidualsCurrentState`);
+    these pin that the opt-in still delivers what it is for.
+    """
 
     def _counting_spring(self, n_steps=200):
         calls = [0]
@@ -860,10 +879,10 @@ class TestTracedOnce:
 
     def test_repeat_calls_do_not_re_enter_residual_fn(self):
         fn, params, calls = self._counting_spring()
-        _quiet(fim, fn, params)
+        _quiet(fim, fn, params, reuse_trace=True)
         calls[0] = 0
         for _ in range(5):
-            _quiet(fim, fn, params)
+            _quiet(fim, fn, params, reuse_trace=True)
         assert calls[0] == 0, (
             f"residual_fn was entered {calls[0]} times over 5 calls; the "
             "traced Jacobian is not being reused")
@@ -874,7 +893,7 @@ class TestTracedOnce:
         line when ``noise_std`` is ``None`` -- a whole extra rollout per
         call, buying nothing.  One entry now: the ``jacfwd`` trace."""
         fn, params, calls = self._counting_spring()
-        _quiet(fim, fn, params)
+        _quiet(fim, fn, params, reuse_trace=True)
         assert calls[0] == 1, calls[0]
 
     def test_a_noise_model_costs_a_trace_not_a_rollout(self):
@@ -884,25 +903,187 @@ class TestTracedOnce:
         Neither happens again -- ``eval_shape`` is cached on the same
         avals by JAX itself."""
         fn, params, calls = self._counting_spring()
-        _quiet(fim, fn, params, noise_std=2.0)
+        _quiet(fim, fn, params, noise_std=2.0, reuse_trace=True)
         first = calls[0]
         calls[0] = 0
-        _quiet(fim, fn, params, noise_std=2.0)
+        _quiet(fim, fn, params, noise_std=2.0, reuse_trace=True)
         assert first == 2, first
         assert calls[0] == 0, (
             f"{calls[0]} entries on a warm call with a noise model")
 
     def test_changing_params_does_not_retrace(self):
         fn, params, calls = self._counting_spring()
-        _quiet(fim, fn, params)
+        _quiet(fim, fn, params, reuse_trace=True)
         calls[0] = 0
         moved = dict(params, stiffness=jnp.float32(1.4 * K_TRUE))
-        _quiet(fim, fn, moved)
+        _quiet(fim, fn, moved, reuse_trace=True)
         assert calls[0] == 0
+
+    @pytest.mark.parametrize("name", ["identifiable_pair", "kcm_null_direction",
+                                      "noise_per_row", "nominal_masked",
+                                      "on_cutoff_n3_m200"])
+    def test_reusing_the_trace_gives_the_default_report_bit_for_bit(
+            self, problems, name):
+        """For a pure residual the opt-in is a speed switch and nothing
+        else: the jitted Jacobian is bit-identical to the eager one the
+        default builds, so every published number agrees exactly --
+        including on a verdict decided at the noise floor, where one ulp
+        in ``F`` would show."""
+        fn, params, kw = problems[name]
+        default, warned_default = _quiet(fim, fn, params, **kw)
+        _quiet(fim, fn, params, reuse_trace=True, **kw)      # compile
+        reused, warned_reused = _quiet(fim, fn, params, reuse_trace=True,
+                                       **kw)
+        assert reused.rank == default.rank
+        assert repr(reused.cond) == repr(default.cond)
+        assert len(warned_reused) == len(warned_default)
+        for field in ("fim", "eigvals", "eigvecs", "crb"):
+            assert np.array_equal(np.asarray(getattr(reused, field)),
+                                  np.asarray(getattr(default, field)),
+                                  equal_nan=True), field
+
+
+class TestTheDefaultReadsTheResidualsCurrentState:
+    """``fim`` answers for the residual as it stands at the call.
+
+    Before ``reuse_trace`` existed the compiled Jacobian was cached on
+    ``residual_fn`` by default, and tracing bakes in every value the
+    residual reads from outside its argument.  The documented pattern --
+    a residual over a sub-tree that reads the rest from ``gm.params``,
+    hoisted out of the loop -- therefore reported the first call's
+    matrix for ever after: the spring's stiffness bound read 0.41 after
+    ``damping`` moved from 2 to 20, where the truth is 44.7.  A bound
+    method is the same trap without a closure in sight, because it
+    compares equal across attribute accesses.  Each case below failed
+    before the default was changed.
+    """
+
+    @staticmethod
+    def _graph_residual():
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0,
+                                     mass=1.0, rest_length=1.0,
+                                     initial_position=0.5,
+                                     initial_velocity=0.0))
+        gm.compile()
+        step_fn = gm._build_step_fn()
+        ext = gm._default_external_inputs()
+        init = {"s": {"position": jnp.float32(0.5),
+                      "velocity": jnp.float32(0.0)}}
+
+        def residual(sub):
+            p = jax.tree.map(lambda x: x, gm.params)      # live graph params
+            p["nodes"]["s"]["stiffness"] = sub["stiffness"]
+            p["nodes"]["s"]["mass"] = sub["mass"]
+
+            def body(s, _):
+                s = step_fn(s, ext, p)
+                return s, s["s"]["position"]
+
+            return jax.lax.scan(body, init, None, length=200)[1]
+
+        sub = {"stiffness": jnp.float32(30.0), "mass": jnp.float32(1.0)}
+        return gm, residual, sub
+
+    def test_a_residual_reading_gm_params_sees_the_new_damping(self):
+        gm, residual, sub = self._graph_residual()
+        before, _ = _quiet(fim, residual, sub)
+        gm.params["nodes"]["s"]["damping"] = jnp.float32(20.0)
+        after, _ = _quiet(fim, residual, sub)
+        fresh, _ = _quiet(fim, lambda s: residual(s), sub)
+        assert np.array_equal(np.asarray(after.fim), np.asarray(fresh.fim))
+        assert np.array_equal(np.asarray(after.crb), np.asarray(fresh.crb))
+        # And the change is one the report can see: a no-op here would
+        # make the equality above vacuous.
+        assert not np.allclose(np.asarray(after.crb), np.asarray(before.crb))
+
+    def test_a_bound_method_sees_its_objects_new_state(self):
+        t = jnp.linspace(0.1, 1.0, 40, dtype=jnp.float32)
+        params = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+
+        class Estimator:
+            def __init__(self):
+                self.u1, self.u2 = t, t ** 2
+
+            def residual(self, p):
+                return p["a"] * self.u1 + p["b"] * self.u2
+
+        est = Estimator()
+        assert est.residual == est.residual           # the trap's premise
+        first, _ = _quiet(fim, est.residual, params)
+        assert first.rank == 2
+        est.u2 = 3.0 * t                               # now collinear with u1
+        second, _ = _quiet(fim, est.residual, params)
+        assert second.rank == 1
+        assert np.all(np.isinf(np.asarray(second.crb)))
+
+    def test_a_residual_reading_a_module_global_sees_it_change(self):
+        t = jnp.linspace(0.1, 1.0, 40, dtype=jnp.float32)
+        params = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+        state = {"u": t}
+
+        def residual(p):
+            return p["a"] * state["u"] + p["b"] * t ** 2
+
+        assert _quiet(fim, residual, params)[0].rank == 2
+        state["u"] = t ** 2
+        assert _quiet(fim, residual, params)[0].rank == 1
+
+    def test_a_noise_models_residual_structure_is_read_per_call(self):
+        """``jax.eval_shape`` caches on the function it is handed, so the
+        noise model's view of the residual's structure was frozen with
+        it.  A residual whose length is read from state has to be given
+        the length it has now, or a per-row sigma is checked against the
+        wrong one."""
+        box = {"n": 5}
+
+        def residual(p):
+            return p["a"] * jnp.arange(box["n"], dtype=jnp.float32) + p["b"]
+
+        params = {"a": jnp.float32(1.0), "b": jnp.float32(2.0)}
+        _quiet(fim, residual, params, noise_std=jnp.ones(5))
+        box["n"] = 7
+        report, _ = _quiet(fim, residual, params, noise_std=jnp.ones(7))
+        assert report.rank == 2
+
+    def test_the_default_enters_residual_fn_once_per_call(self):
+        """The price of reading current state is one trace per call --
+        and exactly one: the eager ``jacfwd``.  No second, wasted
+        evaluation came back with the change."""
+        calls = [0]
+        gm = _spring_gm()
+        residual, params = _spring_residual(gm, ("stiffness", "damping"), 50)
+
+        def counted(sub):
+            calls[0] += 1
+            return residual(sub)
+
+        for _ in range(3):
+            _quiet(fim, counted, params)
+        assert calls[0] == 3, calls[0]
+
+    def test_the_default_leaves_nothing_in_the_cache(self):
+        """A default call must not populate the cross-call cache: an
+        entry there holds the caller's residual -- and whatever it
+        closes over -- alive, for a reuse nobody asked for."""
+        from maddening.sysid import _fim_jacobian_compiled
+        fn, params = _linear_residual(
+            np.random.default_rng(3).standard_normal((12, 2)))
+        before = _fim_jacobian_compiled.cache_info().currsize
+        _quiet(fim, fn, params)
+        assert _fim_jacobian_compiled.cache_info().currsize == before
+
+    @pytest.mark.parametrize("flag", ["yes", 1, 0.0, None])
+    def test_reuse_trace_must_be_a_bool(self, flag):
+        fn, params = _linear_residual(
+            np.random.default_rng(3).standard_normal((12, 2)))
+        with pytest.raises(ValueError, match="reuse_trace must be a bool"):
+            fim(fn, params, reuse_trace=flag)
 
 
 class TestCacheKeyIsComplete:
-    """Every static argument that changes the answer is part of the key.
+    """Under ``reuse_trace=True``, every static argument that changes the
+    answer is part of the key.
 
     A key missing one of these returns another call's compiled Jacobian
     and the wrong report, silently -- there is no shape or dtype error
@@ -911,15 +1092,15 @@ class TestCacheKeyIsComplete:
 
     def test_scale_none_and_relative_do_not_share_an_entry(self, problems):
         fn, params, _ = problems["identifiable_pair"]
-        rel, _ = _quiet(fim, fn, params)
-        absolute, _ = _quiet(fim, fn, params, scale=None)
+        rel, _ = _quiet(fim, fn, params, reuse_trace=True)
+        absolute, _ = _quiet(fim, fn, params, scale=None, reuse_trace=True)
         assert not np.allclose(np.asarray(rel.fim), np.asarray(absolute.fim))
         assert not np.isclose(rel.cond, absolute.cond)
 
     def test_a_mask_does_not_share_an_entry_with_no_mask(self, problems):
         fn, params, _ = problems["identifiable_pair"]
-        full, _ = _quiet(fim, fn, params)
-        masked, _ = _quiet(fim, fn, params,
+        full, _ = _quiet(fim, fn, params, reuse_trace=True)
+        masked, _ = _quiet(fim, fn, params, reuse_trace=True,
                            mask={"stiffness": True, "damping": False})
         assert full.param_names == ("['damping']", "['stiffness']")
         assert masked.param_names == ("['stiffness']",)
@@ -928,8 +1109,8 @@ class TestCacheKeyIsComplete:
     def test_two_different_residuals_do_not_share_an_entry(self, problems):
         fn_a, params_a, _ = problems["identifiable_pair"]
         fn_b, params_b, _ = problems["well_conditioned"]
-        a, _ = _quiet(fim, fn_a, params_a)
-        b, _ = _quiet(fim, fn_b, params_b, scale=None)
+        a, _ = _quiet(fim, fn_a, params_a, reuse_trace=True)
+        b, _ = _quiet(fim, fn_b, params_b, scale=None, reuse_trace=True)
         assert a.param_names != b.param_names
 
     def test_an_unhashable_residual_fn_still_works(self, problems):
@@ -944,7 +1125,7 @@ class TestCacheKeyIsComplete:
             def __call__(self, p):
                 return fn(p)
 
-        got, _ = _quiet(fim, Unhashable(), params)
+        got, _ = _quiet(fim, Unhashable(), params, reuse_trace=True)
         want, _ = _quiet(fim, fn, params)
         assert got.rank == want.rank
         assert np.array_equal(np.asarray(got.crb), np.asarray(want.crb))

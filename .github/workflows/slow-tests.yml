@@ -72,6 +72,12 @@ jobs:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          # No compilation cache here, on purpose: this run is the
+          # authoritative cold timing of the whole suite (one process per
+          # shard, so uncontended), which triage and allowlist edits are
+          # based on.  Per-test JAX trace / lower / compile times go into
+          # the JUnit XML.
+          MADDENING_TEST_JAX_TIMING: "1"
           # This job's share of the suite (tests/_sharding.py).
           MADDENING_TEST_SHARD: "${{ matrix.shard }}/4"
         run: |
@@ -107,7 +113,7 @@ jobs:
         if: ${{ !cancelled() && hashFiles('test-results-shard*.xml') != '' }}
         run: |
           python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
-            --fail-over 0 \
+            --fail-over 0 --cache-mode off \
             --no-removable \
             --title "Slow lane durations (Python ${{ matrix.python-version }}, JAX ${{ matrix.jax-version }}, shard ${{ matrix.shard }} of 4)"
 

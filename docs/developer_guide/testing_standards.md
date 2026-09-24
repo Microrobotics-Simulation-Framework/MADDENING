@@ -437,18 +437,62 @@ every file: change `shard:` and `MADDENING_TEST_SHARD` in `ci.yml`, and
 made faster, or kept with a reason, and the list only shrinks. The summary
 lists entries that may now be removable.
 
-**Where the time usually goes.** When a test here is slow, the first
-suspect is XLA compilation rather than the computation itself. The usual
-fixes:
+### The compilation cache: warm and cold runs
 
-- Build and `jax.jit` the graph or function once in a module-scoped fixture
-  and reuse it, instead of rebuilding it in every test.
-- In a property test, keep array shapes and static arguments fixed across
-  examples. A new shape or a new Python-level constant is a new compile,
-  so an example that varies them costs a compile each time. Draw values,
-  not shapes, and pass them as traced arguments.
-- Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for properties
-  that compile per example.
+The test lanes use JAX's persistent XLA compilation cache, and whether a
+run reads it decides what its times mean:
+
+| Run | Cache | Times mean |
+|---|---|---|
+| Pull request | **warm**: restores the base branch's cache, never saves one | Fast. Anything the PR adds or changes still compiles from scratch, because its programs are not in the base cache, so a new slow test is still caught on the PR that adds it. |
+| Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: every compile is paid in full. |
+| `slow-tests.yml` (Mon/Wed/Fri) | **off**, one process per shard | The authoritative timing of the whole suite. Triage and allowlist edits are based on these runs. |
+| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
+
+Pull requests never save, so a second push cannot read the first push's
+cache: a new test that takes 25 s cold would otherwise pass at 8 s. Each
+shard has its own cache, which works because shard *i* holds the same files
+on every branch (see *Sharded lanes*). The cache key also includes the
+runner's CPU model, because XLA compiles for the host's instruction set. A
+shard that finds no cache for its model runs cold. Every lane summary
+states which kind of run it was: `warm`, `cold`, or `mixed` when the shards
+differed.
+A warm run never lists allowlist entries as removable, because a test that
+is only fast when its compile is cached is still slow.
+
+### Why a test is slow
+
+Each lane records every test's JAX tracing, lowering, XLA compile and
+cache-read time (`tests/_jax_timing.py`, switched on by
+`MADDENING_TEST_JAX_TIMING=1`). The summary splits the slowest tests into:
+
+- **compiling**: XLA backend compilation. This is the only part a cache
+  removes.
+- **tracing/lowering**: building the program in Python. No cache removes
+  it.
+- **running**: executing, Python overhead, I/O, and anything a subprocess
+  does. An un-jitted `for` loop over `node.update` lands here.
+
+**Slow even with a warm cache** lists every test still over 5 s once its
+compile time is subtracted. Every run shows this list, cold or warm. A cache
+cannot fix these tests; they need a code change or `@pytest.mark.slow`.
+
+The usual fixes:
+
+- **Running**: move the loop into JAX. Use `jax.lax.fori_loop` or
+  `jax.lax.scan` over a jitted update instead of a Python `for` loop that
+  dispatches every step op by op. Measured 2026-09-24:
+  `test_heart_pump.py::test_steady_state_pressure` (16,660 eager steps) and
+  `test_rigid_body.py::test_quaternion_stays_normalized` (10,000) spent
+  over 99% of their time this way.
+- **Tracing/lowering**: build the graph or function once, in a
+  module-scoped fixture, and reuse it rather than rebuilding it per test
+  or per example.
+- **Compiling**: in a property test, keep array shapes and static arguments
+  fixed across examples. A new shape or a new Python-level constant is a
+  new program, so draw values rather than shapes and pass them as traced
+  arguments. Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for
+  properties that still compile per example.
 
 ## Test Organization
 

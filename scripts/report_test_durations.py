@@ -32,6 +32,34 @@ every later test that reuses it, so moving one test moves another's time.
 A hard gate at 5 s would fail on noise every day.  At 20 s it fires on the
 tests that actually drag the lane: the ten slowest tests took 17 minutes.
 
+Why a test is slow
+------------------
+When the run sets ``MADDENING_TEST_JAX_TIMING=1``, ``tests/_jax_timing.py``
+records each test's JAX tracing, lowering, XLA compile and cache-read time
+as JUnit properties, and the summary splits every slow test into
+
+* **compiling** -- XLA backend compilation, the only part a persistent
+  compilation cache removes;
+* **tracing / lowering** -- building the program in Python; no cache
+  removes it;
+* **running** -- the rest: executing, Python overhead, I/O, and anything a
+  subprocess does (its JAX events are not seen here).
+  An un-jitted ``for`` loop over ``node.update`` lands here.
+
+Subtracting the compile time gives the time a warm cache cannot remove, on
+any run, cold or warm.  A test still over the policy line after that is
+listed under *Slow even with a warm cache*: it needs a code change, not a
+cache.
+
+Warm and cold runs
+------------------
+``--cache-mode`` says what the run's compilation cache was: ``off`` (none),
+``cold`` (started empty), ``warm`` (restored from an earlier run), or
+``mixed`` (a lane whose shards differed).  A
+warm run's times are not comparable with a cold run's, so the header says
+which it was, and a warm run does not list allowlist entries as removable
+-- a test that is only fast because its compile was cached is still slow.
+
 The allowlist
 -------------
 ``tests/duration_allowlist.txt``: one pytest node id per line, then
@@ -53,9 +81,10 @@ Usage
 -----
 ::
 
-    python -m pytest ... --junitxml=test-results.xml -o junit_family=xunit1
+    MADDENING_TEST_JAX_TIMING=1 python -m pytest ... \\
+        --junitxml=test-results.xml -o junit_family=xunit1
     python scripts/report_test_durations.py test-results.xml \\
-        --allowlist tests/duration_allowlist.txt
+        --allowlist tests/duration_allowlist.txt --cache-mode cold
 
 Writes Markdown to ``--markdown`` (default ``$GITHUB_STEP_SUMMARY`` when
 set), GitHub annotations to stdout, and exits
@@ -80,6 +109,12 @@ from typing import NamedTuple
 #: dropped silently, so the summary table is the complete list.
 ANNOTATION_LIMIT = 10
 
+#: The properties ``tests/_jax_timing.py`` writes.
+JAX_PROPERTIES = ("jax_trace_s", "jax_lower_s", "jax_compile_s", "jax_cache_read_s",
+                  "jax_cache_hits", "jax_cache_misses")
+
+CACHE_MODES = ("off", "cold", "warm", "mixed")
+
 
 class TestTime(NamedTuple):
     nodeid: str
@@ -87,6 +122,30 @@ class TestTime(NamedTuple):
     line: int | None
     seconds: float
     outcome: str
+    #: ``{property: value}`` from ``tests/_jax_timing.py``; ``None`` when
+    #: the run did not record them.
+    jax: dict | None = None
+
+    @property
+    def compiling(self) -> float:
+        return self.jax["jax_compile_s"] if self.jax else 0.0
+
+    @property
+    def building(self) -> float:
+        """Tracing plus lowering."""
+        return self.jax["jax_trace_s"] + self.jax["jax_lower_s"] if self.jax else 0.0
+
+    @property
+    def running(self) -> float:
+        if not self.jax:
+            return self.seconds
+        spent = self.compiling + self.building + self.jax["jax_cache_read_s"]
+        return max(0.0, self.seconds - spent)
+
+    @property
+    def uncacheable(self) -> float:
+        """What is left once a warm cache has removed the XLA compile."""
+        return max(0.0, self.seconds - self.compiling)
 
 
 class ReportError(Exception):
@@ -114,6 +173,16 @@ def _nodeid(case: ET.Element) -> tuple[str, str]:
     return "::".join(parts), file
 
 
+def _jax_properties(case: ET.Element) -> dict | None:
+    props = {p.get("name"): p.get("value") for p in case.iter("property")}
+    if not any(k in props for k in JAX_PROPERTIES):
+        return None
+    try:
+        return {k: float(props.get(k) or 0.0) for k in JAX_PROPERTIES}
+    except ValueError as exc:
+        raise ReportError(f"unreadable JAX timing property: {exc}") from exc
+
+
 def read_report(path: Path) -> list[TestTime]:
     """Parse one pytest JUnit XML file into per-test times."""
     if not path.is_file():
@@ -135,6 +204,7 @@ def read_report(path: Path) -> list[TestTime]:
             nodeid=nodeid, file=file,
             line=int(line) + 1 if line is not None else None,  # 0-based in the XML
             seconds=float(case.get("time") or 0.0), outcome=outcome,
+            jax=_jax_properties(case),
         ))
     return out
 
@@ -168,6 +238,23 @@ def _escape(text: str) -> str:
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def diagnose(t: TestTime) -> str:
+    """Name the largest of running / tracing+lowering / compiling."""
+    if not t.jax:
+        return ""
+    share = {"running": t.running, "tracing/lowering": t.building, "compiling": t.compiling}
+    what = max(share, key=share.get)
+    pct = 100 * share[what] / t.seconds if t.seconds else 0
+    hint = {
+        "running": "un-jitted loop, heavy compute, or a subprocess",
+        "tracing/lowering": "large or repeatedly rebuilt program; no cache removes this",
+        "compiling": (f"{int(t.jax['jax_cache_misses'])} cache misses"
+                      if t.jax["jax_cache_hits"] + t.jax["jax_cache_misses"]
+                      else "a compilation cache would remove this"),
+    }[what]
+    return f"{what} {pct:.0f}%: {hint}"
+
+
 def judge(tests, allow, *, watch_over, slow_over, fail_over):
     """Split the tests into the budget's bands; pure, so it can be tested."""
     by_id = {}
@@ -181,14 +268,16 @@ def judge(tests, allow, *, watch_over, slow_over, fail_over):
         "slow": [t for t in ranked if t.seconds > slow_over],
         "new_slow": [t for t in ranked if t.seconds > slow_over and t.nodeid not in allow],
         "failing": [t for t in ranked if t.seconds > fail_over and t.nodeid not in allow],
+        "slow_warm": [t for t in ranked if t.jax and t.uncacheable > slow_over],
         "allow_absent": sorted(set(allow) - set(by_id)),
         "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over],
     }
 
 
-def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top):
+def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, cache_mode):
     ranked = verdict["ranked"]
     total = sum(t.seconds for t in ranked)
+    timed = [t for t in ranked if t.jax]
     lines = [f"## {title}", ""]
 
     def band(sel):
@@ -200,23 +289,61 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top):
         f"{len(ranked)} tests, {_fmt(total)} of test time "
         f"(setup + call + teardown; collection and start-up excluded).",
         "",
-        "| band | tests | time | share |",
-        "|---|---:|---:|---:|",
-        f"| up to {watch_over:g} s: fine | {band(fine)} |",
-        f"| {watch_over:g}-{slow_over:g} s: watch, optimise | {band(verdict['watch'])} |",
-        f"| over {slow_over:g} s: mark slow, speed up, or keep with a reason | {band(verdict['slow'])} |",
-        "",
     ]
+    cache_line = {
+        "off": "**Compilation cache: off.** Every compile is paid in full.",
+        "cold": "**Compilation cache: cold** (started empty). Every compile is paid in full.",
+        "warm": ("**Compilation cache: warm** (restored from an earlier run). Compiles of "
+                 "unchanged programs were skipped, so these times are lower than a cold "
+                 "run's; new and changed programs still compiled."),
+        "mixed": ("**Compilation cache: mixed** -- some shards restored a cache and some ran "
+                  "cold (a shard whose runner CPU model had no cache yet), so these times mix "
+                  "warm and cold."),
+    }.get(cache_mode, "**Compilation cache: not stated.**")
+    if timed:
+        hits = sum(t.jax["jax_cache_hits"] for t in timed)
+        misses = sum(t.jax["jax_cache_misses"] for t in timed)
+        split = [sum(t.running for t in timed), sum(t.building for t in timed),
+                 sum(t.compiling for t in timed)]
+        cache_line += (f" Cache hits {int(hits)}, misses {int(misses)}. Of the test time: "
+                       f"running {_fmt(split[0])}, tracing/lowering {_fmt(split[1])}, "
+                       f"XLA compile {_fmt(split[2])}.")
+    lines += [cache_line, "",
+              "| band | tests | time | share |",
+              "|---|---:|---:|---:|",
+              f"| up to {watch_over:g} s: fine | {band(fine)} |",
+              f"| {watch_over:g}-{slow_over:g} s: watch, optimise | {band(verdict['watch'])} |",
+              f"| over {slow_over:g} s: mark slow, speed up, or keep with a reason | {band(verdict['slow'])} |",
+              ""]
     if verdict["failing"]:
         lines += [f"### Over {fail_over:g} s and not on the allowlist -- this fails the job", ""]
-        lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)}" for t in verdict["failing"]] + [""]
+        lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)} {diagnose(t)}" for t in verdict["failing"]] + [""]
     if verdict["new_slow"]:
         lines += [f"### Over {slow_over:g} s and not on the allowlist", ""]
-        lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)}" for t in verdict["new_slow"]] + [""]
-    lines += [f"### Slowest {min(top, len(ranked))} tests", "",
-              "| time | test | allowlist |", "|---:|---|---|"]
-    for t in ranked[:top]:
-        lines.append(f"| {_fmt(t.seconds)} | `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
+        lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)} {diagnose(t)}" for t in verdict["new_slow"]] + [""]
+    if verdict["slow_warm"]:
+        lines += [f"### Slow even with a warm cache ({len(verdict['slow_warm'])})", "",
+                  f"Still over {slow_over:g} s once XLA compilation is taken away. A cache "
+                  "cannot fix these; they need a code change (jit or `lax.scan` a Python "
+                  "loop, build the program once and reuse it) or `@pytest.mark.slow`.", "",
+                  "| without compile | running | tracing/lowering | test | allowlist |",
+                  "|---:|---:|---:|---|---|"]
+        for t in verdict["slow_warm"]:
+            lines.append(f"| {_fmt(t.uncacheable)} | {_fmt(t.running)} | {_fmt(t.building)} "
+                         f"| `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
+        lines.append("")
+    lines += [f"### Slowest {min(top, len(ranked))} tests", ""]
+    if timed:
+        lines += ["| time | running | tracing/lowering | compiling | why | test | allowlist |",
+                  "|---:|---:|---:|---:|---|---|---|"]
+        for t in ranked[:top]:
+            lines.append(f"| {_fmt(t.seconds)} | {_fmt(t.running)} | {_fmt(t.building)} "
+                         f"| {_fmt(t.compiling)} | {diagnose(t)} | `{t.nodeid}` "
+                         f"| {allow.get(t.nodeid, '')} |")
+    else:
+        lines += ["| time | test | allowlist |", "|---:|---|---|"]
+        for t in ranked[:top]:
+            lines.append(f"| {_fmt(t.seconds)} | `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
     files = defaultdict(lambda: [0.0, 0])
     for t in ranked:
         files[t.file][0] += t.seconds
@@ -225,7 +352,11 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top):
     for f, (s, n) in sorted(files.items(), key=lambda kv: -kv[1][0])[:15]:
         lines.append(f"| {_fmt(s)} | {n} | {s / n:.2f} s | `{f}` |")
     removable = verdict["allow_absent"] + [t.nodeid for t in verdict["allow_fast"]]
-    if removable:
+    if removable and cache_mode in ("warm", "mixed"):
+        lines += ["", "Allowlist entries are not judged removable on a warm run: a test that "
+                  "is only fast because its compile was cached is still slow. See the "
+                  "after-merge (cold) runs."]
+    elif removable:
         lines += ["", f"### Allowlist entries that may be removable ({len(removable)})", "",
                   "Not run in this lane (marked slow, renamed or deleted), or under "
                   f"{slow_over:g} s this run. One fast run is not proof; check the "
@@ -238,8 +369,9 @@ def annotations(verdict, *, slow_over, fail_over):
     out = []
     for t in verdict["failing"]:
         loc = f"file={t.file},line={t.line}," if t.line else f"file={t.file},"
+        why = f" ({diagnose(t)})" if t.jax else ""
         out.append(f"::error {loc}title=Test over {fail_over:g} s::" + _escape(
-            f"{t.nodeid} took {_fmt(t.seconds)}. Mark it @pytest.mark.slow, make it "
+            f"{t.nodeid} took {_fmt(t.seconds)}{why}. Mark it @pytest.mark.slow, make it "
             f"faster, or add it to tests/duration_allowlist.txt with the reason it "
             f"must run on every push."))
     failing = {t.nodeid for t in verdict["failing"]}
@@ -247,8 +379,9 @@ def annotations(verdict, *, slow_over, fail_over):
         if t.nodeid in failing:
             continue
         loc = f"file={t.file},line={t.line}," if t.line else f"file={t.file},"
+        why = f" ({diagnose(t)})" if t.jax else ""
         out.append(f"::warning {loc}title=Test over {slow_over:g} s::" + _escape(
-            f"{t.nodeid} took {_fmt(t.seconds)}; the budget for the default lane "
+            f"{t.nodeid} took {_fmt(t.seconds)}{why}; the budget for the default lane "
             f"is {slow_over:g} s. Mark it slow or make it faster."))
     return out[:ANNOTATION_LIMIT]
 
@@ -261,6 +394,8 @@ def main(argv=None) -> int:
     p.add_argument("--slow-over", type=float, default=5.0)
     p.add_argument("--fail-over", type=float, default=20.0,
                    help="an unlisted test slower than this fails; 0 disables the gate")
+    p.add_argument("--cache-mode", choices=CACHE_MODES,
+                   help="the run's compilation cache: off, cold (started empty) or warm")
     p.add_argument("--markdown", type=Path,
                    default=Path(os.environ["GITHUB_STEP_SUMMARY"]) if os.environ.get("GITHUB_STEP_SUMMARY") else None,
                    help="append the summary here (default: $GITHUB_STEP_SUMMARY)")
@@ -290,7 +425,8 @@ def main(argv=None) -> int:
         # that is missing.
         verdict["allow_absent"], verdict["allow_fast"] = [], []
     md = markdown(verdict, allow, title=args.title, watch_over=args.watch_over,
-                  slow_over=args.slow_over, fail_over=fail_over, top=args.top)
+                  slow_over=args.slow_over, fail_over=fail_over, top=args.top,
+                  cache_mode=args.cache_mode)
     if args.markdown:
         with open(args.markdown, "a", encoding="utf-8") as fh:
             fh.write(md)
@@ -303,7 +439,8 @@ def main(argv=None) -> int:
     print(f"{len(ranked)} tests; {len(verdict['watch'])} in the "
           f"{args.watch_over:g}-{args.slow_over:g} s watch band; "
           f"{len(verdict['slow'])} over {args.slow_over:g} s "
-          f"({len(verdict['new_slow'])} not allowlisted); "
+          f"({len(verdict['new_slow'])} not allowlisted; "
+          f"{len(verdict['slow_warm'])} slow even with a warm cache); "
           + (f"{len(verdict['failing'])} unlisted over {args.fail_over:g} s."
              if args.fail_over else "hard line off (--fail-over 0)."))
     return 1 if verdict["failing"] else 0

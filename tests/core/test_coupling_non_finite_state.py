@@ -358,6 +358,29 @@ def test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads(route, no
         jax.block_until_ready(gm.get_node_state("a")["x"])
 
 
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_a_single_pass_reads_a_non_finite_field_no_edge_reads(solver):
+    """``max_iterations=1`` takes the same verdict, through its own path.
+
+    One pass has its own reporting branch (no loop, no ratio); the
+    interface residual of that pass is finite and far inside a loose
+    ``rtol``, so only the all-fields rule can say the state is not.
+    """
+    gm = GraphManager()
+    gm.add_node(_WithInternal("a", z0=np.nan))
+    gm.add_node(_ScalarRelay("b", timestep=1.0))
+    gm.add_edge(source="b", target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    gm.add_external_input("a", "w", shape=(), dtype=jnp.float32)
+    gm.add_coupling_group(["a", "b"], convergence_norm="interface", rtol=10.0,
+                          diagnostics=True, max_iterations=1, solver=solver)
+    gm.compile()
+    gm.step({"a": {"w": jnp.float32(0.0)}})
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["iterations"] == 1
+    _assert_reported_as_diverged(d, f"max_iterations=1/{solver}")
+
+
 @pytest.mark.parametrize("norm", NORMS)
 def test_a_finite_internal_field_leaves_the_verdict_alone(norm):
     """The control: the same graph with every field finite converges as before."""

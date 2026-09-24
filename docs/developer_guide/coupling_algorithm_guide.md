@@ -131,11 +131,15 @@ Three settings that are nearly always right and are not in the table:
 
 ## Reading `coupling_diagnostics()`
 
-Each group reports twelve fields: seven for every group, and five --
+Each group reports thirteen fields: eight for every group, and five --
 three spectral, two about the gradient -- that carry a value only under
-`solver="ift"` with `diagnostics=True`.  Three of the seven need
+`solver="ift"` with `diagnostics=True`.  Three of the eight need
 reading carefully, and one of them was renamed in 0.4.0 because its old
-name said more than it checks.
+name said more than it checks.  A group that has not taken a step yet
+(before the first `step()`, and after `reset_state()`) has no entry at
+all: its `_meta` slots hold seeds that keep the scan carry's structure,
+and read as a report they said `converged=True` about a group that had
+never run.
 
 | field | what it is |
 |---|---|
@@ -145,12 +149,44 @@ name said more than it checks.
 | `error_estimate` | `residual · max(ω · amplification, 1)` — **an estimate** of the distance to the fixed point, not of the last step.  Falls back to `residual` when the ratio was rejected |
 | `ratio_usable` | whether the contraction *ratio* was usable — see below.  Renamed from `bound_valid` |
 | `gradient_error_estimate` | how far the IFT adjoint may sit from a finite difference of the same forward.  Numerically `error_estimate`, so it inherits every way that number can understate.  `inf` when `ratio_usable` is false.  Renamed from `gradient_error_bound` |
-| `converged` | the *error estimate* met the group's threshold |
+| `converged` | the *error estimate* met the group's threshold.  **`True` on a stalled float32 iterate** — see below |
 | `rho_spectral` | the spectral radius of `dF/dx` at the returned state, from eight Arnoldi steps on the Jacobian-vector product the IFT adjoint already builds.  Sees every mode, not only the one dominating the step.  NaN for `fori`, for `diagnostics=False` and at `max_iterations=1` |
-| `spectral_error_bound` | `residual · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
+| `spectral_error_bound` | `(residual + floor) · max(‖(I − H)⁻¹‖₂, 1/(1 − rho_spectral))`, with `floor` the residual's own float resolution and `H` the Krylov-compressed Jacobian in the group's own norm — **a bound** on the distance to the fixed point for a linear `F`, whatever the accelerator did; asymptotic for a non-linear one.  See below |
 | `spectral_usable` | the bound is finite and the Arnoldi space had settled (`h_{k+1,k} ≤ 0.05 (1 − rho_spectral)`).  False where nothing was computed and for a group with more than eight independent interface scalars |
 | `gradient_relative_error_bound` | a bound on the relative error of the IFT gradient caused by the forward stopping early: `spectral_error_bound` × the resolvent factor it applies × the change in the map's linearisation per unit distance, for the worst of one probe per floating constant.  **About the gradient, not the solve** — reads 0.0 on an affine group whose state is far off.  See below |
-| `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed |
+| `gradient_bound_usable` | the gradient bound is finite and `spectral_usable` is true.  False where nothing was computed and where the Newton–Kantorovich check fails |
+| `precision_limited` | the residual is at or below its own float resolution: `residual` and `error_estimate` are rounding, at least half of each bound is the floor, and only a wider dtype can shrink them.  Reported for every group |
+
+### A stalled float32 iterate reads `converged=True`
+
+When `(1 − rho) · |x − x*|` falls below half an ulp, a pass changes
+nothing: `F(x) == x` bitwise, the residual is exactly `0.0`, and
+`converged` — and `strict_convergence` — report success although the
+state can be far from its fixed point.  Measured (jaxlib 0.11.0,
+float32): a relay contracting at 0.99999, started 0.3% short of its
+fixed point, stops after one pass with `residual=0.0` and
+`converged=True` at **38 348 ulps**, a relative distance of 4.2e-3
+against a tolerance of 1e-6.  The criterion is deliberately not changed
+for this — a precision floor in it would make a tight float32 tolerance
+unreachable and move iteration counts everywhere — so the bound keys
+are where it shows: `spectral_error_bound` adds the residual's float
+resolution before amplifying it (it read `0.0` there; it now reads
+9.4e-2, which covers the 4.2e-3), and `precision_limited` is `True`.
+On a slow group, turn on `diagnostics=True` and read those two before
+trusting `converged`.  Planned for 0.5.0, not promised by this
+release: `strict_convergence` consulting the spectral bound when
+diagnostics are on.
+
+The floor is `PRECISION_FLOOR_ULPS = 4` units of `eps · max|field|` in
+every entry the norm reads, in the norm's units — `4 eps √n` under
+`"l2"` over its `n` entries, `4 eps / rtol` under `"mixed"` and
+`"interface"` (`residual_precision_floor`).  Four is 2.6x the sum of
+the two measured sources of a residual's rounding: the evaluation
+error of a dense update `A @ u + c` near its fixed point (at most 0.72
+of a unit over 3 000 random contractions) and the disagreement between
+two compilations of the same pass (at most 0.82, the solver-equivalence
+sweep).  It models the map's rounding; a node whose update cancels
+catastrophically inside itself can exceed it.
 
 ### What `ratio_usable` checks, and what it does not
 
@@ -227,8 +263,32 @@ The 119 is what a rigorous bound on a badly non-normal map costs — the
 resolvent norm is the worst direction in the space and the residual is
 rarely in it — and it is why the bound is **reported and not applied**:
 `converged`, the iteration counts and the recorded sweep rows are
-exactly what they were.  The 0.991 is the float32 floor of a
-60 000-entry L2 norm, which the bound inherits from `residual`.
+exactly what they were.  The table predates the precision floor (the
+0.991 in it was the float32 floor of a 60 000-entry L2 norm, which the
+bound then inherited from `residual`; it now adds that floor).
+
+Three things make the resolvent term hold where the table's rows did
+not test it:
+
+* **the residual is in the space.**  The resolvent norm bounds
+  `(I − J)⁻¹ r` only for an `r` inside the invariant space it was
+  measured on.  A Krylov space from one start vector is that vector's
+  cyclic subspace, which a repeated eigenvalue breaks down early: on
+  `A = B ⊗ I₂` it stopped at dimension 2 with a range of dimension 4,
+  the zero Arnoldi residual read as "settled", and the bound read
+  0.92x the true distance.  The residual is now passed in and the space
+  continues from its missing part at every breakdown (1.05x there);
+  whatever it never absorbs is reported as unresolved;
+* **a dead-banded field stays on the loop.**  The dead band takes a
+  field out of the *residual*, not out of the coupling loop.  Weighted
+  zero in the spectrum it cut the loop: `rho_spectral` 0.000 for a loop
+  gain of 0.9 (a displacement of 1e-9 m feeding a stiffness of 1e9),
+  and the bound 0.15–0.29x the kept field's distance.  It now keeps its
+  own magnitude's weight in the spectrum, and its share of the residual
+  — which `residual` does not contain — is measured and folded into
+  the factor (2.8–5.5x there);
+* **a non-finite state reports NaN**, not a spectral radius computed at
+  a state that has left float range.
 
 What it is not: for a non-linear `F` it is asymptotic (Ostrowski) — exact
 to float32 on a log map within tolerance of its fixed point, an estimate
@@ -261,7 +321,20 @@ group already has or measures cheaply:
    adjoint's own matvec: `G` evaluated by the same Jacobian-vector
    product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
    Newton correction (which supplies the direction only), divided by
-   `‖δ‖`.  No Hessian is formed.
+   `‖δ‖`.  No Hessian is formed.  Where the residual is at its float
+   resolution it carries no direction, and a floor-sized vector's
+   resolvent image — the slow mode — stands in;
+4. **how far the linearisation reaches**, by Newton–Kantorovich: with
+   `h = amp · L · ‖δ‖`, `L` the Jacobian's change along `δ` per unit
+   length squared (one more pair of Jacobian-vector products), the
+   resolvent at `x*` is at most `amp / √(1 − 2h)` and a fixed point lies
+   within Kantorovich's radius, so the bound carries that factor and at
+   least that distance — and is `inf`, unusable, at `h ≥ ½`, where
+   nothing measured at `x_k` bounds the resolvent at the fixed point.
+   On a convex map at `F'(x*) = 0.99`, 0.65–4.5% short, the bound without
+   it read 0.20–0.96x the true error with the flag true; `h` there is
+   0.48–0.58, so two of those points now read `inf` and two hold at
+   3.0–3.5x.  `h` is exactly zero on an affine map.
 
 The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
 relative to the tangent, taken for **one probe per floating constant**
@@ -309,7 +382,8 @@ and this key cannot say so.  For the health of the solve read
 covers the interface fields only and on that spring pair reads 2.3e-3.
 Beyond that: it inherits every condition of `spectral_error_bound`; it
 is leading-order in the distance (the curvature is measured over `δ` and
-extrapolated linearly); a field-valued constant is probed along one
+extrapolated linearly, and `h` checks the Jacobian's variation along `δ`
+only); a field-valued constant is probed along one
 random direction; and it is relative to the tangent's norm, so a scalar
 loss whose gradient nearly cancels across the state can carry a larger
 relative error.  `gradient_bound_usable` reports a finite bound and a

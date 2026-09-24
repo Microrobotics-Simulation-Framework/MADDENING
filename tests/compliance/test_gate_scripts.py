@@ -2846,7 +2846,7 @@ class TestDoctestGate:
     #: ``min_mappings_floor.json`` gives the mapping pins
     #: (audit_040_r2/gates, finding G6).  Raise both when examples are
     #: added; lowering both belongs in a commit that says why.
-    COMMITTED_EXAMPLE_FLOOR = 98
+    COMMITTED_EXAMPLE_FLOOR = 110
 
     def test_the_floor_is_not_below_its_committed_value(self):
         gate = _load("check_doctests")

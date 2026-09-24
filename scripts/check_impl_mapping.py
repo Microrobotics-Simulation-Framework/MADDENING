@@ -97,10 +97,15 @@ NODE_ID_PREFIX = "MADD-NODE-"
 # to be a comment saying "never lower one to make CI pass", and dropping a
 # pin from 9 to 1 while deleting 8 rows of the guide left every gate and
 # every mapping test green (audit_040_r2/gates, finding G6).
+#
+# A pin below its guide's count is slack a row deletion hides in: the
+# wavelet guide sat at 20 with 24 references, so four could go
+# (audit_040_phase3_confirm).  Floors, not exact counts, so that two
+# branches each adding rows to one guide do not collide on its number.
 MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 11,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
-    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 20,
+    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 24,
     os.path.join(
         "docs", "algorithm_guide", "solvers", "explicit_integrators.md"
     ): 5,

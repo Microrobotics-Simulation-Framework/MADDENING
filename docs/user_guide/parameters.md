@@ -425,6 +425,46 @@ kind, hyper-parameters, point references) and rebuilds the weights on
 load; a checkpoint stores the weights themselves (`_params_mappings/`),
 and when both are loaded the checkpoint's — possibly trained — weights win.
 
+### Calibrating a parameter that a mapped edge's grid derives from
+
+**The weights do not follow a calibrated geometry parameter, and nothing
+tells you (MADD-ANO-022).** A mapping built from a node's coordinates
+(the point reference `{"node": "rod", "field": "grid_x"}`, or the same
+array passed by hand) computes its weights once, from the grid as it was
+constructed. On the default, uniform `HeatNode`, `grid_x` is derived from
+`length`, and `length` is trainable. Calibrating `length` through
+`gm.params` therefore moves the rod and leaves the mapped edge
+interpolating from the old grid. `compile()` accepts the graph, no
+warning is raised, and the reference's recorded hash still matches,
+because the static array itself never changed.
+
+What you would see, measured on an 8-cell rod calibrated from `length`
+1.0 to 1.25 and mapped onto a 16-cell rod:
+
+- the target rod moves by about `4e-4`, where the same graph constructed
+  at 1.25 moves it by about `1.2e-2`;
+- the gradient of the target with respect to `length` has the wrong sign;
+- `fit_lm` on the target's data stops at `length ≈ 0.22` with a small
+  loss (about `1e-5`), so the fit looks successful. The truth is 1.25.
+  The same fit on the source rod's own data recovers 1.25.
+
+Until a fix lands (being scoped for 0.5.0), use one of these:
+
+- **Freeze the parameter** when a mapped edge references a grid it
+  derives: `gm.set_param_spec("rod", "length", ParamSpec(trainable=False))`.
+  The default mask then leaves it alone, and `fit` refuses a mask that
+  tries to widen back onto it.
+- **Give the mapping explicit coordinates**, as an
+  `{"asset": "points.npy"}` or `{"inline": [...]}` reference. The config
+  then states that the mapping's geometry is fixed, and does not imply
+  that it follows the node.
+- **If the geometry has to be calibrated**, fit it from observations of
+  the node itself rather than through the mapped edge. Then rebuild the
+  graph at the fitted value, so the mapping is rebuilt from the new grid.
+
+The same applies to any node whose static data is derived from a
+trainable parameter while its step reads the parameter directly.
+
 ## What is not a parameter
 
 * Initial conditions (`initial_*`): they are state, not dynamics, and are

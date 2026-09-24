@@ -2,7 +2,10 @@
 BallNode -- a ball under gravity with optional collision against a surface.
 
 Collision detection uses ``jnp.where`` so the entire ``update`` is
-JAX-traceable and JIT-compilable.
+JAX-traceable and JIT-compilable.  Traceable is not the same as
+differentiable through the contact: a gradient taken across a bounce
+omits the derivative of the contact time (MADD-ANO-021; see the class
+docstring).
 """
 
 import jax.numpy as jnp
@@ -38,6 +41,42 @@ class BallNode(SimulationNode):
         Coefficient of restitution for collisions (default 0.8).
     gravity : float
         Gravitational acceleration (default -9.81 m/s^2).
+
+    Warnings
+    --------
+    **Gradients through a bounce are wrong, and nothing warns you
+    (MADD-ANO-021).**  ``update`` tests for contact once per step and,
+    on contact, pins the position to the surface and reflects the
+    velocity.  ``jax.grad`` differentiates the branch that step took,
+    not the moment of contact, so the derivative of the contact time is
+    missing from every gradient taken through a bounce.  Measured with
+    ``dt = 1e-3``, a drop from 1.0 onto a table at 0.0, ``e = 0.8`` and
+    one bounce before ``T = 0.8 s``: the gradient of the final height
+    with respect to the drop height is exactly ``0.0``, where the exact
+    continuous derivative is ``+0.5892``, and the gradient with respect
+    to ``|gravity|`` is ``+0.0651`` against an exact ``+0.0051``.  The
+    gradient with respect to ``elasticity`` is right (``+1.5431`` against
+    ``+1.5436``), because the contact time does not depend on it.  The
+    *values* are fine: the final height is within one tick of travel
+    (``3e-3``) of the exact one.
+
+    The zero is structural, not a precision problem.  The clamp sets the
+    position to a constant, and the impact velocity depends on how many
+    whole steps the fall took rather than on the drop height, so the
+    state after the bounce is flat in the drop height within each
+    one-step window and jumps between windows.  A smaller ``dt`` makes
+    the windows narrower; it does not make the gradient non-zero.
+
+    This is a property of the framework, not of this node: any node
+    that branches on its own state inside ``update`` has the same
+    defect.  Do not calibrate or optimise through a contact with this
+    node.  Smooth the switch instead (a penalty or regularised contact
+    force), or keep the event out of the differentiated interval.
+    Event localisation with an implicit-function-theorem derivative of
+    the event time is planned for 0.5.0.  If you are copying this node
+    as a template for a contact, threshold or stick-slip model, read
+    the "Events inside update()" section of the node-authoring guide
+    first.
     """
 
     meta = NodeMeta(
@@ -74,6 +113,15 @@ class BallNode(SimulationNode):
             "Forward Euler is only 1st-order — large timesteps cause energy drift",
             "Collision detection is per-step: tunneling possible if v*dt > gap",
             "No air resistance or drag",
+            (
+                "Gradients through a bounce omit the contact-time derivative "
+                "(MADD-ANO-021): d(height after bounce)/d(drop height) is "
+                "exactly 0.0 against an exact +0.5892 (dt=1e-3, one bounce), "
+                "and d/d|gravity| is about 13 times too large.  Values are "
+                "correct to one tick.  No warning is raised.  Smooth the contact, or "
+                "do not differentiate through it; event-time derivatives are "
+                "planned for 0.5.0."
+            ),
         ),
         validated_regimes=(
             ValidatedRegime("elasticity", 0.0, 1.0, notes="e=0 is perfectly inelastic, e=1 is perfectly elastic"),
@@ -82,6 +130,8 @@ class BallNode(SimulationNode):
         hazard_hints=(
             "Tunneling through collision surface at large dt or high velocity",
             "Energy drift accumulates over long simulations due to 1st-order integration",
+            "A fit or optimisation through a bounce follows a gradient that "
+            "is zero or wrong while the trajectory looks right (MADD-ANO-021)",
         ),
     )
 

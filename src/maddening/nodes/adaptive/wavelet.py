@@ -39,10 +39,14 @@ How the pieces map onto the base class
   isolated parameter values where two residual magnitudes cross the
   floor's width or the Doerfler bulk crosses a cumulative sum.
 * **Conditioning.**  The constructor bounds the relative solve error
-  by ``kappa(A_hat) eps(dtype) + kappa_phys eps(float64)`` and refuses
-  a configuration above :data:`CONDITION_LIMIT` -- in practice a small
-  periodic ``mass``, since the periodic operator's smallest eigenvalue
-  is ``mass``.
+  by ``kappa(A_hat) eps(dtype) + kappa_phys eps(float64)`` (with the CG
+  stopping tolerance in place of ``eps`` on the masked-CG path) and
+  refuses a configuration above :data:`CONDITION_LIMIT` -- in practice
+  a small periodic ``mass``, since the periodic operator's smallest
+  eigenvalue is ``mass``.  The bound is on the accuracy of a solve that
+  completes; whether the masked CG converges at all is not bounded, and
+  an eager solve that does not is refused with a message naming the
+  conditioning and the fix (:meth:`solve_frozen`).
 * **Frozen solve** (:meth:`solve_frozen`): the ``k`` active functions
   gathered into a dense ``k x k`` block and solved directly
   (``frozen_solver="gather"``, the default), or the masked full-size
@@ -142,7 +146,51 @@ PERIODIC_IMAGES: tuple[int, ...] = (-2, -1, 0, 1, 2)
 #: order 6); in float64 the second refuses one below about ``1e-8`` (1-D,
 #: 128 points) to ``6e-8`` (256 points).  The Dirichlet operator is
 #: bounded away from singular and is not affected.
+#:
+#: What this bounds, exactly.  The first term models a *direct* solve --
+#: the gathered ``k x k`` block (``frozen_solver="gather"``) and the dense
+#: full-basis gradient.  The masked-CG path (``frozen_solver="cg"``) stops
+#: at a relative residual of ``rtol`` (1e-6 in float32, 1e-10 in float64),
+#: which the condition number amplifies just as it does ``eps``, so for it
+#: the first term is ``kappa(A_hat) * max(eps, rtol)``: in float32 that
+#: refuses a periodic mass below about ``2e-2`` rather than ``2e-3``, and
+#: in float64 below about ``2e-6``.  Neither term says whether CG
+#: *converges*.  Measured on the 1-D periodic node at the full budget
+#: (jaxlib 0.11.0, lineax 0.0.7 and 0.1.1 alike), CG stagnates or breaks
+#: down below its tolerance -- more steps do not help -- at conditionings
+#: the bound accepts: float32 at 256 points already at ``mass = 0.3``
+#: (``kappa = 65``) and at 64 or 128 points at ``3e-2``; float64 at 128 or
+#: 256 points at ``1e-5``.  That failure is loud, never a wrong number;
+#: :meth:`WaveletAdaptiveNode.solve_frozen` turns it into a message on the
+#: eager paths (see there).
+#:
+#: The bound is conservative for the ``"level"`` and ``"dk"``
+#: preconditioners, whose diagonal leaves ``kappa(A_hat)`` larger than
+#: the actual error needs: periodic ``mass = 3e-3`` in float32 is refused
+#: under both (bound 1.4e-3 to 1.9e-3) while the measured error of the
+#: full-basis solve is 1.5e-4 (``"level"``) and 8e-5 (``"dk"``), about 12x
+#: inside the limit.  A refused configuration of this kind runs under the
+#: default ``"hybrid"`` preconditioner, whose bound is about half as large
+#: (7.7e-4, accepted), or in float64.  The limit is kept as is: a
+#: preconditioner-specific constant would rest on three measured points.
 CONDITION_LIMIT: float = 1e-3
+
+#: ``(rtol, atol)`` of the masked-CG frozen solve, by precision: float32
+#: (and narrower) and float64.
+_CG_TOLERANCES: dict[bool, tuple[float, float]] = {
+    False: (1e-6, 1e-8),
+    True: (1e-10, 1e-12),
+}
+
+#: Substrings of the errors lineax raises when an iterative solve does not
+#: converge (the same wording in lineax 0.0.7 and 0.1.1): the step budget
+#: ran out, the solve broke down into non-finite values, or it stagnated.
+_CG_FAILURE_SIGNATURES: tuple[str, ...] = (
+    "maximum number of solver steps",
+    "returned non-finite",
+    "breakdown",
+    "stagnation",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +276,8 @@ class WaveletAdaptiveNode(AdaptiveNode):
         enough for the node's dtype to carry the operator: the periodic
         operator's smallest eigenvalue is ``m``, and a configuration whose
         :meth:`solve_error_bound` exceeds :data:`CONDITION_LIMIT` is
-        refused (in float32, a periodic ``m`` below about ``2e-3``).
+        refused (in float32, a periodic ``m`` below about ``2e-3``, or
+        ``2e-2`` with ``frozen_solver="cg"``).
         Baked into the operator: ``ParamSpec(trainable=False)`` and
         declared through :meth:`static_data_deps`.
     sensor : tuple of float, optional
@@ -241,7 +290,11 @@ class WaveletAdaptiveNode(AdaptiveNode):
         Diagonal scaling; see :mod:`~maddening.nodes.adaptive.wavelets.precond`.
     boundary : {"periodic", "dirichlet"}
     frozen_solver : {"gather", "cg"}
-        How :meth:`solve_frozen` solves on the active set.
+        How :meth:`solve_frozen` solves on the active set: ``"gather"``
+        (default), a direct solve on the gathered ``k x k`` block, or
+        ``"cg"``, conjugate gradients on the masked full operator, which
+        accepts any mask but converges less reliably in float32 (see
+        :data:`CONDITION_LIMIT`).
     **kw
         Forwarded to :class:`~maddening.nodes.adaptive.base.AdaptiveNode`
         (``blindness_gate``, ``on_blind``, ``dtype``, the diagnostic
@@ -314,9 +367,13 @@ class WaveletAdaptiveNode(AdaptiveNode):
             "seed fits and the gathered solve never truncates the set; an "
             "oversized mask is refused eagerly and poisoned with NaN under jit",
             "The solve's relative error bound kappa(A_hat) eps(dtype) + "
-            "kappa(-Laplacian_h + m) eps(float64) is at most CONDITION_LIMIT = "
-            "1e-3 (validated at construction; an operator above it is refused, "
-            "naming the dtype and the mass that would work)",
+            "kappa(-Laplacian_h + m) eps(float64) -- with the CG stopping "
+            "tolerance in place of eps(dtype) on the masked-CG path -- is at "
+            "most CONDITION_LIMIT = 1e-3 (validated at construction; an "
+            "operator above it is refused, naming the dtype and the mass that "
+            "would work).  It bounds the accuracy of a completed solve, not "
+            "whether the masked CG converges; an eager CG solve that does not "
+            "is refused with the conditioning and the fix",
             "Inherits the AdaptiveNode assumptions: the returned gradient is "
             "exact within an active-set region and ignores the set's "
             "dependence on the parameters (MADD-ANO-003)",
@@ -558,16 +615,28 @@ class WaveletAdaptiveNode(AdaptiveNode):
         self._sensor_index = int(sidx)
         self._sensor_row = op.Wn[self._sensor_index]
 
+    def _cg_tolerances(self, dtype: Any = None) -> tuple[float, float]:
+        """``(rtol, atol)`` the masked-CG frozen solve stops at in ``dtype``."""
+        dt = self.dtype if dtype is None else jnp.zeros((), dtype=dtype).dtype
+        return _CG_TOLERANCES[bool(jnp.finfo(dt).eps < 1e-10)]
+
     def solve_error_bound(self, dtype: Any = None) -> float:
         """The relative solve error :data:`CONDITION_LIMIT` is compared with.
 
-        ``condition_number * eps(dtype) + physical_condition_number * eps(float64)``
+        ``condition_number * tol + physical_condition_number * eps(float64)``
         -- the node's solve in ``dtype`` (its own by default) plus the
-        float64 assembly.  The constructor refuses a node whose bound
-        exceeds the limit.
+        float64 assembly.  ``tol`` is ``eps(dtype)`` for the direct
+        gathered solve and ``max(eps(dtype), rtol)`` for the masked CG,
+        which stops at a relative residual of ``rtol`` (1e-6 in float32,
+        1e-10 in float64).  The constructor refuses a node whose bound
+        exceeds the limit.  This bounds the accuracy of a solve that
+        completes; whether the masked CG converges is not part of it (see
+        :data:`CONDITION_LIMIT`).
         """
         dt = self.dtype if dtype is None else jnp.zeros((), dtype=dtype).dtype
         eps = float(jnp.finfo(dt).eps)
+        if self.params["frozen_solver"] == "cg":
+            eps = max(eps, self._cg_tolerances(dt)[0])
         eps64 = float(np.finfo(np.float64).eps)
         return self.condition_number * eps + self.physical_condition_number * eps64
 
@@ -577,16 +646,24 @@ class WaveletAdaptiveNode(AdaptiveNode):
         See :data:`CONDITION_LIMIT`.  Every frozen solve is on a principal
         block of ``A_hat``, whose condition number is at most
         ``kappa(A_hat)`` (eigenvalue interlacing), so this bounds the
-        adaptive solves, the masked-CG path and the full-basis gradient
-        alike.  It used to be unchecked: in float32 on 128 points,
-        ``mass=1e-6`` read ``J = 6.7e5`` against ``1.77e5`` and
-        ``mass=1e-8`` read ``-2.9e16``, with no warning -- or with one
-        blaming the active-set budget at ``k = n_max``.
+        rounding error of the direct solves -- the gathered adaptive
+        solves and the full-basis gradient -- and, through the CG
+        tolerance, the accuracy of a masked-CG solve that converges.  It
+        does not bound whether the masked CG converges: at conditionings
+        it accepts, CG can stagnate below its tolerance, which raises
+        rather than returns (:meth:`solve_frozen`).  It used to be
+        unchecked: in float32 on 128 points, ``mass=1e-6`` read
+        ``J = 6.7e5`` against ``1.77e5`` and ``mass=1e-8`` read
+        ``-2.9e16``, with no warning -- or with one blaming the
+        active-set budget at ``k = n_max``.
         """
         bound = self.solve_error_bound()
         if bound <= CONDITION_LIMIT:
             return
         eps = float(jnp.finfo(self.dtype).eps)
+        cg = self.params["frozen_solver"] == "cg"
+        if cg:
+            eps = max(eps, self._cg_tolerances()[0])
         eps64 = float(np.finfo(np.float64).eps)
         solve_term = self.condition_number * eps
         assembly_term = self.physical_condition_number * eps64
@@ -609,15 +686,31 @@ class WaveletAdaptiveNode(AdaptiveNode):
             )
         else:
             cause, mass_hint = "", ""
+        if cg:
+            solver = (
+                f"a masked-CG solve stopping at a relative residual of {eps:.0e} "
+                f"(frozen_solver='cg', {self.dtype})"
+            )
+            gather_bound = (self.condition_number * float(jnp.finfo(self.dtype).eps)
+                            + assembly_term)
+            solver_hint = (
+                f"  Or use frozen_solver='gather', a direct solve bounded by "
+                f"kappa * eps instead ({gather_bound:.1e}"
+                f"{', accepted' if gather_bound <= CONDITION_LIMIT else ''})."
+            )
+        else:
+            solver = f"a {self.dtype} solve (eps {eps:.1e})"
+            solver_hint = ""
         raise ValueError(
             f"{type(self).__name__} {self.name!r}: the solve can be wrong by a "
             f"relative {bound:.1e} (mass={mass!r}, boundary={boundary!r}, "
             f"n_max={self.n_max}), above CONDITION_LIMIT = {CONDITION_LIMIT:.0e}: "
             f"the preconditioned operator's condition number is about "
-            f"{self.condition_number:.2e}, which a {self.dtype} solve (eps "
-            f"{eps:.1e}) turns into {solve_term:.1e}, and the grid operator's is "
+            f"{self.condition_number:.2e}, which {solver} turns into "
+            f"{solve_term:.1e}, and the grid operator's is "
             f"{self.physical_condition_number:.2e}, which the float64 assembly "
             f"turns into {assembly_term:.1e}.  {cause}  {dtype_hint}{mass_hint}"
+            f"{solver_hint}"
         )
 
     # ------------------------------------------------------------------
@@ -796,12 +889,71 @@ class WaveletAdaptiveNode(AdaptiveNode):
             self._refuse_oversized_mask(mask, "solve_frozen")
             c_hat = _gather_kernel(self._Ah, mask, b_hat, k=self.k)
         else:
-            tight = bool(jnp.finfo(self.dtype).eps < 1e-10)
-            c_hat = _cg_kernel(
-                self._Ah_sparse, mask, b_hat,
-                rtol=1e-10 if tight else 1e-6, atol=1e-12 if tight else 1e-8,
-            )
+            c_hat = self._cg_solve(mask, b_hat)
         return {"c": c_hat / self._D}
+
+    def _cg_solve(self, mask: jax.Array, b_hat: jax.Array) -> jax.Array:
+        """The masked-CG frozen solve, with a message when it does not converge.
+
+        :data:`CONDITION_LIMIT` bounds the accuracy of a CG solve that
+        converges, not whether it does: at conditionings the constructor
+        accepts, CG can stagnate or break down below its tolerance (see
+        the measurements there), and lineax then raises its own error --
+        "the maximum number of solver steps was reached, try increasing
+        ``max_steps``", which this signature cannot reach, or "returned
+        non-finite output".  On an eager call -- the cold start in
+        :meth:`initial_state`, a diagnostic, a direct call -- that error
+        is caught here and re-raised as a :class:`ValueError` naming the
+        conditioning, the tolerance and the fixes.  Under a trace (a
+        compiled graph step) the solve runs later, inside XLA, and the
+        failure surfaces as lineax's error when the step executes; the
+        fixes are the same.  Never a wrong number either way.
+        """
+        rtol, atol = self._cg_tolerances()
+        try:
+            c_hat = _cg_kernel(self._Ah_sparse, mask, b_hat, rtol=rtol, atol=atol)
+            if not isinstance(c_hat, jax.core.Tracer):
+                c_hat = jax.block_until_ready(c_hat)
+        except Exception as exc:  # noqa: BLE001 - re-raised unless it is lineax's
+            text = str(exc)
+            if not any(sig in text for sig in _CG_FAILURE_SIGNATURES):
+                raise
+            raise ValueError(self._cg_failure_message(text, rtol, atol)) from exc
+        return c_hat
+
+    def _cg_failure_message(self, text: str, rtol: float, atol: float) -> str:
+        """Why the masked CG did not converge, and what to do instead."""
+        if "maximum number of solver steps" in text:
+            how = "ran out of steps without meeting its tolerance"
+        elif "non-finite" in text:
+            how = "broke down into non-finite values"
+        else:
+            how = "stagnated"
+        eps = float(jnp.finfo(self.dtype).eps)
+        max_steps = max(4 * self.n_max, 200)
+        fixes = [
+            f"use frozen_solver='gather', the default direct solve (error bound "
+            f"kappa * eps = {self.condition_number * eps:.1e} here)"
+        ]
+        if self.dtype != jnp.float64:
+            fixes.append("build the node in float64 (jax.config.update("
+                         "'jax_enable_x64', True) and dtype=jnp.float64)")
+        if self.params["boundary"] == "periodic":
+            fixes.append(f"raise mass (now {self.params['mass']!r}; the periodic "
+                         f"operator's smallest eigenvalue)")
+        return (
+            f"{type(self).__name__} {self.name!r}: the masked-CG frozen solve "
+            f"(frozen_solver='cg') {how}.  CG stops only when every residual "
+            f"component is within atol + rtol * |b_i| (rtol={rtol:.0e}, "
+            f"atol={atol:.0e} in {self.dtype}) and its last step is as small, "
+            f"within max(4 n_max, 200) = {max_steps} steps.  The preconditioned "
+            f"operator's condition number is about {self.condition_number:.2e} "
+            f"(n_max={self.n_max}), and at this conditioning, size and dtype the "
+            f"rounding of the residual keeps it above that tolerance -- more steps "
+            f"do not help.  The constructor's conditioning guard bounds the "
+            f"accuracy of a CG solve that converges, not whether it does.  To go "
+            f"ahead: " + "; or ".join(fixes) + "."
+        )
 
     def objective(self, state: dict, params: dict) -> jax.Array:
         """The sensor reading ``J = u(x_s) = Wn[s] . c``."""

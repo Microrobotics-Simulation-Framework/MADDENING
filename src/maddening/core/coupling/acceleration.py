@@ -144,21 +144,21 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     ``1e-35`` read ``residual=0.0, converged=True`` 43 passes into an
     iteration that takes 126-130 at ``1e-29``, under all three norms and
     both solvers, and the spectral bound built on that residual read
-    6e-4 of the true distance with ``spectral_usable=True``.  So the pair
-    is multiplied by ``2**k`` first, wherever the scale *or* a one-ulp
-    change of the field is below the normal range, and the difference is
-    taken between two normal numbers; the norm then says the same thing
-    about a group at ``1e-35`` as about the same group scaled by any
-    power of two into the normal range -- to the bit, pinned by
+    6e-4 of the true distance with ``spectral_usable=True``.  So wherever
+    a one-ulp change of the field is below the normal range the pair is
+    multiplied by ``2**k`` first and the difference is taken between two
+    normal numbers; the norm then says the same thing about a group at
+    ``1e-35`` as about the same group scaled by any power of two into
+    the normal range -- to the bit, pinned by
     ``test_the_verdict_does_not_change_below_the_change_underflow``.
 
     A field whose magnitude is *itself* subnormal is below what the
     dtype resolves: a flush-to-zero backend (XLA's CPU backend is one)
     reads it as zero and it leaves the norm as a field at zero does;
     elsewhere it is rescaled like the rest.  Every other field is
-    multiplied by exactly ``1.0`` on both operands of the difference and
-    on the scale, so its value is bit-identical to what it was before
-    either guard existed.
+    measured by the expressions the norms always evaluated, selected by a
+    ``where``, so its value -- and the compiled loop it sits in -- is
+    bit-identical to what it was before either guard existed.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
@@ -173,28 +173,52 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
         jnp.isfinite(ref),
         scale * tiny <= 1.0,
     )
-    # The underflow end: above the caller's dead band (so ``ref > 0``)
-    # but a scale below the smallest normal number (or flushed to zero),
-    # or a field so small that a change of one ulp of it is subnormal
-    # (``ref < tiny / eps``), which the subtraction would flush.  There
-    # both operands of the difference and the scale are multiplied by
-    # ``k = 1 / tiny``, a power of two, *before* the difference is
-    # taken, so the quotient is the same one computed on normal numbers;
-    # everywhere else ``k`` is exactly ``1.0`` and multiplying by it is
-    # exact, so an in-range field's value is bit-identical.  NaN ``ref``
-    # and ``scale`` compare False, so this is finite-only, and ``ref *
-    # k`` stays below ``1 / min(rtol, eps)`` on the fields it is applied
-    # to.
+    # The underflow end of the *scale*: above the caller's dead band (so
+    # ``ref > 0``) but a scale below the smallest normal number (or
+    # flushed to zero).  There numerator and denominator are both
+    # multiplied by ``k = 1 / tiny``, a power of two, so the quotient is
+    # the same one; everywhere else ``k`` is exactly ``1.0`` and
+    # multiplying by it is exact.  NaN ``ref`` and ``scale`` compare
+    # False, so this is finite-only.
+    #
+    # These are the expressions the norms have always evaluated, kept
+    # verbatim -- the L2 norm's two-op form included -- because the
+    # residual shares a compiled loop body with the node updates, and
+    # XLA fuses the two: rewritten in an equivalent form (the pair
+    # rescaled before subtracting, ``k`` exactly 1.0 in range) the
+    # arithmetic of the *node updates* moved by an ulp under
+    # ``solver="ift"`` and the L2 norm, and one group stopped on a
+    # different pass.  So the rescaled pair below is an alternative the
+    # ``where`` selects, not a change to these.
+    diff = jnp.abs(new_val - old_val)
     above = ref > atol
-    underflow = jnp.logical_and(
-        above,
-        jnp.logical_or(scale < tiny, ref < float(tiny) / float(info.eps)),
-    )
-    k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(dtype)
-    diff = jnp.abs(new_val * k - old_val * k)
-    active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
-    safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
-    scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
+    if isinstance(rtol, (int, float)) and float(rtol) >= 1.0:
+        # ``scale >= ref`` here (the L2 norm passes ``rtol=1.0``), so a
+        # field with a normal magnitude has a normal scale.
+        active = jnp.logical_and(above, scale > 0)
+        safe = jnp.where(active, scale, jnp.ones_like(scale))
+        scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
+    else:
+        underflow = jnp.logical_and(above, scale < tiny)
+        k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(dtype)
+        active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
+        safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
+        scaled = jnp.where(active, (diff * k) / safe, jnp.zeros_like(diff))
+    # The underflow end of the *change*: a field so small that a change
+    # of one ulp of it is subnormal (``ref < tiny / eps``), which the
+    # subtraction above flushes to zero, whatever ``rtol``.  There the
+    # pair is multiplied by ``K = 1 / tiny`` *before* it is subtracted,
+    # so the difference is taken between two normal numbers, and the
+    # scale by the same ``K``: the same quotient, to the bit, as the
+    # same group scaled by a power of two into the normal range.  This
+    # covers the scale's underflow end too wherever ``rtol >= eps``.
+    # ``ref * K`` stays below ``1 / eps`` on the fields it is applied to.
+    small = jnp.logical_and(above, ref < float(tiny) / float(info.eps))
+    big_k = float(1.0 / float(tiny))
+    active = jnp.logical_or(active, small)
+    pair = jnp.abs(new_val * big_k - old_val * big_k)
+    small_safe = jnp.where(small, rtol * (ref * big_k), jnp.ones_like(scale))
+    scaled = jnp.where(small, pair / small_safe, scaled)
     # ``where`` with the finite computation in the *selected* branch:
     # an evaluable field's value, and its gradient, are exactly what
     # they were before this guard existed.

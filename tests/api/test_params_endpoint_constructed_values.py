@@ -239,6 +239,33 @@ def test_a_structural_value_the_trace_reads_is_written_and_recompiled():
     assert float(gm.get_node_state("n")["x"]) == pytest.approx(1.0 - 0.1 * 7.0)
 
 
+class _TraceTimeMask(SimulationNode):
+    """Builds an array from ``self.params`` while it is traced (a derived
+    mask rebuilt for a new scale): the new value changes a *constant* of the
+    trace, not its text."""
+
+    def __init__(self, name="n", timestep=0.1, scale=1.0):
+        super().__init__(name, timestep, scale=scale)
+
+    def initial_state(self):
+        return {"x": jnp.ones(4, jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        mask = np.linspace(0.5, 1.5, 4, dtype=np.float32) * np.float32(self.params["scale"])
+        return {"x": state["x"] * (1.0 - dt * mask)}
+
+
+def test_a_structural_value_that_changes_a_trace_constant_is_written_and_recompiled():
+    gm = GraphManager()
+    gm.add_node(_TraceTimeMask())
+    gm.compile()
+    resp = _client(gm).put("/graph/params/n", json={"params": {"scale": 2.0}})
+    assert resp.status_code == 200, resp.text
+    gm.step()
+    expected = 1.0 - 0.1 * np.linspace(0.5, 1.5, 4, dtype=np.float32) * 2.0
+    np.testing.assert_allclose(np.asarray(gm.get_node_state("n")["x"]), expected, rtol=1e-6)
+
+
 def test_a_structural_value_the_node_copied_in_init_is_refused():
     gm = GraphManager()
     gm.add_node(_Legacy())

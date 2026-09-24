@@ -578,6 +578,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-024, 025 (new, resolved in this release)**: `PUT /graph/params` accepted and saved a value a node consumes at
+  construction (since 0.1.0); a sharded `LBMNode` imposed its pressure faces at every seam and, by default, filled its global
+  halos unlike its periodic streaming (since 0.2.0). Both are refusals now (see `### Fixed`)
 - **MADD-ANO-021, 022, 023 (open)**: a gradient through a state-triggered branch omits the event time (BallNode's bounce:
   exactly 0 in the drop height); a mapped edge on a grid derived from a trainable parameter keeps its constructor
   geometry when that parameter is calibrated; the FMU TCP bridge authenticates no caller. Workarounds in the registry

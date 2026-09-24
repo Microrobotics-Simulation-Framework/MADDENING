@@ -2675,3 +2675,180 @@ anomalies:
       - "tests/fmi/test_bridge_unauthenticated_access.py::test_an_unrelated_client_holding_the_slot_locks_the_importer_out"
       - "tests/fmi/test_bridge_unauthenticated_access.py::test_the_default_bind_is_loopback"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-024"
+    title: "PUT /graph/params accepted a value a node consumes at construction: reported and saved, never used by the running graph"
+    description: >
+      `PUT /graph/params/{node}` wrote the new value into the node's params
+      dict, answered 200 and echoed it, and `GET /graph/params` served it
+      from then on.  But a node that consumes a parameter when it is
+      constructed -- to build a geometry mask, assemble an operator, or copy
+      it into an attribute in `__init__` -- never reads that dict again, and
+      nothing rebuilt what the constructor had built.  The running graph
+      therefore kept computing with the old value while every surface that
+      reports or saves the graph carried the new one: `to_dict()` and a
+      saved config serialised it, so a reload produced results the server
+      had never produced.  The recompile that the write triggered (the
+      route marked the graph dirty) re-traced the step against the masks
+      built from the old values, so it did not help.
+      Reproduced at v0.1.0, v0.2.1 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) on `LBMPipeNode(nx=8, ny=10, nz=10, pipe_radius=0.8,
+      propeller_x=2, propeller_strength=0.01)` through the real endpoint,
+      20 steps after the write and a recompile: `pipe_radius=0.5` answers
+      200, `GET` reports 0.5, and the velocity field is bit-identical to
+      the radius-0.8 graph and 5.667e-03 from a graph built at 0.5;
+      `propeller_x=5`, a structural integer the constructor turns into a
+      forcing mask, answers 200 and stays bit-identical to the old graph,
+      2.245e-03 from one built at 5, with the same numbers at every one of
+      the three tags.  On the 0.4.0 development tree before the fix
+      (f3b330a) the same write reached `WaveletAdaptiveNode.mass`, which
+      the node bakes into its operator: 200, `GET` 0.5, the graph not
+      marked dirty, the sensor reading unchanged at 1.826243e-01 even
+      after `POST /graph/compile`, and a `to_dict()` reload reading
+      3.599405e-01, the value a node built at 0.5 gives.  In that tree the
+      graph already refused a direct `gm.params` write to a leaf its step
+      cannot read, but it compared against `node.params_pytree()`, and the
+      REST route writes the node's params as well as `gm.params`, so the
+      comparison could not see it.
+      Resolved in 0.4.0 by refusing rather than rebuilding.  The route asks
+      the graph before anything is written: a leaf the compiled step (or
+      the node's hooks, given every declared boundary input) reads from the
+      injected params is used from the next step; a structural value whose
+      trace changes is written and recompiled; a value that changes what
+      `initial_state()` returns takes effect at the next `/sim/reset`; a
+      `static_data_deps` key and anything else is a 400 naming the key and
+      the reason, with nothing written.  `POST /checkpoint/load` runs the
+      same refusal after loading and undoes the load when it fires.  The
+      same class was closed on the FMI surface before release, where the
+      paths are new in 0.4.0 and so never shipped the defect: the model
+      description exports only parameters the step reads (the rest are
+      listed with the reason in `ModelDescription.fixed_parameters`), and
+      the sidecar's `set_params` / `set_fmu_state` and the bridge's
+      `set_state` refuse a new value for a fixed parameter.  Same class as
+      MADD-ANO-004: a public write surface confirming a value the physics
+      does not use.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The result is silently wrong with no error or warning: the API
+      reports and serialises a value the simulation does not use, so a
+      saved config or checkpoint does not reproduce the results the server
+      produced, and an operator reading the parameters back is told the
+      new value is in force.  Graded `major` rather than `minor` for that
+      silence and for the reload divergence (a factor of about two in the
+      wavelet sensor reading above).  `context_dependent` because it needs
+      two things at once: a parameter a node consumes at construction
+      (geometry masks, assembled operators, `__init__` copies) and a write
+      to it through the REST API at run time.  A graph whose constructed
+      values are only ever set through the node constructor is unaffected.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      To change a parameter a node consumes at construction, rebuild the
+      node: `DELETE /graph/nodes/{name}` and then `POST /graph/nodes` with
+      the new value, or `remove_node` / `add_node` in Python.  Before
+      0.4.0, do not treat `GET /graph/params` as what runs; it reports what
+      was written.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The refusal detects "no path at all", as the graph-level check does.
+      A value a node consumes at construction and also reads again later
+      still passes -- `pipe_radius` on a pipe with `fill_fraction < 1`,
+      whose `initial_state` reads it too -- so a node that bakes a
+      parameter should declare it in `static_data_deps`, which is refused
+      outright.  A value nothing reads anywhere is refused as well: it
+      cannot make a reload differ, but telling it apart would mean
+      constructing the node again.
+    verification:
+      - "tests/api/test_params_endpoint_constructed_values.py::test_wavelet_mass_is_refused_and_the_saved_graph_still_matches_the_running_one"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_pipe_radius_is_refused_and_the_saved_graph_still_matches_the_running_one"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_structural_value_consumed_at_construction_is_refused"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_structural_value_the_node_copied_in_init_is_refused"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_an_initial_condition_copied_at_construction_is_refused"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_leaf_the_step_reads_is_written_and_used"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_checkpoint_carrying_another_constructed_value_is_refused_and_not_loaded"
+      - "tests/fmi/test_params_the_step_cannot_read.py::test_a_pipe_exports_what_its_step_reads_and_not_its_geometry"
+      - "tests/fmi/test_params_the_step_cannot_read.py::test_the_sidecar_refuses_a_value_its_step_would_ignore"
+      - "tests/fmi/test_params_the_step_cannot_read.py::test_a_snapshot_cannot_install_a_value_the_step_cannot_read"
+      - "tests/fmi/test_params_the_step_cannot_read.py::test_the_bridge_set_state_refuses_an_archive_that_changes_a_fixed_parameter"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-025"
+    title: "A sharded LBMNode computed a different model from the unsharded node: pressure faces imposed at every seam of a sharded face axis, and an edge-filled global halo by default"
+    description: >
+      `ShardedStencilNode(LBMNode)` departed silently from the node it
+      wraps in two ways.  (1) With the axis of the inlet/outlet pressure
+      faces sharded, `LBMNode.update_padded` applied the Zou-He closure to
+      the edge plane of every shard's slab, so each seam was forced to the
+      face pressures.  The update_padded docstring and the LBM guide called
+      that layout invalid, but nothing enforced it.  (2) The wrapper fills
+      the halos at the edges of the global grid with its `boundary`
+      argument, default `"edge"`, while `LBMNode.update` streams
+      periodically (`jnp.roll`), so even the documented layout computed a
+      different model unless `boundary="periodic"` was passed.
+      Measured on a pressure-driven channel (16x10 D2Q9, walls at
+      y = 0 and y = 9, p_in = 1.01/3, p_out = 0.99/3, 200 steps, two
+      virtual devices, CPU, jaxlib 0.11.0, float32).  At v0.2.0 and v0.3.1
+      (`git archive` of each tag, identical results): sharding the face
+      axis gives 1.1495x the unsharded centreline velocity; sharding across
+      the walls with the default fill gives 0.9973x (max|du| 2.2e-04); with
+      `boundary="periodic"` it matches to 1.2e-07.  On the 0.4.0
+      development tree before the fix (f3b330a), where MADD-ANO-020's face
+      closure was already corrected, the same three runs give 2.0973x, with
+      the densities either side of the seam forced to 0.990 and 1.010,
+      then 0.9936x (max|du| 4.1e-04) and a 2.6e-07 match.  No error or
+      warning in any of them.  `LBMNode.update_padded` and the
+      `boundary="edge"` default both date from v0.2.0, the first release
+      with `ShardedStencilNode`.
+      Resolved in 0.4.0.  (1) The first sharded step that imposes a
+      pressure on a face whose axis is split raises a `ValueError` naming
+      the face(s), the axis, the slab size and an axis to shard instead;
+      the check reads `shard_info`, so a body-force-driven node may still
+      shard any axis, and a mesh axis of one device (no seam) is allowed.
+      (2) `ShardedStencilNode` keeps its STABLE `boundary="edge"` default.
+      A stencil node may now declare `halo_boundary()`, the fill under
+      which its `update_padded` reproduces its `update`; `LBMNode` declares
+      `"periodic"`, and the wrapper refuses at construction any `boundary`
+      that differs from a declared fill, its own default included, with a
+      message saying to pass `boundary="periodic"`.  A node that declares
+      nothing is wrapped exactly as before.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent wrong physics on a public, STABLE wrapper, graded `minor`
+      because (1) was on a layout the docstring and the guide called
+      invalid, and (2) is sub-percent on the default path (0.27% at the
+      tags, 0.64% after MADD-ANO-020's fix), below the node's documented
+      first-order wall error at practical resolutions.  The case for
+      `major`: (2) was the default and nothing said sharding changed the
+      model, and (1) was up to a 2x error with no signal.
+      `context_dependent` because it needs a sharded LBM, and for (1) a
+      pressure-driven one sharded along its flow axis; whether a result
+      built on it matters is a property of the program using it.
+    affected_components:
+      - "maddening.nodes.lbm.LBMNode.update_padded"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `boundary="periodic"` when wrapping an `LBMNode`,
+      and shard only axes no pressure face lies on, or drive the flow with
+      `body_force`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The face-axis refusal fires at the first sharded step that imposes a
+      pressure (at trace time), not at construction, because the faces act
+      only when a pressure input arrives; a direct `update_padded` caller
+      that passes no `shard_info` is not covered.  Wrapping an `LBMNode`
+      without `boundary="periodic"` is refused at construction.  A stencil
+      node that declares no `halo_boundary()` is wrapped as before, where
+      the fill it is given is its boundary condition.
+    verification:
+      - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_sharding_the_inlet_outlet_axis_of_a_pressure_channel_is_refused"
+      - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_with_periodic_halos_a_pressure_channel_sharded_across_its_walls_is_the_unsharded_node"
+      - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_wrapping_an_lbm_node_with_the_default_boundary_is_refused_at_construction"
+      - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_an_explicit_halo_fill_other_than_the_declared_one_is_refused"
+      - "tests/cloud/multigpu/test_lbm_sharded_pressure_faces.py::test_a_node_that_declares_no_halo_boundary_is_wrapped_exactly_as_before"
+    github_issue: null

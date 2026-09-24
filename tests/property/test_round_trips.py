@@ -122,6 +122,7 @@ def _reload_usd(gm: GraphManager) -> GraphManager:
 # Config
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes())
 def test_a_config_round_trip_preserves_trajectory_params_and_specs(recipe):
     """``from_dict(to_dict(g))`` is the same graph: same topology, same
@@ -139,6 +140,7 @@ def test_a_config_round_trip_preserves_trajectory_params_and_specs(recipe):
                             what="trajectory")
 
 
+@pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(require_mapping=True, max_nodes=3))
 def test_a_config_round_trip_preserves_a_mapped_edge_and_its_weights(recipe):
     """The case three audits this cycle found bugs in: an edge carrying an
@@ -304,6 +306,7 @@ def _assert_groups_identical(expected: GraphManager, actual: GraphManager,
             )
 
 
+@pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(require_coupling_group=True))
 def test_a_config_round_trip_preserves_every_coupling_group_field(recipe):
     """The group that comes back out of a config is the group that went
@@ -364,6 +367,7 @@ def test_the_generator_draws_every_option_of_every_coupling_group_enum():
 # Checkpoints
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(), split=st.integers(min_value=1, max_value=N_STEPS - 1))
 def test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout(
     recipe, split,
@@ -392,6 +396,7 @@ def test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout(
                                 what="continued trajectory")
 
 
+@pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(train_mapping_weights=True, max_nodes=3))
 def test_a_checkpoint_beats_the_config_for_trained_mapping_weights(recipe):
     """A config carries the ``MappingSpec``, not the weights.  Weights moved

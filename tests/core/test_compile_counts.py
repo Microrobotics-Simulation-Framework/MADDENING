@@ -366,6 +366,7 @@ def test_pinning_keeps_the_callers_other_xla_flags(script):
         f"--xla_gpu_autotune_level=0 {HOST_DEVICE_FLAG}=4"
 
 
+@pytest.mark.slow  # two runs of the gate in a subprocess: 9-11 s on CI
 def test_the_gate_measures_its_own_device_count_not_the_ambient_one():
     """The CI failure this branch was red for, end to end.
 
@@ -587,6 +588,7 @@ def test_the_gate_fails_on_a_missing_baseline(tmp_path):
     assert "python scripts/compile_counts.py" in done.stderr
 
 
+@pytest.mark.slow  # two runs of the gate in a subprocess: 9-11 s on CI
 def test_regenerating_the_baseline_is_the_documented_one_command(tmp_path):
     """``--check`` must be satisfiable by the command it prints.
 

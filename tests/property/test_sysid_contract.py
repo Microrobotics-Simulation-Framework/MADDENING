@@ -320,6 +320,7 @@ class TestTrainableContract:
     that may have moved.
     """
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(recipe=graph_recipes(max_nodes=3), data=st.data(),
            n_iter=st.integers(min_value=1, max_value=4))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -466,6 +467,7 @@ class TestTrainableContract:
         # no-op that would leave every leaf untouched for free.
         assert float(result.params["nodes"]["s"]["damping"]) != before_damping
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_fit_defaults_its_mask_to_the_trainable_set(self, recipe):
@@ -498,6 +500,7 @@ class TestTrainableContract:
     # ``fitter`` is drawn rather than ``@pytest.mark.parametrize``\ d: a
     # parametrised ``@given`` *method* gets a fresh class instance per
     # case, which Hypothesis rejects as ``HealthCheck.differing_executors``.
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(fitter=st.sampled_from(["adam", "lm", "multiple_shooting"]),
            freeze=st.lists(st.sampled_from(["stiffness", "damping", "mass",
                                             "rest_length"]),
@@ -715,6 +718,7 @@ class TestBoundsAndTransforms:
         note(f"spec={spec} u={u}")
         spec.check(spec.to_constrained(jnp.float32(u)))
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(bounds=st.tuples(_finite(0.5, 5.0), _finite(6.0, 40.0)),
            transform=st.sampled_from([None, "log", "logit"]),
            n_iter=st.integers(min_value=1, max_value=6))
@@ -841,6 +845,7 @@ class TestFIMAgainstFiniteDifference:
     band is not stable between runs.
     """
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_fim_matches_a_central_finite_difference(self, problem):
@@ -865,6 +870,7 @@ class TestFIMAgainstFiniteDifference:
             scale = max(1.0, float(np.abs(F).max()))
             assert np.allclose(F, F_fd, rtol=1e-7, atol=1e-7 * scale), (F, F_fd)
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(truth=st.fixed_dictionaries({
         "stiffness": _finite(1.0, 200.0),
         "damping": _finite(0.1, 10.0),
@@ -1128,6 +1134,7 @@ class TestFIMMaskingAndScaling:
     class was filtered when this one was missed."""
 
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual(), data=st.data(),
            scale=st.sampled_from([None, "relative"]))
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -1163,6 +1170,7 @@ class TestFIMMaskingAndScaling:
         with pytest.raises(ValueError, match="same tree structure"):
             fim(residual, params, mask={"a": True})
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual(), sigma=_finite(0.25, 4.0))
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
     def test_the_noise_model_scales_the_information_by_one_over_sigma_squared(
@@ -1314,6 +1322,7 @@ class TestMaskStructure:
         with pytest.raises(ValueError, match="same tree structure as params"):
             fim(self._residual, params, scale=None, mask=mask)
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(keys=st.lists(st.text("abcdefg", min_size=1, max_size=3),
                          min_size=2, max_size=5, unique=True),
            data=st.data())
@@ -1436,6 +1445,7 @@ class TestWindowTilings:
 
 class TestMultipleShootingLoss:
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tiling=st.sampled_from([t for t in _TILINGS if t[2] < t[0] // t[1]]),
            weight=_finite(1e-3, 1e4))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -1507,6 +1517,7 @@ class TestMultipleShootingLoss:
         assert 0.0 <= unwindowed <= 1e-9 * (1.0 + energy), unwindowed
         assert abs(shooting - unwindowed) <= tol, (shooting, unwindowed)
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tiling=st.sampled_from([t for t in _TILINGS if t[2] < t[0] // t[1]]),
            bump=_finite(0.1, 1.0))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -1661,6 +1672,7 @@ def _build_springs(**coupling_kwargs):
 
 class TestTuneCouplingParams:
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tolerances=st.lists(st.sampled_from([1e-3, 1e-6, 1e-9]),
                                min_size=1, max_size=2, unique=True),
            iterations=st.lists(st.sampled_from([3, 6]), min_size=1, max_size=2,
@@ -1697,6 +1709,7 @@ class TestTuneCouplingParams:
             assert result.best_max_error == min(
                 t["max_error"] for t in result.all_trials)
 
+    @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(iterations=st.lists(st.sampled_from([3, 6, 9]), min_size=2,
                                max_size=2, unique=True))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)

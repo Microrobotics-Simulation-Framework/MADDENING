@@ -175,6 +175,7 @@ def test_unknown_check_name_rejected():
         verify_node(EnergyGain(name="n", timestep=0.01), checks=["nope"])
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_builtin_node_passes_full_battery():
     assert_node_verified(
         SpringDamperNode(name="s", timestep=0.01, stiffness=10.0,
@@ -192,6 +193,7 @@ def test_params_path_divergence_caught():
     assert res["params_gradient_finite"].passed
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_gradient_only_nan_caught():
     res = verify_node(ParamsGradientNaN(name="n", timestep=0.01),
                       bounds={"x": (0.0, 1.0)}, **KW)
@@ -202,6 +204,7 @@ def test_params_gradient_only_nan_caught():
     assert "wrt param 'k'" in res["params_gradient_finite"].detail
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_dead_leaf_caught_by_effective_check():
     res = verify_node(ParamsDeadLeaf(name="n", timestep=0.01),
                       bounds={"x": (0.0, 1.0)}, **KW)
@@ -250,6 +253,7 @@ def test_params_checks_skip_for_nodes_without_params():
                          checks=["params_consistent"], **KW)
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_checks_pass_for_clean_node_and_ignore_structural_entries():
     node = ParamsClean(name="n", timestep=0.01)
     assert set(node.params_pytree()) == {"k", "rest"}   # not label / n
@@ -367,6 +371,7 @@ class DerivativesNotApplicable(_Decay):
 _DECAY_BOUNDS = {"x": (0.25, 1.0)}
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_derivatives_that_ignore_the_injected_params_are_caught():
     res = verify_node(DerivativesIgnoreInjectedParams(name="n", timestep=0.01),
                       bounds=_DECAY_BOUNDS, **KW)
@@ -384,6 +389,7 @@ def test_a_legacy_derivatives_signature_is_caught():
     assert "update() takes params but derivatives() does not" in res["params_effective"].detail
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_a_clean_derivatives_override_passes_and_the_detail_names_the_paths():
     res = verify_node(_Decay(name="n", timestep=0.01), bounds=_DECAY_BOUNDS, **KW)
     assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
@@ -466,6 +472,7 @@ class DerivativesReadOneLeafFromSelf(_Decay):
         return {"x": -(p["k"] * s["x"] + self.params["c"])}
 
 
+@pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_a_conserving_node_passes_the_effective_check():
     """The plain sum of the outputs is blind to a conserved exchange; the
     projected probe is not.  The fixture must be able to express it: the

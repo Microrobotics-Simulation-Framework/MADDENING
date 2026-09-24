@@ -334,6 +334,7 @@ class TestMetaMerge:
         gm.compile()
         return gm
 
+    @pytest.mark.slow  # compiles coupled graphs through step and scan: 5-12 s on CI
     def test_every_execution_path_accepts_a_resumed_state(self, tmp_path):
         """Resume into a graph with *more* ``_meta`` keys than the file."""
         src = self._coupled()
@@ -349,6 +350,7 @@ class TestMetaMerge:
         gm.run_scan(3)
         gm.run_scan_with_history(3)
 
+    @pytest.mark.slow  # compiles coupled graphs through step and scan: 5-12 s on CI
     def test_a_meta_key_this_graph_does_not_have_is_dropped_with_a_warning(
         self, tmp_path,
     ):

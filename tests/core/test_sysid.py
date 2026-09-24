@@ -336,6 +336,7 @@ def _full_residual(gm, obs):
     return residual
 
 
+@pytest.mark.slow  # an LM fit over a rollout: 7-10 s on CI
 @given(kf=st.floats(0.5, 2.0), cf=st.floats(0.5, 2.0))
 # Absolute at the house floor, not ``EXAMPLES_COSTLY``: one example is
 # a 30-iteration Levenberg-Marquardt fit over a full rollout, seconds

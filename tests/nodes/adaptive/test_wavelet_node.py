@@ -338,7 +338,9 @@ def test_the_base_default_full_basis_gradient_is_refused_for_the_gathered_solve_
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("kw", [
-    dict(dim=2, n_levels=1), dict(dim=2, n_levels=2), dict(dim=2, n_levels=2, n_coarse=3),
+    dict(dim=2, n_levels=1), dict(dim=2, n_levels=2),
+    # 4-6 s on the CI runner, over the 5 s test budget: slow lane.
+    pytest.param(dict(dim=2, n_levels=2, n_coarse=3), marks=pytest.mark.slow),
     dict(dim=3, n_levels=1), dict(dim=3, n_levels=2),
     dict(boundary="dirichlet", dim=2, n_levels=1, n_coarse=1),
     dict(boundary="dirichlet", dim=2, n_levels=1),
@@ -921,7 +923,10 @@ def test_at_the_full_budget_near_the_limit_the_capture_check_reads_one_and_blame
 
 _MIRROR_CASES = [
     (dict(dim=2, n_levels=3, boundary="dirichlet", n_coarse=1), 0.25),
-    (dict(dim=2, n_levels=4), 0.61 + 3e-6),
+    # 5-7 s on the CI runner (four levels compiled three ways), over the
+    # 5 s test budget: slow lane.  The Dirichlet case keeps the property
+    # on every push.
+    pytest.param(dict(dim=2, n_levels=4), 0.61 + 3e-6, marks=pytest.mark.slow),
 ]
 
 

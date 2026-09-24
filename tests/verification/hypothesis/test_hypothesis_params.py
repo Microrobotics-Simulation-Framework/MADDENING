@@ -316,6 +316,7 @@ class TestRunPathsAgree:
         assert abs(float(scanned["b"]["velocity"])) < 0.5      # the cancellation case
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
 
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=15),
@@ -356,6 +357,7 @@ class TestGradientMatchesFiniteDifferences:
         traj = _rollout(step_fn, ext, state0, params, n_steps, ("s",))
         return jnp.mean(traj ** 2)
 
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=5, max_value=40),
@@ -470,6 +472,7 @@ class TestAdjointIdentity:
     def test_single_spring(self, spring, seed, n_steps):
         self._check(spring, ("s",), np.random.default_rng(seed), n_steps)
 
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
         n_steps=st.integers(min_value=1, max_value=3),

@@ -8,6 +8,10 @@ them is finite.  Nodes that have not migrated to ``params`` get ``SKIP``
 on the params checks; a node listed in ``MIGRATED`` must not skip them —
 that list is the ledger of the params migration.
 
+A battery over the 5 s test budget runs in the slow lane
+(``slow-tests.yml``, three times a week) rather than on every push; the
+cheap ones keep the full battery, params checks included, on every push.
+
 The sampling envelopes are the nodes' validated regimes, not the
 ``(-1e4, 1e4)`` default: the checks are about the update's structure,
 not about whether a 1D heat cell survives a 1e4 K temperature jump in
@@ -138,7 +142,20 @@ MIGRATED = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
+#: Batteries over 5 s on the CI runner (6-46 s: ``verify_node`` runs its
+#: 100 examples per check eagerly).  They run in the slow lane; ``table``
+#: and ``health_check`` keep the full battery, params checks included, on
+#: every push.
+_SLOW_BATTERIES = {
+    "ball", "heart_pump", "heat", "heat_nonuniform", "rigid_body",
+    "rigid_body_2d", "spring",
+}
+
+
+@pytest.mark.parametrize("name", [
+    pytest.param(n, marks=pytest.mark.slow) if n in _SLOW_BATTERIES else n
+    for n in sorted(CASES)
+])
 def test_builtin_node_passes_battery(name):
     case = CASES[name]
     node = case["node"]()
@@ -187,14 +204,26 @@ def test_heat_source_sampled_with_declared_shape(args):
         # Every path is probed on its own: a flux producer's fluxes and a
         # node with interface DOFs' correction are paths of their own.  The
         # spring's force has no use for ``mass`` -- reported, not failed.
-        ("spring", "update, compute_boundary_fluxes, derivatives, implicit_residual",
-         "not consumed by compute_boundary_fluxes(): ['mass']"),
-        ("heat", "update, compute_boundary_fluxes, derivatives, implicit_residual, "
-                 "compute_interface_correction", None),
-        ("heat_nonuniform", "update, compute_boundary_fluxes, derivatives, "
-                            "implicit_residual, compute_interface_correction", None),
-        ("heart_pump", "update, compute_boundary_fluxes, derivatives, implicit_residual", None),
-        ("rigid_body", "update, derivatives, implicit_residual", None),
+        # All but ``ball`` are over 5 s on the CI runner (5-20 s, the
+        # check's 100 examples per path run eagerly): slow lane.  ``ball``
+        # keeps the not-consumed report on every push.
+        pytest.param(
+            "spring", "update, compute_boundary_fluxes, derivatives, implicit_residual",
+            "not consumed by compute_boundary_fluxes(): ['mass']",
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heat", "update, compute_boundary_fluxes, derivatives, implicit_residual, "
+                    "compute_interface_correction", None,
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heat_nonuniform", "update, compute_boundary_fluxes, derivatives, "
+                               "implicit_residual, compute_interface_correction", None,
+            marks=pytest.mark.slow),
+        pytest.param(
+            "heart_pump", "update, compute_boundary_fluxes, derivatives, implicit_residual",
+            None, marks=pytest.mark.slow),
+        pytest.param("rigid_body", "update, derivatives, implicit_residual", None,
+                     marks=pytest.mark.slow),
         # The collision-free right-hand side has no use for ``elasticity``:
         # reported, not failed -- the case that separates "not consumed"
         # from "read from self.params".

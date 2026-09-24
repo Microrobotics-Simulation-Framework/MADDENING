@@ -988,6 +988,7 @@ def _lbm_kolmogorov_error(n_cells):
     )
 
 
+@pytest.mark.slow  # an LBM refinement ladder: 4-6 s on CI
 @verification_benchmark(
     benchmark_id="MADD-VER-007",
     description=(

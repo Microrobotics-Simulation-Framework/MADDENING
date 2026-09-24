@@ -6,6 +6,20 @@ on:
   pull_request:
     branches: [main, "release/**"]
 
+# One run per branch or PR at a time.  GitHub runs about twenty jobs at
+# once across the whole repository and every run of this workflow costs
+# about fifteen, so a run nobody will read holds up everyone's CI.
+#
+# * Pull requests: a new push cancels the run in progress.  Only the head's
+#   result decides a merge.
+# * main / release/**: a running run is never cancelled -- it may be the
+#   one saving the compilation caches -- but a *queued* run is replaced by
+#   a newer merge's, so back-to-back merges verify (and cache) the tip once
+#   instead of once per merge.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Decide which lanes a change needs.  A change that touches only
   # documentation (docs/, Markdown, plans/, .claude/, LICENSE) runs the

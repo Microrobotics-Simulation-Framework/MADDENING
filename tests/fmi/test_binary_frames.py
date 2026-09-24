@@ -344,7 +344,12 @@ def test_socketless_handle_keeps_the_json_forms():
 
 def _million_cell_bridge(n=1_000_000):
     gm = GraphManager()
-    gm.add_node(HeatNode("h", 1e-3, n_cells=n, thermal_diffusivity=0.5, initial_temperature=100.0))
+    # length=n keeps dx at 1, so the Fourier number dt*alpha/dx^2 is 5e-4:
+    # HeatNode refuses an explicit step above 0.5, and a million cells on
+    # the default unit rod (dx = 1e-6) would be 5e8.  Nothing here steps
+    # the rod; only the size of its temperature field matters.
+    gm.add_node(HeatNode("h", 1e-3, n_cells=n, length=float(n),
+                         thermal_diffusivity=0.5, initial_temperature=100.0))
     gm.compile()
     md = build_model_description(gm, model_name="Heat", model_identifier=MODEL_IDENTIFIER)
     # a realistic field (not a uniform 100.0, which JSON would print in 6 bytes)

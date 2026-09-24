@@ -820,6 +820,186 @@ class TestMinMappingsRatchet:
         assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
 
 
+def _node_guide(tmp_path, title, module, id_lines, name="node_guide.md"):
+    """A guide whose header names a node, followed by one resolvable row."""
+    path = tmp_path / name
+    path.write_text(
+        f"# {title}\n\n**Module**: `{module}`\n" + "".join(id_lines) + "\n"
+        + _TABLE_HEADER
+        + "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n"
+        + "\n## Next Section\n"
+    )
+    return path
+
+
+def _src_tree(tmp_path, **modules):
+    """A throwaway package for the algorithm-ID scan: ``name=source``."""
+    root = tmp_path / "src_pkg"
+    root.mkdir(exist_ok=True)
+    for name, source in modules.items():
+        (root / f"{name}.py").write_text(source)
+    return str(root)
+
+
+class TestNodeAlgorithmIds:
+    """Every node algorithm ID is unique, and a guide's ID is its node's.
+
+    ``LBMNode`` and ``RigidBodyNode`` both carried ``MADD-NODE-007`` from
+    0.1.0 to 0.3.1.  With a second duplicate seeded (``SpringDamperNode``
+    taking ``BallNode``'s ``MADD-NODE-001``) and the heat guide stating
+    ``MADD-NODE-006`` for a node that carries ``MADD-NODE-005``, all seven
+    gates, the SOUP ``--check`` and every compliance test passed
+    (audit_040_phase3_confirm, release-record).
+    """
+
+    def test_the_repository_declares_no_algorithm_id_twice(self, mapping_gate):
+        n_ids, errors = mapping_gate.algorithm_id_errors()
+        assert errors == []
+        # Twelve NodeMeta declarations carry an ID today; a scan that finds
+        # far fewer has lost its scope, not its duplicates.
+        assert n_ids >= 12, n_ids
+
+    def test_rigid_body_keeps_madd_node_007_and_lbm_moved_to_011(self):
+        """The resolution of the duplicate, pinned where it was decided.
+
+        ``RigidBodyNode``'s ID has been pinned by a test shipped in every
+        release since 0.1.0; ``LBMNode``'s was first published in 0.4.0's
+        algorithm guide, so ``LBMNode`` is the one renumbered.
+        """
+        from maddening.nodes.lbm import LBMNode
+        from maddening.nodes.rigid_body import RigidBodyNode
+
+        assert RigidBodyNode.meta.algorithm_id == "MADD-NODE-007"
+        assert LBMNode.meta.algorithm_id == "MADD-NODE-011"
+
+    def test_a_second_node_taking_an_existing_id_fails(self, mapping_gate, tmp_path):
+        """Replays the audit's seeded duplicate: spring takes ball's ID."""
+        root = _src_tree(
+            tmp_path,
+            ball='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            spring='meta = NodeMeta(\n    algorithm_id="MADD-NODE-001",\n)\n',
+        )
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        (message,) = errors
+        assert "MADD-NODE-001 is declared 2 times" in message
+        assert "ball.py:1" in message and "spring.py:2" in message
+
+    def test_the_gate_run_fails_on_a_duplicate_in_its_source_tree(
+        self, mapping_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Through ``main``, whatever guide directory it was pointed at."""
+        root = _src_tree(
+            tmp_path,
+            a='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            b='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+        )
+        monkeypatch.setattr(mapping_gate, "SRC_PACKAGE", root)
+        _guide(tmp_path, "| Diffusion | `maddening.nodes.heat.HeatNode.update` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "MADD-NODE-001 is declared 2 times" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("second", [
+        # NodeMeta's first positional parameter is algorithm_id.
+        'meta = NodeMeta("MADD-NODE-001", "1.0.0")\n',
+        # Any algorithm_id= keyword, not only NodeMeta's.
+        'meta = dataclasses.replace(Base.meta, algorithm_id="MADD-NODE-001")\n',
+        # An attribute-spelled constructor.
+        'meta = compliance.NodeMeta(algorithm_id="MADD-NODE-001")\n',
+    ])
+    def test_every_spelling_of_an_id_is_read(self, mapping_gate, tmp_path, second):
+        root = _src_tree(
+            tmp_path, a='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n',
+            b=second)
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert any("MADD-NODE-001 is declared 2 times" in e for e in errors), errors
+
+    @pytest.mark.parametrize("source, reason", [
+        ('meta = NodeMeta(algorithm_id=PREFIX + "001")\n', "not a string literal"),
+        ('meta = NodeMeta(**META_KWARGS)\n', "can hide an algorithm_id"),
+        ('meta = NodeMeta(ID_CONSTANT)\n', "not a string literal"),
+    ])
+    def test_an_id_the_scan_cannot_read_fails(self, mapping_gate, tmp_path,
+                                              source, reason):
+        """An ID nobody can read is an ID nobody checked for uniqueness."""
+        root = _src_tree(tmp_path, a=source,
+                         b='meta = NodeMeta(algorithm_id="MADD-NODE-002")\n')
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert any(reason in e for e in errors), errors
+
+    def test_the_empty_default_claims_no_id(self, mapping_gate, tmp_path):
+        root = _src_tree(tmp_path, a='meta = NodeMeta(algorithm_id="")\n',
+                         b='meta = NodeMeta(algorithm_id="")\n',
+                         c='meta = NodeMeta(algorithm_id="MADD-NODE-001")\n')
+        assert mapping_gate.algorithm_id_errors(root) == (1, [])
+
+    def test_a_scope_with_no_ids_fails(self, mapping_gate, tmp_path):
+        root = _src_tree(tmp_path, a="x = 1\n")
+        _n, errors = mapping_gate.algorithm_id_errors(root)
+        assert errors and "verifies nothing" in errors[0]
+
+    def test_a_guide_stating_another_nodes_id_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """Replays the audit's heat guide: 006 stated, 005 carried."""
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-006`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        err = capsys.readouterr().err
+        assert "states algorithm ID MADD-NODE-006" in err
+        assert "'MADD-NODE-005'" in err
+
+    def test_a_guide_stating_its_nodes_id_passes(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 0
+        assert "1 guide algorithm ID(s) match" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("id_lines, reason", [
+        ([], "states no '**Algorithm ID**"),
+        (["**Algorithm ID**: `MADD-NODE-005`\n",
+          "**Algorithm ID**: `MADD-NODE-005`\n"], "states 2 algorithm IDs"),
+        (["**Algorithm ID**: MADD-NODE-005\n"], "is not written"),
+        (["**Algorithm ID**:`MADD-NODE-005`\n"], "is not written"),
+    ])
+    def test_a_node_guide_whose_id_cannot_be_compared_fails(
+        self, mapping_gate, tmp_path, capsys, id_lines, reason
+    ):
+        _node_guide(tmp_path, "HeatNode", "maddening.nodes.heat", id_lines)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert reason in capsys.readouterr().err
+
+    def test_a_node_id_on_a_guide_that_names_no_node_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "NoSuchNode", "maddening.nodes.heat",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "does not resolve" in capsys.readouterr().err
+
+    def test_a_node_without_its_own_nodemeta_cannot_own_a_guide_id(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _node_guide(tmp_path, "SimulationNode", "maddening.core.node",
+                    ["**Algorithm ID**: `MADD-NODE-005`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "defines no NodeMeta of its own" in capsys.readouterr().err
+
+    def test_a_non_node_id_needs_no_nodemeta(self, mapping_gate, tmp_path):
+        """``MADD-ALG-INT-001`` documents the integrators, not a node."""
+        _node_guide(tmp_path, "Explicit", "maddening.core",
+                    ["**Algorithm ID**: `MADD-ALG-TEST-001`\n"])
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    def test_two_guides_stating_one_id_fail(self, mapping_gate, tmp_path, capsys):
+        for name in ("one.md", "two.md"):
+            _node_guide(tmp_path, "Explicit", "maddening.core",
+                        ["**Algorithm ID**: `MADD-ALG-TEST-001`\n"], name=name)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "is stated by 2 guides" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # check_citations.py
 # ---------------------------------------------------------------------------

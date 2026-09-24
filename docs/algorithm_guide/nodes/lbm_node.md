@@ -6,8 +6,10 @@ bibliography: ../../bibliography.bib
 
 **Module**: `maddening.nodes.lbm`
 **Stability**: experimental
-**Algorithm ID**: `MADD-NODE-007`
+**Algorithm ID**: `MADD-NODE-011`
 **Version**: 1.1.0
+
+> From 0.4.0 this node's algorithm ID is `MADD-NODE-011`.  Releases 0.1.0 to 0.3.1 gave it `MADD-NODE-007`, which `RigidBodyNode` also carried and keeps; the algorithm is unchanged by the renumbering.
 
 ## Summary
 

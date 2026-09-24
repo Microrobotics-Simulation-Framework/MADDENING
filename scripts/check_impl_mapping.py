@@ -33,12 +33,35 @@ Four things this gate has to get right, because each was a hole:
   that gains rows should raise its pin, or the slack reopens for row
   deletions.
 
+Two identity checks run beside the mappings, because a mapping table is only
+evidence for the node the guide is *about*:
+
+* **Every node algorithm ID is unique across ``src/maddening``.**  Every
+  ``algorithm_id=`` keyword (and ``NodeMeta``'s first positional argument)
+  is read from the source with :mod:`ast`, so a module that needs an
+  optional extra is still scanned.  One that is not a string literal, or a
+  ``NodeMeta(**...)`` that could hide one, fails: an ID the scan cannot read
+  is an ID whose uniqueness nobody checked.  ``LBMNode`` and
+  ``RigidBodyNode`` both carried ``MADD-NODE-007`` from 0.1.0 to 0.3.1, and
+  with a second duplicate seeded every gate still passed
+  (audit_040_phase3_confirm, release-record).
+* **A guide's ``**Algorithm ID**`` is its node's ``NodeMeta.algorithm_id``.**
+  The guide names its node by its ``# Title`` and ``**Module**`` lines; the
+  class they resolve to must define its own ``NodeMeta`` with the ID the
+  guide states.  A ``MADD-NODE-`` ID on a guide whose title and module name
+  no node class fails, and so does a node guide with no ID line, a second
+  ID line, or one not written ``**Algorithm ID**: `ID```.  Every stated ID
+  is also unique among the guides, which is the only check a non-node ID
+  (``MADD-ALG-...``) gets.
+
 Usage:
     python scripts/check_impl_mapping.py [docs/algorithm_guide/]
 
 Exits 0 if all mappings resolve, nonzero if any are stale.
 """
 
+import ast
+import importlib
 import os
 import re
 import sys
@@ -52,6 +75,15 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 from maddening.compliance._validate import resolve_dotted_name  # noqa: E402
 
 DEFAULT_GUIDE_DIR = os.path.join("docs", "algorithm_guide")
+
+#: The package whose node algorithm IDs must be unique.  Scanned whatever
+#: guide directory the gate is pointed at, like the pins: uniqueness is a
+#: property of the tree, not of the scope one run happened to name.
+SRC_PACKAGE = os.path.join(_REPO_ROOT, "src", "maddening")
+
+#: Prefix of the IDs ``NodeMeta.algorithm_id`` carries.  A guide stating
+#: one must name the node that carries it.
+NODE_ID_PREFIX = "MADD-NODE-"
 
 # Minimum number of resolvable ``maddening.*`` references per guide, keyed by
 # path relative to the repository root.  Pinned so that a deleted table, or a
@@ -298,6 +330,169 @@ def check_pinned(
     return errors
 
 
+def _callee_name(call: ast.Call):
+    """``NodeMeta`` for ``NodeMeta(...)`` and ``compliance.NodeMeta(...)``."""
+    func = call.func
+    return getattr(func, "id", None) or getattr(func, "attr", None)
+
+
+def algorithm_ids(src_root: str):
+    """Every node algorithm ID declared under ``src_root``, read statically.
+
+    Returns ``(ids, errors)``: ``ids`` maps each ID to the ``path:line``
+    locations that declare it, and ``errors`` lists every declaration the
+    scan could not read.  Static on purpose: importing the package would
+    skip whatever needs an optional extra, and a duplicate there is still a
+    duplicate.
+
+    Read as an ID: the value of any ``algorithm_id=`` keyword (``NodeMeta``,
+    ``dataclasses.replace`` or anything else), and the first positional
+    argument of a ``NodeMeta(...)`` call, which is ``algorithm_id``.  The
+    empty string is ``NodeMeta``'s default and claims no ID.
+    """
+    ids: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for root, _dirs, files in os.walk(src_root):
+        for fname in sorted(files):
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(root, fname)
+            rel = os.path.relpath(path, _REPO_ROOT)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read(), filename=path)
+            except (SyntaxError, UnicodeDecodeError) as exc:
+                errors.append(f"{rel}: could not be parsed ({exc}), so no "
+                              f"algorithm ID in it was checked")
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                values = [kw.value for kw in node.keywords
+                          if kw.arg == "algorithm_id"]
+                if _callee_name(node) == "NodeMeta":
+                    if node.args:
+                        values.append(node.args[0])
+                    if any(kw.arg is None for kw in node.keywords):
+                        errors.append(
+                            f"{rel}:{node.lineno}: NodeMeta(**...) can hide "
+                            f"an algorithm_id this check cannot read; pass it "
+                            f"as a string literal keyword")
+                for value in values:
+                    where = f"{rel}:{getattr(value, 'lineno', node.lineno)}"
+                    if not (isinstance(value, ast.Constant)
+                            and isinstance(value.value, str)):
+                        errors.append(
+                            f"{where}: algorithm_id is not a string literal, "
+                            f"so its uniqueness cannot be checked; write the "
+                            f"ID out")
+                    elif value.value:
+                        ids.setdefault(value.value, []).append(where)
+    return ids, errors
+
+
+def algorithm_id_errors(src_root: str = SRC_PACKAGE):
+    """``(n_ids, errors)``: every node algorithm ID must be unique."""
+    ids, errors = algorithm_ids(src_root)
+    for aid, where in sorted(ids.items()):
+        if len(where) > 1:
+            errors.append(
+                f"algorithm ID {aid} is declared {len(where)} times "
+                f"({', '.join(where)}).  An algorithm ID names one algorithm "
+                f"in the compliance record; give all but one of them a new, "
+                f"unused ID and record the old -> new mapping in the release "
+                f"notes")
+    if not ids and not errors:
+        errors.append(
+            f"no algorithm_id found under {os.path.relpath(src_root, _REPO_ROOT)}"
+            f"; a uniqueness check over nothing verifies nothing -- the scan "
+            f"scope is wrong")
+    return len(ids), errors
+
+
+#: A line that *tries* to state an ID, whatever its spelling, so that a
+#: misspelt one fails instead of dropping out of the check.
+_ID_LINE_ANY = re.compile(r"^\s*\*\*Algorithm ID\*\*.*$", re.M)
+_ID_LINE = re.compile(r"^\*\*Algorithm ID\*\*: `([^`\s]+)`\s*$")
+_TITLE_LINE = re.compile(r"^# (\S+)\s*$", re.M)
+_MODULE_LINE = re.compile(r"^\*\*Module\*\*: `([\w.]+)`\s*$", re.M)
+
+
+def _guide_node_class(content: str):
+    """``(qualified name, class or None, reason)`` for a guide's node.
+
+    The class is the one the guide's first ``# Title`` names inside its
+    ``**Module**``.  ``class`` is ``None`` with a ``reason`` when either
+    line is missing or the name does not resolve; ``reason`` starts with
+    ``unavailable:`` when an optional extra is what stopped it.
+    """
+    from maddening.core.node import SimulationNode
+
+    title, module = _TITLE_LINE.search(content), _MODULE_LINE.search(content)
+    if not (title and module):
+        return None, None, "it has no '# ClassName' and '**Module**' header"
+    qname = f"{module.group(1)}.{title.group(1)}"
+    res = resolve_dotted_name(qname)
+    if res.unavailable:
+        return qname, None, f"unavailable: {res.reason}"
+    if not res.ok:
+        return qname, None, f"'{qname}' does not resolve ({res.reason})"
+    obj = getattr(importlib.import_module(module.group(1)), title.group(1))
+    if not (isinstance(obj, type) and issubclass(obj, SimulationNode)):
+        return qname, None, f"'{qname}' is not a SimulationNode subclass"
+    return qname, obj, None
+
+
+def guide_id_errors(md_path: str, relpath: str):
+    """Check one guide's stated algorithm ID against its node's NodeMeta.
+
+    Returns ``(stated_id or None, matched, errors, skipped)``; ``matched``
+    is true when the ID was compared with a ``NodeMeta`` and agreed.
+    """
+    with open(md_path, encoding="utf-8") as fh:
+        content = fh.read()
+    lines = [m.group(0).strip() for m in _ID_LINE_ANY.finditer(content)]
+    qname, cls, why_not = _guide_node_class(content)
+    if why_not and why_not.startswith("unavailable:"):
+        return None, False, [], [f"{relpath}: the node the guide documents "
+                                 f"was NOT checked -- {why_not[13:]}"]
+    if not lines:
+        if cls is not None:
+            return None, False, [
+                f"{relpath}: documents node {qname} but states no "
+                f"'**Algorithm ID**: `...`'; its NodeMeta says "
+                f"{getattr(cls.__dict__.get('meta'), 'algorithm_id', None)!r}"
+            ], []
+        return None, False, [], []
+    if len(lines) > 1:
+        return None, False, [f"{relpath}: states {len(lines)} algorithm IDs "
+                             f"({lines}); a guide documents one algorithm"], []
+    m = _ID_LINE.match(lines[0])
+    if not m:
+        return None, False, [
+            f"{relpath}: {lines[0]!r} is not written '**Algorithm ID**: `ID`', "
+            f"so the ID cannot be checked against its node"], []
+    stated = m.group(1)
+    if cls is None:
+        if stated.startswith(NODE_ID_PREFIX):
+            return stated, False, [
+                f"{relpath}: states node algorithm ID {stated}, but {why_not}, "
+                f"so no NodeMeta can be compared with it"], []
+        return stated, False, [], []
+    meta = cls.__dict__.get("meta")
+    if meta is None:
+        return stated, False, [
+            f"{relpath}: states algorithm ID {stated} for {qname}, which "
+            f"defines no NodeMeta of its own (it inherits "
+            f"{getattr(cls.meta, 'algorithm_id', None)!r}); a guide documents "
+            f"the node that carries the ID"], []
+    if meta.algorithm_id != stated:
+        return stated, False, [
+            f"{relpath}: states algorithm ID {stated}, but "
+            f"{qname}.meta.algorithm_id is {meta.algorithm_id!r}"], []
+    return stated, True, [], []
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     guide_dir = argv[0] if argv else os.path.join(_REPO_ROOT, DEFAULT_GUIDE_DIR)
@@ -309,8 +504,11 @@ def main(argv=None) -> int:
     errors: list[str] = []
     notes: list[str] = []
     skipped: list[str] = []
+    id_skipped: list[str] = []
     checked = 0
     per_file: dict[str, int] = {}
+    stated_ids: dict[str, list[str]] = {}
+    ids_matched = 0
 
     # Recursive: the scope used to be a non-recursive listdir of
     # docs/algorithm_guide/nodes/, so a guide in any other subdirectory was
@@ -327,19 +525,33 @@ def main(argv=None) -> int:
             errors.extend(errs)
             notes.extend(ns)
             skipped.extend(sk)
+            stated, matched, errs, sk = guide_id_errors(fpath, relpath)
+            errors.extend(errs)
+            id_skipped.extend(sk)
+            ids_matched += matched
+            if stated is not None:
+                stated_ids.setdefault(stated, []).append(relpath)
+
+    for aid, guides in sorted(stated_ids.items()):
+        if len(guides) > 1:
+            errors.append(f"algorithm ID {aid} is stated by {len(guides)} "
+                          f"guides ({', '.join(guides)}); each documents one "
+                          f"algorithm")
 
     errors.extend(check_pinned(per_file, MIN_MAPPINGS, _REPO_ROOT))
+    n_node_ids, id_errors = algorithm_id_errors(SRC_PACKAGE)
+    errors.extend(id_errors)
 
     for n in notes:
         print(f"NOTE: {n}")
-    for sk in skipped:
+    for sk in skipped + id_skipped:
         print(f"NOTE: {sk}")
 
     if errors:
         for e in errors:
             print(f"ERROR: {e}", file=sys.stderr)
         print(
-            f"\n{len(errors)} stale mapping(s) found out of {checked} checked",
+            f"\n{len(errors)} problem(s) found; {checked} mapping(s) checked",
             file=sys.stderr,
         )
         return 1
@@ -363,9 +575,12 @@ def main(argv=None) -> int:
         return 1
 
     suffix = f", {len(skipped)} not checked" if skipped else ""
+    id_suffix = (f", {len(id_skipped)} not checked" if id_skipped else "")
     print(
         f"OK: {checked} implementation mapping(s) verified{suffix} "
-        f"across {guide_dir}"
+        f"across {guide_dir}; {ids_matched} guide algorithm ID(s) match "
+        f"their node's NodeMeta{id_suffix}; {n_node_ids} node algorithm "
+        f"ID(s) unique across src/maddening"
     )
     return 0
 

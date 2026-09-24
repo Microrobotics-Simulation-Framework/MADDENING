@@ -662,7 +662,11 @@ class LBMNode(SimulationNode):
     """
 
     meta = NodeMeta(
-        algorithm_id="MADD-NODE-007",
+        # MADD-NODE-011 from 0.4.0.  0.1.0 to 0.3.1 carried MADD-NODE-007,
+        # which RigidBodyNode also carried (and keeps); the algorithm is
+        # unchanged by the renumbering.  scripts/check_impl_mapping.py now
+        # refuses a duplicate algorithm ID.
+        algorithm_id="MADD-NODE-011",
         # 1.1.0: Zou-He closure corrected (MADD-ANO-020); see the guide.
         algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,

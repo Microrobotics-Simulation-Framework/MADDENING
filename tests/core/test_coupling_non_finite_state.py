@@ -460,14 +460,15 @@ class _TinyLinear(SimulationNode):
         return {"x": self._g * boundary_inputs["u"] + self._c}
 
 
-def _tiny_graph(norm, c):
+def _tiny_graph(norm, c, *, solver="ift", max_iterations=20):
     gm = GraphManager()
     gm.add_node(_TinyLinear("a", 0.9, c))
     gm.add_node(_TinyLinear("b", 1.0, 0.0))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
+    kw = {"tolerance": 1e-6} if norm == "l2" else {}
     gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
-                          max_iterations=20)
+                          max_iterations=max_iterations, solver=solver, **kw)
     gm.compile()
     return gm
 
@@ -490,3 +491,52 @@ def test_the_verdict_does_not_change_below_the_scale_underflow(norm):
     assert got["iterations"] == want["iterations"], (got, want)
     assert got["converged"] is want["converged"] is False, (got, want)
     assert got["residual"] == pytest.approx(want["residual"], rel=1e-4)
+
+
+#: The control's ``c``: ``x* = 10 c`` is about ``1e-29``, where a change
+#: of one ulp of the field (about ``1.2e-36``) is still a normal number.
+_C_NORMAL = float(np.float32(1e-30))
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("norm", NORMS)
+@pytest.mark.parametrize("shift", (10, 20))
+def test_the_verdict_does_not_change_below_the_change_underflow(norm, solver, shift):
+    """The same group, scaled by ``2**-shift``, run to convergence: the same report, bit for bit.
+
+    At ``c = 1e-30 * 2**-20`` (``x*`` about ``1e-35``) the state is a
+    perfectly normal float32 but a change of one ulp of it is
+    subnormal, and ``|new - old|`` was flushed to zero *before* the
+    underflow guard rescaled it.  The group reported ``residual=0.0,
+    converged=True`` after 43 passes, 1.5e-2 from its fixed point under
+    the L2 norm against a tolerance of 1e-6, where the same group three
+    decades larger takes 126-130 passes.  The scaling here is a power of
+    two, so every normal-range operation the node performs scales
+    exactly, and the norm -- a ratio -- has to reproduce the control's
+    residual to the bit at every pass, hence the same pass count.
+    ``shift=10`` (``x*`` about ``1e-32``) has a normal one-ulp change
+    and a subnormal ``rtol * max|x|`` under the ratio norms.
+    """
+    cap = 400
+    ref = _tiny_graph(norm, _C_NORMAL, solver=solver, max_iterations=cap)
+    ref.step()
+    want = ref.coupling_diagnostics()["a+b"]
+    gm = _tiny_graph(norm, _C_NORMAL * 2.0 ** -shift, solver=solver, max_iterations=cap)
+    gm.step()
+    got = gm.coupling_diagnostics()["a+b"]
+    x_ref = float(ref.get_node_state("a")["x"][0])
+    x_got = float(gm.get_node_state("a")["x"][0])
+    assert want["converged"] is True and 100 < want["iterations"] < cap, (
+        f"fixture premise: the control converges well inside the cap: {want}"
+    )
+    if shift == 20:
+        eps = float(np.finfo(np.float32).eps)
+        assert x_got * eps < float(np.finfo(np.float32).tiny), (
+            "fixture premise: a one-ulp change of the field is subnormal"
+        )
+    assert got["iterations"] == want["iterations"], (got, want)
+    assert got["converged"] is want["converged"] is True, (got, want)
+    assert got["residual"] == want["residual"], (got, want)
+    assert x_got == x_ref * 2.0 ** -shift, "the state scaled exactly"
+    assert got["precision_limited"] is want["precision_limited"], (got, want)
+

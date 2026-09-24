@@ -129,19 +129,42 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     the other direction: the field holds its full 24 bits and its
     change is perfectly measurable, it is only the product that is not.
     So a field above the dead band whose scale is not a normal number
-    is measured on the rescaled pair ``diff * 2**k / (rtol * (ref *
-    2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same quotient
-    -- a power of two scales exactly -- computed where every operand is
-    normal.  A field whose magnitude is *itself* subnormal is below what
-    the dtype resolves: a flush-to-zero backend (XLA's CPU backend is
-    one) reads it as zero and it leaves the norm as a field at zero
-    does; elsewhere it is rescaled like the rest.  Every other field is
-    multiplied by exactly ``1.0`` on both sides of the quotient, so its
-    value is bit-identical to what it was before either guard existed.
+    is measured on the rescaled pair ``|new * 2**k - old * 2**k| / (rtol
+    * (ref * 2**k))`` with ``2**k = 1 / finfo.tiny``, which is the same
+    quotient -- a power of two scales exactly -- computed where every
+    operand is normal.
+
+    **The change is rescaled before it is taken, not after.**  The
+    *difference* of two normal numbers is subnormal whenever it is below
+    ``finfo.tiny``, which for a field of magnitude ``ref`` is every
+    change of less than ``tiny / ref`` of itself -- one ulp as soon as
+    ``ref < tiny / eps`` (about ``9.9e-32`` in float32), whatever the
+    norm's ``rtol``.  The CPU backend flushes that difference to zero,
+    so rescaling ``|new - old|`` afterwards rescaled a zero: a field at
+    ``1e-35`` read ``residual=0.0, converged=True`` 43 passes into an
+    iteration that takes 126-130 at ``1e-29``, under all three norms and
+    both solvers, and the spectral bound built on that residual read
+    6e-4 of the true distance with ``spectral_usable=True``.  So the pair
+    is multiplied by ``2**k`` first, wherever the scale *or* a one-ulp
+    change of the field is below the normal range, and the difference is
+    taken between two normal numbers; the norm then says the same thing
+    about a group at ``1e-35`` as about the same group scaled by any
+    power of two into the normal range -- to the bit, pinned by
+    ``test_the_verdict_does_not_change_below_the_change_underflow``.
+
+    A field whose magnitude is *itself* subnormal is below what the
+    dtype resolves: a flush-to-zero backend (XLA's CPU backend is one)
+    reads it as zero and it leaves the norm as a field at zero does;
+    elsewhere it is rescaled like the rest.  Every other field is
+    multiplied by exactly ``1.0`` on both operands of the difference and
+    on the scale, so its value is bit-identical to what it was before
+    either guard existed.
     """
     ref = _field_reference(new_val, old_val)
     scale = rtol * ref
-    tiny = jnp.finfo(jnp.asarray(scale).dtype).tiny
+    dtype = jnp.asarray(scale).dtype
+    info = jnp.finfo(dtype)
+    tiny = info.tiny
     # ``scale * tiny`` is exact (``tiny`` is a power of two) unless it
     # underflows, and an underflow means the scale is small, which is
     # the evaluable side.  Non-finite ``ref`` fails ``isfinite``; an
@@ -151,29 +174,27 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
         scale * tiny <= 1.0,
     )
     # The underflow end: above the caller's dead band (so ``ref > 0``)
-    # but a scale below the smallest normal number (or flushed to zero).
-    # There numerator and denominator are both multiplied by
-    # ``k = 1 / tiny``, a power of two, so the quotient is the same one;
+    # but a scale below the smallest normal number (or flushed to zero),
+    # or a field so small that a change of one ulp of it is subnormal
+    # (``ref < tiny / eps``), which the subtraction would flush.  There
+    # both operands of the difference and the scale are multiplied by
+    # ``k = 1 / tiny``, a power of two, *before* the difference is
+    # taken, so the quotient is the same one computed on normal numbers;
     # everywhere else ``k`` is exactly ``1.0`` and multiplying by it is
     # exact, so an in-range field's value is bit-identical.  NaN ``ref``
-    # and ``scale`` compare False, so this is finite-only, and ``diff *
-    # k`` stays below ``2 / rtol`` on the fields it is applied to.
-    diff = jnp.abs(new_val - old_val)
-    if isinstance(rtol, (int, float)) and float(rtol) >= 1.0:
-        # ``scale >= ref`` here (the L2 norm passes ``rtol=1.0``), so a
-        # field with a normal magnitude has a normal scale and there is no
-        # underflow end to guard; the formula is the one it always was,
-        # and so is its op count.
-        active = jnp.logical_and(ref > atol, scale > 0)
-        safe = jnp.where(active, scale, jnp.ones_like(scale))
-        scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
-    else:
-        above = ref > atol
-        underflow = jnp.logical_and(above, scale < tiny)
-        k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(jnp.asarray(scale).dtype)
-        active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
-        safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
-        scaled = jnp.where(active, (diff * k) / safe, jnp.zeros_like(diff))
+    # and ``scale`` compare False, so this is finite-only, and ``ref *
+    # k`` stays below ``1 / min(rtol, eps)`` on the fields it is applied
+    # to.
+    above = ref > atol
+    underflow = jnp.logical_and(
+        above,
+        jnp.logical_or(scale < tiny, ref < float(tiny) / float(info.eps)),
+    )
+    k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(dtype)
+    diff = jnp.abs(new_val * k - old_val * k)
+    active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
+    safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
+    scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
     # ``where`` with the finite computation in the *selected* branch:
     # an evaluable field's value, and its gradient, are exactly what
     # they were before this guard existed.

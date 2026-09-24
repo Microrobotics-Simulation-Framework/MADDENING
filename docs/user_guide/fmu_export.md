@@ -30,6 +30,7 @@ binary = build_fmu_binary("build/")                  # needs a C compiler; libc 
 sidecar = FmuSidecar(SidecarConfig(
     schema_token=md.instantiation_token, step_fn=gm._compiled_step,
     initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),
+    fixed_params=md.fixed_parameters,   # the bridge applies it anyway
 ))
 bridge = FmuTcpBridge(sidecar, md, master_dt=gm_base_dt, port=5555).start()
 write_fmu(md, "plant.fmu", binary=binary, endpoint=bridge.endpoint)
@@ -48,7 +49,19 @@ instantiation.
 and unit from the target node's `boundary_input_spec`); parameters are
 `<node>.params.<key>` with `ParamSpec` bounds as `min` / `max`.  Setting a
 parameter goes through the sidecar's bounds check, so an importer cannot
-drive the graph with a constant it declares invalid.  A node name may
+drive the graph with a constant it declares invalid.  Only parameters the
+compiled step reads are exported, all `variability="tunable"`: an
+`initial_*` condition (the initial state is already built), a value a node
+consumed when it was constructed (`LBMPipeNode.pipe_radius`) or declares in
+`static_data_deps` (`WaveletAdaptiveNode.mass`), or one only an unconnected
+input would read (a ball's `elasticity` with no table) would be a knob that
+does nothing, so it is left out and listed, with the reason, in
+`md.fixed_parameters`.  The bridge applies that list to its sidecar: no
+door into the parameter tree -- `fmi3Set*`, `fmi3SetFMUState`, the
+sidecar's own `set_params` / `set_fmu_state` -- installs a new value for
+one of them; the request is `fmi3Error` naming the parameter and why, and
+nothing is written.  Until 0.4.0 shipped they were exported as tunable,
+and the sidecar accepted and reported a value its step never used.  A node name may
 itself contain a `.` (`tank.1`, `hx.hot`): the variable carries its
 `(node, field)` pair, so the bridge never has to guess where the name
 splits, and an export in which two nodes would spell the same variable

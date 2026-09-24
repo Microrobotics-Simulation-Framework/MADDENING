@@ -87,7 +87,16 @@ EXCLUDED = (PACKAGE / "examples",)
 #: (CPython 3.12.3, pytest 9.0.3, jaxlib 0.11.0; the count is a property of
 #: the source, not of the environment, and the static scan in
 #: ``files_with_examples`` agrees with it).
-MIN_EXAMPLES = 98
+#:
+#: 98 -> 110 when audit_040_phase3_confirm found the floor 12 below the 110
+#: examples that run, so deleting the nine in
+#: ``acceleration.arnoldi_spectral_radius`` passed -- against a CHANGELOG
+#: saying the gate fails if the collection shrinks.  A floor below the count
+#: guards only the part of the collection it covers: raise it in the commit
+#: that adds examples (the OK line prints the count beside the floor),
+#: together with ``COMMITTED_EXAMPLE_FLOOR`` in
+#: ``tests/compliance/test_gate_scripts.py``.
+MIN_EXAMPLES = 110
 
 
 def _docstrings(path: Path):

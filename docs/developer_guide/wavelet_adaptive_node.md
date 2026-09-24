@@ -158,6 +158,23 @@ engine-level `cdd_select_with_iterations` returns the same count.
   behaviour produced at `k = n_max` (256 points, `mass=1e-6`) cannot arise:
   that configuration is refused, and just inside the limit the capture
   ratio at the full budget is 1.
+- **The masked-CG path is bounded by what it is, and says when it fails.**
+  `kappa * eps` models a direct solve; `frozen_solver="cg"` stops at a
+  relative residual of `rtol` (1e-6 float32, 1e-10 float64), so its bound
+  is `kappa * max(eps, rtol)` -- float32 cg refuses a periodic mass below
+  about `2e-2`, and the refusal names the gathered solve's own bound.
+  That bounds a CG solve that converges, not whether it does: at
+  conditionings it accepts, lineax's CG stagnates or breaks down (float32
+  at 256 points from `mass=0.3`; float64 at `1e-5`), and more steps do not
+  help, so a `kappa`-versus-`max_steps` guard would not predict it. An
+  eager solve that does not converge is re-raised as a `ValueError` naming
+  `kappa`, the tolerance, the budget and the fixes; under a trace the
+  error still comes from lineax when the step runs (the node cannot catch
+  a runtime error inside XLA without lineax's `throw=False`, which
+  `ift_linear_solve` does not expose -- one of its open API questions).
+  The bound is also conservative for the `"level"` and `"dk"`
+  preconditioners (periodic `mass=3e-3` in float32 refused while the
+  measured error is 8e-5 to 1.5e-4); documented, not loosened.
 - **The selection no longer depends on rounding.** The source is centred
   on every axis but the first, so residuals of mirror-image functions tie
   to rounding and the last bits decided which one survived the cap: eager

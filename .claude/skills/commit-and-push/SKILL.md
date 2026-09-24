@@ -23,19 +23,42 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short --ignore=
 
 ### 2. Compliance CI Scripts Pass
 
-Run every compliance validation script -- the list is `scripts/check_*.py`,
-and today that is six:
+Run every compliance gate.  The gates are whatever `scripts/check_*.py`
+holds -- **discover them with the glob, never copy a list**: the set grew
+three times during 0.4.0, and a copied list (this section's own, which said
+"six" and left out `check_doctests.py`) silently verified less than it
+claimed.
 
 ```bash
-python scripts/check_anomalies.py
-python scripts/check_impl_mapping.py
-python scripts/check_citations.py
-python scripts/check_transforms.py
-python scripts/check_heat_stability.py
-python scripts/check_stable_signatures.py
+for gate in scripts/check_*.py; do
+  args=""
+  [ "$gate" = scripts/check_anomalies.py ] && args="--prefix MADD-ANO-"  # as CI runs it
+  python "$gate" $args || echo "GATE FAILED ($?): $gate"
+done
+python scripts/generate_soup_tables.py --check
 ```
 
-**Gate**: All six must exit 0. Fix any errors before continuing.
+What to expect from the gates whose behaviour is not simply "exit 0 or 1":
+
+- `check_doctests.py` executes every `>>>` example in `src/maddening/` under
+  pytest (about two minutes).  It fails if an example fails or is skipped,
+  or if fewer examples run than its committed floor (`MIN_EXAMPLES`).  Adding
+  examples?  Raise the floor in the same commit.
+- `check_transforms.py` exits **2** ("could not be trusted") when a module it
+  must import needs an optional extra that is not installed -- in practice
+  the `usd` extra (`usd-core`).  Install `.[ci,usd]`, as CI's compliance job
+  does, or pass `--allow-missing-optional` to accept a partial check that
+  names every reference it could not confirm.
+- `check_stable_signatures.py` exits **2** if a module holding a `STABLE`
+  surface cannot be imported; a missing extra is tolerated only while no
+  `STABLE` surface lives in that module.  An intended signature change is
+  accepted with `--update` in the same commit (section 9).
+- `check_doctests.py` also exits **2** if pytest cannot run or no longer
+  exposes the example count it reads.
+
+**Gate**: every gate, and the SOUP `--check`, must exit 0.  Exit 2 is not a
+pass: it means the gate could not see what it verifies.  Fix any errors
+before continuing.
 
 ### 3. Commit Message Convention
 
@@ -80,6 +103,7 @@ Say only what changed and what a user has to do about it. Measurements, file inv
 If the commit adds or modifies a `SimulationNode` subclass, verify:
 
 - [ ] `meta` ClassVar has `NodeMeta` with: `algorithm_id`, `stability`, `description`, `assumptions`, `limitations`, `hazard_hints`
+- [ ] `algorithm_id` is a new, unused ID written as a string literal, and the algorithm guide's `**Algorithm ID**` line states the same one (`check_impl_mapping.py` refuses a duplicate or a mismatch)
 - [ ] `@stability(StabilityLevel.X)` decorator applied
 - [ ] NumPy-style docstring present
 - [ ] `update()` is JAX-traceable (uses `jnp` ops, no Python side effects)

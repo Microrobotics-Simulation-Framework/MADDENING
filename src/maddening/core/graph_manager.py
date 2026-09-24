@@ -14,6 +14,7 @@ the update is always computed but conditionally applied via
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
@@ -3573,6 +3574,154 @@ def _param_leaves_read(step_fn: Callable, state: dict, ext: dict, params: dict) 
     return reads
 
 
+def _hook_outputs(spec: _NodeSpec, state, bi, p) -> list:
+    """The traced outputs of a node's own hooks, called the way the graph
+    calls them: ``update`` and, where the node has them,
+    ``compute_boundary_fluxes`` and ``compute_interface_correction``.
+
+    Only traced values are returned: only those can depend on an input (an
+    index in a correction list is a Python int).
+    """
+    node = spec.node
+    outs = [_node_update(spec, state, bi, spec.timestep, p)]
+    if type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes:
+        outs.append(_node_fluxes(spec, state, bi, spec.timestep, p))
+    iface = getattr(node, "interface_dof_indices", None)
+    if callable(iface) and iface() and _correction_accepts_params(node):
+        outs.append(node.compute_interface_correction(
+            state, bi, spec.timestep, params=p))
+    return [x for x in jax.tree.leaves(outs) if isinstance(x, jax.core.Tracer)]
+
+
+def _declared_boundary_zeros(node) -> dict:
+    """A zero value for every input ``boundary_input_spec()`` declares."""
+    declared = node.boundary_input_spec() or {}
+    return {
+        name: jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32)
+        for name, bspec in declared.items()
+    }
+
+
+def _refers_to(value: Any, targets: list, shared: dict, depth: int = 0) -> bool:
+    """Does ``value`` reach one of ``targets`` (by identity), the dict
+    ``shared``, or an object whose ``params`` is ``shared``?  Followed
+    through bound methods, ``functools.partial``, closures, ``__wrapped__``
+    chains and containers, two levels deep."""
+    if depth > 2:
+        return False
+    if value is shared or any(value is t for t in targets):
+        return True
+    if isinstance(value, type):
+        return False
+    try:
+        if getattr(value, "params", None) is shared:
+            return True
+    except Exception:  # noqa: BLE001 - a property that raises holds nothing
+        pass
+    # A container is searched only when it is small: a long list is data (a
+    # mesh, a table), not a place anyone keeps a bound method.
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return len(value) <= 256 and any(
+            _refers_to(v, targets, shared, depth + 1) for v in value)
+    if isinstance(value, dict):
+        return len(value) <= 256 and any(
+            _refers_to(v, targets, shared, depth + 1) for v in value.values())
+    if not callable(value):
+        return False
+    held: list = []
+    bound = getattr(value, "__self__", None)
+    if bound is not None:
+        held.append(bound)
+    if isinstance(value, functools.partial):
+        held.extend([value.func, *value.args, *value.keywords.values()])
+    for cell in getattr(value, "__closure__", None) or ():
+        try:
+            held.append(cell.cell_contents)
+        except ValueError:          # an empty cell
+            continue
+    wrapped = getattr(value, "__wrapped__", None)
+    if wrapped is not None:
+        held.append(wrapped)
+    return any(_refers_to(v, targets, shared, depth + 1) for v in held)
+
+
+def _node_with_params(node: Any, params: dict) -> Optional[Any]:
+    """A shallow copy of ``node`` that reads ``params`` wherever ``node``
+    reads its own ``params`` dict, or ``None`` when no faithful copy can be
+    made.
+
+    This answers "what would the node compute after a write into its params
+    dict?" without writing to it: the graph may be stepping on a runner
+    thread (``POST /sim/start``) that reads the live dict, so the original
+    is never mutated.  Every node object reachable through attributes whose
+    ``params`` *is* the same dict -- a sharded wrapper and the node it wraps
+    share one -- is copied the same way, so the copy sees the new values
+    wherever the real write would land; a node holding a *copy* of the dict
+    (``HybridNode``'s physics node) keeps its own, because the real write
+    does not reach it either.
+
+    Refused (``None``) when an attribute holds a callable bound to, or
+    closing over, one of the originals (``self._f = jax.jit(self._impl)``):
+    that callable reads the original's params, and a copy that kept it would
+    report "not read" for a value the node does read.  Also refused for an
+    object without ``__dict__``.
+    """
+    original = getattr(node, "params", None)
+    if not isinstance(original, dict):
+        return None
+    sharing: list = []
+
+    def collect(obj, depth: int) -> bool:
+        if depth > 4:
+            return False
+        if any(obj is s for s in sharing):
+            return True
+        try:
+            attrs = vars(obj)
+        except TypeError:
+            return False
+        sharing.append(obj)
+        for value in attrs.values():
+            if value is not obj and getattr(value, "params", None) is original \
+                    and not isinstance(value, type):
+                if not collect(value, depth + 1):
+                    return False
+        return True
+
+    if not collect(node, 0):
+        return None
+    copies = {id(obj): object.__new__(type(obj)) for obj in sharing}
+    for obj in sharing:
+        attrs = dict(vars(obj))
+        for name, value in attrs.items():
+            if value is original:
+                attrs[name] = params
+            elif id(value) in copies and any(value is s for s in sharing):
+                attrs[name] = copies[id(value)]
+            elif _refers_to(value, sharing, original):
+                return None
+        copies[id(obj)].__dict__.update(attrs)
+    return copies[id(node)]
+
+
+def _static_deps_reason(node: Any, key: str) -> Optional[str]:
+    """Why ``node`` cannot read a new value of ``key`` from its params, by
+    its own :meth:`~maddening.core.node.SimulationNode.static_data_deps`
+    declaration, or ``None`` when it declares no static built from ``key``."""
+    # `Callable[..., Any] | None`, not `Any`: `callable()` narrows a bare
+    # `Any` to `(...) -> object`, whose result has no `.items()`.
+    deps: Callable[..., Any] | None = getattr(node, "static_data_deps", None)
+    declared = (deps() if callable(deps) else None) or {}
+    statics = sorted(s for s, names in declared.items() if key in names)
+    if not statics:
+        return None
+    return (
+        f"{type(node).__name__} bakes it into static_data "
+        f"{statics} when the node is constructed (static_data_deps): "
+        "the compiled step reads the static, not the parameter"
+    )
+
+
 def _leaf_values_equal(a, b) -> bool:
     la, lb = jax.tree.leaves(a), jax.tree.leaves(b)
     if len(la) != len(lb):
@@ -3649,8 +3798,9 @@ class GraphManager:
         self._params_verified: dict[str, dict[str, Any]] = {}
         self._step_reads: Optional[tuple[int, Optional[set]]] = None
         # Per node: the keys its own hooks read with every declared
-        # boundary input supplied, keyed by compile generation.
-        self._node_reads: dict[str, tuple[int, set]] = {}
+        # boundary input supplied, keyed by compile generation and by the
+        # node object (a node replaced under the same name is asked again).
+        self._node_reads: dict[str, tuple[int, Any, set]] = {}
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -3966,17 +4116,9 @@ class GraphManager:
         spec = self._nodes.get(owner)
         if spec is None:
             return None
-        # `Callable[..., Any] | None`, not `Any`: `callable()` narrows a bare
-        # `Any` to `(...) -> object`, whose result has no `.items()`.
-        deps: Callable[..., Any] | None = getattr(spec.node, "static_data_deps", None)
-        declared = (deps() if callable(deps) else None) or {}
-        statics = sorted(s for s, names in declared.items() if key in names)
-        if statics:
-            return (
-                f"{type(spec.node).__name__} bakes it into static_data "
-                f"{statics} when the node is constructed (static_data_deps): "
-                "the compiled step reads the static, not the parameter"
-            )
+        declared_reason = _static_deps_reason(spec.node, key)
+        if declared_reason is not None:
+            return declared_reason
         reads = self._params_read_by_step()
         if reads is None or (owner, key) in reads:
             return None
@@ -4007,38 +4149,28 @@ class GraphManager:
         ``boundary_input_spec()`` declares, walked like the step (see
         :func:`_live_jaxpr_inputs`).  ``None`` when the hooks do not trace
         that way (an input the spec does not declare, say): then nothing
-        is refused on this ground.  Cached per compile.
+        is refused on this ground.  Before the node's first compile its own
+        :meth:`~maddening.core.node.SimulationNode.params_pytree` stands in
+        for its ``gm.params`` entry.  Cached per compile and per node
+        object, so a node replaced under the same name between two
+        compiles is asked again.
         """
         gen = self._compile_generation
-        cached = self._node_reads.get(owner)
-        if cached is not None and cached[0] == gen:
-            return cached[1]
         spec = self._nodes[owner]
         node = spec.node
-
-        def hooks(state, bi, p):
-            outs = [_node_update(spec, state, bi, spec.timestep, p)]
-            if type(node).compute_boundary_fluxes is not SimulationNode.compute_boundary_fluxes:
-                outs.append(_node_fluxes(spec, state, bi, spec.timestep, p))
-            iface = getattr(node, "interface_dof_indices", None)
-            if callable(iface) and iface() and _correction_accepts_params(node):
-                outs.append(node.compute_interface_correction(
-                    state, bi, spec.timestep, params=p))
-            # Only traced values can depend on an input; an index in a
-            # correction list is a Python int.
-            return [x for x in jax.tree.leaves(outs) if isinstance(x, jax.core.Tracer)]
-
+        cached = self._node_reads.get(owner)
+        if cached is not None and cached[0] == gen and cached[1] is node:
+            return cached[2]
         try:
-            declared = node.boundary_input_spec() or {}
-            bi = {
-                name: jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32)
-                for name, bspec in declared.items()
-            }
-            leaves = self.params["nodes"][owner]
+            bi = _declared_boundary_zeros(node)
+            leaves = self.params.get("nodes", {}).get(owner)
+            if leaves is None:
+                leaves = node.params_pytree()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 args = (self._state[owner], bi, leaves)
-                closed = jax.make_jaxpr(hooks)(*args)
+                closed = jax.make_jaxpr(
+                    lambda st, b, p: _hook_outputs(spec, st, b, p))(*args)
             paths = [pth for pth, _ in jax.tree_util.tree_flatten_with_path(args)[0]]
             if len(paths) != len(closed.jaxpr.invars):
                 return None
@@ -4049,8 +4181,186 @@ class GraphManager:
             pth[1].key for pth, keep in zip(paths, live)
             if keep and len(pth) >= 2 and getattr(pth[0], "idx", None) == 2
         }
-        self._node_reads[owner] = (gen, reads)
+        self._node_reads[owner] = (gen, node, reads)
         return reads
+
+    def _param_leaves_the_step_cannot_read(self) -> dict[tuple[str, str], str]:
+        """``{(node, key): reason}`` for every leaf of ``params["nodes"]``
+        that a write to the pytree alone could not change the step for.
+
+        A leaf a ``static_data_deps`` entry names (the step reads the static
+        built from it), and -- when the compiled step can be traced -- a
+        leaf no operation of the compiled step takes as an input.  Unlike
+        :meth:`_baked_leaf_reason` this does *not* spare a latent leaf the
+        node's own hooks would read with an input this graph does not
+        connect (a ball's ``elasticity`` without a table edge): it answers
+        for a frozen graph, which is what an exported FMU is -- no edge can
+        be added to one, so such a leaf is a knob that does nothing.  Used
+        by :func:`maddening.fmi.model_description.build_model_description`
+        and the FMI sidecar, which write the pytree and nothing else.
+        """
+        reads = self._params_read_by_step()
+        out: dict[tuple[str, str], str] = {}
+        for owner, leaves in (self.params.get("nodes") or {}).items():
+            spec = self._nodes.get(owner)
+            if spec is None or not spec.accepts_params or not isinstance(leaves, dict):
+                continue
+            for key in leaves:
+                reason = _static_deps_reason(spec.node, key)
+                if reason is None and reads is not None and (owner, key) not in reads:
+                    reason = (
+                        "no operation of the compiled step takes it as an "
+                        "input (an initial condition, which only "
+                        "initial_state() reads; a value the node consumed "
+                        "when it was constructed; or one only an input this "
+                        "graph does not connect would read)"
+                    )
+                if reason is not None:
+                    out[(owner, key)] = reason
+        return out
+
+    def _unused_node_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+        """Why a write of ``params[key] = value`` to node ``owner`` that
+        reaches the node itself -- ``node.params`` and, for a leaf of the
+        params pytree, :attr:`params` as well, which is what ``PUT
+        /graph/params`` writes -- would be used by nothing the running
+        graph computes; ``None`` when it would be used, or when that cannot
+        be told.  ``value`` is what would be stored in ``node.params``; the
+        caller has already established that it differs from the node's
+        current value.
+
+        :meth:`_refuse_baked_param_writes` cannot see such a write: it
+        compares ``gm.params`` against the node's own value, and this write
+        changes both.  But writing ``node.params`` rebuilds nothing the
+        node derived from the value when it was constructed, so the value
+        would be reported by ``GET``, written out by :meth:`to_dict` and
+        :meth:`save_state`, and ignored by every step -- a reloaded graph
+        runs a different model.  The decision, in order:
+
+        1. a :meth:`~maddening.core.node.SimulationNode.static_data_deps`
+           entry names ``key``: refused (the step reads the static);
+        2. a leaf of the params pytree that the compiled step, or the
+           node's own hooks with every declared boundary input supplied,
+           read from the injected params: used, from the next step (the
+           liveness walk of :meth:`_baked_leaf_reason`);
+        3. a structural key (not a pytree leaf): used when the node's hooks
+           trace differently with the new value in ``node.params`` -- the
+           write marks the graph dirty, and the recompile traces them
+           again;
+        4. otherwise: used when ``initial_state()`` returns something else
+           with the new value -- it takes effect at the next reset, the way
+           an ``initial_*`` condition does;
+        5. otherwise: refused -- the node consumed the value when it was
+           constructed, or nothing reads it at all (a value nothing reads
+           cannot make a reloaded graph differ, but it is not a parameter
+           of the running graph either, and the two cannot be told apart
+           without constructing the node again).
+
+        Steps 3 and 4 run the node's code on a shallow copy that reads the
+        new value (:func:`_node_with_params`), never on the node itself;
+        when no faithful copy can be made, or the code raises, nothing is
+        refused.  A value the node consumed at construction *and* reads
+        again later (a geometry parameter that also shapes the initial
+        fill) passes: like the graph-level walk, this detects "no path at
+        all".  A node that bakes a parameter should declare it in
+        ``static_data_deps``, which refuses it on both surfaces.
+        """
+        spec = self._nodes.get(owner)
+        if spec is None:
+            return None
+        node = spec.node
+        declared_reason = _static_deps_reason(node, key)
+        if declared_reason is not None:
+            return declared_reason
+        cls = type(node).__name__
+        live = self.params.get("nodes", {}).get(owner) or {}
+        pytree_leaf = spec.accepts_params and (key in live or key in node.params_pytree())
+        if pytree_leaf:
+            reads = self._params_read_by_step()
+            if reads is not None and (owner, key) in reads:
+                return None
+            node_reads = self._node_param_reads(owner)
+            if node_reads is None or key in node_reads:
+                return None
+            where = (
+                "no operation of the compiled step takes it as an input, "
+                f"{cls}'s own update / flux / interface-correction hooks do "
+                "not read it with every boundary input they declare supplied"
+            )
+        else:
+            if self._hooks_trace_depends(owner, key, value) is not False:
+                return None
+            where = (
+                f"{cls}'s update / flux / interface-correction hooks trace "
+                "identically with the new value in node.params, so the "
+                "recompile the write asks for would not use it"
+            )
+        if key in node.params and self._initial_state_depends(owner, key, value) is not False:
+            return None
+        return (
+            f"{where}, and initial_state() returns the same state with it: "
+            f"nothing {cls} computes while it runs reads the new value (it "
+            "consumed the value when it was constructed, if it uses it at all)"
+        )
+
+    def _hooks_trace_depends(self, owner: str, key: str, value: Any) -> Optional[bool]:
+        """Do the node's hooks trace differently with ``node.params[key] =
+        value``?  ``None`` when that cannot be told (no faithful copy, a
+        trace that raises).  Compared on shallow copies holding the current
+        and the new value, as jaxpr text plus constant values."""
+        spec = self._nodes[owner]
+        node = spec.node
+        traces = []
+        try:
+            bi = _declared_boundary_zeros(node)
+            leaves = None
+            if spec.accepts_params:
+                leaves = self.params.get("nodes", {}).get(owner)
+                if leaves is None:
+                    leaves = node.params_pytree()
+            state = self._state[owner]
+            for params in (dict(node.params), {**node.params, key: value}):
+                probe = _node_with_params(node, params)
+                if probe is None:
+                    return None
+                probe_spec = _NodeSpec(
+                    node=probe, update_fn=probe.update, timestep=spec.timestep,
+                    accepts_params=spec.accepts_params,
+                    flux_accepts_params=spec.flux_accepts_params,
+                )
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    closed = jax.make_jaxpr(
+                        lambda st, b, p, _s=probe_spec: _hook_outputs(_s, st, b, p),
+                    )(state, bi, leaves)
+                traces.append((str(closed.jaxpr), list(closed.consts)))
+        except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
+            return None
+        (text_a, consts_a), (text_b, consts_b) = traces
+        if text_a != text_b or len(consts_a) != len(consts_b):
+            return True
+        return not all(_leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
+
+    def _initial_state_depends(self, owner: str, key: str, value: Any) -> Optional[bool]:
+        """Does ``initial_state()`` return something else with
+        ``node.params[key] = value``?  ``None`` when that cannot be told.
+        Evaluated on shallow copies holding the current and the new
+        value, never on the node itself."""
+        node = self._nodes[owner].node
+        probes = [_node_with_params(node, dict(node.params)),
+                  _node_with_params(node, {**node.params, key: value})]
+        if probes[0] is None or probes[1] is None:
+            return None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                before = probes[0].initial_state()
+                after = probes[1].initial_state()
+        except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
+            return None
+        if jax.tree.structure(before) != jax.tree.structure(after):
+            return True
+        return not _leaf_values_equal(before, after)
 
     def _refuse_baked_param_writes(self, tree: Any, *, live: bool) -> None:
         """Refuse a leaf that differs from its node's value but that the
@@ -4076,8 +4386,9 @@ class GraphManager:
         ``live=False`` checks without remembering.  The reference is the
         node's own
         :meth:`~maddening.core.node.SimulationNode.params_pytree`, so a write
-        that also reaches the node (``PUT /graph/params`` writes both) is not
-        refused.
+        that also reaches the node is not refused here: ``PUT
+        /graph/params`` writes both, and asks
+        :meth:`_unused_node_write_reason` first, before writing anything.
         """
         nodes = tree.get("nodes") if isinstance(tree, dict) else None
         if not isinstance(nodes, dict):

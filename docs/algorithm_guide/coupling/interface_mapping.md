@@ -208,6 +208,26 @@ precision, so the points can be at most `float64` whichever route you take:
 - or, for a set too large to inline, save the `float64` array with
   `numpy.save` and pass `{"asset": "<file>.npy"}`.
 
+Three more kinds of value were changed by the same coercion and are
+refused the same way, each with a message saying what to do instead:
+
+- **integers `float64` cannot represent** (magnitude above `2**53` and
+  not a float64 value, as a Python `int` or an 8-byte NumPy integer):
+  `2**53 + 1` used to become `2**53`.  Add `"dtype": "int64"` (or
+  `"uint64"`) to keep integer points exact, or `"dtype": "float64"` to
+  accept the rounding;
+- **`decimal.Decimal` values `float64` cannot represent**: they went
+  through `float()`.  No reference keeps decimal digits; convert first or
+  add `"dtype": "float64"`;
+- **complex values, at any width** (`numpy.clongdouble` included) —
+  refused **with or without** a `"dtype"`, because the coercion to a real
+  dtype drops the imaginary part (with only a NumPy `ComplexWarning`)
+  rather than rounding it.  Pass `np.real(points)` if the imaginary parts
+  are zero, or the two parts as two real columns.
+
+Values `float64` holds exactly (`2**53`, powers of two beyond it,
+`Decimal("0.5")`) and every other input are coerced as before.
+
 This is a limit of the *serialised* form, not a judgement about extended
 precision, and it is not a closed door.  If a real interface ever needs
 it, extended precision can be supported later behind the same API — a

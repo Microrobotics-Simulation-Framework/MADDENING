@@ -625,6 +625,14 @@ _FACE_MAP = {
     "z_max": (2, "max"),
 }
 
+#: The face across the domain from each face: where a channel's outlet
+#: goes when its inlet is the key.
+_OPPOSITE_FACE = {
+    "x_min": "x_max", "x_max": "x_min",
+    "y_min": "y_max", "y_max": "y_min",
+    "z_min": "z_max", "z_max": "z_min",
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # LBMNode
@@ -656,13 +664,45 @@ class LBMNode(SimulationNode):
     inlet_face : str
         Face for pressure inlet BC: ``"x_min"`` (default), ``"x_max"``, etc.
     outlet_face : str
-        Face for pressure outlet BC: ``"x_max"`` (default).
+        Face for pressure outlet BC: ``"x_max"`` (default).  Must differ
+        from ``inlet_face``.
     geometry_source : str or None
         USD prim path for geometry sourcing.
+
+    Raises
+    ------
+    ValueError
+        For an unknown lattice or face, a face on an axis the lattice does
+        not have, ``grid_shape`` or ``wall_mask`` of the wrong rank or
+        shape, ``tau <= 0.5``, or ``inlet_face == outlet_face``.
+
+    Notes
+    -----
+    **Faces.**  ``inlet_face`` and ``outlet_face`` must be different faces:
+    one face carries one pressure, and the outlet closure, applied second,
+    would overwrite the inlet's on every cell of it, silently dropping
+    ``inlet_pressure``.  Perpendicular faces are allowed; they share the
+    cells along their common edge (one corner cell in 2-D, a line of cells
+    in 3-D), and because the inlet closure runs first and the outlet
+    closure second, those shared cells carry the **outlet** pressure.
+
+    **Sharding.**  Under
+    :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode` the
+    node must be wrapped with ``boundary="periodic"`` (:meth:`halo_boundary`),
+    which is what its unsharded streaming does; any other fill, the
+    wrapper's default ``"edge"`` included, is refused at construction.  A
+    pressure face must not
+    lie on a sharded axis: the first sharded step that imposes a pressure
+    on such a face raises, naming the axis to shard instead (see
+    :meth:`update_padded`).
     """
 
     meta = NodeMeta(
-        algorithm_id="MADD-NODE-007",
+        # MADD-NODE-011 from 0.4.0.  0.1.0 to 0.3.1 carried MADD-NODE-007,
+        # which RigidBodyNode also carried (and keeps); the algorithm is
+        # unchanged by the renumbering.  scripts/check_impl_mapping.py now
+        # refuses a duplicate algorithm ID.
+        algorithm_id="MADD-NODE-011",
         # 1.1.0: Zou-He closure corrected (MADD-ANO-020); see the guide.
         algorithm_version="1.1.0",
         stability=StabilityLevel.EXPERIMENTAL,
@@ -778,6 +818,15 @@ class LBMNode(SimulationNode):
                     f"{face_name} '{face_label}' uses axis {face_axis} "
                     f"but lattice {lat.name} only has {lat.D} dimensions."
                 )
+        if inlet_face == outlet_face:
+            raise ValueError(
+                f"inlet_face and outlet_face are both {inlet_face!r}.  A face "
+                "carries one pressure: the outlet closure runs after the inlet "
+                "closure and would overwrite it on every cell of the face, so "
+                "inlet_pressure would be silently dropped.  Put the outlet on "
+                f"another face -- for a channel, the opposite one, "
+                f"outlet_face={_OPPOSITE_FACE[inlet_face]!r}."
+            )
 
         super().__init__(
             name,
@@ -843,6 +892,93 @@ class LBMNode(SimulationNode):
         """
         return {axis: 1 for axis in range(self._D)}
 
+    def halo_boundary(self) -> str:
+        """``"periodic"``: the halo fill under which the sharded step is this node.
+
+        :meth:`update` streams with ``jnp.roll``, so a population leaving
+        the grid through one face re-enters through the opposite one.  The
+        sharded :meth:`update_padded` streams from halo cells instead, and
+        reproduces :meth:`update` only when the halos at the edges of the
+        global grid hold the cells from the opposite edge -- a periodic
+        fill.  :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+        refuses at construction any ``boundary`` other than this one,
+        including its own default, ``"edge"``, which copies each edge cell
+        into its own halo: on a walled 16x10 D2Q9 pressure channel sharded
+        across the walls that used to run and moved the centreline
+        velocity by 0.64% after 200 steps, where ``boundary="periodic"``
+        matches the unsharded node to float32 rounding.
+        """
+        return "periodic"
+
+    def _refuse_pressure_face_on_sharded_axis(
+        self, shard_info: Optional[dict], imposed: list[tuple[str, str]],
+    ) -> None:
+        """Refuse a pressure face on an axis the sharded step has split.
+
+        ``update_padded`` sees one slab of the grid and applies the Zou-He
+        closure to that slab's edge plane, so on a sharded face axis every
+        seam between two shards would be forced to the face pressure too:
+        measured on a 16x10 D2Q9 channel sharded along its streamwise axis
+        on 2 devices, the planes either side of the seam read density
+        0.990 and 1.010 and the centreline velocity was 2.1x the unsharded
+        one, with no error.  ``shard_info`` (``{axis: (offset,
+        local_extent)}``, from the wrapper) says which axes are split; an
+        axis whose one slab is the whole axis has no seam and is allowed.
+
+        Parameters
+        ----------
+        shard_info : dict or None
+            As passed to :meth:`update_padded`; ``None`` or empty when not
+            sharded.
+        imposed : list of (str, str)
+            ``(boundary input name, face label)`` for each pressure being
+            imposed on this step.
+        """
+        if not shard_info:
+            return
+        split = []
+        for input_name, face in imposed:
+            axis, _ = _FACE_MAP[face]
+            info = shard_info.get(axis)
+            if info is None:
+                continue
+            local_extent = int(info[1])
+            if local_extent >= self._grid_shape[axis]:
+                continue
+            split.append((input_name, face, axis, local_extent))
+        if not split:
+            return
+        on_faces = " and ".join(f"{i} on face {f!r} (axis {a})" for i, f, a, _ in split)
+        split_axes = sorted({(a, n) for _, _, a, n in split})
+        slabs = "; ".join(
+            f"axis {a} into slabs of {n} of its {self._grid_shape[a]} cells"
+            for a, n in split_axes
+        )
+        which = "that axis" if len(split_axes) == 1 else "those axes"
+        face_axes = {_FACE_MAP[f][0] for _, f in imposed}
+        free = [a for a in range(self._D) if a not in face_axes]
+        if free:
+            instead = (
+                f"Shard an axis no pressure face lies on instead -- "
+                f"{' or '.join(f'axis {a}' for a in free)} here, e.g. "
+                f"axis_map={{<mesh axis>: {free[0]}}} -- and leave "
+                f"{' and '.join(f'axis {a}' for a in sorted(face_axes))} unsharded"
+            )
+        else:
+            instead = (
+                "Every axis of this grid has a pressure face on it, so the node "
+                "cannot be sharded while these pressures are imposed: run it "
+                "unsharded"
+            )
+        raise ValueError(
+            f"{type(self).__name__} {self.name!r} imposes {on_faces}, but the "
+            f"sharded step has split {which} ({slabs}).  update_padded applies "
+            "the Zou-He closure to the edge plane of its own slab, so every seam "
+            "between two shards would be forced to the face pressure as well, with "
+            f"no error.  {instead}; or drive the flow with body_force, which does "
+            "not use the pressure faces."
+        )
+
     def initial_state(self) -> dict:
         shape = self._grid_shape
         D = self._D
@@ -895,11 +1031,22 @@ class LBMNode(SimulationNode):
         been halo-exchanged the same way as ``f``), so each shard sees
         its own wall topology.  Zou-He pressure BCs at
         ``inlet_face`` / ``outlet_face`` operate on the local slice of
-        the face plane and are valid as long as the inlet/outlet axis
+        the face plane and are valid only while the inlet/outlet axis
         is *not* sharded in the pencil mesh.  For the canonical
         Hagen-Poiseuille setup we shard ``(spatial_y, spatial_z)`` and
         leave ``x`` (streamwise) replicated -- which puts every shard
         in possession of the full inlet/outlet face.
+
+        Raises
+        ------
+        ValueError
+            When a pressure is imposed (``inlet_pressure`` or
+            ``outlet_pressure`` present) on a face whose axis
+            ``shard_info`` reports split across devices.  Raised while the
+            step is traced, so the first sharded step fails before any
+            number is produced; the message names the axis to shard
+            instead.  A body-force-driven node (no pressure inputs) may be
+            sharded along any axis.
         """
         f_pad = state_padded["f"]
         # Same contract as ``update``: viscosity from the injected params
@@ -981,9 +1128,19 @@ class LBMNode(SimulationNode):
         # Zou-He pressure BCs on the inlet / outlet face (interior shape).
         # Valid under sharding provided the inlet/outlet axis is replicated
         # (not in axis_map); each shard then owns the full face and
-        # applies the BC on its local slice of the face plane.
+        # applies the BC on its local slice of the face plane.  A face on
+        # a split axis is refused here, at trace time.
         inlet_pressure = boundary_inputs.get("inlet_pressure", None)
         outlet_pressure = boundary_inputs.get("outlet_pressure", None)
+        imposed = [
+            (input_name, face)
+            for input_name, face, value in (
+                ("inlet_pressure", self._inlet_face, inlet_pressure),
+                ("outlet_pressure", self._outlet_face, outlet_pressure),
+            )
+            if value is not None
+        ]
+        self._refuse_pressure_face_on_sharded_axis(shard_info, imposed)
         if inlet_pressure is not None:
             inlet_axis, inlet_side = _FACE_MAP[self._inlet_face]
             inlet_rho = inlet_pressure / cs2

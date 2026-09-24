@@ -762,8 +762,14 @@ class HeatNode(SimulationNode):
         """
         return "edge"
 
-    def halo_boundary_hint(self) -> str:
-        """What to do instead of a refused halo fill (for the refusal message)."""
+    def _halo_boundary_hint(self) -> str:
+        """What to do instead of a refused halo fill (for the refusal message).
+
+        Private on purpose: an internal convention between the built-in
+        nodes and ``ShardedStencilNode``'s refusal, not yet part of the node
+        contract.  Promote it (and document it for node authors) only
+        after a release has shown it earns a public, STABLE name.
+        """
         return (
             "A HeatNode end held at a temperature is a boundary input, "
             "exactly as unsharded: pass left_temperature=0.0 / "

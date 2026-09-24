@@ -566,9 +566,8 @@ under multi-GPU sharding:
   returns `"edge"` because `update_padded` closes the rod ends from
   `left_temperature` / `right_temperature` exactly as `update` does, and
   the declaration makes the wrapper refuse `"zero"` and `"periodic"`
-  rather than ignore them.  An optional `halo_boundary_hint()` returning a
-  sentence is appended to the refusal -- say there what the user should
-  do instead (HeatNode's names the inputs that hold an end at 0).  A node
+  rather than ignore them; HeatNode's refusal also names the inputs that
+  hold an end at 0.  A node
   that declares nothing keeps the `"edge"` default and takes any of the
   three fills as given, exactly as before; the wrapper refuses a
   `boundary` that is not one of the three, as a string, at construction.

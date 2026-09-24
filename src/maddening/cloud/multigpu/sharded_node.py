@@ -521,12 +521,13 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         # default ``"edge"`` included.  For LBMNode the halo is the
         # boundary condition, so another fill is another model; for
         # HeatNode, which closes its rod ends itself, another fill would be
-        # ignored without a word.  A node may add what to do instead
-        # (``halo_boundary_hint()``).  A node that declares nothing is
+        # ignored without a word.  A built-in node may add what to do
+        # instead through the private ``_halo_boundary_hint()`` (internal
+        # for now, not part of the node contract).  A node that declares nothing is
         # wrapped exactly as before.
         declared = _declared_halo_boundary(node)
         if declared is not None and boundary != declared:
-            hint = getattr(node, "halo_boundary_hint", None)
+            hint = getattr(node, "_halo_boundary_hint", None)
             hint = hint() if callable(hint) else hint
             raise ValueError(
                 f"ShardedStencilNode: {type(node).__name__} {node.name!r} declares "

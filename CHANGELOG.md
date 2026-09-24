@@ -169,6 +169,8 @@ guidance; the itemized changes follow.
 ### Changed
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
   Action: drop the argument and hold an end at 0 with `left_temperature=0.0` / `right_temperature=0.0` (in a graph, `gm.add_external_input(...)`), exactly as unsharded.
+- **`ShardedStencilNode` refuses a per-axis `boundary` dict**: it was accepted but never worked in the wrapper (it zero-filled the halos of axes
+  `axis_map` leaves unsharded). Action: pass one mode as a string; per-axis modes remain available on `halo_exchange` itself.
 - **Coupling group keys are also refused when one plus `_total` spells another's** (a new `_meta` slot, `<key>_total_iterations`): groups keyed
   `a+b+c` and `a+b+c_total` now fail at `add_coupling_group`, with or without sub-cycling. Rename a node so the keys differ.
 - **`profile_graph` reports `coupling_overhead_ms` signed, alongside a new

@@ -291,6 +291,31 @@ def test_diagnostics_reject_a_parameter_key_that_is_not_in_the_params_pytree():
     node.gradient_capture_ratio(state, {"theta": 0.9, "k": 16})
 
 
+def test_update_refuses_an_injected_key_that_is_not_a_constructor_parameter():
+    """The base ``update`` path, for every subclass, not only the wavelet node.
+
+    ``{"thetta": 0.9}`` used to be merged into the parameter dict and then
+    never read: ``update`` returned the constructor-``theta`` answer, eagerly
+    and under ``jit`` alike, on this top-k toy as on any other subclass.  The
+    refusal names every unknown key; a real key still moves the answer, and
+    a structural constructor entry is accepted as before.
+    """
+    node = _sine(blindness_gate=False)
+    state = node.initial_state()
+    with pytest.raises(ValueError, match=r"PoissonSineTopKNode 'adaptive': unknown parameter key\(s\) \['thetta'\]"):
+        node.update(state, {}, 1.0, params={"thetta": 0.9})
+    with pytest.raises(ValueError, match=r"\['thetta'\]"):
+        jax.jit(lambda s, t: node.update(s, {}, 1.0, params={"thetta": t}))(state, 0.9)
+    with pytest.raises(ValueError, match=r"\['bogus', 'thetta'\]"):
+        node.update(state, {}, 1.0, params={"theta": 0.9, "thetta": 0.9, "bogus": 1.0})
+
+    base = np.asarray(node.update(state, {}, 1.0)["c"])
+    moved = np.asarray(node.update(state, {}, 1.0, params={"theta": 0.9})["c"])
+    assert not np.array_equal(base, moved)
+    same = node.update(state, {}, 1.0, params={"theta": node.params["theta"], "k": 16})
+    np.testing.assert_array_equal(np.asarray(same["c"]), base)
+
+
 # -- cost of the cold-start diagnostic (audit A13) --------------------------------
 
 def test_repeated_initial_state_calls_evaluate_the_diagnostic_once():

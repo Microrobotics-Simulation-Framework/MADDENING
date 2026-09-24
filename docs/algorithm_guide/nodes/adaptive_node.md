@@ -255,7 +255,7 @@ Subclasses may add fields through `extra_initial_state()`.
 | `blindness_gate` | bool | True | — | Run the cold-start diagnostic in `initial_state` (recorded in `self.params`, so it survives a round trip) |
 | `on_blind` | str | `"warn"` | — | `"warn"` / `"raise"` / `"ignore"` policy for a low ratio (recorded in `self.params`) |
 | `dtype` | dtype | canonical float | — | dtype of `c` |
-| subclass `**params` | float / int | — | problem-defined | Physical constants; floats become leaves of the graph parameter pytree with the subclass's `ParamSpec`s |
+| subclass `**params` | float / int | — | problem-defined | Physical constants; floats become leaves of the graph parameter pytree with the subclass's `ParamSpec`s. An injected `params` key that is not a constructor parameter is refused with a `ValueError` naming it, by `update`, the cold start and every diagnostic |
 
 ## Boundary Inputs
 

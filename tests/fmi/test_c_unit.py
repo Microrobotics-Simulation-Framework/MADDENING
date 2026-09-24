@@ -226,6 +226,7 @@ VALGRIND = shutil.which("valgrind")
 CLANG = shutil.which("clang")
 
 
+@pytest.mark.slow  # 25-40 s on CI; slow-tests.yml installs valgrind and clang
 @pytest.mark.skipif(VALGRIND is None, reason="valgrind not installed")
 def test_c_unit_tests_under_valgrind(tmp_path):
     """Memcheck over the whole unit-test binary: no invalid reads/writes,
@@ -248,6 +249,7 @@ def test_fuzz_under_valgrind(tmp_path):
     _assert_fuzz_reached_the_parsers(proc.stdout, 300)
 
 
+@pytest.mark.slow  # 25-40 s on CI; slow-tests.yml installs valgrind and clang
 @pytest.mark.skipif(CLANG is None, reason="clang (libFuzzer) not installed")
 def test_libfuzzer_short_campaign(tmp_path):
     """Coverage-guided fuzzing of the reply parser for a bounded time.

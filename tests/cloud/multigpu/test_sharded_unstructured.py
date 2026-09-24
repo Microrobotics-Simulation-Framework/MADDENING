@@ -416,6 +416,7 @@ class TestStabilityTagging:
 
 class TestPoissonOnGraph:
 
+    @pytest.mark.slow  # compiling the sharded CG solve: 7-12 s on CI
     def test_sharded_cg_solves_graph_laplacian(self):
         """1-D ring graph Laplacian solved via sharded_cg.
 

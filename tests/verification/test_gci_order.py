@@ -811,6 +811,7 @@ def _pipe_node(n_cells=16):
     )
 
 
+@pytest.mark.slow  # the pipe ladder these three share (cached): 14 s on CI
 @verification_benchmark(
     benchmark_id="MADD-VER-013",
     description=(
@@ -869,6 +870,7 @@ def test_the_pipe_flow_converges_under_refinement_where_mms_cannot_run():
     )
 
 
+@pytest.mark.slow  # the pipe ladder these three share (cached): 14 s on CI
 def test_the_pipe_ladder_is_not_in_the_asymptotic_range_and_the_harness_says_so(
 ):
     """The finding, and the reason a GCI needs the asymptotic-range check.
@@ -912,6 +914,7 @@ def test_the_pipe_ladder_is_not_in_the_asymptotic_range_and_the_harness_says_so(
     )
 
 
+@pytest.mark.slow  # the pipe ladder these three share (cached): 14 s on CI
 def test_lbm_pipe_declares_no_order_so_the_study_skips_rather_than_passing():
     """An undeclared node with a converging ladder still is not verified.
 

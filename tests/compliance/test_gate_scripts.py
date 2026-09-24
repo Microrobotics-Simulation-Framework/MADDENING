@@ -53,6 +53,21 @@ def transforms_gate():
 
 
 @pytest.fixture(scope="module")
+def repo_transforms_gate_run():
+    """One run of the transforms gate over the repository, as CI runs it.
+
+    Four tests read its output.  A run costs about 5 s on the CI runner,
+    nearly all of it importing the modules whose registrations it
+    confirms, and it is deterministic for a given tree -- so they share
+    one run rather than paying for four.  ``--allow-missing-optional``:
+    the test matrix installs only ``[ci]``, so the USD test modules
+    cannot be imported here.  The CI compliance job runs the gate without
+    the flag, with the extras.
+    """
+    return _run("check_transforms", "--allow-missing-optional")
+
+
+@pytest.fixture(scope="module")
 def mapping_gate():
     return _load("check_impl_mapping")
 
@@ -133,11 +148,10 @@ class TestTransformGate:
         # about "log" being unregistered.
         assert transforms_gate.main([str(tmp_path)]) == 1
 
-    def test_the_repository_transform_references_all_resolve(self):
-        # ``--allow-missing-optional``: the test matrix installs only
-        # ``[ci]``, so the USD test modules cannot be imported here.  The CI
-        # compliance job runs the gate without the flag, with the extras.
-        result = _run("check_transforms", "--allow-missing-optional")
+    def test_the_repository_transform_references_all_resolve(
+        self, repo_transforms_gate_run
+    ):
+        result = repo_transforms_gate_run
         assert result.returncode == 0, result.stdout + result.stderr
         # Regression guard on the audit finding: the gate reported
         # "OK: 0 ... verified" for the whole of v0.3 and v0.4-dev.
@@ -497,7 +511,7 @@ class TestTransformLiveRegistration:
     _OPTIONAL_EXTRA_PACKAGES = ("tests/usd/", "tests/viz/", "tests/cloud/")
 
     def test_every_local_registration_outside_an_optional_extra_is_confirmed(
-        self
+        self, repo_transforms_gate_run
     ):
         """A NOTE is acceptable only where an extra explains it.
 
@@ -505,7 +519,7 @@ class TestTransformLiveRegistration:
         been able to import, which is indistinguishable from the dead
         registration this check exists to catch.
         """
-        result = _run("check_transforms", "--allow-missing-optional")
+        result = repo_transforms_gate_run
         assert result.returncode == 0, result.stdout + result.stderr
         unexplained = [
             line for line in result.stdout.splitlines()
@@ -518,7 +532,9 @@ class TestTransformLiveRegistration:
             "verified:\n" + "\n".join(unexplained)
         )
 
-    def test_the_reported_registry_size_excludes_what_the_gate_imported(self):
+    def test_the_reported_registry_size_excludes_what_the_gate_imported(
+        self, repo_transforms_gate_run
+    ):
         """The live check imports modules that register transforms.
 
         Those registrations are global, so the registry must be snapshotted
@@ -527,7 +543,7 @@ class TestTransformLiveRegistration:
         "registered in another file does not count" forbids.  The headline
         count is the visible half of that snapshot.
         """
-        result = _run("check_transforms", "--allow-missing-optional")
+        result = repo_transforms_gate_run
         assert result.returncode == 0, result.stdout + result.stderr
         reported = int(
             result.stdout.rsplit("(", 1)[1].split(" transforms")[0]
@@ -546,8 +562,10 @@ class TestTransformLiveRegistration:
             f"counting names its own imports added."
         )
 
-    def test_the_summary_separates_allowlisted_from_verified(self):
-        result = _run("check_transforms", "--allow-missing-optional")
+    def test_the_summary_separates_allowlisted_from_verified(
+        self, repo_transforms_gate_run
+    ):
+        result = repo_transforms_gate_run
         assert result.returncode == 0, result.stdout + result.stderr
         assert "allowlisted and not checked" in result.stdout
 

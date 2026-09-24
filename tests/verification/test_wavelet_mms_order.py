@@ -175,6 +175,7 @@ def _periodic_2d_error(level):
 # The declared order, measured
 # --------------------------------------------------------------------------
 
+@pytest.mark.slow  # a refinement ladder compiled per level: 6-18 s on CI
 @verification_benchmark(
     benchmark_id="MADD-VER-014",
     description=(
@@ -206,6 +207,7 @@ def test_wavelet_node_converges_at_its_declared_spatial_order(float64):
     )
 
 
+@pytest.mark.slow  # a refinement ladder compiled per level: 6-18 s on CI
 @pytest.mark.parametrize("error_at,levels,h_of,kw", [
     (_dirichlet_error, DIRICHLET_LEVELS, _h_dirichlet, dict(boundary="dirichlet")),
     (_periodic_2d_error, PERIODIC_2D_LEVELS, _h_periodic, dict(dim=2)),

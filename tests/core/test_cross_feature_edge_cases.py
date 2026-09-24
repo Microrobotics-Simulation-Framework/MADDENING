@@ -146,6 +146,7 @@ def test_fit_and_fim_reject_an_all_false_mask():
         fim(lambda p: p["nodes"]["s"]["stiffness"][None], gm.params, mask=mask)
 
 
+@pytest.mark.slow  # an LM fit through an IFT-coupled group: 5 s on CI
 def test_fit_lm_through_ift_coupled_group_recovers_stiffness():
     from maddening.sysid import fit_lm, observations_from_history
     def build(k):

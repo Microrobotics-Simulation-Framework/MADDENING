@@ -176,6 +176,14 @@ ci = [
     "rich>=12.0",
     "pyzmq>=25.0",
     "fastapi>=0.100",
+    # 1.7.0 is the first release whose testclient imports
+    # anyio.from_thread.BlockingPortal instead of the anyio.abc alias that
+    # anyio >= 4.14 deprecates.  Below it, every tests/api module fails to
+    # collect under filterwarnings = ["error"] (measured: starlette 1.6.0 +
+    # anyio 4.15.1 gives 11 collection errors; 1.7.0 gives 313 passed), so
+    # the floor replaces the warning filter that used to paper over it.
+    # Test environment only: the runtime `api` extra does not need it.
+    "starlette>=1.7.0",
     "uvicorn>=0.20",
     "websockets>=11.0",
     "equinox>=0.11",
@@ -263,12 +271,6 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",
     # optax 0.2.x sets jax_pmap_shmap_merge which is deprecated in JAX 0.9+
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
-    # anyio >= 4.14 deprecates the anyio.abc.BlockingPortal alias that
-    # starlette's testclient still imports at module level, which turns
-    # every tests/api collection into an error.  Fixed on starlette main
-    # (Kludex/starlette#3497) but not in any release as of 1.6.0; drop
-    # this filter and bump the starlette floor once it ships.
-    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
     # SelkiesRenderer emits PerformanceWarning on CPU fallback
     "ignore::maddening.warnings.PerformanceWarning",
     # SkyPilot deprecation warnings

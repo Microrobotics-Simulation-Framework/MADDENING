@@ -287,7 +287,8 @@ class TestTheManufacturedSolutionsCanSeeABrokenScheme:
     acceptance_criteria=(
         "On the 128-point periodic basis at k = 8, for the Gaussian source at "
         "theta in {0.04, 0.30, 0.42, 0.50, 0.92}: the adaptive sensor reading is "
-        "within 1e-2 relative of the full-basis reading (measured max 6e-3) and "
+        "within 1e-2 relative of the full-basis reading (measured max 4.5e-4, "
+        "at theta = 0.42, float64) and "
         "has the same sign at every position, including the two next to the "
         "periodic seam.  At k = n_max the two coincide to 1e-10.  No "
         "convergence rate in k is claimed."

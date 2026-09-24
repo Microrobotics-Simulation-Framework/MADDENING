@@ -951,8 +951,9 @@ class TestTheDefaultReadsTheResidualsCurrentState:
     residual reads from outside its argument.  The documented pattern --
     a residual over a sub-tree that reads the rest from ``gm.params``,
     hoisted out of the loop -- therefore reported the first call's
-    matrix for ever after: the spring's stiffness bound read 0.41 after
-    ``damping`` moved from 2 to 20, where the truth is 44.7.  A bound
+    matrix for ever after: once ``damping`` moved from 2 to 20 the
+    spring's relative bound on ``mass`` read 0.41 where the truth is 44.7,
+    and on ``stiffness`` 0.362 where it is 0.238.  A bound
     method is the same trap without a closure in sight, because it
     compares equal across attribute accesses.  Each case below failed
     before the default was changed.
@@ -996,6 +997,26 @@ class TestTheDefaultReadsTheResidualsCurrentState:
         # And the change is one the report can see: a no-op here would
         # make the equality above vacuous.
         assert not np.allclose(np.asarray(after.crb), np.asarray(before.crb))
+
+    def test_reuse_trace_on_this_residual_reports_the_quoted_stale_bounds(self):
+        """The figures the docs quote for the trap, column by column.
+
+        ``reuse_trace=True`` on this impure residual is the old default.
+        The docs said the *stiffness* bound read 0.41 against 44.7; that
+        pair is the ``mass`` column (109x too tight), and stiffness errs
+        the other way (0.362 stale, 0.238 true).  Pinned so the example
+        cannot drift from the fixture it cites.
+        """
+        gm, residual, sub = self._graph_residual()
+        _quiet(fim, residual, sub, reuse_trace=True)           # compile
+        gm.params["nodes"]["s"]["damping"] = jnp.float32(20.0)
+        stale, _ = _quiet(fim, residual, sub, reuse_trace=True)
+        true, _ = _quiet(fim, lambda s: residual(s), sub)
+        col = {name: i for i, name in enumerate(stale.param_names)}
+        m, k = col["['mass']"], col["['stiffness']"]
+        s_crb, t_crb = np.asarray(stale.crb), np.asarray(true.crb)
+        np.testing.assert_allclose([s_crb[m], t_crb[m]], [0.411, 44.7], rtol=5e-3)
+        np.testing.assert_allclose([s_crb[k], t_crb[k]], [0.362, 0.238], rtol=5e-3)
 
     def test_a_bound_method_sees_its_objects_new_state(self):
         t = jnp.linspace(0.1, 1.0, 40, dtype=jnp.float32)

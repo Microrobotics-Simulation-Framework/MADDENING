@@ -1132,8 +1132,26 @@ class AdaptiveNode(SimulationNode):
     # ------------------------------------------------------------------
 
     def _merged(self, params: Optional[dict]) -> dict:
-        """``self.params`` overlaid with an injected pytree."""
-        return self.params if params is None else {**self.params, **params}
+        """``self.params`` overlaid with an injected pytree, refusing a key it does not have.
+
+        ``update``, the cold start and every diagnostic overlay through
+        here.  A key that is not a constructor parameter used to be merged
+        and then never read, so ``update(..., params={"thetta": 0.9})``
+        returned the answer at the constructor's ``theta``, eagerly and
+        under ``jit`` alike, for every subclass.  Keys are static under a
+        trace, so the check costs nothing there.
+        """
+        if params is None:
+            return self.params
+        unknown = sorted(set(params) - set(self.params), key=str)
+        if unknown:
+            raise ValueError(
+                f"{type(self).__name__} {self.name!r}: unknown parameter "
+                f"key(s) {unknown} -- not constructor parameters "
+                f"({sorted(self.params)}); the leaves a graph trains are "
+                f"{sorted(self.params_pytree())}."
+            )
+        return {**self.params, **params}
 
     def _pytree(self, params: Optional[dict]) -> dict:
         """Full parameter pytree: the defaults overlaid with ``params``.

@@ -260,6 +260,7 @@ class TestTheManufacturedSolutionsCanSeeABrokenScheme:
         assert float(jnp.max(jnp.abs(jax.vmap(d4x)(pts)))) > 100.0
         assert float(jnp.max(jnp.abs(jax.vmap(d4y)(pts)))) > 100.0
 
+    @pytest.mark.slow  # shares the periodic ladder's compiles with the slow order test: 0.6 s beside it, 6.0 s on CI without it
     def test_a_mis_specified_source_fails_the_order_gate_instead_of_passing(self, float64):
         """Mutation: the mass term in the source with the wrong sign.  The
         node then converges to the wrong limit; the error stops falling and
@@ -277,6 +278,7 @@ class TestTheManufacturedSolutionsCanSeeABrokenScheme:
 # The adaptive budget
 # --------------------------------------------------------------------------
 
+@pytest.mark.slow  # the last default-lane test here to build the float64 node: alone it pays the compile the slow ladders shared (3.4 s -> 9.2 s locally)
 @verification_benchmark(
     benchmark_id="MADD-VER-015",
     description=(

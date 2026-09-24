@@ -468,6 +468,12 @@ class _Affine(SimulationNode):
     def update(self, state, boundary_inputs, dt, *, params=None):
         return {"x": self._gain * boundary_inputs["u"] + self._bias}
 
+    def update_evaluations(self):
+        # One evaluation, declared: the tests below assert the bound and
+        # its usable flag at float32 convergence, which an undeclared
+        # node's group does not get at the floor.
+        return 1
+
 
 def _affine_cycle(gain, bias, **group_kw):
     """``a -> b -> a`` carrying ``diag(gain)``; one sweep is ``rho = gain``.
@@ -686,6 +692,10 @@ class _Linear(SimulationNode):
 
     def update(self, state, boundary_inputs, dt, *, params=None):
         return {"x": self._A @ boundary_inputs["u"] + self._c}
+
+    def update_evaluations(self):
+        # One dense evaluation, declared (see ``_Affine``).
+        return 1
 
 
 def _linear_cycle(A, c, **group_kw):

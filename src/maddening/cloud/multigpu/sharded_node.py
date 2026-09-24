@@ -176,6 +176,10 @@ class _ForwardsCouplingHooks:
     def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
         return self._inner.interface_dof_indices()
 
+    def update_evaluations(self) -> Optional[float]:
+        """The wrapped node's declaration: sharding does not change how often it rounds."""
+        return self._inner.update_evaluations()
+
     def compute_interface_correction(
         self,
         pre_state: dict,

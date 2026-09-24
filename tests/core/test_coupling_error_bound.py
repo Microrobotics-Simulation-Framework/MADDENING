@@ -1116,6 +1116,123 @@ def test_reset_state_restores_the_meta_compile_seeds(label, group_kw):
         np.testing.assert_array_equal(got, want, err_msg=f"{label}: {key}")
 
 
+def _named_graph(partner, x0=0.0, **group_kw):
+    """The ``rho = 0.25`` cycle between ``a`` and a node called *partner*."""
+    gm = GraphManager()
+    gm.add_node(_Affine("a", gain=0.5, bias=1.0, x0=x0))
+    gm.add_node(_Affine(partner, gain=0.5, bias=0.0, x0=-x0))
+    gm.add_edge(source=partner, target="a", source_field="x", target_field="u")
+    gm.add_edge(source="a", target=partner, source_field="x", target_field="u")
+    kw = dict(diagnostics=True, max_iterations=20, tolerance=1e-4)
+    kw.update(group_kw)
+    gm.add_coupling_group(["a", partner], **kw)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("partner,x0,group_kw", [
+    ("probe_spectral", 0.0, dict(diagnostics=False)),
+    ("probe_spectral", 0.0, dict(diagnostics=True)),
+    ("probe_spectral", 0.0, dict(solver="fori", diagnostics=True)),
+    ("b", 3.0, dict(predictor="quadratic")),
+    ("probe_spectral", 3.0, dict(predictor="linear", diagnostics=True)),
+])
+def test_reset_state_restores_the_seeds_by_exact_slot_name(partner, x0, group_kw):
+    """A group key ending in ``_spectral``, and a predictor started off zero.
+
+    The reset classified slots by suffix, spectral suffixes first, so
+    the group ``a+probe_spectral`` -- whose ``coupling_<key>_residual``
+    *ends* in ``_spectral_residual`` -- had its residual and
+    amplification put back to NaN where ``compile()`` seeds 0.0.  And
+    the predictor history, which ``compile()`` seeds with the flattened
+    initial state, was zeroed, which only matches on a fixture that
+    starts at zero (as the test above does).
+    """
+    fresh = _named_graph(partner, x0, **group_kw)
+    seeds = _meta_snapshot(fresh)
+    gm = _named_graph(partner, x0, **group_kw)
+    gm.step()
+    gm.step()
+    gm.reset_state()
+    after = _meta_snapshot(gm)
+    assert set(after) == set(seeds)
+    if group_kw.get("predictor"):
+        key = "+".join(sorted(["a", partner]))
+        assert np.any(seeds[f"coupling_{key}_pred_0"] != 0.0), "fixture premise"
+    for key, want in seeds.items():
+        got = after[key]
+        assert got.dtype == want.dtype and got.shape == want.shape, key
+        np.testing.assert_array_equal(got, want, err_msg=key)
+
+
+#: A group holding a float16 field beside a float32 one, compiled and
+#: scanned in a fresh interpreter; prints the iteration order of the
+#: group's node set, the residual seed's dtype and the scan's verdict.
+_MIXED_DTYPE_SEED_PROBE = """
+import jax.numpy as jnp
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+
+class Node(SimulationNode):
+    def __init__(self, name, dtype):
+        super().__init__(name=name, timestep=1.0)
+        self._dtype = dtype
+    def initial_state(self):
+        return {"x": jnp.asarray(1.0, self._dtype)}
+    def state_fields(self):
+        return ["x"]
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0))}
+    def update(self, state, bi, dt):
+        return {"x": (0.5 + 0.5 * bi["u"]).astype(self._dtype)}
+
+gm = GraphManager()
+gm.add_node(Node("a", jnp.float16))
+gm.add_node(Node("b", jnp.float32))
+gm.add_edge("b", "a", "x", "u")
+gm.add_edge("a", "b", "x", "u", transform=lambda v: v.astype(jnp.float32))
+group = gm.add_coupling_group(["a", "b"], max_iterations=10, diagnostics=True)
+gm.compile()
+seed = gm._state["_meta"]["coupling_a+b_residual"].dtype
+gm.run_scan(2)
+print(",".join(group.nodes), seed, "scan-ok")
+"""
+
+
+def test_the_meta_seed_dtype_does_not_depend_on_the_string_hash():
+    """A float16 field beside a float32 one: seeded float32 in every interpreter.
+
+    ``compile()`` took the seed's dtype from the first floating leaf it
+    met iterating ``group.nodes`` -- a frozenset, ordered by the
+    per-process string hash -- while the step writes the promoted
+    residual (float32).  So ``run_scan`` raised a scan-carry dtype
+    ``TypeError`` under some ``PYTHONHASHSEED`` values and not others.
+    Run in subprocesses, because the order is fixed per interpreter; the
+    premise assert checks that both orders were actually exercised.
+    """
+    import os
+    import subprocess
+    import sys
+
+    orders = set()
+    for hash_seed in ("0", "1", "2", "3", "4", "5"):
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed, JAX_PLATFORMS="cpu")
+        run = subprocess.run(
+            [sys.executable, "-c", _MIXED_DTYPE_SEED_PROBE],
+            env=env, capture_output=True, text=True, timeout=300,
+        )
+        assert run.returncode == 0, (
+            f"PYTHONHASHSEED={hash_seed}: {run.stderr.strip().splitlines()[-1:]}"
+        )
+        order, seed, verdict = run.stdout.split()[-3:]
+        assert (seed, verdict) == ("float32", "scan-ok"), (hash_seed, run.stdout)
+        orders.add(order)
+    assert orders == {"a,b", "b,a"}, (
+        f"fixture premise: both iteration orders exercised, got {orders}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The numerics behind the key, on matrices whose spectrum is known
 # ---------------------------------------------------------------------------

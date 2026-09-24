@@ -381,11 +381,13 @@ anomalies:
       counts as zero -- rather than a floor under the scale, which made
       every criterion absolute below atol/rtol).  coupling_diagnostics()
       reports error_estimate, amplification, ratio_usable and
-      gradient_error_estimate beside the residual.  0.4.0 renamed the last
-      two from bound_valid and gradient_error_bound, because neither is a
-      bound: the old spellings still read through with a DeprecationWarning
-      and are removed in 0.5.0, and they are deliberately absent from
-      keys(), iteration and len().  That estimate is not a bound; see the
+      gradient_error_estimate beside the residual.  During 0.4.0's
+      development the last two were called bound_valid and
+      gradient_error_bound -- no release carried either name -- and they
+      were renamed because neither is a bound: 0.4.0 still resolves the
+      development spellings with a DeprecationWarning until 0.5.0 removes
+      them, and they are deliberately absent from keys(), iteration and
+      len().  That estimate is not a bound; see the
       residual risk.
       A bound is reported beside it, under solver="ift" with
       diagnostics=True only: eight Arnoldi steps on dF/dx at the returned
@@ -396,7 +398,7 @@ anomalies:
       and 1/(1 - rho_spectral).  For a linear F the error of any iterate is
       (A - I)^-1 of its residual whatever the accelerator did, so on the
       two-mode case where error_estimate reads 122x under the true
-      distance the bound reads 7.95x over, 1.22x over under aitken and
+      distance the bound reads 8.05x over, 1.3x over under aitken and
       iqn-ils, and never under on 80 random normal contractions of
       dimension 2-6 with negative and near-1 eigenvalues.  It is reported,
       not applied: converged and the iteration counts are unchanged.
@@ -419,10 +421,10 @@ anomalies:
       distance (a second difference along the Newton correction, one
       probe per floating constant), with gradient_bound_usable beside it.
       It held at every cap of a max_iterations sweep on a concave and a
-      convex map, 1.2-1.7x the true error for the parameter whose error is
+      convex map, 1.2-2.4x the true error for the parameter whose error is
       the larger (up to 11x for the other, which reads its gap to the worst
-      probe), and 15x on a hidden slow mode where error_estimate's distance
-      would have made it 60x short.  It is a statement about the
+      probe), and 83x on a hidden slow mode where error_estimate's distance
+      would have made it 12x short.  It is a statement about the
       gradient, not the solve: on an affine map with additive parameters
       the IFT gradient is exact wherever the forward stops, so it reads
       0.0 while the state is 1.1e-2 from the fixed point with
@@ -446,10 +448,33 @@ anomalies:
       in it would make tight float32 tolerances unreachable.  The bound
       keys are where a user sees it: spectral_error_bound adds the
       residual's float resolution before amplifying it (4 units of
-      eps * max|field| per entry the norm reads; it read 0.0 on that
-      state and now reads 9.4e-2), the gradient bound's distance carries
-      the same floor, and precision_limited reports that the residual is
-      at it.  Planned 0.5.0 work, not a promise of this release:
+      eps * max|field| per entry the norm reads, each field at its own
+      dtype, per evaluation of the map a coupling pass rounds like; it
+      read 0.0 on that state and now reads 9.4e-2), the gradient bound's
+      distance carries the same floor, and precision_limited reports that
+      the residual is at it.  A confirmation audit of the merged tree
+      found the floor's premise -- that the map's evaluation error is a
+      few ulps -- false for a composite map: a node integrating by
+      explicit Euler in N sub-steps is 5.8 units off the exact map at
+      N=20 and 29.4 at N=100, and a stalled relay built on one read the
+      bound 0.07-0.96x its true distance at N=15-200 with
+      spectral_usable=True, whether the node looped inside update() or
+      the framework sub-cycled it.  The floor is now per evaluation,
+      times the evaluations a pass rounds like: the largest sub-cycling
+      divider times SimulationNode.update_evaluations(), a count a node
+      declares for its own loops (4N covers the measured figures).
+      Nothing outside update() can see an undeclared loop, so where the
+      residual is at the floor -- where that count is the whole bound --
+      a group with an undeclared node reports spectral_usable=False and
+      gradient_bound_usable=False; a group whose nodes all declare keeps
+      them.  The same audit found three more ways a bound read low with
+      its flag set, each fixed: the gradient bound's floor, and its probe
+      step, taken from the promoted dtype, so a float16 field beside a
+      float32 one read 0.0 against a true 3.2% error; the spectral
+      weights 1/max|field| flushed to zero above 1/tiny (8.5e37 in
+      float32), which read rho_spectral 0.0 for a 0.9 map and the bound
+      0.12x; and a subnormal per-pass change flushed before it was
+      rescaled (MADD-ANO-019).  Planned 0.5.0 work, not a promise of this release:
       strict_convergence consulting the spectral bound when diagnostics
       are on.  The reported keys are exactly
       ['amplification', 'converged', 'error_estimate',
@@ -482,10 +507,12 @@ anomalies:
       t/100 and take the difference between the two answers as the error
       at t.  On 0.4.0 the flag carries the amplification itself; read
       coupling_diagnostics()['ratio_usable'] to see whether it did, and
-      treat ratio_usable=False as the old behaviour.  That key was spelled
-      'bound_valid' before 0.4.0 and still resolves under the old spelling,
-      with a DeprecationWarning, until 0.5.0 removes it -- but it is not in
-      keys(), so do not look for it by enumerating the report.
+      treat ratio_usable=False as the old behaviour.  No release before
+      0.4.0 reported it under any name (0.3.x has no such key);
+      'bound_valid' was its name during 0.4.0's development, and 0.4.0
+      still resolves that spelling, with a DeprecationWarning, until 0.5.0
+      removes it -- but it is not in keys(), so do not look for it by
+      enumerating the report.
     resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
@@ -540,7 +567,7 @@ anomalies:
       and all read the fast mode.  No function of the residual norms
       separates the two cases; recovering the slow mode needs the
       spectrum itself, and spectral_error_bound is that measurement
-      (7.95x over on the same case).  Second, the step scale is
+      (8.05x over on the same case).  Second, the step scale is
       corrected only where it is constant: under acceleration="fixed"
       the series now accounts for relaxation, having understated by
       1/omega before that landed (0.51x at omega=1.95), but Aitken's
@@ -550,7 +577,7 @@ anomalies:
       first mechanism rather than this one, because a superlinear
       sequence reads rho -> 0.  Neither is corrected in error_estimate;
       the spectral bound needs neither, because it never used the step
-      (1.22x over under both, on the two-mode case).  ratio_usable
+      (1.3x over under both, on the two-mode case).  ratio_usable
       reports a usable *ratio*, not a valid *bound* -- which is what the
       0.4.0 rename is for.
       What the spectral bound leaves open, and why this entry stays
@@ -560,19 +587,24 @@ anomalies:
       on is still error_estimate -- the bound is reported, not applied,
       because on the heterogeneous fixture above (jacobi, aitken) it is
       a rigorous but loose number: the map is far from normal there, the
-      spectral-radius form alone read 30-40x under the true distance on
-      the two steps where Aitken dipped, the resolvent term covers them
-      (1.5x and 3.3x over) and reads up to 119x over on the one step the
-      0.4.0 criterion passes -- correctly, that state is 0.41x the
-      tolerance from the reference -- so a spectral gate would refuse a
-      correct pass.  For a non-linear F it is asymptotic (Ostrowski):
+      spectral-radius form alone read 32x and 42x under the true
+      distance on the two steps where Aitken dipped, the resolvent term
+      covers them (2.9x and 6.5x over) and reads up to 95x over
+      elsewhere, and 911x on the one step the 0.4.0 criterion passes --
+      correctly, that state is 0.50x the tolerance from the reference;
+      the step is precision-limited, the 60 000-entry float floor being
+      the bound there -- so a spectral gate would refuse a correct
+      pass.  For a non-linear F it is asymptotic (Ostrowski):
       exact to float32 on a log map within tolerance of its fixed point,
       an estimate far from one, and nothing checks linearity.  It is
       taken in the group's norm at the returned state, so the dead band's
       excluded fields are outside what it bounds and the interface norm's
       bound is over the interface fields only; its float floor is a model
-      of the map's rounding (PRECISION_FLOOR_ULPS), which a node that
-      cancels catastrophically inside its own update can exceed; and on a
+      of the map's rounding (PRECISION_FLOOR_ULPS, per declared
+      evaluation), which a node that cancels catastrophically inside its
+      own update can exceed, and so can a node that loops inside it
+      without declaring so where the residual is above the floor (at the
+      floor its group is not reported usable); and on a
       stalled float32 iterate it is the floor times the amplification --
       what float32 can resolve about a group that slow -- while converged
       reads True (see the description).  A group with more than eight independent
@@ -591,10 +623,10 @@ anomalies:
       scalar loss whose gradient nearly cancels across the state can carry
       a larger relative error than the tangent does.  And it is exactly as
       blind as the norm: under the interface norm, on the stiff spring pair
-      with iqn-ils and explicit accelerated_fields, it reads 0.0 -- the
+      with iqn-ils and explicit accelerated_fields, it reads 3.1e-7 -- the
       stiffness gradient is exact to float32 -- while the velocities, which
       the norm does not read, are 1.7% off and spectral_error_bound, taken
-      over the interface, reads 2.3e-3.  Evidence: the 2026-09-23 section of
+      over the interface, reads 9.0e-3.  Evidence: the 2026-09-23 section of
       the same memo.
     verification:
       - "tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point"
@@ -620,6 +652,11 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space"
       - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes"
+      - "tests/core/test_coupling_precision_floor.py::test_a_sub_stepped_node_is_floored_per_evaluation"
+      - "tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor"
+      - "tests/core/test_coupling_precision_floor.py::test_the_floor_covers_explicit_euler_per_declared_sub_step"
+      - "tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_spectrum_is_measured_at_the_top_of_the_range"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"
@@ -2125,10 +2162,24 @@ anomalies:
       at `rtol=1e-6`); flushed to zero it made the field inactive, and a
       field at `1e-33` read `iterations=1, residual=0.0, converged=True`
       at 90% from its fixed point.  Such a field (above the dead band, a
-      normal magnitude) is now measured on the pair rescaled by
+      normal magnitude) is measured on the pair rescaled by
       `1 / finfo.tiny`, an exact power of two -- the same quotient,
-      formed where every operand is normal -- so it converges exactly as
-      the same group three decades larger does.
+      formed where every operand is normal.  The first form of that
+      rescale was applied after the difference, and a confirmation audit
+      of the merged tree found the difference itself flushed: below
+      `tiny / eps` (about `9.9e-32` in float32) every one-ulp change of
+      a normal field is subnormal whatever `rtol` is, so under all three
+      norms and both solvers a group at `x* = 1e-35` reported
+      `residual=0.0, converged=True` after 43 passes, `1.5e-2` from its
+      fixed point under the L2 norm against a tolerance of `1e-6`, where
+      the same group at `1e-29` takes 126-130 passes; at a cap of 60
+      `strict_convergence` raised on the `1e-29` group and not on the
+      `1e-35` one.  The pair is now
+      rescaled *before* it is subtracted, as a separate value a `where`
+      selects beside the expressions the norms always evaluated (which
+      keeps the compiled loop bit-identical in range), so the same group
+      scaled by `2**-10` or `2**-20` reports the residual, the verdict
+      and the pass count of its normal-range control to the bit.
       What remains, and why it is a boundary rather than an instance.
       (1) The range rule is deliberately conservative: a float32 field
       whose magnitude is within a factor of about four of overflow
@@ -2167,6 +2218,7 @@ anomalies:
       - "tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state"
       - "tests/core/test_coupling_non_finite_state.py::test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads"
       - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_change_underflow"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-020"

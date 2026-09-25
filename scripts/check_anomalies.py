@@ -393,29 +393,41 @@ def version_range_errors(registry, released=None):
 _RETIRED_IDS_FILE = os.path.join("tests", "compliance", "test_soup_evidence.py")
 _RETIRED_IDS_NAME = "_RETIRED_ANOMALY_IDS"
 
+#: A ``partially_resolved`` entry says part of the defect is gone and part
+#: is not; ``residual_risk`` is where it says which part is left.  Without
+#: it the SOUP table shows "partially resolved" with nothing a reader can
+#: act on (audit_040_p4_2, A9: deleting MADD-ANO-014's passed).
+_STATUSES_THAT_MUST_STATE_RESIDUAL_RISK = ("partially_resolved",)
+
 
 def retired_anomaly_ids(repo_root):
-    """``(ids, error)``: the retired anomaly IDs recorded under ``repo_root``.
+    """``(retired, error)``: the retired anomaly IDs recorded under ``repo_root``.
 
     Reads ``_RETIRED_ANOMALY_IDS`` from ``tests/compliance/
     test_soup_evidence.py`` without importing it (a test module imports
-    pytest and the package).  Only a literal is accepted --
-    ``frozenset()``, or ``frozenset({...})`` / a set, list or tuple of
-    strings -- because the gate must be able to say exactly which IDs are
-    excused.  Fails closed: a missing file or a missing assignment excuses
-    nothing (``ids`` is empty), and an assignment that is present but not
-    such a literal is returned as ``error`` and excuses nothing either.
+    pytest and the package).  It is a literal ``{id: reason}`` dict --
+    ``{}``, or ``{"MADD-ANO-NNN": "why it was retired", ...}`` -- and
+    ``retired`` is that dict.  Only a literal is accepted, because the gate
+    must be able to say exactly which IDs are excused, and every ID carries
+    its reason, because a retirement is a sign-off act and a bare ID in a
+    set said nothing about why a number went unused (audit_040_p4_2, A2).
+
+    Fails closed: a missing file or a missing assignment excuses nothing
+    (``retired`` is empty).  An assignment that is present but is not such
+    a dict -- the set form this took until 0.4.0 included -- is returned as
+    ``error`` and excuses nothing either, and so is an ID whose reason is
+    missing or blank.
     """
     import ast
 
     if not repo_root:
-        return frozenset(), None
+        return {}, None
     path = os.path.join(repo_root, _RETIRED_IDS_FILE)
     try:
         with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read(), filename=path)
     except (OSError, SyntaxError):
-        return frozenset(), None
+        return {}, None
     for node in tree.body:
         if isinstance(node, ast.AnnAssign):
             targets, value = [node.target], node.value
@@ -425,23 +437,156 @@ def retired_anomaly_ids(repo_root):
             continue
         if not any(getattr(t, "id", None) == _RETIRED_IDS_NAME for t in targets):
             continue
-        bad = (f"{_RETIRED_IDS_FILE}: {_RETIRED_IDS_NAME} is not a literal set "
-               f"of anomaly-ID strings (frozenset() or frozenset({{\"MADD-ANO-"
-               f"NNN\", ...}})), so no gap can be excused by it")
-        if (isinstance(value, ast.Call) and getattr(value.func, "id", None) == "frozenset"
-                and not value.keywords and len(value.args) <= 1):
-            if not value.args:
-                return frozenset(), None
-            value = value.args[0]
+        bad = (f"{_RETIRED_IDS_FILE}: {_RETIRED_IDS_NAME} is not a literal "
+               f"{{id: reason}} dict ({{}} or {{\"MADD-ANO-NNN\": \"why it was "
+               f"retired\", ...}}), so no gap can be excused by it")
         try:
-            ids = ast.literal_eval(value) if value is not None else None
+            retired = ast.literal_eval(value) if value is not None else None
         except (ValueError, TypeError, SyntaxError):
-            return frozenset(), bad
-        if not isinstance(ids, (set, frozenset, list, tuple)) or not all(
-                isinstance(i, str) for i in ids):
-            return frozenset(), bad
-        return frozenset(ids), None
-    return frozenset(), None
+            return {}, bad
+        if not isinstance(retired, dict) or not all(
+                isinstance(k, str) for k in retired):
+            return {}, bad
+        blank = sorted(k for k, v in retired.items()
+                       if not isinstance(v, str) or not v.strip())
+        if blank:
+            return {}, (f"{_RETIRED_IDS_FILE}: {_RETIRED_IDS_NAME} records "
+                        f"{blank} with no reason.  A retirement says why the "
+                        f"number went unused; until every ID carries one, "
+                        f"none is excused")
+        return retired, None
+    return {}, None
+
+
+def _git(cwd, *args):
+    """``(returncode, stdout)`` of one git command, or ``(None, why)``."""
+    import subprocess
+
+    try:
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    return done.returncode, done.stdout if done.returncode == 0 else done.stderr
+
+
+def _entry_in(text, aid):
+    """The registry entry ``aid`` in the YAML ``text``, or ``None``."""
+    import yaml
+
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    try:
+        data = yaml.load(text, Loader=loader) or {}
+    except yaml.YAMLError:
+        return None
+    for a in (data.get("anomalies") or []) if isinstance(data, dict) else []:
+        if isinstance(a, dict) and str(a.get("anomaly_id")) == aid:
+            return a
+    return None
+
+
+def last_committed_entry(registry_path, aid):
+    """``(entry, where, error)``: ``aid`` as the registry's history last records it.
+
+    A retired entry is gone from the tree, so the only record of what it
+    said is git.  ``entry`` is the entry as the newest commit that holds
+    it records it: ``HEAD``'s own copy when the deletion is not committed
+    yet, otherwise the copy in the parent of the commit that removed it.
+    ``entry`` is ``None`` with no error when the registry's history never
+    held the ID at all -- a number allocated and withdrawn before any
+    commit recorded it.  ``where`` names the commit the entry was read
+    from.
+
+    Fails closed: a registry outside a git work tree, one git does not
+    track, a shallow clone (whose history may stop before the removal) and
+    a history that names the ID but shows no commit removing it are each
+    an ``error``, never "no such entry".
+    """
+    path = os.path.abspath(registry_path)
+    cwd = os.path.dirname(path)
+    rc, top = _git(cwd, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return None, None, (f"{registry_path} is not in a git work tree "
+                            f"({str(top).strip()}), so what the retired entry "
+                            f"last said cannot be read from its history")
+    rel = os.path.relpath(path, top.strip()).replace(os.sep, "/")
+    rc, shallow = _git(cwd, "rev-parse", "--is-shallow-repository")
+    if rc != 0 or shallow.strip() != "false":
+        return None, None, ("this is a shallow clone, so the commit that "
+                            "removed the retired entry may be outside the "
+                            "history it holds; run the gate in a full clone "
+                            "(actions/checkout with fetch-depth: 0)")
+    rc, out = _git(cwd, "ls-files", "--error-unmatch", "--", rel)
+    if rc != 0:
+        return None, None, (f"{rel} is not tracked by git, so its history "
+                            f"cannot say what the retired entry last said")
+    rc, head = _git(cwd, "show", f"HEAD:{rel}")
+    if rc == 0:
+        entry = _entry_in(head, aid)
+        if entry is not None:
+            return entry, "HEAD", None
+    rc, log = _git(cwd, "log", "--format=%H", "-S", f'anomaly_id: "{aid}"',
+                   "--", rel)
+    if rc != 0:
+        return None, None, f"git log over {rel} failed: {str(log).strip()}"
+    commits = log.split()
+    if not commits:
+        return None, None, None
+    for commit in commits:
+        rc, before = _git(cwd, "show", f"{commit}^:{rel}")
+        if rc != 0:
+            continue
+        rc, after = _git(cwd, "show", f"{commit}:{rel}")
+        after_entry = _entry_in(after, aid) if rc == 0 else None
+        before_entry = _entry_in(before, aid)
+        if before_entry is not None and after_entry is None:
+            return before_entry, f"{commit[:12]}^", None
+    return None, None, (f"the history of {rel} names {aid} "
+                        f"({len(commits)} commit(s)) but no commit removing "
+                        f"its entry could be found")
+
+
+def retirement_errors(retired, registry_path, present=()):
+    """Refuse the retirement of an entry that was still reachable.
+
+    Retiring an ID takes it out of the registry, and so out of the SOUP
+    package's list of what a user of this version is exposed to.  That is
+    only honest for a defect nobody is exposed to: an entry whose last
+    committed ``resolution_status`` is ``resolved`` or ``duplicate`` (the
+    statuses :data:`UNREACHABLE_STATUSES` names), or a number no commit
+    ever recorded.  An ``open`` or ``partially_resolved`` entry -- or any
+    status nobody enumerated -- is closed, and stays in the registry as
+    evidence; it is never retired.  Deleting MADD-ANO-035 (open) and
+    recording it retired passed until this rule (audit_040_p4_2, A2).
+
+    The status is read from git (:func:`last_committed_entry`), because the
+    tree no longer holds the entry; where git cannot answer, the
+    retirement is refused rather than trusted.  An ID still in the
+    registry (``present``) is skipped: :func:`_evidence_errors` already
+    refuses it, as a retirement that never happened.
+    """
+    errors = []
+    for aid in sorted(set(retired) - set(present)):
+        entry, where, problem = last_committed_entry(registry_path, aid)
+        if problem:
+            errors.append(
+                f"{aid} is recorded as retired in {_RETIRED_IDS_FILE}, but "
+                f"whether it was still reachable cannot be established: "
+                f"{problem}.  A retirement that cannot be checked excuses "
+                f"nothing.")
+            continue
+        if entry is None:
+            continue
+        status = entry.get("resolution_status")
+        if status not in UNREACHABLE_STATUSES:
+            errors.append(
+                f"{aid} is recorded as retired in {_RETIRED_IDS_FILE}, but "
+                f"its last committed entry ({where}) is {status!r}, which "
+                f"leaves the defect reachable.  A reachable anomaly is never "
+                f"retired: close it -- 'resolved' with its evidence, or "
+                f"'duplicate' of the entry that carries it -- and keep it in "
+                f"the registry.")
+    return errors
 
 
 def _evidence_errors(anomalies, retired=frozenset()):
@@ -456,10 +601,13 @@ def _evidence_errors(anomalies, retired=frozenset()):
        gone must cite at least one ``verification`` test.  The validator
        resolves every entry that IS there; it has no opinion on a list
        that is empty or missing, so a resolution could lose its evidence
-       and stay green.
+       and stay green.  A ``partially_resolved`` entry must also say, in
+       ``residual_risk``, what is still reachable.
     2. Within each ID prefix the numbers run contiguously from 001 to the
        highest present, except for IDs recorded as retired (``retired``,
-       read by :func:`retired_anomaly_ids`).  Both registries are
+       read by :func:`retired_anomaly_ids`; a retirement of a reachable
+       entry is refused separately, by :func:`retirement_errors`).  Both
+       registries are
        contiguous by construction (``tests/compliance/test_soup_evidence.py``
        says why), so an unexplained gap is a deleted entry.  An entry in
        this list is IEC 62304 evidence: it is retired by recording the
@@ -476,6 +624,7 @@ def _evidence_errors(anomalies, retired=frozenset()):
     """
     import re
 
+    retired = frozenset(retired)
     errors = []
     by_prefix: dict = {}
     for a in anomalies:
@@ -492,6 +641,17 @@ def _evidence_errors(anomalies, retired=frozenset()):
                     f"without a named test is a claim, not evidence: cite the "
                     f"test that pins it (tests/<file>.py::<test>), or set the "
                     f"status back to 'open'."
+                )
+        if status in _STATUSES_THAT_MUST_STATE_RESIDUAL_RISK:
+            residual = a.get("residual_risk")
+            if not isinstance(residual, str) or not residual.strip():
+                errors.append(
+                    f"{aid}: resolution_status is {status!r} but "
+                    f"residual_risk is empty or missing.  A partial "
+                    f"resolution says which part of the defect is still "
+                    f"reachable, and residual_risk is where a reader looks "
+                    f"for it: state it, or set the status to 'open' or "
+                    f"'resolved'."
                 )
         m = re.fullmatch(r"(.*?)(\d+)", aid)
         if m:
@@ -1118,6 +1278,9 @@ def main(argv=None):
     errors = list(errors) + _evidence_errors(anomalies, retired)
     if retired_error:
         errors.append(retired_error)
+    errors += retirement_errors(
+        retired, args.path,
+        present={str(a.get("anomaly_id")) for a in anomalies})
     if n_anomalies:
         errors += version_range_errors(data)
     ref_errors, conditional = _reference_errors(

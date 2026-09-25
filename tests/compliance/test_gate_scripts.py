@@ -1465,6 +1465,7 @@ anomalies:
     resolution_status: "{status}"
     resolution_version: "0.4.0"
     affected_versions: "{versions}"
+    residual_risk: "Test"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     verification:
@@ -1497,6 +1498,45 @@ anomalies:
     affected_components:
       - "maddening.nodes.heat.HeatNode"
 """
+
+
+def _git(repo, *args):
+    """Run git in ``repo`` with no dependence on the machine's git config."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org")
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True, env=env).stdout
+
+
+def _commit_registry(repo, *versions):
+    """A throwaway git repository whose registry went through ``versions``.
+
+    Each version of ``known_anomalies.yaml`` is one commit, oldest first;
+    the work tree is left at the last.  Returns the registry's path.
+    """
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    path = repo / "known_anomalies.yaml"
+    for i, text in enumerate(versions):
+        path.write_text(text)
+        _git(repo, "add", "known_anomalies.yaml")
+        _git(repo, "commit", "-q", "-m", f"registry version {i}")
+    return path
+
+
+_THREE_ANOMALIES = _TWO_ANOMALIES_WITH_A_GAP.replace(
+    '''  - anomaly_id: "MADD-ANO-003"''',
+    '''  - anomaly_id: "MADD-ANO-002"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "{status}"
+    affected_versions: ">=0.1.0"
+  - anomaly_id: "MADD-ANO-003"''')
 
 
 class TestAnomalyGateFailsClosedOnEvidence:
@@ -1555,7 +1595,11 @@ class TestAnomalyGateFailsClosedOnEvidence:
     # The gap rule's message tells the author to record a retirement in
     # _RETIRED_ANOMALY_IDS; until 0.4.0 the rule never read it, so a
     # genuinely retired ID could not pass.  Each case below builds a
-    # repository root holding only the file the gate reads.
+    # repository root holding only the file the gate reads.  A retirement
+    # is an ``{id: reason}`` dict, and the gate reads the retired entry's
+    # last status from git (audit_040_p4_2, A2), so the registry these cases
+    # use lives in a throwaway repository whose history never held
+    # MADD-ANO-002 -- a number no commit recorded, which may be retired.
 
     @staticmethod
     def _root_retiring(tmp_path, assignment):
@@ -1563,20 +1607,19 @@ class TestAnomalyGateFailsClosedOnEvidence:
         (root / "tests" / "compliance").mkdir(parents=True)
         (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
             f"_HIGHEST_ANOMALY_ID = 3\n{assignment}\n")
-        path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        path = _commit_registry(tmp_path / "repo", _TWO_ANOMALIES_WITH_A_GAP)
         return root, path
 
     def test_a_gap_recorded_as_retired_passes(self, tmp_path):
         root, path = self._root_retiring(
-            tmp_path, '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002"})')
+            tmp_path, '_RETIRED_ANOMALY_IDS: dict = {"MADD-ANO-002": "never used"}')
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 0, result.stdout + result.stderr
 
     @pytest.mark.parametrize("assignment", [
-        "_RETIRED_ANOMALY_IDS: frozenset = frozenset()",
-        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-004"})',
-        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-VER-002"})',
+        "_RETIRED_ANOMALY_IDS: dict = {}",
+        '_RETIRED_ANOMALY_IDS: dict = {"MADD-ANO-004": "never used"}',
+        '_RETIRED_ANOMALY_IDS: dict = {"MADD-VER-002": "never used"}',
         '_RETIRED_BENCHMARK_IDS: frozenset = frozenset({"MADD-ANO-002"})',
         "",
     ], ids=["empty", "another-id", "another-prefix", "the-benchmark-set", "no-assignment"])
@@ -1587,21 +1630,38 @@ class TestAnomalyGateFailsClosedOnEvidence:
         assert "missing from the contiguous range" in result.stderr
         assert "MADD-ANO-002" in result.stderr
 
-    def test_a_retired_set_the_gate_cannot_read_excuses_nothing(self, tmp_path):
-        root, path = self._root_retiring(
-            tmp_path, '_RETIRED_ANOMALY_IDS = frozenset(_load_ids("MADD-ANO-002"))')
+    @pytest.mark.parametrize("assignment", [
+        '_RETIRED_ANOMALY_IDS = dict(_load_ids("MADD-ANO-002"))',
+        # The set form this record took until 0.4.0: an ID with no reason.
+        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002"})',
+        '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002"}',
+    ], ids=["computed", "the-old-frozenset", "a-set-literal"])
+    def test_a_retired_record_the_gate_cannot_read_excuses_nothing(
+            self, tmp_path, assignment):
+        root, path = self._root_retiring(tmp_path, assignment)
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 1, result.stdout
-        assert "is not a literal set" in result.stderr
+        assert "is not a literal {id: reason} dict" in result.stderr
+        assert "missing from the contiguous range" in result.stderr
+
+    @pytest.mark.parametrize("reason", ['""', '"   "', "None"])
+    def test_a_retirement_without_a_reason_excuses_nothing(self, tmp_path, reason):
+        root, path = self._root_retiring(
+            tmp_path, f'_RETIRED_ANOMALY_IDS = {{"MADD-ANO-002": {reason}}}')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "with no reason" in result.stderr
         assert "missing from the contiguous range" in result.stderr
 
     def test_a_retired_id_still_in_the_registry_fails(self, tmp_path):
         root, path = self._root_retiring(
             tmp_path,
-            '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002", "MADD-ANO-003"})')
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "never used", '
+            '"MADD-ANO-003": "still here"}')
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 1, result.stdout
         assert "MADD-ANO-003 is recorded as retired" in result.stderr
+        assert "the retirement never happened" in result.stderr
 
     @staticmethod
     def _mutated_registry(tmp_path, mutate):
@@ -1638,6 +1698,139 @@ class TestAnomalyGateFailsClosedOnEvidence:
                       "--repo-root", str(REPO_ROOT))
         assert result.returncode == 1, result.stdout
         assert "MADD-ANO-010" in result.stderr
+
+
+class TestAPartialResolutionStatesWhatIsLeft:
+    """audit_040_p4_2, A9: a ``partially_resolved`` entry with its
+    ``residual_risk`` deleted passed, so the SOUP table could say "partially
+    resolved" and nothing about which part a user is still exposed to."""
+
+    @pytest.mark.parametrize("residual", ["", '    residual_risk: ""\n',
+                                          '    residual_risk: null\n',
+                                          '    residual_risk: "   "\n'],
+                             ids=["absent", "empty", "null", "blank"])
+    def test_a_partial_resolution_without_residual_risk_fails(
+            self, tmp_path, residual):
+        text = _resolved_with_evidence(status="partially_resolved").replace(
+            '    residual_risk: "Test"\n', residual)
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-001" in result.stderr
+        assert "residual_risk is empty or missing" in result.stderr
+
+    def test_a_resolved_entry_needs_no_residual_risk(self, tmp_path):
+        """MADD-ANO-001 and 004 ship resolved with none; the rule is the
+        partial status's."""
+        text = _resolved_with_evidence(status="resolved").replace(
+            '    residual_risk: "Test"\n', "")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_deleting_a_shipped_partial_resolutions_residual_risk_fails(
+            self, tmp_path):
+        """The audit's A9 replayed on the shipped registry: MADD-ANO-014."""
+        def strip(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-014")
+            assert entry["resolution_status"] == "partially_resolved"
+            del entry["residual_risk"]
+
+        path = TestAnomalyGateFailsClosedOnEvidence._mutated_registry(
+            tmp_path, strip)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-014: resolution_status is 'partially_resolved' but " \
+               "residual_risk is empty or missing" in result.stderr
+
+
+class TestARetirementOfAReachableEntryIsRefused:
+    """audit_040_p4_2, A2: deleting open MADD-ANO-035 and listing it in
+    ``_RETIRED_ANOMALY_IDS`` passed, which takes a live defect out of the
+    SOUP package with one line nobody had to justify.
+
+    The tree no longer holds a retired entry, so its last status comes from
+    git: the parent of the commit that removed it, or ``HEAD`` when the
+    deletion is not committed.  These cases drive
+    ``check_anomalies.retirement_errors`` on throwaway repositories, and one
+    runs the gate end to end.
+    """
+
+    @staticmethod
+    def _deleted(tmp_path, status):
+        """002 committed with ``status``, then removed in a second commit."""
+        return _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status=status),
+                                _TWO_ANOMALIES_WITH_A_GAP)
+
+    @pytest.mark.parametrize("status", ["open", "partially_resolved", "wont_fix",
+                                        "anything-unenumerated"])
+    def test_retiring_an_entry_last_committed_reachable_is_refused(
+            self, anomalies_gate, tmp_path, status):
+        path = self._deleted(tmp_path, status)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1, errors
+        assert "MADD-ANO-002 is recorded as retired" in errors[0]
+        assert f"is {status!r}, which leaves the defect reachable" in errors[0]
+
+    @pytest.mark.parametrize("status", ["resolved", "duplicate"])
+    def test_retiring_an_entry_last_committed_closed_is_accepted(
+            self, anomalies_gate, tmp_path, status):
+        path = self._deleted(tmp_path, status)
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path) == []
+
+    def test_the_last_status_is_the_one_before_the_removal(
+            self, anomalies_gate, tmp_path):
+        """Resolved once, reopened, then deleted: the reopening is what counts."""
+        path = _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status="resolved"),
+                                _THREE_ANOMALIES.format(status="open"),
+                                _TWO_ANOMALIES_WITH_A_GAP)
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None and entry["resolution_status"] == "open", where
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+
+    def test_an_uncommitted_deletion_is_read_from_head(
+            self, anomalies_gate, tmp_path):
+        path = _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status="open"))
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "(HEAD) is 'open'" in errors[0], errors
+
+    def test_a_registry_outside_git_is_refused_not_trusted(
+            self, anomalies_gate, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "not in a git work tree" in errors[0], errors
+
+    def test_a_shallow_clone_is_refused_not_trusted(self, anomalies_gate, tmp_path):
+        """CI's default checkout is one commit deep: the removal is not in it."""
+        origin = self._deleted(tmp_path, "open").parent
+        clone = tmp_path / "clone"
+        _git(tmp_path, "clone", "-q", "--depth", "1",
+             f"file://{origin}", str(clone))
+        errors = anomalies_gate.retirement_errors(
+            {"MADD-ANO-002": "why"}, clone / "known_anomalies.yaml")
+        assert len(errors) == 1 and "shallow clone" in errors[0], errors
+
+    def test_the_gate_refuses_it_end_to_end(self, tmp_path):
+        """The audit's A2, through the gate as CI runs it."""
+        path = self._deleted(tmp_path, "open")
+        root = tmp_path / "root"
+        (root / "tests" / "compliance").mkdir(parents=True)
+        (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "no longer needed"}\n')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "which leaves the defect reachable" in result.stderr
+        assert "missing from the contiguous range" not in result.stderr
 
 
 class TestAnomalyGateVerifiesSomething:

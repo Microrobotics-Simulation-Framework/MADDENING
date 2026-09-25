@@ -117,6 +117,11 @@ def _kwargs_ring_node(k=2.0):
         """``update_padded(**kwargs)`` reading ``params`` out of the kwargs:
         a spelling the one params rule counts as taking the keyword."""
 
+        # Its update_padded is pointwise, so it reads the partition layout
+        # as correctly as the Cartesian one it declares a halo for; the
+        # private opt-in ShardedUnstructuredNode takes for such a node.
+        _reads_partition_layout = True
+
         def __init__(self, n=16):
             super().__init__("ring", 0.1, k=k)
             self._n = n

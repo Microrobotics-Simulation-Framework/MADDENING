@@ -130,7 +130,7 @@ anomalies:
       step without a host callback, which is why this entry stays open.
       One route is closed: since 0.4.0 `PUT /graph/params` asks the
       constructor about every value it writes, live leaves included, with
-      the params a saved graph would carry (MADD-ANO-038), so a
+      the params a saved graph would carry (MADD-ANO-044), so a
       `thermal_diffusivity` or `length` written through the REST API past
       the limit is a 400 and is not written.  For
       reference, the stable end of that rod decays rather than diverging: Fo =
@@ -176,7 +176,7 @@ anomalies:
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_dt_passed_to_update_diverges_silently"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_injected_thermal_diffusivity_diverges_silently"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_stable_end_of_the_rod_decays_to_the_recorded_figures"
-      # The REST route is closed (MADD-ANO-038).
+      # The REST route is closed (MADD-ANO-044).
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_above_the_fourier_limit_is_refused_and_the_graph_still_saves"
     github_issue: null
 
@@ -2897,7 +2897,7 @@ anomalies:
       with or without a write (also at v0.3.1).  The sweep changed each
       number; it did not write one across a branch the constructor
       chooses from it, and two such writes, found by a later audit and
-      closed before release, are MADD-ANO-037: `grid_points` on a uniform
+      closed before release, are MADD-ANO-043: `grid_points` on a uniform
       `HeatNode` and `G = 0` on a multiphase `LBMPipeNode`.  The same drive through
       `ShardedStencilNode` (`HeatNode` at both orders, `LBMNode`), against an
       unsharded node built with the new value, found no difference either.
@@ -3828,6 +3828,323 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-037"
+    title: "ShardedUnstructuredNode accepted a Cartesian stencil node and stepped it wrong, every cell, with no error"
+    description: >
+      `ShardedUnstructuredNode` hands the inner node's `update_padded` its
+      fields in partition layout -- `[the shard's own cells | ghost cells]`,
+      the own block padded to `n_local_max` -- and `shard_info = {0:
+      (offset, n_local_max)}`.  A Cartesian stencil node (non-empty
+      `halo_width()`) reads its padded fields as `[halo | interior | halo]`.
+      The wrapper documented `halo_width()` as "ignored" and checked only the
+      mesh size and the partitioned statics, so it accepted such a node and
+      the node read its own cells as halo and its ghosts as interior.
+      Measured on the built-in nodes against the unsharded node (CPU,
+      jaxlib 0.11.0, float32, 10 steps, a chain partition into contiguous
+      blocks): on the 0.4.0 tree before the fix (71479c7), a 16-cell
+      `HeatNode` rod with both ends held was 43.1 K off on two devices and
+      52.6 K on four, every cell wrong and cell 0 never updated; a 16x8 D2Q9
+      `LBMNode` had a 100% velocity error on two devices; `HeatNode(17)`
+      failed on its first step with a false "n_cells was changed after the
+      state was built".  At v0.3.0 and v0.3.1 (`git archive` of each tag,
+      same environment) the rod was 66.2 K off on two devices and 65.3 K on
+      four, the 17-cell rod ran 95.3 K off, and the LBM velocity error was
+      100%.  `ShardedUnstructuredNode` first shipped in v0.3.0.  During the
+      0.4.0 cycle it was also recommended for exactly this: the stencil
+      wrapper's divisibility refusal and the sharding-topology guide said to
+      use it for a grid the device count does not divide, and the guide
+      called the `update_padded` contract identical across wrappers.
+      Resolved in 0.4.0: `ShardedUnstructuredNode` refuses at construction a
+      node that declares a non-empty `halo_width()`, naming the halo, the
+      layout it would misread, and `ShardedStencilNode` as the wrapper to
+      use.  A node written for the partition layout declares an empty
+      `halo_width()`; one whose `update_padded` reads both layouts can say so
+      with a private, provisional `_reads_partition_layout = True`.  The
+      stencil wrapper's refusal and the guide no longer point a stencil node
+      at the unstructured wrapper (only a pointwise node, for which the
+      advice works), and the guide describes the two layouts.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently and grossly wrong: a documented wrapper accepted a built-in
+      node, ran finite, and returned a field wrong at every cell (tens of
+      kelvin on a 350 K rod, 100% on an LBM velocity) with no error or
+      warning; in the 0.4.0 development tree a refusal message recommended
+      the configuration.  `context_dependent` because it needs a Cartesian
+      stencil node wrapped in `ShardedUnstructuredNode`; whether a result
+      built on it matters is a property of the program using it.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: wrap a Cartesian stencil node with `ShardedStencilNode`,
+      sizing each sharded axis to a multiple of its device count.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The refusal reads `halo_width()`.  A node that declares no halo but
+      whose `update_padded` still assumes a Cartesian layout is not
+      detected, and a node that sets the private opt-in is trusted.
+    verification:
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_cartesian_stencil_node_is_refused_by_the_unstructured_wrapper"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_only_an_explicit_opt_in_lets_a_node_with_a_halo_through"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_the_stencil_divisibility_refusal_does_not_point_a_stencil_node_at_the_unstructured_wrapper"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_the_pointwise_divisibility_refusal_gives_advice_that_works_when_followed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-038"
+    title: "ShardedStencilNode edge-filled a sharded static's global halos under a periodic wrapper"
+    description: >
+      `ShardedStencilNode` halo-exchanged every `StaticArray(replication=
+      "shard")` with `boundary="edge"`, whatever the wrapper's own
+      `boundary`, on the stated reasoning that "statics don't evolve, so
+      periodic wrap would be wrong even when state uses periodic" (the
+      node contract and the static-data guide said the same).  The halo
+      fill is a question about space -- which cells lie beyond the edge --
+      and on a periodic grid those are the opposite edge's cells, for a
+      static as much as for the state.  A periodic node that read a static
+      in its halo therefore saw its own edge cell where the unsharded node
+      sees the opposite one.  Measured on a 16-cell periodic diffusion whose
+      coefficient is a sharded static read at the faces (CPU, jaxlib
+      0.11.0, float32, 20 steps): 1.9e-2 off on a field of 0.66, every
+      cell, on 1, 2 and 4 devices on the 0.4.0 tree before the fix
+      (71479c7).  At v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag,
+      same environment) the same 1.9e-2 on 2 and 4 devices; one device was
+      right there only because the pre-0.4.0 one-device exchange wrapped
+      whatever `boundary` said (MADD-ANO-028).  Sharded statics first
+      shipped in v0.2.1; v0.2.0 passed none.  No built-in node is affected:
+      `HeatNode` is wrapped with `"edge"` and does not read `grid_x` on the
+      sharded path, and `LBMNode` carries its wall mask in the state.
+      Resolved in 0.4.0: a sharded static's global halos are filled
+      periodically when the wrapper is `"periodic"`; under `"edge"` and
+      `"zero"`, where there is no cell beyond the edge, they keep the edge
+      fill they always had.  The periodic node above now matches the
+      unsharded one to float32 rounding (6e-8) on 1, 2 and 4 devices, and an
+      equivalence sweep of the built-in stencil nodes (HeatNode orders 2 and
+      4, LBMNode D2Q9 with walls and an obstacle at the global edges, D3Q19;
+      130 configurations) is identical before and after the change.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent and systematic -- every cell, about 3% after 20 steps in the
+      measurement above -- but it needs a custom periodic stencil node that
+      reads a sharded static in its halo; no built-in node does.
+      `context_dependent` because whether a result built on it matters is a
+      property of the program using it.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.1, <0.4.0"
+    workaround: >
+      Before 0.4.0: re-pad the interior of `static_padded[<key>]` inside
+      `update_padded` with the periodic fill the node needs, or keep the
+      static replicated (`replication="replicate"`) and slice it with
+      `shard_info`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Under `"zero"` a static's global halo repeats the edge cell rather than
+      holding zeros; that is the documented behaviour, and a node that needs
+      another value there builds it from `shard_info`.
+    verification:
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_a_periodic_node_reading_a_sharded_static_in_its_halo_matches_unsharded"
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_a_sharded_statics_global_edge_halo_follows_the_documented_fill"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-039"
+    title: "ShardedUnstructuredNode dropped the cells a node had past the layout's count, and gave a node no way to leave padding out of an integral"
+    description: >
+      Two silent miscounts on the unstructured path.  First,
+      `partition_value` gathered `value[ids]` for the ids the layout owns and
+      never compared `value.shape[0]` with the layout, and
+      `ShardedUnstructuredNode` checked no cell count, so a node with more
+      cells than its layout was accepted and the extra cells vanished.  A
+      10-cell decay node on an 8-cell layout, two devices, returned 8 cells
+      and an integral of 32.4 where the node's is 49.5.  Second,
+      `shard_info` gave every shard `(offset, n_local_max)` -- the padded
+      block length -- and nothing else, so a node on an uneven partition
+      could not tell its own cells from the padding at the end of a short
+      shard's block, and a node that summed its block summed the padding
+      into its domain integral: a 7-cell source node on two devices (4 and 3
+      cells) integrated 36.0 where the answer is 35.0, the padded slot
+      having grown by `dt` a step like a cell.  Both measured on the 0.4.0
+      tree before the fix (71479c7) and at v0.3.0 and v0.3.1 (`git archive`
+      of each tag, same environment, the same numbers).
+      `ShardedUnstructuredNode` first shipped in v0.3.0.
+      Resolved in 0.4.0.  The wrapper refuses at construction a node any of
+      whose per-cell state fields (every field but a domain integral) does
+      not have one row per cell of the layout, naming the field and both
+      counts, and `partition_value` refuses such a value for any other
+      caller.  `shard_info` now also carries `"n_local"`, this shard's own
+      cell count as a traced int32 scalar, so a node masks its padding with
+      `jnp.arange(n_local_max) < shard_info["n_local"]`; the entry for axis
+      0 is unchanged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a node's cells disappeared from the sharded state with no
+      error, and an integral on an uneven partition -- the normal case for a
+      graph partitioner -- included padding the node had no means to
+      exclude.  `major` for the first, which loses data outright.
+      `context_dependent` because it needs a mismatched layout, or an
+      integral on an uneven partition.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.cloud.multigpu.halo_unstructured.partition_value"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: build the layout from exactly the node's cells, and mask
+      an integral with a partitioned static of ones
+      (`StaticArray(np.ones(n), replication="partition", ...)`, which
+      `partition_value` pads with zeros).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The count is offered, not imposed: a node that sums its whole block
+      without masking still integrates the padding.  The guide and the
+      wrapper's docstring say how to mask it.
+    verification:
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_whose_cell_count_is_not_the_layouts_is_refused_at_construction"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_zero_d_field_that_is_not_a_domain_integral_is_refused_by_name"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_partition_value_refuses_a_value_that_is_not_one_row_per_layout_cell"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_shard_info_carries_each_shards_own_cell_count"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_that_masks_with_the_count_integrates_only_its_cells"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-040"
+    title: "The sharded wrappers placed a domain integral carried in the state like a grid field: an integral-emitting node could not run in a graph"
+    description: >
+      A node that returns a domain integral carries it in its state when it
+      declares the integral's initial value (which a `run_scan` carry needs)
+      or when a graph feeds a step's output back (a second `step()`).  Both
+      wrappers then placed the integral like a per-cell field.
+      `ShardedUnstructuredNode` partitioned it with `P(mesh_axis)`: a scalar
+      integral fed back was given a partition spec "too long" for it and the
+      step failed, and one declared in `initial_state` failed earlier, with
+      an `IndexError` from partitioning a 0-d array.  `ShardedStencilNode`
+      split it along the sharded spatial axis: a scalar escaped (it has no
+      such axis), but a vector integral -- a 3-component drag on two devices
+      -- failed with an `IndivisibleError` from
+      `device_put`, and in the 0.4.0 development tree with a false "3
+      cells" refusal at construction; a per-shard (unreduced) integral,
+      new in this cycle, fed back by a graph was refused as a grid "changed
+      by a parameter".  Reproduced on the 0.4.0 tree before the fix
+      (71479c7), and at v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each
+      tag, same environment) -- the unstructured cases from v0.3.0, where
+      that wrapper first shipped, the stencil vector case from v0.2.1, where
+      domain integrals did.  Loud, not silent: every failure is an
+      exception.
+      Resolved in 0.4.0: in both wrappers a domain integral carried in the
+      state is placed exactly as the step returns it -- replicated once
+      reduced, stacked along its unreduced mesh axes otherwise, by
+      `initial_state` and on the way into the step -- and reaches
+      `update_padded` unpadded.  Such a node runs three `step()`s and a
+      `run_scan` under either wrapper, matching the unsharded graph.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Every failure raised; no wrong number was ever returned.  It blocked a
+      documented configuration (an integral-emitting node inside a graph)
+      rather than corrupting one.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.1, <0.4.0"
+    workaround: >
+      Before 0.4.0: step the wrapper directly and drop the integral key from
+      the state before each step; do not declare a vector integral in
+      `initial_state` under `ShardedStencilNode`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_domain_integral_fed_back_as_state_steps_again"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node"
+      - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_without_an_initial_integral_steps_in_a_graph"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_vector_domain_integral_in_the_state_runs_in_a_graph_like_the_unsharded_node"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_per_shard_domain_integral_fed_back_by_a_graph_steps_again"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_the_initial_value_of_an_integral_is_placed_as_the_step_returns_it"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-041"
+    title: "halo_exchange ignored a per-axis boundary key naming no exchanged mesh axis, and that axis took the edge fill"
+    description: >
+      `halo_exchange(boundary=<dict>)` looked each exchanged axis up with
+      `boundary.get(mesh_axis, "edge")` and never looked at the keys, so a
+      key naming no exchanged axis -- a misspelt axis name, most often --
+      was ignored, and the axis it meant was filled `"edge"` in place of the
+      mode asked for.  `{"device": "periodic"}` on a `"devices"` exchange of
+      8 cells over 4 devices returned `[0, 0, 1, 2] ... [5, 6, 7, 7]` where
+      periodic is `[7, 0, 1, 2] ... [5, 6, 7, 0]`, with no error; a misspelt
+      *mode* was already refused.  `ShardedStencilNode` passes one mode
+      string and was not affected.  Reproduced on the 0.4.0 tree before the
+      fix (71479c7) and at v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive`
+      of each tag, same environment).
+      Resolved in 0.4.0: a boundary dict key that names no mesh axis in
+      `axes` is refused with a `ValueError` naming it and the axes the call
+      exchanges.  An exchanged axis the dict leaves out still gets
+      `"edge"`, as documented.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent, but only on a direct call of the exchange primitive with a
+      per-axis dict; the wrappers do not use one.  `context_dependent`
+      because the wrong fill changes a stencil's boundary values.
+    affected_components:
+      - "maddening.cloud.multigpu.halo.halo_exchange"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass one mode string, or check each key of the dict
+      against the mesh axes in `axes`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_a_boundary_dict_key_naming_no_exchanged_axis_is_refused"
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_a_boundary_dict_key_naming_a_mesh_axis_this_call_does_not_exchange_is_refused"
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_a_boundary_dict_of_exchanged_axes_fills_as_asked_and_defaults_to_edge"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-042"
+    title: "ShardedStencilNode accepted an empty axis_map and sharded nothing"
+    description: >
+      `ShardedStencilNode(node, mesh, axis_map={})` was accepted for a node
+      with no sharded static, `LBMNode` among them: no spatial axis was
+      sharded, so every device held and stepped the whole grid, and the
+      wrapper returned the unsharded result at the cost of the wrapper.  For
+      `HeatNode` the same call was refused, but by the check on its
+      `grid_x` static ("declares shard_axis=0 but HeatNode shards spatial
+      axes []"), which says nothing about the map.  Reproduced on the 0.4.0
+      tree before the fix (71479c7) and at v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      (`git archive` of each tag, same environment): an `LBMNode` wrapped
+      with `{}` on four devices steps bit-identical to the unsharded node,
+      its state placed `P(None, None, None)`.
+      Resolved in 0.4.0: an empty `axis_map` is refused first, with a
+      message saying nothing would be sharded and naming the node's halo
+      axes to map, as `ShardedPointwiseNode` refuses a node it could not
+      shard.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The numbers were right -- the unsharded node's, bit for bit.  What was
+      silently lost is the sharding itself: memory and time on every device
+      as if unsharded, which a user sizing a run on the wrapper would not
+      expect.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: always map at least one mesh axis to a spatial axis the
+      node has a halo on.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/cloud/multigpu/test_stencil_static_halo_and_axis_map.py::test_an_empty_axis_map_is_refused_for_what_it_is"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-043"
     title: "PUT /graph/params accepted a write that flipped a branch the node fixed at construction: the running graph kept the old branch, a saved graph reloaded the new one"
     description: >
       A node may decide a branch of its computation, and build what the
@@ -3924,7 +4241,7 @@ anomalies:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_node_that_differs_from_its_own_rebuild_is_not_blamed_on_the_write"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-038"
+  - anomaly_id: "MADD-ANO-044"
     title: "PUT /graph/params accepted values the node's own constructor refuses, so a graph saved after the write could not be loaded"
     description: >
       `to_dict()` saves each node as its class and params and `from_dict()`
@@ -3988,7 +4305,7 @@ anomalies:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_the_constructor_is_asked_with_the_live_values_a_save_would_carry"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-039"
+  - anomaly_id: "MADD-ANO-045"
     title: "A non-finite value written through PUT /graph/params was stored, then the reply failed with a 500, and every later GET /graph/params for the node failed too"
     description: >
       `PUT /graph/params/{node}` checked finiteness only for a live leaf of
@@ -4031,7 +4348,7 @@ anomalies:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_is_refused_before_anything_is_written"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-040"
+  - anomaly_id: "MADD-ANO-046"
     title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 once the exchange converges, which each rod's constructor accepts up to 1/2"
     description: >
       Coupling two rods by making each one's end-cell temperature the

@@ -302,10 +302,13 @@ PROBES = {
         "_signature_takes_params": _node_probe(lambda n: _signature_takes_params(n.update_padded)),
         "ShardedStencilNode.accepts_params": _node_probe(
             lambda n: ShardedStencilNode(n, _MESH, {"devices": 0}).accepts_params()),
-        "ShardedUnstructuredNode.accepts_params": _node_probe(
-            lambda n: ShardedUnstructuredNode(n, _MESH, _LAYOUT).accepts_params()),
-        "ShardedUnstructuredNode params_pytree": _node_probe(
-            lambda n: bool(ShardedUnstructuredNode(n, _MESH, _LAYOUT).params_pytree())),
+        # Built without a Cartesian halo: ShardedUnstructuredNode refuses a
+        # node that declares one (it hands update_padded the partition
+        # layout, not [halo | interior | halo]).
+        "ShardedUnstructuredNode.accepts_params": lambda kind, s: ShardedUnstructuredNode(
+            _make(kind, s, halo=False), _MESH, _LAYOUT).accepts_params(),
+        "ShardedUnstructuredNode params_pytree": lambda kind, s: bool(ShardedUnstructuredNode(
+            _make(kind, s, halo=False), _MESH, _LAYOUT).params_pytree()),
     },
     "compute_boundary_fluxes": {
         "_method_accepts_params": _node_probe(

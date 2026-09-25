@@ -45,6 +45,7 @@ from hypothesis import strategies as st
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.nodes.ball import BallNode
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
@@ -198,6 +199,20 @@ def test_every_sharded_wrapper_is_named_with_its_recorded_settings(markers, wrap
     assert type(reloaded.get_node("b")) is BallNode
 
 
+class _CellsNode(SimulationNode):
+    """Eight independent cells, no halo: a node ``ShardedUnstructuredNode``
+    takes (it refuses a Cartesian stencil node such as ``HeatNode``)."""
+
+    def __init__(self, name, timestep, n_cells=8):
+        super().__init__(name, timestep, n_cells=int(n_cells))
+
+    def initial_state(self):
+        return {"x": jnp.zeros(self.params["n_cells"], jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return dict(state)
+
+
 @pytest.mark.skipif(_N_DEVICES < 2, reason="needs >=2 CPU-virtual devices")
 def test_the_pointwise_and_unstructured_wrappers_write_the_markers_the_loader_reads():
     """End to end for the two wrappers the stencil test above does not
@@ -213,12 +228,12 @@ def test_the_pointwise_and_unstructured_wrappers_write_the_markers_the_loader_re
     ring = np.array([[i, (i + 1) % 8] for i in range(8)], dtype=np.int32)
     layout = build_unstructured_partition(
         partition_assignment=(np.arange(8) % 2).astype(np.int32), edges=ring, n_devices=2)
-    rod = HeatNode("rod", 0.01, n_cells=8, thermal_diffusivity=0.02)
+    cells = _CellsNode("cells", 0.01)
     for wrapped, registry, wrapper in (
         (ShardedPointwiseNode(checks, mesh, shard_axes=(0,)),
          {"HealthCheckNode": HealthCheckNode}, "ShardedPointwiseNode"),
-        (ShardedUnstructuredNode(rod, mesh, layout, exchange="ppermute"),
-         {"HeatNode": HeatNode}, "ShardedUnstructuredNode"),
+        (ShardedUnstructuredNode(cells, mesh, layout, exchange="ppermute"),
+         {"_CellsNode": _CellsNode}, "ShardedUnstructuredNode"),
     ):
         config = {"nodes": [json.loads(json.dumps(wrapped.to_dict()))],
                   "edges": [], "external_inputs": []}

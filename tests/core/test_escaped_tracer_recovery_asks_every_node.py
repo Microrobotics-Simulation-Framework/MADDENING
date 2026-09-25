@@ -65,8 +65,9 @@ def _differentiate_through_run_scan(gm, node):
 
 _BUILDERS = {
     "meta-sorts-first": lambda: _graph(),
-    "param-free-first-node": lambda: _graph(first=Clock("a0", 0.01)),
-    "param-free-first-node-uncoupled": lambda: _graph(first=Clock("a0", 0.01),
+    # "A0" sorts before "_meta" and before the springs.
+    "param-free-first-node": lambda: _graph(first=Clock("A0", 0.01)),
+    "param-free-first-node-uncoupled": lambda: _graph(first=Clock("A0", 0.01),
                                                       coupled=False),
 }
 

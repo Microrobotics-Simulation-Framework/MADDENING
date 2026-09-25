@@ -34,7 +34,8 @@ from maddening.nodes.spring import SpringDamperNode
 KW = dict(dt_initial=0.02, dt_max=0.02, atol=1e-3, rtol=1e-3)
 #: Cannot shrink: the unconverged half steps are kept.
 KW_FORCED = dict(dt_initial=0.01, dt_max=0.01, dt_min=0.01, atol=1e-3, rtol=1e-3)
-T_END = 0.004
+#: Past ``dt_initial``, so the first attempt is not clamped to ``t_end``.
+T_END = 0.021
 CAP = 10
 
 

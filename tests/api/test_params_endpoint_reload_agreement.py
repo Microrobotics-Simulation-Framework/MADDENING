@@ -447,7 +447,7 @@ def test_the_constructor_is_asked_with_the_live_values_a_save_would_carry():
     ("[0.1, Infinity, 0.5, 0.9]", "params.grid_points[1]"),
     ("[-Infinity, 0.2, 0.5, 0.9]", "params.grid_points[0]"),
     ("[0.1, 0.2, 0.5, 1" + "0" * 400 + "]", "params.grid_points[3]"),
-])
+], ids=["nan", "infinity", "minus-infinity", "integer-past-float-range"])
 def test_a_non_finite_structural_value_is_refused_before_anything_is_written(literal, where):
     """It used to skip the live-leaf checks, be written, and fail in the
     reply's JSON encoder: a 500 after the write, and every later

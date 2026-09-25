@@ -297,6 +297,22 @@ def test_no_warning_for_a_pair_below_its_limit(order, fourier):
     assert _anomaly_issues(_pair_graph(fourier, order)) == []
 
 
+def test_no_warning_exactly_at_the_limit():
+    """At Fo = 3/8 exactly the interface mode's amplification is exactly -1:
+    neutral, not growing, so "above the limit" does not include it.  The
+    constants are exact in binary (dx = 1/8, alpha = 1/4, dt = 3/128), so
+    the Fourier number the warning computes is 0.375 to the bit."""
+    gm = GraphManager()
+    for name in ("a", "b"):
+        gm.add_node(HeatNode(name, 3.0 / 128.0, n_cells=8, length=1.0,
+                             thermal_diffusivity=0.25))
+    _couple(gm, "a", "b")
+    _group(gm, ["a", "b"])
+    assert _anomaly_issues(gm) == []
+    gm.params["nodes"]["a"] = {"thermal_diffusivity": jnp.float32(0.25 * 1.001)}
+    assert len(_anomaly_issues(gm)) == 1
+
+
 def test_the_order_four_threshold_is_not_the_order_two_one():
     """0.30 is inside 3/8 and inside 5/16, so a warning keyed on either
     figure would stay silent.  The order-4 pair is past its own limit."""

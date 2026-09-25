@@ -112,7 +112,7 @@ NODE_ID_PREFIX = "MADD-NODE-"
 # table to a pin, so raising a guide without raising its pin fails CI
 # rather than reopening the hole.
 MIN_MAPPINGS = {
-    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 13,
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 15,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
     os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 26,
     os.path.join(

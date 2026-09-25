@@ -1,7 +1,7 @@
 """gradient_capture_ratio / frozen_gradient_vanishes_at / symmetry_break / cold-start
 diagnostic on the spike's constructed cases (top-|b|, K=16, sensor at x=1/3).
 
-Known points from ``plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md``:
+Known points, measured in the node's design study:
 theta=0.42 ratio ~0.86 (good), theta=0.48 ~0.17 (partially blind),
 theta=0.5 exactly 0 (Palais trap of the reflection x -> 1 - x).
 

@@ -46,7 +46,7 @@ how the per-step numbers are obtained; this page is about what they say.
 > 2026-09-18 in `0ee18a0`).  The measured numbers are unaffected; the
 > generality was not there.  Iteration counts and `converged_fraction`
 > on this page are therefore lower bounds; re-recording the baselines is
-> queued (`plans/MADDENING_040_DECISIONS.md`, "Not decisions").
+> queued.
 
 > **Where each number on this page comes from.**  Unless it says
 > otherwise, a figure is from `benchmarks/results/coupling_sweep_cpu.json`

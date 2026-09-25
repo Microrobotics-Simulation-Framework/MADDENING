@@ -1,5 +1,5 @@
 """Live-stage bouncing-ball demo — proves :class:`LiveStage` works
-without a MIME dependency (v0.3.0 §A3 acceptance gate).
+without a MIME dependency.
 
 Spins up a 2-node MADDENING graph (a :class:`BallNode` falling under
 gravity, coupled with a :class:`TableNode` that catches it), wires

@@ -39,20 +39,27 @@ chain of ≥ 10 two-DOF nodes), the default-20 GMRES silently converges
 to a low-rank approximation of the adjoint solve.  The returned ``u``
 lies in a 20-D subspace of an N-D problem, so the resulting gradient
 is structurally wrong — *not* a near-correct answer with extra noise,
-but a different gradient.  See
+but a different gradient.  The coupling layer's guard is
 ``tests/core/test_coupling_ift_lineax.py::
-test_gmres_restart_too_small_silently_corrupts_gradient`` for the
-regression guard at the coupling layer; this module applies the same
-``restart = min(N, 50)`` clamp.
+test_gmres_call_uses_explicit_restart_at_least_minN50``: it spies on
+``lineax.GMRES`` while the IFT backward of a 60-float group is traced
+and asserts every construction passes an explicit
+``restart >= min(N, 50)`` and ``max_steps >= 4 * restart``.  It checks
+the arguments, not a gradient.  This module applies the same
+``restart = min(N, 50)`` clamp, pinned the same way by
+``tests/adaptive/test_ift_linear_solve.py::test_gmres_restart_clamp``.
 
-Spike evidence
---------------
+Evidence
+--------
 
-``plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md``: round-2 Q1 Path
-B' establishes the function-level signature; round-4 Investigation 4
-explains why no ``custom_vjp`` is needed; round-6 Investigation 3
-confirms ``jax.experimental.sparse.BCOO`` matrices compose with the
-``FunctionLinearOperator`` path (rel error 7e-15 vs dense solve).
+In ``tests/adaptive/test_ift_linear_solve.py``: the
+``test_autodiff_correctness_*`` tests hold ``jax.grad`` through the
+dense, GMRES and CG backends to a central difference within 1e-5
+relative, which is why no ``custom_vjp`` is installed; and
+``test_bcoo_operator_compatibility`` shows a
+``jax.experimental.sparse.BCOO`` matrix composes with the
+``FunctionLinearOperator`` path (solution within 1e-6 of a dense
+solve, gradient within 1e-4 of a central difference).
 """
 
 from __future__ import annotations
@@ -110,7 +117,8 @@ def ift_linear_solve(
         ``jax.lax.stop_gradient`` on its output: at convergence the
         solution and its sensitivity are independent of ``M``, so
         gradient flow through ``M`` is wasted compute and a potential
-        source of noise.  (Spike round-7 Investigation 1 + round-4 Q4.1.)
+        source of noise.  Pinned by ``tests/adaptive/
+        test_ift_linear_solve.py::test_preconditioner_gradient_blocked``.
     rtol, atol : float
         Relative and absolute tolerances for the iterative solvers.
         Ignored when ``solver="dense"``.

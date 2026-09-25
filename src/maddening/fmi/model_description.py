@@ -1,10 +1,10 @@
-"""``modelDescription.xml`` generator for FMI 3.0 (v0.3.0 §A1).
+"""``modelDescription.xml`` generator for FMI 3.0 (added in v0.3.0).
 
 Reads a :class:`GraphManager`'s public surface together with the
 ``@stability`` audit registry to emit a minimal FMI 3.0
 ``modelDescription.xml``.  Conservative by default: only surfaces
 tagged ``@stability(STABLE)`` enter the FMU unless the caller opts in
-via ``include_evolving=True`` (mirrors STACK_V1 M4's stability gate).
+via ``include_evolving=True``.
 
 What's included for v0.3.0:
 
@@ -374,7 +374,7 @@ def _ensure_stable_only_or_opt_in(
 ) -> bool:
     """Return True iff the named surface is allowed into the FMU.
 
-    The rule (per the v0.3.0 plan §A1): a variable enters the FMU
+    The rule: a variable enters the FMU
     surface iff its source/sink is tagged ``@stability(STABLE)`` and
     the caller explicitly opts it in via the FMU export config — *not*
     by default, to keep the public FMU surface minimal.

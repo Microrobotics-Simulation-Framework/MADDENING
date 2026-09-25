@@ -16,7 +16,8 @@ from typing import Optional
 class StabilityLevel(Enum):
     """API stability classification for nodes and public surfaces.
 
-    Levels (per ``plans/MADDENING_v0.3.0_PLAN.md`` §A2):
+    Levels (what each promises, and how a promise is withdrawn, is
+    ``docs/developer_guide/deprecation_policy.md``):
 
     - ``STABLE``: locked at v1.0.0; backwards-incompatible changes require
       a major version bump.

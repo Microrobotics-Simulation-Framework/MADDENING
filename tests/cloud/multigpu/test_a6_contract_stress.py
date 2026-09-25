@@ -1,4 +1,4 @@
-"""Contract stress-test for the v0.3.0 §A6 -> v0.4.0 MIME commitment.
+"""Contract stress-test for the ShardedUnstructuredNode subclass contract.
 
 We write out the API a hypothetical MIME ``FVMFluidNode`` would have
 (subclassing ``ShardedUnstructuredNode``) and verify that *nothing* in
@@ -7,10 +7,9 @@ v0.4.0.
 
 If this test breaks because we tightened a constructor signature,
 renamed a method, or restructured a contract — that's exactly the
-signal the v0.3.0 plan demands.  Either revert the contract change,
-or escalate it as a deliberate plan revision (with a paired update
-to ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 + a heads-up to the MIME
-team).
+signal it exists to give.  Either revert the contract change, or make
+it deliberately: record it as a breaking change in the CHANGELOG and
+give the MIME team a heads-up.
 """
 
 import os
@@ -168,7 +167,7 @@ class TestA6ContractIsV040Ready:
         assert np.isclose(total, 4.0), f"got {total}"
 
     def test_sharded_gmres_signature_works_for_fvm_use_case(self):
-        """The §A5 GMRES surface (which MIME's PISO pressure step will
+        """The sharded GMRES surface (which MIME's PISO pressure step will
         call) accepts a sharded matvec without any contract change.
         """
         n_global = 16

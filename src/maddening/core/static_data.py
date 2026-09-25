@@ -138,7 +138,7 @@ class StaticArray:
                     "graph-partitioned sharding).",
                 )
         elif self.replication == "partition":
-            # v0.3.0 §A6 — unstructured sharding contract.  By convention
+            # The unstructured sharding contract.  By convention
             # the partitioned axis is axis 0 (the "global cell" axis).
             if self.partition_assignment is None:
                 raise ValueError(

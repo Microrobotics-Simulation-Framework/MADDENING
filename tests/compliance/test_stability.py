@@ -59,7 +59,7 @@ class TestStabilityDecorator:
         assert OldClass._stability_level == StabilityLevel.DEPRECATED
 
     def test_evolving_level_v030(self):
-        """EVOLVING was added in v0.3.0 (per plans/MADDENING_v0.3.0_PLAN.md §A2)."""
+        """EVOLVING was added in v0.3.0."""
         @stability(StabilityLevel.EVOLVING)
         class GrowingClass:
             pass
@@ -68,7 +68,7 @@ class TestStabilityDecorator:
         assert StabilityLevel.EVOLVING.value == "evolving"
 
     def test_internal_level_v030(self):
-        """INTERNAL was added in v0.3.0 (per plans/MADDENING_v0.3.0_PLAN.md §A2)."""
+        """INTERNAL was added in v0.3.0."""
         @stability(StabilityLevel.INTERNAL)
         class InternalClass:
             pass
@@ -77,7 +77,7 @@ class TestStabilityDecorator:
         assert StabilityLevel.INTERNAL.value == "internal"
 
     def test_v030_first_wave_tagged(self):
-        """The v0.3.0 §A2 first wave of API surfaces is tagged.
+        """The v0.3.0 first wave of API surfaces is tagged.
 
         Reads the registry and asserts each surface the plan names is
         present at the expected level.  If the registry doesn't contain

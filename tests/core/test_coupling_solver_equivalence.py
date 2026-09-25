@@ -8,13 +8,11 @@ number of passes by construction.  On an exit that *met the convergence
 criterion* they used not to, and the gap was not round-off: ``fori``
 froze on the iterate whose residual passed while ``ift`` returned that
 iterate advanced by one more pass, so the two answers differed by one
-whole residual -- 2.14% on the affine cycle below, the figure measured
-on MIME's D2 two-scale Schwarz group
-(``plans/MIME_vs_MADDENING_040_BASELINE.md`` §4.2), with both solvers
+whole residual -- 2.14% on the affine cycle below, the figure first
+measured on a two-scale Schwarz coupling group, with both solvers
 reporting ``converged=True``.
 
-**Both solvers now return the iterate that passed** (decision D2 in
-``plans/MADDENING_040_DECISIONS.md``).  Two things follow, and this
+**Both solvers now return the iterate that passed.**  Two things follow, and this
 module holds both:
 
 *The forward solve agrees.*  Whatever the norm, the acceleration and

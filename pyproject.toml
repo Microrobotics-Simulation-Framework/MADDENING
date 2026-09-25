@@ -165,8 +165,7 @@ all = [
 #
 # httpx2 is pulled alongside httpx because starlette's testclient
 # auto-detects httpx2 when present and uses it preferentially.  This
-# closes the v0.2.1 StarletteDeprecationWarning loop (see C5 in
-# plans/MADDENING_v0.3.0_PLAN.md).
+# closes the v0.2.1 StarletteDeprecationWarning loop.
 ci = [
     "fsspec>=2023.1",   # cloud checkpoint URLs (tests/cloud/test_resume.py)
     "pytest>=7.0",

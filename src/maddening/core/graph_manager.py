@@ -1113,7 +1113,8 @@ def _fixed_point_while(
     tolerance the flag just claimed.  Keeping it and re-measuring was
     the alternative; it costs one evaluation of ``F`` per converged
     group per step and still leaves the two solvers returning
-    different states.  See ``plans/MADDENING_040_DECISIONS.md`` D1/D2.
+    different states.  ``tests/core/test_coupling_solver_equivalence.py``
+    pins that both solvers return the state that was measured.
 
     ``first_res`` is the residual of the pass that produced ``x0`` —
     the one ``_run_coupling_inner`` ran before this loop.  It seeds the
@@ -1647,10 +1648,12 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
             # while N>=50 problems still see a meaningful subspace,
             # and bump ``max_steps`` to give the algorithm headroom
             # for several restart cycles.  Do not regress this without
-            # bumping the restart cap in lockstep — see
-            # tests/core/test_coupling_ift_lineax.py::
-            # test_gmres_restart_too_small_silently_corrupts_gradient
-            # for the regression guard.
+            # bumping the restart cap in lockstep.  The regression guard
+            # is tests/core/test_coupling_ift_lineax.py::
+            # test_gmres_call_uses_explicit_restart_at_least_minN50,
+            # which checks that every lx.GMRES construction in the IFT
+            # backward passes an explicit restart >= min(N, 50) and
+            # max_steps >= 4 * restart -- the arguments, not a gradient.
             restart = min(n, 50)
             solver = lx.GMRES(
                 rtol=rtol,

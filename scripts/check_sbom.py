@@ -29,8 +29,15 @@ Per SBOM:
 * the metadata records which install it is and the environment it was
   resolved in (the PEP 508 marker variables), since the transitive
   versions depend on both;
-* every component has a name, a version and a ``pkg:pypi`` purl that
-  agrees with both, and no package appears twice;
+* every component has a name, a version, a ``pkg:pypi`` purl that agrees
+  with both, and a licence (``soup_package.md`` §6: "the licence its
+  metadata declares"), and no package appears twice;
+* every component is reachable from the root component through the
+  dependency graph: an SBOM is what one install resolved to, and a
+  package nothing in that install depends on is not part of it;
+* the Python the SBOM records (``python_full_version`` and
+  ``python_version``) is one ``requires-python`` admits: an environment on
+  any other Python is not one ``pip install maddening`` can produce;
 * every direct dependency ``pyproject.toml`` declares for that install
   (the base dependencies, plus the extra's) is present, at a version its
   specifier admits, and is a direct edge of the root component in the
@@ -73,6 +80,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
@@ -436,6 +444,32 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
             f"{', '.join(PROP_MARKER + v for v in missing_env)}); the resolved "
             f"versions depend on the Python and platform, and the dependency "
             f"markers cannot be evaluated without them")
+    # An SBOM resolved on a Python requires-python refuses describes no
+    # install anybody can make (audit_040_p4_2, S3: 3.11 recorded against
+    # ">=3.12", resealed, passed).  No requires-python is no constraint.
+    requires_python = pyproject["project"].get("requires-python")
+    if requires_python:
+        try:
+            python_spec = SpecifierSet(str(requires_python))
+        except InvalidSpecifier:
+            err(f"pyproject.toml's requires-python {requires_python!r} is not a "
+                f"version specifier, so the recorded Python cannot be checked")
+            python_spec = None
+        for var in ("python_full_version", "python_version"):
+            value = env.get(var)
+            if python_spec is None or value is None:
+                continue                 # a missing variable is reported above
+            try:
+                admitted = python_spec.contains(Version(value), prereleases=True)
+            except InvalidVersion:
+                err(f"records {PROP_MARKER}{var} {value!r}, which is not a "
+                    f"version")
+                continue
+            if not admitted:
+                err(f"records {var} {value}, outside requires-python "
+                    f"{requires_python!r} in pyproject.toml: no install of "
+                    f"this package resolves on that Python; regenerate on a "
+                    f"supported one")
 
     # -- components --------------------------------------------------
     components = sbom.get("components", [])
@@ -463,6 +497,12 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
                 if cversion and parts[2] != cversion:
                     err(f"{label} purl {purl!r} names version {parts[2]!r}, "
                         f"the component says {cversion!r}")
+        if not _license_values(comp):
+            err(f"{label} carries no licence; soup_package.md §6 says every "
+                f"component carries the licence its metadata declares.  "
+                f"Regenerate it with scripts/generate_sbom.py; if the "
+                f"package's metadata names no licence, say so in §6 rather "
+                f"than dropping the field")
         key = canonicalize_name(name)
         if key == ROOT_NAME:
             err("maddening is listed as a component as well as the root: the "
@@ -548,6 +588,34 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
             for ref in sorted((root_edges - expected_edges) & refs):
                 err(f"the root component depends on {ref!r}, which pyproject.toml "
                     f"does not declare as a direct dependency of this install")
+
+    # -- every component is something the install brings in -------------
+    # An orphan -- a component no path from the root reaches -- passed when
+    # it was resealed (audit_040_p4_2, S2), although §6 says each SBOM is
+    # exactly the environment one install resolved to.
+    if root_ref and root_edges is not None:
+        graph: dict[str, list] = {}
+        for dep in sbom.get("dependencies", []):
+            graph.setdefault(dep.get("ref"), []).extend(dep.get("dependsOn", []))
+        reached: set[str] = set()
+        todo = [root_ref]
+        while todo:
+            ref = todo.pop()
+            if ref in reached:
+                continue
+            reached.add(ref)
+            todo.extend(graph.get(ref, []))
+        for i, comp in enumerate(components):
+            name = comp.get("name") or f"#{i}"
+            ref = comp.get("bom-ref")
+            if not ref:
+                err(f"component {name} has no bom-ref, so the dependency graph "
+                    f"cannot reach it from the root")
+            elif ref not in reached:
+                err(f"component {name} ({ref!r}) is reached by no path from the "
+                    f"root component in the dependency graph: nothing "
+                    f"`pip install {install_requirement(install)}` resolves "
+                    f"depends on it, so it is not part of this install")
 
     return errors
 

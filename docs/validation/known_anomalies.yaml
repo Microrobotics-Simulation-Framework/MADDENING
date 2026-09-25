@@ -32,6 +32,9 @@
 #     the fix and after it; the description says which builds had it.
 #     (">=0.4.0.dev0, <0.4.0", which two entries used to carry for this,
 #     admits no version at all -- it read as a window and was empty.)
+#     Such a defect gets an entry only when it is critical or major; every
+#     defect a release carried gets one ("Which defects get an entry" in
+#     CONTRIBUTING.md).
 #   * duplicate: parsed but not compared; the range lives on the other entry.
 #   * FIRST, FIX and resolution_version name versions somebody could install:
 #     a release (a dated "## [X.Y.Z] - YYYY-MM-DD" heading in CHANGELOG.md),
@@ -4668,4 +4671,374 @@ anomalies:
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_end_to_end_pair_diverges_above_three_eighths"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_pair_below_three_eighths_stays_bounded"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_one_rod_with_fixed_data_is_stable_at_the_same_fourier_number"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-051"
+    title: "The HTTP API served every route, POST /cloud/launch included, to any caller with no credential, and the shipped container bound it to 0.0.0.0"
+    description: >
+      From v0.1.0 to v0.3.1 `SimulationServer` had no authentication of any
+      kind.  Every route answered whoever could reach the port: the graph
+      and state writes (`POST /graph/nodes`, `POST /graph/edges`,
+      `PUT /graph/state/{node}`, `PUT /graph/params/{node}`), simulation
+      control, `/checkpoint/save` and `/checkpoint/load` (MADD-ANO-052), the
+      `/ws/state` WebSockets, and `POST /cloud/launch`, `GET /cloud/status`
+      and `POST /cloud/teardown`, which provision and release paid cloud
+      GPU instances with the credentials of the host the server runs on.
+
+      The shipped defaults put it on a network interface.  The cloud
+      container (`docker/Dockerfile.cloud`) set `MADDENING_HOST=0.0.0.0`,
+      `maddening.cloud.entrypoint` fell back to `0.0.0.0` when the variable
+      was unset, and `cloud/_skypilot.py`'s `launch_vm` published port 8000
+      on the VM with a hard-coded `-p 8000:8000`, whatever
+      `JobConfig.ports` said.  So every `CloudSession` launch served the
+      whole API on the VM's public interface.
+
+      Checked at each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on
+      2026-09-25 (CPU, jaxlib 0.11.0), with a FastAPI `TestClient` and no
+      credential: `POST /cloud/launch` answered 200, which that route
+      returns only once `CloudSession.launch` has started its provisioning
+      thread (the probe exited at once, before the thread reached a
+      provider), and `POST /checkpoint/save` with a path outside the
+      server's directory answered 200 and wrote the file.  All five tags
+      carry the container's `0.0.0.0` default and the hard-coded publish.
+      The server had no credential check to consult, so the caller's
+      address did not matter.
+    severity: "critical"
+    safety_relevance: "safety_relevant"
+    safety_relevance_rationale: >
+      Graded `critical`, as the CHANGELOG labels it, because the shipped
+      defaults exposed it: an anonymous caller who could route to port 8000
+      of any `CloudSession` VM could rewrite the graph, its state and its
+      parameters, read the full state, and provision paid instances on the
+      operator's account.  Graded `safety_relevant` on the same grounds as
+      MADD-ANO-015, which records the ZeroMQ half of the same exposure.  The
+      writes change what the simulation computes with nothing in the reply
+      or the state to show it, and the reads disclose everything a caller
+      would need to aim them.  That is a loss of both integrity and
+      confidentiality on a surface the library itself published, which is
+      safety relevant whether or not a particular deployment was reached.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.cloud.entrypoint.main"
+      - "maddening.cloud._skypilot.launch_vm"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On v0.3.1 and earlier: bind the API to 127.0.0.1 (set
+      `MADDENING_HOST=127.0.0.1`, or pass `host="127.0.0.1"` to uvicorn) and
+      reach it over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <host>`).  On
+      a VM started by `CloudSession`, `launch_vm` published port 8000
+      whatever `JobConfig.ports` said, so close 8000 in the provider's
+      firewall or security group as well.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0 by `maddening.api.auth.APIAuth` (PR 85, merged
+      2026-09-20).  A loopback bind is served as before; any other bind, or
+      a request whose peer address is a routable IP whatever the bind,
+      needs `Authorization: Bearer <token>` on every HTTP route and every
+      WebSocket but `/healthz` and the static `/viz/*` pages.  The token is
+      `MADDENING_API_TOKEN`, or one generated at start-up and logged once
+      (or written to `MADDENING_API_TOKEN_FILE`); a blank
+      `MADDENING_API_TOKEN` refuses to start.  `JobConfig.ports` no longer
+      defaults to `[8000]`, and `launch_vm` publishes exactly
+      `JobConfig.ports` (MADD-ANO-015), so a default cloud launch no longer
+      opens the port at all.
+      What remains, and why each is a boundary of the fix rather than an
+      instance of the defect.  (1) There is no TLS: the token crosses the
+      network in cleartext on every request, so a non-loopback API belongs
+      behind an SSH tunnel or a TLS-terminating proxy.  (2) A loopback bind
+      is unauthenticated by design, so on a shared host any local user can
+      reach it, and a reverse proxy on the same host that forwards to a
+      loopback-bound API delivers remote requests from 127.0.0.1, which are
+      not challenged.  (3) One token opens every route; there are no
+      per-route permissions and no way to tell token holders apart.  (4) A
+      generated token is readable by anyone who can read the server's log.
+      (5) Unless `MADDENING_TRANSPORT_TOKEN` is set, the same string seeds
+      the ZeroMQ CURVE keys (MADD-ANO-015's residual risk).
+    verification:
+      - "tests/api/test_bearer_auth.py::test_every_route_refuses_an_anonymous_caller"
+      - "tests/api/test_bearer_auth.py::test_every_websocket_route_refuses_an_anonymous_caller"
+      - "tests/api/test_bearer_auth.py::test_an_anonymous_caller_cannot_launch_cloud_instances"
+      - "tests/api/test_bearer_auth.py::test_a_routable_peer_is_challenged_even_on_a_believed_loopback_bind"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-052"
+    title: "POST /checkpoint/save and /checkpoint/load took any server path from an unauthenticated caller: a file write anywhere the server could write, and a file-existence oracle"
+    description: >
+      From v0.1.0 to v0.3.1 the two checkpoint routes handed their `path`
+      query parameter straight to `GraphManager.save_state` and
+      `GraphManager.load_state`, with no root and no check.  With the API
+      unauthenticated on every bind (MADD-ANO-051), any caller who could
+      reach port 8000 could:
+        - write a checkpoint to any path the server's user could write,
+          anywhere on the file system.  `numpy.savez` appends `.npz` to a
+          name without it, so the file is always an `.npz`, and an existing
+          `.npz` there -- another run's checkpoint, say -- is overwritten.
+          The contents are the graph's state, which the same caller could
+          set through `PUT /graph/state/{node}`;
+        - learn whether any path on the host exists: `load` answered a
+          missing file with "Checkpoint file not found" and an existing one
+          with the parser's own error (for `/etc/passwd`, numpy's "This
+          file contains pickled (object) data"), and a load error echoed
+          the parser's internals;
+        - load any readable `.npz` on the host into the running graph.
+      Checked at each tag, v0.1.0 to v0.3.1, on 2026-09-25 (CPU, jaxlib
+      0.11.0), with a FastAPI `TestClient` and no credential: `POST
+      /checkpoint/save?path=<a directory outside the server's>/written_by_anyone.npz`
+      answered 200 and wrote the file; `path=<dir>/noext` wrote
+      `noext.npz`; `load` of a missing path and of `/etc/hostname`
+      answered 400 with the two different messages above.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major`: the CHANGELOG gives it no label, and the release notes
+      describe it as an arbitrary file write and a file-existence oracle
+      reachable by an unauthenticated client.  The write is constrained to
+      an `.npz` name and to the graph's own arrays, so it cannot plant code,
+      but it can overwrite any checkpoint or other `.npz` file the server's
+      user can write, and the oracle maps the host's file system.  Not
+      `critical`, because the API's own writes (MADD-ANO-051) already gave
+      the same caller the simulation, and this adds reach into the host
+      rather than a new way to change results.
+      Graded `context_dependent`: what the write can damage is whatever
+      `.npz` files the server's user can write and whatever later reads
+      them, which is a property of the host and not of the library.  A
+      checkpoint overwritten with a state of the same graph restores
+      silently into the next run that loads it; one of another graph fails
+      to load, loudly.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.core.graph_manager.GraphManager.save_state"
+      - "maddening.core.graph_manager.GraphManager.load_state"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On v0.3.1 and earlier: keep the API on loopback (MADD-ANO-051's
+      workaround), and run the server as a user that can write only its own
+      working directory.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0 (6cd5cc3, 2026-09-16): a checkpoint path is relative
+      to `SimulationServer(checkpoint_root=)`, default `./checkpoints` under
+      the server's working directory, and must resolve under it after
+      symlinks are followed; anything else is a 400 naming the root, before
+      the file system is touched.  A missing file is a 404 and a load error
+      no longer echoes the parser.  The routes also need the bearer token
+      whenever the API is not on loopback (MADD-ANO-051).
+      What remains: any caller the API admits can still overwrite or load
+      any checkpoint inside the root, which is the routes' purpose.  The
+      default root follows the working directory the server was started
+      in, so two servers started in one directory share it.
+    verification:
+      - "tests/api/test_graph_endpoint_validation.py::test_checkpoint_endpoints_stay_under_the_root"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-053"
+    title: "The WebRTC signaling server validated its own token, not the client's, so it admitted and relayed every client"
+    description: >
+      From v0.1.0 to v0.3.1 `SelkiesSession`'s signaling handler read no
+      credential from the client.  It looked for its own token as a
+      substring of the request's query string, and when that was absent it
+      called `validate_session_token(self._session_id, token, self._secret)`
+      with `token` bound to the *server's own* token, generated at `start()`
+      from the same session id and secret.  That check is true by
+      construction, so `ws.close(1008, "Invalid token")` could never run,
+      and any client that connected was admitted and had its messages
+      handed to the session's input handler (the callback
+      `set_input_handler` installs for keyboard, mouse and gamepad events
+      from the viewer).  The handler lived in
+      `cloud/selkies_session.py` (lines 231-238 at v0.3.1) and is the same
+      at every tag from v0.1.0; the server bound `0.0.0.0:8443`.
+
+      On the shipped cloud path the reach was narrower than the API's: the
+      container started a `SelkiesSession` when GStreamer was available and
+      the Dockerfile exposes 8443, but `launch_vm` did not publish 8443, so
+      the socket was reachable from the VM itself and from containers on
+      its Docker network rather than from the internet.  A program that ran
+      `SelkiesSession` directly on a host, or published 8443, served it to
+      the network.  The container's entry point also built the session
+      with no secret, so it invented a random one per process and no
+      legitimate client could have computed a valid token; the broken check
+      is why that went unnoticed.
+    severity: "critical"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `critical`, as the CHANGELOG labels it: the package's only
+      authentication check at the time rejected nothing, on a socket bound
+      to every interface, and it did so silently -- an operator who set a
+      secret had no sign that it protected nothing.
+      Graded `context_dependent` rather than `safety_relevant` because what
+      an admitted client could reach is decided by the program, not the
+      library.  The handler relays a client's messages only to an input
+      handler the program installs; nothing in the library installs one,
+      so with none installed an intruder could connect and do nothing
+      else.  A program that routes viewer input into its simulation (a
+      mouse drag that moves a body, say) handed that control to anyone who
+      could reach the port.  On the shipped container path the port was
+      not published off the VM.
+    affected_components:
+      - "maddening.cloud.selkies_session.SelkiesSession"
+      - "maddening.cloud.selkies_session._make_signaling_handler"
+      - "maddening.cloud._auth.validate_session_token"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      On v0.3.1 and earlier: do not publish or expose port 8443; reach the
+      signaling server through an SSH tunnel from the viewer's machine, and
+      do not install an input handler that drives the simulation on a
+      session other hosts can reach.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0 (2897b4b, 2026-09-19).  The handler, now built by
+      `_make_signaling_handler`, parses the token the client presented --
+      `Authorization: Bearer <token>` or `?token=<token>` -- and validates
+      that one against the session id and secret in constant time; absent,
+      malformed, duplicated, wrong, and issued for another session or
+      secret are all closed with 1008 before a message is read.  The
+      container reads the secret from `MADDENING_STREAM_SECRET`; without it
+      the session logs that every client will be rejected.
+      What remains.  (1) There is no TLS on the signaling socket, so the
+      token crosses the network in cleartext, and a `?token=` in the URL can
+      reach a proxy's access log.  (2) The token is an HMAC of the session
+      id with no expiry, so whoever observes it can reuse it for the rest of
+      the session.  (3) The default bind is still `0.0.0.0` (the session
+      normally runs in a container, where loopback is unreachable); pass
+      `bind_host="127.0.0.1"` behind a tunnel.
+    verification:
+      - "tests/cloud/test_signaling_auth.py::TestSignalingClientAuthentication::test_no_token_is_rejected"
+      - "tests/cloud/test_signaling_auth.py::TestSignalingClientAuthentication::test_wrong_token_is_rejected"
+      - "tests/cloud/test_signaling_auth.py::TestSignalingClientAuthentication::test_token_for_another_session_is_rejected"
+      - "tests/cloud/test_signaling_auth.py::TestSignalingClientAuthentication::test_token_from_another_secret_is_rejected"
+      - "tests/cloud/test_signaling_auth.py::TestSignalingClientAuthentication::test_empty_token_parameter_is_rejected"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-054"
+    title: "The FMU TCP bridge unpickled the state blob an importer hands to fmi3SetFMUState: remote code execution for anyone who could reach its port"
+    description: >
+      `FmuTcpBridge.handle`'s `set_state` op ran
+      `pickle.loads(base64.b64decode(req["state"]))` on the blob an importer
+      passes to `fmi3SetFMUState`.  Unpickling executes whatever the bytes
+      name, so anyone who could send a frame to the bridge ran code in the
+      simulation's process, as its user.  The bridge authenticates nobody
+      (MADD-ANO-023) and needs no `hello` first, so on its default bind --
+      loopback, an ephemeral port -- that was any local process of any
+      user, and on a non-loopback `host` anyone on the network.  The port
+      was not the only way in: the C wrapper's `fmi3DeserializeFMUState`
+      copied the importer's serialized bytes verbatim and
+      `fmi3SetFMUState` sent them to the bridge as that blob, so a crafted
+      serialized state stored with an importer's saved session would have
+      run when the session was restored.
+
+      Introduced with the bridge in 2efcaea and fixed in 0bd041e, both on
+      2026-09-16, during the 0.4.0 development line.  No tagged release
+      contains it: v0.1.0 to v0.3.1 have no `src/maddening/fmi/tcp_bridge.py`.
+      It is recorded under the registry's rule for defects no release
+      carried: a critical or major one found during the cycle gets an
+      entry.  The in-process pickle entry points that v0.3.0 and v0.3.1 did
+      ship, which no shipped transport reached, are MADD-ANO-055.
+    severity: "critical"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `critical`, as the CHANGELOG labels it: arbitrary code
+      execution, from one unauthenticated frame, in the process that holds
+      the model.  Nothing a caller could do to a running simulation is out
+      of reach of that, including results that stay plausible.
+      Graded `context_dependent`, as MADD-ANO-023 is for the same socket,
+      because who can reach the port is a property of the deployment: the
+      default bind is loopback, so on a single-user host, or in a container
+      whose network namespace nothing else shares, there was no other
+      caller.  What keeps it well above `not_safety_relevant` is that the
+      consequence has no ceiling where the port is reachable.  It is
+      recorded although no release carried it, because a critical defect
+      found in the cycle is part of the evidence of how the release was
+      verified.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge.handle"
+    affected_versions: "none"
+    workaround: >
+      None needed from 0.4.0.  On a 0.4.0.dev0 build between 2efcaea and
+      0bd041e: keep the bridge on its loopback default on a single-user host
+      or in its own network namespace, and restore no FMU state blob that
+      did not come from the same session.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0bd041e (2026-09-16).  The FMU-state blob is an `npz` of
+      plain arrays read with `allow_pickle=False`, carrying the schema
+      token, time, inputs, states and parameters; on `set_state` the archive
+      directory is checked before `np.load` runs (every member one the
+      model expects, with per-member and total declared-size caps), then
+      the token, the key set and every shape, before anything is written.
+      A pickle payload is refused as "not a valid archive" without being
+      executed; so is an `npz` whose member holds a pickled object.
+      What remains is outside this entry: the bridge still authenticates no
+      caller, so anyone who reaches the port can read, write, step and hold
+      the model through the documented ops (MADD-ANO-023, open), and
+      `FmuSidecar.handle` still speaks a pickled protocol for trusted
+      in-process clients, off unless `SidecarConfig(allow_pickle_rpc=True)`
+      turns it on (MADD-ANO-055).
+    verification:
+      - "tests/fmi/test_bridge_security_and_stepping.py::test_set_state_never_unpickles"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-055"
+    title: "deserialize_fmu_state and FmuSidecar.handle unpickled the bytes they were given"
+    description: >
+      v0.3.0 and v0.3.1 shipped two public FMI entry points that called
+      `pickle.loads` on their input.  `deserialize_fmu_state` unpickled
+      `FMUState.payload`, and `FMUState` is a public dataclass that can be
+      built from any bytes; its own docstring describes it as the opaque
+      handle an importer receives from `fmi3GetFMUState` and hands back to
+      `fmi3SetFMUState`.  `FmuSidecar.handle` unpickled every request,
+      which its module docstring describes as a host-to-sidecar wire
+      protocol.  A program that passed either one bytes from a party it
+      did not trust ran that party's code.
+      No transport the library shipped reached either one: the C wrapper
+      that was to carry the protocol was out of scope for v0.3.0, and the
+      0.4.0 TCP bridge has its own state format (MADD-ANO-054 records the
+      bridge's own unpickling).  So the exposure was a program's own use of
+      the two functions, which is why this is `minor` where MADD-ANO-054 is
+      `critical`.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `minor` because nothing the library shipped delivered untrusted
+      bytes to either function; a program had to do that itself, as it
+      would have to for `pickle.loads`.  It is a defect rather than a
+      documented property because both functions present themselves as a
+      state handle and a wire protocol, which is what a reader passes
+      untrusted bytes to.
+      Graded `context_dependent`: whether any untrusted party could supply
+      the bytes is entirely a property of the program that called them.
+      Where one could, the consequence was code execution in the
+      simulation's process.
+    affected_components:
+      - "maddening.fmi.fmu_state.deserialize_fmu_state"
+      - "maddening.fmi.fmu_state.FMUState"
+      - "maddening.fmi.sidecar.FmuSidecar.handle"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1: pass `deserialize_fmu_state` only an `FMUState`
+      that `serialize_fmu_state` produced in the same process, and
+      `FmuSidecar.handle` only requests from a trusted, in-process caller.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved in 0.4.0 (b8b2ced, 2026-09-19).  `FMUState`'s payload is an
+      `npz` of plain arrays plus the key paths that rebuild the tree, read
+      with `allow_pickle=False`, so `deserialize_fmu_state` executes
+      nothing; a payload written before 0.4.0 is a pickle and is refused by
+      name, with a message saying to take a fresh snapshot.
+      `serialize_fmu_state` refuses a leaf that is not a plain array or a
+      key that is not a string, both of which it used to pickle.
+      What remains: `FmuSidecar.handle` still speaks the pickled protocol,
+      now only when the sidecar is built with
+      `SidecarConfig(allow_pickle_rpc=True)`; by default it refuses and
+      says why.  A program that turns it on must give it only trusted,
+      in-process requests.
+    verification:
+      - "tests/fmi/test_fmu_state.py::TestNoPickle::test_a_pickle_payload_is_refused_rather_than_unpickled"
+      - "tests/fmi/test_sidecar.py::TestWireProtocol::test_the_pickled_rpc_protocol_is_refused_unless_opted_into"
     github_issue: null

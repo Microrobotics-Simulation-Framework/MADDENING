@@ -535,6 +535,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history: check_anomalies reads a retired anomaly's
+          # last committed status from git (the tree no longer holds the
+          # entry), and refuses the retirement in a shallow clone, whose
+          # history may stop before the commit that removed it.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5

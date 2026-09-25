@@ -227,7 +227,8 @@ def _static_counts() -> dict[str, tuple[int, int]]:
         per_docstring = [len(parser.get_examples(d)) for d in _docstrings(path)]
         per_docstring = [n for n in per_docstring if n]
         if per_docstring:
-            found[str(rel)] = (len(per_docstring), sum(per_docstring))
+            # POSIX, as pytest spells a node id and EXAMPLES_PER_FILE keys it.
+            found[rel.as_posix()] = (len(per_docstring), sum(per_docstring))
     return found
 
 

@@ -1,4 +1,7 @@
-"""``coupling_diagnostics()`` under waveform relaxation counts every sweep.
+"""``coupling_diagnostics()`` counts every sweep of ``waveform_iterations > 1``.
+
+(The sweeps are restarts of one fixed-point solve, not waveform
+relaxation: MADD-ANO-027.)
 
 A group with ``subcycling=True`` over nodes at different timesteps runs
 ``waveform_iterations`` sweeps per step.  Each sweep is a fixed-point
@@ -318,13 +321,25 @@ def test_a_capped_first_sweep_is_continued_by_the_later_ones(runs):
     assert _hex_state(swept) == _hex_state(converged)
 
 
-def test_the_sub_step_interpolation_modes_coincide_at_a_converged_step(runs):
-    """Both ends of the interpolation are estimates of the end-of-step value.
+def test_the_interpolation_modes_coincide_when_the_source_is_scheduled_after(runs):
+    """With the sub-cycled node's source scheduled after it, the modes are one.
 
-    So ``"constant"``, ``"linear"`` and ``"quadratic"`` (which is never
-    given its third value) return the same state to the last bit once the
-    step has converged.
+    Both ends of the interpolation are estimates of the end-of-step value:
+    the pass's incoming iterate and the in-pass state.  They differ only
+    by the in-pass change of a source scheduled *before* the sub-cycled
+    node, so the modes coincide under Jacobi, for a source scheduled after
+    the sub-cycled node, and at exact stationarity, and nowhere else
+    (MADD-ANO-027) -- not merely "at a converged step": with the slow node
+    scheduled first they differ by about the tolerance per step.  This
+    graph is the second case: ``fast`` (sub-cycled) is scheduled before
+    ``slow``, its only source, under Gauss-Seidel, so ``"constant"``,
+    ``"linear"`` and ``"quadratic"`` (which is never given its third value,
+    and is ``"linear"`` everywhere) return the same state to the last bit.
     """
+    gm = runs()["gm"]
+    # The precondition the claim rests on, checked rather than assumed.
+    assert gm.schedule == ["fast", "slow"], gm.schedule
+    assert gm._coupling_groups[0].iteration_mode == "gauss-seidel"
     states = [_hex_state(runs(boundary_interpolation=mode))
               for mode in ("constant", "linear", "quadratic")]
     assert runs()["report"]["converged"] is True

@@ -30,7 +30,10 @@ three are the timing goals::
     stencil      checklist 1 and 3 for ``ShardedStencilNode``: a 2-D field
                  with a sharded ``StaticArray``, forward rollout and the
                  adjoint (initial field and a parameter) against the
-                 unsharded node.                    -> stencil.json
+                 unsharded node, with periodic ends at every size and, at
+                 the smallest, ``"edge"`` ends (the wrapper's default)
+                 and Dirichlet ends held through a boundary input.
+                                                    -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
                  a graph, with a non-local correction, forward and adjoint
                  against ``HybridNode(inner)``.    -> hybrid.json
@@ -50,12 +53,20 @@ three are the timing goals::
     checklist    the five checklist goals, in the order above.
     all          all eight, in the order above.
 
-Every goal records ``checks`` (name, measured value, limit, passed) and
-``passed`` in its JSON, prints a failed check as ``CHECK FAILED``, and the
-runner exits 1 when any check failed.  ``--summarise DIR`` reads the JSON
-files back and prints the checklist verdict, the per-goal tables and the
-``ppermute`` vs ``all_to_all`` recommendation.  It does not import JAX, so
-it works on a laptop without a usable jaxlib.
+Every goal records ``checks`` (name, measured value, limit, the sense of
+the comparison, passed) and ``passed`` in its JSON, prints a failed check
+as ``CHECK FAILED``, and the runner exits 1 when any check failed.  A case
+the device count cannot express (the 2-D pencil mesh below 4 or on an odd
+count; a neighbour-direction swap on 2) is recorded as a check *not run*
+and printed as ``CHECK NOT RUN``: not a failure, but the goal does not
+read complete.  ``--summarise DIR`` reads the JSON files back and prints
+the checklist verdict, the per-goal tables and the ``ppermute`` vs
+``all_to_all`` recommendation.  It re-derives every check's pass/fail from
+its value, limit and sense rather than trusting the recorded flag, and
+fails a record that disagrees.  A checklist item reads ``CLOSED`` only
+when every goal deciding it passed with every check run, on real GPUs,
+not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4) devices.  It does
+not import JAX, so it works on a laptop without a usable jaxlib.
 
 Every timed callable receives inputs that were placed on the device mesh
 once, with the ``NamedSharding`` the compiled executable expects, outside
@@ -67,7 +78,8 @@ steady-state timings, on both the sharded and the unsharded side.
 The recommendation only counts rows from a real accelerator run (not
 ``--dry-run``) on at least ``MIN_DECIDING_DEVICES`` (4) devices; with
 ``--allow-fewer-devices`` (recorded in the JSON) a 2- or 3-device run may
-decide.  A single device performs no exchange and never decides.
+decide.  A single device performs no exchange and never decides.  The flag
+is about the ranking only: it never lets a checklist item close.
 
 Sizes default to the hardware: on GPUs the cell counts are
 ``1e5, 3e5, 1e6``; on CPU (or with ``--dry-run``) they are a few hundred
@@ -131,13 +143,25 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
 DRY_RUN_CELLS = (256, 1024)
-MIN_DECIDING_DEVICES = 4        # the session's question is "on 4 GPUs"
+#: The session's question is "on 4 GPUs".  A transport ranking may decide
+#: on fewer with ``--allow-fewer-devices``; a checklist item never closes on
+#: fewer, whatever that flag says: on 2 devices a shard's left and right
+#: neighbour are the same device, so a halo that swaps directions passes
+#: every halo and stencil check, and the 2-D pencil cases do not run.
+MIN_DECIDING_DEVICES = 4
 MIN_DEVICES_WITH_ESCAPE = 2     # --allow-fewer-devices: still needs a real exchange
+
+#: Global-edge conditions the ``stencil`` goal runs, at its smallest size
+#: (the largest runs ``"periodic"`` only, to stay inside its time box).
+#: ``"edge"`` is ``ShardedStencilNode``'s default fill; ``"dirichlet"`` holds
+#: a boundary input beyond the grid, applied by the node after the exchange.
+STENCIL_BOUNDARIES = ("periodic", "edge", "dirichlet")
+STENCIL_WALL = 1.5              # the Dirichlet value; unlike any edge cell of the field
 
 #: The sharding checklist's goals, cheapest first, then the timing goals.
 CHECKLIST_GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid")
@@ -583,23 +607,35 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
     """The nodes of the checklist goals (class factory: JAX is imported late)."""
 
     class Field2D(SimulationNode):
-        """A 2-D field solver: periodic diffusion relaxing towards a far field.
+        """A 2-D field solver: diffusion relaxing towards a far field.
 
         ``f <- f + dt * (diffusivity * mask * lap(f) + exchange * (ambient - f))``
         with the 5-point Laplacian.  Axis 0 is the one a
         ``ShardedStencilNode`` shards; the halo along axis 1 is filled on
         each device.  ``mask`` is a ``StaticArray(replication="shard")``,
         so every sharded run also exercises the per-device static path.
-        ``update`` pads the whole field periodically, ``update_padded``
-        receives the wrapper's periodic halos, and both then run the same
-        arithmetic: sharded, the node is the unsharded node up to where XLA
-        places the operations.
+        ``update`` pads the whole field itself, ``update_padded`` receives
+        the wrapper's halos, and both then run the same arithmetic:
+        sharded, the node is the unsharded node up to where XLA places the
+        operations.
+
+        ``boundary`` is what lies beyond the grid, on both axes
+        (``STENCIL_BOUNDARIES``): ``"periodic"`` wraps and ``"edge"``
+        repeats the edge cell -- the wrapper's fill of the same name does
+        it, sharded -- and ``"dirichlet"`` holds the boundary input
+        ``wall`` there: the wrapper fills ``"edge"`` and ``update_padded``
+        overwrites the halos at the *global* edges, finding them along
+        the sharded axis from ``shard_info``.
         """
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
-                     exchange: float = 0.0, timestep: float = 0.1) -> None:
+                     exchange: float = 0.0, timestep: float = 0.1,
+                     boundary: str = "periodic") -> None:
             super().__init__(name=name, timestep=timestep, diffusivity=diffusivity,
                              exchange=exchange)
+            if boundary not in STENCIL_BOUNDARIES:
+                raise ValueError(f"boundary {boundary!r} is not one of {STENCIL_BOUNDARIES}")
+            self.boundary = boundary
             self._shape = (int(ny), int(nx))
             j = np.arange(ny, dtype=np.float32)[:, None]
             i = np.arange(nx, dtype=np.float32)[None, :]
@@ -626,7 +662,10 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             return {"f": jnp.asarray(f.astype(np.float32))}
 
         def boundary_input_spec(self) -> dict:
-            return {"ambient": BoundaryInputSpec(shape=(), description="far-field value")}
+            spec = {"ambient": BoundaryInputSpec(shape=(), description="far-field value")}
+            if self.boundary == "dirichlet":
+                spec["wall"] = BoundaryInputSpec(shape=(), description="value beyond the grid")
+            return spec
 
         def param_specs(self) -> dict:
             return {**super().param_specs(),
@@ -640,10 +679,23 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                    + f_pad[1:-1, 2:] - 4.0 * f)
             return f + dt * (p["diffusivity"] * mask * lap + p["exchange"] * (ambient - f))
 
+        @staticmethod
+        def _hold_walls(f_pad, wall, first, last):
+            """Dirichlet halos: rows beyond the global edge of axis 0 (``first``
+            / ``last``: this block holds that edge) and both columns of
+            axis 1, which is whole on every device here."""
+            f_pad = f_pad.at[0, :].set(jnp.where(first, wall, f_pad[0, :]))
+            f_pad = f_pad.at[-1, :].set(jnp.where(last, wall, f_pad[-1, :]))
+            return f_pad.at[:, 0].set(wall).at[:, -1].set(wall)
+
         def update(self, state, boundary_inputs, dt, *, params=None):
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
-            f_pad = jnp.pad(state["f"], 1, mode="wrap")
+            mode = {"periodic": "wrap", "edge": "edge", "dirichlet": "edge"}[self.boundary]
+            f_pad = jnp.pad(state["f"], 1, mode=mode)
+            if self.boundary == "dirichlet":
+                wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
+                f_pad = self._hold_walls(f_pad, wall, True, True)
             mask = jnp.asarray(self._static["mask"].value)
             return {"f": self._new(f_pad, mask, ambient, p, dt)}
 
@@ -652,6 +704,11 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
             f_pad = state_padded["f"]
+            if self.boundary == "dirichlet":
+                wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
+                offset, extent = (shard_info or {}).get(0, (0, f_pad.shape[0] - 2))
+                f_pad = self._hold_walls(f_pad, wall, offset == 0,
+                                         offset + extent == self._shape[0])
             # The static is halo-exchanged along the sharded axis only.
             mask = static_padded["mask"][1:-1]
             return {"f": f_pad.at[1:-1, 1:-1].set(self._new(f_pad, mask, ambient, p, dt))}
@@ -804,24 +861,85 @@ def _rel_each(a, b) -> float:
     return float(np.max(rel)) if rel.size else 0.0
 
 
+#: How a check's ``value`` is compared with its ``limit``.  Recorded with
+#: every check (schema 4) so that ``--summarise`` can re-derive pass/fail
+#: instead of trusting the recorded flag.
+SENSES = ("<=", "==")
+
+
+def expected_pass(c: dict) -> bool | None:
+    """Pass/fail of a check, re-derived from its ``value``, ``limit`` and
+    ``sense``; ``None`` when the record cannot be judged (an unknown sense,
+    or a value of the wrong type for its sense).
+
+    ``"<="``: a finite number no greater than the limit.  ``"=="``: a
+    yes/no value equal to the limit (``true``).  A schema-3 record has no
+    ``sense``; it is read from the limit's type, which is how schema 3
+    wrote them.  The recording side (:func:`check`, :func:`check_that`)
+    uses this same rule, so a record that disagrees with it was not
+    written by this runner as it stands.
+    """
+    value, limit = c.get("value"), c.get("limit")
+    sense = c.get("sense", "==" if isinstance(limit, bool) else "<=")
+    if sense == "==":
+        if not (isinstance(value, bool) and isinstance(limit, bool)):
+            return None
+        return value == limit
+    if sense == "<=":
+        if (isinstance(value, bool) or isinstance(limit, bool)
+                or not isinstance(value, (int, float))
+                or not isinstance(limit, (int, float))):
+            return None
+        return math.isfinite(value) and value <= limit
+    return None
+
+
 def check(name: str, value, limit: float) -> dict:
     """A measured ``value`` that must not exceed ``limit``; non-finite fails."""
-    v = float(value)
-    return {"name": name, "value": v, "limit": float(limit),
-            "passed": bool(math.isfinite(v) and v <= limit)}
+    c = {"name": name, "value": float(value), "limit": float(limit), "sense": "<="}
+    c["passed"] = bool(expected_pass(c))
+    return c
 
 
 def check_that(name: str, ok, detail: str = "") -> dict:
     """A yes/no check (a refusal raised, an array partitioned, ...)."""
-    return {"name": name, "value": bool(ok), "limit": True, "passed": bool(ok),
-            "detail": detail}
+    c = {"name": name, "value": bool(ok), "limit": True, "sense": "==", "detail": detail}
+    c["passed"] = bool(expected_pass(c))
+    return c
+
+
+def check_not_run(name: str, why: str) -> dict:
+    """A check this run could not make (too few devices for the case, say).
+
+    Recorded rather than silently skipped, so that the goal cannot read
+    as complete: ``passed`` is ``False`` for any reader that looks only at
+    that, the runner reports it as ``NOT RUN`` rather than as a failure
+    (it exits 0 for it), and ``--summarise`` keeps the checklist items the
+    goal decides open.
+    """
+    return {"name": name, "value": None, "limit": None, "sense": None, "passed": False,
+            "not_run": True, "detail": why}
 
 
 def finish_checks(out: dict, checks: list) -> dict:
-    """Store ``checks`` and ``passed`` (no checks at all is not a pass)."""
+    """Store ``checks`` and ``passed``: every check ran and passed, and there
+    was at least one (no checks is not a pass, and neither is a check not run)."""
     out["checks"] = checks
     out["passed"] = bool(checks) and all(c["passed"] for c in checks)
     return out
+
+
+def check_status(c: dict) -> str:
+    """``"passed"``, ``"failed"``, ``"not run"``, or ``"inconsistent"`` -- the
+    recorded ``passed`` disagrees with what the value, limit and sense say,
+    or the record cannot be judged.  ``"inconsistent"`` counts as a failure."""
+    if c.get("not_run"):
+        return "not run" if c.get("passed") is False else "inconsistent"
+    want = expected_pass(c)
+    recorded = c.get("passed")
+    if want is None or not isinstance(recorded, bool) or recorded != want:
+        return "inconsistent"
+    return "passed" if want else "failed"
 
 
 def _parity_checks(prefix: str, diff: dict, limit: float) -> list:
@@ -1192,6 +1310,16 @@ def _names_both(message: str, cells: int, devices: int) -> bool:
     return f"{cells} cells" in message and f"{devices} devices" in message
 
 
+def _pencil_mesh_fits(n_devices: int) -> bool:
+    """The ``2 x (D / 2)`` pencil mesh the 2-D cases use exists for ``D``."""
+    return n_devices >= 4 and n_devices % 2 == 0
+
+
+def _pencil_mesh_needs(n_devices: int) -> str:
+    return (f"needs an even device count >= 4 for a 2 x (D/2) pencil mesh; this run has "
+            f"{n_devices}")
+
+
 def run_indivisible(args, out: dict) -> dict:
     """The stencil and pointwise wrappers refuse a grid the mesh cannot split,
     at construction and in the caller's terms; the unstructured wrapper
@@ -1232,7 +1360,7 @@ def run_indivisible(args, out: dict) -> dict:
                    _names_both(msg, ny_bad, D)),
     ]
 
-    if D >= 4 and D % 2 == 0:
+    if _pencil_mesh_fits(D):
         # A pencil mesh: the refusal names the axis that does not divide.
         nz = D // 2
         rows, cols = 16, 8 * nz + 1
@@ -1248,6 +1376,9 @@ def run_indivisible(args, out: dict) -> dict:
             check_that("pencil refusal names spatial axis 1 and both numbers",
                        "spatial axis 1" in msg and _names_both(msg, cols, nz)),
         ]
+    else:
+        checks.append(check_not_run("pencil (2-D mesh) refusal naming the axis that does "
+                                    "not divide", _pencil_mesh_needs(D)))
 
     # The rule is the stencil path's: the unstructured wrapper carries a
     # padded layout and takes an uneven split.
@@ -1347,9 +1478,21 @@ def run_halo(args, out: dict) -> dict:
     checks = []
     ny, nx = field_shape(max(args.cells), D)
     meshes = [("1d", create_device_mesh(shape=(D,)), (D, 1), P(MESH_AXIS, None))]
-    if D >= 4 and D % 2 == 0:
+    if _pencil_mesh_fits(D):
         meshes.append(("2d", create_device_mesh(shape=(2, D // 2)), (2, D // 2),
                        P("spatial_y", "spatial_z")))
+    else:
+        checks.append(check_not_run("2d pencil mesh: every boundary mode and width, forward "
+                                    "and adjoint vs NumPy", _pencil_mesh_needs(D)))
+    if D < 3:
+        # The forward and backward ring permutations are the same pair on
+        # two devices, so no case on this mesh can tell a correct exchange
+        # from one that takes each halo from the wrong neighbour.
+        checks.append(check_not_run(
+            "1d mesh: left and right neighbours are different devices, so a halo taken "
+            "from the wrong neighbour shows",
+            f"needs >= 3 devices on the axis; on {D} both neighbours of a shard are the "
+            "same device"))
     cases = []
     for label, mesh, (py, pz), spec in meshes:
         nx_m = -(-nx // pz) * pz
@@ -1458,12 +1601,12 @@ def _loss_weight(ny: int, nx: int) -> np.ndarray:
     return (1.0 + 0.5 * np.cos(2 * np.pi * (x - 2 * y))).astype(np.float32)
 
 
-def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight):
+def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_inputs):
     """``(rollout, value_and_grad)``, both jitted, both through the public
     ``update(..., params=)`` -- the call a graph traces into its step."""
     def advance(f0, d, n):
         def body(_, f):
-            return node.update({"f": f}, {}, dt, params={"diffusivity": d})["f"]
+            return node.update({"f": f}, boundary_inputs, dt, params={"diffusivity": d})["f"]
         return lax.fori_loop(0, n, body, f0)
 
     def loss(f0, d):
@@ -1474,27 +1617,41 @@ def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight):
             jax.jit(jax.value_and_grad(loss, argnums=(0, 1))))
 
 
+def stencil_cases(cells) -> list:
+    """``(cells, boundary)`` pairs the ``stencil`` goal runs: every
+    ``STENCIL_BOUNDARIES`` entry at the smallest size, ``"periodic"`` at
+    the others."""
+    smallest = min(cells)
+    return [(n, b) for n in cells
+            for b in (STENCIL_BOUNDARIES if n == smallest else ("periodic",))]
+
+
 def run_stencil(args, out: dict) -> dict:
-    """A 2-D stencil field sharded along axis 0 against the unsharded node."""
+    """A 2-D stencil field sharded along axis 0 against the unsharded node,
+    under each global-edge condition of :func:`stencil_cases`."""
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
     results, checks = [], []
-    for n_hint in args.cells:
+    for n_hint, boundary in stencil_cases(args.cells):
         ny, nx = field_shape(n_hint, D)
-        ref = Field2D("field", ny, nx, exchange=0.3)
-        sharded = ShardedStencilNode(Field2D("field", ny, nx, exchange=0.3), mesh,
-                                     axis_map={MESH_AXIS: 0}, boundary="periodic")
+        ref = Field2D("field", ny, nx, exchange=0.3, boundary=boundary)
+        # "dirichlet" is the node's own condition over the wrapper's default
+        # "edge" fill; the other two are the wrapper's fill of that name.
+        sharded = ShardedStencilNode(
+            Field2D("field", ny, nx, exchange=0.3, boundary=boundary), mesh,
+            axis_map={MESH_AXIS: 0}, boundary="edge" if boundary == "dirichlet" else boundary)
+        bi = {"wall": jnp.float32(STENCIL_WALL)} if boundary == "dirichlet" else {}
         dt, d = ref.delta_t, jnp.float32(0.2)
         weight = jnp.asarray(_loss_weight(ny, nx))
         f0 = {"unsharded": ref.initial_state()["f"], "sharded": sharded.initial_state()["f"]}
-        entry = {"cells": ny * nx, "shape": [ny, nx], "n_devices": D, "steps": args.steps,
-                 "grad_steps": args.grad_steps,
+        entry = {"cells": ny * nx, "shape": [ny, nx], "boundary": boundary, "n_devices": D,
+                 "steps": args.steps, "grad_steps": args.grad_steps,
                  "input_partitioned": _is_partitioned(f0["sharded"], D),
                  "forward": {}, "gradient": {}}
         got = {}
         for label, node in (("unsharded", ref), ("sharded", sharded)):
-            rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight)
+            rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight, bi)
             x = f0[label]
             fwd_compile_s, _ = compile_seconds(rollout, x, d)
             final = np.asarray(jax.device_get(rollout(x, d)))
@@ -1513,7 +1670,7 @@ def run_stencil(args, out: dict) -> dict:
         entry["gradient"]["parity_loss"] = _rel_each(l_s, l_u)
         entry["gradient"]["parity_grad_initial_field"] = _diff(gf_s, gf_u)
         entry["gradient"]["parity_grad_diffusivity"] = _rel_each(gd_s, gd_u)
-        prefix = f"{ny}x{nx}"
+        prefix = f"{ny}x{nx} {boundary}"
         checks.append(check_that(f"{prefix}: sharded field is partitioned over {D} devices",
                                  entry["input_partitioned"]))
         checks += _parity_checks(f"{prefix} forward f vs unsharded", entry["forward"]["parity_f"],
@@ -1528,7 +1685,7 @@ def run_stencil(args, out: dict) -> dict:
                                  f"{gd_u:.6e}"))
         results.append(entry)
         fwd = entry["forward"]
-        print(f"[stencil] {prefix:>11} fwd {fwd['sharded']['rollout']['ms_per_step']:8.3f} ms/step"
+        print(f"[stencil] {prefix:>21} fwd {fwd['sharded']['rollout']['ms_per_step']:8.3f} ms/step"
               f" (unsharded {fwd['unsharded']['rollout']['ms_per_step']:8.3f})"
               f"  max_rel f {fwd['parity_f']['max_rel']:.1e}"
               f"  grad field {entry['gradient']['parity_grad_initial_field']['max_rel']:.1e}"
@@ -1824,7 +1981,11 @@ def run_coupled(args, out: dict) -> dict:
 
 
 def check_checklist_device_count(n_devices: int) -> None:
-    """A sharding check on one device compares a program with itself."""
+    """A sharding check on one device compares a program with itself.
+
+    2 or 3 devices run (to prove the script, or to localise a failure),
+    but their results never close a checklist item: see
+    ``MIN_DECIDING_DEVICES`` and :func:`closes_the_gap`."""
     if n_devices < MIN_DEVICES_WITH_ESCAPE:
         raise SystemExit(f"the checklist goals need >= {MIN_DEVICES_WITH_ESCAPE} devices "
                          f"(got --n-devices {n_devices}): on one device nothing is sharded")
@@ -1929,23 +2090,52 @@ def _fmt_speedup(s) -> str:
 
 def closes_the_gap(doc: dict) -> bool:
     """Can this run close the CPU-only gap?  Real GPUs, not a dry run, on
-    ``>= 4`` devices (``>= 2`` when it recorded ``--allow-fewer-devices``)."""
+    ``>= MIN_DECIDING_DEVICES`` (4) devices -- whatever
+    ``--allow-fewer-devices`` says.  That flag lets a *transport ranking*
+    decide on 2-3 devices; it never closes a checklist item, because on
+    two devices a halo taken from the wrong neighbour passes every halo
+    and stencil check, and the 2-D pencil cases do not run."""
     env = doc.get("environment", {})
     n = int(doc.get("n_devices") or doc.get("config", {}).get("n_devices") or 0)
-    allow = bool(doc.get("allow_fewer_devices", False))
     return (env.get("platform") == "gpu" and not doc.get("dry_run", False)
-            and (n >= MIN_DECIDING_DEVICES or (allow and n >= MIN_DEVICES_WITH_ESCAPE)))
+            and n >= MIN_DECIDING_DEVICES)
+
+
+def _file_flag_consistent(doc: dict) -> bool:
+    """The file-level ``passed`` says what its checks say: every check ran
+    and passed, and there was at least one."""
+    statuses = [check_status(c) for c in doc["checks"]]
+    want = bool(statuses) and all(s == "passed" for s in statuses)
+    return isinstance(doc.get("passed"), bool) and doc["passed"] == want
 
 
 def goal_verdict(docs: list) -> str:
-    """``PASS`` / ``FAIL`` / ``not run`` / ``no checks`` over every file of a goal."""
+    """``PASS`` / ``FAIL`` / ``INCOMPLETE`` / ``not run`` / ``no checks`` over
+    every file of a goal.
+
+    Pass/fail is re-derived from each check's value, limit and sense
+    (:func:`check_status`), not read from the recorded flag: a flag that
+    disagrees with them, at the check or the file level, is a ``FAIL``.
+    ``INCOMPLETE``: nothing failed, but a check was recorded as not run.
+    """
     if not docs:
         return "not run"
     if any("checks" not in d for d in docs):
         return "no checks"          # schema 2 files recorded none
-    if any(not c["passed"] for d in docs for c in d["checks"]):
+    statuses = [check_status(c) for d in docs for c in d["checks"]]
+    if ("failed" in statuses or "inconsistent" in statuses
+            or not all(_file_flag_consistent(d) for d in docs)):
         return "FAIL"
-    return "PASS" if all(d.get("passed") for d in docs) else "no checks"
+    if "not run" in statuses:
+        return "INCOMPLETE"
+    return "PASS" if "passed" in statuses else "no checks"
+
+
+def _why_still_open(docs: list) -> str:
+    if any(d.get("dry_run", False) or d.get("environment", {}).get("platform") != "gpu"
+           for d in docs):
+        return "open: passed on CPU / dry run only"
+    return f"open: passed on fewer than {MIN_DECIDING_DEVICES} devices"
 
 
 def checklist_status(docs_by_goal: dict) -> dict:
@@ -1954,50 +2144,84 @@ def checklist_status(docs_by_goal: dict) -> dict:
     for item, (_claim, goals) in CHECKLIST.items():
         verdicts = {g: goal_verdict(docs_by_goal.get(g, [])) for g in goals}
         detail = ", ".join(f"{g} {v}" for g, v in verdicts.items())
+        docs = [d for g in goals for d in docs_by_goal.get(g, [])]
         if "FAIL" in verdicts.values():
             status[item] = ("FAILED", detail)
         elif any(v != "PASS" for v in verdicts.values()):
             status[item] = ("open", detail)
-        elif all(closes_the_gap(d) for g in goals for d in docs_by_goal[g]):
+        elif all(closes_the_gap(d) for d in docs):
             status[item] = ("CLOSED", detail)
         else:
-            status[item] = ("open: passed on CPU / dry run only", detail)
+            status[item] = (_why_still_open(docs), detail)
     return status
 
 
 def _fmt_value(c: dict) -> str:
-    v = c["value"]
-    return str(v) if isinstance(v, bool) else f"{v:.3e}"
+    v = c.get("value")
+    if v is None:
+        return "not run"
+    return str(v) if isinstance(v, bool) or not isinstance(v, (int, float)) else f"{v:.3e}"
+
+
+def _why_failed(c: dict) -> str:
+    """One line for a check that failed or whose record is inconsistent."""
+    line = f"{c.get('name')}: {_fmt_value(c)} (limit {c.get('limit')})"
+    if check_status(c) == "inconsistent":
+        if c.get("not_run"):
+            why = "a check that was not run cannot pass"
+        else:
+            want = expected_pass(c)
+            why = (f"value, limit and sense {c.get('sense')!r} cannot be judged" if want is None
+                   else f"the value {'passes' if want else 'fails'} its limit")
+        line += f" -- recorded passed={c.get('passed')!r}, but {why}"
+    elif c.get("detail"):
+        line += f" -- {c['detail']}"
+    return line
 
 
 def _print_runs_and_checklist(docs_by_goal: dict) -> int:
-    """The per-file run table, the checklist verdict and every failed check.
-    Returns the number of failed checks."""
+    """The per-file run table, the checklist verdict, every failed check and
+    every check not run.  Returns the number of failures: failed checks,
+    inconsistent records, and files whose ``passed`` disagrees with their
+    checks."""
     print("Runs (one line per JSON file)")
     print(f"{'goal':<12} {'platform':<8} {'dev':>3}  {'device kind':<26} {'jax / jaxlib':<17} "
           f"{'dry run':<7} {'checks':>7}  verdict")
-    failed = []
+    failed, not_run, bad_files = [], [], []
     for goal in ALL_GOALS:
         for doc in docs_by_goal.get(goal, []):
             env = doc.get("environment", {})
             checks = doc.get("checks")
-            n_ok = "-" if checks is None else f"{sum(c['passed'] for c in checks)}/{len(checks)}"
+            statuses = [check_status(c) for c in checks or []]
+            n_ok = "-" if checks is None else f"{statuses.count('passed')}/{len(checks)}"
             n_dev = doc.get("n_devices") or doc.get("config", {}).get("n_devices", "?")
             kinds = ",".join(env.get("device_kinds", [])) or "?"
             print(f"{goal:<12} {env.get('platform', '?'):<8} {n_dev:>3}  {kinds[:26]:<26} "
                   f"{env.get('jax', '?') + ' / ' + env.get('jaxlib', '?'):<17} "
                   f"{'yes' if doc.get('dry_run') else 'no':<7} {n_ok:>7}  "
                   f"{goal_verdict([doc])}")
-            failed += [(goal, c) for c in (checks or []) if not c["passed"]]
-    print("\nChecklist (CLOSED needs a PASS from real GPUs, not a dry run, on >= 4 devices)")
+            for c, s in zip(checks or [], statuses):
+                if s in ("failed", "inconsistent"):
+                    failed.append((goal, c))
+                elif s == "not run":
+                    not_run.append((goal, c))
+            if checks is not None and not _file_flag_consistent(doc):
+                bad_files.append((goal, doc.get("passed")))
+    print(f"\nChecklist (CLOSED needs a PASS from real GPUs, not a dry run, on >= "
+          f"{MIN_DECIDING_DEVICES} devices, with every check run)")
     for item, (status, detail) in checklist_status(docs_by_goal).items():
         print(f"{item}  {CHECKLIST[item][0]:<74} {status}  [{detail}]")
-    if failed:
+    if failed or bad_files:
         print("\nFailed checks")
         for goal, c in failed:
-            print(f"  [{goal}] {c['name']}: {_fmt_value(c)} (limit {c['limit']})"
-                  + (f" -- {c['detail']}" if c.get("detail") else ""))
-    return len(failed)
+            print(f"  [{goal}] {_why_failed(c)}")
+        for goal, flag in bad_files:
+            print(f"  [{goal}] file records passed={flag!r}, which its checks do not bear out")
+    if not_run:
+        print("\nChecks not run (each keeps its checklist items open)")
+        for goal, c in not_run:
+            print(f"  [{goal}] {c.get('name')} -- {c.get('detail', '')}")
+    return len(failed) + len(bad_files)
 
 
 def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
@@ -2048,7 +2272,9 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
         for doc in docs_by_goal["stencil"]:
             for r in doc["results"]:
                 fw, gr = r["forward"], r["gradient"]
-                print(f"{r['shape'][0]:>5}x{r['shape'][1]:<5} f {fw['parity_f']['max_rel']:.1e}  "
+                # schema 3 ran periodic ends only and did not record them
+                print(f"{r['shape'][0]:>5}x{r['shape'][1]:<5} {r.get('boundary', 'periodic'):<9} "
+                      f"f {fw['parity_f']['max_rel']:.1e}  "
                       f"loss {gr['parity_loss']:.1e}  grad field "
                       f"{gr['parity_grad_initial_field']['max_rel']:.1e}  grad d "
                       f"{gr['parity_grad_diffusivity']:.1e}  fwd "
@@ -2068,8 +2294,10 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
 
 
 def summarise(directory: Path) -> int:
-    """Print the verdicts and tables; 0 = every recorded check passed,
-    1 = no goal JSON under ``directory``, 3 = at least one check failed."""
+    """Print the verdicts and tables; 0 = no check failed (checks recorded
+    as not run are listed and keep their items open, but are not
+    failures), 1 = no goal JSON under ``directory``, 3 = at least one check
+    failed, or a recorded pass/fail disagrees with its value and limit."""
     docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
     if not any(docs_by_goal.values()):
         print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")
@@ -2147,7 +2375,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--allow-fewer-devices", action="store_true",
                     help=f"let a real-GPU exchange run on 2..{MIN_DECIDING_DEVICES - 1} devices "
                          f"decide the transport (default: only >= {MIN_DECIDING_DEVICES} decide); "
-                         "recorded in the JSON")
+                         "recorded in the JSON.  It never closes a checklist item, which "
+                         f"needs >= {MIN_DECIDING_DEVICES} devices")
     ap.add_argument("--warmup", type=int, help="untimed calls before timing (default 5; dry-run 1)")
     ap.add_argument("--repeats", type=int, help="timed calls (default 20; dry-run 3)")
     ap.add_argument("--steps", type=int, help="steps per timed block for --goal forward (default 20; dry-run 3)")
@@ -2219,7 +2448,7 @@ def main(argv: list[str] | None = None) -> int:
     runners = {"exchange": run_exchange, "forward": run_forward, "gradient": run_gradient,
                "indivisible": run_indivisible, "halo": run_halo, "coupled": run_coupled,
                "stencil": run_stencil, "hybrid": run_hybrid}
-    failed_goals = []
+    failed_goals, incomplete_goals = [], []
     for goal in goals:
         doc = {
             "schema_version": SCHEMA_VERSION,
@@ -2239,17 +2468,29 @@ def main(argv: list[str] | None = None) -> int:
         path = args.out / f"{goal}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2)
-        failed = [c for c in doc["checks"] if not c["passed"]]
+        not_run = [c for c in doc["checks"] if c.get("not_run")]
+        ran = [c for c in doc["checks"] if not c.get("not_run")]
+        failed = [c for c in ran if not c["passed"]]
         print(f"wrote {path} ({doc['wall_s']:.1f} s)  checks "
-              f"{len(doc['checks']) - len(failed)}/{len(doc['checks'])} passed")
+              f"{len(ran) - len(failed)}/{len(ran)} passed"
+              + (f", {len(not_run)} not run" if not_run else ""))
         for c in failed:
             print(f"CHECK FAILED [{goal}] {c['name']}: {_fmt_value(c)} (limit {c['limit']})"
                   + (f" -- {c['detail']}" if c.get("detail") else ""))
-        if not doc["passed"]:
+        for c in not_run:
+            print(f"CHECK NOT RUN [{goal}] {c['name']} -- {c['detail']}")
+        # A check not run is not a failure (the exit status stays 0 for
+        # it), but it keeps the goal from reading complete in --summarise.
+        if failed or not ran:
             failed_goals.append(goal)
             if len(goals) > 1 and not args.keep_going and goal != goals[-1]:
                 print(f"STOPPED after {goal}: its checks failed (--keep-going runs the rest)")
                 break
+        elif not_run:
+            incomplete_goals.append(goal)
+    if incomplete_goals:
+        print(f"INCOMPLETE (checks not run; the checklist items stay open): "
+              f"{', '.join(incomplete_goals)}")
     if failed_goals:
         print(f"FAILED: {', '.join(failed_goals)}")
         return 1

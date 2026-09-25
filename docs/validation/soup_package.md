@@ -200,8 +200,11 @@ the directory holds any other SBOM.  It fails if a direct dependency
 SBOM, or is at a version outside its declared range.  It fails if a SOUP
 item §1 lists is missing, or is at a version outside the `pyproject.toml`
 range.  It also fails if a component has no purl, or a purl that disagrees
-with it, and if the file was edited after generation: the `serialNumber`
-is derived from the content.  Each failure names the discrepancy.
+with it, or no licence; if a component is reached by no path from the root
+in the dependency graph, so that no install brings it in; if the recorded
+Python is one `requires-python` refuses; and if the file was edited after
+generation: the `serialNumber` is derived from the content.  Each failure
+names the discrepancy.
 
 **Determinism.**  Components and the dependency graph are sorted, keys are
 written sorted, `metadata.timestamp` is the resolution cutoff (or

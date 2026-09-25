@@ -289,6 +289,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The coupling guide is re-measured on the release tree** (`benchmarks/results/coupling_sweep*_cpu.json`): its "fixed point that barely moves" row now
+  starts from `gauss-seidel`/`none`, not Jacobi at ω = 0.8; the heat benchmark fixtures run at half their Fourier number (the rod-end fix doubled
+  their gain; slab pairs are unstable above Fo = 3/8); `boundary_interpolation` modes can differ by O(tolerance), not "bit-identical"
 - **Sharded wrappers, audit of the frozen tree**: a params write followed by `compile()` reaches the sharded step, for a legacy-contract node's constant and for a halo width that follows a parameter (`HeatNode.stencil_order`) (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
   `ShardedUnstructuredNode` validates `domain_integral_axes` names.  The routes MADD-ANO-024's first fix left open (a part-full pipe's `pipe_radius`, `n_cells`, `stencil_order=3`, wrapped and unprobeable nodes) are closed.
   Action: re-run sharded results whose structural parameters were written after the wrapper was built, and sharded float64 stencil runs under x64.

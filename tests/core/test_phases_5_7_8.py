@@ -85,23 +85,6 @@ def _make_mixed_rate_springs(dt_fast=0.001, dt_slow=0.01,
     return gm
 
 
-def _make_uniform_reference(dt=0.001, k=50.0, c=1.0, m=1.0,
-                             pos_a=0.0, pos_b=3.0):
-    """Both springs at the fast rate for reference comparison."""
-    gm = GraphManager()
-    a = SpringDamperNode(name="fast", timestep=dt, stiffness=k,
-                         damping=c, mass=m, rest_length=1.0,
-                         initial_position=pos_a)
-    b = SpringDamperNode(name="slow", timestep=dt, stiffness=k,
-                         damping=c, mass=m, rest_length=1.0,
-                         initial_position=pos_b)
-    gm.add_node(a)
-    gm.add_node(b)
-    gm.add_edge("fast", "slow", "position", "anchor_position")
-    gm.add_edge("slow", "fast", "position", "anchor_position")
-    return gm
-
-
 # ==================================================================
 # Phase 5a: IQN auto interface-field detection
 # ==================================================================

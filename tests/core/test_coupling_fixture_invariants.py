@@ -334,8 +334,10 @@ _KNOWN_DISAGREEMENTS = {
 #: The cap below is set from the measurements, which are unaffected.
 #: Measured at the registry's caps, ``jac/fixed0.5/l2``
 #: leaves ``chain-5`` at an error estimate of 1.5e-04 (residual
-#: 2.4e-05) and ``heterogeneous-2000`` at 1.3e-04 (Gauss-Seidel) /
-#: 5.2e-03 (Jacobi), all against a 1e-04 threshold.  120 clears every
+#: 2.4e-05), and ``fixed0.5/l2`` leaves ``heterogeneous-2000`` at up
+#: to 9.2e-04 under Gauss-Seidel and 2.6e-02 under Jacobi over 25 steps
+#: (at the fixture's Fourier number of 0.2; 1.3e-04 and 5.2e-03 were
+#: measured at 0.4), all against a 1e-04 threshold.  120 clears every
 #: spring configuration and 60 every grid one; the grid gets the
 #: smaller number because 2 000 cells x 24 configurations is what makes
 #: this file slow.
@@ -1117,6 +1119,242 @@ def test_recorded_sweep_signatures_exclude_the_driver_nodes(name):
 
 
 # ---------------------------------------------------------------------------
+# The recorded files against the code: one live row per fixture
+# ---------------------------------------------------------------------------
+#
+# Everything below this block re-derives the guide's claims from the
+# committed JSON, which is only worth something while the JSON describes
+# the code.  It stopped doing so for three fixtures when the HeatNode
+# rod-end fix doubled their interface gain (MADD-ANO-007): ``slow-drift``
+# was recorded at 3.18 passes and 100% converged under ``gs/none/l2`` and
+# measured 25.00 and 0% on the tree that shipped the guide quoting it,
+# and nothing failed.  So each fixture's baseline row is re-measured here,
+# over the window the file records, and compared with the row.
+
+
+#: How far a live row may sit from its recorded one.  Iteration counts
+#: are integers averaged over the statistics window, so one step that
+#: rounds to a different pass count moves the mean by 1/50; the band
+#: allows a few such steps, which is what separates CI's two jaxlib
+#: versions from this box's, and nothing like the 3.18 -> 25.00 that a
+#: stale file showed.
+_LIVE_ITERATIONS_REL = 0.05
+_LIVE_ITERATIONS_ABS = 0.1
+_LIVE_CONVERGED_ABS = 0.05
+
+#: The row each fixture is re-measured under.  ``gs/none/l2`` is the
+#: sweep's own baseline and the cheapest row to run.
+_LIVE_LABEL = "gs/none/l2"
+
+
+def _live_row(name, fixture, label):
+    """Re-measure one recorded row the way the sweep measured it.
+
+    The statistics window is the sweep's (``profile_graph`` with
+    ``n_stat_steps``): from a reset state, the file's ``warmup`` steps,
+    then its ``stat_steps`` steps, reading every group's report after
+    each.  ``iterations_mean`` is the largest group's mean and
+    ``converged_fraction`` the smallest group's, as ``_measure`` records
+    them.
+    """
+    data = _recorded(name)
+    summary = data["fixtures"][fixture]
+    configs = {c.label: c for c in cf.sweep_configs(("l2", "interface"),
+                                                   extra_fields=True)}
+    config = configs[label]
+    if data.get("max_iterations_override"):
+        config = dataclasses.replace(
+            config, max_iterations=data["max_iterations_override"])
+    built = cf.FIXTURES[fixture].build(config)
+    gm = built.gm
+    gm.reset_state()
+    for _ in range(summary["warmup"]):
+        gm.step()
+    iterations = {key: [] for key in built.group_keys}
+    converged = {key: [] for key in built.group_keys}
+    for _ in range(summary["stat_steps"]):
+        gm.step()
+        diag = gm.coupling_diagnostics()
+        for key in built.group_keys:
+            iterations[key].append(int(diag[key]["iterations"]))
+            converged[key].append(bool(diag[key]["converged"]))
+    return {
+        "iterations_mean": max(float(np.mean(v)) for v in iterations.values()),
+        "converged_fraction": min(float(np.mean(v)) for v in converged.values()),
+        "predicted_rho": dict(built.predicted_rho),
+    }
+
+
+def _live_row_disagreements(recorded, live):
+    """What a live measurement says the recorded row gets wrong."""
+    out = []
+    want, got = recorded["iterations_mean"], live["iterations_mean"]
+    band = max(_LIVE_ITERATIONS_REL * want, _LIVE_ITERATIONS_ABS)
+    if not abs(got - want) <= band:
+        out.append(f"records {want:.2f} passes per step, the code takes {got:.2f}")
+    want, got = recorded["converged_fraction"], live["converged_fraction"]
+    if not abs(got - want) <= _LIVE_CONVERGED_ABS:
+        out.append(f"records {want:.0%} converged, the code converges {got:.0%}")
+    if recorded["predicted_rho"] != live["predicted_rho"]:
+        out.append(f"records predicted_rho {recorded['predicted_rho']}, the "
+                   f"fixture predicts {live['predicted_rho']}")
+    return out
+
+
+def _assert_live_row_matches(name, fixture, label=_LIVE_LABEL):
+    rows = {(r["fixture"], r["label"]): r
+            for r in _recorded(name)["rows"] if r.get("ok")}
+    wrong = _live_row_disagreements(rows[(fixture, label)],
+                                    _live_row(name, fixture, label))
+    assert not wrong, (
+        f"{name}: {fixture} {label} " + "; ".join(wrong) + ".  The file no "
+        f"longer describes the code: re-record it (the commands are in "
+        f"docs/developer_guide/coupling_algorithm_guide.md, 'How the numbers "
+        f"were produced') and update every figure quoted from it"
+    )
+
+
+def _live_cases():
+    """``(file, fixture)`` for every fixture of every recorded file.
+
+    Per push: the three fixtures a stale file actually hid (the heat
+    fixtures, whose gain the rod-end fix doubled -- ``expensive-pair`` and
+    ``heterogeneous`` at the sizes they were recorded at are a few
+    seconds each) and one spring fixture from each spring file.  The rest
+    are slow-marked, because each is a compile and up to a hundred steps
+    (40-60 s for the whole set on the CI runner); the per-push cases are
+    the siblings that keep every file checked on every push.
+    """
+    per_push = {
+        ("coupling_sweep_cpu.json", "slow-drift"),
+        ("coupling_sweep_cpu.json", "stiff-pair-0.5"),
+        ("coupling_sweep_expensive_cpu.json", "expensive-pair"),
+        ("coupling_sweep_expensive_cpu.json", "heterogeneous"),
+        ("coupling_sweep_cap16_cpu.json", "stiff-pair-0.8"),
+    }
+    cases = []
+    for name in _SWEEP_JSON:
+        for fixture in _recorded(name)["fixtures"]:
+            marks = () if (name, fixture) in per_push else (pytest.mark.slow,)
+            cases.append(pytest.param(name, fixture, marks=marks,
+                                      id=f"{name.removesuffix('.json')}-{fixture}"))
+    return cases
+
+
+@pytest.mark.parametrize("name,fixture", _live_cases())
+def test_every_recorded_fixture_still_measures_its_baseline_row(name, fixture):
+    """The recorded ``gs/none/l2`` row is what the fixture does today.
+
+    Iterations per step and the converged fraction, over the window the
+    file records, within :data:`_LIVE_ITERATIONS_REL` and
+    :data:`_LIVE_CONVERGED_ABS`; and the fixture's ``predicted_rho``
+    exactly.  A file that predates a change to the solver, the criterion
+    or a node the fixture is built from fails here rather than in a
+    reader's hands.
+    """
+    _assert_live_row_matches(name, fixture)
+
+
+def test_the_live_row_check_can_fail():
+    """The comparison objects to the staleness it exists to catch.
+
+    The ``slow-drift`` ``gs/none/l2`` row as recorded on 2026-09-18
+    against what the fixture measured after the rod-end fix (before its
+    Fourier number was halved), and the same row against the corrected
+    ``predicted_rho``: each disagreement has to be reported, and a row
+    that is inside the bands must not be.
+    """
+    old = {"iterations_mean": 3.18, "converged_fraction": 1.0,
+           "predicted_rho": {"jacobi": 0.45, "gauss-seidel": 0.2025,
+                             "groups": {}}}
+    after_the_fix = dict(old, iterations_mean=25.0, converged_fraction=0.0)
+    wrong = _live_row_disagreements(old, after_the_fix)
+    assert len(wrong) == 2 and "passes" in wrong[0] and "converged" in wrong[1], wrong
+
+    doubled = dict(old, predicted_rho={"jacobi": 0.9, "gauss-seidel": 0.81,
+                                       "groups": {}})
+    assert _live_row_disagreements(old, doubled) == [
+        "records predicted_rho {'jacobi': 0.45, 'gauss-seidel': 0.2025, "
+        "'groups': {}}, the fixture predicts {'jacobi': 0.9, "
+        "'gauss-seidel': 0.81, 'groups': {}}"]
+
+    # Two steps in fifty one pass longer, one step unconverged: inside.
+    near = dict(old, iterations_mean=3.22, converged_fraction=0.98)
+    assert _live_row_disagreements(old, near) == []
+
+
+# ---------------------------------------------------------------------------
+# The heat fixtures contract at the rate they predict
+# ---------------------------------------------------------------------------
+
+
+def _median_rate(built, n_steps=12):
+    """``1 - 1/amplification``, the median over *n_steps* steps."""
+    gm = built.gm
+    key = built.group_keys[0]
+    amps = []
+    for _ in range(n_steps):
+        gm.step()
+        amp = float(gm.coupling_diagnostics()[key]["amplification"])
+        if math.isfinite(amp) and amp >= 1.0:
+            amps.append(amp)
+    assert amps, "no usable contraction ratio in the window"
+    return 1.0 - 1.0 / float(np.median(amps))
+
+
+@pytest.mark.parametrize("builder,mode", [
+    ("slow-drift", "gauss-seidel"),
+    ("slow-drift", "jacobi"),
+    ("heterogeneous", "jacobi"),
+])
+def test_the_heat_fixtures_contract_at_the_rate_they_predict(builder, mode):
+    """``predicted_rho`` is the measured rate, not half of it.
+
+    ``HeatNode`` imposes its Dirichlet datum through the ghost cell
+    ``2*T_b - T[0]``, so a slab's interface gain is ``2*Fo``; the
+    fixtures predicted ``Fo`` (and ``Fo**2``) until the audit measured
+    amplification 5.24 -- a rate of 0.81 -- on ``slow-drift`` where it
+    predicted 0.2025.  Measured here from the report's own amplification,
+    on reduced grids: the rate is set by the interface, not by the grid
+    size.  A tolerance, not a tight bound: the residual ratio carries the
+    first passes' transient.
+    """
+    if builder == "slow-drift":
+        config = cf.CouplingConfig(iteration_mode=mode, max_iterations=60,
+                                   tolerance=1e-7)
+        built = cf.build_slow_drift(config, n_cells=64)
+    else:
+        # At the fixture's own criterion: tightened to 1e-7 on a small
+        # grid, this group reaches exact stationarity, its last residual
+        # ratio is 0 and the amplification reads 1.0 -- a rate of 0.
+        built = cf.build_heterogeneous(cf.CouplingConfig(iteration_mode=mode),
+                                       n_cells=2000)
+    predicted = built.predicted_rho[mode]
+    measured = _median_rate(built)
+    assert measured == pytest.approx(predicted, abs=0.03), (
+        f"{builder} under {mode} contracts at {measured:.3f}; the fixture "
+        f"predicts {predicted:.3f}"
+    )
+
+
+@pytest.mark.parametrize("fourier", [0.375, 0.4, 0.45, 0.0])
+def test_a_slab_pair_past_its_coupled_stability_limit_is_refused(fourier):
+    """Two slabs exchanging end-cell temperatures are unstable above 3/8.
+
+    Solved to convergence, the pair has an alternating interface mode
+    whose amplification is ``-1`` at ``Fo = 3/8`` (-1.5 at 0.4, -4 at
+    0.45), where one ``HeatNode`` with fixed data is stable to 1/2.
+    ``slow-drift`` sat at 0.45 after the rod-end fix and left float range
+    within 90 steps; the builders refuse such a number instead.
+    """
+    with pytest.raises(ValueError, match="unstable in time"):
+        cf.build_slow_drift(cf.CouplingConfig(), n_cells=16, fourier=fourier)
+    with pytest.raises(ValueError, match="unstable in time"):
+        cf.build_expensive_pair(cf.CouplingConfig(), n_cells=16,
+                                fourier=fourier)
+
+
+# ---------------------------------------------------------------------------
 # The guide's universal claims, re-derived from the rows it cites
 # ---------------------------------------------------------------------------
 #
@@ -1139,9 +1377,15 @@ def _measured_rows():
     return out
 
 
-def test_fixed_relaxation_never_helps_gauss_seidel_and_helps_jacobi_twice():
+def test_fixed_relaxation_never_helps_gauss_seidel_and_helps_jacobi_on_two_fixtures():
     """Guide: "not one Gauss-Seidel row beats its unrelaxed counterpart ...
-    every row where relaxation wins is a Jacobi row, and there are two"."""
+    every row where relaxation wins is a Jacobi row" -- on two fixtures,
+    ``slow-drift`` and ``expensive-pair``, under both norms.
+
+    The first recording had three (fixture, norm) winners, not four:
+    plain Jacobi under L2 on ``expensive-pair`` converged on 85% of its
+    steps then, so no relaxed row could be compared with it.
+    """
     rows = _measured_rows()
     winners = set()
     for (fixture, label), row in rows.items():
@@ -1158,13 +1402,21 @@ def test_fixed_relaxation_never_helps_gauss_seidel_and_helps_jacobi_twice():
     assert {(w[0], w[2]) for w in winners} == {
         ("slow-drift", "l2"),
         ("slow-drift", "interface"),
+        ("expensive-pair", "l2"),
         ("expensive-pair", "interface"),
     }, sorted(winners)
 
 
-def test_gauss_seidel_needs_between_1_7_and_1_9_times_fewer_iterations():
-    """Guide: "1.7-1.9x fewer iterations than Jacobi on every shape where
-    both converge (1.69 on ``chain-2`` to 1.93 on ``slow-drift``)"."""
+def test_gauss_seidel_needs_between_1_7_and_2_1_times_fewer_iterations():
+    """Guide: "Gauss-Seidel needs 1.7-2.1x fewer iterations than Jacobi on
+    every shape where both converge on every step -- 1.68 on
+    ``stiff-pair-0.25`` to 2.06 on ``slow-drift``".
+
+    Both endpoints are pinned, not only the band: a re-recorded sweep
+    that moves either one has to move the sentence with it.  (The first
+    recording's 1.69 to 1.93 stayed quoted for a week after the file it
+    came from stopped holding it.)
+    """
     rows = _measured_rows()
     ratios = {}
     for (fixture, label), row in rows.items():
@@ -1178,17 +1430,22 @@ def test_gauss_seidel_needs_between_1_7_and_1_9_times_fewer_iterations():
     # Every ratio rounds into the quoted band, and none is below one --
     # there is no shape on one device where Jacobi needs fewer passes.
     outside = {f: round(v, 2) for f, v in ratios.items()
-               if not 1.7 <= round(v, 1) <= 1.9}
+               if not 1.7 <= round(v, 1) <= 2.1}
     assert not outside, outside
+    low = min(ratios, key=ratios.get)
+    high = max(ratios, key=ratios.get)
+    assert (low, round(ratios[low], 2)) == ("stiff-pair-0.25", 1.68), ratios
+    assert (high, round(ratios[high], 2)) == ("slow-drift", 2.06), ratios
 
 
-def test_interface_norm_iteration_change_is_inside_the_quoted_range():
-    """Guide: "removes -5% to 31% of the iterations" on ``gs/none``.
+def test_interface_norm_iteration_change_is_the_quoted_range():
+    """Guide: "removes -18% to 28% of the iterations" on ``gs/none``.
 
     The fast fixtures only.  The claim is explicitly about them: a grid
     fixture whose L2 residual is mostly bulk change is a different
-    regime and the guide quotes it separately (``expensive-pair``
-    6.0 -> 1.5, a 75% cut).
+    regime and the guide quotes it separately.  Both endpoints are the
+    file's, to the nearest percent: the first recording's "-5% to 31%"
+    was still quoted after the re-run moved both of them outside it.
     """
     rows = {k: v for k, v in _measured_rows().items()
             if k[0] not in ("expensive-pair", "heterogeneous")}
@@ -1203,8 +1460,9 @@ def test_interface_norm_iteration_change_is_inside_the_quoted_range():
             / l2["iterations_mean"] * 100.0)
     assert changes
     worst, best = min(changes.values()), max(changes.values())
-    assert -5.5 <= worst, {f: round(v, 1) for f, v in changes.items()}
-    assert best <= 31.5, {f: round(v, 1) for f, v in changes.items()}
+    shown = {f: round(v, 1) for f, v in changes.items()}
+    assert math.floor(worst + 0.5) == -18, shown
+    assert math.floor(best + 0.5) == 28, shown
 
 
 def test_jacobi_loses_convergence_when_iqn_is_restricted_to_the_cheap_nodes():

@@ -34,6 +34,23 @@ def _snapshot():
     return {k: getattr(jax.config, k) for k in _JAX_SETTINGS}, cc.enabled_dir()
 
 
+def _cache_left_behind(settings):
+    """Where JAX's cache object points, if not at the directory ``settings`` name.
+
+    JAX reads and writes through this object whatever the settings say
+    once it exists: with the settings restored but the object kept, every
+    later compile still looks programs up in, and (above the restored
+    minimum compile time) writes them to, the test's directory.
+    """
+    built = _jax_cache_state._cache  # noqa: SLF001 -- the object JAX writes through
+    if built is None:
+        return None
+    want = settings["jax_compilation_cache_dir"]
+    if want is not None and Path(built._path) == Path(want):  # noqa: SLF001
+        return None
+    return str(built._path)  # noqa: SLF001
+
+
 @contextlib.contextmanager
 def _compile_cache_restored():
     """Undo everything ``enable`` / ``warm_cache`` change process-wide.
@@ -62,6 +79,7 @@ def _module_start():
     start = _snapshot()
     yield start
     assert _snapshot() == start, "a test in this module left a compilation cache switched on"
+    assert _cache_left_behind(start[0]) is None, "a test in this module left JAX's cache object behind"
 
 
 @pytest.fixture(autouse=True)
@@ -153,27 +171,39 @@ def test_warm_cache_reports(tmp_path):
 
 
 def test_the_restore_undoes_enable_and_forgets_the_cache_it_built(tmp_path):
-    """``enable`` plus a compile builds a cache in ``tmp_path``; afterwards nothing writes there."""
+    """``enable`` plus a compile builds a cache in the test's directory;
+    afterwards nothing uses it, and the cache the process had is back.
+
+    The process starts the test with a cache already in use, as a CI lane
+    does (``JAX_COMPILATION_CACHE_DIR``); the autouse fixture undoes that.
+    """
+    outer = tmp_path / "outer"
+    jax.config.update("jax_compilation_cache_dir", str(outer))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.jit(lambda x: x - 5.0)(jnp.float32(1.0)).block_until_ready()
+    assert _entries(outer), "the outer cache is not in use: the checks below prove nothing"
     before = _snapshot()
     target = tmp_path / "xla"
     with _compile_cache_restored():
         cc.enable(str(target))
         jax.jit(lambda x: x * 2.0 + 1.0)(jnp.float32(1.0)).block_until_ready()
         written = _entries(target)
-        assert written, "enable() and a compile wrote no cache entry: the check below proves nothing"
+        assert written, "the compile went to the cache the process already had, not enable()'s"
+        assert _cache_left_behind(before[0]) == str(target)     # ...so the check can fire
     assert _snapshot() == before
+    assert _cache_left_behind(before[0]) is None
+    in_outer = len(_entries(outer))
     # A program this process has never compiled: had the cache object
-    # survived, it would be written to ``target`` too.
+    # survived, it would be looked up in ``target`` and written there.
     jax.jit(lambda x: x * 3.0 - 7.0)(jnp.float32(2.0)).block_until_ready()
+    assert _cache_left_behind(before[0]) is None
     assert _entries(target) == written, "a compile after the restore still wrote to the test's cache"
+    assert len(_entries(outer)) > in_outer, "the process's own cache did not come back"
 
 
 # Keep this last: it checks the state every test above left behind.
 def test_the_module_leaves_the_process_cache_as_it_found_it(_module_start):
-    settings, enabled = _snapshot()
-    assert (settings, enabled) == _module_start
-    built = _jax_cache_state._cache  # noqa: SLF001 -- the object JAX writes through
-    if built is not None:
-        # Rebuilt since the last reset: only ever from the starting directory.
-        assert settings["jax_compilation_cache_dir"] is not None
-        assert Path(built._path) == Path(settings["jax_compilation_cache_dir"])  # noqa: SLF001
+    assert _snapshot() == _module_start
+    # Rebuilt since the last reset, if at all: only ever from the starting directory.
+    assert _cache_left_behind(_module_start[0]) is None

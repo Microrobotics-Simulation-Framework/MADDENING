@@ -194,7 +194,8 @@ def _check_reload(case: str, reload) -> None:
     pytest.param(case, marks=pytest.mark.slow) if case in SLOW_CASES else case
     for case in sorted(CASES)
 ])
-def test_a_config_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case):
+def test_a_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case):
+    """Through the JSON config; the USD reload is the test below."""
     _check_reload(case, _reload_json)
 
 

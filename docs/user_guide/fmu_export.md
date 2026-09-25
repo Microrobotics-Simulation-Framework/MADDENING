@@ -178,13 +178,16 @@ archive directory is checked before anything is decompressed.
 bridge's single FMU instance for as long as it lives, so each wait has a
 finite budget: ten seconds to begin the first frame, five minutes of
 silence between frames once the peer has spoken, and two minutes to
-finish a frame whose length it has announced.  Overrunning any of them
-ends the connection exactly as EOF does.  The instance slot is claimed
+finish a frame whose length it has announced -- two minutes in total,
+whether the rest of the frame dribbles in or stops arriving.  Overrunning
+any of them ends the connection exactly as EOF does.  The instance slot is claimed
 when a peer sends its first complete frame, not when it connects, so a
 peer that connects and says nothing — a crashed importer, a dropped
 link, a port scan — claims nothing.  At most sixteen connection threads
 are live at once; further connections are closed on accept.  `stop()`
-shuts every live connection down and joins its worker.
+shuts every live connection down and joins its worker.  A bridge serves
+once: calling `start()` again, or after `stop()`, raises `RuntimeError`;
+build a new `FmuTcpBridge` to serve again.
 
 **A value that `set` refuses, `set_state` refuses too.**  Both doors
 into the state and parameter tree apply the same checks: every value

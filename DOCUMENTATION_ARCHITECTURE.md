@@ -1439,10 +1439,11 @@ from datetime import date
 
 
 class AnomalySeverity(Enum):
-    """Severity classification aligned with IEC 62304 problem reporting."""
-    CRITICAL = "critical"   # Causes incorrect results with no workaround
-    MAJOR = "major"         # Causes incorrect results but has workaround
-    MINOR = "minor"         # Cosmetic or minor inconvenience
+    """Severity classification aligned with IEC 62304 problem reporting.
+    The definitions below ("Severity") are this class's docstring."""
+    CRITICAL = "critical"   # Silent wrong result or unauthorised access: default config, no workaround, undetectable
+    MAJOR = "major"         # Any other silent wrong result or unauthorised access; a loud failure with no workaround
+    MINOR = "minor"         # Loud with a workaround; documentation/metadata; performance; x64-only float32 rounding; cosmetic
     ENHANCEMENT = "enhancement"  # Not a defect; a feature request
 
 
@@ -1490,6 +1491,43 @@ the source of truth.  Until the 0.4.0 documentation pass this section
 described a `ResolutionStatus` with `WORKAROUND_AVAILABLE`, `FIXED` and
 `DEFERRED` members that the implementation never had: a workaround is
 recorded in the `workaround` field, not in the status.
+
+##### Severity
+
+`AnomalySeverity`'s docstring in `src/maddening/core/compliance/anomaly.py`
+is the one definition; this section repeats it.  Until 0.4.0 the only
+written definition was the comment "cosmetic or minor inconvenience" for
+`minor`, and registry entries whose results were silently wrong by up to
+2.1x were labelled `minor` against it.
+
+Two terms carry the definitions.  A *wrong result* is a value the library
+returns, reports or saves that describes the simulated system or vouches for
+it -- a state, an output, a gradient, a convergence flag or error estimate,
+the reported status of an operation it performed, a saved or reloaded
+configuration -- and that differs from what the library documents by more
+than the accuracy the library states for it (a scheme's declared order, a
+solve's tolerance).  A result is *silent* when the library raised no
+exception and emitted no warning when it produced it; a field that later
+goes non-finite was still silent, because its finite values before that were
+wrong and nothing said so.
+
+**A silent wrong result is never `minor`**, whatever its size, however
+narrow the configuration that reaches it, and whether or not a built-in node
+reaches it.  Size, reach and detectability go in the entry's description and
+`safety_relevance_rationale`, where a reader can weigh them; they do not
+lower the severity below `major`.
+
+| Severity | Definition |
+|---|---|
+| `critical` | A silent wrong result, or access by a party the user did not authorise, that a shipped default configuration reaches, that no workaround avoids short of not using the feature, and that the user cannot detect from anything the library returns. |
+| `major` | Any other silent wrong result.  Any other unauthorised access (one that needs a non-default configuration, or that a workaround prevents).  A loud failure (an exception, a refusal, a crash) whose only workaround is not to use the feature. |
+| `minor` | A loud failure with a workaround that keeps the feature usable.  A wrong statement in documentation or declared metadata where the computed values still meet the accuracy the library states for them.  A defect in performance, placement or a count of work done that changes no value describing or vouching for the solution.  A difference that appears only under `jax_enable_x64` and leaves the result no less accurate than the default float32 would.  A cosmetic defect. |
+| `enhancement` | Not a defect: a request for behaviour the library never claimed. |
+
+Severity rates the defect, not its status (a `resolved` entry keeps the
+severity of what it records), and is independent of `safety_relevance`.
+The release-gate tiers below key on it: a `critical` or `major` defect must
+be in the registry before the release that closes it, with no grace period.
 
 `OPEN`, `PARTIALLY_RESOLVED` and `WONT_FIX` all count as *reachable* in the
 version the registry describes; `RESOLVED` and `DUPLICATE` do not.
@@ -1572,9 +1610,9 @@ anomalies:
 
 | Label | Color | Meaning |
 |-------|-------|---------|
-| `anomaly:critical` | Red | Incorrect results, no workaround |
-| `anomaly:major` | Orange | Incorrect results, workaround available |
-| `anomaly:minor` | Yellow | Cosmetic or minor issue |
+| `anomaly:critical` | Red | `critical` as defined under "Severity" (section 9.7) |
+| `anomaly:major` | Orange | `major`: every other silent wrong result, among others |
+| `anomaly:minor` | Yellow | `minor`: loud with a workaround, documentation, performance, cosmetic -- never a silent wrong result |
 | `safety-relevant` | Purple | Could affect safety-critical downstream use |
 | `soup-assessment` | Blue | Relevant to IEC 62304 SOUP evaluation |
 | `known-anomaly` | Gray | Tracked in known_anomalies.yaml |

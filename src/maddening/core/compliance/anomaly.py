@@ -12,7 +12,56 @@ from typing import Optional
 
 
 class AnomalySeverity(Enum):
-    """Anomaly severity classification."""
+    """Anomaly severity classification.
+
+    This is the one definition of the four levels.  ``known_anomalies.yaml``,
+    the SOUP package and the ``anomaly:*`` issue labels all use it, and
+    DOCUMENTATION_ARCHITECTURE.md section 9.7 repeats it.  Severity rates
+    the defect: a ``resolved`` entry keeps the severity of what it records,
+    and it is independent of ``safety_relevance``, which rates how much
+    the defect matters in a given context of use.
+
+    Two terms carry the definitions.  A *wrong result* is a value the
+    library returns, reports or saves that describes the simulated system
+    or vouches for it -- a state, an output, a gradient, a convergence flag
+    or error estimate, the reported status of an operation it performed, a
+    saved or reloaded configuration -- and that differs from what the
+    library documents by more than the accuracy the library states for it
+    (a scheme's declared order, a solve's tolerance).  A result is *silent*
+    when the library raised no exception and emitted no warning when it
+    produced it.  A field that later goes non-finite was still silent: its
+    finite values before that were wrong and nothing said so.
+
+    **The rule for silent wrong results: a silent wrong result is never
+    minor**, whatever its size, however narrow the configuration that
+    reaches it, and whether or not a built-in node reaches it.  Size, reach
+    and detectability belong in the entry's description and
+    ``safety_relevance_rationale``, where a reader can weigh them; they do
+    not lower the severity below ``major``.
+
+    CRITICAL
+        A silent wrong result, or access by a party the user did not
+        authorise, that a shipped default configuration reaches, that no
+        workaround avoids short of not using the feature, and that the
+        user cannot detect from anything the library returns.
+    MAJOR
+        Any other silent wrong result.  Any other unauthorised access
+        (one that needs a non-default configuration, or that a workaround
+        prevents).  And a loud failure -- an exception, a refusal, a crash
+        -- whose only workaround is not to use the feature.
+    MINOR
+        A loud failure with a workaround that keeps the feature usable.  A
+        wrong statement in documentation or declared metadata where the
+        computed values still meet the accuracy the library states for
+        them.  A defect in performance, placement or a count of work done
+        (iterations, passes, where a graph runs) that changes no value
+        describing or vouching for the solution.  A difference that appears
+        only under ``jax_enable_x64`` and leaves the result no less accurate
+        than the framework's default float32 would compute it.  A cosmetic
+        defect.
+    ENHANCEMENT
+        Not a defect: a request for behaviour the library never claimed.
+    """
     CRITICAL = "critical"
     MAJOR = "major"
     MINOR = "minor"

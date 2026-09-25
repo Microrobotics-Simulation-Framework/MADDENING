@@ -183,6 +183,15 @@ def test_the_fixture_is_consistent():
     assert errors_of(make_sbom("net", {**CORE, "pyzmq": "27.2.0"}), "net") == []
 
 
+def test_a_document_that_is_not_cyclonedx_is_named():
+    def change(s):
+        s["bomFormat"] = "SPDX"
+        del s["specVersion"]
+    errors = errors_of(mutate(make_sbom(), change))
+    assert _has(errors, "bomFormat is 'SPDX'")
+    assert _has(errors, "has no specVersion")
+
+
 def test_a_dropped_direct_dependency_is_named():
     sbom = mutate(make_sbom(), lambda s: s["components"].remove(component(s, "numpy")))
     errors = errors_of(sbom)

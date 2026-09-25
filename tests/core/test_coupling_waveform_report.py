@@ -64,10 +64,10 @@ def _hex_state(run):
 
 def _build(max_iterations=10, waveform_iterations=1, solver="ift",
            diagnostics=False, rates="mixed", subcycling=True,
-           boundary_interpolation="linear"):
+           boundary_interpolation="linear", tolerance=1e-8):
     """Compile, step once, and record what the report and the state say."""
     gm = _springs(dt_fast=0.001 if rates == "mixed" else 0.01)
-    kw = dict(max_iterations=max_iterations, tolerance=1e-8,
+    kw = dict(max_iterations=max_iterations, tolerance=tolerance,
               subcycling=subcycling, waveform_iterations=waveform_iterations,
               solver=solver, diagnostics=diagnostics)
     if boundary_interpolation != "linear":
@@ -294,17 +294,34 @@ def test_the_report_does_not_move_the_state(runs):
 # then every assertion below is expected to fail.
 
 
-def test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change(runs):
-    """Every sweep solves the same fixed point, so a converged first one ends it.
+def test_each_later_sweep_moves_a_converged_state_by_about_one_residual(runs):
+    """After a converged first sweep, every later sweep still applies a pass.
 
-    Waveform relaxation would hand each sweep the previous sweep's
-    boundary waveform over the sub-step window and could move the state;
-    a restart from a converged state cannot.
+    Every sweep solves the same fixed point and starts with one pass, so
+    a restart from a converged state applies at least one more pass and
+    moves the state by about one residual: within the tolerance, and to
+    the last bit only at exact stationarity.  At ``tolerance=1e-8`` this
+    pair is stationary in float32 and the sweeps coincide
+    (``test_the_returned_state_is_the_state_before_the_fix``); at
+    ``1e-4`` the first sweep stops two passes in, short of stationarity,
+    and the later sweeps' passes show.  (The documentation used to say a
+    converged first sweep left the later ones nothing to change, which
+    only a tolerance at the float floor could confirm.)  Waveform
+    relaxation would hand each sweep the previous sweep's boundary
+    waveform over the sub-step window instead.
     """
-    one = runs(max_iterations=10, waveform_iterations=1)
-    three = runs(max_iterations=10, waveform_iterations=3)
-    assert one["report"]["converged"] is True
-    assert _hex_state(three) == _hex_state(one)
+    tol = 1e-4
+    one = runs(max_iterations=10, waveform_iterations=1, tolerance=tol)
+    three = runs(max_iterations=10, waveform_iterations=3, tolerance=tol)
+    assert one["report"]["converged"] is True, one["report"]
+    assert three["report"]["converged"] is True, three["report"]
+    # Each of the two later sweeps applies at least one pass.
+    assert three["report"]["total_iterations"] >= one["report"]["iterations"] + 2
+    # ... which moves the state, by no more than the tolerance.
+    assert _hex_state(three) != _hex_state(one)
+    for leaf, value in one["state"].items():
+        np.testing.assert_allclose(three["state"][leaf], value, rtol=0, atol=tol,
+                                   err_msg=leaf)
 
 
 def test_a_capped_first_sweep_is_continued_by_the_later_ones(runs):

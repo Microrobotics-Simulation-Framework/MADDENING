@@ -235,8 +235,9 @@ loss = lambda p: windowed_loss(
 
 `windowed_loss` is teacher-forced: every window restarts from the
 measured state, so gradients cannot compound over a long stiff rollout
-(`mask_unconverged=True` zeroes windows in which a coupling group exited
-at `max_iterations`).
+(`mask_unconverged=True` drops, from the loss and from its gradient,
+windows in which a coupling group exited at `max_iterations`
+unconverged, including a window that diverged).
 
 Before fitting, ask what the data can identify:
 

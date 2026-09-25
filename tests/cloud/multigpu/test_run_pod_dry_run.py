@@ -60,6 +60,23 @@ def _runner_module():
     return module
 
 
+def _rules_only_runner():
+    """The runner with its record-integrity rules switched off.
+
+    The docs the verdict tests below build are synthetic -- one check, no
+    results, no provenance -- and pin the other verdict rules in isolation:
+    flags re-derived from value, limit and sense, the device count, the dry
+    run, checks not run.  None of them is a record the runner would write,
+    so each would read ``INVALID`` and hide the rule under test.  The record
+    rules themselves are tested on a real runner record, in
+    ``test_run_pod_verdict_integrity.py``.
+    """
+    rp = _runner_module()
+    rp.record_problems = lambda doc: []
+    rp.item_problems = lambda docs: []
+    return rp
+
+
 @pytest.fixture(scope="module")
 def dry_run_dir(tmp_path_factory):
     """One process for every goal, as the session's own dry run does."""
@@ -103,6 +120,9 @@ def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, g
         assert c["sense"] in rp.SENSES
         # on four devices every case runs, and every record re-derives
         assert rp.check_status(c) == "passed", c
+    # and the file is evidence --summarise accepts: the runner's own
+    # derivation of its checks from its results gives exactly these
+    assert rp.record_problems(doc) == [], rp.record_problems(doc)
 
 
 @pytest.mark.slow
@@ -297,6 +317,7 @@ def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
         assert f"{goal:<12} cpu" in out
     assert "Coupled group" in out and "Stencil wrapper" in out and "Halo exchange" in out
     assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
+    assert "Records that cannot decide" not in out
     for boundary in ("periodic", "edge", "dirichlet"):
         assert f"16x16    {boundary:<9} f " in out, out
 
@@ -367,19 +388,31 @@ def test_runner_makes_no_cloud_calls():
 
 def _exchange_doc(platform: str, rows: list[tuple[int, float, float]], *, dry_run=False,
                   n_devices: int = 4, allow_fewer_devices: bool = False) -> dict:
+    """An ``exchange.json`` as the runner writes it (a ring mesh, so the
+    recorded cell counts are the configured ones), checks included: a row
+    decides only from a file that reads ``PASS``."""
+    rp = _runner_module()
     results = []
     for cells, a2a, ppm in rows:
         results.append({
             "cells": cells, "n_devices": n_devices, "bit_identical": True,
+            "input_presharded": True,
             "ppermute_speedup_median": (a2a / ppm) if ppm else None,
             "methods": {
                 "all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 8 * 4 * 4},
                 "ppermute": {"median_ms": ppm, "min_ms": ppm, "bytes_total": 2 * 4 * 4},
             },
         })
-    return {"goal": "exchange", "dry_run": dry_run, "allow_fewer_devices": allow_fewer_devices,
-            "results": results,
-            "environment": {"platform": platform, "device_kinds": ["NVIDIA A100-SXM4-80GB"]}}
+    doc = {"schema_version": rp.SCHEMA_VERSION, "goal": "exchange", "dry_run": dry_run,
+           "allow_fewer_devices": allow_fewer_devices, "n_devices": n_devices,
+           "results": results,
+           "environment": {"platform": platform, "device_kinds": ["NVIDIA A100-SXM4-80GB"],
+                           "devices": [f"{platform}:{i}" for i in range(n_devices)],
+                           "n_devices_visible": n_devices, "git_commit": "0" * 40},
+           "config": {"cells": [cells for cells, _, _ in rows], "synthetic": "ring",
+                      "mesh": None, "n_devices": n_devices,
+                      "allow_fewer_devices": allow_fewer_devices}}
+    return rp.finish_checks(doc, rp.exchange_checks(results, n_devices))
 
 
 @pytest.mark.parametrize(
@@ -425,7 +458,7 @@ def test_recommendation_requires_four_devices_unless_fewer_are_allowed():
     # the escape hatch may also be read from the recorded CLI config
     doc = _exchange_doc("gpu", rows, n_devices=3)
     del doc["allow_fewer_devices"]
-    doc["config"] = {"allow_fewer_devices": True}
+    doc["config"]["allow_fewer_devices"] = True
     assert rp.recommend([doc])["decision"] == "ppermute"
     # a 4-device real run decides on its own
     four = rp.recommend([_exchange_doc("gpu", rows, n_devices=4)])
@@ -630,7 +663,7 @@ def test_check_status_rederives_pass_fail_from_the_value_and_limit(record, statu
 def test_summarise_does_not_trust_a_recorded_pass(tmp_path, capsys):
     """A check with value 0.5 against limit 0.0, recorded ``passed: true``,
     read PASS / CLOSED: the summary counted the flags."""
-    rp = _runner_module()
+    rp = _rules_only_runner()
     docs = _all_goal_docs()
     docs["halo"][0]["checks"][0].update(value=0.5, limit=0.0, sense="<=", passed=True)
     status = rp.checklist_status(docs)
@@ -648,7 +681,7 @@ def test_summarise_does_not_trust_a_recorded_pass(tmp_path, capsys):
 
 
 def test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices():
-    rp = _runner_module()
+    rp = _rules_only_runner()
     closed = rp.checklist_status(_all_goal_docs())
     assert [s for s, _ in closed.values()] == ["CLOSED"] * 6
     for kw in ({"dry_run": True}, {"platform": "cpu"}):
@@ -667,7 +700,7 @@ def test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices():
     assert rp.closes_the_gap(_goal_doc("halo", n_devices=4))
     # a check not run keeps its items open; one that claims to have passed fails them
     docs = _all_goal_docs()
-    docs["halo"][0]["checks"].append(_runner_module().check_not_run("2d pencil", "needs 4"))
+    docs["halo"][0]["checks"].append(rp.check_not_run("2d pencil", "needs 4"))
     docs["halo"][0]["passed"] = False
     assert rp.goal_verdict(docs["halo"]) == "INCOMPLETE"
     assert rp.checklist_status(docs)[2] == ("open", "halo INCOMPLETE")
@@ -705,7 +738,7 @@ def _summarise_without_tables(rp, directory: Path) -> int:
 
 
 def test_summarise_exits_3_and_lists_a_failed_check(tmp_path, capsys):
-    rp = _runner_module()
+    rp = _rules_only_runner()
     docs = _all_goal_docs()
     docs["halo"] = [_goal_doc("halo", passed=False)]
     _write_checklist_docs(tmp_path, docs)
@@ -716,7 +749,7 @@ def test_summarise_exits_3_and_lists_a_failed_check(tmp_path, capsys):
 
 
 def test_summarise_lists_checks_not_run_and_exits_0(tmp_path, capsys):
-    rp = _runner_module()
+    rp = _rules_only_runner()
     docs = _all_goal_docs()
     docs["indivisible"][0]["checks"].append(rp.check_not_run("pencil refusal", "needs 4"))
     docs["indivisible"][0]["passed"] = False
@@ -762,15 +795,26 @@ def test_a_two_device_run_records_the_cases_it_cannot_run():
     rp = _runner_module()
     args = SimpleNamespace(n_devices=2, cells=[64], synthetic="grid", partition="contiguous",
                            mesh=None, steps=1)
-    for run, expected in ((rp.run_halo, {"2d pencil mesh", "1d mesh: left and right"}),
-                          (rp.run_indivisible, {"pencil (2-D mesh) refusal"})):
+    for goal, run, expected in (
+            ("halo", rp.run_halo, {"2d pencil mesh", "1d mesh: left and right"}),
+            ("indivisible", rp.run_indivisible, {"pencil (2-D mesh) refusal"})):
         doc = run(args, {})
         not_run = [c for c in doc["checks"] if c.get("not_run")]
         assert {next(e for e in expected if c["name"].startswith(e)) for c in not_run} \
             == expected, not_run
         assert all(c["passed"] for c in doc["checks"] if not c.get("not_run"))
         assert doc["passed"] is False
-        assert rp.goal_verdict([{**doc, "environment": {"platform": "gpu"}}]) == "INCOMPLETE"
+        # The envelope main() writes around it, on two GPUs: the record is
+        # valid -- its checks are what the runner derives on two devices,
+        # not-run checks included -- and the goal reads incomplete.
+        doc.update(schema_version=rp.SCHEMA_VERSION, goal=goal, n_devices=2, dry_run=False,
+                   allow_fewer_devices=False,
+                   environment={"platform": "gpu", "devices": ["gpu:0", "gpu:1"],
+                                "n_devices_visible": 2, "git_commit": "0" * 40},
+                   config={"cells": [64], "synthetic": "grid", "mesh": None, "n_devices": 2,
+                           "allow_fewer_devices": False})
+        assert rp.record_problems(doc) == [], rp.record_problems(doc)
+        assert rp.goal_verdict([doc]) == "INCOMPLETE"
 
 
 @pytest.mark.slow

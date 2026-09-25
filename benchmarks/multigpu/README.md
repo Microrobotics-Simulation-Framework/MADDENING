@@ -77,8 +77,9 @@ The dry run takes about a minute on three cores.  It must print
 `checks n/n passed` for all eight goals, no `CHECK NOT RUN` line, and exit
 0.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
-(a dry run never closes an item) and the transport recommendation as
-`undecided`.  Anything else: fix it here, not on the pod.
+(a dry run never closes an item), list nothing under "Records that cannot
+decide", and show the transport recommendation as `undecided`.  Anything
+else: fix it here, not on the pod.
 
 What the timings measure: every timed callable gets inputs that were
 placed on the mesh once, with the `NamedSharding` the compiled
@@ -241,8 +242,10 @@ pod:
 
 A failed goal's JSON is still written (it records which check failed and
 by how much); copy it back with the rest.  The failure is reproduced and
-fixed off the pod, and a later session runs only the failed goal and the
-goals after it.
+fixed off the pod, and a later session runs the failed goal, the goals
+after it, and every earlier goal that decides a checklist item together
+with one of those: an item is decided only by files from one git commit
+(section 5), so a fix commit re-runs every goal of the items it touches.
 
 ## 4. Copy back, then tear down (the maintainer, by hand)
 
@@ -264,25 +267,62 @@ and commit it with the summary output pasted into the commit body.
 ## 5. Read the result
 
 `python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu`
-exits 0 when no recorded check failed, 3 when any failed, and 1 when the
-directory holds no goal JSON.  It does not take a check's recorded
-`passed` on trust: pass/fail is re-derived from the check's `value`,
-`limit` and `sense`, and a record that disagrees -- a value of 0.5
-against a limit of 0.0 recorded as passed, say -- is listed as failed
-(`recorded passed=True, but the value fails its limit`), as is a file
-whose top-level `passed` its checks do not bear out.  It prints:
+exits 0 when no recorded check failed, 3 when any failed or a file cannot
+decide (below), and 1 when the directory holds no goal JSON.  It does not
+take a check's recorded `passed` on trust: pass/fail is re-derived from
+the check's `value`, `limit` and `sense`, and a record that disagrees --
+a value of 0.5 against a limit of 0.0 recorded as passed, say -- is
+listed as failed (`recorded passed=True, but the value fails its limit`),
+as is a file whose top-level `passed` its checks do not bear out.
+
+Nor does it take a file's word for *what* was checked.  A file is
+evidence only if it is what `run_pod.py`, as it stands, would have
+written; otherwise its goal reads `INVALID` and it closes nothing.  A
+file must:
+
+* be on the current `schema_version` (4);
+* record an `n_devices` no larger than the devices its `environment`
+  lists (`n_devices_visible`, which must count `devices`), and the same
+  `n_devices` in its `config` and in every result entry;
+* hold every case the runner runs for the file's own `config` (`cells`,
+  `n_devices`, `synthetic`, `mesh`) and no other: every boundary mode ×
+  width × mesh of `halo`, the `"edge"` and Dirichlet ends of `stencil`
+  at its smallest size, both solvers of `coupled`, both transports, ...;
+* carry exactly the checks the runner derives from its results -- the
+  same names, values, limits, senses and flags.  So every limit is the
+  one in `LIMITS` (a limit loosened, or tightened, in the file is
+  refused), a results table that disagrees with a check is refused, and
+  a check deleted from the file or added to it is refused.  The order of
+  the checks does not matter.
+
+And the files that decide one checklist item must all record the same
+`git_commit` (and must record one).  A directory holding goals from two
+commits keeps the items they share open; re-run those goals on one
+commit.  If the runner itself changed between the session and the
+summary (a new check, a new case), the session's files no longer match
+it and read `INVALID`: summarise with the commit the session ran, which
+every file records.  The transport ranking uses the rows of an
+`exchange.json` only when that file reads `PASS`.
+
+It prints:
 
 * **Runs**: one line per JSON file — platform, devices, device kind,
-  `jax / jaxlib`, dry run, checks passed, verdict.
+  `jax / jaxlib`, dry run, checks passed, verdict (`PASS`, `FAIL`,
+  `INVALID`, `INCOMPLETE`).
 * **Checklist**: per item, `CLOSED` (every goal that decides it passed,
-  with every check run, on real GPUs, not a dry run, on ≥ 4 devices —
-  `--allow-fewer-devices` does not lower that: it is for the transport
-  ranking, and on 2 devices a halo taken from the wrong neighbour passes
-  every check), `FAILED` (a deciding goal failed a check), `open` (a
-  deciding goal was not run, recorded no checks, or is `INCOMPLETE`:
-  a check was recorded as not run), `open: passed on CPU / dry run only`,
-  or `open: passed on fewer than 4 devices`.  The session succeeded when
-  all six read `CLOSED`.
+  with every check run and every file valid, on real GPUs, not a dry run,
+  on ≥ 4 devices, from one commit — `--allow-fewer-devices` does not
+  lower that: it is for the transport ranking, and on 2 devices a halo
+  taken from the wrong neighbour passes every check), `FAILED` (a
+  deciding goal failed a check), `open: <file> cannot decide it (<why>)`
+  (a deciding file is `INVALID`), `open` (a deciding goal was not run,
+  recorded no checks, or is `INCOMPLETE`: a check was recorded as not
+  run), `open: passed on CPU / dry run only`, `open: passed on fewer than
+  4 devices`, or `open: its files come from N commits` / `open: no git
+  commit recorded in <file>`.  The session succeeded when all six read
+  `CLOSED`.
+* **Records that cannot decide**: every reason a file is `INVALID`, and
+  every item whose files come from more than one commit.
 * **Failed checks**, each with its value and limit, and **Checks not
   run**, each with why.
 * The per-goal tables (indivisible, halo, coupled, stencil, hybrid), then

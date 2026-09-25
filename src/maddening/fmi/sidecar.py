@@ -158,6 +158,66 @@ def _restored_leaf(value: Any, live: Any, *, what: str) -> np.ndarray:
     return _checked_value(arr, live_arr.dtype, what=what)
 
 
+def _state_key(node: str, field: str) -> str:
+    """How a state field is named in a key-set refusal (the bridge's member name)."""
+    return f"s/{node}/{field}"
+
+
+def _param_key(section: str, owner: str, key: str) -> str:
+    """How a parameter leaf is named in a key-set refusal (the bridge's member name)."""
+    return f"p/{section}/{owner}/{key}"
+
+
+def _key_set_error(what: str, expected: set, got: set) -> Optional[ValueError]:
+    """The refusal for a snapshot whose ``what`` (``"fields"`` or
+    ``"parameters"``) are not exactly the live model's, or ``None``.
+
+    Shared by :meth:`FmuSidecar.set_fmu_state` and the TCP bridge's
+    ``set_state``, which name members the same way (``s/<node>/<field>``,
+    ``p/<section>/<owner>/<key>``), so the two restore paths refuse a
+    partial or padded snapshot with the same words.
+    """
+    if got == expected:
+        return None
+    return ValueError(f"FMU state {what} differ from the model: "
+                      f"missing {sorted(expected - got)}, extra {sorted(got - expected)}")
+
+
+def _state_leaves(state: Any, *, what: str) -> dict[tuple[str, str], Any]:
+    """``{(node, field): leaf}`` of a graph state (``node -> {field: array}``)."""
+    if not isinstance(state, dict):
+        raise ValueError(f"{what}: expected a mapping of nodes, got {type(state).__name__}")
+    out: dict[tuple[str, str], Any] = {}
+    for node, fields in state.items():
+        if not isinstance(fields, dict):
+            # A graph state is node -> {field: array}; anything else is
+            # not a snapshot of this sidecar's model.
+            raise ValueError(f"{what} {node}: expected a mapping of fields, "
+                             f"got {type(fields).__name__}")
+        for field, value in fields.items():
+            out[(node, field)] = value
+    return out
+
+
+def _param_leaves(params: Any, *, what: str) -> dict[tuple[str, str, str], Any]:
+    """``{(section, owner, key): leaf}`` of a parameter tree
+    (``section -> {owner: {key: array}}``, the ``GraphManager.params`` layout)."""
+    if not isinstance(params, dict):
+        raise ValueError(f"{what}: expected a mapping of sections, got {type(params).__name__}")
+    out: dict[tuple[str, str, str], Any] = {}
+    for section, owners in params.items():
+        if not isinstance(owners, dict):
+            raise ValueError(f"{what} {section}: expected a mapping of owners, "
+                             f"got {type(owners).__name__}")
+        for owner, leaves in owners.items():
+            if not isinstance(leaves, dict):
+                raise ValueError(f"{what} {section}/{owner}: expected a mapping of "
+                                 f"parameters, got {type(leaves).__name__}")
+            for key, value in leaves.items():
+                out[(section, owner, key)] = value
+    return out
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
@@ -276,13 +336,23 @@ class FmuSidecar:
     # -- High-level handlers -------------------------------------------------
 
     def step(self, external_inputs: dict[str, dict[str, Any]]) -> dict:
-        if self._params is None:
-            self._state = self._config.step_fn(self._state, external_inputs)
-        else:
-            self._state = self._config.step_fn(
-                self._state, external_inputs, self._params,
-            )
+        self._state = self._advanced(self._state, external_inputs)
         return self._state
+
+    def _advanced(self, state: dict[str, dict[str, Any]],
+                  external_inputs: dict[str, dict[str, Any]]) -> dict:
+        """``state`` one step on, under the current parameters, without
+        committing it.
+
+        :meth:`step` is this plus the commit.  The TCP bridge runs a
+        communication step's sub-steps through here on a local state and
+        commits once at the end, so a failed sub-step leaves nothing
+        behind and a step still running when the bridge is stopped writes
+        nothing into a stopped bridge's sidecar.
+        """
+        if self._params is None:
+            return self._config.step_fn(state, external_inputs)
+        return self._config.step_fn(state, external_inputs, self._params)
 
     def get_params(self) -> dict[str, Any]:
         """``{"<node>.params.<key>": value}`` for every FMI ``parameter``
@@ -370,14 +440,19 @@ class FmuSidecar:
 
         A snapshot is a door into the state and parameter tree, so it is
         held to the checks the TCP bridge's ``set_state`` applies, with the
-        same messages, all before anything is committed: every state leaf
-        and every parameter must be finite and representable in the dtype
-        (and have the shape) of the live leaf it replaces, a parameter the
-        step cannot read (``SidecarConfig.fixed_params``) may not change,
-        and the restored parameters must lie inside their declared
+        same messages, all before anything is committed: it must carry
+        exactly the live model's state fields and, when this sidecar has a
+        parameter tree, exactly its parameters -- no node, field or
+        parameter missing and none extra; every state leaf and every
+        parameter must be finite and representable in the dtype (and have
+        the shape) of the live leaf it replaces; a parameter the step
+        cannot read (``SidecarConfig.fixed_params``) may not change; and
+        the restored parameters must lie inside their declared
         ``ParamSpec`` bounds when the config carries ``param_specs``.  A
         snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` --
-        therefore does not restore; the error names the field.
+        therefore does not restore; the error names the field.  A sidecar
+        without a parameter tree ignores any parameters a snapshot
+        carries.
 
         Raises
         ------
@@ -390,34 +465,39 @@ class FmuSidecar:
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
-        new_state: dict[str, dict[str, Any]] = {}
-        for node, fields in state.items():
-            if not isinstance(fields, dict):
-                # A graph state is node -> {field: array}; anything else is
-                # not a snapshot of this sidecar's model.
-                raise ValueError(f"FMU state {node}: expected a mapping of fields, "
-                                 f"got {type(fields).__name__}")
-            live_fields = self._state.get(node) or {}
-            new_state[node] = {
-                field: _restored_leaf(value, live_fields.get(field),
-                                      what=f"FMU state {node}.{field}")
-                for field, value in fields.items()
-            }
+        # The key sets first, as the bridge compares its archive's members:
+        # a snapshot missing a node used to restore and leave the next step
+        # to fail with a KeyError (the sidecar stayed broken), one with an
+        # extra field restored it, and one missing a parameter leaf failed
+        # the next step's completeness check.
+        got_state = _state_leaves(state, what="FMU state")
+        live_state = _state_leaves(self._state, what="live state")
+        refusal = _key_set_error("fields", {_state_key(*k) for k in live_state},
+                                 {_state_key(*k) for k in got_state})
+        if refusal is not None:
+            raise refusal
+        # Rebuilt on the live skeleton, so a node with no fields -- which no
+        # key names -- is kept as it is.
+        new_state: dict[str, dict[str, Any]] = {node: {} for node in self._state}
+        for (node, field), live in live_state.items():
+            new_state[node][field] = _restored_leaf(
+                got_state[(node, field)], live, what=f"FMU state {node}.{field}")
         new_params = None
-        if params is not None and self._params is not None:
-            new_params = {}
-            for section, owners in params.items():
-                if not isinstance(owners, dict):
-                    new_params[section] = owners
-                    continue
-                live_owners = self._params.get(section) or {}
-                new_params[section] = {
-                    owner: {key: jnp.asarray(_restored_leaf(
-                        value, (live_owners.get(owner) or {}).get(key),
-                        what=f"FMU state param {owner}.params.{key}"))
-                        for key, value in leaves.items()}
-                    for owner, leaves in owners.items()
-                }
+        if self._params is not None:
+            got_params = ({} if params is None
+                          else _param_leaves(params, what="FMU state params"))
+            live_params = _param_leaves(self._params, what="live params")
+            refusal = _key_set_error("parameters",
+                                     {_param_key(*k) for k in live_params},
+                                     {_param_key(*k) for k in got_params})
+            if refusal is not None:
+                raise refusal
+            new_params = {section: {owner: {} for owner in owners}
+                          for section, owners in self._params.items()}
+            for (section, owner, key), live in live_params.items():
+                new_params[section][owner][key] = jnp.asarray(_restored_leaf(
+                    got_params[(section, owner, key)], live,
+                    what=f"FMU state param {owner}.params.{key}"))
             # A snapshot is a door into the parameter tree like set_params:
             # it may not install a new value for a parameter the step cannot
             # read.  Checked before anything is committed.

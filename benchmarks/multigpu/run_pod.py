@@ -108,7 +108,7 @@ is about the ranking only: it never lets a checklist item close.
 
 Sizes default to the hardware: on GPUs the cell counts are
 ``1e5, 3e5, 1e6``; on CPU (or with ``--dry-run``) they are a few hundred
-cells so the whole script proves itself in about two minutes.
+cells so the whole script proves itself in a minute or two.
 ``--dry-run`` additionally pins JAX to the CPU backend with four virtual
 host devices when no accelerator backend was requested, so::
 

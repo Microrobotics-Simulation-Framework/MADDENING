@@ -101,9 +101,9 @@ python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
 
-The dry run takes about a minute and a half on three cores (about two
-minutes with `--cells 256 1024`), most of it XLA compiling the `stencil`
-cases and the coupled group's adjoint.  It must print `checks n/n passed` for all eight goals, no
+The dry run takes about a minute on three cores (a minute and a half
+with `--cells 256 1024`), most of it XLA compiling the `stencil` cases
+and the coupled group's adjoint.  It must print `checks n/n passed` for all eight goals, no
 `CHECK NOT RUN` line, and exit 0.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
 (a dry run never closes an item), list nothing under "Records that cannot

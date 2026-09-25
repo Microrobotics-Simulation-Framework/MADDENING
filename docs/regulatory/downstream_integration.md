@@ -123,7 +123,7 @@ The MADDENING documentation architecture is designed to support the most demandi
 5. **Algorithm Guides**: Per-node documentation of governing equations, discretization, assumptions, limitations, and validated regimes — with CI-validated bibliography citations (`docs/bibliography.bib`) and CI-validated implementation-to-code mappings
 6. **HealthCheckNode**: Configurable execution-layer fault detection (NaN/Inf, bounds, moment checks) for use in downstream safety monitoring
 7. **Compliance Schema Types**: Importable Python types (`NodeMeta`, `AnomalyRecord`, etc.) for downstream libraries to use and extend
-8. **{term}`SBOM`** (planned, not yet provided): a CycloneDX-format software bill of materials attached to each release; see `docs/validation/soup_package.md` §6
+8. **{term}`SBOM`**: CycloneDX 1.6 JSON SBOMs for the base install and for the `server`, `surrogates` and `usd` extras (`docs/validation/sbom/`).  Each records the resolved dependency tree, with every package's version, purl and declared licence, and the Python, platform and date it was resolved on.  They are regenerated from the release commit for each release and attached to the GitHub release.  Which installs are covered and why, and what an SBOM does not record, are in `docs/validation/soup_package.md` §6
 
 ### What MADDENING does NOT provide
 
@@ -136,6 +136,12 @@ The MADDENING documentation architecture is designed to support the most demandi
 - Notified Body relationship
 - End-user training materials for clinical use
 - Cybersecurity risk assessment for the deployed product (MADDENING assumes trusted inputs; see `docs/regulatory/intended_use.md`)
+- Authentication on every network surface, or anything beyond one shared secret per surface.  What 0.4.0 does provide, and where it stops (`SECURITY.md` has the detail):
+  - **HTTP/WebSocket API** (`api` extra): a bearer token (`MADDENING_API_TOKEN`) is required on any bind other than loopback.  There is **no TLS**, so the token crosses the network in cleartext; put the API behind an SSH tunnel or a TLS-terminating proxy.  A loopback bind is unauthenticated.
+  - **ZeroMQ transports** (`network` extra): off loopback, CURVE encryption and authentication are required, keyed from one shared token (`MADDENING_TRANSPORT_TOKEN`, else `MADDENING_API_TOKEN`).  Every holder of the token can derive both keypairs, so the transport does not tell token holders apart and has no per-peer keys.  There is no forward secrecy.  See the residual risk of MADD-ANO-015.  A loopback bind is unauthenticated.
+  - **WebRTC signaling socket** (`streaming` extra): clients are authenticated with HMAC tokens derived from `MADDENING_STREAM_SECRET`; without the secret no client can connect.
+  - **FMU TCP bridge** (`maddening.fmi.tcp_bridge`): **no authentication at all**.  Any process that can reach its port can read, write, step and hold the model, whatever interface it is bound to.  It binds loopback on an ephemeral port by default, and it is for trusted clients only (MADD-ANO-023, open).
+  - No user accounts, per-user authorisation, access audit or rate limiting on any surface.
 
 ### LGPL Replaceability
 

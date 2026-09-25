@@ -35,7 +35,7 @@ The commercial integration layer is responsible for:
 - Network security for any API endpoints (the FastAPI server is a development tool, not a production deployment surface)
 - Authentication and access control for simulation services
 
-A MADDENING {term}`SBOM` (Section 14 of the documentation architecture), giving the complete dependency tree needed for the manufacturer's cybersecurity documentation, is planned and not yet published (`docs/validation/soup_package.md` §6); until then `pyproject.toml` declares the dependency ranges.
+MADDENING's {term}`SBOM`s (CycloneDX 1.6, `docs/validation/sbom/`; Section 14 of the documentation architecture) give the resolved dependency tree of the base install and of the `server`, `surrogates` and `usd` extras, with each package's version, purl and declared licence, for the manufacturer's cybersecurity documentation.  Each records one resolution, on the Python version, platform and date it names; `pyproject.toml` declares the ranges any install resolves within.  The environment a product actually deploys is the manufacturer's to record: `scripts/generate_sbom.py` does it for any combination of extras (`docs/validation/soup_package.md` §6).
 
 ## LGPL Replaceability Statement
 

@@ -27,7 +27,7 @@ This document maps MADDENING's documentation and design to {term}`EU MDR` (EU 20
 ## MDCG 2019-16 — Cybersecurity
 
 MADDENING provides:
-- **{term}`SBOM`**: CycloneDX format, attached to each release (when implemented)
+- **{term}`SBOM`**: CycloneDX 1.6 JSON for the base install and the `server`, `surrogates` and `usd` extras, in `docs/validation/sbom/`, regenerated for each release and attached to it (`docs/validation/soup_package.md` §6)
 - **SECURITY.md**: vulnerability reporting process
 - **Dependency monitoring**: GitHub Dependabot + manual JAX changelog review
 - **Cybersecurity boundary**: documented in `docs/regulatory/intended_use.md`

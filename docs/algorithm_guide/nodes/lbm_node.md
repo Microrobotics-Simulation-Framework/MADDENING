@@ -151,8 +151,8 @@ Before 0.4.0 the closure computed $u_n = \sigma[1 - (S_T + S_K)/\rho_p]$, with t
 
 | Parameter | Verified Range | Notes |
 |-----------|---------------|-------|
-| `tau` | 0.501 – 2.0 | $\tau > 0.5$ required; $\tau \gg 1$ adds numerical diffusion |
-| Reynolds number | 0 – 100 | Laminar channel and pipe flow (MADD-VER-003, MADD-VER-016) |
+| `tau` | 0.8 – 1.0 | The values the benchmarks run at: 0.8 (MADD-VER-003, MADD-VER-007) and 1.0 (MADD-VER-016).  $\tau > 0.5$ is required; $\tau \gg 1$ adds numerical diffusion.  The 0.501 – 2.0 this row claimed until 0.4.0 was never run |
+| Reynolds number | 0 – 0.21 | Stokes regime only.  Measured on the benchmarks' own runs: 0.21 and 0.19 for MADD-VER-016's channel at $H = 8$ and $16$ ($u_{mean} H / \nu$), 0.21 for MADD-VER-003's pipe ($u_{mean} \cdot 2R / \nu$).  The 0 – 100 this row claimed until 0.4.0 was never run |
 | Inlet/outlet density difference | up to 1% of the mean | MADD-VER-016's range; larger drops add compressibility error |
 
 ## Known Limitations and Failure Modes
@@ -224,4 +224,4 @@ $\tau > \tfrac12$, which the constructor enforces through $\nu > 0$. The equilib
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-03-16 | Initial implementation |
-| 1.1.0 | 2026-09-24 | Zou-He closure corrected: the face now carries the prescribed density and zero tangential velocity (MADD-ANO-020). `outlet_pressure_avg` averages over the runtime wall mask. `inlet_face == outlet_face`, a pressure face on a sharded axis and a sharding `boundary` other than `"periodic"` (`halo_boundary()`) are refused |
+| 1.1.0 | 2026-09-24 | Zou-He closure corrected: the face now carries the prescribed density and zero tangential velocity (MADD-ANO-020). `outlet_pressure_avg` averages over the runtime wall mask. `inlet_face == outlet_face`, a pressure face on a sharded axis and a sharding `boundary` other than `"periodic"` (`halo_boundary()`) are refused. The `tau` and Reynolds-number regimes are narrowed to what the benchmarks run (metadata only) |

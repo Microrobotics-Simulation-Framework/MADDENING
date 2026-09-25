@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -832,12 +833,27 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         *,
         static_padded=None,
         shard_info=None,
+        params=None,
     ):
+        """Forward to the wrapped node's ``update_padded``.
+
+        What an outer ``ShardedStencilNode`` calls when this wrapper is
+        the node it wraps.  ``params`` is forwarded under the one params
+        rule, as ``static_padded`` and ``shard_info`` are under theirs.
+        In the 0.4.0 development tree this took no ``params``, so the
+        outer wrapper read the nested node as a params-free one, the
+        node's leaves never reached ``GraphManager.params``, and a
+        ``run_scan(params=)`` write of ``thermal_diffusivity`` moved
+        nothing (0.0 K, against 30.9 K for the singly wrapped rod), with
+        no error.
+        """
         kwargs = {}
         if self._inner_accepts_static_padded and static_padded is not None:
             kwargs["static_padded"] = static_padded
         if self._inner_accepts_shard_info and shard_info is not None:
             kwargs["shard_info"] = shard_info
+        if self._inner_accepts_params and params is not None:
+            kwargs["params"] = params
         return self._inner.update_padded(
             state_padded, boundary_inputs, dt, **kwargs
         )
@@ -849,7 +865,12 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     # -- graph parameter contract (proxied to the inner node) -----------
 
     def accepts_params(self, *, method: str = "update") -> bool:
-        if method != "update":
+        # ``update`` and ``update_padded`` both hand ``params`` to the
+        # wrapped node's ``update_padded``, so both answer for it.  An
+        # outer wrapper asks ``"update_padded"``, and the base class would
+        # answer from this wrapper's own signature -- which says nothing
+        # about the node it forwards to.
+        if method not in ("update", "update_padded"):
             return super().accepts_params(method=method)
         return self._inner_accepts_params
 
@@ -980,7 +1001,8 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             return arr2
 
         def _local_update(local_state, local_bi, local_dt, local_static,
-                          local_params, *, grid_bi=frozenset()):
+                          local_params, *, grid_bi=frozenset(),
+                          local_extents=None):
             # 1. Halo-pad state.  A domain integral carried in the state
             #    is not a grid field: passed through unpadded.
             padded = {
@@ -1014,19 +1036,17 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             # 3. Compute shard_info: {spatial_axis: (global_offset,
             #    local_extent)} for every spatial axis the node shards.
             #    ``global_offset`` is a traced JAX scalar — usable in
-            #    dynamic_slice, not in Python integer slicing.
+            #    dynamic_slice, not in Python integer slicing.  The local
+            #    extent was fixed before tracing, from the global grid
+            #    (:meth:`_local_extents`).  It used to be read here off the
+            #    first local state field long enough to have the axis, in
+            #    sorted key order -- a domain integral carried in the state
+            #    included -- so a vector integral named to sort first gave
+            #    HeatNode an extent of 2 on 4-cell blocks, and its right rod
+            #    end was never closed (70.9 K off, no error).
             shard_info: dict[int, tuple[Any, int]] = {}
             for ma, sax in axis_map.items():
-                extent = None
-                for arr in local_state.values():
-                    if sax < arr.ndim:
-                        extent = arr.shape[sax]
-                        break
-                if extent is None:
-                    for arr in local_static.values():
-                        if sax < arr.ndim:
-                            extent = arr.shape[sax]
-                            break
+                extent = (local_extents or {}).get(sax)
                 if extent is None:
                     continue
                 offset = lax.axis_index(ma) * extent
@@ -1044,19 +1064,24 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 padded, local_bi, local_dt, **extra_kwargs
             )
 
-            # 5. Classify outputs: state fields → strip halos; declared
-            #    integrals → psum across the full mesh; otherwise raise
-            #    (the out_specs build below would also catch it).
+            # 5. Classify outputs: declared integrals → psum across the
+            #    full mesh; state fields → strip halos; otherwise raise
+            #    (the out_specs build below would also catch it).  An
+            #    integral first: a node whose ``state_fields()`` also lists
+            #    it (the default lists every ``initial_state`` key) had it
+            #    stripped like a grid field and never summed, and shard_map
+            #    refused the unreplicated result with an error about
+            #    out_specs.
             out: dict[str, Any] = {}
             for k, v in new_padded.items():
-                if k in state_set:
-                    out[k] = strip_fn(v, original=local_state[k], halo=halo_widths)
-                elif k in integrals:
+                if k in integrals:
                     reduce_axes, unreduced = integral_reduction[k]
                     red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v
                     # One leading axis per unreduced mesh axis: the local
                     # value is that shard's slice of the stacked result.
                     out[k] = red[(None,) * len(unreduced)] if unreduced else red
+                elif k in state_set:
+                    out[k] = strip_fn(v, original=local_state[k], halo=halo_widths)
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "
@@ -1105,6 +1130,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             for f, arr in state.items()
         }
         grid_bi = self._grid_shaped_boundary_inputs(state, boundary_inputs)
+        self._refuse_misshapen_inputs(state, boundary_inputs, grid_bi)
         bi_specs = {
             k: (self._spec_for_field(jnp.asarray(v)) if k in grid_bi else P())
             for k, v in boundary_inputs.items()
@@ -1124,8 +1150,10 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             out_specs[k] = P(*unreduced) if unreduced else P()
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
+        local_extents = self._local_extents(state, static)
         sm = shard_map(
-            functools.partial(self._local_update_fn, grid_bi=grid_bi),
+            functools.partial(self._local_update_fn, grid_bi=grid_bi,
+                              local_extents=local_extents),
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
@@ -1138,6 +1166,60 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         fn = jax.jit(sm)
         self._sharded_cache[key] = fn
         return fn
+
+    def _local_extents(self, state: dict, static: dict) -> dict[int, int]:
+        """``{spatial_axis: cells per block}`` for every sharded axis.
+
+        Worked out before tracing, from the global shapes: a grid field's
+        extent along the axis divided by the devices on its mesh axis.  A
+        grid field is a state field that is not a domain integral and has
+        the axis; a sharded ``StaticArray`` split along the axis stands in
+        when no state field has it.  A domain integral carried in the
+        state is not on the grid and never sets the extent (before 0.4.0
+        the first field in sorted key order did, integral or not).
+
+        Raises
+        ------
+        ValueError
+            When the inner node reads ``shard_info`` and two grid fields
+            disagree about an axis's extent: they are split into blocks of
+            different sizes, and one ``(offset, extent)`` pair cannot
+            describe both.
+        """
+        integrals = set(self._inner.domain_integral_fields())
+        out: dict[int, int] = {}
+        for mesh_axis, spatial_axis in self._axis_map.items():
+            extents = {
+                f"state field {f!r}": int(jnp.shape(arr)[spatial_axis])
+                for f, arr in sorted(state.items())
+                if f not in integrals and jnp.ndim(arr) > spatial_axis
+            }
+            if not extents:
+                extents = {
+                    f"static array {k!r}": int(jnp.shape(arr)[spatial_axis])
+                    for k, arr in sorted(static.items())
+                    if k in self._sharded_static
+                    and self._sharded_static[k].shard_axis == spatial_axis
+                    and jnp.ndim(arr) > spatial_axis
+                }
+            if not extents:
+                continue
+            if len(set(extents.values())) > 1 and self._inner_accepts_shard_info:
+                listed = ", ".join(f"{what} has {n}" for what, n in extents.items())
+                raise ValueError(
+                    f"ShardedStencilNode {self.name!r}: the grid fields of "
+                    f"{type(self._inner).__name__} disagree about the extent of "
+                    f"spatial axis {spatial_axis} ({listed} cells), so they are "
+                    "split into blocks of different sizes, and the one "
+                    "(offset, extent) pair update_padded receives in "
+                    f"shard_info[{spatial_axis}] cannot describe both.  Give "
+                    "every field sharded along this axis the grid's extent, or "
+                    "declare a field that is one value for the whole domain in "
+                    "domain_integral_fields()."
+                )
+            global_extent = next(iter(extents.values()))
+            out[spatial_axis] = global_extent // int(self._mesh.shape[mesh_axis])
+        return out
 
     def _classify_sharded_static(self, static_data) -> dict[str, StaticArray]:
         """Pick the ``replication="shard"`` entries out of ``static_data``.
@@ -1393,10 +1475,30 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         carries component dims *and* the grid has undeclared spatial
         axes) cannot be resolved from shapes alone.
         """
+        grid = self._grid_rank_and_shape(state)
+        if grid is None:
+            return frozenset()
+        rank, ref = grid
+        out = set()
+        for k, v in boundary_inputs.items():
+            shape = tuple(jnp.shape(v))
+            if len(shape) >= rank and tuple(shape[:rank]) == ref:
+                out.add(k)
+        return frozenset(out)
+
+    def _grid_rank_and_shape(
+        self, state: dict,
+    ) -> Optional[tuple[int, tuple[int, ...]]]:
+        """``(rank, global grid shape)`` of the state, or ``None``.
+
+        The rule :meth:`_grid_shaped_boundary_inputs` documents: the rank is
+        bracketed by the axes the node declares and by the smallest grid
+        field, and the shape is the leading ``rank`` dims of a grid field.
+        """
         halo = self._inner.halo_width()
         declared = list(self._axis_map.values()) + list(halo.keys())
         if not declared:
-            return frozenset()
+            return None
         rank_lb = max(int(a) for a in declared) + 1
         integrals = set(self._inner.domain_integral_fields())
         grid_fields = [
@@ -1404,15 +1506,68 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             if k not in integrals and jnp.ndim(arr) >= rank_lb
         ]
         if not grid_fields:
-            return frozenset()
+            return None
         rank = max(rank_lb, min(int(jnp.ndim(a)) for a in grid_fields))
-        ref = tuple(int(n) for n in jnp.shape(grid_fields[0])[:rank])
-        out = set()
-        for k, v in boundary_inputs.items():
-            shape = tuple(jnp.shape(v))
-            if len(shape) >= rank and tuple(shape[:rank]) == ref:
-                out.add(k)
-        return frozenset(out)
+        return rank, tuple(int(n) for n in jnp.shape(grid_fields[0])[:rank])
+
+    def _refuse_misshapen_inputs(
+        self, state: dict, boundary_inputs: dict, grid_bi: frozenset[str],
+    ) -> None:
+        """Refuse a replicated input that the node declares per cell and cannot be.
+
+        A boundary input that is not grid-shaped is replicated: every shard
+        receives the whole array and cannot tell it from a local one.  So a
+        caller's ``heat_source`` of 4 values on a 16-cell rod split four
+        ways was read by each shard as its own 4 cells -- one pattern
+        repeated along the rod -- and one of 6 as a halo-padded block;
+        an ``LBMNode`` ``body_force`` of shape ``(4, 8, 2)`` on a
+        ``(16, 8)`` grid was zero-padded and applied on every slab.  The
+        unsharded node refuses all three (its arrays do not broadcast).
+
+        So an input whose declared ``boundary_input_spec()`` shape is per
+        cell (its leading dims are the grid's) must either be grid-shaped
+        -- sharded like the state -- or broadcast to that declared shape,
+        the forms the unsharded ``update`` takes (a scalar, a uniform
+        vector).  Anything else is refused here, before tracing, naming the
+        global shape the caller passed.  An input the node does not
+        declare, or declares with a shape that is not per cell, is left to
+        the node.
+        """
+        grid = self._grid_rank_and_shape(state)
+        if grid is None:
+            return
+        rank, ref = grid
+        try:
+            specs = dict(self._inner.boundary_input_spec() or {})
+        except Exception:  # noqa: BLE001 - no declaration to check against
+            return
+        for key, value in boundary_inputs.items():
+            if key in grid_bi or key not in specs:
+                continue
+            declared = getattr(specs[key], "shape", None)
+            try:
+                declared = tuple(int(n) for n in declared)
+            except (TypeError, ValueError):
+                continue           # not a concrete shape: nothing to hold it to
+            if len(declared) < rank or declared[:rank] != ref:
+                continue           # not a per-cell input
+            given = tuple(int(n) for n in jnp.shape(value))
+            try:
+                fits = np.broadcast_shapes(given, declared) == declared
+            except ValueError:
+                fits = False
+            if fits:
+                continue
+            raise ValueError(
+                f"ShardedStencilNode {self.name!r}: boundary input {key!r} has "
+                f"shape {given}, but {type(self._inner).__name__} declares it "
+                f"per cell with shape {declared}, and {given} neither is that "
+                f"grid (leading dims {ref}) nor broadcasts to it, so it is not "
+                "a value the node declares for this input.  Sharded, it would "
+                "be handed whole to every shard and read as that shard's own "
+                f"block.  Pass the whole grid, shape {declared}, or a value "
+                "that broadcasts to it (a scalar, a uniform vector)."
+            )
 
     def _spec_for_field(self, arr: jax.Array) -> P:
         """PartitionSpec for a single state field array.

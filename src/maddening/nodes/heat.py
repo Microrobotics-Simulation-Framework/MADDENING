@@ -505,7 +505,7 @@ class HeatNode(SimulationNode):
         hazard_hints=(
             "CFL is checked only against the constructor's timestep, thermal_diffusivity and length; a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
             "No runtime validation of thermal_diffusivity > 0",
-            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and reaches float range within about 90 steps at Fo = 0.45 (MADD-ANO-037)",
+            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (MADD-ANO-037)",
         ),
         implementation_map={
             "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode._compute_laplacian",

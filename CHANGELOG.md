@@ -292,6 +292,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`PUT /graph/params` answers 200 only for a write a saved graph reproduces** (MADD-ANO-034, 035, 036): the constructor is asked with every changed key and the live values a save carries (a live leaf skipped it: a `HeatNode` past its Fourier limit, `rho_gas > rho_liquid`); a write the running node would honour unlike its rebuild is refused
+  (`LBMPipeNode`'s `G` crossing 0; `HeatNode` now fixes its grid at construction, so `grid_points` on a uniform rod is refused); a non-finite value is a 400 before any write (it was stored, then a 500 on every GET); params carry POST's 422 bounds, and a
+  state over the cap or of another layout is refused before anything that size is built.  Action: rebuild a node to change such a value, and check that configs saved after a REST write still load.
 - **The coupling guide is re-measured on the release tree** (`benchmarks/results/coupling_sweep*_cpu.json`): its "fixed point that barely moves" row now
   starts from `gauss-seidel`/`none`, not Jacobi at ω = 0.8; the heat benchmark fixtures run at half their Fourier number (the rod-end fix doubled
   their gain; slab pairs are unstable above Fo = 3/8); `boundary_interpolation` modes can differ by O(tolerance), not "bit-identical"
@@ -611,6 +614,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-034, 035, 036 (new, resolved in this release)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
+  **MADD-ANO-037 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8, not the 1/2 each accepts; keep Fo < 3/8 on such pairs
 - **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
   **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;

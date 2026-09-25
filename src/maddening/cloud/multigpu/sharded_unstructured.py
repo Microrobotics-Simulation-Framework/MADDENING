@@ -215,8 +215,31 @@ class ShardedUnstructuredNode(SimulationNode):
         self._layout = layout
         self._exchange = exchange
         self._sharded_static = sharded_static
-        # Cached compiled fns keyed by the input signature.
+        # Cached compiled fns keyed by the input signature.  Dropped by
+        # :meth:`invalidate_static_cache` (every ``compile()``): each entry
+        # is a trace of the inner node as it read its params then.
         self._sharded_cache: dict[Any, Any] = {}
+        # Rows of a per-cell array in partition layout, and whether that
+        # layout *is* global cell order (every shard full, and shard ``d``
+        # owning the ``d``-th contiguous block in ascending order).  When
+        # the two counts agree and it is not, a global-order array and a
+        # partition-layout one have the same shape; see
+        # ``_cell_boundary_inputs``.
+        self._n_layout_rows = layout.n_devices * layout.n_local_max
+        n_global = int(np.asarray(layout.partition_assignment).size)
+        self._layout_is_global_order = (
+            self._n_layout_rows == n_global
+            and np.array_equal(
+                np.concatenate([np.asarray(ids) for ids in layout.local_global_ids]),
+                np.arange(n_global),
+            )
+        )
+        # A misspelt mesh axis in ``domain_integral_axes`` used to be read
+        # as "not this axis" and return the stacked per-shard partials in
+        # place of the reduced value; refused here, by name, as
+        # ``ShardedStencilNode`` refuses it.
+        for key in node.domain_integral_fields():
+            self._integral_is_reduced(key)
         # Cached per-device materialisation of the partitioned statics;
         # see ``_materialise_partitioned_statics``.
         self._static_device_cache: Optional[tuple] = None
@@ -241,6 +264,16 @@ class ShardedUnstructuredNode(SimulationNode):
 
     def boundary_input_spec(self):
         return self._inner.boundary_input_spec()
+
+    def update_evaluations(self) -> Optional[float]:
+        """The wrapped node's declaration: sharding does not change how often it rounds.
+
+        Without it a sub-stepping node lost its declaration when wrapped,
+        and a coupling group containing it read its float floor as one
+        evaluation (``spectral_usable=False`` at the floor, where the
+        unwrapped node's group was usable).
+        """
+        return self._inner.update_evaluations()
 
     def interface_dof_indices(self) -> dict[str, tuple[str, int]]:
         """Refuse, by name, an inner node that declares interface DOFs.
@@ -339,7 +372,19 @@ class ShardedUnstructuredNode(SimulationNode):
         signature) tuple and dispatches.  ``params`` (the node's entry of
         ``GraphManager.params``) is replicated to every shard and handed
         to an inner ``update_padded(..., params=)``.
+
+        ``state`` is in partition layout, as :meth:`initial_state` builds
+        it: every field of ``state_fields()`` has ``n_devices *
+        n_local_max`` rows.  A field with another leading axis -- a state
+        in global cell order on a partition with padding, say -- is
+        refused by name.  When the two counts agree (every shard full)
+        and the partition does not keep cells in global order, a
+        global-order state has the same shape as a partition-layout one
+        and cannot be told from it here; convert it with
+        :func:`~maddening.cloud.multigpu.halo_unstructured.partition_value`
+        before writing it.
         """
+        self._check_state_layout(state)
         # Materialise first: it refreshes ``self._sharded_static``, which
         # ``_get_sharded_fn`` keys its compiled-function cache on.
         static_partitioned = self._materialise_partitioned_statics()
@@ -355,8 +400,18 @@ class ShardedUnstructuredNode(SimulationNode):
         in place; replacing the array object is detected automatically.
         The ``super()`` call forwards to the wrapped node, so a cache
         further in is dropped too.
+
+        The compiled ``shard_map`` step functions go with it, because
+        :meth:`~maddening.core.graph_manager.GraphManager.compile` calls
+        this on every node and a recompile has to trace the inner node
+        afresh: a node on the three-argument contract that reads a
+        constant from ``self.params`` has that value baked into each
+        cached trace.  Before 0.4.0 they survived, so a parameter write
+        followed by ``compile()`` left the sharded step on the old value
+        (MADD-ANO-032).
         """
         self._static_device_cache = None
+        self._sharded_cache.clear()
         super().invalidate_static_cache()
 
     def _materialise_partitioned_statics(self) -> dict:
@@ -437,10 +492,8 @@ class ShardedUnstructuredNode(SimulationNode):
         }
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
-        axes_decl = dict(getattr(self._inner, "domain_integral_axes", dict)())
         for k in self._inner.domain_integral_fields():
-            axes = axes_decl.get(k)
-            if axes is None or self._mesh_axis in tuple(axes):
+            if self._integral_is_reduced(k):
                 out_specs[k] = P()  # fully replicated after psum
             else:
                 out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
@@ -458,6 +511,50 @@ class ShardedUnstructuredNode(SimulationNode):
         self._sharded_cache[key] = fn
         return fn
 
+    def _integral_is_reduced(self, key: str) -> bool:
+        """Is domain integral ``key`` summed over the mesh axis?
+
+        ``True`` unless the node's ``domain_integral_axes()`` names axes
+        for ``key`` that leave this wrapper's mesh axis out, in which case
+        the per-shard values are stacked.  An axis name the mesh does not
+        have is refused rather than read as "not this axis".
+        """
+        axes = dict(getattr(self._inner, "domain_integral_axes", dict)()).get(key)
+        if axes is None:
+            return True
+        axes = tuple(axes)
+        mesh_axes = tuple(self._mesh.axis_names)
+        unknown = [a for a in axes if a not in mesh_axes]
+        if unknown:
+            raise ValueError(
+                f"ShardedUnstructuredNode: domain_integral_axes[{key!r}] of "
+                f"{type(self._inner).__name__} {self._inner.name!r} names mesh "
+                f"axes {unknown} not in mesh.axis_names={mesh_axes}"
+            )
+        return self._mesh_axis in axes
+
+    def _check_state_layout(self, state: dict) -> None:
+        """Refuse a per-cell state field that is not in partition layout."""
+        n_layout = self._n_layout_rows
+        # Every field but a domain integral (replicated after its psum) is
+        # per-cell: ``initial_state`` partitions them all.
+        integrals = set(self._inner.domain_integral_fields())
+        for k in state:
+            if k in integrals:
+                continue
+            shape = tuple(jnp.shape(state[k]))
+            if shape and shape[0] == n_layout:
+                continue
+            raise ValueError(
+                f"ShardedUnstructuredNode {self.name!r}: state field {k!r} has "
+                f"shape {shape}; the wrapper steps a state in partition layout, "
+                f"{n_layout} rows (n_devices * n_local_max = "
+                f"{self._layout.n_devices} * {self._layout.n_local_max}), as "
+                "initial_state() builds it.  A state in global cell order has "
+                "to go through partition_value(value=..., layout=...) and be "
+                f"reshaped to ({n_layout}, ...) first."
+            )
+
     def _cell_boundary_inputs(self, boundary_inputs: dict) -> frozenset[str]:
         """Names of the boundary inputs that are per-cell fields.
 
@@ -469,14 +566,42 @@ class ShardedUnstructuredNode(SimulationNode):
         ``n_local_max + n_ghost_max`` rows.  Scalars and anything else are
         replicated.  A global-order array (leading axis ``n_global_cells``)
         is refused rather than silently misread.
+
+        When the two lengths coincide -- every shard owns ``n_local_max``
+        cells -- the shape cannot say which order an array is in.  If the
+        partition keeps cells in global order (shard ``d`` owns the
+        ``d``-th contiguous block, ascending) the two orders are the same
+        array and it is accepted.  Otherwise it is refused: until 0.4.0 it
+        was read as partition layout, so a global-order input -- what an
+        edge from an unsharded node delivers -- gave each cell another
+        cell's value (an interleaved 8-cell, 2-device partition read
+        ``[1..8]`` as ``[1, 5, 2, 6, 3, 7, 4, 8]``).  Renumber the cells so
+        that each shard owns a contiguous ascending block, and both
+        readings agree.
         """
-        n_layout = self._layout.n_devices * self._layout.n_local_max
+        n_layout = self._n_layout_rows
         n_global = int(np.asarray(self._layout.partition_assignment).size)
         out = set()
         for k, v in boundary_inputs.items():
             shape = tuple(jnp.shape(v))
             if not shape:
                 continue
+            if shape[0] == n_layout and n_layout == n_global \
+                    and not self._layout_is_global_order:
+                raise ValueError(
+                    f"boundary input {k!r} has leading axis {n_layout}, which "
+                    "is both the global cell count and the partition-layout "
+                    f"row count (n_devices * n_local_max = "
+                    f"{self._layout.n_devices} * {self._layout.n_local_max}), "
+                    "and this partition does not keep cells in global order: "
+                    "ShardedUnstructuredNode cannot tell a global-order array "
+                    "from a partition-layout one, and reading one as the other "
+                    "gives each cell another cell's value.  Renumber the cells "
+                    "so that each device owns a contiguous, ascending block of "
+                    "global ids (e.g. relabel them in the order "
+                    "np.argsort(partition_assignment, kind='stable')); the two "
+                    "orders then coincide."
+                )
             if shape[0] == n_layout:
                 out.add(k)
             elif shape[0] == n_global:
@@ -497,7 +622,7 @@ class ShardedUnstructuredNode(SimulationNode):
         n_local_max = layout.n_local_max
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
-        integral_axes = dict(getattr(inner, 'domain_integral_axes', dict)())
+        reduced = {k: self._integral_is_reduced(k) for k in integrals}
 
         accepts_params = self._inner_accepts_params
 
@@ -546,8 +671,7 @@ class ShardedUnstructuredNode(SimulationNode):
                     # Strip the ghost tail.
                     out[k] = v[:n_local_max]
                 elif k in integrals:
-                    axes = integral_axes.get(k)
-                    if axes is None or mesh_axis in tuple(axes):
+                    if reduced[k]:
                         out[k] = lax.psum(v, axis_name=mesh_axis)
                     else:
                         out[k] = v[None]          # stacked along the mesh axis

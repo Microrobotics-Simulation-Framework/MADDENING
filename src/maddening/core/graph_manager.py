@@ -4389,6 +4389,87 @@ class GraphManager:
             return True
         return not all(_leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
 
+    def _state_shape_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+        """Why ``node.params[key] = value`` cannot be taken by the running
+        node because it changes the layout of the state the node builds --
+        the fields of ``initial_state()``, their shapes or dtypes (a cell
+        count, a grid shape) -- or makes ``initial_state()`` raise; ``None``
+        when the layout is unchanged or that cannot be told.
+
+        Such a value is not an initial condition that "takes effect at the
+        next reset": the running state keeps its old shape until then, and
+        the step recompiled for the new value is traced against it.
+        Unsharded, a ``HeatNode`` given a new ``n_cells`` failed its next
+        step (a 500 through ``PUT /graph/params``, after a 200); sharded,
+        it stepped the old 16 cells with ``dx = L/17`` and never closed the
+        right rod end.  Refused on both, before anything is written.
+
+        Evaluated on shallow copies holding the current and the new value
+        (:func:`_node_with_params`), never on the node itself.  A wrapper
+        that closes over the node it wraps cannot be copied that way; the
+        node it wraps, which shares its params dict and builds the state
+        the wrapper places, is asked instead.
+        """
+        node = self._nodes[owner].node
+        shared = getattr(node, "params", None)
+        if not isinstance(shared, dict):
+            return None
+        probes = None
+        candidates = [node]
+        seen: list = []
+        while candidates and probes is None and len(seen) < 8:
+            candidate = candidates.pop(0)
+            if any(candidate is s for s in seen):
+                continue
+            seen.append(candidate)
+            pair = (_node_with_params(candidate, dict(shared)),
+                    _node_with_params(candidate, {**shared, key: value}))
+            if pair[0] is not None and pair[1] is not None:
+                probes = pair
+                break
+            for attr in list(getattr(candidate, "__dict__", {}).values()):
+                if attr is not candidate and not isinstance(attr, type) \
+                        and getattr(attr, "params", None) is shared:
+                    candidates.append(attr)
+        if probes is None:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                before = probes[0].initial_state()
+            except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
+                return None
+            try:
+                after = probes[1].initial_state()
+            except Exception as exc:  # noqa: BLE001 - the new value breaks it
+                return (
+                    f"{type(node).__name__}.initial_state() raises with it "
+                    f"({type(exc).__name__}: {exc})"
+                )
+
+        def layout(state) -> dict:
+            flat = jax.tree_util.tree_flatten_with_path(state)[0]
+            return {
+                jax.tree_util.keystr(path): (tuple(np.shape(leaf)),
+                                             str(np.asarray(leaf).dtype))
+                for path, leaf in flat
+            }
+
+        was, now = layout(before), layout(after)
+        if was == now:
+            return None
+        changed = [
+            f"{field} {was.get(field, 'absent')} -> {now.get(field, 'absent')}"
+            for field in sorted(set(was) | set(now))
+            if was.get(field) != now.get(field)
+        ]
+        return (
+            "it changes the layout of the state the node builds ((shape, "
+            f"dtype) of {'; '.join(changed)}), and the running state keeps "
+            "its layout until it is reset: the step recompiled for the new "
+            "value would be traced against a state it was not written for"
+        )
+
     def _initial_state_depends(self, owner: str, key: str, value: Any) -> Optional[bool]:
         """Does ``initial_state()`` return something else with
         ``node.params[key] = value``?  ``None`` when that cannot be told.

@@ -542,7 +542,10 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
             for ref in sorted(expected_edges - root_edges):
                 err(f"the root component does not depend on {ref!r}, a declared "
                     f"direct dependency")
-            for ref in sorted(root_edges - expected_edges):
+            # An edge to a ref that names no component is reported above
+            # as dangling; calling it "undeclared" too would be wrong when
+            # it is a declared dependency whose component is missing.
+            for ref in sorted((root_edges - expected_edges) & refs):
                 err(f"the root component depends on {ref!r}, which pyproject.toml "
                     f"does not declare as a direct dependency of this install")
 

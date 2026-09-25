@@ -113,7 +113,7 @@ the parent class already returns the right value:
 $ grep -rn "def requires_halo\|requires_halo =\|@property" --include="*.py" | grep -A1 "requires_halo"
 ```
 
-MIME's CI runs a grep gate on this — see the v0.3.0 plan's §B6.
+MIME's CI runs a grep gate on this.
 
 ## Related
 

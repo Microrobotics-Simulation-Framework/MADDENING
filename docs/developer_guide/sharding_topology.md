@@ -164,7 +164,7 @@ the equivalent expressed as a graph with the same number of cells.
 For the MICROROBOTICA Light cloud-rendered demos at 30 fps the gap is
 load-bearing — that's why we keep both paths.
 
-For the v0.3.0 §A6 substrate the toy test is 16 cells and the
+For the v0.3.0 unstructured substrate the toy test is 16 cells and the
 intermediate smoke is 1024 cells; v0.4.0 work will tune the sparse
 halo exchange for real-mesh sizes (10⁴–10⁶ cells) and add NCCL
 fast-paths for actual GPUs.
@@ -187,5 +187,3 @@ fix it back in v0.3.0 — surface the break here, not in v0.4.0.
 * {doc}`node_authoring` — the inner-node side of the contract.
 * {doc}`stability_report` — current @stability tagging of the
   sharding API surface.
-* ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 — the source-of-truth scope
-  document (not version-controlled; lives next to the repo).

@@ -3,8 +3,7 @@
 The restructure splits ``maddening.surrogates`` into thematic
 subpackages — ``primitives/``, ``weights/``, ``training/``, ``replace/``.
 
-v0.3.0 completed the physical-move + drop-shims step (B5 in
-plans/MADDENING_v0.3.0_PLAN.md): the legacy
+v0.3.0 completed the physical-move + drop-shims step: the legacy
 ``maddening.surrogates.{checkpoint,trainer,callbacks,physics_losses}``
 import paths were removed; users must import from the subpackage
 paths directly.

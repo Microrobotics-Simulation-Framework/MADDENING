@@ -1,7 +1,7 @@
-"""LiveStage — generic per-timestep USD writer pulled into MADDENING (v0.3.0 §A3).
+"""LiveStage — generic per-timestep USD writer pulled into MADDENING (v0.3.0).
 
-The plan deliberately *demoted* A3 from "substantial new feature" to
-"small consolidation": the live-stage architecture already existed in
+This was a small consolidation, not a new feature: the live-stage
+architecture already existed in
 MIME's :mod:`mime.viz.stage_bridge`.  MICROROBOTICA already rendered
 those stages.  What was missing was a domain-neutral generalisation
 that non-MIME MADDENING consumers (the bouncing-ball demo, future
@@ -38,8 +38,8 @@ Stability
 ~~~~~~~~~
 The generic surface is tagged ``@stability(EVOLVING)`` — the wire
 format (USD stage layout) is settled, but new generic primitives may
-be added.  v0.4.0+ will harden specific shapes; the freeze happens at
-the M4 (v0.9.0) stability gate per STACK_V1.
+be added.  Promotion is decided in the stability freeze rounds that
+lead to 1.0 (``docs/developer_guide/api_freeze_proposal.md``).
 """
 
 from __future__ import annotations

@@ -138,7 +138,7 @@ class StaticArray:
                     "graph-partitioned sharding).",
                 )
         elif self.replication == "partition":
-            # v0.3.0 §A6 — unstructured sharding contract.  By convention
+            # The unstructured sharding contract.  By convention
             # the partitioned axis is axis 0 (the "global cell" axis).
             if self.partition_assignment is None:
                 raise ValueError(
@@ -203,8 +203,12 @@ class StaticArray:
 def coerce_static_data_value(value: Any, *, node_name: str, key: str) -> Any:
     """Validate that a static_data value is a ``StaticArray`` or scalar.
 
-    Called from :func:`maddening.core.node._iter_static_data_for_hash`
-    on every static_data access.  Scalars, strings, and tuples pass
+    Called for every entry by
+    :meth:`maddening.core.node.SimulationNode.static_data_hash` (which
+    ``GraphManager`` calls when it compiles and before each public entry
+    point runs, to catch a changed shape or dtype) and by
+    ``ShardedStencilNode._classify_sharded_static`` in
+    :mod:`maddening.cloud.multigpu.sharded_node`.  Scalars, strings, and tuples pass
     through unchanged.  Bare arrays (anything with ``shape``/``dtype``
     that isn't a ``StaticArray``) raise :class:`MigrationError`
     naming the migration target.

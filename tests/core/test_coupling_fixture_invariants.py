@@ -230,7 +230,7 @@ class _Disagreement:
 #:
 #: **These ten rows are one defect, and it is not the one they were
 #: first recorded under.**  They were entered as the visible price of
-#: decision D2 (``plans/MADDENING_040_DECISIONS.md``) — both solvers
+#: the 0.4.0 change under which both solvers
 #: now return the iterate whose residual met the criterion rather than
 #: the update it went on to produce, and for IQN that discarded update
 #: is the quasi-Newton step — with the remedy "tighten the fixture's

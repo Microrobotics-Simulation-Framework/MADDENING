@@ -1,4 +1,4 @@
-"""FMI 3.0 round-trip against ``fmpy`` (v0.3.0 §A1 verification gate).
+"""FMI 3.0 round-trip against ``fmpy`` (the FMI verification gate).
 
 What this test actually exercises
 ---------------------------------

@@ -78,8 +78,8 @@ $-1.5808 \times 10^{-3}$ against a true change of $-2.3598 \times 10^{-3}$ — a
 **33 % shortfall**, equal to the sum of the 27 jumps crossed. The omitted term
 decays with the active-set budget, because the coefficient that swaps rank
 shrinks: on the same problem the jump contribution falls from $2.5 \times
-10^{-1}$ of $|J|$ at $K = 8$ to $\sim 10^{-8}$ at $K = 64$ (the spike measured
-$4 \times 10^{-8}$). Registered as anomaly `MADD-ANO-003`; asserted by
+10^{-1}$ of $|J|$ at $K = 8$ to $1.2 \times 10^{-8}$ at $K = 64$. Registered
+as anomaly `MADD-ANO-003`; asserted by
 `tests/nodes/adaptive/test_active_set_switch.py`.
 
 **Budget adequacy and blindness.** Let $G$ be a symmetry group of $(A, b, s)$ with fixed-point set
@@ -169,8 +169,8 @@ names which one the evidence points at; `on_blind="raise"` refuses.
 | Active-set budget `K` | 4 – 256 | Top-K budgets 4 – 256 of up to 256 modes, all constructible with the default cold-start policy. **The gradient-capture ratio is a function of `K` alone, not of the active fraction `K / n_max`:** on the 1-D sine reference problem it measures 0.163 / 0.565 / 0.855 / 0.999 at `K` = 4 / 8 / 16 / 32, *at every* `n_max` (`tests/nodes/adaptive/test_blindness_diagnostics.py::test_gradient_capture_ratio_tracks_the_active_set_budget_not_symmetry` pins this, and `docs/developer_guide/adaptive_node.md` states it the same way; re-measured at `c51cd6a`, 2026-09-19). The 0.7 threshold is therefore crossed **between `K` = 8 and `K` = 16**, and on this problem construction *warns* at `K` ≤ 8 (it is not rejected); the missing first-order term is then percent-level — see the row below. Size the node from `K`, and read the ratio back with `check_gradient_capture()` on your own problem rather than inferring it from either number |
 | Jump contribution to $dJ/d\theta$ | $2.5\times10^{-1}$ (K=8) → $\sim10^{-8}$ (K=64) | Fraction of $\|J\|$ omitted by the returned gradient per unit $\theta$, 1-D sine toy over $[0.40, 0.42]$. Treat the frozen gradient as trustworthy only in the large-budget end of this range |
 | Trainable parameters | 1 | The diagnostic constants were calibrated on 1-D and 2-D parameter spaces; above `D_threshold = 5` run `frozen_gradient_vanishes_at` between optimiser steps, reading a `False` as "not a trap" rather than a `True` as "trap" |
-| `gradient_capture_threshold` | 0.7 | Spike round 6; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
-| `blindness_break_delta` | 0.05 | Spike round 7; escapes the 1-D trap (minimum 0.03) and the 2-D traps tested |
+| `gradient_capture_threshold` | 0.7 | Design-study choice; states measured at 0.86 (good), 0.17 (partial), 0.0 (trap) |
+| `blindness_break_delta` | 0.05 | Design-study choice; escapes the 1-D trap (minimum 0.03) and the 2-D traps tested |
 
 ## Known Limitations and Failure Modes
 
@@ -206,8 +206,9 @@ names which one the evidence points at; `on_blind="raise"` refuses.
    pass and a `NaN` gradient; the base class cannot repair it. Use
    `AdaptiveNode.mask_safe` on the operand.
 5. **Non-local bases can produce wrong-sign solutions** when the selection is
-   by source magnitude near a boundary (spike round 4, sine basis with
-   top-$|b|$): the active modes' values at the sensor alternate in sign.
+   by source magnitude near a boundary (observed in the design study with
+   the sine basis and top-$|b|$): the active modes' values at the sensor
+   alternate in sign.
    Selecting by solution magnitude ($|b_k/\lambda_k|$) or using a local basis
    avoids it; the base class does not choose for the subclass.
 6. **Cost.** `gradient_capture_ratio` and `symmetry_break` need a full-basis gradient,
@@ -284,8 +285,8 @@ Subclasses may add fields through `extra_initial_state()`.
   `tests/nodes/adaptive/test_frozen_solve_gradients.py` (`jax.grad` vs central
   finite differences to $10^{-6}$ — each with the active set asserted not to
   change within the step — and vs dense closed-form references),
-  `tests/nodes/adaptive/test_blindness_diagnostics.py` (spike-measured
-  blindness ratios 0.86 / 0.17 / 0.0 at $\theta = 0.42 / 0.48 / 0.5$, trap
+  `tests/nodes/adaptive/test_blindness_diagnostics.py` (blindness ratios
+  of about 0.86 / 0.17 / 0.0 at $\theta = 0.42 / 0.48 / 0.5$, trap
   detection and escape), `tests/nodes/adaptive/test_traceability.py` (jit,
   scan, vmap, no gradient leak through the selection),
   `tests/nodes/adaptive/test_graph_integration.py` (GraphManager, params
@@ -298,8 +299,9 @@ Subclasses may add fields through `extra_initial_state()`.
   gradient trap and `mask_safe`),
   `tests/nodes/adaptive/test_round_trip.py` and
   `tests/usd/test_usd_adaptive_node.py` (config and USD reconstruction).
-- Design evidence: `plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md`
-  (seven spike rounds behind the constants above).
+- Design evidence: the diagnostic constants above were fixed in a
+  pre-implementation design study; the tracked evidence for them is the
+  tests listed above.
 
 ## Changelog
 

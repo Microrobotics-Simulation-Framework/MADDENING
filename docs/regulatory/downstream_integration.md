@@ -123,7 +123,7 @@ The MADDENING documentation architecture is designed to support the most demandi
 5. **Algorithm Guides**: Per-node documentation of governing equations, discretization, assumptions, limitations, and validated regimes — with CI-validated bibliography citations (`docs/bibliography.bib`) and CI-validated implementation-to-code mappings
 6. **HealthCheckNode**: Configurable execution-layer fault detection (NaN/Inf, bounds, moment checks) for use in downstream safety monitoring
 7. **Compliance Schema Types**: Importable Python types (`NodeMeta`, `AnomalyRecord`, etc.) for downstream libraries to use and extend
-8. **{term}`SBOM`**: CycloneDX-format software bill of materials attached to each release
+8. **{term}`SBOM`** (planned, not yet provided): a CycloneDX-format software bill of materials attached to each release; see `docs/validation/soup_package.md` §6
 
 ### What MADDENING does NOT provide
 

@@ -31,12 +31,13 @@ bulk-chasing, hierarchical refinement. It gives a subclass three things:
 > error. Measured on the 1-D sine toy at `n_max = 256`, `k = 16`, the integral
 > of the returned gradient over `theta` in `[0.40, 0.50]` is `-1.5808e-3`
 > against a true change of `-2.3598e-3` — a 33 % shortfall equal to the sum of
-> the 27 jumps crossed. It is negligible with a large basis budget (the spike
-> measured `4e-8` at `k = 64`). Anomaly `MADD-ANO-003`.
+> the 27 jumps crossed. It is negligible with a large basis budget: summed
+> over the switches in `[0.40, 0.42]`, the jumps are `1.2e-8` of `|J|` at
+> `k = 64` (`tests/nodes/adaptive/test_active_set_switch.py`). Anomaly
+> `MADD-ANO-003`.
 
 This guide is for subclass authors. The method and its evidence are in the
-[algorithm guide](../algorithm_guide/nodes/adaptive_node.md) and in
-`plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md`.
+[algorithm guide](../algorithm_guide/nodes/adaptive_node.md).
 
 ## When to use it
 

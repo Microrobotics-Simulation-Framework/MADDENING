@@ -62,7 +62,7 @@ class TestStaticArrayConstruction:
 
 
 class TestStaticArrayPartitionVariant:
-    """The replication='partition' variant added in v0.3.0 (§A6)."""
+    """The replication='partition' variant added in v0.3.0."""
 
     def test_partition_requires_assignment(self):
         with pytest.raises(

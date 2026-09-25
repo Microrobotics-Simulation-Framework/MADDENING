@@ -145,6 +145,71 @@ def test_param_spec_from_dict_bounds_null():
 
 
 # ---------------------------------------------------------------------------
+# from_dict refuses what it used to coerce
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", ["false", "no", "0", "", None, 0, 1, 0.0, [], {}],
+                         ids=["str_false", "str_no", "str_0", "str_empty", "null", "int_0",
+                              "int_1", "float_0", "list", "dict"])
+def test_from_dict_refuses_a_trainable_that_is_not_a_boolean(raw):
+    """``bool()`` read the strings ``"false"``, ``"no"`` and ``"0"`` as
+    trainable, and JSON ``null`` as frozen: a hand-edited or foreign
+    document silently unfroze what it meant to freeze."""
+    with pytest.raises(ValueError, match="trainable must be true or false"):
+        ParamSpec.from_dict({"trainable": raw, "bounds": [0.0, None]})
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_from_dict_takes_a_boolean_trainable_as_given(raw):
+    assert ParamSpec.from_dict({"trainable": raw}).trainable is raw
+    assert ParamSpec.from_dict({}).trainable is True           # the default
+
+
+@pytest.mark.parametrize("bound", [True, False, "2", "1e3", [0.0]],
+                         ids=["true", "false", "str_int", "str_float", "list"])
+def test_from_dict_refuses_a_bound_that_is_not_a_number(bound):
+    """``float()`` read ``true`` as ``1.0`` and ``"2"`` as ``2.0``, past the
+    refusal ``__post_init__`` applies to exactly those values."""
+    with pytest.raises(ValueError, match="not a real number"):
+        ParamSpec.from_dict({"bounds": [bound, None]})
+    with pytest.raises(ValueError, match="not a real number"):
+        ParamSpec.from_dict({"bounds": [None, bound]})
+
+
+def test_from_dict_reads_back_everything_to_dict_writes():
+    """The refusals take nothing away from a document this class wrote."""
+    inf = float("inf")
+    for spec in (ParamSpec(), ParamSpec(trainable=False),
+                 ParamSpec(bounds=(0.0, None), transform="log", units="m"),
+                 ParamSpec(bounds=(-1.0, 2.0), transform="logit", description="d"),
+                 ParamSpec(bounds=(-inf, inf)), ParamSpec(bounds=(0, 3))):
+        back = ParamSpec.from_dict(spec.to_dict())
+        assert back == spec and back.trainable is spec.trainable
+        assert all(b is None or type(b) is float for b in back.bounds)
+
+
+def test_a_saved_graph_with_a_string_trainable_is_refused_on_load():
+    """``GraphManager.from_dict`` applies ``param_specs`` overrides through
+    ``ParamSpec.from_dict``; a string there is an error naming the value,
+    not a spec that silently reads as trainable."""
+    from maddening.nodes.spring import SpringDamperNode
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0))
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False))
+    gm.compile()
+    config = gm.to_dict()
+    assert config["param_specs"]["s"]["mass"]["trainable"] is False
+    registry = {"SpringDamperNode": SpringDamperNode}
+    reloaded = GraphManager.from_dict(config, registry)
+    reloaded.compile()
+    assert reloaded.param_specs()["nodes"]["s"]["mass"].trainable is False
+    config["param_specs"]["s"]["mass"]["trainable"] = "false"
+    with pytest.raises(ValueError, match="trainable must be true or false, got str 'false'"):
+        GraphManager.from_dict(config, registry)
+
+
+# ---------------------------------------------------------------------------
 # #14: identity clip keeps the leaf dtype
 # ---------------------------------------------------------------------------
 

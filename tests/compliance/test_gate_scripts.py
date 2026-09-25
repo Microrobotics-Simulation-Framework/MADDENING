@@ -837,6 +837,112 @@ class TestMinMappingsRatchet:
         """The floor is a claim about the tree, not a number in a file."""
         assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
 
+    def test_every_pin_equals_its_committed_floor(self, mapping_gate):
+        """Equal, not ``>=``: slack under a pin in the floor file lets the
+        pin drop to it together with the rows."""
+        pins, floor = self._pins(mapping_gate), self._floor()
+        differ = {path: (pins.get(path), floor.get(path))
+                  for path in set(pins) | set(floor)
+                  if pins.get(path) != floor.get(path)}
+        assert not differ, (
+            f"MIN_MAPPINGS and min_mappings_floor.json disagree: {differ} "
+            f"(pin, floor).  Move both, in one commit.")
+
+    @staticmethod
+    def _guide_counts(mapping_gate):
+        counts = {}
+        guide_dir = REPO_ROOT / "docs" / "algorithm_guide"
+        for path in sorted(guide_dir.rglob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            rel = os.path.normpath(str(path.relative_to(REPO_ROOT)))
+            n, errors, _notes, skipped = mapping_gate.check_guide(str(path), rel)
+            assert not errors and not skipped, (rel, errors, skipped)
+            counts[rel] = n
+        return counts
+
+    def test_every_pin_is_its_guides_count(self, mapping_gate):
+        """A pin below its count is slack a row deletion hides in.
+
+        heat, lbm and wavelet sat two below (11/13, 22/24, 24/26), so
+        deleting two rows from any of them passed, against a docstring and
+        a CHANGELOG saying the pins sat at the counts (audit_040_p4_1,
+        M5-M8).  Raise the pin in the commit that adds the rows.
+        """
+        counts = self._guide_counts(mapping_gate)
+        slack = {path: (pin, counts.get(path))
+                 for path, pin in self._pins(mapping_gate).items()
+                 if counts.get(path) != pin}
+        assert not slack, f"(pin, rows found) per guide: {slack}"
+
+    def test_every_guide_with_a_mapping_table_is_pinned(self, mapping_gate):
+        """An unpinned guide is all slack: its whole table can go."""
+        unpinned = {path: n for path, n in self._guide_counts(mapping_gate).items()
+                    if n and path not in self._pins(mapping_gate)}
+        assert not unpinned, (
+            f"guides with Implementation Mapping rows and no MIN_MAPPINGS "
+            f"pin: {unpinned}; pin each at its count, here and in "
+            f"min_mappings_floor.json")
+
+
+def _delete_heat_rows(text, n):
+    needles = ["`maddening.nodes.heat._laplacian_nonuniform`",
+               "`maddening.nodes.heat._laplacian_4th_order_uniform`"][:n]
+    return _delete_rows_containing(text, needles)
+
+
+def _delete_rows_containing(text, needles):
+    lines = text.splitlines(keepends=True)
+    kept = [line for line in lines if not any(n in line for n in needles)]
+    assert len(lines) - len(kept) == len(needles), "a replayed row has moved"
+    return "".join(kept)
+
+
+def _delete_last_single_reference_rows(text, n):
+    import re
+
+    section = re.search(r"## Implementation Mapping\s*\n(.*?)(?=\n## |\Z)",
+                        text, re.S).group(1)
+    rows = [line for line in section.splitlines()
+            if line.startswith("| ") and line.count("`maddening.") == 1]
+    return _delete_rows_containing(text, rows[-n:])
+
+
+@pytest.mark.parametrize("guide, mutate", [
+    pytest.param("heat_node.md", lambda t: _delete_heat_rows(t, 1), id="M5"),
+    pytest.param("heat_node.md", lambda t: _delete_heat_rows(t, 2), id="M6"),
+    pytest.param("wavelet_adaptive_node.md", lambda t: _delete_rows_containing(
+        t, ["| Analysis $c = W^{-1} u$ |", "| Dirichlet basis |"]), id="M7"),
+    pytest.param("lbm_node.md",
+                 lambda t: _delete_last_single_reference_rows(t, 2), id="M8"),
+])
+def test_deleting_rows_from_a_pinned_guide_fails_the_gate(
+    mapping_gate, tmp_path, monkeypatch, guide, mutate
+):
+    """audit_040_p4_1, M5-M8: row deletions inside a pin's slack passed.
+
+    The guide is copied to a scratch repository root at its real relative
+    path, so the gate's own pin for it applies, and the gate runs over that
+    one guide: unmutated it passes, mutated it must exit non-zero.  The
+    node-ID uniqueness scan is stubbed out: it reads all of ``src`` (about
+    2 s) and is not what these mutants test.
+    """
+    monkeypatch.setattr(mapping_gate, "algorithm_id_errors",
+                        lambda _src: (0, []))
+    rel = os.path.join("docs", "algorithm_guide", "nodes", guide)
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True)
+    text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(mapping_gate, "MIN_MAPPINGS",
+                        {rel: mapping_gate.MIN_MAPPINGS[rel]})
+
+    target.write_text(text, encoding="utf-8")
+    assert mapping_gate.main([str(target.parent)]) == 0
+
+    target.write_text(mutate(text), encoding="utf-8")
+    assert mapping_gate.main([str(target.parent)]) == 1
+
 
 def _node_guide(tmp_path, title, module, id_lines, name="node_guide.md"):
     """A guide whose header names a node, followed by one resolvable row."""
@@ -2907,6 +3013,14 @@ spec.loader.exec_module(gate)
 gate.REPO_ROOT = Path(sys.argv[2])
 gate.PACKAGE = Path("src/probe_pkg")
 gate.EXCLUDED = (gate.PACKAGE / "examples",)
+# The per-file pins name the real package's files; a probe package pins its
+# own.  PROBE_PINS (JSON) when a test sets it, else the probe's own counts,
+# so a test about something else is not failed by a pin it never meant.
+import json, os
+pins = os.environ.get("PROBE_PINS")
+gate.EXAMPLES_PER_FILE = (
+    json.loads(pins) if pins is not None
+    else {path: n for path, (_d, n) in gate._static_counts().items()})
 sys.exit(gate.main(sys.argv[3:]))
 """
 
@@ -2922,13 +3036,23 @@ def two():
 '''
 
 
-def _doctest_gate(tmp_path, module_source, *args):
+def _doctest_gate(tmp_path, module_source, *args, pins=None, extra=None):
+    """Run the doctest gate over a probe package holding ``mod.py``.
+
+    ``extra`` maps further module names to their source; ``pins`` replaces
+    the gate's ``EXAMPLES_PER_FILE`` (default: the probe's own counts).
+    """
     pkg = tmp_path / "src" / "probe_pkg"
     pkg.mkdir(parents=True, exist_ok=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "mod.py").write_text(module_source)
+    for name, text in (extra or {}).items():
+        (pkg / name).write_text(text)
     env = dict(os.environ, JAX_PLATFORMS="cpu",
                PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    env.pop("PROBE_PINS", None)
+    if pins is not None:
+        env["PROBE_PINS"] = json.dumps(pins)
     return subprocess.run(
         [sys.executable, "-c", _DOCTEST_GATE_ON,
          str(SCRIPTS / "check_doctests.py"), str(tmp_path), *args],
@@ -3029,23 +3153,157 @@ class TestDoctestGate:
     #: ``min_mappings_floor.json`` gives the mapping pins
     #: (audit_040_r2/gates, finding G6).  Raise both when examples are
     #: added; lowering both belongs in a commit that says why.
-    COMMITTED_EXAMPLE_FLOOR = 110
+    COMMITTED_EXAMPLE_FLOOR = 111
 
-    def test_the_floor_is_not_below_its_committed_value(self):
+    #: The committed per-file pins, the second half of ``EXAMPLES_PER_FILE``'s
+    #: ratchet.  Deleting the only example in ``core/compliance/metadata.py``
+    #: dropped the whole file out of the gate with "OK" (audit_040_p4_1, D6).
+    COMMITTED_EXAMPLES_PER_FILE = {
+        "src/maddening/api/auth.py": 7,
+        "src/maddening/api/server.py": 3,
+        "src/maddening/core/compliance/metadata.py": 1,
+        "src/maddening/core/coupling/acceleration.py": 37,
+        "src/maddening/core/simulation/calibration.py": 8,
+        "src/maddening/core/solver_utils.py": 5,
+        "src/maddening/nodes/adaptive/wavelet.py": 6,
+        "src/maddening/nodes/adaptive/wavelets/dirichlet.py": 1,
+        "src/maddening/nodes/adaptive/wavelets/transform.py": 5,
+        "src/maddening/serialization/json_codec.py": 3,
+        "src/maddening/surrogates/types.py": 4,
+        "src/maddening/testing/mms.py": 14,
+        "src/maddening/transport_auth.py": 7,
+        "src/maddening/viz/backends/matplotlib_renderer.py": 6,
+        "src/maddening/viz/backends/terminal_renderer.py": 2,
+        "src/maddening/viz/usd_viewer.py": 2,
+    }
+
+    def test_the_floor_equals_its_committed_value(self):
+        """Equal, not ``>=``: a committed floor with slack under it lets
+        ``MIN_EXAMPLES`` drop to it together with the examples."""
         gate = _load("check_doctests")
-        assert gate.MIN_EXAMPLES >= self.COMMITTED_EXAMPLE_FLOOR, (
-            f"MIN_EXAMPLES is {gate.MIN_EXAMPLES}, below the committed floor "
-            f"{self.COMMITTED_EXAMPLE_FLOOR}; an example set that shrank "
-            f"needs a reason, not a lower number"
+        assert gate.MIN_EXAMPLES == self.COMMITTED_EXAMPLE_FLOOR, (
+            f"MIN_EXAMPLES is {gate.MIN_EXAMPLES}, the committed floor is "
+            f"{self.COMMITTED_EXAMPLE_FLOOR}; move both together, and an "
+            f"example set that shrank needs a reason, not a lower number"
         )
+        assert self.COMMITTED_EXAMPLE_FLOOR == sum(
+            self.COMMITTED_EXAMPLES_PER_FILE.values())
 
-    def test_the_floor_is_attainable_from_the_source_as_it_stands(self):
-        """A floor above the examples in the tree could only ever fail.
+    def test_the_floor_is_the_number_of_examples_in_the_source(self):
+        """A floor below the count guards only part of the collection.
 
-        Static, so it holds without running the ~100 examples; the gate's
-        own run in the compliance job is the dynamic half.
+        It sat at 110 over 111 examples, so one deletion passed
+        (audit_040_p4_1, D5); above the count it could only ever fail.
+        Static, so it holds without running the examples; the gate's own
+        run in the compliance job is the dynamic half.
         """
         gate = _load("check_doctests")
         static = sum(n for _d, n in gate._static_counts().values())
-        assert static >= gate.MIN_EXAMPLES, (static, gate.MIN_EXAMPLES)
+        assert static == gate.MIN_EXAMPLES, (
+            f"{static} examples in the source, MIN_EXAMPLES is "
+            f"{gate.MIN_EXAMPLES}: set it (and COMMITTED_EXAMPLE_FLOOR) to "
+            f"the count")
+
+    def test_every_file_is_pinned_at_its_count(self):
+        """The per-file pins are the source's per-file counts, exactly."""
+        gate = _load("check_doctests")
+        static = {path: n for path, (_d, n) in gate._static_counts().items()}
+        assert gate.EXAMPLES_PER_FILE == static, {
+            path: (gate.EXAMPLES_PER_FILE.get(path), static.get(path))
+            for path in set(static) | set(gate.EXAMPLES_PER_FILE)
+            if gate.EXAMPLES_PER_FILE.get(path) != static.get(path)
+        }
+
+    def test_every_pin_equals_its_committed_value(self):
+        gate = _load("check_doctests")
+        assert gate.EXAMPLES_PER_FILE == self.COMMITTED_EXAMPLES_PER_FILE
+
+    # -- replays of audit_040_p4_1 D5 / D6 ---------------------------------
+
+    @staticmethod
+    def _counts_with(gate, rel, mutate):
+        """The tree's per-file example counts with ``rel`` mutated."""
+        import doctest
+        import tempfile
+
+        counts = {path: n for path, (_d, n) in gate._static_counts().items()}
+        text = mutate((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "mutated.py"
+            probe.write_text(text, encoding="utf-8")
+            n = sum(len(doctest.DocTestParser().get_examples(d))
+                    for d in gate._docstrings(probe))
+        if n:
+            counts[rel] = n
+        else:
+            counts.pop(rel, None)
+        return counts
+
+    def test_the_real_pins_refuse_one_example_deleted_from_acceleration(self):
+        """D5: one example out of ``acceleration.py``, 111 -> 110."""
+        gate = _load("check_doctests")
+        rel = "src/maddening/core/coupling/acceleration.py"
+        example = ('    >>> float(residual_precision_floor(s, ["n"], "l2", '
+                   'atol=2.0))   # dead-banded: nothing read\n    0.0\n')
+
+        def mutate(text):
+            assert example in text, "the replayed example has moved"
+            return text.replace(example, "", 1)
+
+        counts = self._counts_with(gate, rel, mutate)
+        assert sum(counts.values()) >= gate.MIN_EXAMPLES - 1
+        errors, _slack = gate.per_file_errors(counts, gate.EXAMPLES_PER_FILE)
+        assert any(e.startswith(f"{rel}: 36 example(s)") for e in errors), errors
+
+    def test_the_real_pins_refuse_a_file_losing_its_only_example(self):
+        """D6: ``metadata.py``'s one example deleted; the file drops out."""
+        gate = _load("check_doctests")
+        rel = "src/maddening/core/compliance/metadata.py"
+
+        def mutate(text):
+            start = text.index("    Examples\n    --------\n    >>> Discret")
+            end = text.index("\n\n", start)
+            return text[:start] + text[end + 2:]
+
+        counts = self._counts_with(gate, rel, mutate)
+        assert rel not in counts, "the mutation must remove every example"
+        errors, _slack = gate.per_file_errors(counts, gate.EXAMPLES_PER_FILE)
+        assert any(e.startswith(f"{rel}: 0 example(s)") for e in errors), errors
+
+    def test_a_file_that_loses_its_only_example_fails_the_gate(self, tmp_path):
+        """D6 end to end: the total still clears ``--min``; the pin does not."""
+        other = '"""Module."""\n\n\ndef one():\n    """One.\n\n    >>> 3\n    3\n    """\n'
+        pins = {"src/probe_pkg/mod.py": 2, "src/probe_pkg/other.py": 1}
+        ok = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2", pins=pins,
+                           extra={"other.py": other})
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        gone = other.replace("    >>> 3\n    3\n", "")
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2",
+                               pins=pins, extra={"other.py": gone})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/other.py: 0 example(s) executed and passed, "
+                "pinned at 1") in result.stdout
+
+    def test_one_example_deleted_from_a_docstring_fails_the_gate(self, tmp_path):
+        """D5 end to end, with the total floor one below the count."""
+        source = _TWO_EXAMPLES.replace("    >>> 2 + 2\n    4\n", "")
+        result = _doctest_gate(tmp_path, source, "--min", "1",
+                               pins={"src/probe_pkg/mod.py": 2})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/mod.py: 1 example(s) executed and passed, "
+                "pinned at 2") in result.stdout
+
+    def test_a_file_with_examples_and_no_pin_fails_the_gate(self, tmp_path):
+        """Fail closed: an unpinned file's examples are guarded by nothing."""
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2", pins={})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/mod.py holds docstring examples and has no "
+                "entry in EXAMPLES_PER_FILE") in result.stdout
+
+    def test_a_pin_below_its_count_is_reported_as_slack(self, tmp_path):
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2",
+                               pins={"src/probe_pkg/mod.py": 1})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ("NOTE: src/probe_pkg/mod.py: 2 example(s), pinned at 1"
+                in result.stdout)
 

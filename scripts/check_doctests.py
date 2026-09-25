@@ -17,9 +17,12 @@ Three things are checked, because the count alone is not enough:
    worse than no gate: it is cited as coverage.  So the script
    independently scans the package source with :mod:`ast` +
    :mod:`doctest`, finds every file that *contains* an example, and fails
-   unless a doctest in each of them actually passed.  On top of that a
-   committed floor (``MIN_EXAMPLES``) guards the absolute number of
-   *examples executed*.  Both are counted from passing test reports, so
+   unless a doctest in each of them actually passed.  That scan reads the
+   same tree it checks, so a file that loses its last example drops out
+   of it too; ``EXAMPLES_PER_FILE`` pins each file's count, so it cannot.
+   On top of that a committed floor (``MIN_EXAMPLES``) guards the absolute
+   number of *examples executed*.  All are counted from passing test
+   reports, so
    deselection, a skip and an import error are all failures of this
    gate -- a doctest that does not run is prose again, which is the thing
    the gate exists to prevent.
@@ -54,8 +57,9 @@ Usage:
 Exit codes:
     0 -- every example ran, passed, and the set that ran is the expected size
     1 -- a doctest failed, a file with examples produced no passing doctest,
-         an example was skipped, nothing ran, or fewer examples than the
-         floor executed
+         an example was skipped, nothing ran, fewer examples than the
+         floor executed, a file executed fewer examples than its pin in
+         EXAMPLES_PER_FILE, or a file holds examples and has no pin
     2 -- the run could not be trusted (pytest could not be run at all, or
          the doctest runner no longer exposes the count this gate reads)
 """
@@ -96,7 +100,84 @@ EXCLUDED = (PACKAGE / "examples",)
 #: that adds examples (the OK line prints the count beside the floor),
 #: together with ``COMMITTED_EXAMPLE_FLOOR`` in
 #: ``tests/compliance/test_gate_scripts.py``.
-MIN_EXAMPLES = 110
+#:
+#: 110 -> 111 when audit_040_p4_1 found the floor one below the count
+#: again: deleting one example from ``coupling/acceleration.py`` passed,
+#: and so did deleting the only example in ``core/compliance/metadata.py``
+#: -- a whole file dropping out, because the file check below compares the
+#: run against a *static scan of the same tree*, which loses the file too.
+#: Hence ``EXAMPLES_PER_FILE``.  ``TestDoctestGate`` now holds this number
+#: *equal* to the examples in the source, not merely below them, so the
+#: slack cannot reopen silently.
+MIN_EXAMPLES = 111
+
+#: The examples each file holds, pinned.  A total floor guards only the
+#: total: one example deleted where another was added passes it, and so
+#: does a file that loses every example, because the "every file with an
+#: example ran" check reads its list of files from the same source it is
+#: checking.  A pinned file that executes fewer examples than its pin
+#: fails, a file that has disappeared fails, and a file holding examples
+#: with no pin fails -- fail closed, so a new file's examples are guarded
+#: from the commit that adds them.
+#:
+#: Pins are floors: more examples than the pin passes the gate and is
+#: printed as slack to remove.  ``TestDoctestGate`` holds every pin equal
+#: to its file's count, and equal to ``COMMITTED_EXAMPLES_PER_FILE`` in the
+#: test module, so raising or lowering one is a two-file edit.  Keys are
+#: repository-relative POSIX paths, as pytest spells a doctest's node id.
+EXAMPLES_PER_FILE: dict[str, int] = {
+    "src/maddening/api/auth.py": 7,
+    "src/maddening/api/server.py": 3,
+    "src/maddening/core/compliance/metadata.py": 1,
+    "src/maddening/core/coupling/acceleration.py": 37,
+    "src/maddening/core/simulation/calibration.py": 8,
+    "src/maddening/core/solver_utils.py": 5,
+    "src/maddening/nodes/adaptive/wavelet.py": 6,
+    "src/maddening/nodes/adaptive/wavelets/dirichlet.py": 1,
+    "src/maddening/nodes/adaptive/wavelets/transform.py": 5,
+    "src/maddening/serialization/json_codec.py": 3,
+    "src/maddening/surrogates/types.py": 4,
+    "src/maddening/testing/mms.py": 14,
+    "src/maddening/transport_auth.py": 7,
+    "src/maddening/viz/backends/matplotlib_renderer.py": 6,
+    "src/maddening/viz/backends/terminal_renderer.py": 2,
+    "src/maddening/viz/usd_viewer.py": 2,
+}
+
+
+def per_file_errors(examples_run: dict[str, int],
+                    pins: dict[str, int],
+                    holding: set[str] | frozenset[str] = frozenset()
+                    ) -> tuple[list[str], list[str]]:
+    """``(errors, slack)`` for the examples each file executed.
+
+    ``examples_run`` maps a file to the examples that ran and passed in it;
+    ``pins`` is :data:`EXAMPLES_PER_FILE`; ``holding`` names files the
+    static scan found examples in, so a file whose examples all failed to
+    run is still recognised as needing a pin.  ``slack`` lists pins below
+    their file's count: not a failure here, but a deletion can hide in it.
+    """
+    errors, slack = [], []
+    for path, pin in sorted(pins.items()):
+        ran = examples_run.get(path, 0)
+        if ran < pin:
+            errors.append(
+                f"{path}: {ran} example(s) executed and passed, pinned at "
+                f"{pin} in EXAMPLES_PER_FILE -- an example was deleted, "
+                f"skipped or broken, or the file stopped contributing any.  "
+                f"Lower the pin only for an example that was legitimately "
+                f"removed, with COMMITTED_EXAMPLES_PER_FILE in "
+                f"tests/compliance/test_gate_scripts.py"
+            )
+        elif ran > pin:
+            slack.append(f"{path}: {ran} example(s), pinned at {pin}")
+    for path in sorted((set(examples_run) | set(holding)) - set(pins)):
+        errors.append(
+            f"{path} holds docstring examples and has no entry in "
+            f"EXAMPLES_PER_FILE; pin it at its count (and add it to "
+            f"COMMITTED_EXAMPLES_PER_FILE) so a later deletion fails"
+        )
+    return errors, slack
 
 
 def _docstrings(path: Path):
@@ -351,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
             "skipped, or they failed:\n"
             + "\n".join(f"    {m}  ({expected[m]} example docstring(s))" for m in missing)
         )
+    pin_errors, slack = per_file_errors(recorder.examples_run,
+                                        EXAMPLES_PER_FILE, set(expected))
+    failures.extend(pin_errors)
     if examples < args.min:
         failures.append(
             f"{examples} example(s) executed in passing doctests, floor is "
@@ -367,8 +451,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {f}")
         return 1
 
+    for line in slack:
+        print(f"NOTE: {line}; raise the pin -- slack is where a deleted "
+              f"example hides")
     print(f"\nOK: {examples} docstring example(s) in {total} docstring(s) "
-          f"ran and passed, 0 skipped, floor {args.min}")
+          f"ran and passed, 0 skipped, floor {args.min}; "
+          f"{len(EXAMPLES_PER_FILE)} file(s) at or above their pinned count")
     return 0
 
 

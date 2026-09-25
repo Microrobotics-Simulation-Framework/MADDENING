@@ -8367,16 +8367,61 @@ class GraphManager:
         :meth:`to_dict` writes since 0.4.0, and the bare tokens an older
         config carries, which ``json.loads`` has already turned into
         floats by the time the dict arrives here (``MADD-ANO-006``).
+
+        A node saved inside a sharded wrapper (``ShardedPointwiseNode``,
+        ``ShardedStencilNode``, ``ShardedUnstructuredNode``) is rebuilt
+        *unsharded*, as the node it wraps, with a ``UserWarning`` naming
+        the wrapper, the settings the config recorded and the call that
+        wraps it again: a config does not carry the device mesh (nor an
+        unstructured partition layout), which need not exist on the
+        machine loading it.  Until 0.4.0 the sharding was dropped with no
+        word (MADD-ANO-036).
         """
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             decode_non_finite,
         )
+
+        def warn_unsharded(nd: dict) -> None:
+            # Rebuilding the wrapper needs a mesh (and, unstructured, a
+            # partition layout), which a config does not carry and the
+            # loading machine may not have, so the node comes back unsharded
+            # -- said out loud, with the settings and the call that restores
+            # them, rather than refused: the wrapped node's model is what a
+            # wrapper computes, so the reloaded graph is a correct one.
+            name, inner = nd["name"], nd["type"]
+            if nd.get("sharding") == "unstructured":
+                wrapper, lost = "ShardedUnstructuredNode", "device mesh and partition layout"
+                settings = {k: nd[k] for k in ("n_devices", "exchange") if k in nd}
+                call = (f"ShardedUnstructuredNode(gm.get_node({name!r}), mesh, layout, "
+                        f"exchange={nd.get('exchange', 'all_to_all')!r})")
+            elif nd.get("sharded_stencil"):
+                wrapper, lost = "ShardedStencilNode", "device mesh"
+                settings = {k: nd[k] for k in ("axis_map", "boundary") if k in nd}
+                call = (f"ShardedStencilNode(gm.get_node({name!r}), mesh, "
+                        f"axis_map={nd.get('axis_map')!r}, boundary={nd.get('boundary')!r})")
+            else:
+                wrapper, lost = "ShardedPointwiseNode", "device mesh"
+                settings = {k: nd[k] for k in ("shard_axes",) if k in nd}
+                axes = nd.get("shard_axes", [0])
+                axes = tuple(axes) if isinstance(axes, list) else axes
+                call = f"ShardedPointwiseNode(gm.get_node({name!r}), mesh, shard_axes={axes!r})"
+            warnings.warn(
+                f"node {name!r} was saved as a {wrapper} {settings} and is rebuilt "
+                f"unsharded, as a plain {inner}: a config does not carry the {lost}, "
+                f"which need not exist on the machine loading it.  It now runs on one "
+                f"device.  To shard it again, swap the wrapper in before compile(): "
+                f"maddening.surrogates.replace.replace_node(gm, {name!r}, {call}).",
+                UserWarning, stacklevel=3,
+            )
+
         config = decode_non_finite(config)
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
+            if nd.get("sharded"):
+                warn_unsharded(nd)
         resolve = gm.point_resolver(base_dir)
         for ed in config["edges"]:
             mapping = None

@@ -762,16 +762,19 @@ def test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged():
 
 
 #: ``spectral_error_bound / distance`` on the two-mode case, measured
-#: 7.95 (jaxlib 0.11.0, CPU, float32).  Two factors, both in the
-#: conservative direction and neither slack in the spectrum
-#: (``rho_spectral`` reads 0.999 to six figures).  The bound multiplies
-#: the *whole* residual by the amplification while only the slow
-#: mode's share of it -- about a seventh at the exit -- is amplified
-#: that much: 6.5x, a property of where the criterion stops.  And the
-#: amplification is the resolvent norm of the Gauss-Seidel one-pass
+#: 8.05 (8.051; jaxlib 0.11.0, CPU, float32, the final tree).  Three
+#: factors, all in the conservative direction and none slack in the
+#: spectrum (``rho_spectral`` reads 0.999 to six figures).  The bound
+#: multiplies the *whole* residual by the amplification while only the
+#: slow mode's share of it -- about a seventh at the exit -- is
+#: amplified that much: 6.5x, a property of where the criterion stops.
+#: The amplification is the resolvent norm of the Gauss-Seidel one-pass
 #: map, ``[[0, R], [0, R]]``, which is not normal: 1219 against the
 #: ``1/(1 - 0.999) = 1000`` of the spectral-radius form, another 1.22x
 #: (the same 1.22 appears on every fixture built on this relay shape).
+#: And the key adds the residual's float floor before amplifying it:
+#: 9.5e-07 on a residual of 7.3e-05, 1.3% (7.95 without it, the figure
+#: first recorded in ERROR_BOUND_DECISION.md, before the floor existed).
 _TWO_MODE_SPECTRAL_RATIO = 8.0
 
 #: The resolvent-over-radius factor of the ``a -> b -> a`` relay shape,
@@ -853,12 +856,16 @@ def test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_n
     third of the four conditions ``error_estimate`` rests on and the
     one ``relaxation_step_scale`` documents as uncorrected.  The
     spectral bound never used the step.  Measured on the two-mode case
-    it is *tight* under both -- ratio 1.22, which is exactly the relay
-    shape's non-normality factor -- because both accelerators
-    annihilate the fast mode and leave the whole remaining error in the
-    slow one, where ``residual / (1 - rho)`` holds with equality and
-    the resolvent form adds its 1.22.  Pinned two-sided for that
-    reason, with float32 room, and beside it the size of
+    it is *tight* under both -- 1.335 under Aitken and 1.323 under
+    IQN-ILS (jaxlib 0.11.0) -- because both accelerators annihilate the
+    fast mode and leave the whole remaining error in the slow one, where
+    ``residual / (1 - rho)`` holds with equality.  The resolvent form
+    adds the relay shape's non-normality factor, 1.22 (1.2197 with the
+    floor taken out), and the float floor the key adds to the residual
+    adds the rest: 9.5e-07 on residuals of 1.0e-05 and 1.1e-05, which
+    both accelerators drive nearer the floor than plain iteration does.
+    Pinned two-sided for that reason, with float32 room, and beside it
+    the size of
     ``error_estimate``'s shortfall so the contrast is on the record
     rather than implied.  Aitken exhausts the
     cap here (its 499x amplification never meets 1e-4 in sixty

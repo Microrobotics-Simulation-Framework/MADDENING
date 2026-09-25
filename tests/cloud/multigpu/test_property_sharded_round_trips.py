@@ -1,15 +1,19 @@
 """A graph containing a sharded node, through checkpoint, config and USD.
 
 Checkpointing round-trips correctly and is stated here as a property.
-The two serialisation formats do not, and the failures are pinned as
-strict xfails rather than fixed: both need a decision about the public
-representation of a sharded node, which a test branch must not take.
+The two serialisation formats do not restore the wrapper.
 
-* **W7 (config)** -- ``ShardedStencilNode.to_dict`` delegates to the
-  inner node and appends ``sharded``/``axis_map``/``boundary``, so the
-  config records ``"type": "HeatNode"`` and ``from_dict`` rebuilds a
-  plain, single-device node.  The reload succeeds and quietly gives back
-  a different graph.
+* **W7 (config), decided in 0.4.0 (MADD-ANO-036)** -- the wrappers'
+  ``to_dict`` delegates to the inner node and appends ``sharded`` and
+  the wrapper's settings, so the config records ``"type": "HeatNode"``
+  and ``from_dict`` rebuilds a plain, single-device node.  That used to
+  happen with no word.  Restoring the wrapper would need the device mesh
+  (and, unstructured, the partition layout), which a config does not
+  carry and the loading machine need not have, so the reload stays
+  unsharded and now says so: a ``UserWarning`` naming the wrapper, its
+  recorded settings and the ``replace_node`` call that wraps it again.
+  A refusal was rejected because the unsharded reload computes the
+  wrapped node's model, which is what the wrapper computes.
 * **W7 (USD)** -- the USD writer records the *wrapper's* qualified class
   name and the loader calls it as ``cls(name=..., timestep=...,
   **params)``, which no wrapper accepts.  The save succeeds; the load
@@ -41,6 +45,8 @@ from hypothesis import strategies as st
 from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
+from maddening.nodes.ball import BallNode
 from maddening.nodes.heat import HeatNode
 from maddening.nodes.spring import SpringDamperNode
 from tests.cloud.multigpu.property_support import (
@@ -140,20 +146,111 @@ def _sharded_heat_graph(n_cells: int = 8) -> GraphManager:
 
 
 @pytest.mark.skipif(_N_DEVICES < 2, reason="needs >=2 CPU-virtual devices")
-@pytest.mark.xfail(strict=True, reason=(
-    "whole-tree audit W7: ShardedStencilNode.to_dict() records the INNER "
-    "node's type plus a 'sharded' flag, and GraphManager.from_dict ignores "
-    "the flag, so a config round trip silently returns a single-device "
-    "graph.  Fixing it is a decision about the public config schema (how a "
-    "wrapper and its mesh are represented, and what an older loader should "
-    "do with it), which this test branch must not take."))
-def test_a_config_round_trip_keeps_a_sharded_node_sharded():
+def test_a_config_round_trip_of_a_sharded_node_warns_and_reloads_it_unsharded():
+    """W7 (config), MADD-ANO-036: the reload is the unsharded rod, the same
+    numbers as the sharded one, and it says so -- naming the wrapper, the
+    settings the config recorded and the call that restores them."""
     gm = _sharded_heat_graph()
     config = json.loads(json.dumps(gm.to_dict()))
-    assert config["nodes"][0]["sharded"] is True     # recorded...
-    reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
-    assert isinstance(reloaded.get_node("rod"), ShardedStencilNode), (
-        "...and dropped on reload: the graph is now single-device")
+    assert config["nodes"][0]["sharded"] is True
+    with pytest.warns(UserWarning) as caught:
+        reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
+    assert len(caught) == 1, [str(w.message) for w in caught]
+    message = str(caught[0].message)
+    for expected in ("'rod'", "ShardedStencilNode", "'axis_map': {'devices': 0}",
+                     "'boundary': 'edge'", "unsharded", "HeatNode",
+                     "replace_node(gm, 'rod', ShardedStencilNode(gm.get_node('rod'), "
+                     "mesh, axis_map={'devices': 0}, boundary='edge'))"):
+        assert expected in message, (expected, message)
+    assert caught[0].filename == __file__        # points at the caller
+    node = reloaded.get_node("rod")
+    assert isinstance(node, HeatNode) and not isinstance(node, ShardedStencilNode)
+
+    reloaded.compile()
+    heat = {"rod": {"heat_source": jnp.full((8,), 0.5, jnp.float32)}}
+    for _ in range(5):
+        gm.step(heat)
+        reloaded.step(heat)
+    np.testing.assert_allclose(_state_of(reloaded, "rod")["temperature"],
+                               _state_of(gm, "rod")["temperature"], rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("markers, wrapper, names", [
+    ({"sharded": True, "shard_axes": [0, 1]}, "ShardedPointwiseNode",
+     ("'shard_axes': [0, 1]", "shard_axes=(0, 1)", "device mesh")),
+    ({"sharded": True, "sharding": "unstructured", "n_devices": 4,
+      "exchange": "ppermute"}, "ShardedUnstructuredNode",
+     ("'n_devices': 4", "'exchange': 'ppermute'", "mesh, layout, exchange='ppermute'",
+      "partition layout")),
+    ({"sharded": True, "sharded_stencil": True, "axis_map": {"x": 1},
+      "boundary": "periodic"}, "ShardedStencilNode",
+     ("'axis_map': {'x': 1}", "boundary='periodic'")),
+])
+def test_every_sharded_wrapper_is_named_with_its_recorded_settings(markers, wrapper, names):
+    """The three wrappers' ``to_dict`` markers, as a config carries them."""
+    config = {"nodes": [{"type": "BallNode", "name": "b", "timestep": 0.01,
+                         "params": {}, **markers}],
+              "edges": [], "external_inputs": []}
+    with pytest.warns(UserWarning, match=f"saved as a {wrapper} ") as caught:
+        reloaded = GraphManager.from_dict(config, {"BallNode": BallNode})
+    assert len(caught) == 1
+    for expected in names:
+        assert expected in str(caught[0].message), (expected, str(caught[0].message))
+    assert type(reloaded.get_node("b")) is BallNode
+
+
+class _CellsNode(SimulationNode):
+    """Eight independent cells, no halo: a node ``ShardedUnstructuredNode``
+    takes (it refuses a Cartesian stencil node such as ``HeatNode``)."""
+
+    def __init__(self, name, timestep, n_cells=8):
+        super().__init__(name, timestep, n_cells=int(n_cells))
+
+    def initial_state(self):
+        return {"x": jnp.zeros(self.params["n_cells"], jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return dict(state)
+
+
+@pytest.mark.skipif(_N_DEVICES < 2, reason="needs >=2 CPU-virtual devices")
+def test_the_pointwise_and_unstructured_wrappers_write_the_markers_the_loader_reads():
+    """End to end for the two wrappers the stencil test above does not
+    cover: each real wrapper's ``to_dict`` is recognised as that wrapper,
+    so a renamed marker cannot make the warning name the wrong one."""
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+    from maddening.nodes.health_check import HealthCheckNode
+
+    mesh = create_device_mesh(shape=(2,))
+    checks = HealthCheckNode("h", 0.01, checks={"a": {"finite": True}, "b": {"finite": True}})
+    ring = np.array([[i, (i + 1) % 8] for i in range(8)], dtype=np.int32)
+    layout = build_unstructured_partition(
+        partition_assignment=(np.arange(8) % 2).astype(np.int32), edges=ring, n_devices=2)
+    cells = _CellsNode("cells", 0.01)
+    for wrapped, registry, wrapper in (
+        (ShardedPointwiseNode(checks, mesh, shard_axes=(0,)),
+         {"HealthCheckNode": HealthCheckNode}, "ShardedPointwiseNode"),
+        (ShardedUnstructuredNode(cells, mesh, layout, exchange="ppermute"),
+         {"_CellsNode": _CellsNode}, "ShardedUnstructuredNode"),
+    ):
+        config = {"nodes": [json.loads(json.dumps(wrapped.to_dict()))],
+                  "edges": [], "external_inputs": []}
+        with pytest.warns(UserWarning, match=f"saved as a {wrapper} "):
+            reloaded = GraphManager.from_dict(config, registry)
+        assert type(reloaded.get_node(wrapped.name)) is type(wrapped._inner)
+
+
+def test_an_unsharded_config_loads_without_a_warning():
+    import warnings
+
+    gm = GraphManager()
+    gm.add_node(BallNode("b", 0.01))
+    config = json.loads(json.dumps(gm.to_dict()))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        GraphManager.from_dict(config, {"BallNode": BallNode})
 
 
 @pytest.mark.skipif(_N_DEVICES < 2, reason="needs >=2 CPU-virtual devices")

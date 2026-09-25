@@ -52,7 +52,7 @@ class MaddeningCouplingGroup "MaddeningCouplingGroup" (
     bool maddening:subcycling = false
     string maddening:boundaryInterpolation = "linear"
     int maddening:jacobianReuse = 0 (doc = "IQN-IMVJ columns kept across timesteps")
-    int maddening:waveformIterations = 1 (doc = "Waveform relaxation passes when subcycling")
+    int maddening:waveformIterations = 1 (doc = "Fixed-point sweeps per step when subcycling; experimental, re-solves the same fixed point and is not waveform relaxation (MADD-ANO-027)")
     bool maddening:diagnostics = false
     string maddening:predictor = "none"
     string maddening:solver = "ift" (doc = "Fixed-point solver: ift or fori")

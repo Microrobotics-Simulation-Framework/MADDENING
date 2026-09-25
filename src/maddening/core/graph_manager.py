@@ -3668,7 +3668,7 @@ def _build_adaptive_scan(
         built with ``collect_strict=True``: ``strict_convergence`` is
         checked here, on ``accepted & ~done``, so a solve the scan
         discards -- the error estimate's full step, a rejected attempt,
-        a step past ``t_end`` -- never raises (MADD-ANO-052).
+        a step past ``t_end`` -- never raises.
     user_state : callable
         Strips the internal ``_meta`` key from a state dict.
     max_steps : int
@@ -6004,7 +6004,11 @@ class GraphManager:
                     from maddening.core.coupling.acceleration import (
                         flatten_coupled_state as _fcs_pred,
                     )
-                    group_names_pred = list(g.nodes)
+                    # In the order the step flattens it (the group's
+                    # schedule), not ``frozenset`` order, which follows
+                    # the per-process string hash: the seed was written
+                    # in a different order from one run to the next.
+                    group_names_pred = [n for n in schedule if n in g.nodes]
                     flat0 = _fcs_pred(
                         self._state, group_names_pred,
                         fields=float_fields_of(self._state, group_names_pred),
@@ -8054,7 +8058,8 @@ class GraphManager:
         function's ``strict_messages`` attribute maps the same keys to the
         two messages.  The adaptive steppers compute solves they discard
         -- the error estimate's full step, every rejected attempt -- and
-        check only the ones they keep (MADD-ANO-052).
+        check only the ones they keep, as a multi-rate step checks only
+        the solves it applies (MADD-ANO-044).
         """
         schedule = list(self._schedule)
         nodes_dict = dict(self._nodes)
@@ -8350,7 +8355,7 @@ class GraphManager:
         # for the solves the stepper keeps: the error estimate's full step
         # and a rejected attempt are discarded, and raising about them
         # stopped the controller from recovering by rejecting the very
-        # step whose coupling had not converged (MADD-ANO-052).
+        # step whose coupling had not converged.
         dt_step_fn = self._build_dt_step_fn(collect_strict=True)
         strict_messages = cast(Any, dt_step_fn).strict_messages
         # JIT-compile the dt-parameterised step
@@ -8620,7 +8625,9 @@ class GraphManager:
                            "amplification", "pred_count", "V", "W"):
                 seeds[f"coupling_{key}_{suffix}"] = zeros
             if group.predictor != "none":
-                names = list(group.nodes)      # the order ``compile()`` flattens in
+                # The order the step (and ``compile()``) flattens in.
+                names = ([n for n in self._schedule if n in group.nodes]
+                         or sorted(group.nodes))
                 flat0 = flatten_coupled_state(
                     fresh, names, fields=float_fields_of(fresh, names),
                 )

@@ -167,6 +167,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`compile()` refuses a group-internal flux edge the coupling loop reads from the state** -- under `convergence_norm="interface"`, and into a sub-cycled member under `boundary_interpolation="linear"` / `"quadratic"` (a bare `KeyError` inside the step since 0.1.0, MADD-ANO-052) -- and an IQN `accelerated_fields` naming no floating field; a non-floating field it names is dropped.
+  Action: use the `"mixed"` / `"l2"` norm or `"constant"` interpolation the message names; name a floating field.
 - **`scripts/report_test_durations.py` labels each shard's compilation cache from the hits its report records**: `warm` only when a restored cache served most lookups, else `restored but unused (cold)`, with every shard's hit rate; it warns when a `--cache-mode off` run records cache lookups in more than one file, and no longer offers a skipped or failed allowlisted test as removable.
   Action: none; compare times by a shard's label, not by whether it restored a cache. Pull requests that add or remove a slow mark, remove a test or edit the allowlist now run CI cold.
 - **`compile()` refuses a sub-cycled node whose timestep does not divide its group's largest** (to 1e-9 relative), which covered `round(macro/node_dt) * node_dt` per macro step and drifted silently (MADD-ANO-046). Action: give it a dividing timestep; the error names the two nearest.
@@ -301,6 +303,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling, second audit**: every acceleration acts on floating fields only (an integer, boolean or PRNG-key leaf raised a `TypeError` under `aitken` / `fixed` / IQN since 0.1.0, and `solver="fori"` rounded it through float32 during 0.4.0 development; MADD-ANO-051); `strict_convergence` under `run_adaptive*` raises only about a solve the stepper keeps; `windowed_loss(mask_unconverged=True)` drops a diverged window from the gradient too (it made the gradient NaN);
+  `coupling_diagnostics()` judges the last step under the group that took it, not a replacement; after `jax.grad` of `run_scan` the graph is put back whatever its first node (`step()` raised `UnexpectedTracerError` on a coupled graph with lowercase node names).
+  Action: re-run `solver="fori"` results from accelerated groups holding integer state, and masked sysid fits that saw a NaN gradient.
 - **`PUT /graph/params` answers 200 only for a write a saved graph reproduces** (MADD-ANO-047, 048, 049): the constructor is asked with every changed key and the live values a save carries (a live leaf skipped it: a `HeatNode` past its Fourier limit, `rho_gas > rho_liquid`); a write the running node would honour unlike its rebuild is refused
   (`LBMPipeNode`'s `G` crossing 0; `HeatNode` now fixes its grid at construction, so `grid_points` on a uniform rod is refused); a non-finite value is a 400 before any write (it was stored, then a 500 on every GET); params carry POST's 422 bounds, and a
   state over the cap or of another layout is refused before anything that size is built.  Action: rebuild a node to change such a value, and check that configs saved after a REST write still load.
@@ -636,6 +641,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-051, 052 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError` (both since 0.1.0; see `### Fixed`, `### Changed`).
+  **MADD-ANO-027** now says each extra waveform sweep applies at least one more pass, moving a converged state by about one residual
 - **MADD-ANO-047, 048, 049 (new, resolved in this release)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
   **MADD-ANO-050 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8, not the 1/2 each accepts; keep Fo < 3/8 on such pairs
 - **MADD-ANO-046 (new, resolved in this release)**: a sub-cycled node whose timestep did not divide the macro timestep drifted by a fixed fraction of every step (since 0.1.0; see `### Changed`)

@@ -198,10 +198,14 @@ class CouplingGroup:
         relaxation (MADD-ANO-027): each sweep re-solves the same fixed
         point, from where the previous sweep stopped and with a freshly
         started accelerator, and no sweep sees a boundary waveform over
-        the sub-step window (see ``boundary_interpolation``).  With a
-        converged first sweep the result equals ``waveform_iterations=1``;
-        when the first sweep stops at ``max_iterations`` the later sweeps
-        act as extra iterations, so raise ``max_iterations`` instead.
+        the sub-step window (see ``boundary_interpolation``).  Every
+        sweep starts with one pass, so after a converged first sweep each
+        later sweep still applies at least one more pass and moves the
+        state by about one residual -- within the tolerance, and
+        identical to ``waveform_iterations=1`` only at exact
+        stationarity.  When the first sweep stops at ``max_iterations``
+        the later sweeps act as extra iterations, so raise
+        ``max_iterations`` instead.
         ``1`` (the default) runs the solve once.  Read **only** when
         ``subcycling=True``; setting it away from its default otherwise
         is inert and warns (``UserWarning``).  Each sweep has a budget of

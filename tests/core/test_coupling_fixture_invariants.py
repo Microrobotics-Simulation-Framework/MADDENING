@@ -1255,6 +1255,37 @@ def test_every_recorded_fixture_still_measures_its_baseline_row(name, fixture):
     _assert_live_row_matches(name, fixture)
 
 
+#: The non-baseline rows ``docs/developer_guide/coupling_algorithm_guide.md``
+#: quotes in its "Start here" table (IQN, Aitken, ``jac/fixed0.8``, the
+#: interface norm), as ``(file, fixture, label)``.  The baseline check
+#: above re-measures ``gs/none/l2`` only, so a quoted row could go stale
+#: with nothing failing: the guide's 4.0 iterations for ``gs/iqn-ils/l2``
+#: on ``stiff-pair-0.95`` survived being changed to 9.0 in the file.  All
+#: slow: each is a compile and up to a hundred steps.
+_GUIDE_QUOTED_ROWS = (
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/l2"),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/none/interface"),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/interface"),
+    ("coupling_sweep_cpu.json", "star-16", "jac/fixed0.8/l2"),
+    ("coupling_sweep_cpu.json", "star-16", "gs/aitken/interface"),
+    ("coupling_sweep_cpu.json", "star-16", "gs/iqn-ils/interface"),
+    ("coupling_sweep_cpu.json", "star-2", "gs/aitken/interface"),
+    ("coupling_sweep_cpu.json", "slow-drift", "jac/fixed0.8/l2"),
+    ("coupling_sweep_cpu.json", "slow-drift", "gs/none/interface"),
+    ("coupling_sweep_cpu.json", "slow-drift", "gs/iqn-imvj5/l2"),
+    ("coupling_sweep_cpu.json", "chain-20", "jac/fixed0.8/l2"),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.8", "jac/fixed0.8/l2"),
+)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name,fixture,label", _GUIDE_QUOTED_ROWS,
+                         ids=[f"{f}-{lab}" for _, f, lab in _GUIDE_QUOTED_ROWS])
+def test_every_row_the_guide_quotes_is_what_the_fixture_measures(name, fixture, label):
+    """Each quoted row, re-measured like the baseline row and held to its bands."""
+    _assert_live_row_matches(name, fixture, label)
+
+
 def test_the_live_row_check_can_fail():
     """The comparison objects to the staleness it exists to catch.
 

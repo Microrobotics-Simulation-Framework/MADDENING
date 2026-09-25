@@ -144,7 +144,7 @@ For `stencil_order=4` the bare 5-point symbol would allow $3/8$, but the cubic b
 - Benchmark: `MADD-VER-001` — Analytical solution comparison for constant-BC diffusion
 - Benchmark: `MADD-VER-002` — Global spatial convergence against the Fourier solution; measured rate 1.900 against a theoretical 2.0
 - Benchmark: `MADD-VER-005` — Spatial order of accuracy by the Method of Manufactured Solutions; measured 2.000
-- Benchmark: `MADD-VER-006` — Temporal order of accuracy by MMS; measured 0.998
+- Benchmark: `MADD-VER-006` — Temporal order of accuracy by MMS; measured 1.000
 - Test files: `tests/verification/test_heat_analytical.py`, `tests/verification/test_mms_order.py`
 - The `stencil_order=4` claim is measured at 3.957 over a 10/20/40/80/160 ladder by `tests/verification/test_mms_order.py::test_heat_fourth_order_stencil_converges_at_its_declared_spatial_order`
 

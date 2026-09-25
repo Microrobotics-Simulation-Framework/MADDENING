@@ -30,11 +30,13 @@ Measured on the suite's 1-D sine toy (``n_max = 256``, top-``|b|``,
 ``[0.40, 0.50]`` gives ``-1.5808e-3`` against a true objective change of
 ``-2.3598e-3`` -- a 33 % shortfall, accounted for to six digits by the
 sum of the 27 jumps crossed in that window.  The error is negligible in
-the large-basis-budget regime the pattern is designed for: the spike
-measured a boundary-flip contribution of ``4e-8`` at ``k = 64``
-(``plans/MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md``, rounds 1-7, which
-also carry the measurements behind every constant in this module).
-Registered as anomaly ``MADD-ANO-003``.
+the large-basis-budget regime the pattern is designed for: summed over
+the switches in ``theta in [0.40, 0.42]``, the jumps are ``2.5e-1`` of
+``|J|`` at ``k = 8`` and ``1.2e-8`` at ``k = 64`` (float64;
+``tests/nodes/adaptive/test_active_set_switch.py::
+test_the_omitted_term_decays_with_the_active_set_budget`` asserts the
+decrease and a ``1e-6`` bound at ``k = 64``).  Registered as anomaly
+``MADD-ANO-003``.
 
 State contract
 --------------
@@ -52,8 +54,8 @@ material constant) are **not** state: they live in the graph parameter
 pytree (``params``) like every other node's constants, so ``jax.grad``
 and system identification reach them.
 
-Selection-Equivariance Theorem (spike round 6)
-----------------------------------------------
+Selection-Equivariance Theorem
+------------------------------
 
 Let ``G`` be a compact group acting on the basis index set and on the
 parameter space, ``Fix(G)`` its fixed-point set, ``A(theta) c = b(theta)``
@@ -75,7 +77,7 @@ The base class therefore provides a diagnostic and a mitigation:
   active-set-budget adequacy**: how much of the full-basis gradient the
   frozen set reproduces.  A symmetry trap drives it to ``0``, but so
   does a budget too small for the objective, and the ratio alone cannot
-  tell the two apart on its own.  (The spike's name for it,
+  tell the two apart on its own.  (Its earlier name,
   ``blindness_ratio``, is kept as a deprecated alias.)
 * :meth:`AdaptiveNode.frozen_gradient_vanishes_at` -- a binary check
   that the frozen gradient is negligible against its own rate of
@@ -247,20 +249,23 @@ class AdaptiveNode(SimulationNode):
     ----------
     gradient_capture_threshold : float
         ``0.7``.  Below this ratio the active set is judged not to
-        reproduce the full-basis gradient (spike round 6: minimises
-        expected cost of a false escape versus a missed trap over the
-        1-D and 2-D test problems).  ``blindness_threshold`` is a
+        reproduce the full-basis gradient (chosen during the design study
+        to minimise the expected cost of a false escape versus a missed
+        trap over its 1-D and 2-D test problems; on the 1-D sine toy the
+        three regimes measure about 0.86, 0.17 and 0.0, bracketed by
+        ``tests/nodes/adaptive/test_blindness_diagnostics.py``).
+        ``blindness_threshold`` is a
         deprecated alias kept in sync with it.
     blindness_break_delta : float
         ``0.05``.  Magnitude of the :meth:`symmetry_break` perturbation
-        (spike round 7: one perturbation of this size escaped every 1-D
-        and 2-D trap tested with no drift back; the 1-D minimum was
+        (in the design study one perturbation of this size escaped every
+        1-D and 2-D trap tested with no drift back; the 1-D minimum was
         0.03).
     D_threshold : int
         ``5``.  Number of trainable parameters above which the cold-start
         check alone is insufficient and
         :meth:`frozen_gradient_vanishes_at` should be run between
-        optimiser steps as well (spike round 5).  The base
+        optimiser steps as well (a design-study choice).  The base
         class does not enforce a monitoring policy; subclasses and
         optimisation loops read this constant to decide theirs.
 
@@ -362,7 +367,8 @@ class AdaptiveNode(SimulationNode):
         },
     )
 
-    # Spike-finalised constants (rounds 5-7); per-instance overrides via
+    # Constants fixed by the design study (the class docstring gives the
+    # reason for each); per-instance overrides via
     # the constructor.  Kept out of :meth:`params_pytree`: they steer
     # host-side diagnostics, they are not physics a fit could identify.
     gradient_capture_threshold: float = 0.7
@@ -852,9 +858,9 @@ class AdaptiveNode(SimulationNode):
         moves along the full-basis gradient, which in the audited
         budget-limited case lowered the ratio from 0.565 to 0.060.
 
-        Cost: at most two ratios and one symmetry break.
-        Spike round 4 found no cheap substitute for the full diagnostic
-        at cold start; round 7 found one perturbation sufficient.
+        Cost: at most two ratios and one symmetry break.  The design
+        study found no cheaper substitute for the full diagnostic at cold
+        start, and found one perturbation sufficient.
 
         Parameters
         ----------
@@ -1028,9 +1034,9 @@ class AdaptiveNode(SimulationNode):
         re-selects the active set there, and compares the frozen gradient
         at the two points.  Returns ``True`` when the proxy
         ``|g_0| / (|g_eps - g_0| / eps)`` falls below ``1e-2``: the frozen
-        gradient is flat where its own variation is not.  Spike round 7:
-        reliable for exact traps, not a continuous estimator of partial
-        blindness -- use :meth:`gradient_capture_ratio` for that.
+        gradient is flat where its own variation is not.  Reliable for
+        exact traps, not a continuous estimator of partial blindness --
+        use :meth:`gradient_capture_ratio` for that.
 
         What a ``True`` establishes, and what it does not
         ------------------------------------------------

@@ -745,8 +745,7 @@ def test_converged_is_proof_the_returned_state_is_within_tolerance(cap):
     that measured 0.25, handed back the state one update later, and
     *that* state's residual was 2.5 -- two and a half times the
     tolerance it had just reported meeting, silently.  Returning the
-    iterate that passed (decision D2,
-    ``plans/MADDENING_040_DECISIONS.md``) makes the flag a statement
+    iterate that passed (the 0.4.0 change) makes the flag a statement
     about the state the caller holds on a non-monotone group, which is
     the only case where it was ever in doubt.
 

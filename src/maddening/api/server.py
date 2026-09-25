@@ -1140,7 +1140,9 @@ class SimulationServer:
             changes the shape of the state the node builds (``n_cells``, a
             grid shape), sharded or not: the running state keeps its shape,
             and the step recompiled for the new value either failed on it
-            or, sharded, stepped it on a grid it does not have.
+            or, sharded, stepped it on a grid it does not have.  And so is
+            a structural value the node's constructor refuses: a graph saved
+            with it could not be loaded.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
@@ -1233,18 +1235,21 @@ class SimulationServer:
                     if key in node.params and _same_param_value(node.params[key], value):
                         continue
                     node_value = value
-                shape_reason = self.gm._state_shape_write_reason(node_name, key, node_value)
+                # A structural value is checked against the node's own
+                # constructor: the saved graph is rebuilt through it.
+                shape_reason = (
+                    self.gm._constructor_write_reason(node_name, key, node_value)
+                    if key not in staged else None
+                ) or self.gm._state_shape_write_reason(node_name, key, node_value)
                 if shape_reason is not None:
                     raise HTTPException(
                         status_code=400,
                         detail=(
                             f"{key}: node '{node_name}' cannot take a new value "
                             f"for this parameter while it runs: {shape_reason}.  "
-                            "Stepping the old state with it fails, or on a "
-                            "sharded node computes on a grid the state does not "
-                            "have.  Nothing was written; to change it, rebuild "
-                            f"the node (DELETE /graph/nodes/{node_name}, then "
-                            "POST /graph/nodes with the new value)."
+                            "Nothing was written; to change it, rebuild the "
+                            f"node (DELETE /graph/nodes/{node_name}, then POST "
+                            "/graph/nodes with the new value)."
                         ),
                     )
                 reason = self.gm._unused_node_write_reason(node_name, key, node_value)

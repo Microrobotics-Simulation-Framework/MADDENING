@@ -3769,22 +3769,33 @@ def _param_probe_pair(node: Any, key: str, value: Any) -> Optional[tuple]:
     shared = getattr(node, "params", None)
     if not isinstance(shared, dict):
         return None
-    candidates: list = [node]
-    seen: list = []
-    while candidates and len(seen) < 8:
-        candidate = candidates.pop(0)
-        if any(candidate is s for s in seen):
-            continue
-        seen.append(candidate)
+    for candidate in _params_holders(node):
         old = _node_with_params(candidate, dict(shared))
         new = _node_with_params(candidate, {**shared, key: value})
         if old is not None and new is not None:
             return old, new, candidate is not node
+    return None
+
+
+def _params_holders(node: Any) -> list:
+    """``node``, then every node it wraps that shares its params dict
+    (breadth first, a few deep): the objects a ``node.params`` write lands
+    on, outermost first."""
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return []
+    out: list = []
+    candidates: list = [node]
+    while candidates and len(out) < 8:
+        candidate = candidates.pop(0)
+        if any(candidate is seen for seen in out):
+            continue
+        out.append(candidate)
         for attr in list(getattr(candidate, "__dict__", {}).values()):
             if attr is not candidate and not isinstance(attr, type) \
                     and getattr(attr, "params", None) is shared:
                 candidates.append(attr)
-    return None
+    return out
 
 
 def _unprobeable_write_reason(node: Any) -> str:
@@ -4457,6 +4468,48 @@ class GraphManager:
         if text_a != text_b or len(consts_a) != len(consts_b):
             return True
         return not all(_leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
+
+    def _constructor_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+        """Why the node's own constructor refuses its params with
+        ``params[key] = value``, or ``None`` when it takes them or that
+        cannot be told.
+
+        A graph is saved (:meth:`to_dict`) as each node's class and params,
+        and loaded by calling the class with them (:meth:`from_dict`), so a
+        value the constructor refuses is one a saved graph cannot load.
+        Written straight into ``node.params`` it bypassed that validation:
+        ``PUT /graph/params`` took ``HeatNode``'s ``stencil_order=3``, the
+        running rod kept its 2nd-order stencil (there is no 3rd), and the
+        saved graph raised ``stencil_order must be 2 or 4`` on load.
+
+        Asked of the node, or of the node a wrapper wraps (it shares the
+        params dict, and is the one built from them), whichever is rebuilt
+        from its current params as :meth:`from_dict` would rebuild it; a
+        node that is not rebuilt that way is not asked.
+        """
+        node = self._nodes[owner].node
+        shared = getattr(node, "params", None)
+        for candidate in _params_holders(node):
+            cls = type(candidate)
+
+            def build(params, cls=cls, candidate=candidate):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return cls(name=candidate.name, timestep=candidate.delta_t, **params)
+
+            try:
+                build(dict(shared or {}))
+            except Exception:  # noqa: BLE001 - not rebuilt from its params
+                continue
+            try:
+                build({**(shared or {}), key: value})
+            except Exception as exc:  # noqa: BLE001 - the constructor refuses it
+                return (
+                    f"{cls.__name__}'s constructor refuses it ({type(exc).__name__}: "
+                    f"{exc}), so a graph saved with it would not load"
+                )
+            return None
+        return None
 
     def _state_shape_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
         """Why ``node.params[key] = value`` cannot be taken by the running

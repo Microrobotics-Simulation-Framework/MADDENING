@@ -258,6 +258,36 @@ def test_a_value_that_changes_the_state_shape_is_refused_and_nothing_is_written(
     assert client.post("/sim/reset").json()["state"]["h"]["temperature"].__len__() == 16
 
 
+def test_a_structural_value_the_constructor_refuses_is_refused():
+    """``stencil_order`` is structural (the hooks trace differently with it),
+    so ``PUT /graph/params`` took ``stencil_order=3``: the running rod kept
+    its 2nd-order stencil -- there is no 3rd -- while ``to_dict()`` saved 3,
+    and loading the saved graph raised.  A graph is saved as the node's
+    class and params and loaded through its constructor, so the constructor
+    is asked first.  A value it takes (4) is still written, and the saved
+    graph reproduces the running one."""
+    from maddening.nodes.heat import HeatNode
+
+    gm = _rod()
+    client = _client(gm)
+    node_before, live_before = _node_params(gm, "h"), _live(gm, "h")
+    resp = client.put("/graph/params/h", json={"params": {"stencil_order": 3}})
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "HeatNode's constructor refuses it" in detail
+    assert "stencil_order must be 2 or 4, got 3" in detail
+    _assert_nothing_written(gm, "h", node_before, live_before, False)
+
+    assert client.put("/graph/params/h", json={"params": {"stencil_order": 4}}).status_code == 200
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        again = GraphManager.from_dict(gm.to_dict(), {"HeatNode": HeatNode})
+        again.compile()
+    gm.compile()
+    np.testing.assert_array_equal(np.asarray(again.run_scan(3)["h"]["temperature"]),
+                                  np.asarray(gm.run_scan(3)["h"]["temperature"]))
+
+
 class _ModeSwitch(SimulationNode):
     """``initial_state()`` accepts two layouts and raises for anything else."""
 

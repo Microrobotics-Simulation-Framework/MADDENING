@@ -797,6 +797,11 @@ class FmuTcpBridge:
 
     def _serve_conn_inner(self, conn: socket.socket) -> None:
         with conn:
+            # The read loop's condition below makes the same check before
+            # its first read, so either one alone keeps a worker started
+            # after stop() from serving (pinned by
+            # test_a_worker_that_starts_after_stop_serves_nothing, which
+            # fails only with both removed).
             if self._stop.is_set():
                 return
             binary = False                # negotiated at hello, per connection

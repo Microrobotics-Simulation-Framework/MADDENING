@@ -242,7 +242,7 @@ domain integral carried in the state never sets it.  Before 0.4.0 the
 first local field in sorted key order did, integral or not, and a
 `HeatNode` carrying a vector energy integral named to sort before
 `temperature` was told the wrong block size and never closed its right
-rod end (MADD-ANO-051).  A node that reads `shard_info` whose grid fields
+rod end (MADD-ANO-056).  A node that reads `shard_info` whose grid fields
 are split into blocks of different sizes along one axis is refused: one
 `(offset, extent)` pair cannot describe both.
 

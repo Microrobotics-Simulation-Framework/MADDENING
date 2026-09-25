@@ -1388,7 +1388,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         ``shard_info[axis]``'s local extent is the grid's extent along the
         axis over the devices on its mesh axis, fixed before tracing; a
         domain integral carried in the state never sets it (before 0.4.0
-        the first field in sorted key order did: MADD-ANO-051).
+        the first field in sorted key order did: MADD-ANO-056).
 
         Raises
         ------
@@ -1397,7 +1397,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             ``initial_state()`` builds now; when a boundary input the node
             declares per cell is neither grid-shaped nor broadcastable to
             its declared shape (it would reach every shard whole and be
-            read as that shard's block: MADD-ANO-052); or when the inner
+            read as that shard's block: MADD-ANO-057); or when the inner
             node reads ``shard_info`` and its grid fields disagree about a
             sharded axis's extent.
         """

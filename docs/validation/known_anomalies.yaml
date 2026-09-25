@@ -4034,7 +4034,7 @@ anomalies:
       domain integrals did.  Loud, not silent: every failure is an
       exception.  (A vector integral whose length the device count divides
       was split without an error, and set the block size `shard_info`
-      reports; that is MADD-ANO-051.)
+      reports; that is MADD-ANO-056.)
       Resolved in 0.4.0: in both wrappers a domain integral carried in the
       state is placed exactly as the step returns it -- replicated once
       reduced, stacked along its unreduced mesh axes otherwise, by
@@ -4065,7 +4065,7 @@ anomalies:
       output was classified as a grid field first), and handing the
       integral to each shard whole made `ShardedStencilNode` read it as the
       block size it reports in `shard_info`, silently, where a misplaced
-      integral had mostly raised (MADD-ANO-051).  "None known", which this
+      integral had mostly raised (MADD-ANO-056).  "None known", which this
       said, was written before either was found.  None known beyond them.
     verification:
       - "tests/cloud/multigpu/test_integral_listed_as_state_field.py::test_an_integral_listed_in_state_fields_is_summed_over_the_shards"
@@ -4681,7 +4681,7 @@ anomalies:
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_one_rod_with_fixed_data_is_stable_at_the_same_fourier_number"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-051"
+  - anomaly_id: "MADD-ANO-056"
     title: "ShardedStencilNode read the block size it hands update_padded in shard_info off a domain integral carried in the state, so a sharded HeatNode carrying a vector or per-shard energy integral never closed its right rod end"
     description: >
       `ShardedStencilNode` passes `update_padded` `shard_info = {axis:
@@ -4740,7 +4740,7 @@ anomalies:
       - "tests/cloud/multigpu/test_shard_info_extent.py::test_grid_fields_of_different_extents_are_refused_for_a_node_reading_shard_info"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-052"
+  - anomaly_id: "MADD-ANO-057"
     title: "A sharded HeatNode or LBMNode applied, on every shard, a heat_source or body_force of a shape the unsharded node refuses"
     description: >
       `ShardedStencilNode` shards a boundary input that is grid-shaped and
@@ -4801,7 +4801,7 @@ anomalies:
       - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_update_padded_on_the_whole_grid_fills_a_per_cell_force_periodically"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-053"
+  - anomaly_id: "MADD-ANO-058"
     title: "The LBM constructors accepted a non-finite viscosity or relaxation time, and LBMPipeNode a propeller disc outside the grid, each running a different model with no error"
     description: >
       `LBMNode` checked `tau = 0.5 + viscosity / cs2 > 0.5` only, so

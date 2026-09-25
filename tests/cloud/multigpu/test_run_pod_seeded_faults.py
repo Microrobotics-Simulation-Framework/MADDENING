@@ -19,11 +19,13 @@ code rather than dropping it.
 from __future__ import annotations
 
 import copy
+import gc
 import importlib.util
 import json
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import NamedTuple
 
@@ -151,16 +153,33 @@ def test_the_seeds_must_fail_every_item_the_wrapper_decides():
 
 @pytest.fixture(scope="module")
 def seeded_wrapper_classes():
-    """``{seed: ShardedStencilNode}`` built from each seeded source, in-process."""
+    """``{seed: ShardedStencilNode}`` built from each seeded source, in-process.
+
+    Executed with ``@stability`` made a no-op, under a module name outside
+    the package: a seeded copy registered as a STABLE surface of the
+    library is still in the process-wide registry when the stable-signature
+    tests run later in the same process (it failed twelve of them on CI).
+    The registry must come out exactly as it went in, and the classes are
+    dropped when the module's tests end.
+    """
+    from maddening.core.compliance import stability as stab
+
+    before = dict(stab._STABILITY_REGISTRY)
+    real = stab.stability
+    stab.stability = lambda level: (lambda obj: obj)
     out = {}
-    for name, seed in _SEEDS.items():
-        module_name = f"maddening.cloud.multigpu._sharded_node_seeded_{name}"
-        spec = importlib.util.spec_from_loader(module_name, loader=None)
-        module = importlib.util.module_from_spec(spec)
-        exec(compile(_seeded_source(seed), f"<seeded {name}>", "exec"),  # noqa: S102
-             module.__dict__)
-        out[name] = module.ShardedStencilNode
-    return out
+    try:
+        for name, seed in _SEEDS.items():
+            module = types.ModuleType(f"run_pod_seeded_wrapper_{name}")
+            exec(compile(_seeded_source(seed), f"<seeded {name}>", "exec"),  # noqa: S102
+                 module.__dict__)
+            out[name] = module.ShardedStencilNode
+    finally:
+        stab.stability = real
+    assert stab._STABILITY_REGISTRY == before, "a seeded copy registered a stable surface"
+    yield out
+    out.clear()
+    gc.collect()
 
 
 @pytest.fixture(scope="module")

@@ -413,7 +413,10 @@ def test_stop_waits_for_a_worker_registered_after_its_first_sweep(monkeypatch):
 
     def sweep():
         found = real_sweep()
-        sweeps.append(found)
+        # A copy: stop() unions the second sweep into the set the first
+        # returned, so recording that object would show the late worker in
+        # the first sweep as soon as the second had run.
+        sweeps.append(frozenset(found))
         release_accept.set()             # the accept completes after the first sweep
         return found
 

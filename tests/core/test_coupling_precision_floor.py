@@ -472,7 +472,7 @@ class _Relax(SimulationNode):
         return self._declare
 
 
-def _stalled_substep_graph(n, *, framework=False, declare=None):
+def _stalled_substep_graph(n, *, framework=False, declare=None, wrap=None):
     """A relay whose node integrates ``n`` explicit Euler sub-steps, started stalled at 1.0.
 
     ``h = 1/n`` and ``C`` put every increment ``h (T - x)`` at 0.95 of
@@ -482,16 +482,18 @@ def _stalled_substep_graph(n, *, framework=False, declare=None):
     (``subcycling=True``, node timestep ``1/n`` of its partner's)
     instead of the node looping inside ``update``.  Returns the graph
     and the exact fixed point (float64 closed form on the float32
-    constants).
+    constants).  ``wrap``, when given, is applied to the node before it is
+    added (a wrapper must keep its declaration).
     """
     h = float(np.float32(1.0 / n))
     c = float(np.float32(0.5 + 0.95 * _HALF_ULP_OF_ONE / h))
     gm = GraphManager()
+    wrap = wrap or (lambda node: node)
     if framework:
-        gm.add_node(_Relax("a", 1, h, c, timestep=1.0 / n, declare=declare))
+        gm.add_node(wrap(_Relax("a", 1, h, c, timestep=1.0 / n, declare=declare)))
         kw = {"subcycling": True}
     else:
-        gm.add_node(_Relax("a", n, h, c, declare=declare))
+        gm.add_node(wrap(_Relax("a", n, h, c, declare=declare)))
         kw = {}
     gm.add_node(_Relay("b", 1.0))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
@@ -537,6 +539,27 @@ def test_a_sub_stepped_node_is_floored_per_evaluation(n, framework):
     # The floor is the per-evaluation one times the count.
     floor = n * PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0)
     assert d["spectral_error_bound"] >= floor / (1.0 - d["rho_spectral"]) * (1 - 1e-6)
+
+
+def test_a_hybrid_node_keeps_its_physics_nodes_evaluation_count():
+    """``HybridNode`` did not forward ``update_evaluations()``: the group
+    around a declaring node, wrapped, read its floor as one evaluation --
+    bound 1.07e-06 against a true distance of 7.43e-06, and
+    ``spectral_usable=False`` where the bare node's group is usable.  The
+    wrapped group now reads exactly what the bare one reads."""
+    from maddening.core.simulation.hybrid_node import HybridNode
+
+    n = 100
+    bare, x_star = _stalled_substep_graph(n, declare=n)
+    hybrid, _ = _stalled_substep_graph(
+        n, declare=n, wrap=lambda node: HybridNode(node, lambda s, b, dt: {}))
+    assert hybrid._nodes["a"].node.update_evaluations() == n
+    for gm in (bare, hybrid):
+        gm.step()
+    want, got = bare.coupling_diagnostics()["a+b"], hybrid.coupling_diagnostics()["a+b"]
+    assert got["spectral_usable"] is True, got
+    assert got["spectral_error_bound"] >= _l2_distance(hybrid, x_star)
+    assert got["spectral_error_bound"] == want["spectral_error_bound"]
 
 
 @pytest.mark.parametrize("n", (20, 100))

@@ -226,6 +226,71 @@ def test_rewriting_the_constructed_value_of_a_baked_leaf_is_accepted():
     assert resp.status_code == 200, resp.text
 
 
+def _rod(**kw):
+    from maddening.nodes.heat import HeatNode
+
+    gm = GraphManager()
+    gm.add_node(HeatNode("h", 1e-3, n_cells=16, thermal_diffusivity=0.5,
+                         initial_temperature=0.3, **kw))
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("n_cells", [17, 18, 8])
+def test_a_value_that_changes_the_state_shape_is_refused_and_nothing_is_written(n_cells):
+    """``n_cells`` changes the shape of the state ``initial_state()`` builds.
+    The rule "``initial_state()`` reads it, so it takes effect at the next
+    reset" answered 200; the running state kept 16 cells, and the next
+    ``/sim/step`` was a 500 (sharded, it stepped 16 cells with ``dx = L/17``
+    and an open right end).  Refused, naming the field and both shapes, and
+    the request's other keys are not written either."""
+    gm = _rod()
+    client = _client(gm)
+    node_before, live_before = _node_params(gm, "h"), _live(gm, "h")
+    resp = client.put("/graph/params/h", json={
+        "params": {"thermal_diffusivity": 0.4, "n_cells": n_cells}})
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("n_cells:")
+    assert f"((16,), 'float32') -> (({n_cells},), 'float32')" in detail
+    _assert_nothing_written(gm, "h", node_before, live_before, False)
+    assert client.post("/sim/step").status_code == 200
+    assert client.post("/sim/reset").json()["state"]["h"]["temperature"].__len__() == 16
+
+
+class _ModeSwitch(SimulationNode):
+    """``initial_state()`` accepts two layouts and raises for anything else."""
+
+    def __init__(self, name="n", timestep=0.1, layout="flat"):
+        super().__init__(name, timestep, layout=layout)
+
+    def initial_state(self):
+        shapes = {"flat": (4,), "square": (2, 2)}
+        if self.params["layout"] not in shapes:
+            raise ValueError(f"unknown layout {self.params['layout']!r}")
+        return {"x": jnp.ones(shapes[self.params["layout"]], jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": state["x"] * 0.5}
+
+
+@pytest.mark.parametrize("value, why", [
+    ("square", "changes the layout of the state"),
+    ("round", "initial_state() raises with it"),
+])
+def test_a_structural_value_the_state_cannot_be_built_with_is_refused(value, why):
+    """The same rule for a structural (non-numeric) value: one that changes
+    the state's shape is refused, and so is one ``initial_state()`` raises
+    for -- the next ``/sim/reset`` could not build a state with it."""
+    gm = GraphManager()
+    gm.add_node(_ModeSwitch())
+    gm.compile()
+    resp = _client(gm).put("/graph/params/n", json={"params": {"layout": value}})
+    assert resp.status_code == 400, resp.text
+    assert why in resp.json()["detail"]
+    assert gm._nodes["n"].node.params["layout"] == "flat" and not gm._dirty
+
+
 def test_an_initial_condition_the_node_reads_takes_effect_at_the_next_reset():
     gm = GraphManager()
     gm.add_node(BallNode(name="b", timestep=0.01, initial_position=5.0))

@@ -228,3 +228,68 @@ def test_sharded_node_alias_removed_in_v030():
     alias in v0.2.x).  Importing it must now fail with ImportError."""
     with pytest.raises(ImportError):
         from maddening.cloud.multigpu.sharded_node import ShardedNode  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
+# dt reaches the inner node at the precision it was given
+# ---------------------------------------------------------------------------
+
+
+class _Decay1D(SimulationNode):
+    """``du/dt = -k u + D lap(u)``, periodic, in the precision of its state."""
+
+    def __init__(self, dtype):
+        super().__init__(name="decay", timestep=0.1, k=1.0, D=0.1)
+        self._dtype = dtype
+
+    def halo_width(self):
+        return {0: 1}
+
+    def initial_state(self):
+        return {"u": jnp.linspace(1.0, 2.0, 16, dtype=self._dtype)}
+
+    def _new(self, up, dt):
+        u = up[1:-1]
+        return u + dt * (-self.params["k"] * u + self.params["D"] * (up[2:] - 2 * u + up[:-2]))
+
+    def update(self, state, boundary_inputs, dt):
+        return {"u": self._new(jnp.pad(state["u"], 1, mode="wrap"), dt)}
+
+    def update_padded(self, state_padded, boundary_inputs, dt, *,
+                      static_padded=None, shard_info=None):
+        return {"u": state_padded["u"].at[1:-1].set(self._new(state_padded["u"], dt))}
+
+
+@pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
+def test_a_float64_node_steps_with_a_float64_dt_when_sharded():
+    """Under ``jax_enable_x64`` the wrapper used to cast ``dt`` to float32,
+    so a float64 node stepped with ``float32(0.1)`` (1.5e-8 relative off)
+    when sharded and with ``0.1`` unwrapped: 1.66e-6 relative apart after
+    1000 steps.  One step is enough to see it at float64 precision; the
+    unsharded node is the reference, and the two now agree to the bit."""
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        node = _Decay1D(jnp.float64)
+        sharded = ShardedStencilNode(node, create_device_mesh(shape=(4,)),
+                                     axis_map={"devices": 0}, boundary="periodic")
+        state = node.initial_state()
+        want = np.asarray(jax.jit(node.update)(state, {}, 0.1)["u"])
+        got = np.asarray(sharded.update(sharded.initial_state(), {}, 0.1)["u"])
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+    assert got.dtype == np.float64
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
+def test_a_float32_node_still_steps_in_float32_when_sharded():
+    """Without the cast a Python ``dt`` arrives weakly typed, so a float32
+    state stays float32 -- the dtype the wrapper's out_specs were built for."""
+    node = _Decay1D(jnp.float32)
+    sharded = ShardedStencilNode(node, create_device_mesh(shape=(4,)),
+                                 axis_map={"devices": 0}, boundary="periodic")
+    got = sharded.update(sharded.initial_state(), {}, 0.1)["u"]
+    assert got.dtype == jnp.float32
+    np.testing.assert_array_equal(
+        np.asarray(got), np.asarray(jax.jit(node.update)(node.initial_state(), {}, 0.1)["u"]))

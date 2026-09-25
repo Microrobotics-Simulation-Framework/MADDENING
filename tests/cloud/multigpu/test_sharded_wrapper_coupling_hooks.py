@@ -171,3 +171,59 @@ def test_the_unstructured_wrapper_refuses_interface_dofs_by_name():
     assert ShardedUnstructuredNode(Ring(False), mesh, layout).interface_dof_indices() == {}
     with pytest.raises(NotImplementedError, match=r"'ring'.*\['x_bc'\].*partition layout"):
         ShardedUnstructuredNode(Ring(True), mesh, layout).interface_dof_indices()
+
+
+class _Declaring(SimulationNode):
+    """A node that sub-steps internally and says so: ``update_evaluations() == 7``.
+
+    It has what each wrapper needs -- a 16-cell field, a halo on its one
+    axis and an ``update_padded`` -- and its step is irrelevant here."""
+
+    def __init__(self, halo=True):
+        super().__init__("sub", 0.1)
+        self._halo = halo
+
+    def initial_state(self):
+        return {"x": jnp.arange(16, dtype=jnp.float32)}
+
+    def halo_width(self):
+        return {0: 1} if self._halo else {}
+
+    def update(self, state, bi, dt):
+        return dict(state)
+
+    def update_padded(self, state_padded, bi, dt, **kwargs):
+        return dict(state_padded)
+
+    def update_evaluations(self):
+        return 7
+
+
+def _declaring_wrapped(kind):
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+    from maddening.core.simulation.hybrid_node import HybridNode
+
+    mesh = create_device_mesh(shape=(4,))
+    if kind == "pointwise":
+        return ShardedPointwiseNode(_Declaring(halo=False), mesh)
+    if kind == "stencil":
+        return ShardedStencilNode(_Declaring(), mesh, {"devices": 0})
+    if kind == "hybrid":
+        return HybridNode(_Declaring(halo=False), lambda state, bi, dt: {})
+    pa = (np.arange(16) * 4 // 16).astype(np.int32)
+    edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=4)
+    return ShardedUnstructuredNode(_Declaring(), mesh, layout)
+
+
+@pytest.mark.parametrize("kind", ["pointwise", "stencil", "unstructured", "hybrid"])
+def test_every_wrapper_forwards_the_update_evaluations_of_the_node_it_wraps(kind):
+    """A wrapper that drops the declaration makes a coupling group read the
+    node's float floor as one evaluation.  ``HybridNode`` and
+    ``ShardedUnstructuredNode`` dropped it; the Cartesian wrappers did not."""
+    from maddening.core.graph_manager import _declared_evaluations
+
+    wrapped = _declaring_wrapped(kind)
+    assert wrapped.update_evaluations() == 7
+    assert _declared_evaluations(wrapped) == 7.0

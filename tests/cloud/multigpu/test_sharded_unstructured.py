@@ -540,39 +540,48 @@ class TestPoissonOnGraph:
 
 @pytest.mark.slow
 def test_ten_thousand_cell_ring_matches_unsharded():
-    """v0.4.0 plan: real-mesh-size forward smoke (lower end of the 1e4-1e6
-    band) on the 4-device CPU-virtual mesh.  The toy node's padded update
-    is a pass-through on ``x`` (its unsharded ``update`` averages, so the
-    two are not comparable — see its docstring); what this exercises at
-    size is the partition build, ghost exchange, gather and the psum,
-    with a wall-time record for the halo path."""
+    """v0.4.0 plan: real-mesh-size forward check (lower end of the 1e4-1e6
+    band) on the 4-device CPU-virtual mesh: six steps of a node that
+    relaxes each cell towards the mean of its ring neighbours, sharded and
+    unsharded, from a random state.  The partition is interleaved, so every
+    neighbour of every cell is a ghost and each step's answer depends on
+    the whole exchange.
+
+    Until 0.4.0 this used the toy node above, whose padded update passes
+    ``x`` through, and compared the result with the *initial* state: it
+    passed whatever the exchange delivered.  It keeps the wall-time record
+    for the halo path."""
     import time
+
+    from tests.cloud.multigpu.property_support import UnstructuredRelaxNode, ring_edges
 
     n_global, n_devices = 10_000, 4
     pa = (np.arange(n_global) % n_devices).astype(np.int32)
-    edges = np.array([[i, (i + 1) % n_global] for i in range(n_global)], dtype=np.int32)
+    edges = ring_edges(n_global)
     layout = build_unstructured_partition(partition_assignment=pa, edges=edges,
                                           n_devices=n_devices)
     mesh = create_device_mesh(shape=(n_devices,))
-    node = _NeighbourAverageNode(name="big", n_global_cells=n_global, edges=edges,
-                                 partition_assignment=pa)
+    node = UnstructuredRelaxNode(name="big", n_global_cells=n_global, edges=edges,
+                                 rate=0.5, layout=layout)
     sharded = ShardedUnstructuredNode(node, mesh, layout)
-    state = sharded.initial_state()
-    ref_state = node.initial_state()
-    fields = set(node.state_fields())
+    x0 = np.random.default_rng(7).standard_normal(n_global).astype(np.float32)
 
-    def _state_only(d):
-        return {k: v for k, v in d.items() if k in fields}
+    ref = {"x": jnp.asarray(x0)}
+    step = jax.jit(node.update)
+    for _ in range(6):
+        ref = step(ref, {}, 1.0)
 
-    out = sharded.update(state, {}, 1.0)
-    jax.block_until_ready(jax.tree.leaves(out))
+    state = {"x": jnp.asarray(partition_value(value=x0, layout=layout).reshape(-1))}
+    state = sharded.update(state, {}, 1.0)
+    jax.block_until_ready(state)
     t0 = time.perf_counter()
     for _ in range(5):
-        out = sharded.update(_state_only(out), {}, 1.0)
-    jax.block_until_ready(jax.tree.leaves(out))
+        state = sharded.update(state, {}, 1.0)
+    jax.block_until_ready(state)
     per_step_ms = (time.perf_counter() - t0) / 5 * 1e3
-    gathered = sharded.gather_global(out)
-    # pass-through semantics of the toy padded update: x is carried exactly
-    np.testing.assert_array_equal(np.asarray(gathered["x"]), np.asarray(ref_state["x"]))
-    assert np.isclose(float(jax.device_get(out["total_mass"])), n_global)
+
+    got = sharded.gather_global(state)["x"]
+    want = np.asarray(ref["x"])
+    assert not np.allclose(want, x0, atol=1e-3), "fixture premise: the state moves"
+    np.testing.assert_allclose(np.asarray(got), want, rtol=1e-6, atol=1e-6)
     print(f"\n[sharded unstructured 1e4 cells / 4 CPU devices] {per_step_ms:.2f} ms/step")

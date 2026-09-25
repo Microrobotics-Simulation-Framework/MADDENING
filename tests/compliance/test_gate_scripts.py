@@ -696,6 +696,82 @@ class TestImplementationMappingGate:
         assert "declared a JAX primitive" in out
         assert "OK: 1 implementation mapping(s) verified, 1 not checked" in out
 
+    # -- a row traces its term to code, not to a whole class -------------
+    #
+    # audit_040_p4_2, M5: re-pointing a row from ``HeatNode.update`` to
+    # ``HeatNode`` passed, because the resolver asked only for something
+    # callable and a class is.
+
+    def test_a_row_re_pointed_from_a_method_to_its_class_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _guide(tmp_path, "| Diffusion | `maddening.nodes.heat.HeatNode` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        err = capsys.readouterr().err
+        assert "resolves to the class HeatNode" in err
+        assert "Class `HeatNode`" in err            # the hint says how to mean it
+
+    def test_the_audits_m5_on_the_shipped_heat_guide_fails(
+        self, mapping_gate, tmp_path
+    ):
+        text = (REPO_ROOT / "docs" / "algorithm_guide" / "nodes"
+                / "heat_node.md").read_text()
+        mutated = text.replace("`maddening.nodes.heat.HeatNode.update`",
+                               "`maddening.nodes.heat.HeatNode`", 1)
+        assert mutated != text
+        (tmp_path / "heat_node.md").write_text(mutated)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_row_that_declares_it_maps_the_class_is_allowed(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Grid set-up | `maddening.nodes.heat.HeatNode` | "
+               "Class `HeatNode`: the constructor builds the grid |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    @pytest.mark.parametrize("notes", [
+        "Class `BallNode`",                       # names another class
+        "the Class `HeatNode` constructor",      # not at the start
+        "class `HeatNode`",                       # not the spelling
+    ])
+    def test_a_class_marker_is_read_exactly(self, mapping_gate, tmp_path, notes):
+        _guide(tmp_path,
+               f"| Grid set-up | `maddening.nodes.heat.HeatNode` | {notes} |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_class_marker_on_a_row_naming_no_class_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """The marker is a claim, like the inherited one; a stale one fails."""
+        _guide(tmp_path,
+               "| Diffusion | `maddening.nodes.heat.HeatNode.update` | "
+               "Class `HeatNode` |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "no code span in it resolves to a class" in capsys.readouterr().err
+
+    def test_a_class_marker_does_not_excuse_the_rows_other_spans(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Grid set-up | `maddening.nodes.heat.HeatNode`, "
+               "`maddening.nodes.ball.BallNode` | Class `HeatNode` |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_property_is_code_a_row_can_trace_to(self, mapping_gate, tmp_path):
+        """Not callable when read off the class, and still a function."""
+        _guide(tmp_path,
+               "| Static fields | `maddening.nodes.heat.HeatNode.static_data` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    def test_a_staticmethod_and_a_module_function_still_resolve(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Mask guard | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | |\n",
+               "| Integration | `maddening.core.simulation.integrators.integrate_node` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
     def test_a_scope_of_only_declared_primitives_fails(
         self, mapping_gate, tmp_path
     ):

@@ -1660,20 +1660,28 @@ def _git(repo, *args):
                           capture_output=True, text=True, env=env).stdout
 
 
-def _commit_registry(repo, *versions):
+def _commit_registry(repo, *versions, rel="known_anomalies.yaml"):
     """A throwaway git repository whose registry went through ``versions``.
 
-    Each version of ``known_anomalies.yaml`` is one commit, oldest first;
-    the work tree is left at the last.  Returns the registry's path.
+    Each version of the registry, at ``rel`` inside ``repo``, is one
+    commit, oldest first; the work tree is left at the last.  Returns the
+    registry's path.
     """
     repo.mkdir(parents=True, exist_ok=True)
     _git(repo, "init", "-q")
-    path = repo / "known_anomalies.yaml"
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
     for i, text in enumerate(versions):
         path.write_text(text)
-        _git(repo, "add", "known_anomalies.yaml")
+        _git(repo, "add", rel)
         _git(repo, "commit", "-q", "-m", f"registry version {i}")
     return path
+
+
+#: Where the shipped registry sits.  A registry in a subdirectory is the
+#: case that matters: git reads a pathspec relative to its working
+#: directory, and a lookup run from ``docs/validation`` once found nothing.
+_NESTED_REGISTRY = "docs/validation/known_anomalies.yaml"
 
 
 _THREE_ANOMALIES = _TWO_ANOMALIES_WITH_A_GAP.replace(
@@ -1912,10 +1920,11 @@ class TestARetirementOfAReachableEntryIsRefused:
 
     @staticmethod
     def _deleted(tmp_path, status):
-        """002 committed with ``status``, then removed in a second commit."""
+        """002 committed with ``status``, then removed in a second commit,
+        in a registry laid out where the shipped one is."""
         return _commit_registry(tmp_path / "repo",
                                 _THREE_ANOMALIES.format(status=status),
-                                _TWO_ANOMALIES_WITH_A_GAP)
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
 
     @pytest.mark.parametrize("status", ["open", "partially_resolved", "wont_fix",
                                         "anything-unenumerated"])
@@ -1939,16 +1948,37 @@ class TestARetirementOfAReachableEntryIsRefused:
         path = _commit_registry(tmp_path / "repo",
                                 _THREE_ANOMALIES.format(status="resolved"),
                                 _THREE_ANOMALIES.format(status="open"),
-                                _TWO_ANOMALIES_WITH_A_GAP)
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
         entry, where, problem = anomalies_gate.last_committed_entry(
             path, "MADD-ANO-002")
         assert problem is None and entry["resolution_status"] == "open", where
         assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
 
+    def test_the_lookup_works_from_a_nested_registry_and_the_repo_root(
+            self, anomalies_gate, tmp_path):
+        for rel in (_NESTED_REGISTRY, "known_anomalies.yaml"):
+            path = _commit_registry(tmp_path / rel.replace("/", "_"),
+                                    _THREE_ANOMALIES.format(status="resolved"),
+                                    _TWO_ANOMALIES_WITH_A_GAP, rel=rel)
+            entry, where, problem = anomalies_gate.last_committed_entry(
+                path, "MADD-ANO-002")
+            assert problem is None, (rel, problem)
+            assert entry["resolution_status"] == "resolved", rel
+            assert where.endswith("^"), where
+
+    def test_a_number_no_commit_recorded_may_be_retired(
+            self, anomalies_gate, tmp_path):
+        path = _commit_registry(tmp_path / "repo", _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        assert anomalies_gate.last_committed_entry(path, "MADD-ANO-002") == (
+            None, None, None)
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path) == []
+
     def test_an_uncommitted_deletion_is_read_from_head(
             self, anomalies_gate, tmp_path):
         path = _commit_registry(tmp_path / "repo",
-                                _THREE_ANOMALIES.format(status="open"))
+                                _THREE_ANOMALIES.format(status="open"),
+                                rel=_NESTED_REGISTRY)
         path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
         errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
         assert len(errors) == 1 and "(HEAD) is 'open'" in errors[0], errors
@@ -1967,7 +1997,7 @@ class TestARetirementOfAReachableEntryIsRefused:
         _git(tmp_path, "clone", "-q", "--depth", "1",
              f"file://{origin}", str(clone))
         errors = anomalies_gate.retirement_errors(
-            {"MADD-ANO-002": "why"}, clone / "known_anomalies.yaml")
+            {"MADD-ANO-002": "why"}, clone / _NESTED_REGISTRY)
         assert len(errors) == 1 and "shallow clone" in errors[0], errors
 
     def test_the_gate_refuses_it_end_to_end(self, tmp_path):

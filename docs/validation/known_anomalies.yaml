@@ -3626,3 +3626,192 @@ anomalies:
     verification:
       - "tests/cloud/multigpu/test_sharded_stencil_node.py::test_a_float64_node_steps_with_a_float64_dt_when_sharded"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-034"
+    title: "LBMNode's wall_mask was dropped by every save/reload: the reloaded graph ran with no walls"
+    description: >
+      `LBMNode(wall_mask=...)` kept the mask on the node and did not record
+      it in `params`.  Every path that rebuilds a node from a saved graph
+      calls `cls(name=, timestep=, **params)` -- `GraphManager.from_dict` on
+      a `to_dict()` config, `load_graph_from_usd` on a stage written by
+      `save_graph_to_usd` -- so the rebuilt node had no walls, the
+      `wall_mask` field of its state was all zero, and the reloaded graph
+      ran a wall-free domain with no error or warning.  Nothing else in the
+      config differed, so nothing flagged it.  A provenance record carrying
+      the config had the same hole.  Measured on a 12 x 8 D2Q9 channel with
+      walls on both long sides and one obstacle cell, driven by a uniform
+      body force of 2e-5 for 30 steps (CPU, jaxlib 0.11.0): the original
+      graph's peak speed is 4.73e-4 and the reloaded graph's 6.10e-4, and
+      the two velocity fields differ by more than the original's peak
+      speed, because the reloaded channel has no walls to hold the flow.
+      `POST /graph/nodes` could not build a walled node at all: a JSON body
+      carries the mask as nested lists, and the constructor read
+      `wall_mask.shape`.  Reproduced at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and
+      v0.3.1 and on the audited 0.4.0 tree (`git archive` of each, one
+      script: 32 wall cells before the config round trip, 0 after).
+      Resolved in 0.4.0: the constructor records the mask in `params` as
+      nested lists of bool, the JSON-faithful spelling `HeatNode` already
+      uses for `grid_points`, and accepts any array-like.  A node built
+      without a mask writes no key, so a wall-free node's config is
+      unchanged.  The mask is structural: it is not a leaf of the parameter
+      pytree, and `PUT /graph/params` refuses a new mask for a running node
+      and writes nothing, because the step reads the mask the constructor
+      built.  The same sweep over every built-in node's constructor
+      arguments found one more loss, `AdaptiveNode(dtype=...)`, which no
+      release carried and which is fixed in the same change.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent and total for the geometry: a reloaded walled flow runs as if
+      the domain were open, and every quantity downstream of it (wall shear,
+      flow rate, pressure drop) is wrong while the graph otherwise looks
+      identical.  It reaches every workflow that saves a graph and runs it
+      again -- a resumed or replayed study, a configuration shipped to
+      another machine, a result reproduced from its provenance record.
+      `context_dependent` because it needs an `LBMNode` built with a
+      `wall_mask` and a save/reload between construction and use; a graph
+      built and run in one process is unaffected.
+    affected_components:
+      - "maddening.nodes.lbm.LBMNode"
+      - "maddening.core.graph_manager.GraphManager.from_dict"
+      - "maddening.usd.serialization.load_graph_from_usd"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: rebuild the `LBMNode` with its `wall_mask` after loading
+      the graph, and replace the loaded node with it before compiling; or
+      keep the graph in the process that built it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A config now carries the mask as nested lists of bool, about seven
+      bytes per cell (some 460 kB for a 64 x 32 x 32 grid).  Large but
+      faithful; nothing is dropped to keep it small.
+    verification:
+      - "tests/nodes/test_lbm_wall_mask_round_trip.py::test_a_config_round_trip_through_json_steps_the_same_flow"
+      - "tests/nodes/test_lbm_wall_mask_round_trip.py::test_a_usd_round_trip_steps_the_same_flow"
+      - "tests/nodes/test_lbm_wall_mask_round_trip.py::test_a_node_rebuilt_from_its_params_has_the_same_walls"
+      - "tests/nodes/test_lbm_wall_mask_round_trip.py::test_the_fixture_can_express_a_lost_mask"
+      - "tests/nodes/test_builtin_node_round_trip.py::test_a_reloaded_built_in_node_writes_builds_and_steps_as_the_original"
+      - "tests/nodes/test_builtin_node_round_trip.py::test_every_built_in_node_has_a_round_trip_case"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_new_lbm_wall_mask_is_refused_and_the_saved_graph_keeps_the_running_walls"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-035"
+    title: "ShardedUnstructuredNode reads a global-order state as partition layout on a balanced partition not in global order"
+    description: >
+      `ShardedUnstructuredNode` steps a state in partition layout:
+      `n_devices * n_local_max` rows, shard by shard, each shard's cells in
+      `local_global_ids` order.  It checks a written state only by its
+      leading axis.  On a balanced partition -- every shard full, so
+      `n_devices * n_local_max == n_global` -- whose cells are not in
+      global order, a state written in global cell order with
+      `GraphManager.set_node_state` has exactly the partition-layout shape.
+      It is stored without a word and read as partition layout, so each
+      cell steps from another cell's value.  On an interleaved 8-cell ring
+      over 2 devices (cells 0, 2, 4, 6 on the first, 1, 3, 5, 7 on the
+      second) `x = [1, ..., 8]` written in global order is read, by
+      `gather_global` and by the step, as `[1, 5, 2, 6, 3, 7, 4, 8]`.  The
+      docstring of `update` has said so since 0.4.0 (#151).  A partition
+      with padding (unbalanced) is refused by shape, and a balanced
+      partition in global order (each device a contiguous ascending block)
+      reads both spellings alike, so only the balanced, reordered case is
+      silent.  Present since the wrapper was introduced in 0.3.0
+      (`git archive` of v0.3.0 and v0.3.1, same reproducer, same
+      permutation).  The per-cell boundary input in the same situation is
+      refused since 0.4.0; the state is not, because the documented
+      partition-layout spelling has the same shape as the global-order one
+      and a refusal would refuse it too.  Telling them apart needs an
+      explicit layout on the state write, an API change scheduled for
+      0.5.0.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent and total for the state it touches: every cell takes another
+      cell's value, so the field that is stepped is a permutation of the
+      field that was written, and nothing reports it.  Writing an initial
+      condition in global cell order is the natural spelling, and a
+      balanced partition is the common case whenever the cell count divides
+      evenly.  `context_dependent` because it needs a `ShardedUnstructuredNode`,
+      a partition whose shards are all full and whose cells are not in
+      global order, and a whole state written from outside (not the one
+      `initial_state()` builds, nor a checkpoint of the same graph).
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+    affected_versions: ">=0.3.0"
+    workaround: >
+      Either renumber the cells so that each device owns a contiguous,
+      ascending block of global ids -- relabel them in the order
+      `np.argsort(partition_assignment, kind="stable")`, after which global
+      order and partition layout are the same array -- or convert a
+      global-order state with
+      `partition_value(value=state, layout=node.layout).reshape(n_devices * n_local_max, ...)`
+      before writing it with `set_node_state`.
+    resolution_status: "open"
+    verification:
+      - "tests/cloud/multigpu/test_sharded_boundary_inputs.py::test_a_global_order_state_on_a_balanced_interleaved_partition_is_read_as_partition_layout"
+      - "tests/cloud/multigpu/test_sharded_boundary_inputs.py::test_a_global_order_state_on_a_balanced_partition_steps_the_cells_it_names"
+      - "tests/cloud/multigpu/test_sharded_boundary_inputs.py::test_the_workaround_a_state_converted_with_partition_value_steps_the_cells_it_names"
+      - "tests/cloud/multigpu/test_sharded_boundary_inputs.py::test_the_workaround_renumbered_cells_read_a_global_order_state_correctly"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-036"
+    title: "A config round trip dropped a node's sharding with no word: the reloaded graph ran unsharded"
+    description: >
+      The sharded wrappers' `to_dict` delegates to the wrapped node and
+      appends `sharded` and the wrapper's settings -- `axis_map` and
+      `boundary` for `ShardedStencilNode`, `shard_axes` for
+      `ShardedPointwiseNode`, `sharding`, `n_devices` and `exchange` for
+      `ShardedUnstructuredNode` -- so a config records the wrapped node's
+      type.  `GraphManager.from_dict` ignored every one of those keys and
+      rebuilt a plain single-device node, without a warning: a graph saved
+      to run across devices reloaded to run on one.  Reproduced at v0.2.0,
+      v0.3.1 and the audited 0.4.0 tree (`git archive` of each, a
+      `HeatNode` behind a two-device `ShardedStencilNode`: the config
+      records `sharded`, `axis_map`, `boundary`; the reload is a
+      `HeatNode` and nothing is said).  The whole-tree audit had pinned it
+      as a strict xfail (W7) pending a decision.
+      Resolved in 0.4.0 by making the loss loud rather than by restoring
+      the wrapper.  Restoring needs the device mesh -- and, unstructured,
+      the partition layout -- which a config does not carry and the
+      loading machine need not have; refusing would block the only reload
+      of a graph that computes the right numbers, because a wrapper
+      computes the wrapped node's model.  So `from_dict` rebuilds the node
+      unsharded and emits a `UserWarning` naming the node, the wrapper,
+      the settings the config recorded and the
+      `maddening.surrogates.replace.replace_node(gm, name, <wrapper>(...))`
+      call that wraps it again before `compile()`.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      For every built-in node the reloaded, unsharded graph computes the
+      same numbers as the sharded one (the wrappers reproduce the node or
+      refuse at construction since 0.4.0), so what was lost silently was
+      where the graph ran, not what it computed: a run sized for several
+      devices on one, slower or out of memory.  `context_dependent`
+      because a user node whose sharded step is not its unsharded one --
+      a halo fill it does not declare -- would change its numbers on the
+      reload, and in releases before 0.4.0 a sharded `LBMNode` was such a
+      node (MADD-ANO-025).
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.from_dict"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: after `from_dict`, wrap the node again and swap it in
+      with `replace_node` before `compile()`, using the `axis_map` /
+      `boundary` / `shard_axes` the config recorded beside the node.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The wrapper is still not restored, by design: a config describes the
+      model, not the devices.  A USD stage of a sharded graph still fails
+      to load, loudly (`TypeError`; pinned as a strict xfail).
+    verification:
+      - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_a_config_round_trip_of_a_sharded_node_warns_and_reloads_it_unsharded"
+      - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_every_sharded_wrapper_is_named_with_its_recorded_settings"
+      - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_the_pointwise_and_unstructured_wrappers_write_the_markers_the_loader_reads"
+      - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_an_unsharded_config_loads_without_a_warning"
+    github_issue: null

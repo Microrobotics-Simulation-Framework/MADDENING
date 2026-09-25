@@ -965,9 +965,11 @@ def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
     note(f"rho={gain} c={bias} head_start={head_start} distance={distance} {d}")
     assert d["spectral_usable"] is True, d
     assert d["rho_spectral"] == pytest.approx(rho_slow, abs=1e-4)
+    # No ratio in the message: a bound that dropped its floor reads
+    # exactly 0.0 on a stalled draw.
     assert d["spectral_error_bound"] >= distance, (
         f"reported {d['spectral_error_bound']:.4e} for a true distance of "
-        f"{distance:.4e} ({distance / d['spectral_error_bound']:.2f}x)"
+        f"{distance:.4e}"
     )
 
 

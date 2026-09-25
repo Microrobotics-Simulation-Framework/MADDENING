@@ -209,6 +209,18 @@ def test_a_converged_group_is_at_its_fixed_point_in_every_field_at_every_scale(
     a number the caller can act on and the first is one they will
     trust -- and ``strict_convergence`` raises on the second and stays
     silent on the first.
+
+    What it does not see on its own: both fields start at zero and
+    contract at the same rate, so a norm that ignores one of them keeps
+    iterating on the other, and the ignored one arrives anyway.  Seeded
+    faults of that kind -- the pre-0.4.0 ``atol`` default, a norm that
+    flushes a subnormal change to zero -- fail here only on the rarer
+    draws where *both* fields sit inside the fault (both at
+    ``_UNDERFLOW_END``, say).  The sibling below starts the big field at
+    its fixed point and fails on both faults every run, and
+    ``test_the_verdict_does_not_change_below_the_change_underflow`` in
+    ``tests/core/test_coupling_non_finite_state.py`` pins the underflow
+    end bit for bit against a power-of-two-scaled control.
     """
     gm = _graph(big=big, small=small, gain=gain, norm=norm, solver=solver,
                 acceleration=acceleration, threshold=threshold)
@@ -259,9 +271,11 @@ def test_a_small_field_is_not_dropped_merely_for_being_small(
     one pass, whatever the small field was doing.
 
     Two faults, each seen here: the pre-0.4.0 ``atol=1e-8`` default
-    (the 1e-9 and 1e-12 draws fall inside it and are dropped), and a
-    norm that subtracts before rescaling (at ``_UNDERFLOW_END`` the last
-    changes are subnormal, flushed to zero, and the group stops ~1% short).
+    (the 1e-9 and 1e-12 draws fall inside it and are dropped: one pass,
+    the small field 25-49% short), and a norm that subtracts before
+    rescaling (at ``_UNDERFLOW_END`` the last changes are subnormal,
+    flushed to zero, and the group stops 0.4-0.7% short, twenty times
+    the budget).
     """
     # Asserted, not assumed: every value ``small`` is drawn from is already
     # below the 1e-6 the property needs, so this rejected 0.0% of draws even
@@ -278,9 +292,16 @@ def test_a_small_field_is_not_dropped_merely_for_being_small(
     diag = gm.coupling_diagnostics()["a+b"]
     got = float(gm.get_node_state("a")["small"])
     want = small / (1.0 - gain ** 2)
-    assert got == pytest.approx(want, rel=max(_SLACK * threshold,
-                                              _FLOAT32_FLOOR)), (
-        f"the small field stopped at {got!r} against {want!r}; {diag}"
+    # Relative, spelled out.  ``pytest.approx(want, rel=...)`` also
+    # accepts anything within its default ``abs=1e-12``, which for a
+    # field at 1e-12 or below is every value at all: the check this line
+    # replaces passed a small field left 25% short, and a 1e-36 one
+    # stopped 0.4% short by a norm that subtracted before rescaling.
+    budget = max(_SLACK * threshold, _FLOAT32_FLOOR)
+    rel = abs(got - want) / abs(want)
+    assert rel <= budget, (
+        f"the small field stopped {rel:.3g} from its fixed point "
+        f"({got!r} against {want!r}); budget {budget:.3g}; {diag}"
     )
     assert diag["iterations"] > 1, (
         f"one pass cannot converge a contraction of {gain ** 2}; {diag}"

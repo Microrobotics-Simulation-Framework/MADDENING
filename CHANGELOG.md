@@ -167,6 +167,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`GraphManager.from_dict` warns when it rebuilds a sharded node unsharded**: a config carries no device mesh, so the node comes back as the node it wraps; the `UserWarning` names the wrapper, the settings the config recorded and the `replace_node` call that wraps it again (MADD-ANO-036, silent since 0.2.0).
+  Action: re-wrap after loading when the run must be sharded; filter the warning when an unsharded reload is what you want.
 - **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;
   `ShardedStencilNode` refuses an outer `boundary` other than a wrapped `ShardedStencilNode`'s, and a state its node no longer builds; `ShardedPointwiseNode` refuses a node with no state field on the shard axis.
   Action: rebuild a node to change such a value; renumber cells with `np.argsort(partition_assignment, kind="stable")`; pass the inner wrapper's `boundary`; shard an axis the state has, or leave the node unwrapped.
@@ -611,9 +613,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
-- **MADD-ANO-034 (new, resolved in this release)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`).  **MADD-ANO-035 (new, open)**: on a balanced partition whose cells are not in global order, `ShardedUnstructuredNode`
-  reads a global-order state written with `set_node_state` as partition layout, so each cell steps from another cell's value (since 0.3.0).  Convert the state with `partition_value` first, or renumber the cells with
-  `np.argsort(partition_assignment, kind="stable")`; an explicit layout on the state write is planned for 0.5.0
+- **MADD-ANO-034, 036 (new, resolved in this release)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`); a config round trip dropped a node's sharding with no word (since 0.2.0; now a warning, see `### Changed`).
+  **MADD-ANO-035 (new, open)**: on a balanced partition not in global order, `ShardedUnstructuredNode` reads a global-order state written with `set_node_state` as partition layout, so each cell steps from another cell's value (since 0.3.0).
+  Convert the state with `partition_value` first, or renumber the cells with `np.argsort(partition_assignment, kind="stable")`; an explicit layout on the state write is planned for 0.5.0
 - **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
   **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;

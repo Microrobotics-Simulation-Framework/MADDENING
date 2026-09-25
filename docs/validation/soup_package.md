@@ -98,8 +98,9 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-033 | ShardedStencilNode stepped with dt rounded to float32 under jax_enable_x64 | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 | MADD-ANO-034 | LBMNode's wall_mask was dropped by every save/reload: the reloaded graph ran with no walls | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-035 | ShardedUnstructuredNode reads a global-order state as partition layout on a balanced partition not in global order | `major` | `context_dependent` | `open` | >=0.3.0 |
+| MADD-ANO-036 | A config round trip dropped a node's sharding with no word: the reloaded graph ran unsharded | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 
-*35 anomalies registered.  16 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 13 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*36 anomalies registered.  16 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 13 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

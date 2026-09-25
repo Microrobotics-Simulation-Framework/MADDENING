@@ -592,6 +592,11 @@ class HeatNode(SimulationNode):
                     f"n_cells ({n_cells})"
                 )
 
+        # Which grid this rod is, fixed here with the coordinates built
+        # below: see ``_is_nonuniform``.  Set before ``super().__init__``
+        # so nothing the base class calls can see the node without it.
+        self._nonuniform = gp_list is not None
+
         super().__init__(
             name,
             timestep,
@@ -668,6 +673,12 @@ class HeatNode(SimulationNode):
         correctly, because the gradient would at that point be missing
         the term through the grid.  See
         :meth:`~maddening.core.node.SimulationNode.static_data_deps`.
+
+        Which branch applies is the grid the node was *constructed* on
+        (``_is_nonuniform``), not the current ``params["grid_points"]``:
+        a uniform rod does not become a non-uniform one because a list
+        was written into its params, so it still declares nothing, and
+        such a write is refused as read by nothing the node computes.
         """
         if self._is_nonuniform:
             return {"grid_x": ("grid_points",)}
@@ -781,7 +792,22 @@ class HeatNode(SimulationNode):
 
     @property
     def _is_nonuniform(self) -> bool:
-        return self.params.get("grid_points") is not None
+        """Whether this rod was *constructed* on a non-uniform grid.
+
+        Decided in ``__init__``, together with the coordinates
+        ``_grid_x`` holds, and never re-read from ``self.params``.  The
+        branch and the coordinates it reads must come from the same
+        construction: until 0.4.0 this read ``params["grid_points"]``
+        live, so a ``grid_points`` written into a uniform rod's params
+        after construction (``PUT /graph/params`` answered 200) switched
+        the step to the variable-dx stencil on the stale *uniform*
+        coordinates -- the running rod stayed uniform while ``to_dict()``
+        saved, and a reload ran, the new grid (166 K apart after 200
+        steps on a 12-cell rod).  With the branch fixed here a written
+        ``grid_points`` is read by nothing the running node computes,
+        and the parameter write is refused on that ground.
+        """
+        return self._nonuniform
 
     @property
     def _grid_x(self):

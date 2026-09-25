@@ -1447,8 +1447,22 @@ class SimulationServer:
             grid shape), sharded or not: the running state keeps its shape,
             and the step recompiled for the new value either failed on it
             or, sharded, stepped it on a grid it does not have.  And so is
-            a structural value the node's constructor refuses: a graph saved
-            with it could not be loaded.
+            a request whose values the node's constructor refuses, asked
+            with every changed key at once and the params a save would
+            carry: a graph saved with them could not be loaded.  And so is
+            one the running node would honour differently from the node a
+            saved graph rebuilds -- a constructor that derives a branch or
+            an array from the value (``LBMPipeNode``'s multiphase switch
+            from ``G != 0``) leaves the running node computing with what it
+            derived from the old one.
+
+            A non-finite number anywhere in the request is a 400 before
+            anything else.  Integers and element counts are bounded as in
+            ``POST /graph/nodes`` (a 422 from the request model), and a
+            value that would take the node's state past
+            :data:`MAX_NODE_STATE_ELEMENTS`, or change its layout, is
+            refused before any node or state is built with it wherever the
+            node's ``initial_state()`` can be evaluated abstractly.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
@@ -1569,16 +1583,14 @@ class SimulationServer:
             # below that establish it on concrete values build the node and
             # its state at the new size first.  Told here without building
             # anything, where the node's initial_state() can be evaluated
-            # abstractly; one key at a time for the message, then together
-            # (two dimensions that multiply).
+            # abstractly.  One key at a time, like the checks it precedes:
+            # a key that changes the layout on its own is refused by the
+            # first of them, so every node built below has the running
+            # node's state layout.
             for key, node_value in changes.items():
                 reason = _state_write_reason_before_building(node, {key: node_value})
                 if reason is not None:
                     raise refused([key], reason)
-            if len(changes) > 1:
-                reason = _state_write_reason_before_building(node, changes)
-                if reason is not None:
-                    raise refused(list(changes), reason)
             # A value the node consumed when it was constructed (a wall
             # mask, an assembled operator, a copy of an initial condition)
             # is not rebuilt by writing node.params: the write would be

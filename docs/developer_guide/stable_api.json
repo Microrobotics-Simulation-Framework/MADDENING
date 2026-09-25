@@ -694,6 +694,11 @@
               "default": "None",
               "kind": "KEYWORD_ONLY",
               "name": "shard_info"
+            },
+            {
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "params"
             }
           ]
         }

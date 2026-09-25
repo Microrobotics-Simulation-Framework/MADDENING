@@ -301,6 +301,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharded stencil wrapper and LBM nodes, round-3 audit** (MADD-ANO-051, 052, 053): `shard_info`'s block size comes from the grid, not a domain integral in the state (a sharded `HeatNode` carrying a vector energy integral left its right end open, 70.9 K off); a nested `ShardedStencilNode` keeps the node's parameters; a replicated `heat_source`/`body_force` the unsharded node refuses is refused sharded (it was applied on every shard);
+  `LBMNode`/`LBMPipeNode` refuse a non-finite viscosity or `tau`, a `propeller_x` outside the grid and a disc covering no cell (each ran with no collision or no propeller).  Action: re-run sharded results whose node carries an integral in its state; give pipes of 10 planes or fewer an explicit `propeller_x` (the default is 10).
 - **`PUT /graph/params` answers 200 only for a write a saved graph reproduces** (MADD-ANO-047, 048, 049): the constructor is asked with every changed key and the live values a save carries (a live leaf skipped it: a `HeatNode` past its Fourier limit, `rho_gas > rho_liquid`); a write the running node would honour unlike its rebuild is refused
   (`LBMPipeNode`'s `G` crossing 0; `HeatNode` now fixes its grid at construction, so `grid_points` on a uniform rod is refused); a non-finite value is a 400 before any write (it was stored, then a 500 on every GET); params carry POST's 422 bounds, and a
   state over the cap or of another layout is refused before anything that size is built.  Action: rebuild a node to change such a value, and check that configs saved after a REST write still load.

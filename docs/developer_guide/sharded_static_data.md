@@ -223,7 +223,8 @@ def update_padded(self, state_padded, boundary_inputs, dt,
     #
     # global_offset is a TRACED jax scalar:
     #   lax.axis_index(mesh_axis) * local_extent
-    # local_extent is a Python int.
+    # local_extent is a Python int: the grid's extent along the axis
+    # over the devices on its mesh axis.
     if shard_info is not None and 0 in shard_info:
         offset, extent = shard_info[0]
         # offset usable in dynamic_slice; NOT in Python int slicing
@@ -233,6 +234,17 @@ def update_padded(self, state_padded, boundary_inputs, dt,
 
 `shard_info` is `None` when the node is run outside of
 `ShardedStencilNode`.
+
+`local_extent` is worked out before the step is traced, from a grid
+field's global shape: a state field that is not a domain integral, or a
+sharded `StaticArray` split along the axis when no state field has it.  A
+domain integral carried in the state never sets it.  Before 0.4.0 the
+first local field in sorted key order did, integral or not, and a
+`HeatNode` carrying a vector energy integral named to sort before
+`temperature` was told the wrong block size and never closed its right
+rod end (MADD-ANO-051).  A node that reads `shard_info` whose grid fields
+are split into blocks of different sizes along one axis is refused: one
+`(offset, extent)` pair cannot describe both.
 
 `ShardedUnstructuredNode` passes a different `shard_info`, for a
 different layout: `{0: (offset, n_local_max), "n_local": n_owned}`.

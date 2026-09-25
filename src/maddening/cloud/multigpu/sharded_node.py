@@ -1384,6 +1384,22 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         it does unwrapped.  Until 0.4.0 it was cast to float32, so under
         ``jax_enable_x64`` a float64 node stepped with a rounded ``dt``
         when sharded (MADD-ANO-033).
+
+        ``shard_info[axis]``'s local extent is the grid's extent along the
+        axis over the devices on its mesh axis, fixed before tracing; a
+        domain integral carried in the state never sets it (before 0.4.0
+        the first field in sorted key order did: MADD-ANO-051).
+
+        Raises
+        ------
+        ValueError
+            When a state field's shape is not what the inner node's
+            ``initial_state()`` builds now; when a boundary input the node
+            declares per cell is neither grid-shaped nor broadcastable to
+            its declared shape (it would reach every shard whole and be
+            read as that shard's block: MADD-ANO-052); or when the inner
+            node reads ``shard_info`` and its grid fields disagree about a
+            sharded axis's extent.
         """
         self._check_state_matches_inner(state)
         static_materialised = self._materialise_sharded_statics()

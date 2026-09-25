@@ -103,7 +103,7 @@ import struct
 import threading
 import time
 import zipfile
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -985,7 +985,10 @@ class FmuTcpBridge:
                 self._decode_state(bytes(blob))
                 return {"ok": True}
             if op == "reset":
-                self._sidecar._state = _copy_tree(self._initial_state)      # noqa: SLF001
+                # A copy of the state dict the bridge started from; _copy_tree
+                # is typed for any tree, so say which one this is.
+                self._sidecar._state = cast(                              # noqa: SLF001
+                    "dict[str, dict[str, Any]]", _copy_tree(self._initial_state))
                 if self._initial_params is not None:
                     self._sidecar._params = _copy_tree(self._initial_params)  # noqa: SLF001
                 self._inputs, self._time = self._zero_inputs(), 0.0

@@ -387,15 +387,19 @@ class FmuSidecar:
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
-        new_state = {
-            node: ({field: _restored_leaf(value, self._state.get(node, {}).get(field),
-                                          what=f"FMU state {node}.{field}")
-                    for field, value in fields.items()}
-                   if isinstance(fields, dict)
-                   else _restored_leaf(fields, self._state.get(node),
-                                       what=f"FMU state {node}"))
-            for node, fields in state.items()
-        }
+        new_state: dict[str, dict[str, Any]] = {}
+        for node, fields in state.items():
+            if not isinstance(fields, dict):
+                # A graph state is node -> {field: array}; anything else is
+                # not a snapshot of this sidecar's model.
+                raise ValueError(f"FMU state {node}: expected a mapping of fields, "
+                                 f"got {type(fields).__name__}")
+            live_fields = self._state.get(node) or {}
+            new_state[node] = {
+                field: _restored_leaf(value, live_fields.get(field),
+                                      what=f"FMU state {node}.{field}")
+                for field, value in fields.items()
+            }
         new_params = None
         if params is not None and self._params is not None:
             new_params = {}

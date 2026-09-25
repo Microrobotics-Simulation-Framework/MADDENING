@@ -17,6 +17,16 @@ JUnit ``time`` covers) and attaches the sums to the test as
 ``user_properties``, which ``--junitxml`` writes as ``<property>``
 elements.  ``scripts/report_test_durations.py`` reads them.
 
+It also counts the processes a test starts (``subprocesses``), from
+Python's audit events (PEP 578: ``subprocess.Popen``, ``os.system``,
+``os.fork``, ...).  A child's JAX events never reach this process, so a
+test whose JAX work runs in a child records no compile here although a
+warm cache -- whose directory the child inherits -- may still speed it
+up; the report uses the count to say so instead of calling the test
+uncacheable.  Not seen: ``multiprocessing`` children started with the
+``spawn`` or ``forkserver`` method, which fork without an audit event
+(the ``fork`` method raises ``os.fork`` and is counted).
+
 Registered from ``tests/conftest.py`` only when
 ``MADDENING_TEST_JAX_TIMING=1`` (CI sets it), so local runs are untouched.
 Each xdist worker is its own process and records its own tests.
@@ -25,6 +35,7 @@ Each xdist worker is its own process and records its own tests.
 from __future__ import annotations
 
 import collections
+import sys
 
 import pytest
 
@@ -42,7 +53,14 @@ COUNT_EVENTS = {
     "/jax/compilation_cache/cache_hits": "jax_cache_hits",
     "/jax/compilation_cache/cache_misses": "jax_cache_misses",
 }
-PROPERTIES = (*DURATION_EVENTS.values(), *COUNT_EVENTS.values())
+#: Audit events that start another process -> ``subprocesses``.  If
+#: Python renames one, ``tests/compliance/test_report_test_durations.py``
+#: fails rather than the count silently reading zero.
+SPAWN_EVENTS = frozenset({
+    "subprocess.Popen", "os.system", "os.fork", "os.forkpty",
+    "os.posix_spawn", "os.spawn", "os.exec",
+})
+PROPERTIES = (*DURATION_EVENTS.values(), *COUNT_EVENTS.values(), "subprocesses")
 
 
 class JaxTiming:
@@ -60,6 +78,11 @@ class JaxTiming:
         prop = COUNT_EVENTS.get(event)
         if prop is not None:
             self.totals[prop] += 1
+
+    def on_audit(self, event, args):
+        # An audit hook runs inside the audited call and must never raise.
+        if event in SPAWN_EVENTS:
+            self.totals["subprocesses"] += 1
 
     def reset(self):
         self.totals.clear()
@@ -100,5 +123,7 @@ def register(config):
     timing = JaxTiming()
     monitoring.register_event_duration_secs_listener(timing.on_duration)
     monitoring.register_event_listener(timing.on_event)
+    # Audit hooks cannot be removed; this one lives as long as the session.
+    sys.addaudithook(timing.on_audit)
     config.pluginmanager.register(Plugin(timing), "maddening-jax-timing")
     return timing

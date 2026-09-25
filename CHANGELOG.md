@@ -285,6 +285,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **CI test-time report** (`scripts/report_test_durations.py`): a cache read is no longer subtracted twice and is shown apart from compile; a share is capped at 100%; a test that started a process is listed as "work in a subprocess
+  (not measured here)", not "slow even with a warm cache"; a report holding only collection errors exits 2 instead of passing.
+  Action: none; a slow test's split in the lane summary now adds up, and a subprocess test is no longer sent for a code change a warm cache would make unneeded.
 - **Compliance gates catch the defects a mutation audit slipped past them**: `check_doctests` pins every file's example count (`EXAMPLES_PER_FILE`) and it and `check_impl_mapping` sit at the counts; `check_anomalies` refuses a `pytest.skip()`/`xfail()` in a cited test, an aliased mark, `skipif(True)`,
   a broken first-party import and evidence under `tests/viz`, and counts imperative conditional skips; `check_citations` reads digit-led, line-wrapped and `@comment`-hidden keys; `check_heat_stability` judges `grid_points=None`;
   `generate_soup_tables --check` refuses a duplicated block. Action: a new docstring example goes into `EXAMPLES_PER_FILE` in `scripts/check_doctests.py`.

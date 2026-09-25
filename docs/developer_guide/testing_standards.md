@@ -385,14 +385,33 @@ falls in one of three bands:
 | 1–5 s | The watch list. Optimise it when you are in the file; usually the cost is JIT compilation (see below). |
 | over 5 s | Mark it `@pytest.mark.slow`, unless it can be made much faster, or it guards something important enough to pay for on every push. In that case, add it to `tests/duration_allowlist.txt` as `<node id> # kept: <why>`. |
 
-Slow tests are not lost: `slow-tests.yml` runs the whole suite, slow tests
-included, on Monday, Wednesday and Friday, and on demand from the Actions
-tab. A property under `tests/verification/hypothesis/` that is marked slow
-also still runs on every push, at the `ci` profile's depth, in the
-`verify-hypothesis` job, which selects `-m "slow or not slow"`. A slow test
-that needs a tool the default lane installs (valgrind, for
-`tests/fmi/test_c_unit.py`) needs `slow-tests.yml` to install it too, or it
-skips there and runs nowhere.
+Slow tests still run, but less often, and not on every branch.
+`slow-tests.yml` runs the whole suite, slow tests included, on a schedule
+(Monday, Wednesday and Friday) that covers `main` only, because GitHub runs
+a scheduled workflow on the default branch and nowhere else. A release
+branch (`release/**`) gets a slow-lane run only when someone dispatches the
+workflow on it by hand, from the Actions tab or with
+`gh workflow run slow-tests.yml --ref <branch>`. So a slow test you add on
+a release branch has not run on that branch until someone does. A property
+under `tests/verification/hypothesis/` that is marked slow also still runs
+on every push, at the `ci` profile's depth, in the `verify-hypothesis` job,
+which selects `-m "slow or not slow"`. A slow test that needs a tool the
+default lane installs (valgrind, for `tests/fmi/test_c_unit.py`) needs
+`slow-tests.yml` to install it too, or it skips there and runs nowhere.
+
+Two more ways a test can fail to run where you expect it to:
+
+- **A test that reads documentation.** A pull request that changes only
+  documentation (`docs/`, Markdown, `plans/`, `.claude/`, `LICENSE`,
+  `CITATION.cff`) runs the `compliance` job alone, and that job runs
+  `tests/compliance/` and nothing else. A test that reads one of those
+  paths therefore belongs in `tests/compliance/`;
+  `tests/compliance/test_ci_workflows.py` fails if a test elsewhere names
+  one. A push to `main` or `release/**` always runs every lane.
+- **A test that needs `usd-core`.** Only the `test-usd` job installs the
+  `usd` extra, so a test outside `tests/usd/` that imports `pxr` or
+  `maddening.usd` skips in the sharded lanes. List its file in `test-usd`'s
+  pytest command in `ci.yml`; the same compliance test checks that you did.
 
 CI enforces the budget in the `Test time budget` step of each test lane
 (`scripts/report_test_durations.py`, reading pytest's JUnit XML):
@@ -451,7 +470,7 @@ run reads it decides what its times mean:
 |---|---|---|
 | Pull request | **warm**: restores the base branch's cache, never saves one | Fast. Anything the PR adds or changes still compiles from scratch, because its programs are not in the base cache, so a new slow test is still caught on the PR that adds it. |
 | Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: every compile is paid in full. |
-| `slow-tests.yml` (Mon/Wed/Fri) | **off**, one process per shard | The authoritative timing of the whole suite. Triage and allowlist edits are based on these runs. |
+| `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
 | Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
 
 Pull requests never save, so a second push cannot read the first push's
@@ -461,26 +480,61 @@ on every branch (see *Sharded lanes*). The cache key also includes the
 runner's CPU model, because XLA compiles for the host's instruction set. A
 shard that finds no cache for its model runs cold. Every lane summary
 states which kind of run it was: `warm`, `cold`, or `mixed` when the shards
-differed.
+differed, or when a shard recorded no mode.
 A warm run never lists allowlist entries as removable, because a test that
 is only fast when its compile is cached is still slow.
+
+A cache is saved only after a push run whose test step passed, and only
+once `scripts/prune_jax_cache.py` has deleted every entry that does not
+decompress whole. JAX writes an entry in place and never rewrites one, and
+a test's subprocess (which inherits the cache directory) can be killed
+mid-write; a truncated entry, once saved, would make every pull request
+that restores it raise (JAX warns, and `filterwarnings = ["error"]` turns
+that into a test error).
+
+A shard whose report holds nothing but collection errors (a test file that
+fails to import stops pytest before any test runs) fails the budget step
+with exit 2: no test ran, so there is nothing to pass. The lane summary
+leaves such a report out and lists no allowlist entry as removable.
 
 ### Why a test is slow
 
 Each lane records every test's JAX tracing, lowering, XLA compile and
-cache-read time (`tests/_jax_timing.py`, switched on by
-`MADDENING_TEST_JAX_TIMING=1`). The summary splits the slowest tests into:
+cache-read time, and how many processes it started (`tests/_jax_timing.py`,
+switched on by `MADDENING_TEST_JAX_TIMING=1`). The summary splits the
+slowest tests into:
 
 - **compiling**: XLA backend compilation. This is the only part a cache
-  removes.
+  removes. JAX's compile timer wraps the whole compile-or-read-the-cache
+  call, so on a cache hit what it times *is* the cache read; the read is
+  subtracted from it and shown on its own.
+- **cache read**: reading compiled programs back from the persistent
+  cache. A warm run pays it; a cold run does not.
 - **tracing/lowering**: building the program in Python. No cache removes
   it.
 - **running**: executing, Python overhead, I/O, and anything a subprocess
   does. An un-jitted `for` loop over `node.update` lands here.
 
+JAX's timers can overlap: on jax 0.10.2 one test's tracing alone summed to
+more than its wall time. A share is therefore capped at 100%, and the
+diagnosis says when the parts add up to more than the whole.
+
 **Slow even with a warm cache** lists every test still over 5 s once its
-compile time is subtracted. Every run shows this list, cold or warm. A cache
-cannot fix these tests; they need a code change or `@pytest.mark.slow`.
+compile time (not its cache reads) is subtracted. Every run shows this
+list, cold or warm. A cache cannot fix these tests; they need a code change
+or `@pytest.mark.slow`.
+
+**Work in a subprocess (not measured here)** lists the tests that would
+otherwise be on that list but started a process. A child's tracing and
+compiling never reach the pytest process, and the child inherits the cache
+directory, so a warm cache may still speed them up. Measured: a test whose
+JAX work runs in a child recorded no compile at all, and a warm run took it
+to about half its cold time. Compare a warm run before treating one as
+slow. Processes are counted from Python's audit events (`subprocess.Popen`,
+`os.system`, `os.fork`, `os.posix_spawn`), which miss `multiprocessing`
+children started with the `spawn` or `forkserver` method. A report written
+before the count existed cannot tell, so there a test with no JAX activity
+at all in the pytest process is listed here.
 
 The usual fixes:
 

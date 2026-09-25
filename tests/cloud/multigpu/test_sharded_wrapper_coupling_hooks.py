@@ -214,7 +214,9 @@ def _declaring_wrapped(kind):
     pa = (np.arange(16) * 4 // 16).astype(np.int32)
     edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
     layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=4)
-    return ShardedUnstructuredNode(_Declaring(), mesh, layout)
+    # No Cartesian halo: ShardedUnstructuredNode refuses a node that
+    # declares one.
+    return ShardedUnstructuredNode(_Declaring(halo=False), mesh, layout)
 
 
 @pytest.mark.parametrize("kind", ["pointwise", "stencil", "unstructured", "hybrid"])

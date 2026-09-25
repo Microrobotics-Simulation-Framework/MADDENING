@@ -16,8 +16,11 @@ writing down because they are the reasons a property test passes a bug:
 So this module fixes both.  The fixed point is known in closed form --
 each field runs its own scalar cycle ``a = g*b + bias``, ``b = g*a``,
 whose fixed point is ``bias / (1 - g**2)`` -- and the field magnitudes
-are drawn across fifteen decades, from 1e-12 to 1e3, independently for
-the two fields of every node.  A group that says it converged is then
+are drawn from 1e-12 to 1e3, independently for the two fields of every
+node, plus one value at 1e-36: a field so small that a change of a
+fraction of itself is subnormal, which a flush-to-zero backend (XLA's
+CPU backend is one) reads as no change at all unless the norm rescales
+the pair before subtracting.  A group that says it converged is then
 checked field by field against arithmetic, not against itself.
 
 The property is one sentence:
@@ -133,7 +136,7 @@ def _compiled_graph(*, norm, solver, acceleration, threshold):
 
 
 def _solve(*, big, small, gain, **config):
-    """One step of the cached graph for *config*, from its initial state.
+    """One step of the cached graph for *config*, the big field at its fixed point.
 
     The same step a graph built with these constants would take:
     ``_TwoScale`` reads ``gain`` and the biases from ``params`` either
@@ -142,10 +145,21 @@ def _solve(*, big, small, gain, **config):
     in ``tests/core/test_coupling_error_bound.py``).  Building a graph per
     example instead spent 18-22 s on the CI runner compiling copies of
     three programs.
+
+    ``big`` starts *at* its fixed point and ``small`` at zero, so the
+    small field is the only thing left to converge and the only thing
+    that can hold the group in the loop.  Both starting at zero, the two
+    fields contracted together at the same rate: a group that dropped
+    the small field still iterated until the big one arrived, and by
+    then the small one had arrived too -- so this property passed with
+    the pre-0.4.0 ``atol=1e-8`` default put back.
     """
     gm = _compiled_graph(**config)
     f32 = jnp.float32
     gm.reset_state()
+    fixed = big / (1.0 - gain ** 2)
+    gm.set_node_state("a", {"big": f32(fixed), "small": f32(0.0)})
+    gm.set_node_state("b", {"big": f32(gain * fixed), "small": f32(0.0)})
     gm.step(params={"nodes": {
         "a": {"gain": f32(gain), "bias_big": f32(big), "bias_small": f32(small)},
         "b": {"gain": f32(gain), "bias_big": f32(0.0), "bias_small": f32(0.0)},
@@ -154,9 +168,16 @@ def _solve(*, big, small, gain, **config):
 
 
 #: Fifteen decades, which is where an absolute dead band becomes
-#: visible: the shipped default was 1e-8, in the middle of this range.
+#: visible (the shipped default was 1e-8, in the middle of this range),
+#: and one value at the change-underflow end.  At 1e-36 a float32 field
+#: resolves changes down to ~1e-43, but a change below ``tiny`` (1.2e-38),
+#: i.e. below ~1% of the field, is subnormal: flushed to zero by the
+#: subtraction unless the norm rescales the pair first (MADD-ANO-019).
+#: Not 1e-38 itself: a field whose magnitude is subnormal is below what
+#: the dtype resolves and leaves the norm like a field at zero.
+_UNDERFLOW_END = 1e-36
 _MAGNITUDES = st.sampled_from(
-    [1e-12, 1e-9, 1e-8, 1e-7, 1e-5, 1e-3, 1.0, 1e3]
+    [1e-12, 1e-9, 1e-8, 1e-7, 1e-5, 1e-3, 1.0, 1e3, _UNDERFLOW_END]
 )
 
 
@@ -219,7 +240,7 @@ def test_a_converged_group_is_at_its_fixed_point_in_every_field_at_every_scale(
 
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
-    small=st.sampled_from([1e-12, 1e-9, 1e-7]),
+    small=st.sampled_from([1e-12, 1e-9, 1e-7, _UNDERFLOW_END]),
     gain=st.sampled_from([0.5, 0.7]),
     norm=st.sampled_from(["l2", "mixed", "interface"]),
 )
@@ -230,12 +251,17 @@ def test_a_small_field_is_not_dropped_merely_for_being_small(
 
     The consequence above -- a wrong answer called converged -- needs
     the small field to be the *only* thing unconverged, which not every
-    draw arranges.  This states the mechanism directly: a group
-    carrying a field six or more decades below its largest one must
-    still measure that field, so its residual has to move when the
-    field does.  Under the shipped default the residual was exactly
-    ``0.0`` and the group exited after one pass, whatever the small
-    field was doing.
+    draw arranges.  This arranges it: the big field starts at its fixed
+    point (see :func:`_solve`), so a group carrying a field six or more
+    decades below its largest one must still measure that field, and
+    its residual has to move when the field does.  Under the shipped
+    default the residual was exactly ``0.0`` and the group exited after
+    one pass, whatever the small field was doing.
+
+    Two faults, each seen here: the pre-0.4.0 ``atol=1e-8`` default
+    (the 1e-9 and 1e-12 draws fall inside it and are dropped), and a
+    norm that subtracts before rescaling (at ``_UNDERFLOW_END`` the last
+    changes are subnormal, flushed to zero, and the group stops ~1% short).
     """
     # Asserted, not assumed: every value ``small`` is drawn from is already
     # below the 1e-6 the property needs, so this rejected 0.0% of draws even

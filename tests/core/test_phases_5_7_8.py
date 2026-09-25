@@ -1,9 +1,14 @@
 """Tests for Phase 5 (IQN auto-detect, quadratic interpolation, interface
-residual), Phase 7 (IQN-IMVJ), and Phase 8 (waveform relaxation).
+residual), Phase 7 (IQN-IMVJ), and Phase 8 (``waveform_iterations``).
 
-Covers: auto interface-field detection for IQN, quadratic subcycling
+Covers: auto interface-field detection for IQN, sub-cycling boundary
 interpolation, interface residual convergence norm, IQN-IMVJ acceleration
-with Jacobian reuse, and waveform relaxation.
+with Jacobian reuse, and ``waveform_iterations``.  The last two phases'
+names promise more than the code does: ``waveform_iterations > 1``
+re-solves the same fixed point rather than relaxing a waveform, and
+``boundary_interpolation="quadratic"`` is never given its third value, so
+it is ``"linear"`` (MADD-ANO-027).  The tests below pin what the code
+does, and say where.
 """
 
 import jax
@@ -327,11 +332,11 @@ class TestInterfaceResidual:
 
 
 # ==================================================================
-# Phase 5b: Quadratic subcycling interpolation
+# Phase 5b: Sub-cycling boundary interpolation
 # ==================================================================
 
 class TestQuadraticInterpolation:
-    """Tests for quadratic boundary interpolation in subcycling."""
+    """Tests for ``boundary_interpolation="quadratic"`` in subcycling."""
 
     def test_quadratic_interpolation_converges(self):
         """Subcycled graph with boundary_interpolation='quadratic'
@@ -349,73 +354,67 @@ class TestQuadraticInterpolation:
         assert jnp.isfinite(state["fast"]["position"])
         assert jnp.isfinite(state["slow"]["position"])
 
-    def test_quadratic_more_accurate_than_linear(self):
-        """On a problem with fast-varying boundaries, quadratic
-        should be closer to a uniform-rate reference than linear.
+    def test_quadratic_interpolation_is_linear_interpolation_today(self):
+        """``"quadratic"`` returns ``"linear"``'s state to the last bit.
+
+        A recorded limitation, not a property (MADD-ANO-027).  The
+        quadratic branch interpolates through three values and the
+        sub-step loop never passes it the third (``s_prev_prev``), so it
+        runs the linear branch.  This test used to be called
+        ``test_quadratic_more_accurate_than_linear`` and compared two
+        identical programs; what it can honestly assert is that they are
+        identical, so that implementing the third value fails it and the
+        registry entry and the docs are revisited.
+
+        The pin is only worth something where interpolation matters at
+        all.  Both ends of the interpolation are estimates of the
+        end-of-step value -- the pass's incoming iterate and the in-pass
+        state -- and they differ only for a source scheduled *before* the
+        sub-cycled node, by that source's in-pass change.  So the slow
+        node is added first, and the tolerance is above float32
+        resolution so a converged step is not exactly stationary: there
+        ``"constant"`` and ``"linear"`` differ, which is asserted first,
+        and ``"quadratic"`` must still be ``"linear"`` rather than either
+        of the other two.
         """
-        k, c, m = 20.0, 1.0, 1.0
-        pos_a, pos_b = 0.0, 3.0
-        dt_fast, dt_slow = 0.001, 0.005
-        n_slow_steps = 100
-        n_fast_steps = n_slow_steps * round(dt_slow / dt_fast)
+        def run(mode):
+            gm = GraphManager()
+            for name, dt, x0 in (("slow", 0.005, 3.0), ("fast", 0.001, 0.0)):
+                gm.add_node(SpringDamperNode(
+                    name=name, timestep=dt, stiffness=50.0, damping=1.0,
+                    mass=1.0, rest_length=1.0, initial_position=x0))
+            gm.add_edge("fast", "slow", "position", "anchor_position")
+            gm.add_edge("slow", "fast", "position", "anchor_position")
+            gm.add_coupling_group(
+                ["fast", "slow"], max_iterations=20, tolerance=1e-4,
+                subcycling=True, boundary_interpolation=mode,
+            )
+            gm.compile()
+            assert gm.schedule == ["slow", "fast"], gm.schedule
+            gm.run_scan(_INTERPOLATION_STEPS)
+            return {(n, f): float(gm.get_node_state(n)[f]).hex()
+                    for n in ("fast", "slow") for f in ("position", "velocity")}
 
-        # Reference: both nodes at fast rate
-        gm_ref = _make_uniform_reference(
-            dt=dt_fast, k=k, c=c, m=m, pos_a=pos_a, pos_b=pos_b
+        constant, linear, quadratic = (
+            run(m) for m in ("constant", "linear", "quadratic"))
+        assert linear != constant, (
+            "fixture premise: with the slow node scheduled first and a "
+            "tolerance above float32 resolution, linear and constant "
+            "interpolation should return different states"
         )
-        gm_ref.add_coupling_group(
-            ["fast", "slow"],
-            max_iterations=20, tolerance=1e-10,
-        )
-        gm_ref.compile()
-        s_ref = gm_ref.run_scan(n_fast_steps)
-
-        # Linear interpolation
-        gm_lin = _make_mixed_rate_springs(
-            dt_fast=dt_fast, dt_slow=dt_slow,
-            k=k, c=c, m=m, pos_a=pos_a, pos_b=pos_b,
-        )
-        gm_lin.add_coupling_group(
-            ["fast", "slow"],
-            max_iterations=20, tolerance=1e-10,
-            subcycling=True,
-            boundary_interpolation="linear",
-        )
-        gm_lin.compile()
-        s_lin = gm_lin.run_scan(n_slow_steps)
-
-        # Quadratic interpolation
-        gm_quad = _make_mixed_rate_springs(
-            dt_fast=dt_fast, dt_slow=dt_slow,
-            k=k, c=c, m=m, pos_a=pos_a, pos_b=pos_b,
-        )
-        gm_quad.add_coupling_group(
-            ["fast", "slow"],
-            max_iterations=20, tolerance=1e-10,
-            subcycling=True,
-            boundary_interpolation="quadratic",
-        )
-        gm_quad.compile()
-        s_quad = gm_quad.run_scan(n_slow_steps)
-
-        # Compute errors vs reference
-        err_lin = float(
-            jnp.abs(s_ref["fast"]["position"] - s_lin["fast"]["position"])
-            + jnp.abs(s_ref["slow"]["position"] - s_lin["slow"]["position"])
-        )
-        err_quad = float(
-            jnp.abs(s_ref["fast"]["position"] - s_quad["fast"]["position"])
-            + jnp.abs(s_ref["slow"]["position"] - s_quad["slow"]["position"])
+        assert quadratic == linear, (
+            "boundary_interpolation='quadratic' no longer returns the linear "
+            "state bit for bit: if it now receives its third value, update "
+            "MADD-ANO-027, CouplingGroup.boundary_interpolation and the "
+            "coupling guide, and replace this pin with an accuracy test"
         )
 
-        # Both should be finite
-        assert jnp.isfinite(jnp.array(err_lin))
-        assert jnp.isfinite(jnp.array(err_quad))
 
-        # Quadratic should be at least as accurate as linear (or very close)
-        assert err_quad <= err_lin + 1e-6, (
-            f"Quadratic error {err_quad} should be <= linear error {err_lin}"
-        )
+#: Macro-steps of the interpolation pin: enough for the in-pass change
+#: of the slow node to accumulate into a state difference between
+#: "constant" and "linear" (2.7e-05 relative after 100 steps at
+#: tolerance 1e-4), few enough to stay cheap.
+_INTERPOLATION_STEPS = 20
 
 
 # ==================================================================
@@ -555,13 +554,23 @@ class TestIQNIMVJ:
 
 
 # ==================================================================
-# Phase 8a: Waveform relaxation
+# Phase 8a: waveform_iterations (sweeps, not waveform relaxation)
 # ==================================================================
 
-class TestWaveformRelaxation:
-    """Tests for waveform relaxation (multiple passes over sub-steps)."""
+class TestWaveformIterations:
+    """Tests for ``waveform_iterations``: repeated sweeps, not waveform relaxation.
 
-    def test_waveform_relaxation_converges(self):
+    ``waveform_iterations=N`` on a sub-cycling group runs its fixed-point
+    solve ``N`` times per step, each sweep starting from where the last
+    stopped with a fresh accelerator, over the same one-pass map
+    (MADD-ANO-027).  These tests check that the option runs under every
+    path; what the extra sweeps do and do not change is pinned in
+    ``tests/core/test_coupling_waveform_report.py``
+    (``test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change``,
+    ``test_a_capped_first_sweep_is_continued_by_the_later_ones``).
+    """
+
+    def test_waveform_iterations_run_and_stay_finite(self):
         """Basic convergence with waveform_iterations=3."""
         gm = _make_mixed_rate_springs()
         gm.add_coupling_group(
@@ -576,7 +585,7 @@ class TestWaveformRelaxation:
         assert jnp.isfinite(state["slow"]["position"])
 
     def test_waveform_with_scan(self):
-        """Waveform relaxation works in lax.scan."""
+        """``waveform_iterations`` works in lax.scan."""
         gm = _make_mixed_rate_springs()
         gm.add_coupling_group(
             ["fast", "slow"],
@@ -590,44 +599,8 @@ class TestWaveformRelaxation:
         assert jnp.all(jnp.isfinite(history["fast"]["position"]))
         assert jnp.all(jnp.isfinite(history["slow"]["position"]))
 
-    def test_waveform_differs_from_single_pass(self):
-        """Waveform iterations should give different (generally more
-        accurate) results than a single pass.
-        """
-        kwargs = dict(dt_fast=0.001, dt_slow=0.005, k=50.0, c=1.0,
-                      pos_a=0.0, pos_b=3.0)
-        n_steps = 50
-
-        gm_single = _make_mixed_rate_springs(**kwargs)
-        gm_single.add_coupling_group(
-            ["fast", "slow"],
-            max_iterations=10, tolerance=1e-8,
-            subcycling=True,
-            waveform_iterations=1,
-        )
-        gm_single.compile()
-        s_single = gm_single.run_scan(n_steps)
-
-        gm_multi = _make_mixed_rate_springs(**kwargs)
-        gm_multi.add_coupling_group(
-            ["fast", "slow"],
-            max_iterations=10, tolerance=1e-8,
-            subcycling=True,
-            waveform_iterations=3,
-        )
-        gm_multi.compile()
-        s_multi = gm_multi.run_scan(n_steps)
-
-        diff = float(jnp.abs(
-            s_single["fast"]["position"] - s_multi["fast"]["position"]
-        ))
-        # With multiple waveform iterations, results should differ
-        # (or be identical if already converged in 1 pass, which is
-        # unlikely for stiff coupling)
-        assert jnp.isfinite(jnp.array(diff))
-
     def test_waveform_with_aitken(self):
-        """Waveform relaxation combined with Aitken acceleration."""
+        """``waveform_iterations`` combined with Aitken acceleration."""
         gm = _make_mixed_rate_springs()
         gm.add_coupling_group(
             ["fast", "slow"],
@@ -641,7 +614,7 @@ class TestWaveformRelaxation:
         assert jnp.isfinite(state["fast"]["position"])
 
     def test_waveform_with_diagnostics(self):
-        """Waveform relaxation stores diagnostics."""
+        """``waveform_iterations`` stores diagnostics."""
         gm = _make_mixed_rate_springs()
         gm.add_coupling_group(
             ["fast", "slow"],
@@ -657,7 +630,7 @@ class TestWaveformRelaxation:
         assert diag["fast+slow"]["iterations"] >= 1
 
     def test_waveform_grad_compatible(self):
-        """Waveform relaxation is differentiable."""
+        """``waveform_iterations`` is differentiable."""
         gm = _make_mixed_rate_springs()
         gm.add_coupling_group(
             ["fast", "slow"],

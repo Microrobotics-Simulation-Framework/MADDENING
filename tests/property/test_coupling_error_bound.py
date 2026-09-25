@@ -40,6 +40,23 @@ distance could not be measured in the same units the threshold is quoted
 in.  The criterion machinery sees only a scalar residual and cannot tell
 the three norms apart; ``tests/core/test_coupling_error_bound.py``
 covers ``"interface"`` by example.
+
+The slow companion
+------------------
+The generated groups alone could not fail on the defect this property is
+named for.  Library nodes coupled at their drawn settings contract
+fast -- a residual and the distance it leaves differ by ``rho / (1 -
+rho)``, which is inside ``_SLACK`` for every ``rho`` below 0.8 -- so a
+seeded fault that put the raw residual test back (the criterion reading
+``residual`` where it reads ``residual / (1 - rho)``) passed this
+property under both the ``dev`` and ``ci`` profiles.  Every drawn graph
+therefore also carries a *slow companion*: a scalar relay cycle in a
+group of its own, contracting at a drawn ``rho`` in ``[0.9, 0.95]``,
+started a drawn distance short of its fixed point, under a drawn norm,
+solver and step scale.  Its fixed point is arithmetic, so it is measured
+against that rather than against a tighter solve.  At those rates the raw
+residual test stops 10-20x its threshold from the fixed point, and the
+property fails on the first draw.
 """
 
 from __future__ import annotations
@@ -58,12 +75,19 @@ from maddening.core.coupling.acceleration import (
     coupling_residual_mixed,
     relaxation_step_scale,
 )
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 
 from tests.conftest import EXAMPLES_COSTLY
 from tests.core.test_coupling_solver_equivalence import (
     residual_noise_floor,
 )
-from tests.property.strategies import graph_recipes, without_inert_knobs
+from tests.property.strategies import (
+    CouplingGroupRecipe,
+    EdgeRecipe,
+    NodeRecipe,
+    graph_recipes,
+    without_inert_knobs,
+)
 
 #: How much the linear extrapolation, the reference's own residual and
 #: float32 are jointly allowed to be wrong by.  See the module docstring.
@@ -217,10 +241,175 @@ def _measurable_norm_recipes(draw):
     return dataclasses.replace(recipe, coupling_groups=tuple(groups))
 
 
+class _SlowRelay(SimulationNode):
+    """``x <- gain * u + bias``, a scalar started at ``x0``.
+
+    Two of these in a cycle, one of them the identity (``gain=1``,
+    ``bias=0``), are the slow companion: a Gauss-Seidel pass advances the
+    other by ``x -> gain * x + bias``, so the group contracts at exactly
+    ``gain`` and its fixed point is ``bias / (1 - gain)`` on both nodes.
+    """
+
+    def __init__(self, name, timestep, gain, bias, x0):
+        super().__init__(name=name, timestep=timestep)
+        self._gain = float(gain)
+        self._bias = float(bias)
+        self._x0 = float(x0)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self._x0, jnp.float32)}
+
+    def state_fields(self):
+        return ["x"]
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.float32(0.0),
+                                       description="u")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": jnp.float32(self._gain) * boundary_inputs["u"]
+                + jnp.float32(self._bias)}
+
+    def update_evaluations(self):
+        return 1
+
+
+@dataclasses.dataclass(frozen=True)
+class _SlowRelayRecipe(NodeRecipe):
+    """A :class:`NodeRecipe` for :class:`_SlowRelay`.
+
+    ``GraphRecipe.build`` calls ``node.build()`` on every node, so a
+    companion rides along in the recipe -- and so in every graph built
+    from it -- without a registry entry of its own.
+    """
+
+    def build(self):
+        return _SlowRelay(self.name, self.timestep, **self.params)
+
+
+#: The companion's node names; nothing in ``NODE_NAME_POOL`` collides.
+_COMPANION = ("slow_companion", "slow_companion_relay")
+_COMPANION_KEY = "+".join(sorted(_COMPANION))
+
+#: Where the companion starts, as a multiple of its threshold short of
+#: its fixed point.  Far enough that the raw residual test would stop
+#: well outside ``_SLACK`` (it stops once the distance is below
+#: ``threshold / (omega * (1 - rho))``, 10-20x the threshold here), near
+#: enough that the error-bound criterion arrives inside the cap.
+_COMPANION_HEAD_START = 30.0
+
+#: Passes the companion may spend.  The slowest draw contracts at
+#: ``1 - 0.8 * (1 - 0.95) = 0.96`` per pass and has to cover a factor
+#: of ``_COMPANION_HEAD_START``: 84 passes.
+_COMPANION_CAP = 150
+
+#: The bias; the fixed point is ``bias / (1 - rho)``, O(10).
+_COMPANION_BIAS = 1.0
+
+
+def _companion_fixed_point(rate: float) -> float:
+    """``bias / (1 - rate)`` of the float32 map the companion evaluates."""
+    g = float(np.float32(rate))
+    return float(np.float32(_COMPANION_BIAS)) / (1.0 - g)
+
+
+@st.composite
+def _slow_companion(draw, timestep: float):
+    """The companion's nodes, edges and group, drawn.
+
+    Only ``"none"`` and ``"fixed"`` are drawn.  They are the two
+    accelerations whose step scale the estimate corrects (it is constant
+    there, ``relaxation_step_scale``); Aitken's clipped factor and IQN's
+    quasi-Newton step are documented as uncorrected (``MADD-ANO-005``'s
+    residual risk), and the generated groups draw them anyway.  The
+    relaxation stays in ``[0.8, 1.6]``: at ``rho >= 0.9`` that keeps the
+    relaxed rate ``1 - omega * (1 - rho)`` positive, the regime where the
+    estimate is tight rather than merely safe, and the pass count under
+    the cap.
+    """
+    rate = draw(st.floats(min_value=0.9, max_value=0.95))
+    norm = draw(st.sampled_from(("l2", "mixed")))
+    threshold = draw(st.sampled_from((1e-3, 1e-4)))
+    acceleration = draw(st.sampled_from(("none", "fixed")))
+    relaxation = (draw(st.floats(min_value=0.8, max_value=1.6))
+                  if acceleration == "fixed" else 1.0)
+    solver = draw(st.sampled_from(("ift", "fori")))
+    x_star = _companion_fixed_point(rate)
+    x0 = x_star * (1.0 - _COMPANION_HEAD_START * threshold)
+    slow, relay = _COMPANION
+    nodes = (
+        _SlowRelayRecipe("SlowRelay", slow, timestep, (
+            ("gain", rate), ("bias", _COMPANION_BIAS), ("x0", x0))),
+        _SlowRelayRecipe("SlowRelay", relay, timestep, (
+            ("gain", 1.0), ("bias", 0.0), ("x0", x0))),
+    )
+    edges = (EdgeRecipe(relay, slow, "x", "u"), EdgeRecipe(slow, relay, "x", "u"))
+    live = ({"tolerance": threshold} if norm == "l2"
+            else {"rtol": threshold})
+    group = CouplingGroupRecipe(
+        nodes=_COMPANION, max_iterations=_COMPANION_CAP,
+        convergence_norm=norm, diagnostics=True, acceleration=acceleration,
+        relaxation=relaxation, solver=solver, **live,
+    )
+    return nodes, edges, group, rate
+
+
+@st.composite
+def _recipes_with_a_slow_companion(draw):
+    """``(recipe, rate)``: :func:`_measurable_norm_recipes` plus the companion.
+
+    The companion steps at the graph's base timestep (the recipe's
+    timesteps are one base times 1, 2 or 4, so the smallest is the GCD)
+    and so is solved on every ``step()``.
+    """
+    recipe = draw(_measurable_norm_recipes())
+    timestep = min(n.timestep for n in recipe.nodes)
+    nodes, edges, group, rate = draw(_slow_companion(timestep))
+    return dataclasses.replace(
+        recipe,
+        nodes=recipe.nodes + nodes,
+        edges=recipe.edges + edges,
+        coupling_groups=recipe.coupling_groups + (group,),
+    ), rate
+
+
+def _check_the_companion(gm, group, diagnostics, rate) -> bool:
+    """The invariant on the companion, against its arithmetic fixed point.
+
+    Returns whether it was checked: a companion that ran out of passes
+    reported ``converged=False``, which is the honest answer and says
+    nothing about this property.
+    """
+    d = diagnostics[_COMPANION_KEY]
+    if not d["converged"]:
+        return False
+    nodes = sorted(_COMPANION)
+    x_star = np.float32(_companion_fixed_point(rate))
+    got = {n: dict(gm.get_node_state(n)) for n in nodes}
+    want = {n: {"x": jnp.asarray(x_star, jnp.float32)} for n in nodes}
+    distance = _distance(group, got, want, nodes)
+    threshold = _threshold(group)
+    note(f"companion: rho={rate} distance={distance:.3e} "
+         f"threshold={threshold:.3e} residual={d['residual']:.3e} "
+         f"estimate={d['error_estimate']:.3e} norm={group.convergence_norm} "
+         f"accel={group.acceleration} omega={group.relaxation} "
+         f"solver={group.solver} iterations={d['iterations']}")
+    assert distance <= threshold * _SLACK, (
+        f"the slow companion (rho={rate}) reported converged at threshold "
+        f"{threshold} but is {distance} from its fixed point"
+    )
+    assert d["error_estimate"] * _SLACK >= distance, (
+        f"the companion's error estimate {d['error_estimate']} does not "
+        f"bound its distance {distance} from the fixed point"
+    )
+    return True
+
+
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-@given(recipe=_measurable_norm_recipes())
+@given(case=_recipes_with_a_slow_companion())
 def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
-    recipe,
+    case,
 ):
     """The invariant, measured against an independently converged answer.
 
@@ -231,35 +420,63 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
     the answer, and nothing in the library said so.  That is
     ``MADD-ANO-005``, and this is the assertion that retires it.
 
+    Every generated group that converged is measured against the same
+    recipe re-solved 1000x tighter, and the slow companion against its
+    arithmetic fixed point (module docstring).  The companion is what
+    makes the property able to fail on the defect: without it a raw
+    residual criterion passed.
+
     Rejected draws
     --------------
-    2.4% under the ``ci`` profile, measured, down from 42.9%.  The
-    ``"interface"`` norm is excluded by the strategy rather than assumed
-    away (see :func:`_measurable_norm_recipes`); what is left cannot be
-    generated, because whether a *drawn* group reaches its threshold in the
-    steps it was given, and whether the 20x-tighter reference reaches its
-    own, are outcomes of the solve rather than shapes of the input.  At 2.4%
-    that residual costs a fortieth of the search and nothing else.
+    The property rejects an example only when nothing was checked: the
+    companion ran out of passes *and* no generated group converged
+    against a converged reference.  The ``"interface"`` norm is excluded by the
+    strategy rather than assumed away (see
+    :func:`_measurable_norm_recipes`); whether a drawn group reaches its
+    threshold in the passes it was given is an outcome of the solve, not a
+    shape of the input, so it cannot be generated.
     """
+    recipe, rate = case
     recipe = _diagnostics_recipe(recipe)
+    # The companion reports under ``"ift"`` without diagnostics; turning
+    # them on there compiles the spectral and gradient bounds for a group
+    # whose verdict is all this reads, which doubled the property's time.
+    # ``"fori"`` reports only with them.
+    recipe = dataclasses.replace(recipe, coupling_groups=tuple(
+        dataclasses.replace(g, diagnostics=g.solver == "fori")
+        if g.nodes == _COMPANION else g
+        for g in recipe.coupling_groups))
     gm = recipe.build()
     gm.step()
     diagnostics = gm.coupling_diagnostics()
-    assume(diagnostics)
 
     groups = {"+".join(sorted(g.nodes)): g for g in gm._coupling_groups}  # noqa: SLF001
     assert all(g.convergence_norm != "interface" for g in groups.values()), (
         "_measurable_norm_recipes must leave no group on the interface norm"
     )
-    converged = {key: groups[key] for key, d in diagnostics.items()
-                 if d["converged"]}
-    assume(converged)
+    checked = int(_check_the_companion(
+        gm, groups[_COMPANION_KEY], diagnostics, rate))
 
-    reference = _tightened(recipe).build()
+    converged = {key: groups[key] for key, d in diagnostics.items()
+                 if d["converged"] and key != _COMPANION_KEY}
+    if not converged:
+        assume(checked)
+        return
+
+    # The reference re-solves the generated groups only: the companion
+    # is measured against arithmetic, and the tightened criterion would
+    # spend its whole cap on it for nothing.
+    generated = dataclasses.replace(
+        recipe,
+        nodes=tuple(n for n in recipe.nodes if n.name not in _COMPANION),
+        edges=tuple(e for e in recipe.edges if e.target not in _COMPANION),
+        coupling_groups=tuple(g for g in recipe.coupling_groups
+                              if g.nodes != _COMPANION),
+    )
+    reference = _tightened(generated).build()
     reference.step()
     ref_diagnostics = reference.coupling_diagnostics()
 
-    checked = 0
     for key, group in converged.items():
         # A reference that did not itself converge is not a fixed point,
         # so it cannot be used to measure a distance to one.
@@ -451,10 +668,6 @@ def test_the_bound_is_the_same_on_both_solvers(recipe, solver):
 # ---------------------------------------------------------------------------
 
 from maddening.core.graph_manager import GraphManager  # noqa: E402
-from maddening.core.node import (  # noqa: E402
-    BoundaryInputSpec,
-    SimulationNode,
-)
 
 
 class _Affine(SimulationNode):
@@ -526,16 +739,21 @@ def _compiled_affine_cycle(n_modes, **group_kw):
     return _affine_cycle(ones * 0.5, ones, **group_kw)
 
 
-def _step_affine(gm, gain, bias):
+def _step_affine(gm, gain, bias, x0=None):
     """One step of *gm* from its initial state, with ``a``'s constants set.
 
     ``reset_state`` puts the state *and* every coupling seed back to what
     ``compile()`` left (``test_reset_state_restores_the_meta_compile_seeds``
     in ``tests/core/test_coupling_error_bound.py`` pins that), so the step
-    is the one a freshly built graph would take.  Returns the group's
-    diagnostics.
+    is the one a freshly built graph would take.  *x0*, when given, is
+    written into both nodes' ``x`` first -- a start other than zero, with
+    the coupling seeds still fresh.  Returns the group's diagnostics.
     """
     gm.reset_state()
+    if x0 is not None:
+        start = jnp.asarray(x0, jnp.float32)
+        gm.set_node_state("a", {"x": start})
+        gm.set_node_state("b", {"x": start})
     gm.step(params={"nodes": {"a": {
         "gain": jnp.asarray(gain, jnp.float32),
         "bias": jnp.asarray(bias, jnp.float32),
@@ -680,41 +898,71 @@ def test_the_estimate_is_never_smaller_than_the_distance_it_estimates(
     )
 
 
+#: How far short of its fixed point the state may start, relatively.
+#: ``None`` starts it at zero, as the strict xfail does.  The rest reach
+#: the float32 floor: a mode contracting at ``rho`` stalls -- ``F(x) ==
+#: x`` bitwise -- once ``(1 - rho) * |x - x*|`` is under half an ulp,
+#: which at ``rho >= 0.99`` is a relative distance under ``6e-8 / (1 -
+#: rho)``: every slow mode at 1e-6, the slowest at 1e-5 and 1e-4.
+_HEAD_STARTS = (None, 1e-6, 1e-5, 1e-4)
+
+#: The group a head start is solved in: a threshold no float32 residual
+#: above zero meets, so the loop runs until the fast mode is bitwise
+#: stationary too, and the residual left is the rounding the key's floor
+#: is for.  At the analytic group's 1e-3 the fast mode's last change is
+#: what stops the loop, and multiplied by the slow mode's amplification
+#: it covers the stalled distance by itself, floor or no floor.
+_STALL_GROUP = dict(max_iterations=60, tolerance=1e-12)
+
+
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
     rho_slow=st.floats(min_value=0.99, max_value=0.9999),
     rho_fast=st.floats(min_value=0.0, max_value=0.5),
     c_slow=st.floats(min_value=1e-6, max_value=1e-3),
+    head_start=st.sampled_from(_HEAD_STARTS),
 )
-@example(rho_slow=0.999, rho_fast=0.2, c_slow=1e-5)
+@example(rho_slow=0.999, rho_fast=0.2, c_slow=1e-5, head_start=None)
+@example(rho_slow=0.9999, rho_fast=0.2, c_slow=1e-3, head_start=1e-6)
 def test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds(
-    rho_slow, rho_fast, c_slow,
+    rho_slow, rho_fast, c_slow, head_start,
 ):
-    """The same draws as the strict xfail above, held by the spectral key.
+    """The strict xfail's draws, held by the spectral key -- and a stall.
 
-    Nothing about the two-mode map changes between the two tests --
-    same generator, same criterion, same returned state.  What changes
-    is where ``rho`` comes from: the residual sequence reads the fast
-    mode for as long as it dominates the step, the Arnoldi space of
-    ``dF/dx`` contains both modes from the first product.  For a linear
-    map the error is ``(A - I)^{-1}`` of the residual whatever the
-    iteration did, so the bound holds wherever the residual is above
-    its own noise.
+    With ``head_start=None`` nothing about the two-mode map changes
+    between the two tests -- same generator, same criterion, same
+    returned state.  What changes is where ``rho`` comes from: the
+    residual sequence reads the fast mode for as long as it dominates the
+    step, the Arnoldi space of ``dF/dx`` contains both modes from the
+    first product.  For a linear map the error is ``(A - I)^{-1}`` of the
+    residual whatever the iteration did, so the bound holds wherever the
+    residual is above its own noise.
 
-    That noise is the key's own business, not this test's:
-    ``spectral_error_bound`` adds the residual's float resolution
-    (``residual_precision_floor``) before amplifying it, so the
-    comparison below is bare.  It used to add ``4 * 8 * eps * sqrt(n) /
-    (1 - rho)`` to the key first -- exactly the margin the key lacked,
-    which is how a stalled float32 iterate reading a bound of ``0.0``
-    thousands of ulps from its fixed point went unnoticed.
+    Below its noise is the other half, and those draws alone did not
+    reach it: started at zero, the group stops on a criterion three
+    decades above float32 resolution, so dropping the float floor from
+    the key passed this property.  A head start puts both modes near
+    their fixed point instead (:data:`_HEAD_STARTS`) and runs the loop
+    until nothing moves (:data:`_STALL_GROUP`): the slow mode stalls a
+    measurable distance away with a residual that reads nothing, the
+    bound is then the floor times the amplification, and without the
+    floor it reads under the distance.  The comparison stays bare -- the
+    floor is the key's business, and a margin added here is how a
+    stalled iterate reading a bound of ``0.0`` went unnoticed before.
     """
     gain = (rho_slow, rho_fast)
     bias = (c_slow, 1.0)
-    gm = _compiled_affine_cycle(2, **_TWO_MODE_GROUP)
-    d = _step_affine(gm, gain, bias)
+    if head_start is None:
+        gm = _compiled_affine_cycle(2, **_TWO_MODE_GROUP)
+        d = _step_affine(gm, gain, bias)
+    else:
+        gm = _compiled_affine_cycle(2, **_STALL_GROUP)
+        gains = np.asarray(gain, np.float32).astype(np.float64)
+        biases = np.asarray(bias, np.float32).astype(np.float64)
+        x0 = biases / (1.0 - gains) * (1.0 - head_start)
+        d = _step_affine(gm, gain, bias, x0=x0)
     distance = _exact_distance(gm, gain, bias)
-    note(f"rho={gain} c={bias} distance={distance} {d}")
+    note(f"rho={gain} c={bias} head_start={head_start} distance={distance} {d}")
     assert d["spectral_usable"] is True, d
     assert d["rho_spectral"] == pytest.approx(rho_slow, abs=1e-4)
     assert d["spectral_error_bound"] >= distance, (

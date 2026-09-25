@@ -108,8 +108,18 @@ class CouplingGroup:
         ``tolerance`` -- so setting it away from its default under
         ``convergence_norm="l2"`` is inert and warns (``UserWarning``).
     diagnostics : bool
-        If True, store iteration count and final residual in the
-        ``_meta`` key of the state dict after each step.
+        Under ``solver="ift"`` the iteration count, the final residual
+        and the amplification are stored in ``_meta`` (and reported by
+        ``GraphManager.coupling_diagnostics()``) whatever this says;
+        ``True`` adds the spectral keys (``rho_spectral``,
+        ``spectral_error_bound``, ``spectral_usable``) and the IFT
+        gradient-error bound (``gradient_relative_error_bound``,
+        ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
+        products for the spectrum and ``11 + k + 4 n_c`` more for the
+        bound per group per step (``k <= 8``, ``n_c`` the group's
+        floating constants).  Under ``solver="fori"`` ``True`` is what
+        stores the iteration count, residual and amplification at all;
+        the spectral and gradient keys stay NaN there.
     acceleration : str
         Acceleration method.  ``"none"`` is plain fixed-point,
         ``"aitken"`` uses Aitken delta-squared relaxation,
@@ -144,19 +154,26 @@ class CouplingGroup:
         If True, allow mixed timesteps within the coupling group.
         Fast nodes take multiple sub-steps per coupling iteration.
     boundary_interpolation : str
-        Time interpolation of boundary conditions during subcycling.
-        Read **only** when ``subcycling=True``; setting it away from
-        its default otherwise is inert and warns (``UserWarning``).
-        ``"constant"`` holds values constant, ``"linear"`` linearly
-        interpolates between previous and current iteration values.
-        Both ends are estimates of the *end*-of-step value -- the pass's
-        incoming iterate and the in-pass state -- and never the
-        beginning-of-step value, so at a converged step the three modes
-        coincide: bit-identical over 100 steps of a sub-cycled spring
-        pair (MADD-ANO-027).
-        ``"quadratic"`` is meant to use three successive iteration
-        values, but no third value is ever supplied, so it is
-        ``"linear"``.
+        How a sub-cycled node's inputs from the rest of its group are
+        resolved at each of its sub-steps.  Read **only** when
+        ``subcycling=True``; setting it away from its default otherwise
+        is inert and warns (``UserWarning``).  ``"constant"`` reads the
+        in-pass state at every sub-step; ``"linear"`` interpolates
+        between the pass's incoming iterate and the in-pass state,
+        reaching the in-pass state at the last sub-step.  Both ends are
+        estimates of the *end*-of-step value, never the
+        beginning-of-step value (MADD-ANO-027), so the two differ only
+        where a source node earlier in the same Gauss-Seidel pass has
+        already moved: they are bit-identical when every source of the
+        sub-cycled node is scheduled after it, under
+        ``iteration_mode="jacobi"`` (both ends are then the incoming
+        iterate), and at exact stationarity, and otherwise differ by
+        about the tolerance per step -- 2.7e-05 relative after 100
+        steps of a sub-cycled spring pair scheduled slow node first at
+        ``tolerance=1e-4``, and bit-identical over the same 100 steps
+        with the fast node first.  ``"quadratic"`` is meant to use three
+        successive iteration values, but no third value is ever
+        supplied, so it is exactly ``"linear"``.
     jacobian_reuse : int
         For ``"iqn-imvj"``: number of V/W columns retained from the
         previous timestep.  ``0`` means no reuse (same as IQN-ILS).
@@ -223,9 +240,11 @@ class CouplingGroup:
         invalid.  The test is on that state's own residual, so a group
         that arrives on its last pass runs rather than raising (see
         ``GraphManager.coupling_diagnostics``).  Default False:
-        the condition is only reported via
-        ``GraphManager.coupling_diagnostics()["converged"]`` when
-        ``diagnostics=True``.  Recommended True for training and
+        the condition is only reported, via
+        ``GraphManager.coupling_diagnostics()["converged"]``, which
+        ``solver="ift"`` records whatever ``diagnostics`` says.  On a
+        multi-rate graph only a step that applies the group's solve is
+        checked.  Recommended True for training and
         calibration runs.  Read **only** under ``solver="ift"``;
         setting it True under ``"fori"`` is inert and warns
         (``UserWarning``).  With ``waveform_iterations > 1`` on a
@@ -709,9 +728,10 @@ _INERT_RULES: tuple[_InertRule, ...] = (
         live=lambda g: g.subcycling,
         message=_gated_on(
             "subcycling",
-            "takes one pass per coupling iteration; waveform relaxation "
-            "repeats a whole sub-step window, which only a subcycled "
-            "group has",
+            "runs the group's fixed-point solve once per step; "
+            "waveform_iterations re-runs only a sub-cycling group's solve, "
+            "restarting it from where the previous run stopped (a restart, "
+            "not waveform relaxation: MADD-ANO-027)",
             "Set subcycling=True",
         ),
     ),
@@ -790,6 +810,11 @@ def coupling_group_kwargs(d: dict[str, Any]) -> tuple[list[str], dict[str, Any]]
 #: worktree and a wheel all answer the same.
 _PACKAGE = "maddening"
 
+#: Top-level names of the standard library's modules, whose frames are
+#: never the user's either (``dataclasses.replace``, ``contextlib``,
+#: ``functools``).  ``__main__`` is not one of them.
+_STDLIB_MODULES = frozenset(sys.stdlib_module_names) - {"__main__"}
+
 
 def _caller_stacklevel() -> int:
     """``stacklevel`` landing a warning on the first frame outside MADDENING.
@@ -805,10 +830,14 @@ def _caller_stacklevel() -> int:
     can act on, which is most of what makes a warning worth emitting.
 
     So the stack is walked instead: the first frame whose module is
-    outside the ``maddening`` package is the user's.  A stack that is
-    package frames all the way up (an example module run as the entry
-    point) falls back to its outermost frame rather than off the end,
-    where :mod:`warnings` would attribute the message to ``sys``.
+    outside the ``maddening`` package *and outside the standard library*
+    is the user's.  The standard library is skipped because it is
+    machinery too: ``dataclasses.replace`` re-runs ``__post_init__`` from
+    ``dataclasses.py``, and a warning about a group the profiler rebuilt
+    was attributed to that line.  A stack with no such frame (an example
+    module of the package run as the entry point) falls back to its
+    outermost package frame rather than off the end, where
+    :mod:`warnings` would attribute the message to ``sys``.
     """
     try:
         frame = sys._getframe(1)  # the frame that will call warnings.warn
@@ -817,13 +846,16 @@ def _caller_stacklevel() -> int:
         # called us -- right for a direct ``CouplingGroup(...)``.
         return 3
     level = 1
+    fallback = None
     while True:
         module = frame.f_globals.get("__name__", "")
-        if module != _PACKAGE and not module.startswith(_PACKAGE + "."):
+        if module == _PACKAGE or module.startswith(_PACKAGE + "."):
+            fallback = level
+        elif module.partition(".")[0] not in _STDLIB_MODULES:
             return level
         parent = frame.f_back
         if parent is None:
-            return level
+            return level if fallback is None else fallback
         frame = parent
         level += 1
 

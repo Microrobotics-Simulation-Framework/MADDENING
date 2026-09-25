@@ -50,6 +50,7 @@ from maddening.core.coupling.acceleration import (
     _field_reference,
     convergence_criterion,
     float_fields_of,
+    reported_converged,
     reported_error_estimate,
     residual_precision_floor,
     spectral_error_bound,
@@ -847,6 +848,27 @@ def _refuse_colliding_group_keys(groups) -> None:
                     "other's.  Rename a node so the two keys differ."
                 )
             slots[slot] = group.nodes
+
+
+def _keep_fired_group_meta(group, fires, new_meta, old_meta):
+    """``_meta`` after a multi-rate base step ran *group*'s solve.
+
+    ``fires`` is ``None`` for a group at the base rate, which fires on
+    every step, and the merge is the plain one.  Otherwise each slot the
+    group owns (``_GROUP_META_SUFFIXES``) takes the solve's value only
+    when the step fires and keeps its previous value when it does not --
+    ``jnp.where``, exactly as ``_apply_multirate`` treats the group's
+    node states.  Every other slot passes through as the solve left it.
+    """
+    merged = {**old_meta, **new_meta}
+    if fires is None:
+        return merged
+    key = "+".join(sorted(group.nodes))
+    for suffix in _GROUP_META_SUFFIXES:
+        slot = f"coupling_{key}_{suffix}"
+        if slot in new_meta and slot in old_meta:
+            merged[slot] = jnp.where(fires, new_meta[slot], old_meta[slot])
+    return merged
 
 
 def _group_dividers(group, nodes):
@@ -1961,7 +1983,7 @@ def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
-    multigpu_device_map=None, node_params=None,
+    multigpu_device_map=None, node_params=None, fires=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -1974,6 +1996,21 @@ def _run_coupled_block_impl(
 
     This is the shared implementation used by both ``_build_step_fn``
     and ``_build_dt_step_fn``.
+
+    ``runtime_dt`` (``run_adaptive*``) is the step every node advances
+    by.  A sub-cycled node still takes ``round(macro_dt / node_dt)``
+    sub-steps per pass, so each is scaled to
+    ``runtime_dt * node_dt / macro_dt``: at ``runtime_dt == macro_dt``
+    that is the node's own timestep, the sub-step the compiled step
+    takes.  Handing every sub-step the whole ``runtime_dt`` advanced the
+    fast node by ``divider * runtime_dt`` per step.
+
+    ``fires`` is ``None``, or -- on a multi-rate graph, for a group
+    whose rate divider is above one -- the traced boolean saying whether
+    this base step applies the group's solve at all.  The solve is
+    computed either way; ``graph_step_multirate`` keeps its result only
+    when it fires, and ``strict_convergence`` must not raise about a
+    solve the step discards, so its predicates are gated on it here.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -2077,9 +2114,33 @@ def _run_coupled_block_impl(
     def _pre(nn):
         return state_from_float_image(initial_node_states[nn], _init_metas[nn])
 
+    # Compute subcycling rate dividers if needed (``None``: the group
+    # does not sub-cycle, including ``subcycling=True`` over one timestep).
+    group_dividers = _group_dividers(group, nodes) or {}
+    use_subcycling = bool(group_dividers)
+    # The group's macro timestep: the time one coupling pass covers.
+    macro_dt = (max(nodes[nn].timestep for nn in group_dividers)
+                if use_subcycling else None)
+
     def _get_dt(nn):
         spec = nodes[nn]
-        return runtime_dt if runtime_dt is not None else spec.timestep
+        if runtime_dt is None:
+            return spec.timestep
+        if use_subcycling and spec.timestep != macro_dt:
+            # ``run_adaptive*``: the step covers ``runtime_dt``.  A member
+            # of a sub-cycling group keeps its ratio to the macro step, so
+            # its ``group_dividers[nn]`` sub-steps cover ``runtime_dt`` as
+            # well (exactly, at an integer ratio), and at ``runtime_dt ==
+            # macro_dt`` each is the node's own timestep, the sub-step the
+            # compiled step takes.  See the docstring.
+            return runtime_dt * (spec.timestep / macro_dt)
+        return runtime_dt
+
+    def _gate_on_firing(predicate):
+        """``predicate``, but only on a base step that keeps this solve."""
+        if fires is None:
+            return predicate
+        return jnp.logical_and(fires, predicate)
 
     _MISSING = object()
 
@@ -2126,10 +2187,6 @@ def _run_coupled_block_impl(
                     boundary_inputs[ei.target_field] = node_ext[ei.target_field]
         return boundary_inputs
 
-    # Compute subcycling rate dividers if needed (``None``: the group
-    # does not sub-cycle, including ``subcycling=True`` over one timestep).
-    group_dividers = _group_dividers(group, nodes) or {}
-    use_subcycling = bool(group_dividers)
     use_linear_interp = group.boundary_interpolation == "linear"
     use_quadratic_interp = group.boundary_interpolation == "quadratic"
     # How many evaluations one pass rounds like, for the float floor the
@@ -2438,7 +2495,7 @@ def _run_coupled_block_impl(
                 # branch below.
                 sub = eqx.error_if(
                     sub,
-                    jnp.logical_not(jnp.isfinite(single_est)),
+                    _gate_on_firing(jnp.logical_not(jnp.isfinite(single_est))),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging: its "
                     "state is non-finite (a field is NaN, inf, or beyond "
@@ -2457,10 +2514,10 @@ def _run_coupled_block_impl(
                     # non-finite case is caught above by name; this
                     # predicate keeps the closed form regardless.
                     sub,
-                    jnp.logical_and(
+                    _gate_on_firing(jnp.logical_and(
                         jnp.isfinite(single_est),
                         jnp.logical_not(single_est <= conv_threshold_value),
-                    ),
+                    )),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "
@@ -2800,9 +2857,13 @@ def _run_coupled_block_impl(
                 # dropping it from the dead band (MADD-ANO-019), so this
                 # is exactly the diverged iteration, and no larger cap
                 # would help.  Named first so the message says so.
+                # Both predicates are gated on the step keeping this
+                # solve: a multi-rate base step computes and discards
+                # it on every phase the group does not fire on, and
+                # used to raise about a solve nothing applied.
                 x_star_full = eqx.error_if(
                     x_star_full,
-                    jnp.logical_not(jnp.isfinite(final_est)),
+                    _gate_on_firing(jnp.logical_not(jnp.isfinite(final_est))),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging: its "
                     "state is non-finite (a field is NaN, inf, or beyond "
@@ -2825,10 +2886,10 @@ def _run_coupled_block_impl(
                     # non-finite residual as ``converged=False``; the
                     # guard has to agree.
                     x_star_full,
-                    jnp.logical_and(
+                    _gate_on_firing(jnp.logical_and(
                         jnp.isfinite(final_est),
                         jnp.logical_not(final_est <= conv_threshold_value),
-                    ),
+                    )),
                     f"coupling group {sorted(group.nodes)} exited at "
                     f"max_iterations={max_iters} without converging; "
                     "the IFT gradient is invalid here. Raise "
@@ -2947,6 +3008,22 @@ def _run_coupled_block_impl(
             init_ncols = jnp.int32(n_reuse)
             init_flat = _flatten(state_after_first)
 
+            # The secant columns IQN-IMVJ carries to the next step are
+            # the ones the latching pass left, as under ``"ift"``, whose
+            # loop stops there.  This loop runs on, and every pass on a
+            # frozen state measures the same residual and the same raw
+            # output, so it used to shift a zero column in each time: by
+            # the cap the warm-start window was all zeros,
+            # ``jacobian_reuse`` did nothing, and the solvers disagreed
+            # on ``iterations`` from the second step on.  IQN-ILS keeps
+            # nothing across steps, so its program is left as it was.
+            freeze_columns = group.acceleration == "iqn-imvj"
+
+            def _secant_live(i, converged):
+                if freeze_columns:
+                    return jnp.logical_and(i > 1, jnp.logical_not(converged))
+                return i > 1
+
             if track_diag:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2, icount, fres,
@@ -2961,7 +3038,7 @@ def _run_coupled_block_impl(
                      cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
                         x_raw, x_old, prev_r, prev_s,
                         V, W, nc, omega, prev_ra,
-                        have_prev=i > 1,
+                        have_prev=_secant_live(i, converged),
                     )
                     s_partial = _unflatten(x_new, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
@@ -3002,7 +3079,7 @@ def _run_coupled_block_impl(
                      cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
                         x_raw, x_old, prev_r, prev_s,
                         V, W, nc, omega, prev_ra,
-                        have_prev=i > 1,
+                        have_prev=_secant_live(i, converged),
                     )
                     s_partial = _unflatten(x_new, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
@@ -6101,7 +6178,7 @@ class GraphManager:
 
         def _run_coupled_block(group, group_schedule, new_state,
                                full_state, external_inputs, node_params,
-                               runtime_dt=None):
+                               runtime_dt=None, fires=None):
             """Execute a coupling group with Gauss-Seidel iteration.
 
             In Gauss-Seidel coupling, each iteration re-solves the SAME
@@ -6126,6 +6203,9 @@ class GraphManager:
             runtime_dt : JAX scalar or None
                 If provided, overrides each node's compiled timestep
                 (used by adaptive timestepping).
+            fires : JAX bool or None
+                Multi-rate only: whether this base step keeps the
+                group's solve (see ``_run_coupled_block_impl``).
             """
             return _run_coupled_block_impl(
                 group, group_schedule, new_state, full_state,
@@ -6134,7 +6214,7 @@ class GraphManager:
                 ext_by_target=ext_by_target, back_edge_set=back_edge_set,
                 has_external=has_external, all_edges=self._edges,
                 multigpu_device_map=self._multigpu_device_map,
-                node_params=node_params,
+                node_params=node_params, fires=fires,
             )
 
         if not is_multirate and not has_coupling:
@@ -6203,20 +6283,35 @@ class GraphManager:
                         )
                     else:
                         _, group, group_schedule = block
+                        # Every member shares one divider: a sub-cycling
+                        # group is scheduled at its macro timestep and any
+                        # other group at the single timestep ``compile``
+                        # requires of it.
+                        group_rd = rate_dividers[group_schedule[0]]
+                        fires = (None if group_rd == 1
+                                 else (step_count % group_rd) == 0)
                         coupled_result = _run_coupled_block(
                             group, group_schedule, new_state,
                             full_state, external_inputs, node_params,
+                            fires=fires,
                         )
                         for nn in group_schedule:
                             new_state[nn] = _apply_multirate(
                                 nn, coupled_result[nn], new_state
                             )
-                        # Propagate diagnostic keys from coupled result
+                        # Propagate the group's ``_meta`` slots -- its
+                        # diagnostics, predictor history and IQN-IMVJ warm
+                        # start -- by the same rule as its node states:
+                        # only from a solve the step keeps.  Merged
+                        # unconditionally, a phase the group does not fire
+                        # on published the report, the profiler's and
+                        # sysid's verdicts and the next warm start of a
+                        # solve whose state it threw away.
                         if _META_KEY in coupled_result:
-                            new_state[_META_KEY] = {
-                                **new_state.get(_META_KEY, {}),
-                                **coupled_result[_META_KEY],
-                            }
+                            new_state[_META_KEY] = _keep_fired_group_meta(
+                                group, fires, coupled_result[_META_KEY],
+                                new_state.get(_META_KEY, {}),
+                            )
             else:
                 for node_name in schedule:
                     updated = _resolve_and_update_node(
@@ -6419,9 +6514,16 @@ class GraphManager:
               and near the fixed point that floor is the whole value:
               see the note on ``solver`` below.
             - ``"amplification"`` : float — the estimated
-              ``1 / (1 - rho)`` of the group's slowest mode, from the
-              ratio of the last two residuals.  ``nan`` when the
-              estimate was rejected (see ``"ratio_usable"``).
+              ``1 / (1 - rho)``, with
+              ``rho = max(r_k / r_{k-1}, sqrt(r_k / r_{k-2}))`` taken from
+              the last three residuals: the worse of the one-step ratio
+              and the two-step rate, so an alternating (non-normal)
+              sequence cannot flatter it
+              (:func:`~maddening.core.coupling.acceleration.error_amplification`).
+              ``rho`` is the rate of the mode that dominates the *step*,
+              which need not be the slowest mode (see
+              ``"ratio_usable"``).  ``nan`` when the estimate was
+              rejected.
             - ``"error_estimate"`` : float — ``residual * omega *
               amplification``, an estimate of ``||x - x*||`` in the
               same norm: how far the returned state is from the fixed
@@ -6848,8 +6950,14 @@ class GraphManager:
                     int(meta.get(f"coupling_{key}_total_iterations", iterations)),
                     iterations,
                 )
-                residual = float(meta[res_key])
-                amp = float(meta.get(amp_key, 0.0))
+                # The slots as stored, in the dtype the solve computed
+                # them in: the estimate and the verdict below are taken in
+                # that dtype, as the loop took them (see
+                # ``reported_converged``).
+                residual_slot = np.asarray(meta[res_key])
+                amp_slot = np.asarray(meta.get(amp_key, 0.0))
+                residual = float(residual_slot)
+                amp = float(amp_slot)
                 # A valid amplification is ``1/(1 - rho)`` with
                 # ``rho`` in ``[0, 1)``, so it is always >= 1; the
                 # solvers write 0.0 for "rejected".
@@ -6861,7 +6969,8 @@ class GraphManager:
                 # criterion, so this reproduces their ``converged``; the
                 # profiler and ``sysid`` read the same criterion.
                 threshold, scale = convergence_criterion(group)
-                error_estimate = reported_error_estimate(residual, amp, scale)
+                error_estimate = reported_error_estimate(residual_slot, amp_slot, scale)
+                converged = reported_converged(residual_slot, amp_slot, scale, threshold)
                 # The spectral triple (Ritz radius, Arnoldi residual,
                 # resolvent norm) is present only under solver="ift"
                 # with diagnostics=True,
@@ -6926,7 +7035,7 @@ class GraphManager:
                     "gradient_error_estimate": (
                         error_estimate if valid else float("inf")
                     ),
-                    "converged": error_estimate <= threshold,
+                    "converged": converged,
                     "rho_spectral": rho_spec,
                     "spectral_error_bound": spectral_bound,
                     "spectral_usable": spectral_usable,
@@ -7571,6 +7680,26 @@ class GraphManager:
 
         return dt_step_fn
 
+    def _adaptive_multirate_message(self, entry: str) -> str:
+        """Why ``run_adaptive*`` refuses this (multi-rate) graph.
+
+        What it enforces is that the graph is not multi-rate, which is not
+        "every node shares one timestep": nodes of different timesteps
+        are accepted inside a coupling group with ``subcycling=True``,
+        which ``compile()`` schedules at the group's macro timestep.
+        """
+        return (
+            f"{entry}: adaptive timestepping is incompatible with multi-rate "
+            "graphs, and this graph is one (rate dividers "
+            f"{dict(sorted(self._rate_dividers.items()))}).  The adaptive "
+            "step advances every node by the same dt; nodes of different "
+            "timesteps can share it only inside one coupling group with "
+            "subcycling=True, whose faster members are sub-stepped at "
+            "dt * node_timestep / group_macro_timestep.  Give the other "
+            "nodes the same timestep, put them in such a group, or use "
+            "step / run_scan."
+        )
+
     def run_adaptive(
         self,
         t_end: float,
@@ -7588,7 +7717,14 @@ class GraphManager:
 
         Uses Richardson extrapolation (step-doubling) for error
         estimation and a PI controller for step-size adjustment.
-        Incompatible with multi-rate graphs.
+        Incompatible with multi-rate graphs: every node advances by the
+        same ``dt``.  Nodes of different timesteps are accepted inside a
+        coupling group with ``subcycling=True``, whose members keep their
+        ratio to the group's macro timestep: each of a fast node's
+        ``round(macro / node_timestep)`` sub-steps is
+        ``dt * node_timestep / macro``, so at an integer ratio every
+        member covers ``dt``.  (Before 0.4.0 each sub-step was handed the
+        whole ``dt``, advancing the fast node by ``divider * dt``.)
 
         Parameters
         ----------
@@ -7648,10 +7784,7 @@ class GraphManager:
         # that had just become multi-rate through, and refused one that
         # had just stopped being multi-rate.
         if self._is_multirate:
-            raise RuntimeError(
-                "Adaptive timestepping is incompatible with multi-rate "
-                "graphs.  All nodes must share the same timestep."
-            )
+            raise RuntimeError(self._adaptive_multirate_message("run_adaptive"))
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
@@ -7820,9 +7953,7 @@ class GraphManager:
             self.compile()
         # After the recompile, for the reason given in ``run_adaptive``.
         if self._is_multirate:
-            raise RuntimeError(
-                "Adaptive timestepping is incompatible with multi-rate graphs."
-            )
+            raise RuntimeError(self._adaptive_multirate_message("run_adaptive_scan"))
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 

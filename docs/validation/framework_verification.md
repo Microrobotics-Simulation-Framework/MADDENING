@@ -18,10 +18,12 @@ hard-pins `jax` and `jaxlib`; every other base dependency is installed from
 its range, so the resolved version differs between runs and no run records
 it.  Reading `jax>=0.10,<0.13` in the table below as "verified across that
 range" would be wrong — one point in it has been exercised.  Closing this
-properly needs a lock file or an SBOM captured per CI run (§6 of
-`soup_package.md` records the CycloneDX SBOM as still planned); until then
-the table says what is pinned and what is not, rather than letting the
-declared range stand in for the tested one.
+properly needs a lock file or an SBOM captured per CI run.  The committed
+CycloneDX SBOMs (§6 of `soup_package.md`) do not close it: each records one
+clean resolution on the date it names, not the environment a CI run
+installed, which resolves afresh.  Until CI records its own, the table says
+what is pinned and what is not, rather than letting the declared range
+stand in for the tested one.
 ```
 
 ## Test Suite

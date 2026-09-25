@@ -1,6 +1,6 @@
 """Graph-partitioned sharding wrapper — :class:`ShardedUnstructuredNode`.
 
-v0.3.0 §A6 substrate.  Sibling of
+Added in v0.3.0.  Sibling of
 :class:`maddening.cloud.multigpu.sharded_node.ShardedStencilNode`.
 They share the substrate (state dict signature, halo exchange call
 inside ``shard_map``, output classification via state_fields /
@@ -12,7 +12,7 @@ domain_integral_fields) but differ in what "halo" means:
   on another shard that this shard's stencil reads — fetched via a
   sparse :func:`exchange_unstructured` collective.
 
-Class hierarchy (per ``plans/MADDENING_v0.3.0_PLAN.md`` §A6):
+Class hierarchy:
 
 .. code-block:: text
 

@@ -502,20 +502,43 @@ class LBMPipeNode(SimulationNode):
             "Compressibility errors at high Mach number (Ma > 0.1)",
             "BGK is less stable than MRT for high Reynolds numbers",
             "No turbulence model — results unreliable above Re ~2000",
-            "CUDA 12.2 + jaxlib 0.5.1 causes segfault on GPU (MADD-ANO-001)",
             "Wall bounce-back is 1st-order at curved boundaries",
+            "No accuracy verdict: the one convergence study (MADD-VER-013) "
+            "is not in the asymptotic range, and no test compares the node "
+            "against an analytical solution with a pass criterion",
         ),
         validated_regimes=(
             ValidatedRegime("tau", 0.501, 2.0, notes="tau > 0.5 required for stability; tau >> 1 causes numerical diffusion"),
-            ValidatedRegime("Reynolds number", 0, 100, notes="Validated against Poiseuille analytical solution"),
-            ValidatedRegime("grid", 8, 128, notes="Per-dimension; convergence verified up to 128³"),
+            ValidatedRegime(
+                "Reynolds number", 0, 0.03,
+                notes=(
+                    "Re = u_mean * 2R / nu.  The only verification runs, "
+                    "MADD-VER-013's uniformly forced pipe flow (tau = 0.8, "
+                    "body force 1e-6), are in the Stokes regime: Re <= 0.013 "
+                    "on the 12/16/24 ladder and 0.030 at 32.  The shape "
+                    "factor u_max/u_mean approaches the Hagen-Poiseuille "
+                    "value 2 from below (1.79, 1.86, 1.92, 1.93), but no "
+                    "test holds the node to an analytical solution"
+                ),
+            ),
+            ValidatedRegime(
+                "grid", 12, 32,
+                notes=(
+                    "Cross-section cells per side (ny = nz, nx = 1) of "
+                    "MADD-VER-013.  The 12/16/24 ladder converges "
+                    "monotonically (observed order 1.49, GCI 10.7% at "
+                    "Fs = 3.0); adding 32 shows it is not in the asymptotic "
+                    "range (per-triple orders 1.49 and 3.35), so this is a "
+                    "convergence statement, not an accuracy one.  No "
+                    "convergence study runs above 32 per side"
+                ),
+            ),
         ),
         hazard_hints=(
-            "Behaviour uncharacterised at Re > 100; validated only for laminar flow",
+            "Behaviour uncharacterised above Re ~0.03; verified only in the Stokes regime (MADD-VER-013), not across the laminar range",
             "No turbulence model — do not use above laminar-turbulent transition (Re ~2000)",
             "Wall bounce-back assumes rigid, impermeable walls; deformable or porous walls not modelled",
             "Gravity applied uniformly — no spatially varying body forces",
-            "CUDA 12.2 + jaxlib 0.5.1 causes segfault on GPU (MADD-ANO-001); CPU unaffected",
             "Passive scalar tracer uses D3Q7 with separate tau — accuracy degrades at high Peclet number",
         ),
     )

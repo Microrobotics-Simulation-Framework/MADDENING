@@ -24,7 +24,7 @@ class TestStabilityLevel:
     def test_all_six_exist(self):
         # v0.3.0 added EVOLVING + INTERNAL on top of the original four
         # (EXPERIMENTAL, PROVISIONAL, STABLE, DEPRECATED).  See
-        # plans/MADDENING_v0.3.0_PLAN.md §A2.
+        # docs/developer_guide/deprecation_policy.md.
         assert len(StabilityLevel) == 6
 
 

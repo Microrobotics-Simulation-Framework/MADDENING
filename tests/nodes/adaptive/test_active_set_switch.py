@@ -10,8 +10,7 @@ Clarke subgradient exists, and the returned gradient -- which is exact
 misses a *first-order* contribution equal to the sum of the jumps a step
 crosses.  These tests assert that, rather than hiding it.
 
-Per ``MADDENING_ADAPTIVE_NODE_SPIKE_FINDINGS.md`` recommendation 3, the
-in-region gradient check does **not** use a finite difference of the
+The in-region gradient check does **not** use a finite difference of the
 mask-recomputing objective: the oracle is the smooth branch the forward
 pass actually selected, and the step is verified to stay inside the
 region.  Registered as anomaly MADD-ANO-003.

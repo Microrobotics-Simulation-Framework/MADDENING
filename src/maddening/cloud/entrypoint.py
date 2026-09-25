@@ -57,13 +57,19 @@ def main() -> None:
     except ImportError:
         logger.warning("GStreamer not available; streaming disabled")
 
-    # Build simulation graph
+    # Build simulation graph.  Not implemented: this entry point never
+    # loads MADDENING_GRAPH_USD, so the server below starts with an empty
+    # graph whatever the variable says.  The loader exists
+    # (maddening.usd.load_graph_from_usd); wiring it in here is future
+    # work.  The log line says so rather than announcing a load that
+    # does not happen.
     graph_usd = os.environ.get("MADDENING_GRAPH_USD", "")
     if graph_usd:
-        logger.info("Loading graph from USD: %s", graph_usd)
-        # USD graph loading would go here
-        # from maddening.usd import load_graph
-        # gm = load_graph(graph_usd)
+        logger.warning(
+            "MADDENING_GRAPH_USD=%s is set, but this entry point does not load "
+            "a graph from USD yet; the server starts with an empty graph.",
+            graph_usd,
+        )
 
     # Start FastAPI server.  The bind address is read here rather than
     # just before uvicorn.run() because the app has to know it: a

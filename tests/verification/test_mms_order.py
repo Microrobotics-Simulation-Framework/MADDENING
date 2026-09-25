@@ -905,7 +905,7 @@ def _heat_transient_error(n_steps, *, n_cells=21, t_final=0.2):
     acceptance_criteria=(
         "Observed temporal order over the finest pair of a 250/500/1000/2000 "
         "step ladder within [-0.25, +1.0] of the declared 1.0 "
-        "(measured: 0.998)"
+        "(measured: 1.000)"
     ),
     references=(
         "Roache2002: Code Verification by the Method of Manufactured Solutions",

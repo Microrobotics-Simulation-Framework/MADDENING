@@ -1,6 +1,6 @@
 """``fmi3GetDirectionalDerivative`` wired through ``jax.jvp`` / ``jax.vjp``.
 
-This is the load-bearing v0.3.0 §A1 deliverable: MADDENING's FMU
+This is the load-bearing piece of the FMI 3.0 substrate: MADDENING's FMU
 shim exposes exact directional derivatives by wrapping JAX's autodiff
 primitives.  FMI 2.0 had no equivalent; choosing FMI 3.0 here is what
 lets the MADDENING FMU keep its differentiable-simulation advantage

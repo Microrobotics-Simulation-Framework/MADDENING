@@ -112,7 +112,12 @@ See `docs/regulatory/iec62304_mapping.md` for the full lifecycle mapping.
 
 - Version control: Git (GitHub)
 - Release tags: semantic versioning (`vX.Y.Z`)
-- {term}`SBOM`: CycloneDX format (planned, Phase 3)
+- {term}`SBOM`: none is published.  A CycloneDX SBOM generated at release
+  time from a clean install is planned (the `sbom` extra pins the tool,
+  `cyclonedx-bom`).  A `sbom.json` captured from one development machine's
+  whole environment in 2026-03 sat at the repository root, never
+  regenerated, until 0.4.0 removed it: it listed that machine's packages,
+  not MADDENING's dependency set.
 - CI: GitHub Actions
 
 ## 7. Anomaly Management Policy

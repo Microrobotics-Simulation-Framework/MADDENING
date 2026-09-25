@@ -46,10 +46,23 @@ See the "Spring helpers" comment below for why the damping is a function
 of ``g`` and why every spring fixture carries a driver node.
 
 The heat fixtures are parameterised by the Fourier number
-``Fo = alpha*dt/dx**2``, which plays the same role: ``HeatNode``
-recomputes its interface cells from the stencil
-(``compute_interface_correction``), so the gain from a neighbour's
-interface temperature to this node's interface cell is ``Fo``.
+``Fo = alpha*dt/dx**2``, which plays the same role.  ``HeatNode``
+imposes its Dirichlet datum at the rod end through the ghost cell
+``T_ghost = 2*T_b - T[0]`` (MADD-ANO-007), so the gain from a
+neighbour's interface temperature to this node's interface cell is
+``2*Fo``: a slab pair contracts as ``2*Fo`` under Jacobi and
+``(2*Fo)**2`` under Gauss-Seidel.  Until 0.4.0 the datum was written
+into the end cell and the gain was ``Fo``; every heat fixture's Fourier
+number was halved when that changed, so each still contracts at the
+rate it was designed and first recorded at.
+
+Exchanging the two slabs' end-cell temperatures as each other's
+Dirichlet data also sets a *time-step* limit tighter than one node's:
+the exactly coupled pair has an alternating interface mode whose
+amplification leaves the unit circle at ``Fo = 3/8`` (-1.5 per step at
+``Fo = 0.4``, -4 at ``0.45``), where ``HeatNode`` alone is stable to
+``1/2``.  ``_HEAT_PAIR_FOURIER_LIMIT`` records it and the slab fixtures
+stay below it.
 
 Usage::
 
@@ -704,17 +717,37 @@ def build_stiff_pair(config: CouplingConfig, gain: float = 0.5,
 # ---------------------------------------------------------------------------
 
 
+#: Largest Fourier number at which two ``HeatNode`` slabs that exchange
+#: their end-cell temperatures as Dirichlet data are stable in *time*
+#: once the exchange is solved to convergence.  The pair's interface
+#: mode has amplification ``-1`` exactly at ``3/8`` (derived from the
+#: coupled operator, and measured: a 200-cell pair stays bounded over
+#: 60 steps at 0.375 and grows to 4e5 at 0.4 and 1e33 at 0.45 under
+#: ``gs/none``).  ``HeatNode``'s own limit, 1/2, is for fixed data.
+_HEAT_PAIR_FOURIER_LIMIT = 3.0 / 8.0
+
+
+def _check_heat_pair_fourier(fourier):
+    """Refuse a slab-pair Fourier number the coupled pair cannot step."""
+    if not 0.0 < fourier < _HEAT_PAIR_FOURIER_LIMIT:
+        raise ValueError(
+            f"fourier={fourier} is outside (0, {_HEAT_PAIR_FOURIER_LIMIT}): "
+            "two slabs exchanging end-cell temperatures are unstable in "
+            "time there once the exchange converges"
+        )
+
+
 def _heat_pair(config, n_cells, fourier, *, names=("slabA", "slabB"),
                max_iterations=15, tolerance=1e-5):
     """Two 1-D heat grids exchanging interface temperatures.
 
-    ``HeatNode`` overwrites its boundary cells with the Dirichlet values
-    and the coupling loop then restores the stencil value through
-    ``compute_interface_correction``, so the gain from one slab's
-    interface cell to the other's is the Fourier number
-    ``Fo = alpha*dt/dx**2`` — Jacobi contracts as ``Fo``, Gauss-Seidel
-    as ``Fo**2``.
+    Each slab's end-cell temperature is the other's Dirichlet datum, and
+    ``HeatNode`` imposes that datum through the ghost cell
+    ``2*T_b - T[0]``, so the gain from one slab's interface cell to the
+    other's is ``2*Fo`` with ``Fo = alpha*dt/dx**2`` — Jacobi contracts
+    as ``2*Fo``, Gauss-Seidel as ``(2*Fo)**2``.
     """
+    _check_heat_pair_fourier(fourier)
     from maddening.core.graph_manager import GraphManager
     from maddening.core.transforms import extract_first, extract_last
     from maddening.nodes.heat import HeatNode
@@ -748,12 +781,13 @@ def _heat_pair(config, n_cells, fourier, *, names=("slabA", "slabB"),
     return BuiltGraph(
         gm=gm, group_keys=("+".join(sorted(names)),),
         expensive_nodes=frozenset(names),
-        predicted_rho=_rho(jacobi=fourier, gauss_seidel=fourier ** 2),
+        predicted_rho=_rho(jacobi=2.0 * fourier,
+                           gauss_seidel=(2.0 * fourier) ** 2),
     )
 
 
 def build_expensive_pair(config: CouplingConfig, n_cells: int = 100_000,
-                         fourier: float = 0.4) -> BuiltGraph:
+                         fourier: float = 0.2) -> BuiltGraph:
     """Two ~1e5-cell heat grids coupled at one interface.
 
     The compute-bound counterpart to ``chain-N``: the iteration *count*
@@ -762,6 +796,12 @@ def build_expensive_pair(config: CouplingConfig, n_cells: int = 100_000,
     the entire ``temperature`` array, the quasi-Newton least-squares
     runs on 2*n_cells rows — which is exactly the trade IQN is meant to
     win and exactly where it can lose.
+
+    ``fourier=0.2`` puts the interface gain at ``2*Fo = 0.4``, the rate
+    this fixture was designed and first recorded at (it was ``Fo = 0.4``
+    while ``HeatNode`` wrote its datum into the end cell), and keeps the
+    pair under ``_HEAT_PAIR_FOURIER_LIMIT``: at 0.4 the converged pair
+    is unstable in time.
     """
     return _heat_pair(config, n_cells, fourier)
 
@@ -772,7 +812,7 @@ def build_expensive_pair(config: CouplingConfig, n_cells: int = 100_000,
 
 
 def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
-                        n_cheap: int = 4, fourier: float = 0.4,
+                        n_cheap: int = 4, fourier: float = 0.2,
                         gain: float = 0.6,
                         dt: float = _SPRING_DT) -> BuiltGraph:
     """One expensive heat grid coupled to *n_cheap* scalar spring nodes.
@@ -798,6 +838,14 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     physical material property, and does not need to be: the interface
     gain this fixture exists to control is the Fourier number, which is
     the same either way.
+
+    ``fourier=0.2`` makes the grid's interface gain ``2*Fo = 0.4`` and
+    the loop's Jacobi rate ``sqrt(0.4 * gain) = 0.49``, the rate the
+    fixture was designed and first recorded at (``Fo = 0.4`` while
+    ``HeatNode`` wrote its datum into the end cell).  Unlike the slab
+    pairs this loop is stable in time either way; at 0.4 it contracts
+    at 0.69, and plain Jacobi then converges on 5% of steps within the
+    cap (a 2 000-cell grid, 40 steps).
     """
     from maddening.core.graph_manager import GraphManager
     from maddening.core.transforms import scale
@@ -852,8 +900,13 @@ def build_heterogeneous(config: CouplingConfig, n_cells: int = 60_000,
     gm.compile()
     return BuiltGraph(gm=gm, group_keys=("+".join(sorted(names)),),
                       expensive_nodes=frozenset({"grid"}),
+                      # The grid's interface gain is ``2*Fo`` (the
+                      # ghost-cell datum, see ``_heat_pair``) and the
+                      # probes' is ``gain``; the loop through both is
+                      # their product.  Measured: 0.694 under Jacobi at
+                      # Fo = 0.4, 0.490 at 0.2.
                       predicted_rho=_rho(
-                          jacobi=math.sqrt(fourier * gain)))
+                          jacobi=math.sqrt(2.0 * fourier * gain)))
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +1008,7 @@ def build_mixed_modes(config: CouplingConfig, n_chain: int = 5,
 
 
 def build_slow_drift(config: CouplingConfig, n_cells: int = 2_000,
-                     fourier: float = 0.45) -> BuiltGraph:
+                     fourier: float = 0.225) -> BuiltGraph:
     """The ``expensive-pair`` shape, run where the fixed point creeps.
 
     Two heat slabs started at uniform ``+1`` and ``-1``, so the interface
@@ -972,9 +1025,18 @@ def build_slow_drift(config: CouplingConfig, n_cells: int = 2_000,
     need several iterations has to be damped hard enough to stay
     time-step stable, and then settles within a few tens of steps
     instead of drifting.  Diffusion separates the two scales — the
-    interface gain is ``Fo`` while the profile relaxes over
+    interface gain is ``2*Fo`` while the profile relaxes over
     ``O(n_cells**2)`` steps.
+
+    ``fourier=0.225`` is an interface gain of 0.45 under Jacobi and
+    0.2025 under Gauss-Seidel, the rates the fixture was designed and
+    first recorded at, when ``HeatNode`` wrote its datum into the end
+    cell and the gain was ``Fo = 0.45``.  Left at 0.45 after the
+    ghost-cell fix the gain was 0.9 and the pair was past
+    ``_HEAT_PAIR_FOURIER_LIMIT``: ``gs/none/l2`` exhausted its cap of 25
+    on every step and the state left float range within 90 steps.
     """
+    _check_heat_pair_fourier(fourier)
     import numpy as np
 
     from maddening.core.graph_manager import GraphManager
@@ -1010,8 +1072,8 @@ def build_slow_drift(config: CouplingConfig, n_cells: int = 2_000,
     )
     gm.compile()
     return BuiltGraph(gm=gm, group_keys=("slabA+slabB",),
-                      predicted_rho=_rho(jacobi=fourier,
-                                         gauss_seidel=fourier ** 2))
+                      predicted_rho=_rho(jacobi=2.0 * fourier,
+                                         gauss_seidel=(2.0 * fourier) ** 2))
 
 
 # ---------------------------------------------------------------------------

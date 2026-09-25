@@ -11,9 +11,9 @@ Why FMI 3.0, not 2.0
 The load-bearing reason is ``fmi3GetDirectionalDerivative``: MADDENING
 is built on JAX autodiff, and ``jax.jvp`` / ``jax.vjp`` already produce
 exact directional derivatives.  Exposing them through FMI 3 is a thin
-shim (see :mod:`maddening.fmi.directional_derivatives`).  FMI 2.0 has
-no equivalent — we'd be deliberately discarding our most
-differentiating capability.
+shim (see :mod:`maddening.fmi.directional_derivatives`; the shipped FMU
+binary does not reach it yet, see below).  FMI 2.0 has no equivalent —
+we'd be deliberately discarding our most differentiating capability.
 
 Other FMI 3 features that map well onto MADDENING:
 
@@ -22,25 +22,38 @@ Other FMI 3 features that map well onto MADDENING:
 * **Opaque binary** — maps onto :class:`BinaryStateEncoder`'s schema
   for graph state that doesn't decompose cleanly into FMI scalars.
 * **Scheduled execution (clocks)** — maps onto MADDENING's
-  multi-rate scheduler.  v0.3.0 ships single-clock support; per-effect
-  multi-rate is a later extension within FMI 3.
-* **Co-simulation** — same contract as FMI 2.0; both supported.
+  multi-rate scheduler.  Since 0.4.0 ``modelDescription.xml`` can
+  declare one clock per node timestep
+  (``build_model_description(multi_clock=True)``); the shipped C wrapper
+  still refuses scheduled execution.
+* **Co-simulation** — the interface type the shipped FMU implements;
+  the C wrapper refuses model exchange.
 
-Scope for v0.3.0
-~~~~~~~~~~~~~~~~
+What ships in 0.4.0
+~~~~~~~~~~~~~~~~~~~
 
 * :mod:`maddening.fmi.model_description` — builds
   ``modelDescription.xml`` from a :class:`GraphManager`'s public surface
   + the ``@stability`` audit registry.
-* :mod:`maddening.fmi.directional_derivatives` — wraps ``jax.jvp`` /
-  ``jax.vjp`` behind a small ``fmi3GetDirectionalDerivative``-shaped
-  Python API.  The FMU C shim calls into this via ZMQ.
+* :mod:`maddening.fmi.package` — compiles the C wrapper
+  (``maddening/fmi/c/maddening_fmu.c``; libc and the FMI 3.0 headers
+  only) and packages the ``.fmu`` (:func:`build_fmu_binary`,
+  :func:`write_fmu`).
+* :mod:`maddening.fmi.tcp_bridge` — :class:`FmuTcpBridge`, the Python
+  end of the C wrapper's wire protocol: length-prefixed JSON frames (and
+  binary frames under protocol 2) over a plain TCP socket.  ZeroMQ is not
+  involved.  The bridge authenticates no caller, so keep it on its
+  default loopback bind (MADD-ANO-023).
+* :mod:`maddening.fmi.sidecar` — :class:`FmuSidecar`, which holds the
+  JAX-JITted graph the bridge drives.  Its pickle RPC (``handle``) is off
+  by default, and nothing in MADDENING calls it.
 * :mod:`maddening.fmi.fmu_state` — round-trips full graph state via
   the integrity manifest already shipped under v0.2 #8.
-* :mod:`maddening.fmi.sidecar` — out-of-process ZMQ shim that the FMU
-  C wrapper marshals into.  v0.3.0 ships the protocol + a Python
-  reference implementation; the C wrapper itself is a v0.4.0 / MIME
-  v0.5.0 deliverable.
+* :mod:`maddening.fmi.directional_derivatives` — wraps ``jax.jvp`` /
+  ``jax.vjp`` behind a small ``fmi3GetDirectionalDerivative``-shaped
+  Python API, for Python callers.  The FMU cannot reach it: the C
+  wrapper's ``fmi3GetDirectionalDerivative`` returns ``fmi3Error``, and
+  the bridge protocol has no derivative request.
 
 Out of scope until later
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -50,8 +63,8 @@ Out of scope until later
   Simulink-workstation acceptance — MIME's, not MADDENING's.
   MADDENING ships the substrate; MIME picks specific subgraphs and
   emits citeable FMUs.
-* Per-effect multi-rate clock-based FMU export — designed-in
-  (the FMI 3 clock concept), single-clock-only for v0.3.0.
+* Scheduled execution through the FMU binary, and directional
+  derivatives through it — both refused by the C wrapper today.
 
 Public API
 ~~~~~~~~~~

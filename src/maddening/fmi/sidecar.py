@@ -1,14 +1,16 @@
-"""ZMQ sidecar protocol for the MADDENING FMU shim.
+"""Sidecar for the MADDENING FMU shim, and its (pickle) in-process protocol.
 
 Architecture
 ~~~~~~~~~~~~
 
 The FMU itself is a compiled DLL/dylib/so loaded into a host
 co-simulation tool (FMPy / Simulink / OpenModelica).  The host calls
-FMI 3.0 C functions on it; the DLL marshals each call into a ZMQ
-message and forwards it to a long-running Python sidecar process
-that holds the JAX-JITted graph.  This is the only way to avoid
-paying XLA's startup cost on every FMU instantiation.
+FMI 3.0 C functions on it; the DLL marshals each call into a
+length-prefixed frame and forwards it over TCP to
+:class:`maddening.fmi.tcp_bridge.FmuTcpBridge`, which drives a
+long-running Python :class:`FmuSidecar` holding the JAX-JITted graph.
+This is the only way to avoid paying XLA's startup cost on every FMU
+instantiation.  No ZeroMQ is involved.
 
 Wire format
 ~~~~~~~~~~~
@@ -175,9 +177,10 @@ class FmuSidecar:
     """In-process FMU sidecar — handles FMI 3.0 RPC messages.
 
     Holds the JAX-JITted graph in long-running memory.  A real
-    deployment runs this as a separate process behind a ZMQ socket;
-    tests instantiate it directly and call :meth:`handle` to
-    exercise the protocol without involving a real socket.
+    deployment runs it in a Python process of its own, apart from the
+    importer's, behind :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge`;
+    tests instantiate it directly and call :meth:`handle` to exercise the
+    protocol without involving a real socket.
     """
 
     def __init__(self, config: SidecarConfig) -> None:

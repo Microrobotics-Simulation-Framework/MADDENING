@@ -112,7 +112,12 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
-from maddening.fmi.sidecar import FmuSidecar, _checked_value, _not_tunable_error
+from maddening.fmi.sidecar import (
+    FmuSidecar,
+    _checked_value,
+    _not_tunable_error,
+    _restored_leaf,
+)
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
 
@@ -1107,13 +1112,10 @@ class FmuTcpBridge:
             new_state: dict[str, dict[str, Any]] = {}
             for k in expected:
                 _, node, field = k.split("/", 2)
-                live = np.asarray(state[node][field])
-                arr = data[k]
-                if arr.shape != live.shape:
-                    raise ValueError(f"FMU state {node}.{field}: shape {arr.shape} != {live.shape}")
-                new_state.setdefault(node, {})[field] = jnp.asarray(
-                    checked_value(arr, live.dtype, what=f"FMU state {node}.{field}")
-                )
+                # The leaf check FmuSidecar.set_fmu_state applies too: one
+                # function, so the two restore paths cannot drift apart.
+                new_state.setdefault(node, {})[field] = jnp.asarray(_restored_leaf(
+                    data[k], state[node][field], what=f"FMU state {node}.{field}"))
             params = self._sidecar.params
             new_params = None
             if params is not None:
@@ -1125,14 +1127,8 @@ class FmuTcpBridge:
                             key = f"p/{section}/{owner}/{k}"
                             if key not in keys:
                                 raise ValueError(f"FMU state lacks parameter {key}")
-                            live = np.asarray(v)
-                            arr = data[key]
-                            if arr.shape != live.shape:
-                                raise ValueError(f"FMU state param {key}: shape {arr.shape} != {live.shape}")
-                            new_params[section][owner][k] = jnp.asarray(
-                                checked_value(arr, live.dtype,
-                                              what=f"FMU state param {owner}.params.{k}")
-                            )
+                            new_params[section][owner][k] = jnp.asarray(_restored_leaf(
+                                data[key], v, what=f"FMU state param {owner}.params.{k}"))
             inputs: dict[str, dict[str, Any]] = self._zero_inputs()
             for k in keys:
                 if k.startswith("i/"):

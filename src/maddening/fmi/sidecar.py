@@ -67,6 +67,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
     get_directional_derivative,
@@ -137,6 +138,22 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
     if not fits:
         raise ValueError(f"{what}: value does not fit its type {dtype}")
     return cast
+
+
+def _restored_leaf(value: Any, live: Any, *, what: str) -> np.ndarray:
+    """A snapshot leaf, checked against the live leaf it would replace.
+
+    The shape must match and the value must pass :func:`_checked_value` in
+    the live leaf's dtype.  A leaf with no live counterpart is checked in
+    its own dtype (finite only).
+    """
+    arr = np.asarray(value)
+    if live is None:
+        return _checked_value(arr, arr.dtype, what=what)
+    live_arr = np.asarray(live)
+    if arr.shape != live_arr.shape:
+        raise ValueError(f"{what}: shape {arr.shape} != {live_arr.shape}")
+    return _checked_value(arr, live_arr.dtype, what=what)
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -345,17 +362,55 @@ class FmuSidecar:
         )
 
     def set_fmu_state(self, fmu_state: FMUState) -> None:
+        """Restore a snapshot taken by :meth:`get_fmu_state` (or built with
+        :func:`~maddening.fmi.fmu_state.serialize_fmu_state`).
+
+        A snapshot is a door into the state and parameter tree, so it is
+        held to the checks the TCP bridge's ``set_state`` applies, with the
+        same messages, all before anything is committed: every state leaf
+        and every parameter must be finite and representable in the dtype
+        (and have the shape) of the live leaf it replaces, a parameter the
+        step cannot read (``SidecarConfig.fixed_params``) may not change,
+        and the restored parameters must lie inside their declared
+        ``ParamSpec`` bounds when the config carries ``param_specs``.  A
+        snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` --
+        therefore does not restore; the error names the field.
+
+        Raises
+        ------
+        ValueError
+            On a schema-token mismatch or an unreadable payload (see
+            :func:`~maddening.fmi.fmu_state.deserialize_fmu_state`), or if
+            any of the checks above fails.  Nothing is written.
+        """
         state, params = deserialize_fmu_state(
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
+        new_state = {
+            node: ({field: _restored_leaf(value, self._state.get(node, {}).get(field),
+                                          what=f"FMU state {node}.{field}")
+                    for field, value in fields.items()}
+                   if isinstance(fields, dict)
+                   else _restored_leaf(fields, self._state.get(node),
+                                       what=f"FMU state {node}"))
+            for node, fields in state.items()
+        }
         new_params = None
         if params is not None and self._params is not None:
-            new_params = {
-                k: ({n: {kk: jnp.asarray(vv) for kk, vv in leaves.items()}
-                     for n, leaves in v.items()} if isinstance(v, dict) else v)
-                for k, v in params.items()
-            }
+            new_params = {}
+            for section, owners in params.items():
+                if not isinstance(owners, dict):
+                    new_params[section] = owners
+                    continue
+                live_owners = self._params.get(section) or {}
+                new_params[section] = {
+                    owner: {key: jnp.asarray(_restored_leaf(
+                        value, (live_owners.get(owner) or {}).get(key),
+                        what=f"FMU state param {owner}.params.{key}"))
+                        for key, value in leaves.items()}
+                    for owner, leaves in owners.items()
+                }
             # A snapshot is a door into the parameter tree like set_params:
             # it may not install a new value for a parameter the step cannot
             # read.  Checked before anything is committed.
@@ -368,7 +423,10 @@ class FmuSidecar:
                 restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
                 if not _same_leaf(restored, current):
                     raise _not_tunable_error(name, reason, current)
-        self._state = state
+            # The declared bounds, through the same function the bridge's
+            # set_state applies them with, so the messages agree.
+            check_bounds(new_params, self._config.param_specs or {})
+        self._state = new_state
         if new_params is not None:
             self._params = new_params
 

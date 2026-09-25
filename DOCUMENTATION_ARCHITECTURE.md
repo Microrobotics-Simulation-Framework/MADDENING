@@ -1654,6 +1654,13 @@ When the anomaly is sufficiently understood, a developer **manually** creates or
 
 This transition must not be automated. An automated pipeline that converts issues to YAML entries would bypass the human judgement required for a compliance artifact. The YAML registry is what a Notified Body reads; the GitHub issue is the engineering evidence behind it.
 
+**Which defects get an entry.** The registry covers:
+
+- **every defect a released version carried**, whatever its severity -- `affected_versions` names the releases (`">=FIRST"` while it is reachable, `">=FIRST, <FIX"` once a release fixes it); and
+- **every defect of severity `critical` or `major` found during a development cycle, even one no release carried** -- `affected_versions: "none"`, with the description saying which development builds had it and the entry resolved in the release that the cycle builds towards.  MADD-ANO-018, 019 and 054 are such entries.  A never-shipped defect that serious is part of the evidence of how the release was verified, and a reader assessing the release needs to see that it was found and closed.
+
+A `minor` defect introduced and fixed within one cycle needs no entry: the CHANGELOG and the commit that fixed it are its record.  When an entry falls due is the release gate's business (below); this rule says which defects the registry must eventually hold.  A security fix in the CHANGELOG's `### Security` section that meets either condition cites its entry.
+
 **Phase 3 — Verification (CI consistency check)**
 
 The design is for CI to enforce consistency between the two artifacts.  **Only
@@ -1666,6 +1673,14 @@ labels.**  Implemented, in `scripts/check_anomalies.py`:
   `_RETIRED_ANOMALY_IDS`, and a high-water pin (`_HIGHEST_ANOMALY_ID`, with its
   test, in `tests/compliance/test_soup_evidence.py`) catches deletion of the
   highest entry and an unannounced addition
+- A retirement is an `{id: reason}` record: an ID with no reason excuses
+  nothing, and the retirement of an entry whose last committed
+  `resolution_status` was reachable (`open`, `partially_resolved`,
+  `wont_fix`) is refused.  The gate reads that status from git, since the
+  tree no longer holds the entry, and refuses a retirement it cannot check
+  (no work tree, a shallow clone)
+- A `resolved` or `partially_resolved` entry cites a `verification` test,
+  and a `partially_resolved` one states its `residual_risk`
 
 Not implemented (planned):
 
@@ -1680,26 +1695,29 @@ The three-phase model ensures that engineering discussion (Phase 1) and regulato
 CI enforcement must distinguish between anomalies that are still under investigation (Phase 1) and those that have been resolved without proper formalization. The guiding principle: **never block active investigation, always block incomplete compliance**.
 
 > **Status at 0.4.0: most of this subsection is design, not implementation.**
-> Of the numbered checks below, item 1 and the deletion half of item 3 are
-> implemented; items 2, 4 and 5, the three-tier release gate (items 6-9) and
+> Of the numbered checks below, items 1 and 4 and the deletion half of item 3
+> are implemented; items 2 and 5, the three-tier release gate (items 6-9) and
 > the automated cycle counting it depends on are **not implemented** —
 > nothing in CI reads GitHub issues, labels or close dates.  What
 > `scripts/check_anomalies.py` does enforce, on every push, is in its module
 > docstring: schema validation (`maddening.compliance.validate_anomaly_registry`);
-> ID contiguity within each prefix, excusing only IDs recorded in
-> `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`), with the
+> ID contiguity within each prefix, excusing only IDs recorded, each with its
+> reason, in `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`)
+> and never an entry whose last committed status was reachable, with the
 > high-water pin `_HIGHEST_ANOMALY_ID` in the same file catching deletion of
 > the highest entry; a `verification:` list on every `resolved` or
-> `partially_resolved` entry, each reference resolving to a collected test;
-> and the PEP 440 `affected_versions` convention, checked against
-> `maddening_version` and the released versions in `CHANGELOG.md`.
+> `partially_resolved` entry, each reference resolving to a collected test,
+> and a `residual_risk` on every `partially_resolved` one; and the PEP 440
+> `affected_versions` convention, checked against `maddening_version` and the
+> released versions in `CHANGELOG.md`.  Item 4 is
+> `scripts/generate_soup_tables.py --check`'s.
 
 **On every push (CI check):**
 
 1. The YAML schema is validated (`schema_version`, required fields, valid enums, unique IDs) — *implemented*
 2. Every YAML entry with a `github_issue` field must reference a valid, existing issue — *not implemented*
 3. No YAML entries have been silently deleted (only `resolution_status` changes are permitted) — *deletion is caught (ID contiguity, `_RETIRED_ANOMALY_IDS`, the high-water pin); an edit to other fields is not*
-4. The `maddening_version` field in `known_anomalies.yaml` matches the current release — *not implemented: it must be a PEP 440 version and anchors the `affected_versions` convention, but nothing compares it with the package version*
+4. The `maddening_version` field in `known_anomalies.yaml` matches the current release — *implemented: `scripts/generate_soup_tables.py --check`, which `tests/compliance/test_soup_evidence.py` runs in CI, fails when it differs from the version in `pyproject.toml` (and so does `CITATION.cff`'s); `check_anomalies.py` also holds it to PEP 440, since it anchors the `affected_versions` convention*
 
 **CI warnings (non-blocking):**
 
@@ -2857,7 +2875,8 @@ if __name__ == "__main__":
 `scripts/check_anomalies.py` (Section 9.7) delegates the schema check to
 `maddening.compliance.validate_anomaly_registry()`, so that logic exists in
 one place, and adds the registry-level rules a downstream registry does not
-necessarily want: ID contiguity against `_RETIRED_ANOMALY_IDS`, a
+necessarily want: ID contiguity against `_RETIRED_ANOMALY_IDS` (an
+`{id: reason}` record that cannot retire a reachable entry), a
 `verification:` list on every resolved entry with each reference resolved to
 a collected test, and the PEP 440 `affected_versions` convention.  It is not a
 thin wrapper; its module docstring says what it enforces.

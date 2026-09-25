@@ -14,7 +14,9 @@ cannot drift apart on what "this symbol exists" means.
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
+import inspect
 import os
 from types import ModuleType
 from typing import NamedTuple, Optional
@@ -188,6 +190,7 @@ def resolve_dotted_name(
     *,
     require_own: bool = False,
     require_callable: bool = False,
+    require_routine: bool = False,
 ) -> Resolution:
     """Resolve ``module.path.Class.attr`` and report why it failed.
 
@@ -203,6 +206,13 @@ def resolve_dotted_name(
         ``SimulationNode.update`` answers in its place.
     require_callable : bool, optional
         When true, the resolved object must be callable.
+    require_routine : bool, optional
+        When true, the resolved object must be a function, a method or a
+        property -- code an equation term can be traced to.  A class is
+        callable, so ``require_callable`` alone accepted one, and a row
+        re-pointed from ``HeatNode.update`` to ``HeatNode`` kept resolving
+        (audit_040_p4_2, M5).  A wrapper that exposes ``__wrapped__``
+        (``functools.wraps``, ``jax.jit``) is judged by what it wraps.
 
     Returns
     -------
@@ -240,6 +250,8 @@ def resolve_dotted_name(
     obj = mod
     inherited_from = None
     seen = mod.__name__
+    parent = None
+    attr = None
     for attr in attrs:
         parent = obj
         if not hasattr(parent, attr):
@@ -272,6 +284,38 @@ def resolve_dotted_name(
                 )
         obj = getattr(parent, attr)
         seen = f"{seen}.{attr}"
+
+    if require_routine:
+        # A property read off its class is the property object, which is
+        # not callable; it is still code a row can trace a term to.
+        static = None
+        if isinstance(parent, type) and attr is not None:
+            try:
+                static = inspect.getattr_static(parent, attr)
+            except AttributeError:
+                static = None
+        if isinstance(static, (property, functools.cached_property)):
+            return Resolution(True, None, inherited_from)
+        if isinstance(obj, type):
+            return Resolution(
+                False,
+                f"'{qname}' resolves to the class {obj.__name__}, not to a "
+                f"function, method or property",
+                inherited_from,
+            )
+        target = obj
+        if callable(obj):
+            try:
+                target = inspect.unwrap(obj)
+            except ValueError:           # a __wrapped__ cycle
+                target = obj
+        if not (inspect.isroutine(obj) or inspect.isroutine(target)):
+            return Resolution(
+                False,
+                f"'{qname}' resolves to a {type(obj).__name__}, not to a "
+                f"function, method or property",
+                inherited_from,
+            )
 
     if require_callable and not callable(obj):
         return Resolution(

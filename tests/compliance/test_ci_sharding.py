@@ -5,14 +5,20 @@ Shard ``i`` of a pull request has to hold the same test files as shard
 restores was saved by that shard on the base branch.  These tests pin the
 properties that make that true: the assignment is a function of the file
 path alone, every test lands on exactly one shard, the pins are real and
-in range, and CI runs the job count the pins were balanced for.
+in range, and CI runs the job count the pins were balanced for -- every
+shard of it, each over the whole suite (no matrix leg excluded, no extra
+``--ignore`` or selection flag), since either would drop tests from CI
+while every other check here still passed.
 """
 
+import hashlib
 import re
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from tests import _sharding
 
@@ -29,10 +35,15 @@ def test_the_assignment_is_a_fixed_function_of_the_path():
 
 
 def test_pins_apply_only_at_the_job_count_they_were_balanced_for():
-    path, pinned = next(iter(_sharding.PINS.items()))
-    assert _sharding.shard_of(path, _sharding.PINS_FOR) == pinned
-    other = _sharding.PINS_FOR + 1
-    assert 1 <= _sharding.shard_of(path, other) <= other
+    # At any other count a pinned file hashes like every other file: a pin
+    # that leaked would put it on a shard the count may not even have.
+    for path, pinned in _sharding.PINS.items():
+        assert _sharding.shard_of(path, _sharding.PINS_FOR) == pinned
+        for n in (1, 2, 3, 5, 8):
+            if n == _sharding.PINS_FOR:
+                continue
+            by_hash = int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1
+            assert _sharding.shard_of(path, n) == by_hash, (path, n)
 
 
 def test_every_pin_names_a_real_file_and_a_real_shard():
@@ -79,3 +90,52 @@ def test_ci_runs_the_job_count_the_pins_were_balanced_for(workflow):
     n = _sharding.PINS_FOR
     assert listed == list(range(1, n + 1)), workflow
     assert f'MADDENING_TEST_SHARD: "${{{{ matrix.shard }}}}/{n}"' in ci, workflow
+
+
+def _workflow(name):
+    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+
+
+def _pytest_args(job, step_name):
+    (step,) = [s for s in job["steps"] if s.get("name") == step_name]
+    # Continuation lines joined, so the invocation reads as one command.
+    lines = [ln.strip() for ln in re.sub(r"\\\n", " ", step["run"]).splitlines()
+             if "-m pytest" in ln and not ln.strip().startswith("#")]
+    assert len(lines) == 1, lines
+    # `${{ matrix.shard }}` -> `{{matrix.shard}}`, one shell word.
+    tokens = shlex.split(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", lines[0]))
+    return tokens[tokens.index("pytest") + 1:]
+
+
+@pytest.mark.parametrize("workflow, job", [("ci.yml", "test"), ("slow-tests.yml", "slow")])
+def test_no_matrix_leg_drops_or_adds_a_shard(workflow, job):
+    # `exclude: [{shard: 4}]` would leave the shard axis intact -- so the
+    # count check above passes -- while a quarter of the suite runs nowhere.
+    matrix = _workflow(workflow)["jobs"][job]["strategy"]["matrix"]
+    assert matrix["shard"] == list(range(1, _sharding.PINS_FOR + 1))
+    for key in ("exclude", "include"):
+        for leg in matrix.get(key) or []:
+            assert "shard" not in leg, f"{workflow}: matrix {key} touches a shard: {leg}"
+
+
+#: Every argument the default lane's pytest takes that does not change
+#: which tests run.  Anything else fails the test below: an added
+#: ``--ignore``, ``-k``, ``-m`` or ``--deselect`` would silently drop tests
+#: from every shard at once.
+REPORTING_ARGS = {"-v", "-rs", "--tb=short", "--durations=0", "--durations-min=1.0",
+                  "-o", "junit_family=xunit1",
+                  "--junitxml=test-results-shard{{matrix.shard}}.xml"}
+
+
+@pytest.mark.parametrize("workflow, job, step, selection", [
+    ("ci.yml", "test", "Run tests", ["tests/", "--ignore=tests/viz"]),
+    ("slow-tests.yml", "slow", "Run full suite (slow lane)",
+     ["tests/", "-m", "slow or not slow", "--ignore=tests/viz"]),
+])
+def test_the_sharded_lanes_run_the_whole_suite_but_viz(workflow, job, step, selection):
+    args = _pytest_args(_workflow(workflow)["jobs"][job], step)
+    chosen = [a for a in args if a not in REPORTING_ARGS]
+    assert chosen == selection, (
+        f"{workflow} {step!r}: pytest selects {chosen}, expected exactly {selection}; "
+        "if a new argument only changes reporting, add it to REPORTING_ARGS")
+    assert len(args) == len(set(args)), args

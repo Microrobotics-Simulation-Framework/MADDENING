@@ -11,10 +11,15 @@ so the file stays well inside the budget it tests.
 """
 
 import importlib.util
+import os
 import re
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +36,11 @@ def gate():
 
 
 def _case(file, name, seconds, cls="", line=10, extra="", jax=None):
+    """A ``<testcase>``; ``jax`` overrides the timing properties (``None``: none).
+
+    A ``subprocesses`` key in ``jax`` is written only when given, as in a
+    report from before the process count was recorded.
+    """
     module = file[:-3].replace("/", ".")
     classname = f"{module}.{cls}" if cls else module
     if jax is not None:
@@ -167,6 +177,24 @@ def test_the_summary_names_the_bands_and_the_removable_entries(gate, tmp_path, c
     assert "`tests/a/test_gone.py::test_renamed`" in md.split("may be removable")[1]
 
 
+def test_an_allowlist_entry_exempts_exactly_its_node_id(gate, tmp_path, capsys):
+    # Not a prefix: a base id does not exempt its parametrisations, and a
+    # file does not exempt its tests.  One entry must not quietly cover
+    # tests nobody decided to keep.
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_p[a]", 30.0),
+                     _case("tests/a/test_x.py", "test_q", 30.0),
+                     _case("tests/a/test_x.py", "test_kept[b]", 30.0))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/a/test_x.py::test_p # kept: only the base id is listed\n"
+                     "tests/a/test_x.py # kept: only the file is listed\n"
+                     "tests/a/test_x.py::test_kept[b] # kept: the exact id\n")
+    code, out = _run(gate, capsys, report, "--allowlist", allow)
+    assert code == 1
+    assert "tests/a/test_x.py::test_p[a] took 30.0 s" in out
+    assert "tests/a/test_x.py::test_q took 30.0 s" in out
+    assert "test_kept[b] took" not in out
+
+
 def test_the_shipped_allowlist_names_real_tests_with_reasons(gate):
     # A stale entry exempts nothing, but a typo'd one would silently fail to
     # exempt the test it meant -- and a list nobody can check only grows.
@@ -217,7 +245,8 @@ def test_a_test_slow_without_its_compile_is_listed_as_slow_even_when_warm(gate, 
     assert "`tests/a/test_x.py::test_loop`" in warm
     assert "test_compiles" not in warm
     assert "**Compilation cache: cold**" in md
-    assert "running 9.0 s, tracing/lowering 0.0 s, XLA compile 9.0 s" in md
+    assert ("running 9.0 s, tracing/lowering 0.0 s, XLA compile 9.0 s (cache reads excluded), "
+            "cache reads 0.0 s") in md
     # "%" is escaped as %25 in a workflow command
     assert "(running 89%25: un-jitted loop, heavy compute, or a subprocess)" in out
 
@@ -326,3 +355,287 @@ def test_a_partial_lane_lists_no_allowlist_entry_as_removable(gate, tmp_path, ca
     Path(str(report) + ".md").unlink()
     _run(gate, capsys, report, "--allowlist", allow, "--no-removable")
     assert "may be removable" not in Path(str(report) + ".md").read_text()
+
+
+def test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects(gate):
+    """An entry is matched exactly, so a typo in it exempts nothing, silently.
+
+    The check above finds the file and the function; this one asks pytest
+    for the real node ids, so a wrong parameter id or class name fails too.
+    Slow-marked tests are collected as well: an entry for one is stale,
+    which the lane summary reports, not a typo.
+    """
+    entries = gate.read_allowlist(ALLOWLIST)
+    files = sorted({nodeid.split("::", 1)[0] for nodeid in entries})
+    # Not this job's shard (which would deselect other shards' files), nor
+    # this job's timing plugin.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+         "-m", "slow or not slow", *files],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    collected = {line.strip() for line in proc.stdout.splitlines() if "::" in line}
+    missing = sorted(set(entries) - collected)
+    assert not missing, f"allowlist entries pytest does not collect: {missing}"
+
+
+def test_a_cache_read_is_counted_once_and_reported_on_its_own(gate, tmp_path, capsys):
+    """JAX times the whole compile-or-read-the-cache call as the compile.
+
+    ``backend_compile_duration`` wraps ``compile_or_get_cached()``, and the
+    cache read (``cache_retrieval_time_sec``) is recorded inside it, so on
+    a hit the "compile" *is* the read.  The shape below is a measured warm
+    run of one program (jax 0.11.0, 2026-09-25): compile event 0.365 s of
+    which 0.348 s was the read.
+    """
+    warm = {"jax_trace_s": 0.208, "jax_lower_s": 0.242, "jax_compile_s": 0.365,
+            "jax_cache_read_s": 0.348, "jax_cache_hits": 3, "jax_cache_misses": 0}
+    t = gate.TestTime("t.py::warm", "t.py", 1, 1.748, "passed", warm)
+    assert t.compiling == pytest.approx(0.017)
+    assert t.cache_read == pytest.approx(0.348)
+    # Each part subtracted once: running is wall - compile event - build.
+    assert t.running == pytest.approx(1.748 - 0.365 - 0.450)
+    # A warm run is the run that pays the read, so it is not removable.
+    assert t.uncacheable == pytest.approx(1.748 - 0.017)
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_warm", 6.0,
+                                     jax={**warm, "jax_compile_s": 1.5, "jax_cache_read_s": 1.0}))
+    _run(gate, capsys, report, "--cache-mode", "warm")
+    md = Path(str(report) + ".md").read_text()
+    assert "XLA compile 0.5 s (cache reads excluded), cache reads 1.0 s" in md
+    assert "running 4.0 s" in md                   # 6.0 - 1.5 - 0.45
+
+
+def test_a_test_whose_work_runs_in_a_subprocess_is_not_called_slow_even_when_warm(
+        gate, tmp_path, capsys):
+    """A child's compiles are invisible here, and it inherits the cache directory.
+
+    Measured: a test whose JAX work runs in a child recorded 0 s of
+    compile in the pytest process on both CI lanes, was listed as "slow
+    even with a warm cache", and ran at 0.53x on the next warm run.
+    """
+    report = _report(
+        tmp_path,
+        # started a process and recorded no JAX of its own
+        _case("tests/a/test_x.py", "test_child", 9.0, jax={"subprocesses": 1}),
+        # started a process and compiled in-process too
+        _case("tests/a/test_x.py", "test_both", 9.0,
+              jax={"subprocesses": 2, "jax_compile_s": 1.0}),
+        # a report from before the count: no JAX activity at all here
+        _case("tests/a/test_x.py", "test_old_report", 9.0, jax={}),
+        # plain Python, no process started: a cache cannot help it
+        _case("tests/a/test_x.py", "test_sleeps", 9.0, jax={"subprocesses": 0}),
+    )
+    code, out = _run(gate, capsys, report, "--cache-mode", "cold")
+    md = Path(str(report) + ".md").read_text()
+    warm = md.split("### Slow even with a warm cache (1)")[1].split("###")[0]
+    assert "test_sleeps" in warm
+    assert not any(name in warm for name in ("test_child", "test_both", "test_old_report"))
+    sub = md.split("### Work in a subprocess (not measured here) (3)")[1].split("###")[0]
+    assert all(f"`tests/a/test_x.py::{name}`" in sub
+               for name in ("test_child", "test_both", "test_old_report"))
+    assert "| not recorded |" in sub
+    assert "running 100%: work in a subprocess (not measured here)" in md
+    assert "1 slow even with a warm cache; 3 with work in a subprocess" in out
+
+
+def test_a_split_that_adds_up_to_more_than_the_wall_time_is_capped_and_flagged(gate):
+    # Measured on jax 0.10.2 in CI: a 0.28 s test whose tracing events
+    # summed to 0.33 s, printed as "tracing/lowering 118%".
+    over = gate.TestTime("t.py::over", "t.py", 1, 0.28, "passed",
+                         {"jax_trace_s": 0.30, "jax_lower_s": 0.03, "jax_compile_s": 0.0,
+                          "jax_cache_read_s": 0, "jax_cache_hits": 0, "jax_cache_misses": 0})
+    why = gate.diagnose(over)
+    assert why.startswith("tracing/lowering 100%: ")
+    assert "more than the wall time" in why
+    assert not re.search(r"\b(10[1-9]|1[1-9][0-9]|[2-9][0-9]{2,})%", why)
+    within = over._replace(seconds=1.0)
+    assert "more than the wall time" not in gate.diagnose(within)
+
+
+def test_a_report_holding_only_a_collection_error_does_not_pass(gate, tmp_path, capsys):
+    """A file that fails to import stops pytest before any test runs.
+
+    Every shard collects the whole suite, so one broken import leaves every
+    shard's report with a single collection-error entry.  That is a run in
+    which no test ran, which the gate must not pass -- and a lane summary
+    built from it must not call allowlist entries removable.  The report
+    here is real pytest output, from this interpreter's pytest.
+    """
+    project = tmp_path / "project"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "test_broken.py").write_text("import a_module_that_does_not_exist\n")
+    (project / "tests" / "test_fine.py").write_text("def test_fine():\n    pass\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    proc = subprocess.run([sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
+                           "--junitxml=broken.xml", "-o", "junit_family=xunit1"],
+                          cwd=project, env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 2, proc.stdout
+    broken = project / "broken.xml"
+    (case,) = gate.read_report(broken)
+    assert case.collection_error and case.outcome == "error"
+    code, out = _run(gate, capsys, broken)
+    assert code == 2 and "collection error" in out
+    # In a lane with another shard's real report: that report is judged,
+    # the broken one left out, and nothing is called removable.
+    fine = _report(tmp_path, _case("tests/a/test_x.py", "test_fast", 0.2), name="fine.xml")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/b/test_y.py::test_elsewhere # pending triage\n")
+    code, out = _run(gate, capsys, broken, fine, "--allowlist", allow, "--cache-mode", "cold")
+    assert code == 0
+    assert "::warning title=Test durations::left out" in out and "broken.xml" in out
+    assert "may be removable" not in Path(str(broken) + ".md").read_text()
+
+
+def test_timing_plugin_counts_the_processes_a_test_starts():
+    from types import SimpleNamespace
+    from tests import _jax_timing as jt
+
+    timing = jt.JaxTiming()
+    plugin = jt.Plugin(timing)
+    item = SimpleNamespace(user_properties=[])
+    plugin.pytest_runtest_setup(item)
+    timing.on_audit("subprocess.Popen", ("python", ["python", "-c", ""], None, None))
+    timing.on_audit("os.fork", ())
+    timing.on_audit("open", ("f", "r", 0))            # not a process
+    plugin.pytest_runtest_makereport(item, SimpleNamespace(when="teardown"))
+    assert dict(item.user_properties)["subprocesses"] == 2
+
+
+def test_python_still_raises_the_audit_events_the_process_count_listens_for():
+    # If Python renamed one, the count would read zero and a subprocess
+    # test would be called uncacheable again.  Checked in a child, since an
+    # audit hook cannot be removed once added.
+    from tests import _jax_timing as jt
+
+    probe = (
+        "import os, subprocess, sys\n"
+        "seen = set()\n"
+        "sys.addaudithook(lambda e, a: seen.add(e))\n"
+        "subprocess.run([sys.executable, '-c', ''], check=True)\n"
+        "os.system('true')\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os._exit(0)\n"
+        "os.waitpid(pid, 0)\n"
+        "os.waitpid(os.posix_spawn('/bin/true', ['true'], dict(os.environ)), 0)\n"
+        "print(' '.join(sorted(e for e in seen if e.startswith(('os.', 'subprocess.')))))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    seen = set(proc.stdout.split())
+    # (os.spawn* forks and execs on POSIX, raising os.fork; its own event is Windows-only.)
+    for event in ("subprocess.Popen", "os.system", "os.fork", "os.posix_spawn"):
+        assert event in seen, f"Python no longer raises {event!r}"
+        assert event in jt.SPAWN_EVENTS
+
+
+def _ci():
+    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+
+
+def _budget_step():
+    (step,) = [s for s in _ci()["jobs"]["test"]["steps"] if s.get("name") == "Test time budget"]
+    return step
+
+
+def _commands(script):
+    joined = re.sub(r"\\\n", " ", script)
+    return [ln.strip() for ln in joined.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def test_the_budget_step_can_fail_the_job():
+    """The gate is a gate only while its exit code is the step's.
+
+    ``--fail-over 0`` switches the hard line off, ``continue-on-error``
+    turns a red step green, and ``|| true`` (or ``set +e``) swallows the
+    exit code -- each a one-line change that leaves every other check here
+    passing.
+    """
+    job = _ci()["jobs"]["test"]
+    step = _budget_step()
+    assert "continue-on-error" not in job and "continue-on-error" not in step
+    # GitHub's default for `run:` is `bash -e {0}`; a custom shell could drop -e.
+    assert "shell" not in step
+    assert step["if"] == "${{ !cancelled() }}", "the budget must run after a red test step too"
+    # The `${{ }}` expressions are GitHub's, evaluated before the shell runs.
+    script = re.sub(r"\$\{\{.*?\}\}", "EXPR", step["run"])
+    for undo in ("--fail-over", "||", "set +e"):
+        assert undo not in script, f"the budget step contains {undo!r}"
+    # `${{ matrix.shard }}` -> `{{matrix.shard}}`, one shell word.
+    last = shlex.split(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    assert last[:3] == ["python", "scripts/report_test_durations.py",
+                        "test-results-shard{{matrix.shard}}.xml"], last
+    assert last[last.index("--allowlist") + 1] == "tests/duration_allowlist.txt"
+
+
+def _render(text, values):
+    def sub(m):
+        expr = m.group(1).strip()
+        assert expr in values, f"the test does not know the expression {expr!r}; add it"
+        return values[expr]
+    return re.sub(r"\$\{\{(.*?)\}\}", sub, text)
+
+
+def _shim(tmp_path):
+    """A PATH on which `python` and `python3` run this interpreter."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("python", "python3"):
+        (bin_dir / name).write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        (bin_dir / name).chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+
+
+def test_the_budget_step_records_the_cache_mode_even_when_the_gate_fails(tmp_path):
+    """The step runs under ``bash -e``: a line after a failing gate never runs.
+
+    The mode file used to be written after the gate, so an over-budget
+    shard left none, and the lane summary labelled the lane from the other
+    three shards -- "cold" for a lane with a warm shard, whose allowlisted
+    tests were then offered as removable.
+    """
+    work = tmp_path / "work"
+    (work / "tests").mkdir(parents=True)
+    (work / "scripts").symlink_to(REPO_ROOT / "scripts")
+    (work / "tests" / "duration_allowlist.txt").write_text("# empty\n")
+    _report(work, _case("tests/a/test_x.py", "test_slow", 25.0), name="test-results-shard1.xml")
+    step = _budget_step()
+    script = _render(step["run"], {
+        "matrix.shard": "1",
+        "(steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') "
+        "&& 'warm' || 'cold'": "warm",
+    })
+    proc = subprocess.run(["bash", "-e", "-c", script], cwd=work, capture_output=True, text=True,
+                          env={**os.environ, "PATH": _shim(tmp_path)}, timeout=120)
+    assert proc.returncode == 1, proc.stdout + proc.stderr     # the gate failed the step
+    assert (work / "cache-mode-shard1.txt").read_text().strip() == "warm"
+
+
+def test_a_lane_missing_a_shards_cache_mode_is_labelled_mixed(tmp_path):
+    (step,) = [s for s in _ci()["jobs"]["test-durations"]["steps"]
+               if s.get("name") == "Summarise the lane"]
+    work = tmp_path / "work"
+    (work / "results").mkdir(parents=True)
+    (work / "tests").mkdir()
+    (work / "scripts").symlink_to(REPO_ROOT / "scripts")
+    (work / "tests" / "duration_allowlist.txt").write_text(
+        "tests/a/test_x.py::test_cached # pending triage\n")
+    for shard in (1, 2, 3, 4):
+        _report(work / "results", _case("tests/a/test_x.py", f"test_{shard}", 0.2),
+                name=f"test-results-shard{shard}.xml")
+    for shard in (1, 2, 3):                         # shard 4 wrote no mode file
+        (work / "results" / f"cache-mode-shard{shard}.txt").write_text("warm\n")
+    summary = tmp_path / "summary.md"
+    script = _render(step["run"], {"matrix.jax-version": "0.10.2"})
+    proc = subprocess.run(["bash", "-e", "-c", script], cwd=work, capture_output=True, text=True,
+                          env={**os.environ, "PATH": _shim(tmp_path),
+                               "GITHUB_STEP_SUMMARY": str(summary)}, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    md = summary.read_text()
+    assert "**Compilation cache: mixed**" in md
+    assert "may be removable" not in md

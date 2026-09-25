@@ -21,14 +21,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Decide which lanes a change needs.  A change that touches only
+  # Decide which lanes a change needs.  A pull request that touches only
   # documentation (docs/, Markdown, plans/, .claude/, LICENSE) runs the
   # compliance job alone: that job owns the docs checks (citations,
   # implementation mapping, anomaly registry) and the only tests that read
-  # docs/ (tests/compliance).  Anything else, including this workflow, runs
-  # every lane.  A push with no usable base (new branch, force-push) and an
-  # empty diff (a commit and its revert in one push) count as code: the
-  # safe side.  Pattern semantics, on purpose: POSIX `case` `*` matches `/`,
+  # docs/ (tests/compliance; tests/compliance/test_ci_workflows.py fails if
+  # a test elsewhere names a docs path).  Anything else, including this
+  # workflow, runs every lane.  A pull request with no merge base and an
+  # empty diff (a commit and its revert) count as code: the safe side.
+  #
+  # A push (a merge to main / release/**) always runs every lane.  Diffing
+  # it against `github.event.before` is not safe: the concurrency group
+  # below replaces a *pending* push run with the next one, so for merges
+  # A (code), B (code), C (docs) in quick succession B's run can be
+  # replaced while it waits, and C's diff B..C is docs only -- C would then
+  # skip every lane, the combined A+B tree would never be tested on the
+  # branch, and no compilation cache would be saved for it.
+  #
+  # Pattern semantics, on purpose: POSIX `case` `*` matches `/`,
   # so `docs/*` covers every nested path under docs/ and `*.md` / `*.rst`
   # match anywhere in the tree, including a README inside src/maddening
   # (package content, but nothing the test lanes read).  Renames are not
@@ -48,18 +58,16 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
         run: |
           set -eu
-          if [ "$EVENT" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
-            base="$(git merge-base "origin/$BASE_REF" HEAD || true)"
-          elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
-               && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            base="$BEFORE"
-          else
-            base=""
+          if [ "$EVENT" != "pull_request" ]; then
+            # See the job comment: a push's own diff can miss a merge whose
+            # run was replaced while pending.
+            echo "$EVENT: running every lane"
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
+          base="$(git merge-base "origin/$BASE_REF" HEAD || true)"
           if [ -z "$base" ]; then
             echo "no diff base; running every lane"
             echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
@@ -166,11 +174,13 @@ jobs:
           pip install -e ".[ci]"
 
       - name: Install C toolchain for the FMU wrapper tests
-        # gcc + clang ship on ubuntu-latest; valgrind does not.  tests/fmi/
-        # test_c_unit.py builds the wrapper plain, with ASan/UBSan, runs the
-        # unit + fuzz binaries under both and under valgrind, and a short
-        # libFuzzer campaign with clang; each part self-skips if its tool is
-        # missing, so this step is what makes CI actually exercise them.
+        # gcc + clang ship on ubuntu-latest; valgrind does not.  Per push,
+        # tests/fmi/test_c_unit.py builds the wrapper with the default `cc`
+        # (gcc), plain and with ASan/UBSan, and runs the fuzz binary under
+        # valgrind (test_fuzz_under_valgrind), which self-skips without it:
+        # that is what this step is for.  The unit binary under valgrind and
+        # the libFuzzer campaign -- the only use of clang -- are slow-marked
+        # and run in slow-tests.yml, which installs both itself.
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind clang
 
       - name: Compilation cache mode
@@ -218,6 +228,7 @@ jobs:
           restore-keys: ${{ steps.cc.outputs.key }}-
 
       - name: Run tests
+        id: tests
         env:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
@@ -233,9 +244,15 @@ jobs:
           # file per entry to decide what to evict -- quadratic over a cold
           # run of tens of thousands of compiles, and it pushed the first
           # trial of this lane past 95 minutes.  The cap's other effect is a
-          # file lock, which only matters with several processes writing
-          # the same directory; the lanes run one pytest process.  A cold
-          # run starts empty, so the cache is bounded by one suite's worth.
+          # file lock.  Without it, more than one process can still write
+          # here: each lane runs one pytest process, but a test that starts
+          # a Python subprocess passes this variable on, and the child reads
+          # and writes the same directory.  JAX writes an entry in place
+          # (no temp file and rename) and never rewrites one that exists, so
+          # a child killed mid-write leaves a truncated entry for good; the
+          # "Drop unreadable compilation-cache entries" step below removes
+          # those before a cache is saved.  A cold run starts empty, so the
+          # cache is bounded by one suite's worth.
           # Record each test's JAX trace / lower / compile / cache-read
           # time into the JUnit XML (tests/_jax_timing.py), so the budget
           # step can say why a slow test is slow.
@@ -269,18 +286,31 @@ jobs:
         # budget is in docs/developer_guide/testing_standards.md.
         if: ${{ !cancelled() }}
         run: |
-          python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
-            --allowlist tests/duration_allowlist.txt --markdown /dev/null
           # What this shard's cache was, for the lane summary: warm only if a
-          # cache was actually restored.
+          # cache was actually restored.  Written first: this runs under
+          # `bash -e`, so a line after a failing gate would never run and the
+          # lane summary would label the lane from the other shards alone.
           echo "${{ (steps.cc.outputs.mode == 'warm' && steps.cc-restore.outputs.cache-matched-key != '') && 'warm' || 'cold' }}" \
             > cache-mode-shard${{ matrix.shard }}.txt
+          python scripts/report_test_durations.py test-results-shard${{ matrix.shard }}.xml \
+            --allowlist tests/duration_allowlist.txt --markdown /dev/null
+
+      - name: Drop unreadable compilation-cache entries
+        # A truncated entry (see "No JAX_COMPILATION_CACHE_MAX_SIZE" above)
+        # would be restored by every later pull request, and reading it
+        # raises there (JAX warns; pytest's filterwarnings=error makes that
+        # a test error).  Every entry must decompress whole before a save.
+        id: prune-cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' }}
+        run: python scripts/prune_jax_cache.py "${{ runner.temp }}/jax-cache"
 
       - name: Save compilation cache
         # Only after a merge (a push to main / release/**), whose run
         # started from an empty cache: the saved cache then holds exactly
-        # the base branch's programs.  Pull requests never save.
-        if: ${{ !cancelled() && github.event_name == 'push' }}
+        # the base branch's programs.  Only when the test step passed: a
+        # failed or crashed run may have killed a writer mid-entry.  Pull
+        # requests never save.
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.tests.outcome == 'success' && steps.prune-cache.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/jax-cache
@@ -330,9 +360,12 @@ jobs:
           fi
           [ "$n" -gt 0 ] || exit 0
           # warm, cold, or mixed when the shards differ (a shard whose CPU
-          # model had no cache yet runs cold).
+          # model had no cache yet runs cold) -- or when a shard's mode file
+          # is missing, since that shard's mode is then unknown.
           modes=$(cat results/cache-mode-shard*.txt 2>/dev/null | sort -u)
           case "$modes" in warm|cold) mode=$modes ;; *) mode=mixed ;; esac
+          nmodes=$(ls results/cache-mode-shard*.txt 2>/dev/null | wc -l)
+          [ "$nmodes" -eq 4 ] || mode=mixed
           python3 scripts/report_test_durations.py results/test-results-shard*.xml \
             --allowlist tests/duration_allowlist.txt --fail-over 0 $extra --cache-mode "$mode" \
             --title "Test durations (Python 3.12, JAX ${{ matrix.jax-version }}, $n of 4 shards)"
@@ -356,11 +389,21 @@ jobs:
           pip install -e ".[ci,usd]"
 
       - name: Run USD tests
+        # tests/usd/, plus every test elsewhere that needs usd-core: the
+        # sharded lanes install .[ci] without it, so these skip there, and
+        # this is the only job that runs them.  A file that imports pxr or
+        # maddening.usd must be listed here, or in the exemptions of
+        # tests/compliance/test_ci_workflows.py with the reason it runs
+        # without usd-core.
         env:
           JAX_PLATFORMS: cpu
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          python -m pytest tests/usd/ -v --tb=short
+          python -m pytest -v -rs --tb=short \
+            tests/usd/ \
+            tests/property/test_round_trips.py \
+            tests/cloud/multigpu/test_property_sharded_round_trips.py \
+            tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the

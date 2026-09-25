@@ -9,8 +9,10 @@ on the params checks; a node listed in ``MIGRATED`` must not skip them —
 that list is the ledger of the params migration.
 
 A battery over the 5 s test budget runs in the slow lane
-(``slow-tests.yml``, three times a week) rather than on every push; the
-cheap ones keep the full battery, params checks included, on every push.
+(``slow-tests.yml``: scheduled three times a week on ``main`` only, and on
+a release branch only when dispatched by hand) rather than on every push;
+the cheap ones keep the full battery, params checks included, on every
+push.
 
 The sampling envelopes are the nodes' validated regimes, not the
 ``(-1e4, 1e4)`` default: the checks are about the update's structure,

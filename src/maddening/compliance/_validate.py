@@ -303,10 +303,12 @@ def resolve_dotted_name(
                 f"function, method or property",
                 inherited_from,
             )
-        try:
-            target = inspect.unwrap(obj)
-        except ValueError:               # a __wrapped__ cycle
-            target = obj
+        target = obj
+        if callable(obj):
+            try:
+                target = inspect.unwrap(obj)
+            except ValueError:           # a __wrapped__ cycle
+                target = obj
         if not (inspect.isroutine(obj) or inspect.isroutine(target)):
             return Resolution(
                 False,

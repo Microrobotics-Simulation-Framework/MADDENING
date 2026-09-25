@@ -609,6 +609,15 @@ def test_finalise_records_the_install_and_its_environment():
     assert sbom["metadata"]["timestamp"] == "2026-09-25T00:00:00Z"
 
 
+def test_finalise_of_an_extra_records_that_extra_and_its_requirement():
+    comps = {**CORE, "pyzmq": "27.2.0"}
+    sbom = _finalise(_raw(comps, []), _probe(comps), install="net")
+    props = {p["name"]: p["value"] for p in sbom["metadata"]["properties"]}
+    assert props[check_sbom.PROP_INSTALL] == "net"
+    assert props[check_sbom.PROP + "requirement"] == "maddening[net]"
+    assert errors_of(sbom, "net") == []
+
+
 def test_finalise_refuses_an_environment_missing_a_declared_dependency():
     comps = {k: v for k, v in CORE.items() if k != "numpy"}
     with pytest.raises(ValueError, match="numpy>=1.24"):

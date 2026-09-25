@@ -339,7 +339,8 @@ class TestTracer:
 class TestLBMGraphIntegration:
     def test_graph_compile_and_step(self):
         gm = GraphManager()
-        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8))
+        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8,
+                                propeller_x=4))
         gm.compile()
         gm.step()
         state = gm.get_node_state("fluid")
@@ -349,7 +350,8 @@ class TestLBMGraphIntegration:
 
     def test_jit_compatible(self):
         """The update function should be JIT-compilable."""
-        node = LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8)
+        node = LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8,
+                           propeller_x=4)
         state = node.initial_state()
 
         @jax.jit
@@ -362,7 +364,8 @@ class TestLBMGraphIntegration:
     def test_scan_compatible(self):
         """Can run inside GraphManager.run_scan."""
         gm = GraphManager()
-        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8))
+        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8,
+                                propeller_x=4))
         gm.compile()
         final_state = gm.run_scan(5)
         assert "fluid" in final_state
@@ -372,7 +375,8 @@ class TestLBMGraphIntegration:
     def test_scan_with_history(self):
         """run_scan_with_history captures tracer field."""
         gm = GraphManager()
-        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8))
+        gm.add_node(LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8,
+                                propeller_x=4))
         gm.compile()
         _, history = gm.run_scan_with_history(5)
         assert "tracer" in history["fluid"]
@@ -448,14 +452,14 @@ class TestMultiphaseInit:
     def test_multiphase_validation(self):
         """Should reject invalid multiphase parameters."""
         with pytest.raises(ValueError, match="rho_liquid"):
-            LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8,
+            LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8, propeller_x=4,
                         G=-5.0, rho_liquid=0.1, rho_gas=0.5)
         with pytest.raises(ValueError, match="rho_gas"):
-            LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8,
+            LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8, propeller_x=4,
                         G=-5.0, rho_gas=-0.1)
 
     def test_multiphase_initial_state_shapes(self):
-        node = LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8,
+        node = LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8, propeller_x=4,
                            G=-5.0, fill_fraction=0.55)
         state = node.initial_state()
         assert state["f"].shape == (8, 8, 8, 19)
@@ -562,7 +566,7 @@ class TestMultiphaseDynamics:
 
     def test_jit_compatible(self):
         """Multiphase update should be JIT-compilable."""
-        node = LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8,
+        node = LBMPipeNode("f", 0.01, nx=8, ny=8, nz=8, propeller_x=4,
                            G=-4.5, fill_fraction=0.55)
         state = node.initial_state()
 
@@ -584,7 +588,7 @@ class TestMultiphaseDynamics:
         """G=0 should produce identical results to the original single-phase."""
         gm = GraphManager()
         node = LBMPipeNode("fluid", timestep=0.01, nx=8, ny=8, nz=8,
-                           propeller_strength=0.001, gravity=-0.001,
+                           propeller_x=4, propeller_strength=0.001, gravity=-0.001,
                            G=0.0, fill_fraction=0.55)
         gm.add_node(node)
         import warnings

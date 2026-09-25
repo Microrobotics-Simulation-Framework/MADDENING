@@ -696,6 +696,82 @@ class TestImplementationMappingGate:
         assert "declared a JAX primitive" in out
         assert "OK: 1 implementation mapping(s) verified, 1 not checked" in out
 
+    # -- a row traces its term to code, not to a whole class -------------
+    #
+    # audit_040_p4_2, M5: re-pointing a row from ``HeatNode.update`` to
+    # ``HeatNode`` passed, because the resolver asked only for something
+    # callable and a class is.
+
+    def test_a_row_re_pointed_from_a_method_to_its_class_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        _guide(tmp_path, "| Diffusion | `maddening.nodes.heat.HeatNode` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        err = capsys.readouterr().err
+        assert "resolves to the class HeatNode" in err
+        assert "Class `HeatNode`" in err            # the hint says how to mean it
+
+    def test_the_audits_m5_on_the_shipped_heat_guide_fails(
+        self, mapping_gate, tmp_path
+    ):
+        text = (REPO_ROOT / "docs" / "algorithm_guide" / "nodes"
+                / "heat_node.md").read_text()
+        mutated = text.replace("`maddening.nodes.heat.HeatNode.update`",
+                               "`maddening.nodes.heat.HeatNode`", 1)
+        assert mutated != text
+        (tmp_path / "heat_node.md").write_text(mutated)
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_row_that_declares_it_maps_the_class_is_allowed(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Grid set-up | `maddening.nodes.heat.HeatNode` | "
+               "Class `HeatNode`: the constructor builds the grid |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    @pytest.mark.parametrize("notes", [
+        "Class `BallNode`",                       # names another class
+        "the Class `HeatNode` constructor",      # not at the start
+        "class `HeatNode`",                       # not the spelling
+    ])
+    def test_a_class_marker_is_read_exactly(self, mapping_gate, tmp_path, notes):
+        _guide(tmp_path,
+               f"| Grid set-up | `maddening.nodes.heat.HeatNode` | {notes} |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_class_marker_on_a_row_naming_no_class_fails(
+        self, mapping_gate, tmp_path, capsys
+    ):
+        """The marker is a claim, like the inherited one; a stale one fails."""
+        _guide(tmp_path,
+               "| Diffusion | `maddening.nodes.heat.HeatNode.update` | "
+               "Class `HeatNode` |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+        assert "no code span in it resolves to a class" in capsys.readouterr().err
+
+    def test_a_class_marker_does_not_excuse_the_rows_other_spans(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Grid set-up | `maddening.nodes.heat.HeatNode`, "
+               "`maddening.nodes.ball.BallNode` | Class `HeatNode` |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 1
+
+    def test_a_property_is_code_a_row_can_trace_to(self, mapping_gate, tmp_path):
+        """Not callable when read off the class, and still a function."""
+        _guide(tmp_path,
+               "| Static fields | `maddening.nodes.heat.HeatNode.static_data` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
+    def test_a_staticmethod_and_a_module_function_still_resolve(
+        self, mapping_gate, tmp_path
+    ):
+        _guide(tmp_path,
+               "| Mask guard | `maddening.nodes.adaptive.base.AdaptiveNode.mask_safe` | |\n",
+               "| Integration | `maddening.core.simulation.integrators.integrate_node` | |\n")
+        assert mapping_gate.main([str(tmp_path)]) == 0
+
     def test_a_scope_of_only_declared_primitives_fails(
         self, mapping_gate, tmp_path
     ):
@@ -1279,6 +1355,80 @@ class TestCitationGateReadsWhatPandocReads:
     ):
         assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 0
 
+    # -- the in-text form: ``@Key`` in prose, outside any bracket ------------
+    #
+    # audit_040_p4_2, C5: ``As @NoSuchKey2099 shows.`` appended to a guide
+    # passed, because only bracketed citations were read.
+
+    @pytest.mark.parametrize("doc", [
+        pytest.param("See [@Crank1975].\n\nAs @Nobody2031 shows.\n", id="C5-mid-sentence"),
+        pytest.param("See [@Crank1975].\n\n@Nobody2031 says so.\n", id="line-start"),
+        pytest.param("See [@Crank1975].\n\nAs @Nobody2031 [p. 3] shows.\n",
+                     id="with-a-locator"),
+        pytest.param("See [@Crank1975].\n\nAs @{Nobody 2031} shows.\n", id="braced"),
+        pytest.param("See [@Crank1975].\n\n```python\nx = 1\n```\n\nAs @Nobody2031 shows.\n",
+                     id="after-a-closed-fence"),
+    ])
+    def test_an_in_text_citation_of_an_undefined_key_fails(
+        self, citations_gate, tmp_path, monkeypatch, capsys, doc
+    ):
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 1
+        assert "(an in-text citation" in capsys.readouterr().err
+
+    def test_the_audits_c5_on_the_shipped_heat_guide_fails(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        guide = REPO_ROOT / "docs" / "algorithm_guide" / "nodes" / "heat_node.md"
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "heat_node.md").write_text(
+            guide.read_text() + "\nAs @NoSuchKey2099 shows.\n")
+        monkeypatch.setenv("BIB_PATH", str(REPO_ROOT / "docs" / "bibliography.bib"))
+        assert citations_gate.main([str(docs)]) == 1
+
+    def test_an_in_text_citation_of_a_defined_key_passes_and_counts(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        doc = "As @Crank1975 shows, and [@Crank1975] again.\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 0
+        assert "OK: 2 citation(s) verified" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("doc", [
+        pytest.param("Tag it `@stability(StabilityLevel.STABLE)`.\n", id="inline-code"),
+        pytest.param("Tag it ``@stability`` twice.\n", id="double-backtick-code"),
+        pytest.param("```python\n@pytest.mark.slow\ndef test_x(): ...\n```\n",
+                     id="fenced-code"),
+        pytest.param("~~~~\n@given(st.floats())\n~~~~\n", id="tilde-fence"),
+        pytest.param("```\n@unclosed\n", id="unclosed-fence-runs-to-the-end"),
+        pytest.param("<!-- @NotACitation -->\n", id="html-comment"),
+        pytest.param("Mail me@example.org or see a@b.\n", id="address"),
+        pytest.param("Compute `A @ B`, or A @ B in prose.\n", id="matmul"),
+        pytest.param("A [bracketed @Crank1975 key] is read once.\n",
+                     id="inside-a-bracket"),
+    ])
+    def test_code_comments_and_addresses_are_not_in_text_citations(
+        self, citations_gate, tmp_path, doc
+    ):
+        path = tmp_path / "g.md"
+        path.write_text(doc)
+        assert citations_gate.extract_in_text_citations(str(path)) == []
+
+    def test_a_decorator_written_in_prose_is_read_as_pandoc_reads_it(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Pandoc renders it as a broken citation; the gate says so, and how
+        to write it instead."""
+        doc = "See [@Crank1975].  Current @stability tagging.\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 1
+        assert "put it in backticks" in capsys.readouterr().err
+
+    def test_an_in_text_citation_is_reported_on_its_own_line(
+        self, citations_gate, tmp_path
+    ):
+        doc = tmp_path / "g.md"
+        doc.write_text("Intro.\n\n```\ncode\n```\nAs @Nobody2031 shows.\n")
+        assert citations_gate.extract_in_text_citations(str(doc)) == [(6, "Nobody2031")]
+
     def test_c10_an_entry_inside_a_comment_block_is_not_defined(
         self, citations_gate, tmp_path, monkeypatch, capsys
     ):
@@ -1465,6 +1615,7 @@ anomalies:
     resolution_status: "{status}"
     resolution_version: "0.4.0"
     affected_versions: "{versions}"
+    residual_risk: "Test"
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     verification:
@@ -1497,6 +1648,53 @@ anomalies:
     affected_components:
       - "maddening.nodes.heat.HeatNode"
 """
+
+
+def _git(repo, *args):
+    """Run git in ``repo`` with no dependence on the machine's git config."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.org")
+    return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True, env=env).stdout
+
+
+def _commit_registry(repo, *versions, rel="known_anomalies.yaml"):
+    """A throwaway git repository whose registry went through ``versions``.
+
+    Each version of the registry, at ``rel`` inside ``repo``, is one
+    commit, oldest first; the work tree is left at the last.  Returns the
+    registry's path.
+    """
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q")
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for i, text in enumerate(versions):
+        path.write_text(text)
+        _git(repo, "add", rel)
+        _git(repo, "commit", "-q", "-m", f"registry version {i}")
+    return path
+
+
+#: Where the shipped registry sits.  A registry in a subdirectory is the
+#: case that matters: git reads a pathspec relative to its working
+#: directory, and a lookup run from ``docs/validation`` once found nothing.
+_NESTED_REGISTRY = "docs/validation/known_anomalies.yaml"
+
+
+_THREE_ANOMALIES = _TWO_ANOMALIES_WITH_A_GAP.replace(
+    '''  - anomaly_id: "MADD-ANO-003"''',
+    '''  - anomaly_id: "MADD-ANO-002"
+    title: "Test"
+    description: "Test"
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: "Test"
+    resolution_status: "{status}"
+    affected_versions: ">=0.1.0"
+  - anomaly_id: "MADD-ANO-003"''')
 
 
 class TestAnomalyGateFailsClosedOnEvidence:
@@ -1555,7 +1753,11 @@ class TestAnomalyGateFailsClosedOnEvidence:
     # The gap rule's message tells the author to record a retirement in
     # _RETIRED_ANOMALY_IDS; until 0.4.0 the rule never read it, so a
     # genuinely retired ID could not pass.  Each case below builds a
-    # repository root holding only the file the gate reads.
+    # repository root holding only the file the gate reads.  A retirement
+    # is an ``{id: reason}`` dict, and the gate reads the retired entry's
+    # last status from git (audit_040_p4_2, A2), so the registry these cases
+    # use lives in a throwaway repository whose history never held
+    # MADD-ANO-002 -- a number no commit recorded, which may be retired.
 
     @staticmethod
     def _root_retiring(tmp_path, assignment):
@@ -1563,20 +1765,19 @@ class TestAnomalyGateFailsClosedOnEvidence:
         (root / "tests" / "compliance").mkdir(parents=True)
         (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
             f"_HIGHEST_ANOMALY_ID = 3\n{assignment}\n")
-        path = tmp_path / "known_anomalies.yaml"
-        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        path = _commit_registry(tmp_path / "repo", _TWO_ANOMALIES_WITH_A_GAP)
         return root, path
 
     def test_a_gap_recorded_as_retired_passes(self, tmp_path):
         root, path = self._root_retiring(
-            tmp_path, '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002"})')
+            tmp_path, '_RETIRED_ANOMALY_IDS: dict = {"MADD-ANO-002": "never used"}')
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 0, result.stdout + result.stderr
 
     @pytest.mark.parametrize("assignment", [
-        "_RETIRED_ANOMALY_IDS: frozenset = frozenset()",
-        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-004"})',
-        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-VER-002"})',
+        "_RETIRED_ANOMALY_IDS: dict = {}",
+        '_RETIRED_ANOMALY_IDS: dict = {"MADD-ANO-004": "never used"}',
+        '_RETIRED_ANOMALY_IDS: dict = {"MADD-VER-002": "never used"}',
         '_RETIRED_BENCHMARK_IDS: frozenset = frozenset({"MADD-ANO-002"})',
         "",
     ], ids=["empty", "another-id", "another-prefix", "the-benchmark-set", "no-assignment"])
@@ -1587,21 +1788,38 @@ class TestAnomalyGateFailsClosedOnEvidence:
         assert "missing from the contiguous range" in result.stderr
         assert "MADD-ANO-002" in result.stderr
 
-    def test_a_retired_set_the_gate_cannot_read_excuses_nothing(self, tmp_path):
-        root, path = self._root_retiring(
-            tmp_path, '_RETIRED_ANOMALY_IDS = frozenset(_load_ids("MADD-ANO-002"))')
+    @pytest.mark.parametrize("assignment", [
+        '_RETIRED_ANOMALY_IDS = dict(_load_ids("MADD-ANO-002"))',
+        # The set form this record took until 0.4.0: an ID with no reason.
+        '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002"})',
+        '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002"}',
+    ], ids=["computed", "the-old-frozenset", "a-set-literal"])
+    def test_a_retired_record_the_gate_cannot_read_excuses_nothing(
+            self, tmp_path, assignment):
+        root, path = self._root_retiring(tmp_path, assignment)
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 1, result.stdout
-        assert "is not a literal set" in result.stderr
+        assert "is not a literal {id: reason} dict" in result.stderr
+        assert "missing from the contiguous range" in result.stderr
+
+    @pytest.mark.parametrize("reason", ['""', '"   "', "None"])
+    def test_a_retirement_without_a_reason_excuses_nothing(self, tmp_path, reason):
+        root, path = self._root_retiring(
+            tmp_path, f'_RETIRED_ANOMALY_IDS = {{"MADD-ANO-002": {reason}}}')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "with no reason" in result.stderr
         assert "missing from the contiguous range" in result.stderr
 
     def test_a_retired_id_still_in_the_registry_fails(self, tmp_path):
         root, path = self._root_retiring(
             tmp_path,
-            '_RETIRED_ANOMALY_IDS: frozenset = frozenset({"MADD-ANO-002", "MADD-ANO-003"})')
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "never used", '
+            '"MADD-ANO-003": "still here"}')
         result = _run("check_anomalies", str(path), "--repo-root", str(root))
         assert result.returncode == 1, result.stdout
         assert "MADD-ANO-003 is recorded as retired" in result.stderr
+        assert "the retirement never happened" in result.stderr
 
     @staticmethod
     def _mutated_registry(tmp_path, mutate):
@@ -1638,6 +1856,162 @@ class TestAnomalyGateFailsClosedOnEvidence:
                       "--repo-root", str(REPO_ROOT))
         assert result.returncode == 1, result.stdout
         assert "MADD-ANO-010" in result.stderr
+
+
+class TestAPartialResolutionStatesWhatIsLeft:
+    """audit_040_p4_2, A9: a ``partially_resolved`` entry with its
+    ``residual_risk`` deleted passed, so the SOUP table could say "partially
+    resolved" and nothing about which part a user is still exposed to."""
+
+    @pytest.mark.parametrize("residual", ["", '    residual_risk: ""\n',
+                                          '    residual_risk: null\n',
+                                          '    residual_risk: "   "\n'],
+                             ids=["absent", "empty", "null", "blank"])
+    def test_a_partial_resolution_without_residual_risk_fails(
+            self, tmp_path, residual):
+        text = _resolved_with_evidence(status="partially_resolved").replace(
+            '    residual_risk: "Test"\n', residual)
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-001" in result.stderr
+        assert "residual_risk is empty or missing" in result.stderr
+
+    def test_a_resolved_entry_needs_no_residual_risk(self, tmp_path):
+        """MADD-ANO-001 and 004 ship resolved with none; the rule is the
+        partial status's."""
+        text = _resolved_with_evidence(status="resolved").replace(
+            '    residual_risk: "Test"\n', "")
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        result = _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_deleting_a_shipped_partial_resolutions_residual_risk_fails(
+            self, tmp_path):
+        """The audit's A9 replayed on the shipped registry: MADD-ANO-014."""
+        def strip(data):
+            entry = next(a for a in data["anomalies"]
+                         if a["anomaly_id"] == "MADD-ANO-014")
+            assert entry["resolution_status"] == "partially_resolved"
+            del entry["residual_risk"]
+
+        path = TestAnomalyGateFailsClosedOnEvidence._mutated_registry(
+            tmp_path, strip)
+        result = _run("check_anomalies", str(path), "--prefix", "MADD-ANO-",
+                      "--repo-root", str(REPO_ROOT))
+        assert result.returncode == 1, result.stdout
+        assert "MADD-ANO-014: resolution_status is 'partially_resolved' but " \
+               "residual_risk is empty or missing" in result.stderr
+
+
+class TestARetirementOfAReachableEntryIsRefused:
+    """audit_040_p4_2, A2: deleting open MADD-ANO-035 and listing it in
+    ``_RETIRED_ANOMALY_IDS`` passed, which takes a live defect out of the
+    SOUP package with one line nobody had to justify.
+
+    The tree no longer holds a retired entry, so its last status comes from
+    git: the parent of the commit that removed it, or ``HEAD`` when the
+    deletion is not committed.  These cases drive
+    ``check_anomalies.retirement_errors`` on throwaway repositories, and one
+    runs the gate end to end.
+    """
+
+    @staticmethod
+    def _deleted(tmp_path, status):
+        """002 committed with ``status``, then removed in a second commit,
+        in a registry laid out where the shipped one is."""
+        return _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status=status),
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+
+    @pytest.mark.parametrize("status", ["open", "partially_resolved", "wont_fix",
+                                        "anything-unenumerated"])
+    def test_retiring_an_entry_last_committed_reachable_is_refused(
+            self, anomalies_gate, tmp_path, status):
+        path = self._deleted(tmp_path, status)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1, errors
+        assert "MADD-ANO-002 is recorded as retired" in errors[0]
+        assert f"is {status!r}, which leaves the defect reachable" in errors[0]
+
+    @pytest.mark.parametrize("status", ["resolved", "duplicate"])
+    def test_retiring_an_entry_last_committed_closed_is_accepted(
+            self, anomalies_gate, tmp_path, status):
+        path = self._deleted(tmp_path, status)
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path) == []
+
+    def test_the_last_status_is_the_one_before_the_removal(
+            self, anomalies_gate, tmp_path):
+        """Resolved once, reopened, then deleted: the reopening is what counts."""
+        path = _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status="resolved"),
+                                _THREE_ANOMALIES.format(status="open"),
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None and entry["resolution_status"] == "open", where
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+
+    def test_the_lookup_works_from_a_nested_registry_and_the_repo_root(
+            self, anomalies_gate, tmp_path):
+        for rel in (_NESTED_REGISTRY, "known_anomalies.yaml"):
+            path = _commit_registry(tmp_path / rel.replace("/", "_"),
+                                    _THREE_ANOMALIES.format(status="resolved"),
+                                    _TWO_ANOMALIES_WITH_A_GAP, rel=rel)
+            entry, where, problem = anomalies_gate.last_committed_entry(
+                path, "MADD-ANO-002")
+            assert problem is None, (rel, problem)
+            assert entry["resolution_status"] == "resolved", rel
+            assert where.endswith("^"), where
+
+    def test_a_number_no_commit_recorded_may_be_retired(
+            self, anomalies_gate, tmp_path):
+        path = _commit_registry(tmp_path / "repo", _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        assert anomalies_gate.last_committed_entry(path, "MADD-ANO-002") == (
+            None, None, None)
+        assert anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path) == []
+
+    def test_an_uncommitted_deletion_is_read_from_head(
+            self, anomalies_gate, tmp_path):
+        path = _commit_registry(tmp_path / "repo",
+                                _THREE_ANOMALIES.format(status="open"),
+                                rel=_NESTED_REGISTRY)
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "(HEAD) is 'open'" in errors[0], errors
+
+    def test_a_registry_outside_git_is_refused_not_trusted(
+            self, anomalies_gate, tmp_path):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "not in a git work tree" in errors[0], errors
+
+    def test_a_shallow_clone_is_refused_not_trusted(self, anomalies_gate, tmp_path):
+        """CI's default checkout is one commit deep: the removal is not in it."""
+        self._deleted(tmp_path, "open")
+        origin = tmp_path / "repo"
+        clone = tmp_path / "clone"
+        _git(tmp_path, "clone", "-q", "--depth", "1",
+             f"file://{origin}", str(clone))
+        errors = anomalies_gate.retirement_errors(
+            {"MADD-ANO-002": "why"}, clone / _NESTED_REGISTRY)
+        assert len(errors) == 1 and "shallow clone" in errors[0], errors
+
+    def test_the_gate_refuses_it_end_to_end(self, tmp_path):
+        """The audit's A2, through the gate as CI runs it."""
+        path = self._deleted(tmp_path, "open")
+        root = tmp_path / "root"
+        (root / "tests" / "compliance").mkdir(parents=True)
+        (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "no longer needed"}\n')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "which leaves the defect reachable" in result.stderr
+        assert "missing from the contiguous range" not in result.stderr
 
 
 class TestAnomalyGateVerifiesSomething:

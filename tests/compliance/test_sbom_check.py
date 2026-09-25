@@ -50,6 +50,7 @@ PYPROJECT = {
         "name": "maddening",
         "version": VERSION,
         "license": "LGPL-3.0-or-later",
+        "requires-python": ">=3.12",
         "dependencies": ["jax>=0.10,<0.13", "numpy>=1.24", "pyyaml>=6.0"],
         "optional-dependencies": {
             "net": ["pyzmq>=25.0"],
@@ -213,8 +214,18 @@ def test_a_soup_item_absent_from_the_sbom_and_pyproject_is_named():
     assert _has(errors, "SOUP item scipy", "declares no base dependency")
 
 
+def _depended_on_by(sbom: dict, parent: str, child: str) -> None:
+    """Give ``child`` an incoming edge, as a transitive install would."""
+    ref = component(sbom, parent)["bom-ref"]
+    dep = next(d for d in sbom["dependencies"] if d["ref"] == ref)
+    dep.setdefault("dependsOn", []).append(component(sbom, child)["bom-ref"])
+
+
 def test_a_soup_item_pyproject_does_not_declare_is_named_even_when_installed():
-    sbom = make_sbom(components={**CORE, "scipy": "1.18.1"})
+    # Installed transitively (jax pulls it in), so the one rule that fires
+    # is the SOUP rule under test and not the orphan rule.
+    sbom = mutate(make_sbom(components={**CORE, "scipy": "1.18.1"}),
+                  lambda s: _depended_on_by(s, "jax", "scipy"))
     errors = errors_of(sbom, soup=SOUP_ITEMS + ["scipy>=1.0"])
     assert errors == [f"SBOM: SOUP item scipy is listed in soup_package.md, but "
                       f"pyproject.toml declares no base dependency of that name"]
@@ -303,6 +314,84 @@ def test_a_root_edge_to_an_undeclared_package_is_named():
         root["dependsOn"].append("jaxlib==0.11.2")
     assert _has(errors_of(mutate(make_sbom(), add)),
                 "root component depends on 'jaxlib==0.11.2'", "does not declare")
+
+
+# -- what soup_package.md section 6 rules out (audit_040_p4_2, S2/S3/S8) -----
+#
+# Each edit below was resealed, as a regeneration would be, and passed.
+
+
+def test_an_orphan_component_no_install_brings_in_is_named():
+    """S2: a component nothing reaches from the root, with its own node."""
+    def orphan(s):
+        s["components"].append({
+            "bom-ref": "requests==2.0.0", "name": "requests", "version": "2.0.0",
+            "purl": "pkg:pypi/requests@2.0.0", "type": "library",
+            "licenses": [{"license": {"id": "Apache-2.0"}}]})
+        s["dependencies"].append({"ref": "requests==2.0.0"})
+    errors = errors_of(mutate(make_sbom(), orphan))
+    assert errors == ["SBOM: component requests ('requests==2.0.0') is reached by "
+                      "no path from the root component in the dependency graph: "
+                      "nothing `pip install maddening` resolves depends on it, so "
+                      "it is not part of this install"]
+
+
+def test_a_transitive_component_is_reached_through_its_parent():
+    """jaxlib has no root edge; jax's edge is what makes it part of the install."""
+    assert errors_of(make_sbom()) == []
+    cut = mutate(make_sbom(), lambda s: next(
+        d for d in s["dependencies"] if d["ref"] == _ref("jax", CORE["jax"])
+    ).update(dependsOn=[]))
+    assert _has(errors_of(cut), "component jaxlib", "reached by no path")
+
+
+def test_a_component_without_a_bom_ref_is_named():
+    sbom = mutate(make_sbom(), lambda s: component(s, "numpy").pop("bom-ref"))
+    assert _has(errors_of(sbom), "component numpy has no bom-ref")
+
+
+@pytest.mark.parametrize("full, short", [("3.11.9", "3.11"), ("3.10.4", "3.10")])
+def test_a_python_outside_requires_python_is_named(full, short):
+    """S3: the SBOM records a Python ``requires-python`` refuses."""
+    env = {**ENV, "python_full_version": full, "python_version": short}
+    errors = errors_of(make_sbom(env=env))
+    assert _has(errors, f"records python_full_version {full}", "'>=3.12'")
+    assert _has(errors, f"records python_version {short}", "'>=3.12'")
+
+
+def test_the_supported_python_and_a_later_one_are_admitted():
+    for full, short in (("3.12.3", "3.12"), ("3.13.1", "3.13")):
+        env = {**ENV, "python_full_version": full, "python_version": short}
+        assert errors_of(make_sbom(env=env)) == [], full
+
+
+def test_no_requires_python_is_no_constraint():
+    pyproject = copy.deepcopy(PYPROJECT)
+    del pyproject["project"]["requires-python"]
+    env = {**ENV, "python_full_version": "3.11.9", "python_version": "3.11"}
+    assert errors_of(make_sbom(env=env), pyproject=pyproject) == []
+
+
+@pytest.mark.parametrize("licences", [None, [], [{"license": {}}]],
+                         ids=["dropped", "empty", "no-id-name-or-expression"])
+def test_a_component_without_a_licence_is_named(licences):
+    """S8: soup_package.md section 6 says every component carries its licence."""
+    def drop(s):
+        comp = component(s, "numpy")
+        if licences is None:
+            comp.pop("licenses")
+        else:
+            comp["licenses"] = licences
+    errors = errors_of(mutate(make_sbom(), drop))
+    assert _has(errors, "component numpy carries no licence")
+
+
+def test_every_committed_component_carries_a_licence():
+    """The rules above hold of the files CI checks, not only of the fixture."""
+    for path in sorted(check_sbom.SBOM_DIR.glob("*.cdx.json")):
+        sbom = json.loads(path.read_text())
+        for comp in sbom["components"]:
+            assert check_sbom._license_values(comp), (path.name, comp["name"])
 
 
 def test_a_hand_edited_sbom_is_refused():
@@ -569,8 +658,11 @@ def _raw(components: dict[str, str], root_edges: list[str], licences=True) -> di
             "properties": [{"name": "cdx:reproducible", "value": "true"}],
         },
         "components": comps,
+        # cyclonedx-py records the transitive edges too: jax -> jaxlib.
         "dependencies": [{"ref": "root-component", "dependsOn": root_edges}]
-        + [{"ref": _ref(n, v)} for n, v in components.items()],
+        + [{"ref": _ref(n, v), **({"dependsOn": [_ref("jaxlib", components["jaxlib"])]}
+                                   if n == "jax" and "jaxlib" in components else {})}
+           for n, v in components.items()],
     }
 
 

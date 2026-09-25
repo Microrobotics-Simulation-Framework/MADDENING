@@ -131,6 +131,7 @@ Rules:
 - CI validates all function names resolve to existing callables (`scripts/check_impl_mapping.py`)
 - Every code span in the Implementation column is a fully qualified `maddening.*` name, except in a row whose Notes cell begins `JAX primitive` or `Third-party`
 - A symbol the named class inherits rather than defines needs a Notes cell that begins ``Inherited from `BaseClass` ``; the gate checks the base and fails the marker once the class overrides the symbol
+- Every symbol is a function, method or property, not a class: name the method the term is computed in.  A row that does mean a class (its constructor, say) begins its Notes cell ``Class `Name` ``; the gate fails the marker when no symbol in the row is that class
 
 ## Commit Message Convention
 

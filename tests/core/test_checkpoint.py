@@ -334,6 +334,8 @@ class TestMetaMerge:
         gm.compile()
         return gm
 
+    # Per push, through run_scan without diagnostics:
+    # tests/core/test_checkpoint_meta_merge_through_run_scan.py::test_a_resumed_state_missing_a_meta_key_runs_through_run_scan
     @pytest.mark.slow  # compiles coupled graphs through step and scan: 5-12 s on CI
     def test_every_execution_path_accepts_a_resumed_state(self, tmp_path):
         """Resume into a graph with *more* ``_meta`` keys than the file."""
@@ -350,6 +352,8 @@ class TestMetaMerge:
         gm.run_scan(3)
         gm.run_scan_with_history(3)
 
+    # Per push, through run_scan without diagnostics:
+    # tests/core/test_checkpoint_meta_merge_through_run_scan.py::test_a_resumed_meta_key_this_graph_lacks_is_dropped_before_run_scan
     @pytest.mark.slow  # compiles coupled graphs through step and scan: 5-12 s on CI
     def test_a_meta_key_this_graph_does_not_have_is_dropped_with_a_warning(
         self, tmp_path,

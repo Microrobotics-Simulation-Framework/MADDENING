@@ -394,6 +394,15 @@ def is_additive(recorded: dict[str, Any], current: dict[str, Any]) -> bool:
     ``**kwargs``.  Anything else is breaking, including a widened annotation:
     the annotation is part of what a type checker holds callers to, and
     deciding which widenings are safe is not something this can do from text.
+
+    A defaulted parameter is not omittable when a recorded variadic already
+    catches what a caller would bind to it.  ``f(a, *args)`` to
+    ``f(a, b=1, *args)``: ``f(1, 2, 3)`` bound ``args=(2, 3)`` and now binds
+    ``b=2, args=(3,)`` (audit_040_p4_2, G3).  ``f(a, **kwargs)`` to
+    ``f(a, b=1, **kwargs)``: ``f(1, b=2)`` put ``b`` in ``kwargs`` and now
+    binds the parameter.  So a new positional parameter is breaking beside a
+    recorded ``*args``, and a new keyword-passable one beside a recorded
+    ``**kwargs``.
     """
     if recorded.get("kind") != current.get("kind"):
         return False
@@ -424,13 +433,20 @@ def is_additive(recorded: dict[str, Any], current: dict[str, Any]) -> bool:
     if new_positional[:len(old_positional)] != old_positional:
         return False
 
-    # every new parameter is one an existing call can leave out
+    # every new parameter is one an existing call can leave out -- and one
+    # no existing call already reaches through a recorded variadic
+    old_kinds = {p["kind"] for p in old_params}
     for parameter in new_params:
         if parameter["name"] in set(recorded_names):
             continue
         if parameter["kind"] in ("VAR_POSITIONAL", "VAR_KEYWORD"):
             continue
         if "default" not in parameter:
+            return False
+        if "VAR_POSITIONAL" in old_kinds and parameter["kind"] in _POSITIONAL:
+            return False
+        if "VAR_KEYWORD" in old_kinds and parameter["kind"] in (
+                "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY"):
             return False
     return True
 

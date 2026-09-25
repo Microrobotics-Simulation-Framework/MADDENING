@@ -52,6 +52,8 @@ propeller_force : scalar, optional
 
 from __future__ import annotations
 
+import operator
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -414,14 +416,18 @@ class LBMPipeNode(SimulationNode):
     nx, ny, nz : int
         Grid dimensions.  ``nx`` is the pipe length (flow direction).
     tau : float
-        BGK relaxation time.  Must be > 0.5 for stability.
+        BGK relaxation time.  Must be finite and > 0.5 for stability.
         Kinematic viscosity: ``nu = (tau - 0.5) / 3``.
     pipe_radius : float
         Pipe radius as fraction of ``min(ny, nz) / 2`` (0-1).
     propeller_x : int
-        Axial position of the propeller disc (grid index).
+        Axial position of the propeller disc (grid index,
+        ``0 <= propeller_x < nx``).  The default, 10, therefore needs
+        ``nx > 10``; a position outside the grid is refused (until 0.4.0 it
+        built no disc, and the pipe ran with no propeller).
     propeller_radius : float
-        Propeller disc radius as fraction of pipe radius (0-1).
+        Propeller disc radius as fraction of pipe radius (0-1).  A disc
+        that covers no cell of the cross-section is refused.
     propeller_strength : float
         Body force magnitude applied at the propeller disc.
     initial_velocity : float
@@ -592,10 +598,18 @@ class LBMPipeNode(SimulationNode):
         initial_rho_liquid: float | None = None,
         initial_rho_gas: float | None = None,
     ):
+        # ``tau <= 0.5`` alone let a non-finite value through: inf passes
+        # it (no collision at all) and nan passes every comparison.
+        if not np.isfinite(tau):
+            raise ValueError(f"tau must be a finite number > 0.5 (got {tau}).")
         if tau <= 0.5:
             raise ValueError(
                 f"tau must be > 0.5 for stability (got {tau}). "
                 f"nu = (tau - 0.5) / 3 = {(tau - 0.5) / 3:.4f}"
+            )
+        if not np.isfinite(tau_tracer):
+            raise ValueError(
+                f"tau_tracer must be a finite number > 0.5 (got {tau_tracer})."
             )
         if tau_tracer <= 0.5:
             raise ValueError(
@@ -604,6 +618,25 @@ class LBMPipeNode(SimulationNode):
         if not 0.0 < fill_fraction <= 1.0:
             raise ValueError(
                 f"fill_fraction must be in (0, 1] (got {fill_fraction})."
+            )
+        # The actuator disc is one x-plane of the grid.  An index outside
+        # it used to build no disc at all (see the mask check below); the
+        # default, 10, is outside any pipe of 10 cells or fewer.
+        try:
+            prop_plane = operator.index(propeller_x)
+        except TypeError:
+            raise ValueError(
+                f"propeller_x must be an integer grid index along x (got "
+                f"{propeller_x!r})."
+            ) from None
+        if not 0 <= prop_plane < nx:
+            raise ValueError(
+                f"propeller_x={propeller_x} is outside the grid: the pipe has "
+                f"nx={nx} planes along x, indexed 0 to {nx - 1}, so the "
+                "propeller disc would cover no cell and exert no force.  Pass "
+                f"a propeller_x in [0, {nx})"
+                + (" (the default, 10, needs nx > 10)." if propeller_x == 10
+                   else ".")
             )
         if initial_rho_liquid is None:
             initial_rho_liquid = rho_liquid
@@ -655,6 +688,20 @@ class LBMPipeNode(SimulationNode):
         self._propeller_mask = self._build_propeller_mask(
             nx, ny, nz, propeller_x, propeller_radius, pipe_radius,
         )
+        # The disc must cover a cell.  ``mask.at[propeller_x]`` drops an
+        # index outside the grid without a word, and a radius that takes in
+        # no cell centre builds an empty disc, so either ran a pipe with no
+        # propeller at all: propeller_x=99 on nx=8 left max|u| at 3.7e-9
+        # after 10 steps, where propeller_x=4 reached 5.2e-3.
+        if not bool(jnp.any(self._propeller_mask)):
+            raise ValueError(
+                f"LBMPipeNode {name!r}: the propeller disc (propeller_radius="
+                f"{propeller_radius} of the pipe radius, pipe_radius="
+                f"{pipe_radius}) covers no cell of the {ny}x{nz} cross-section, "
+                "so the propeller would exert no force.  Increase "
+                "propeller_radius (a fraction of the pipe radius, 0-1) or use "
+                "a larger cross-section."
+            )
         self._nx = nx
         self._ny = ny
         self._nz = nz

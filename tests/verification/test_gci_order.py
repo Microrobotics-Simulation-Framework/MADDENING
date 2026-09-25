@@ -753,7 +753,8 @@ def test_mms_cannot_reach_lbm_pipe_at_all():
     needs revisiting -- so this fails loudly
     rather than leaving a stale justification in place.
     """
-    node = LBMPipeNode("pipe", 1.0, nx=1, ny=8, nz=8, tau=_PIPE_TAU)
+    node = LBMPipeNode("pipe", 1.0, nx=1, ny=8, nz=8, tau=_PIPE_TAU,
+                       propeller_x=0)
     assert node.boundary_input_spec() == {}
 
 

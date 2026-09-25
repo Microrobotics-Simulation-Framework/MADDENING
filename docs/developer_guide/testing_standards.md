@@ -110,6 +110,10 @@ python scripts/check_citations.py
 | `XLA_FLAGS` | Disable GPU autotune (avoids equinox segfaults) | `--xla_gpu_autotune_level=0` |
 | `PYTEST_DISABLE_PLUGIN_AUTOLOAD` | Prevent plugin conflicts | `1` |
 | `MADDENING_HYPOTHESIS_PROFILE` | Hypothesis depth/settings profile (`dev` or `ci`) | `dev` |
+| `MADDENING_TEST_SHARD` | Keep only shard `i` of `N` of the test files (`tests/_sharding.py`); CI sets it per job. Unset: every file | `2/4` |
+| `MADDENING_TEST_JAX_TIMING` | Record each test's JAX trace / lower / compile / cache-read time and processes started into the JUnit XML (`tests/_jax_timing.py`), for the time budget. CI sets it | `1` |
+| `MADDENING_REQUIRE_PACKAGING_TESTS` | Fail, rather than skip, the wheel test when the build backend is missing. CI's test lanes set it | `1` |
+| `JAX_COMPILATION_CACHE_DIR` | JAX's persistent compilation cache directory; the test lanes point it at the restored or empty cache (see *The compilation cache* below). Unset locally: no cache | `$RUNNER_TEMP/jax-cache` |
 
 ## 4. Property-Based Testing (recommended for physics nodes)
 
@@ -400,6 +404,8 @@ on every push, at the `ci` profile's depth, in the `verify-hypothesis` job,
 which selects `-m "slow or not slow"`. A slow test that needs a tool the
 default lane installs (valgrind, for `tests/fmi/test_c_unit.py`) needs
 `slow-tests.yml` to install it too, or it skips there and runs nowhere.
+Before you slow-mark a test that checks a framework property, read *What
+only the slow lane checks* below.
 
 Two more ways a test can fail to run where you expect it to:
 
@@ -426,7 +432,13 @@ CI enforces the budget in the `Test time budget` step of each test lane
   log (`--durations=0 --durations-min=1.0`). The XML is uploaded as the
   `test-durations-*` artifact and kept for 90 days.
 - An unlisted test over **5 s** gets a warning annotation on the run.
-- An unlisted test over **20 s** fails the job.
+- An unlisted test over **20 s** fails the job. An allowlisted one passes
+  (the allowlist has no ceiling), but gets a warning annotation, so a kept
+  test that regresses is still seen.
+- GitHub shows at most ten annotations per step, and the script emits no
+  more than that: the summary table is the complete list. The `Test
+  durations` job emits the 5 s warnings again for the whole lane, so each
+  one appears once on its shard and once on the lane summary.
 
 The hard line is four times the policy line because of runner noise. On
 eight green lane-runs of the same tree, one test's time varied by 1.7x
@@ -458,8 +470,23 @@ one summary per lane from all four shards' reports.
 
 To rebalance, edit `PINS`, which moves only the files you pin, and take the
 per-file totals from the lane summary. Changing the job count re-deals
-every file: change `shard:` and `MADDENING_TEST_SHARD` in `ci.yml`, and
-`PINS_FOR`. `tests/compliance/test_ci_sharding.py` checks that they agree.
+every file, and the count is written in several places that must move
+together:
+
+- in `ci.yml`: `shard:` and `MADDENING_TEST_SHARD` in the `test` job, the
+  `of4` in the compilation cache's key and in the durations artifact's
+  name, and the `-ne 4` and "of 4" in the `Test durations` job's
+  "Summarise the lane" step;
+- in `slow-tests.yml`: `shard:`, `MADDENING_TEST_SHARD`, the artifact
+  name's `of4` and the "of 4" in the step titles;
+- `PINS_FOR` in `tests/_sharding.py`, and the pins themselves.
+
+The compliance tests pin most of these at four, so a change to the count
+fails them until each place is updated: `test_ci_sharding.py` (`shard:`,
+`MADDENING_TEST_SHARD` and `PINS_FOR`, in both workflows),
+`test_ci_workflows.py` and `test_report_test_durations.py` (the cache key,
+and the lane summary run on four shards' reports and on three). The
+artifact names and the step titles are not checked.
 
 Every allowlist entry is `<node id> # kept: <why it must run on every
 push>`. The tests that were already over 5 s when the budget arrived
@@ -479,7 +506,7 @@ run reads it decides what its times mean:
 | Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt` or `tests/_sharding.py` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
 | Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: each program compiles in full the first time the run needs it. A later test that needs the same program reads it back from the cache the run is writing (17-25% of lookups on CI), so it can look fast because an earlier test paid. |
 | `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
-| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
+| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. The job reads the message from its checkout; if it cannot, it runs cold and says so in a warning. |
 
 Pull requests never save, so a second push cannot read the first push's
 cache: a new test that takes 25 s cold would otherwise pass at 8 s.
@@ -492,11 +519,23 @@ fast; only the cold run after the merge sees what it now costs, and fails
 it (commit `04cad05` found one such case by hand). So the `changes` job asks for
 a cold run when the diff adds or removes `mark.slow`, removes a
 `def test...` line (a test deleted, renamed or moved), or edits the
-allowlist or the shard assignment. What it does not see: a new test placed
-before an existing one that shares its program, which reads the program
-from the base cache on the pull request and pays for it after the merge,
-and slow marks applied by a helper or a hook rather than written as
-`mark.slow`.
+allowlist or the shard assignment. What it does not see, so a pull request
+that does one of these runs warm and the cold run after the merge is the
+first to see what the change moved:
+
+- a new test placed before an existing one that shares its program, which
+  reads the program from the base cache on the pull request and pays for
+  it after the merge;
+- slow marks applied by a helper or a hook rather than written as
+  `mark.slow`;
+- a parametrize case removed (a value deleted from the list, with no
+  `def test` line removed);
+- a test that stops running without being deleted: an added `skip`,
+  `skipif`, `xfail(run=False)` or `importorskip`.
+
+Closing the last two is planned for 0.5.0. Until then, put `[cold-ci]` in
+the head commit of a pull request that does either to a test sharing a
+compiled program with the tests after it.
 
 Each shard has its own cache, which works because shard *i* holds the same
 files on every branch (see *Sharded lanes*). XLA:CPU compiles for the
@@ -562,12 +601,16 @@ list, cold or warm. A cache cannot fix these tests; they need a code change
 or `@pytest.mark.slow`.
 
 **Work in a subprocess (not measured here)** lists the tests that would
-otherwise be on that list but started a process. A child's tracing and
-compiling never reach the pytest process, and the child inherits the cache
-directory, so a warm cache may still speed them up. Measured: a test whose
-JAX work runs in a child recorded no compile at all, and a warm run took it
-to about half its cold time. Compare a warm run before treating one as
-slow. Processes are counted from Python's audit events (`subprocess.Popen`,
+otherwise be on that list but started a process. For a child that runs
+JAX, the child's tracing and compiling never reach the pytest process, and
+the child inherits the cache directory, so a warm cache may still speed it
+up. Measured: a test whose JAX work runs in a child recorded no compile at
+all, and a warm run took it to about half its cold time. Compare a warm
+run before treating one as slow. The list does not know what a child
+runs, though: a test whose child is a C compiler, valgrind or a fuzzer is
+listed here too, although no cache can help it. Telling the two apart is
+planned for 0.5.0; until then, read the test before concluding a warm
+cache would help. Processes are counted from Python's audit events (`subprocess.Popen`,
 `os.system`, `os.fork`, `os.posix_spawn`), which miss `multiprocessing`
 children started with the `spawn` or `forkserver` method. A report written
 before the count existed cannot tell, so there a test with no JAX activity
@@ -591,6 +634,40 @@ The usual fixes:
   new program, so draw values rather than shapes and pass them as traced
   arguments. Use the `EXAMPLES_COSTLY` tier (see *Depth tiers* above) for
   properties that still compile per example.
+
+### What only the slow lane checks
+
+A slow mark takes a property off every push. On a release branch it then
+runs only when someone dispatches `slow-tests.yml`, so a regression can sit
+unseen until then. So write the reason at the mark: what the test costs on
+CI and what makes it cost that. For a test of a framework property (the
+coupling solvers and their reports, gradients, the params pytree,
+sharding, checkpoints, the CI gates), say one of two things there as well:
+
+- **where the property is still checked on every push.** Usually this is a
+  cheaper witness: a smaller graph, one step instead of eight, one check of
+  a battery. Name it on a comment line above the mark, as
+  `# Per push: <node id>`. For example, the adjoint of a coupling group
+  with a sharded member is slow-marked in
+  `tests/cloud/multigpu/test_coupling_group_with_sharded_and_replicated_members.py`,
+  and its comment names
+  `test_coupling_group_adjoint_through_a_sharded_member.py`, which
+  differentiates one step of the same group on every push;
+- **or that it is slow-only on purpose**, in which case the property
+  belongs in the table below with the reason.
+
+These framework properties are checked only in the slow lane, on purpose:
+
+| Property | Slow-marked tests | Why nothing checks it on every push |
+|---|---|---|
+| Second-order differentiation (a Hessian) through the IFT coupling step | `tests/core/test_coupling_ift_forward_mode.py::test_hessian_through_ift_step` | A second-order transform of the IFT step, compiled for both solvers: 5-10 s on CI, nearly all compile. First-order forward and reverse mode through the same step run on every push. |
+| The coupling fixture registry at full width: every registered fixture builds and steps; 19 of the 24 recorded baseline rows; 22 of the 24 cells of the multi-rate solver-equivalence class | `tests/core/test_coupling_fixture_invariants.py::test_every_registered_fixture_builds_and_steps` and `::test_every_recorded_fixture_still_measures_its_baseline_row`; `tests/core/test_coupling_solver_equivalence.py::test_the_multirate_solvers_agree_across_the_configuration_class` | Each fixture, row or cell is a graph of its own to build and compile: 4-10 s each on CI, and 34-50 s for the registry. The fixtures the per-push tests use are built on every push anyway. Five baseline rows, at least one from each recorded file, and the two cells in the counterexample's own configuration stay on every push. |
+| The FMU C wrapper under valgrind's memcheck, and the libFuzzer campaign | `tests/fmi/test_c_unit.py::test_c_unit_tests_under_valgrind`, `::test_libfuzzer_short_campaign` and `::test_fuzz_long_run` | The tools' own run time: 22-28 s each on CI for the first two. On every push the wrapper's unit tests and a short fuzz run pass built plain and under ASan/UBSan, and the fuzz binary runs under valgrind. |
+| The compile-count gate end to end: the baseline regenerated by the one command the gate prints, and the gate pinning its own device count under inherited `XLA_FLAGS` | `tests/core/test_compile_counts.py::test_regenerating_the_baseline_is_the_documented_one_command` and `::test_the_gate_measures_its_own_device_count_not_the_ambient_one` | Each runs the gate twice in a subprocess: 7-11 s on CI. The gate itself (`scripts/compile_counts.py --check` against the committed baseline) runs on every push, and so do its refusals, on synthetic documents. |
+| The deprecated `calibrate()` and `tune_coupling_params()` | `tests/core/test_calibrate.py::TestCalibratePhysics` and `tests/core/test_calibration.py::TestTuneCouplingParams` | Hundreds of eager gradient steps (30-165 s on CI) and a compiled graph per grid point (up to 15 s each), over APIs deprecated for removal in 0.5.0 in favour of `maddening.sysid.fit`, which is tested on every push. Their deprecation warnings are checked on every push. |
+
+To add a row, say what the property is, which tests check it, and why no
+cheaper test can. If a cheaper test can, write it instead.
 
 ## Test Organization
 

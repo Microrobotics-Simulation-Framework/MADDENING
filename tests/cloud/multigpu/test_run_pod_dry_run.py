@@ -835,21 +835,15 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
     assert grad[:, 0].tolist() == [1, 1, 1, 2, 2, 1, 1, 1]
 
 
-def test_a_two_device_run_records_the_cases_it_cannot_run():
-    """On 2 devices the 2-D pencil cases have no mesh and a halo from the
-    wrong neighbour cannot show; each is a check *not run*, so the goal
-    reads incomplete instead of passing on what it could reach.  The
-    wrapper goals run their 1-D cases and record the pencil as not run."""
+def _two_device_goals_record_what_they_cannot_run(goals):
+    """Run ``goals`` (``(name, runner, expected not-run prefixes)``) on 2
+    devices and check each records exactly those checks as not run, passes
+    the rest, and makes a valid record that reads ``INCOMPLETE``."""
     rp = _runner_module()
     args = SimpleNamespace(n_devices=2, cells=[64], synthetic="grid", partition="contiguous",
                            mesh=None, steps=1, grad_steps=1, warmup=0, repeats=1)
-    for goal, run, expected in (
-            ("halo", rp.run_halo, {"2d pencil mesh", "1d mesh: left and right"}),
-            ("indivisible", rp.run_indivisible, {"pencil (2-D mesh) refusal"}),
-            ("stencil", rp.run_stencil, {"2d pencil mesh"}),
-            ("hybrid", rp.run_hybrid, {"2d pencil mesh"}),
-            ("coupled", rp.run_coupled, {"2d pencil mesh"})):
-        doc = run(args, {})
+    for goal, run_name, expected in goals:
+        doc = getattr(rp, run_name)(args, {})
         not_run = [c for c in doc["checks"] if c.get("not_run")]
         assert {next(e for e in expected if c["name"].startswith(e)) for c in not_run} \
             == expected, not_run
@@ -866,6 +860,27 @@ def test_a_two_device_run_records_the_cases_it_cannot_run():
                            "allow_fewer_devices": False})
         assert rp.record_problems(doc) == [], rp.record_problems(doc)
         assert rp.goal_verdict([doc]) == "INCOMPLETE"
+
+
+def test_a_two_device_run_records_the_cases_it_cannot_run():
+    """On 2 devices the 2-D pencil cases have no mesh and a halo from the
+    wrong neighbour cannot show; each is a check *not run*, so the goal
+    reads incomplete instead of passing on what it could reach."""
+    _two_device_goals_record_what_they_cannot_run([
+        ("halo", "run_halo", {"2d pencil mesh", "1d mesh: left and right"}),
+        ("indivisible", "run_indivisible", {"pencil (2-D mesh) refusal"})])
+
+
+@pytest.mark.slow
+def test_a_two_device_run_of_the_wrapper_goals_records_the_pencil_as_not_run():
+    """The goals that run the stencil wrapper, on 2 devices: every 1-D case
+    runs and passes, and the pencil mesh is one check not run.  Slow: it
+    compiles four stencil cases, a hybrid graph and a coupled group's
+    adjoint (43 s on three cores)."""
+    _two_device_goals_record_what_they_cannot_run([
+        ("stencil", "run_stencil", {"2d pencil mesh"}),
+        ("hybrid", "run_hybrid", {"2d pencil mesh"}),
+        ("coupled", "run_coupled", {"2d pencil mesh"})])
 
 
 def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch):
@@ -888,12 +903,16 @@ def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch
     monkeypatch.setattr(sharded_node, "_global_edge_halos", always_wrap)
     args = SimpleNamespace(n_devices=2, cells=[64], steps=2, grad_steps=2, warmup=0,
                            repeats=1)
-    doc = rp.run_stencil(args, {})
-    failed = {" ".join(c["name"].split()[:5]).rstrip(":") for c in doc["checks"]
+    # The goal's field cases on the only mesh 2 devices have; its lattice
+    # case is periodic, which the fault cannot move, and is left out here
+    # to keep this per-push test to three small compiles.
+    cases = [c for c in rp.stencil_cases(args.cells, args.n_devices) if c[1] == "field"]
+    assert [c[2:] for c in cases] == [("periodic", "1d"), ("edge", "1d"), ("dirichlet", "1d")]
+    checks = rp.stencil_checks([rp.run_stencil_case(c, args) for c in cases], args.n_devices)
+    failed = {" ".join(c["name"].split()[:5]).rstrip(":") for c in checks
               if not c["passed"] and not c.get("not_run")}
     assert failed == {"field 1d 2x1 8x8 edge", "field 1d 2x1 8x8 dirichlet"}, [
-        c["name"] for c in doc["checks"] if not c["passed"]]
-    assert doc["passed"] is False
+        c["name"] for c in checks if not c["passed"]]
 
 
 def test_checklist_goals_refuse_a_single_device():

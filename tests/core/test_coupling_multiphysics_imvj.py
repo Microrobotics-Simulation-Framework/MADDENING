@@ -116,7 +116,9 @@ def test_imvj_uses_fewer_iterations_than_none():
 
 # Slow-marked (still run by slow-tests.yml): a gradient and two
 # finite-difference solves through a 20-step scan of the heat-rod/spring
-# group, 7-13 s on the CI runner.  The forward is checked on every push above.
+# group, 7-13 s on the CI runner.  The forward is checked on every push above,
+# and the gradient against finite differences, over three steps, by
+# tests/core/test_imvj_gradient_matches_finite_differences.py.
 @pytest.mark.slow
 def test_gradient_through_multiphysics_imvj_matches_fd():
     gm = _graph()
@@ -138,4 +140,8 @@ def test_gradient_through_multiphysics_imvj_matches_fd():
     assert np.isfinite(g) and g != 0.0
     h = 0.5
     fd = (float(loss(k0 + h)) - float(loss(k0 - h))) / (2 * h)
-    assert abs(g - fd) <= 5e-2 * abs(fd) + 1e-3, (g, fd)
+    # Relative only: the gradient is about 0.0116, so the absolute floor of
+    # 1e-3 this used to add made the tolerance about 14% -- wide enough to
+    # pass an adjoint that ignores the coupling's own Jacobian.  Measured:
+    # 1.4% apart (float32 cancellation at this step).
+    assert abs(g - fd) <= 5e-2 * abs(fd), (g, fd)

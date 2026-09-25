@@ -412,6 +412,9 @@ Two more ways a test can fail to run where you expect it to:
   `usd` extra, so a test outside `tests/usd/` that imports `pxr` or
   `maddening.usd` skips in the sharded lanes. List its file in `test-usd`'s
   pytest command in `ci.yml`; the same compliance test checks that you did.
+  Do not slow-mark it: `test-usd` runs no slow test and the slow lane has
+  no `usd-core`, so it would run nowhere (the compliance test checks this
+  too).
 
 CI enforces the budget in the `Test time budget` step of each test lane
 (`scripts/report_test_durations.py`, reading pytest's JUnit XML):
@@ -456,10 +459,12 @@ per-file totals from the lane summary. Changing the job count re-deals
 every file: change `shard:` and `MADDENING_TEST_SHARD` in `ci.yml`, and
 `PINS_FOR`. `tests/compliance/test_ci_sharding.py` checks that they agree.
 
-`pending triage` entries in the allowlist are tests that were already over
-5 s when the budget arrived (2026-09-24). Each one is to be marked slow,
-made faster, or kept with a reason, and the list only shrinks. The summary
-lists entries that may now be removable.
+Every allowlist entry is `<node id> # kept: <why it must run on every
+push>`. The tests that were already over 5 s when the budget arrived
+(2026-09-24) have all been marked slow, made faster, or kept that way. The
+summary lists entries that may now be removable: ones no longer in the lane,
+or that passed under 5 s (a skipped or failed test says nothing about its
+cost, so it is never listed).
 
 ### The compilation cache: warm and cold runs
 
@@ -468,21 +473,51 @@ run reads it decides what its times mean:
 
 | Run | Cache | Times mean |
 |---|---|---|
-| Pull request | **warm**: restores the base branch's cache, never saves one | Fast. Anything the PR adds or changes still compiles from scratch, because its programs are not in the base cache, so a new slow test is still caught on the PR that adds it. |
-| Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: every compile is paid in full. |
+| Pull request | **warm**: restores the base branch's cache, never saves one | Fast. A program the PR adds or changes is not in the base cache, so it still compiles from scratch and a new slow test is caught on the PR that adds it. A cost that *moves* is not: see below. |
+| Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt` or `tests/_sharding.py` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
+| Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: each program compiles in full the first time the run needs it. A later test that needs the same program reads it back from the cache the run is writing (17-25% of lookups on CI), so it can look fast because an earlier test paid. |
 | `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
 | Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
 
 Pull requests never save, so a second push cannot read the first push's
-cache: a new test that takes 25 s cold would otherwise pass at 8 s. Each
-shard has its own cache, which works because shard *i* holds the same files
-on every branch (see *Sharded lanes*). The cache key also includes the
-runner's CPU model, because XLA compiles for the host's instruction set. A
-shard that finds no cache for its model runs cold. Every lane summary
-states which kind of run it was: `warm`, `cold`, or `mixed` when the shards
-differed, or when a shard recorded no mode.
-A warm run never lists allowlist entries as removable, because a test that
-is only fast when its compile is cached is still slow.
+cache: a new test that takes 25 s cold would otherwise pass at 8 s.
+
+**Why some pull requests run cold.** The first test to compile a shared
+program pays for every later test that reuses it. When a pull request
+slow-marks, deletes or moves that test, the next one inherits the compile.
+On a warm run it reads the program from the base branch's cache and looks
+fast; only the cold run after the merge sees what it now costs, and fails
+it (commit `04cad05` found one such case by hand). So the `changes` job asks for
+a cold run when the diff adds or removes `mark.slow`, removes a
+`def test...` line (a test deleted, renamed or moved), or edits the
+allowlist or the shard assignment. What it does not see: a new test placed
+before an existing one that shares its program, which reads the program
+from the base cache on the pull request and pays for it after the merge,
+and slow marks applied by a helper or a hook rather than written as
+`mark.slow`.
+
+Each shard has its own cache, which works because shard *i* holds the same
+files on every branch (see *Sharded lanes*). XLA:CPU compiles for the
+host's instruction set, and what keeps an executable off a host it was not
+built for is JAX's own cache key, which includes the CPU's features. The
+workflow's key also includes the runner's CPU model, but only to raise the
+hit rate: runners reporting the same model can still differ in features,
+and a shard on one of those restores a cache and then misses almost every
+lookup. So the summary labels each shard from the hits and misses its
+report records: **warm** only when it restored a cache *and* more than half
+its lookups hit, otherwise **restored but unused (cold)**. It prints every
+shard's label and hit rate, and the lane as `warm`, `cold`,
+`restored but unused (cold)`, or `mixed` when the shards differ or a shard
+recorded no mode. A run in which any shard restored a cache never lists
+allowlist entries as removable, because a test that is only fast when its
+compile is cached is still slow.
+
+`slow-tests.yml` runs with no cache. If its report records cache lookups in
+more than one file, the summary warns: a test switched a persistent cache
+on in-process and left it on, and the times after it are partly warm. A
+test that turns a cache on (`maddening.core.simulation.compile_cache.enable`
+or `warm_cache`) must restore the JAX settings and reset JAX's cache
+object afterwards, as `tests/core/test_compile_cache.py` does.
 
 A cache is saved only after a push run whose test step passed, and only
 once `scripts/prune_jax_cache.py` has deleted every entry that does not

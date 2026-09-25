@@ -201,7 +201,9 @@ def test_the_shipped_allowlist_names_real_tests_with_reasons(gate):
     entries = gate.read_allowlist(ALLOWLIST)
     assert entries, "the allowlist parsed empty"
     for nodeid, reason in entries.items():
-        assert reason.startswith(("pending triage", "kept: ")), (nodeid, reason)
+        # Every entry is a decision: the `pending triage` backlog the gate
+        # started with is gone, and a new one would be a list nobody decided.
+        assert reason.startswith("kept: "), (nodeid, reason)
         file, *_, name = nodeid.split("::")
         path = REPO_ROOT / file
         assert path.is_file(), f"{nodeid}: {file} does not exist"
@@ -260,7 +262,7 @@ def test_a_warm_run_never_calls_an_allowlist_entry_removable(gate, tmp_path, cap
         _run(gate, capsys, report, "--allowlist", allow, "--cache-mode", mode)
         md = Path(str(report) + ".md").read_text().split("## Test durations")[-1]
         assert ("may be removable" in md) is listed, mode
-        assert ("not judged removable on a warm run" in md) is (not listed), mode
+        assert ("not judged removable on a run that restored a cache" in md) is (not listed), mode
 
 
 def test_the_timing_plugin_attaches_its_properties_before_the_teardown_report():
@@ -593,11 +595,31 @@ def test_the_budget_step_can_fail_the_job():
     script = re.sub(r"\$\{\{.*?\}\}", "EXPR", step["run"])
     for undo in ("--fail-over", "||", "set +e"):
         assert undo not in script, f"the budget step contains {undo!r}"
-    # `${{ matrix.shard }}` -> `{{matrix.shard}}`, one shell word.
-    last = shlex.split(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    # The gate is the whole of the step's last command: anything chained
+    # after it (`; true`, `| tee`, `&& ...`, `&`) decides the step's exit
+    # code instead.  `${{ matrix.shard }}` -> `{{matrix.shard}}`, one word.
+    last = _shell_words(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    operators = [w for w in last if w and set(w) <= set(";&|<>()")]
+    assert not operators, f"the gate is not the whole last command: {operators} in {last}"
     assert last[:3] == ["python", "scripts/report_test_durations.py",
                         "test-results-shard{{matrix.shard}}.xml"], last
     assert last[last.index("--allowlist") + 1] == "tests/duration_allowlist.txt"
+
+
+def _shell_words(command):
+    """Words and shell operators, as a POSIX shell splits them."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+@pytest.mark.parametrize("tail", ["; true", ";true", " | tee gate.log", " || true", " && true",
+                                  " &", " > /dev/null"])
+def test_the_budget_step_check_sees_anything_chained_after_the_gate(tail):
+    command = ("python scripts/report_test_durations.py test-results-shard{{matrix.shard}}.xml "
+               "--allowlist tests/duration_allowlist.txt --markdown /dev/null")
+    assert not [w for w in _shell_words(command) if set(w) <= set(";&|<>()")]
+    assert [w for w in _shell_words(command + tail) if set(w) <= set(";&|<>()")], tail
 
 
 def _render(text, values):
@@ -666,3 +688,224 @@ def test_a_lane_missing_a_shards_cache_mode_is_labelled_mixed(tmp_path):
     md = summary.read_text()
     assert "**Compilation cache: mixed**" in md
     assert "may be removable" not in md
+
+
+# ---------------------------------------------------------------------------
+# What each shard's compilation cache was, from what its report recorded
+# ---------------------------------------------------------------------------
+
+
+def _lookups(hits, misses, n_tests=4):
+    """``n_tests`` cases in one file sharing ``hits`` / ``misses``."""
+    per = [(hits // n_tests + (i < hits % n_tests), misses // n_tests + (i < misses % n_tests))
+           for i in range(n_tests)]
+    return [_case("tests/a/test_x.py", f"test_{i}", 0.1,
+                  jax={"jax_cache_hits": h, "jax_cache_misses": m}) for i, (h, m) in enumerate(per)]
+
+
+def _shard(tmp_path, n, hits, misses, mode):
+    report = _report(tmp_path, *_lookups(hits, misses), name=f"test-results-shard{n}.xml")
+    if mode is not None:
+        (tmp_path / f"cache-mode-shard{n}.txt").write_text(mode + "\n")
+    return report
+
+
+def test_a_restored_cache_that_most_lookups_missed_is_not_called_warm(gate, tmp_path, capsys):
+    """The label follows the hits, not the restore.
+
+    On CI about one PR shard in four restored a cache and then hit 17-20% of
+    its lookups -- a cold run's rate, from programs it compiled itself --
+    because JAX's key includes the host's CPU features and runners with one
+    CPU model name can differ in them.  Those shards used to be labelled
+    warm, with "these times are lower than a cold run's".
+    """
+    reports = [_shard(tmp_path, 1, 3856, 521, "warm"), _shard(tmp_path, 2, 625, 2916, "warm")]
+    code, out = _run(gate, capsys, *reports, "--cache-mode", "warm")
+    md = Path(str(reports[0]) + ".md").read_text()
+    assert code == 0
+    assert "**Compilation cache: mixed**" in md and "**Compilation cache: warm**" not in md
+    assert "shard 1 warm, 3856 of 4377 lookups hit (88%)" in md
+    assert "shard 2 restored but unused (cold), 625 of 3541 lookups hit (18%)" in md
+    assert "compilation cache: shard 1 warm" in out            # the step log says it too
+
+
+def test_a_lane_whose_restored_caches_all_went_unused_says_so(gate, tmp_path, capsys):
+    reports = [_shard(tmp_path, n, 600, 2900, "warm") for n in (1, 2)]
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/b/test_y.py::test_elsewhere # kept: x\n")
+    _run(gate, capsys, *reports, "--cache-mode", "warm", "--allowlist", allow)
+    md = Path(str(reports[0]) + ".md").read_text()
+    assert "**Compilation cache: restored but unused (cold)**" in md
+    # A shard that restored a cache still lists nothing as removable: a low
+    # hit rate can also be a change that touched most programs.
+    assert "may be removable" not in md
+    assert "not judged removable on a run that restored a cache" in md
+
+
+@pytest.mark.parametrize("hits, label", [(51, "warm"), (50, "restored but unused (cold)"),
+                                         (0, "restored but unused (cold)")])
+def test_warm_needs_more_than_half_of_the_lookups_to_hit(gate, tmp_path, capsys, hits, label):
+    report = _shard(tmp_path, 1, hits, 100 - hits, "warm")
+    _run(gate, capsys, report)
+    md = Path(str(report) + ".md").read_text()
+    assert f"shard 1 {label}, {hits} of 100 lookups hit" in md
+
+
+def test_a_warm_run_that_recorded_no_lookups_keeps_its_claim(gate, tmp_path, capsys):
+    # Without the timing plugin there is nothing to judge the claim by.
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_t", 0.1),
+                     name="test-results-shard1.xml")
+    (tmp_path / "cache-mode-shard1.txt").write_text("warm\n")
+    _run(gate, capsys, report)
+    assert "**Compilation cache: warm**" in Path(str(report) + ".md").read_text()
+
+
+def test_each_shards_mode_file_decides_its_label(gate, tmp_path, capsys):
+    # --cache-mode is the workflow's summary of the same files; a file beside
+    # a report is that shard's own record, and wins.
+    cold = _shard(tmp_path, 1, 20, 80, "cold")
+    warm = _shard(tmp_path, 2, 99, 1, "warm")
+    _run(gate, capsys, cold, warm, "--cache-mode", "warm")
+    md = Path(str(cold) + ".md").read_text()
+    assert "shard 1 cold, 20 of 100" in md and "shard 2 warm, 99 of 100" in md
+    assert "**Compilation cache: mixed**" in md
+
+
+@pytest.mark.parametrize("content", ["", "warmish", "WARM"])
+def test_an_unreadable_mode_file_is_unknown_not_guessed(gate, tmp_path, capsys, content):
+    report = _shard(tmp_path, 1, 99, 1, None)
+    (tmp_path / "cache-mode-shard1.txt").write_text(content)
+    other = _shard(tmp_path, 2, 99, 1, "warm")
+    _run(gate, capsys, report, other, "--cache-mode", "warm")
+    md = Path(str(report) + ".md").read_text()
+    assert "shard 1 unknown" in md and "**Compilation cache: mixed**" in md
+
+
+def test_a_cold_run_is_not_said_to_pay_every_compile_in_full(gate, tmp_path, capsys):
+    # A cold CI shard reads back 17-25% of its lookups from programs it
+    # compiled earlier in the same run.
+    report = _shard(tmp_path, 1, 20, 80, "cold")
+    _run(gate, capsys, report)
+    md = Path(str(report) + ".md").read_text()
+    assert "**Compilation cache: cold**" in md
+    assert "Every compile is paid in full" not in md
+    assert "reads it back from the cache the run is writing" in md
+
+
+def _off_report(tmp_path, files):
+    cases = [_case("tests/a/test_first.py", "test_before", 0.1, jax={})]
+    cases += [_case(f, f"test_{i}", 0.1, jax={"jax_cache_hits": 1, "jax_cache_misses": 2})
+              for i, f in enumerate(files)]
+    return _report(tmp_path, *cases, name="test-results-shard4.xml")
+
+
+def test_an_off_run_whose_later_tests_hit_a_cache_is_flagged(gate, tmp_path, capsys):
+    """The slow lane claims no cache; a test that leaves one on makes that false.
+
+    ``tests/core/test_compile_cache.py`` switched a persistent cache on and
+    never off, and 858 of one slow shard's 1503 tests then ran with it,
+    under a summary that said "Compilation cache: off".
+    """
+    report = _off_report(tmp_path, ["tests/core/test_leaks.py", "tests/nodes/test_after.py",
+                                    "tests/nodes/test_after.py"])
+    _, out = _run(gate, capsys, report, "--cache-mode", "off", "--fail-over", "0")
+    md = Path(str(report) + ".md").read_text()
+    warning = [ln for ln in out.splitlines() if ln.startswith("::warning title=Compilation cache::")]
+    assert len(warning) == 1, out
+    assert "3 tests recorded persistent-cache lookups (hits 3, misses 6)" in warning[0]
+    assert "from tests/core/test_leaks.py::test_0 on" in warning[0]
+    assert "cache claimed off, but 3 tests recorded persistent-cache lookups" in md
+    assert "left it on" in md
+
+
+def test_an_off_run_with_lookups_in_one_file_is_noted_without_a_warning(gate, tmp_path, capsys):
+    # A file whose tests configure a cache of their own records lookups; a
+    # cache it left on would show in the files after it.
+    report = _off_report(tmp_path, ["tests/core/test_own_cache.py"] * 2)
+    _, out = _run(gate, capsys, report, "--cache-mode", "off", "--fail-over", "0")
+    md = Path(str(report) + ".md").read_text()
+    assert "::warning title=Compilation cache::" not in out
+    assert "cache claimed off, but 2 tests recorded" in md and "All in one file" in md
+
+
+def test_an_off_run_without_lookups_is_not_flagged(gate, tmp_path, capsys):
+    report = _off_report(tmp_path, [])
+    _, out = _run(gate, capsys, report, "--cache-mode", "off", "--fail-over", "0")
+    assert "Compilation cache::" not in out
+    assert "cache claimed off, but" not in Path(str(report) + ".md").read_text()
+
+
+def test_a_skipped_or_failed_allowlisted_test_is_not_called_removable(gate, tmp_path, capsys):
+    # Fast because it did not run, or stopped early: that says nothing about
+    # what it costs when it passes.
+    report = _report(tmp_path,
+                     _case("tests/a/test_x.py", "test_passed_fast", 0.2),
+                     _case("tests/a/test_x.py", "test_skipped", 0.0,
+                           extra='<skipped type="pytest.skip" message="no tool"/>'),
+                     _case("tests/a/test_x.py", "test_failed", 0.3,
+                           extra='<failure message="assert 0">assert 0</failure>'),
+                     _case("tests/a/test_x.py", "test_errored", 0.1,
+                           extra='<error message="fixture failed">boom</error>'))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("".join(f"tests/a/test_x.py::{n} # kept: x\n"
+                             for n in ("test_passed_fast", "test_skipped", "test_failed",
+                                       "test_errored")))
+    _run(gate, capsys, report, "--allowlist", allow, "--cache-mode", "cold")
+    removable = Path(str(report) + ".md").read_text().split("may be removable")[1]
+    assert "`tests/a/test_x.py::test_passed_fast`" in removable
+    for name in ("test_skipped", "test_failed", "test_errored"):
+        assert name not in removable, name
+
+
+
+def _lane(tmp_path, shards, modes, allow_text):
+    """Run the "Summarise the lane" step on ``shards`` ({n: cases}) and ``modes`` ({n: mode})."""
+    (step,) = [s for s in _ci()["jobs"]["test-durations"]["steps"]
+               if s.get("name") == "Summarise the lane"]
+    work = tmp_path / "work"
+    (work / "results").mkdir(parents=True)
+    (work / "tests").mkdir()
+    (work / "scripts").symlink_to(REPO_ROOT / "scripts")
+    (work / "tests" / "duration_allowlist.txt").write_text(allow_text)
+    for n, cases in shards.items():
+        _report(work / "results", *cases, name=f"test-results-shard{n}.xml")
+    for n, mode in modes.items():
+        (work / "results" / f"cache-mode-shard{n}.txt").write_text(mode + "\n")
+    summary = tmp_path / "summary.md"
+    proc = subprocess.run(["bash", "-e", "-c", _render(step["run"], {"matrix.jax-version": "0.10.2"})],
+                          cwd=work, capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "PATH": _shim(tmp_path),
+                               "GITHUB_STEP_SUMMARY": str(summary)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return summary.read_text(), proc.stdout
+
+
+@pytest.mark.parametrize("reports, listed", [(4, True), (3, False)])
+def test_a_lane_missing_a_shards_report_lists_no_allowlist_entry_as_removable(
+        tmp_path, reports, listed):
+    """An allowlisted test absent from three shards' reports may be on the fourth.
+
+    Every shard wrote its cache mode (the budget step writes it before the
+    gate, so a shard whose test step crashed without a report still has
+    one): all four are ``cold``, so only the missing report can keep the
+    entry off the removable list.  With all four reports the same entry is
+    listed -- the fixture can express what the step guards.
+    """
+    shards = {n: [_case(f"tests/s{n}/test_x.py", "test_t", 0.2)] for n in range(1, reports + 1)}
+    md, out = _lane(tmp_path, shards, {n: "cold" for n in (1, 2, 3, 4)},
+                    "tests/s9/test_gone.py::test_elsewhere # kept: x\n")
+    assert "**Compilation cache: cold**" in md
+    assert ("may be removable" in md) is listed, md
+    assert ("only 3 of 4 shard reports" in out) is (not listed), out
+
+
+def test_the_lane_summary_labels_each_shard_from_its_hits(tmp_path):
+    """End to end through the workflow step: four shards restored a cache, one did not use it."""
+    def lookups(hits, misses):
+        return [_case("tests/a/test_x.py", "test_t", 0.1,
+                      jax={"jax_cache_hits": hits, "jax_cache_misses": misses})]
+    shards = {1: lookups(3856, 521), 2: lookups(625, 2916), 3: lookups(6334, 1), 4: lookups(4195, 0)}
+    md, _ = _lane(tmp_path, shards, {n: "warm" for n in shards}, "# empty\n")
+    assert "**Compilation cache: mixed**" in md
+    assert "shard 2 restored but unused (cold), 625 of 3541 lookups hit (18%)" in md
+    assert "shard 3 warm, 6334 of 6335 lookups hit (100%)" in md

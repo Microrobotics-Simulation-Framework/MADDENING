@@ -1,6 +1,6 @@
 """Sparse halo exchange for unstructured / graph-partitioned sharding.
 
-v0.3.0 §A6 substrate.  Sibling of
+Added in v0.3.0.  Sibling of
 :mod:`maddening.cloud.multigpu.halo` (Cartesian, stencil-based) —
 they share the same job (deliver neighbour-cell values inside a
 ``shard_map`` call) but the data structures are different:
@@ -30,10 +30,9 @@ This module provides:
 Differentiability: ``lax.all_to_all`` is differentiable; gradients
 flow through.
 
-Scope (v0.3.0): toy-mesh sized (up to ~10⁴ cells).  Production-grade
+Scope: toy-mesh sized (up to ~10⁴ cells).  Production-grade
 performance (batched send/recv, NCCL fast-path, real-mesh sized) is
-v0.4.0 work — see ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 v0.4.0
-commitment.
+not implemented.
 """
 
 from __future__ import annotations
@@ -124,9 +123,9 @@ class UnstructuredPartitionLayout:
     def local_index_of(self, device: int, global_id: int) -> int:
         """Look up where global cell ``global_id`` lives on ``device``.
 
-        Useful for the partition-assignment handoff contract documented
-        in ``plans/MADDENING_v0.3.0_PLAN.md`` §A6 — the experiment-setup
-        code can use this to translate global cell IDs into the local
+        Useful for the partition-assignment handoff documented in
+        :mod:`maddening.cloud.multigpu.sharded_unstructured` — the
+        experiment-setup code can use this to translate global cell IDs into the local
         layout the node sees.
 
         Returns

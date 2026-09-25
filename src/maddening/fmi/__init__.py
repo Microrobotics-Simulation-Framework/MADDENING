@@ -1,8 +1,7 @@
-"""FMI 3.0 substrate for MADDENING (v0.3.0 §A1).
+"""FMI 3.0 substrate for MADDENING (added in v0.3.0).
 
-Per STACK_V1 §3 M2 and the v0.3.0 plan: the *generic* FMI 3.0
-machinery lives here in MADDENING.  MIME's ``mime-fmi`` (shipping in
-v0.5.0 / STACK_V1 M3) is a thin selector that picks specific
+The *generic* FMI 3.0 machinery lives here in MADDENING.  MIME's
+planned ``mime-fmi`` is a thin selector that picks specific
 subgraphs out of MIME and re-emits them as named, citeable FMUs.
 The architectural work is here.
 
@@ -46,20 +45,21 @@ Scope for v0.3.0
 Out of scope until later
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-* FMU **import** + SSP — both later (per ADR-2026-FMI Rev 3).
+* FMU **import** + SSP — both later.
 * MIME-side ``mime-fmi`` package + named-experiment FMUs +
-  Simulink-workstation acceptance — STACK_V1 M3 (MIME v0.5.0).
-  MADDENING ships the substrate in v0.3.0; MIME picks specific
-  subgraphs and emits citeable FMUs in M3.
+  Simulink-workstation acceptance — MIME's, not MADDENING's.
+  MADDENING ships the substrate; MIME picks specific subgraphs and
+  emits citeable FMUs.
 * Per-effect multi-rate clock-based FMU export — designed-in
   (the FMI 3 clock concept), single-clock-only for v0.3.0.
 
 Public API
 ~~~~~~~~~~
 
-The substrate is tagged ``@stability(EVOLVING)`` until M4 (v0.9.0)
-when STACK_V1 freezes the surface.  Within evolving, additions are
-allowed but signatures are stable.
+The substrate is tagged ``@stability(EVOLVING)``.  Promotion is
+decided surface by surface in the stability freeze rounds that lead
+to 1.0 (``docs/developer_guide/api_freeze_proposal.md``).  Within
+evolving, additions are allowed but signatures are stable.
 """
 
 from maddening.fmi.directional_derivatives import (

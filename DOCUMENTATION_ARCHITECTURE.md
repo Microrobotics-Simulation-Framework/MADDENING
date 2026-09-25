@@ -1656,12 +1656,22 @@ This transition must not be automated. An automated pipeline that converts issue
 
 **Phase 3 — Verification (CI consistency check)**
 
-CI enforces consistency between the two artifacts:
+The design is for CI to enforce consistency between the two artifacts.  **Only
+the registry half of it is implemented; nothing in CI reads GitHub issues or
+labels.**  Implemented, in `scripts/check_anomalies.py`:
 
-- Every issue labeled `known-anomaly` that has been open for more than one release cycle should have a corresponding YAML entry (CI warning, not blocking — some issues may still be in Phase 1 investigation)
-- Every YAML entry with a `github_issue` field must reference a valid, existing issue
-- No YAML entries may be silently deleted (only `resolution_status` changes are permitted)
 - The YAML schema is validated on every push
+- No YAML entry may be silently deleted: within each ID prefix the numbers must
+  run contiguously from 001 to the highest present, except IDs recorded in
+  `_RETIRED_ANOMALY_IDS`, and a high-water pin (`_HIGHEST_ANOMALY_ID`, with its
+  test, in `tests/compliance/test_soup_evidence.py`) catches deletion of the
+  highest entry and an unannounced addition
+
+Not implemented (planned):
+
+- A warning for an issue labeled `known-anomaly` that has been open for more than one release cycle without a corresponding YAML entry
+- A check that a YAML entry's `github_issue` field references a valid, existing issue
+- Restricting changes to an existing entry to `resolution_status`: the gate sees a deleted entry, not an edited one
 
 The three-phase model ensures that engineering discussion (Phase 1) and regulatory documentation (Phase 2) are clearly separated, with CI (Phase 3) enforcing consistency without automating the regulatory judgement.
 
@@ -1669,22 +1679,37 @@ The three-phase model ensures that engineering discussion (Phase 1) and regulato
 
 CI enforcement must distinguish between anomalies that are still under investigation (Phase 1) and those that have been resolved without proper formalization. The guiding principle: **never block active investigation, always block incomplete compliance**.
 
+> **Status at 0.4.0: most of this subsection is design, not implementation.**
+> Of the numbered checks below, item 1 and the deletion half of item 3 are
+> implemented; items 2, 4 and 5, the three-tier release gate (items 6-9) and
+> the automated cycle counting it depends on are **not implemented** —
+> nothing in CI reads GitHub issues, labels or close dates.  What
+> `scripts/check_anomalies.py` does enforce, on every push, is in its module
+> docstring: schema validation (`maddening.compliance.validate_anomaly_registry`);
+> ID contiguity within each prefix, excusing only IDs recorded in
+> `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`), with the
+> high-water pin `_HIGHEST_ANOMALY_ID` in the same file catching deletion of
+> the highest entry; a `verification:` list on every `resolved` or
+> `partially_resolved` entry, each reference resolving to a collected test;
+> and the PEP 440 `affected_versions` convention, checked against
+> `maddening_version` and the released versions in `CHANGELOG.md`.
+
 **On every push (CI check):**
 
-1. The YAML schema is validated (`schema_version`, required fields, valid enums, unique IDs)
-2. Every YAML entry with a `github_issue` field must reference a valid, existing issue
-3. No YAML entries have been silently deleted (only `resolution_status` changes are permitted)
-4. The `maddening_version` field in `known_anomalies.yaml` matches the current release
+1. The YAML schema is validated (`schema_version`, required fields, valid enums, unique IDs) — *implemented*
+2. Every YAML entry with a `github_issue` field must reference a valid, existing issue — *not implemented*
+3. No YAML entries have been silently deleted (only `resolution_status` changes are permitted) — *deletion is caught (ID contiguity, `_RETIRED_ANOMALY_IDS`, the high-water pin); an edit to other fields is not*
+4. The `maddening_version` field in `known_anomalies.yaml` matches the current release — *not implemented: it must be a PEP 440 version and anchors the `affected_versions` convention, but nothing compares it with the package version*
 
 **CI warnings (non-blocking):**
 
-5. Open issues labeled `known-anomaly` that have been open for more than one release cycle but do not yet have a corresponding YAML entry — these are Phase 1 anomalies still under investigation, and blocking CI would penalise active triage
+5. Open issues labeled `known-anomaly` that have been open for more than one release cycle but do not yet have a corresponding YAML entry — these are Phase 1 anomalies still under investigation, and blocking CI would penalise active triage — *not implemented*
 
-**Release gate (blocking — enforced before `git tag`), three tiers:**
+**Release gate (blocking — enforced before `git tag`), three tiers — not implemented:**
 
 The release gate uses a three-tier model that allocates clerical effort proportionally to safety impact. A solo developer should not spend equal formalization effort on a cosmetic numerical precision note and a known safety-relevant instability.
 
-**Tier 1 — `safety-relevant` label (any severity):** Hard gate, no grace period. Any closed issue labeled `safety-relevant` must have a corresponding YAML entry before the release is tagged. No exceptions. This tier exists because safety-relevant anomalies are Notified Body-facing artifacts for Class III — they must be formalized immediately upon resolution.
+**Tier 1 — `safety-relevant` label (any severity):** Hard gate, no grace period. Any closed issue labeled `safety-relevant` must have a corresponding YAML entry before the release is tagged. No exceptions. This tier exists because safety-relevant anomalies are the entries a downstream risk assessment depends on most — they must be formalized immediately upon resolution.
 
 **Tier 2 — `anomaly:critical` or `anomaly:major` (without `safety-relevant`):** No grace period. Must be formalized in YAML before the release in which they are closed. These are significant anomalies that affect numerical correctness and must be visible to downstream SOUP assessors, even if their safety relevance is "not_safety_relevant" or "context_dependent."
 
@@ -1697,43 +1722,12 @@ The release gate uses a three-tier model that allocates clerical effort proporti
 
 This three-tier model prevents the following failure modes: (a) CI blocks that discourage developers from filing anomaly issues in the first place, (b) issues closed as "fixed" without a corresponding compliance record, (c) releases shipped with unformalized safety-relevant anomalies, and (d) disproportionate clerical burden on minor issues that slows development velocity without meaningful compliance benefit.
 
-**Automated cycle counting**: The Tier 3 grace period tracking must be automated by `scripts/check_anomalies.py` — manual tracking of how many release cycles a specific issue has been open is an unsustainable clerical burden for a solo developer. The script must compare each closed `anomaly:minor` issue's close date (via the GitHub API) against the release timestamps in `CHANGELOG.md` or git tags. If the issue was closed more than one release cycle ago without a YAML entry, the script emits a warning. If two or more release cycles have passed, the script fails the release gate. This automation is a prerequisite for the three-tier model to function; without it, Tier 3 grace periods will be tracked inconsistently or not at all.
+**Automated cycle counting (not implemented)**: The Tier 3 grace period tracking would have to be automated by `scripts/check_anomalies.py`, which does none of it today — manual tracking of how many release cycles a specific issue has been open is an unsustainable clerical burden for a solo developer. The script would compare each closed `anomaly:minor` issue's close date (via the GitHub API) against the release timestamps in `CHANGELOG.md` or git tags. If the issue was closed more than one release cycle ago without a YAML entry, the script would emit a warning; if two or more release cycles had passed, it would fail the release gate. This automation is a prerequisite for the three-tier model to function; without it, Tier 3 grace periods will be tracked inconsistently or not at all.
 
-```python
-# scripts/check_anomalies.py (CI validation script)
-
-import yaml
-import sys
-
-def validate_anomalies(path="docs/validation/known_anomalies.yaml"):
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
-    errors = []
-    ids_seen = set()
-    for a in data.get("anomalies", []):
-        # Uniqueness
-        if a["anomaly_id"] in ids_seen:
-            errors.append(f"Duplicate anomaly_id: {a['anomaly_id']}")
-        ids_seen.add(a["anomaly_id"])
-
-        # Required fields
-        for field in ("anomaly_id", "title", "description",
-                      "severity", "safety_relevance",
-                      "safety_relevance_rationale"):
-            if not a.get(field):
-                errors.append(f"{a['anomaly_id']}: missing {field}")
-
-        # Valid enums
-        if a["severity"] not in ("critical", "major", "minor", "enhancement"):
-            errors.append(f"{a['anomaly_id']}: invalid severity")
-
-    if errors:
-        for e in errors:
-            print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-    print(f"OK: {len(ids_seen)} anomalies validated")
-```
+The real gate is `scripts/check_anomalies.py`; its module docstring is the
+specification of what it enforces.  A sketch of the script that stood here,
+written before it existed, bore no resemblance to the implementation and was
+removed.
 
 ##### Release Process Integration
 
@@ -2698,14 +2692,11 @@ from maddening.core.compliance.validation import (
     verification_benchmark,
 )
 
-# Stability — no-op stub until Phase 4
-# In Phase 0–3, `stability` is an identity decorator (applies the marker
-# attribute but does not populate a registry or generate reports).  The
-# functional implementation lands in Phase 4 (Appendix B item 30).
-# This avoids a broken import while still allowing downstream libraries
-# to annotate their API surfaces with `@stability(StabilityLevel.STABLE)`
-# from day one — the annotations are inert until the machinery exists.
-from maddening.core.compliance.stability import stability
+# Stability.  `@stability` records each tagged surface in a registry
+# (`_STABILITY_REGISTRY`), and `generate_stability_report()` renders it;
+# docs/developer_guide/stability_report.md is generated from it by
+# scripts/generate_stability_report.py and equality-checked in CI.
+from maddening.core.compliance.stability import stability, generate_stability_report
 
 # Registry validation
 from maddening.compliance._validate import validate_anomaly_registry
@@ -2723,7 +2714,7 @@ from maddening.compliance._validate import validate_anomaly_registry
 
 **Part of the base install**: The compliance namespace is included in the base `pip install maddening` — no extras required. The schema types are lightweight (standard library only: `dataclasses`, `enum`, `typing`). If a downstream library needs only the compliance schema and not the simulation framework, it can `pip install maddening` and import from `maddening.compliance` without triggering JAX installation, provided it does not import from `maddening.core` or `maddening.nodes`. A separate `pip install maddening[compliance]` extra is not needed at this time, but could be introduced later if the base install grows unwieldy.
 
-**Stability guarantee**: The `maddening.compliance` namespace is the stable API surface for downstream libraries. It follows strict semantic versioning: breaking changes to schema types only in major versions. New types may be added in minor versions. Downstream libraries pin to a MADDENING version range and import from this namespace; they are insulated from internal refactoring of `maddening.core`. The `@stability(StabilityLevel.STABLE)` decorator (Section 9.5) should be applied to `maddening.compliance` exports once the stability machinery is implemented (Phase 4).
+**Stability guarantee**: The `maddening.compliance` namespace is the stable API surface for downstream libraries. It follows strict semantic versioning: breaking changes to schema types only in major versions. New types may be added in minor versions. Downstream libraries pin to a MADDENING version range and import from this namespace; they are insulated from internal refactoring of `maddening.core`. The stability machinery (Section 9.5) is implemented; applying `@stability` to the `maddening.compliance` exports themselves is still to do.
 
 ### Shared Tooling
 
@@ -2860,21 +2851,13 @@ if __name__ == "__main__":
     main()
 ```
 
-The original `scripts/check_anomalies.py` (Section 9.7) should be refactored to delegate to `maddening.compliance.validate_anomaly_registry()`, so the validation logic exists in exactly one place:
-
-```python
-# scripts/check_anomalies.py (updated)
-"""CI script — thin wrapper around the compliance validator."""
-import sys
-from maddening.compliance._validate import validate_anomaly_registry
-
-errors = validate_anomaly_registry("docs/validation/known_anomalies.yaml")
-if errors:
-    for e in errors:
-        print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-print(f"OK: anomaly registry is valid")
-```
+`scripts/check_anomalies.py` (Section 9.7) delegates the schema check to
+`maddening.compliance.validate_anomaly_registry()`, so that logic exists in
+one place, and adds the registry-level rules a downstream registry does not
+necessarily want: ID contiguity against `_RETIRED_ANOMALY_IDS`, a
+`verification:` list on every resolved entry with each reference resolved to
+a collected test, and the PEP 440 `affected_versions` convention.  It is not a
+thin wrapper; its module docstring says what it enforces.
 
 #### Other Shared Tooling
 
@@ -2885,7 +2868,7 @@ The following utilities are schema-driven and path-agnostic, making them reusabl
 | Anomaly registry validator | `maddening.compliance.validate_anomaly_registry()` | Validate downstream registry against same schema |
 | NodeMeta harvester | `maddening.compliance.collect_node_metadata()` | Harvest metadata from downstream node classes (works on any `SimulationNode` subclass) |
 | Hazard hints harvester | `maddening.compliance.collect_hazard_hints()` | Harvest hazard hints across downstream nodes for risk management input |
-| Stability report generator | `maddening.compliance.generate_stability_report()` | Generate stability report covering downstream API surfaces. **(Phase 4 — not yet available)**: depends on `@stability` decorator infrastructure (Section 9.5, Appendix B item 29). Do not import until Phase 4 is complete. |
+| Stability report generator | `maddening.compliance.generate_stability_report()` | Generate stability report covering downstream API surfaces: every surface tagged with `@stability` in the current process, MADDENING's and the downstream library's alike. |
 | Verification benchmark registry | `maddening.compliance.verification_benchmark` | Register downstream benchmarks in the same registry pattern |
 | Bibliography citation validator | `scripts/check_citations.py` (standalone) | Downstream libraries can adapt the script to validate their own algorithm guides against their own `.bib` file (or MADDENING's); set `BIB_PATH` env var to override the default path |
 
@@ -3219,7 +3202,7 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 See Appendix E Phase 0 for the verifiable checklist corresponding to these items.
 
-0a. **`maddening/compliance/` namespace** (Section 16) — create the compliance subpackage with `__init__.py` re-exporting all schema types (`NodeMeta`, `AnomalyRecord`, `ValidationBenchmark`, etc.), decorators (`@verification_benchmark`, `@stability`), and harvesting utilities. Must be importable without JAX. **Note on `@stability`**: In Phase 0–3, the `stability` export is a **no-op identity decorator** — it attaches the stability level as a marker attribute but does not populate a registry or generate reports. This avoids a broken import or missing-module error during Phases 0–3 while allowing downstream libraries to annotate their API surfaces immediately. The functional implementation (registry population, `generate_stability_report()`) lands in Phase 4 (item 30).
+0a. **`maddening/compliance/` namespace** (Section 16) — create the compliance subpackage with `__init__.py` re-exporting all schema types (`NodeMeta`, `AnomalyRecord`, `ValidationBenchmark`, etc.), decorators (`@verification_benchmark`, `@stability`), and harvesting utilities. Must be importable without JAX. **Note on `@stability`**: this plan made the `stability` export an inert marker until Phase 4.  In the event the decorator has populated its registry since v0.1.0, and `generate_stability_report()` is exported from the namespace.
 0b. **`maddening/compliance/_validate.py` and `__main__.py`** (Section 16) — anomaly registry validator accepting a path argument and optional `--prefix` flag. Expose as `python -m maddening.compliance check-anomalies <path>`.
 
 ### Phase 1: Regulatory Foundation (implement now)
@@ -3488,7 +3471,7 @@ These items establish the shared compliance infrastructure that all subsequent p
 - [x] `maddening/compliance/__init__.py` exists and re-exports at minimum: `NodeMeta`, `EdgeMeta`, `ValidatedRegime`, `Reference`, `StabilityLevel`, `UQReadiness`, `AnomalyRecord`, `AnomalySeverity`, `SafetyRelevance`, `ResolutionStatus`, `ValidationBenchmark`, `BenchmarkType`, `verification_benchmark`, `stability` (Section 16)
 - [x] `from maddening.compliance import NodeMeta` succeeds without importing JAX (Section 16)
 - [x] `from maddening.compliance import validate_anomaly_registry` succeeds (Section 16)
-- [x] `from maddening.compliance import stability` succeeds and `stability` is a **no-op identity decorator** — applying `@stability(StabilityLevel.STABLE)` to a class or function succeeds without error but does not populate a registry or generate reports. The functional implementation lands in Phase 4 (Appendix B item 30). (Section 16)
+- [x] `from maddening.compliance import stability` succeeds, and applying `@stability(StabilityLevel.STABLE)` to a class or function records it in the stability registry that `generate_stability_report()` renders (the plan had it inert until Phase 4; it never was). (Section 16)
 
 **Anomaly registry validator:**
 

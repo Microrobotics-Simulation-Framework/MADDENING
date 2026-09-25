@@ -1,4 +1,4 @@
-"""Tests for the generic :class:`LiveStage` writer (v0.3.0 §A3)."""
+"""Tests for the generic :class:`LiveStage` writer (added in v0.3.0)."""
 
 import math
 import os

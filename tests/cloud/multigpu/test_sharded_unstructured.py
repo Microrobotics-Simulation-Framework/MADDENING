@@ -1,10 +1,9 @@
-"""Tests for graph-partitioned sharding (v0.3.0 §A6).
+"""Tests for graph-partitioned sharding (added in v0.3.0).
 
 The toy node tested here is a "neighbour-average" stencil over an
-arbitrary connectivity graph.  v0.3.0 verifies the contract + small-
-scale correctness; v0.4.0 will harden the implementation against
-real-mesh-sized cases (10^4-10^6 cells) — see
-``plans/MADDENING_v0.3.0_PLAN.md`` §A6 v0.4.0 commitment.
+arbitrary connectivity graph.  These tests verify the contract and
+small-scale correctness; real-mesh-sized cases (10^4-10^6 cells) are
+not covered.
 """
 
 import os
@@ -362,7 +361,7 @@ class TestShardedUnstructuredNode:
 
 
 # ---------------------------------------------------------------------------
-# Intermediate-size smoke (per §A6 risk-mitigation) — 1024 cells, 4 shards.
+# Intermediate-size smoke — 1024 cells, 4 shards.
 # Marked slow because it does compile + run a non-trivial shard_map.
 # ---------------------------------------------------------------------------
 
@@ -409,8 +408,8 @@ class TestStabilityTagging:
 
 
 # ---------------------------------------------------------------------------
-# Compose §A5 + §A6 — solve a Poisson on the toy graph using sharded_cg.
-# This is the cross-cutting verification gate from the v0.3.0 plan.
+# Compose the sharded solver with unstructured sharding — solve a Poisson
+# on the toy graph using sharded_cg.  The cross-cutting verification gate.
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +424,7 @@ class TestPoissonOnGraph:
         the identity — this matches what an FVM PISO solver does at
         the Neumann boundary (impose a reference cell).  The Laplacian
         action is computed via :func:`exchange_unstructured` so we
-        exercise the full §A5 + §A6 compose path.
+        exercise the full solver + unstructured-halo compose path.
         """
         from jax import shard_map
         from jax.sharding import PartitionSpec as P

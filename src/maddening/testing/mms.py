@@ -86,9 +86,14 @@ operator: the forcing scheme changes the order of accuracy, so the
 study would measure the scheme rather than the operator), every node
 with no natural forcing input, and most nodes a *user* writes.  The
 alternative considered — an optional manufactured-source hook on
-:class:`~maddening.core.node.SimulationNode` — was rejected; see
-``TODO.md``, "DECIDED AGAINST: a manufactured-source convention on
-``SimulationNode``".
+:class:`~maddening.core.node.SimulationNode` — was rejected: a generic
+source is ill-defined for the lattice Boltzmann node that prompted it
+and for any node that projects onto a constraint, it would be
+production API surface that serves only tests, and an optional hook
+most user nodes never implement would not deliver the coverage it was
+proposed for.  ``docs/developer_guide/verification.md`` ("Grid
+convergence: the fallback where MMS cannot reach") records the
+argument.
 
 The second half of this module is what made rejecting it acceptable.
 :func:`measure_gci` runs the *same refinement ladder* as
@@ -359,7 +364,10 @@ _ORDER_BAND_FIXTURES = (
 #: pair, and over every ladder recorded in :data:`_ORDER_BAND_FIXTURES`
 #: the finest pair lands close to theory: HeatNode 2.000 against 2 and
 #: 3.957 against 4, LBMNode 1.998 against 2, and the five ODE nodes
-#: 1.000-1.001 against 1.  The largest honest shortfall anywhere is
+#: 1.000-1.001 against 1 (``r6_declared_orders.log``, a 100-1600 step
+#: ladder; on the shorter ladders their MADD-VER-008 to 012 benchmarks
+#: register, the same nodes measure 0.999 to 1.029, SpringDamperNode's
+#: 1.029 being the highest).  The largest honest shortfall anywhere is
 #: **0.043** (the 4th-order heat stencil's 3.957), and a short ladder
 #: read at its coarsest pair is further out still — 3.760 on the same
 #: study, 0.240 low, because the asymptotic range has not been reached.

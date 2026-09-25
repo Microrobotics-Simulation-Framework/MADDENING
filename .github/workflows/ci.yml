@@ -173,6 +173,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull request checks out GitHub's merge commit; two deep also
+          # fetches its parents, one of them the head commit whose message
+          # "Compilation cache mode" reads.
+          fetch-depth: 2
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -213,19 +218,23 @@ jobs:
         # after a merge -- run COLD: start empty, compile each program in
         # full the first time the run needs it, and save the result as the
         # cache the next PRs restore.  `[cold-ci]` in a PR's head commit
-        # message forces a cold run, for before/after numbers.
+        # message forces a cold run, for before/after numbers.  A message
+        # that cannot be read runs cold too, with a warning: a `[cold-ci]`
+        # request cannot be ruled out.
         id: cc
         env:
-          GH_TOKEN: ${{ github.token }}
           COLD_DIFF: ${{ needs.changes.outputs.cold }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           mode=warm
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             mode=cold
-          else
-            msg=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}" --jq .commit.message || true)
+          elif msg=$(git log -1 --format=%B "$HEAD_SHA"); then
             case "$msg" in *"[cold-ci]"*) mode=cold ;; esac
             if [ "$COLD_DIFF" = "true" ]; then mode=cold; fi
+          else
+            echo "::warning title=Compilation cache::could not read the message of head commit '$HEAD_SHA' (git's error is above), so running cold: a [cold-ci] request cannot be ruled out"
+            mode=cold
           fi
           # XLA:CPU compiles for the host's instruction set.  What keeps an
           # executable off a host it was not built for is JAX's own cache

@@ -23,7 +23,9 @@ over ``--slow-over`` (5 s)
     reason*.  Unlisted tests over this line get a warning annotation on
     the run.
 over ``--fail-over`` (20 s)
-    An unlisted test this slow fails the job.
+    An unlisted test this slow fails the job.  An allowlisted one passes
+    -- the allowlist has no ceiling -- but gets a warning annotation, so a
+    kept test that regresses from 6 s to 900 s is not silent.
 
 Why the hard line is four times the policy line
 -----------------------------------------------
@@ -472,6 +474,8 @@ def judge(tests, allow, *, watch_over, slow_over, fail_over):
         "slow": [t for t in ranked if t.seconds > slow_over],
         "new_slow": [t for t in ranked if t.seconds > slow_over and t.nodeid not in allow],
         "failing": [t for t in ranked if t.seconds > fail_over and t.nodeid not in allow],
+        # Exempt from failing, not from being seen: the allowlist has no ceiling.
+        "kept_over_hard_line": [t for t in ranked if t.seconds > fail_over and t.nodeid in allow],
         "slow_warm": [t for t in ranked if t.jax and t.uncacheable > slow_over
                       and not t.subprocess_work],
         "slow_subprocess": [t for t in ranked if t.jax and t.uncacheable > slow_over
@@ -550,6 +554,12 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
     if verdict["failing"]:
         lines += [f"### Over {fail_over:g} s and not on the allowlist -- this fails the job", ""]
         lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)} {diagnose(t)}" for t in verdict["failing"]] + [""]
+    if verdict["kept_over_hard_line"]:
+        lines += [f"### Allowlisted and over {fail_over:g} s -- passes, but check the cost", "",
+                  "The allowlist exempts a test at any duration. Check that this is still "
+                  "what keeping it on every push costs.", ""]
+        lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)} {diagnose(t)}"
+                  for t in verdict["kept_over_hard_line"]] + [""]
     if verdict["new_slow"]:
         lines += [f"### Over {slow_over:g} s and not on the allowlist", ""]
         lines += [f"- `{t.nodeid}` -- {_fmt(t.seconds)} {diagnose(t)}" for t in verdict["new_slow"]] + [""]
@@ -621,6 +631,13 @@ def annotations(verdict, *, slow_over, fail_over):
             f"{t.nodeid} took {_fmt(t.seconds)}{why}. Mark it @pytest.mark.slow, make it "
             f"faster, or add it to tests/duration_allowlist.txt with the reason it "
             f"must run on every push."))
+    for t in verdict["kept_over_hard_line"]:
+        loc = f"file={t.file},line={t.line}," if t.line else f"file={t.file},"
+        why = f" ({diagnose(t)})" if t.jax else ""
+        out.append(f"::warning {loc}title=Allowlisted test over {fail_over:g} s::" + _escape(
+            f"{t.nodeid} took {_fmt(t.seconds)}{why}. It is on tests/duration_allowlist.txt, "
+            f"so the job passes, but the allowlist has no ceiling: check that this is still "
+            f"what keeping it on every push costs."))
     failing = {t.nodeid for t in verdict["failing"]}
     for t in verdict["new_slow"]:
         if t.nodeid in failing:
@@ -716,7 +733,9 @@ def main(argv=None) -> int:
           f"({len(verdict['new_slow'])} not allowlisted; "
           f"{len(verdict['slow_warm'])} slow even with a warm cache; "
           f"{len(verdict['slow_subprocess'])} with work in a subprocess, not measured here); "
-          + (f"{len(verdict['failing'])} unlisted over {args.fail_over:g} s."
+          + (f"{len(verdict['failing'])} unlisted over {args.fail_over:g} s"
+             + (f", {len(verdict['kept_over_hard_line'])} allowlisted over it."
+                if verdict["kept_over_hard_line"] else ".")
              if args.fail_over else "hard line off (--fail-over 0)."))
     return 1 if verdict["failing"] else 0
 

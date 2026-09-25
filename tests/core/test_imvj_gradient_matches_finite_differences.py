@@ -74,5 +74,8 @@ def test_the_gradient_through_a_multiphysics_imvj_group_matches_finite_differenc
     g = float(value_and_grad(k0)[1])
     fd = (float(value_and_grad(k0 + h)[0]) - float(value_and_grad(k0 - h)[0])) / (2 * h)
     assert np.isfinite(g) and g != 0.0
-    # The slow test's tolerance; measured here: 0.3% apart.
-    assert abs(g - fd) <= 5e-2 * abs(fd) + 1e-3, (g, fd)
+    # Relative only: the gradient is about 0.0087, so an absolute floor of
+    # 1e-3 (the slow test's, until it was dropped) would pass a gradient 14%
+    # off -- which is what an adjoint that ignores the coupling's own
+    # Jacobian returns here.  Measured: 0.3% apart.
+    assert abs(g - fd) <= 2e-2 * abs(fd), (g, fd)

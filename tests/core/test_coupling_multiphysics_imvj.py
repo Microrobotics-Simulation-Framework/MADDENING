@@ -140,4 +140,8 @@ def test_gradient_through_multiphysics_imvj_matches_fd():
     assert np.isfinite(g) and g != 0.0
     h = 0.5
     fd = (float(loss(k0 + h)) - float(loss(k0 - h))) / (2 * h)
-    assert abs(g - fd) <= 5e-2 * abs(fd) + 1e-3, (g, fd)
+    # Relative only: the gradient is about 0.0116, so the absolute floor of
+    # 1e-3 this used to add made the tolerance about 14% -- wide enough to
+    # pass an adjoint that ignores the coupling's own Jacobian.  Measured:
+    # 1.4% apart (float32 cancellation at this step).
+    assert abs(g - fd) <= 5e-2 * abs(fd), (g, fd)

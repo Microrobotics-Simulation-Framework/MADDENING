@@ -160,9 +160,13 @@ def test_the_host_verdict_is_the_in_graph_verdict_on_float32_slots():
         assert reported_error_estimate(residual, amplification, scale) == float(expected)
         for threshold in (float(expected), math.nextafter(float(expected), 0.0),
                           math.nextafter(float(expected), math.inf)):
-            assert acceleration.reported_converged(
-                residual, amplification, scale, threshold) is \
-                bool(expected <= threshold), (residual, amplification, scale, threshold)
+            verdict = bool(expected <= threshold)
+            # A float64 *scalar* threshold too: NumPy 2 promotes a bare
+            # Python float to the array's dtype, but not a np.float64.
+            for spelled in (threshold, np.float64(threshold)):
+                assert acceleration.reported_converged(
+                    residual, amplification, scale, spelled) is verdict, (
+                    residual, amplification, scale, spelled)
 
 
 def test_float64_slots_keep_the_float64_arithmetic():

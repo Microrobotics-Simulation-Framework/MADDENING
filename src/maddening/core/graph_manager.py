@@ -850,27 +850,6 @@ def _refuse_colliding_group_keys(groups) -> None:
             slots[slot] = group.nodes
 
 
-def _keep_fired_group_meta(group, fires, new_meta, old_meta):
-    """``_meta`` after a multi-rate base step ran *group*'s solve.
-
-    ``fires`` is ``None`` for a group at the base rate, which fires on
-    every step, and the merge is the plain one.  Otherwise each slot the
-    group owns (``_GROUP_META_SUFFIXES``) takes the solve's value only
-    when the step fires and keeps its previous value when it does not --
-    ``jnp.where``, exactly as ``_apply_multirate`` treats the group's
-    node states.  Every other slot passes through as the solve left it.
-    """
-    merged = {**old_meta, **new_meta}
-    if fires is None:
-        return merged
-    key = "+".join(sorted(group.nodes))
-    for suffix in _GROUP_META_SUFFIXES:
-        slot = f"coupling_{key}_{suffix}"
-        if slot in new_meta and slot in old_meta:
-            merged[slot] = jnp.where(fires, new_meta[slot], old_meta[slot])
-    return merged
-
-
 def _group_dividers(group, nodes):
     """Evaluations of each node per coupling pass under ``subcycling=True``, or ``None``.
 
@@ -6495,33 +6474,31 @@ class GraphManager:
                             coupled_result = _solve(new_state)
                         else:
                             # Solve only on a base step that keeps the
-                            # result: the fixed-point iteration is the cost
-                            # of the step, and a group at divider ``d`` used
-                            # to pay it ``d`` times per solve it applied.
-                            # The branch that does not solve hands the
-                            # state through unchanged, so the selects below
-                            # are exact either way -- and under ``vmap``,
-                            # where a batched ``cond`` runs both branches,
-                            # they are what keeps the discarded solve out.
+                            # result; the other branch hands the state
+                            # through untouched.  The group's node states
+                            # *and* its ``_meta`` slots -- diagnostics,
+                            # predictor history, IQN-IMVJ warm start -- are
+                            # therefore those of the last applied solve.
+                            # The solve used to run on every base step with
+                            # only the node states selected afterwards, so
+                            # between firings the slots described solves
+                            # the step threw away (the report, the profiler,
+                            # sysid's mask, the predictor and the warm start
+                            # all read them), and a group at divider ``d``
+                            # paid its fixed-point iteration ``d`` times per
+                            # solve it applied.  Under ``vmap`` over states
+                            # at different phases the batched ``cond``
+                            # selects per element between the two branches'
+                            # outputs, which is the same rule.
                             coupled_result = jax.lax.cond(
                                 fires, _solve, dict, new_state)
                         for nn in group_schedule:
-                            new_state[nn] = _apply_multirate(
-                                nn, coupled_result[nn], new_state
-                            )
-                        # Propagate the group's ``_meta`` slots -- its
-                        # diagnostics, predictor history and IQN-IMVJ warm
-                        # start -- by the same rule as its node states:
-                        # only from a solve the step keeps.  Merged
-                        # unconditionally, a phase the group does not fire
-                        # on published the report, the profiler's and
-                        # sysid's verdicts and the next warm start of a
-                        # solve whose state it threw away.
+                            new_state[nn] = coupled_result[nn]
                         if _META_KEY in coupled_result:
-                            new_state[_META_KEY] = _keep_fired_group_meta(
-                                group, fires, coupled_result[_META_KEY],
-                                new_state.get(_META_KEY, {}),
-                            )
+                            new_state[_META_KEY] = {
+                                **new_state.get(_META_KEY, {}),
+                                **coupled_result[_META_KEY],
+                            }
             else:
                 for node_name in schedule:
                     updated = _resolve_and_update_node(

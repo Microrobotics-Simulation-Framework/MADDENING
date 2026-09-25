@@ -6662,6 +6662,10 @@ class GraphManager:
     def coupling_diagnostics(self) -> dict[str, dict]:
         """Return coupling convergence info from the last step.
 
+        On a multi-rate graph a coupling group solves only on the base
+        steps its rate divider fires on, and between those its entry is
+        the most recent applied solve's.
+
         Returns
         -------
         dict
@@ -6772,7 +6776,14 @@ class GraphManager:
               ``"ratio_usable"``.
             - ``"converged"`` : bool — the *error estimate* met the
               group's threshold (``tolerance`` for the L2 norm, ``1.0``
-              for the mixed / interface norms).  ``False`` means the
+              for the mixed / interface norms), compared in the
+              residual's dtype with the threshold rounded to it -- the
+              comparison the loop, ``strict_convergence`` and the sysid
+              mask make in-graph
+              (:func:`~maddening.core.coupling.acceleration.reported_converged`),
+              so all of them give one verdict; ``"error_estimate"`` is
+              the float32 estimate of a float32 group, not the float64
+              product of its factors.  ``False`` means the
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.

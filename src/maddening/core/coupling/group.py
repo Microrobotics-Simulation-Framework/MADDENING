@@ -152,7 +152,13 @@ class CouplingGroup:
         (``UserWarning``).
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
-        Fast nodes take multiple sub-steps per coupling iteration.
+        Fast nodes take multiple sub-steps per coupling iteration: a
+        whole number, ``macro_dt / node_dt``, ``macro_dt`` the largest
+        timestep in the group.  Every member's timestep must therefore
+        divide ``macro_dt`` (to a relative ``1e-9``); ``compile()``
+        refuses one that does not, which would otherwise cover
+        ``round(macro_dt / node_dt) * node_dt`` per macro step and drift
+        from the rest of the graph.
     boundary_interpolation : str
         How a sub-cycled node's inputs from the rest of its group are
         resolved at each of its sub-steps.  Read **only** when

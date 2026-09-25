@@ -8414,6 +8414,7 @@ class GraphManager:
             else:
                 # Reject step -- shrink dt and retry
                 n_rejected += 1
+                attempted = dt
                 factor = config.safety * (1.0 / error_norm) ** (1.0 / (config.order + 1))
                 factor = min(max(factor, config.min_factor), config.max_factor)
                 dt = max(dt * factor, dt_min)
@@ -8428,13 +8429,18 @@ class GraphManager:
                         f"(error={error_norm:.3e}). Accepting step.",
                         stacklevel=2,
                     )
+                    # The step accepted is the attempt just made, whose two
+                    # half steps covered ``attempted`` -- up to
+                    # ``dt_min / min_factor``, not ``dt_min``.  Advancing
+                    # the clock by ``dt_min`` left it behind the state
+                    # (MADD-ANO-053).
                     state = state_half
-                    t += dt_min
+                    t += attempted
                     n_steps += 1
-                    dt_history.append(dt_min)
+                    dt_history.append(attempted)
                     t_history.append(t)
                     if callback is not None:
-                        callback(t, dt_min, self._user_state(state))
+                        callback(t, attempted, self._user_state(state))
                     self._notify(EVENT_STEP, self._user_state(state))
 
         self._store_state(state)

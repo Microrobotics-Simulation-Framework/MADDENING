@@ -4795,3 +4795,49 @@ anomalies:
       - "tests/core/test_coupling_flux_edge_readers.py::test_a_sub_cycled_consumer_of_a_flux_edge_needs_constant_interpolation"
       - "tests/core/test_coupling_flux_edge_readers.py::test_constant_interpolation_steps_the_sub_cycled_flux_consumer"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-053"
+    title: "run_adaptive advanced its clock by dt_min when it accepted an attempt at dt_min, while the state advanced by the attempted step"
+    description: >
+      When an attempt's error is too large and the shrunk step would fall
+      to `dt_min`, `GraphManager.run_adaptive` warns and accepts the
+      attempt it has just made: the state becomes that attempt's two half
+      steps, which cover the attempted step.  The attempted step can be up
+      to `dt_min / min_factor` (5x `dt_min` at the default controller), but
+      the stepper advanced `t`, `dt_history`, `t_history` and the
+      callback's `dt` by `dt_min`.  The state then ran ahead of the time
+      reported for it, and the loop, stopping on its own clock, carried the
+      state past `t_end`.  Measured at v0.3.1 (`git archive`, CPU, jaxlib
+      0.11.0) and on the 0.4.0 development tree: a node integrating its own
+      clock beside a spring pair whose coupling diverges at `dt = 0.01`,
+      `run_adaptive(0.02, dt_initial=0.01, dt_max=0.01, dt_min=0.005)` --
+      the first attempt is rejected and accepted at `dt_min` -- reported
+      `t_history[-1] = 0.02` beside a clock state of 0.025.  The code is the
+      same at v0.1.0.  `run_adaptive_scan` accepts at `dt_min` only an
+      attempt made at `dt_min`, and was not affected.
+      Resolved in 0.4.0: the accepted step advances the clock, the
+      histories and the callback by the step it covered.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong time accounting, but only on a step the stepper
+      already warns about ("hit dt_min ... Accepting step"), and by at most
+      `dt_min / min_factor - dt_min` per such step.  `context_dependent`
+      because a run that never reaches `dt_min`, or sets `dt_min` far below
+      the steps it takes, is unaffected, while a run whose `dt_min` is
+      reached repeatedly reports a trajectory against the wrong times.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: treat a run that warned "hit dt_min" as having an
+      unreliable `t_history`, or use `run_adaptive_scan`; read the time of
+      the state from a node that integrates its own clock.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  The step accepted at `dt_min` is still the attempt the
+      controller rejected on its error estimate, as the warning says.
+    verification:
+      - "tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps"
+    github_issue: null

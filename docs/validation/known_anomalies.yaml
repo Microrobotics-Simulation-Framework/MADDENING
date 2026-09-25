@@ -3707,12 +3707,14 @@ anomalies:
       one applied solve converged) read the same slots, and
       `strict_convergence=True` raised about a discarded solve on the
       first base step after a firing.
-      Resolved in 0.4.0: the group's slots follow its node states'
-      `jnp.where` on the firing predicate; `strict_convergence` checks
-      only a step that keeps the solve; the profiler samples a multi-rate
-      group only on the steps it fires on; and the solve itself runs under
-      a `lax.cond`, so a step that would discard it no longer computes
-      it.  The node states are bit-identical to before, on jaxlib 0.10.2,
+      Resolved in 0.4.0: the group's solve runs under a `lax.cond` on the
+      firing predicate, so a base step that does not fire neither
+      computes it nor touches the group's node states or `_meta` slots,
+      which are therefore always the last applied solve's;
+      `strict_convergence` checks only a step that keeps the solve (a
+      batched `cond` under `vmap` runs both branches); and the profiler
+      samples a multi-rate group only on the steps it fires on.  The node
+      states are bit-identical to before, on jaxlib 0.10.2,
       0.11.0 and 0.11.2, wherever neither a predictor nor IQN-IMVJ was
       learning from a discarded solve, and a group at the base rate
       compiles to exactly the program it did.
@@ -3748,9 +3750,10 @@ anomalies:
     residual_risk: >
       Between firings the report describes the group's most recent applied
       solve, not a step of its own.  Under `vmap` over states at different
-      phases a batched `lax.cond` runs both branches; the selects and the
-      gated strict check keep the discarded solve out there too, which a
-      test pins, but the work is not saved in that case.
+      phases a batched `lax.cond` runs both branches and selects per
+      element, and the gated strict check keeps the discarded solve from
+      raising there too, which a test pins; the work is not saved in that
+      case.
     verification:
       - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_report_between_firings_is_the_last_applied_solve"
       - "tests/core/test_multirate_group_meta_follows_firing.py::test_strict_convergence_does_not_raise_about_a_discarded_solve"

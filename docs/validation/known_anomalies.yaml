@@ -610,8 +610,14 @@ anomalies:
       reads True (see the description).  A group with more than eight independent
       interface scalars gets rho_spectral from below, a margin of twice
       the Arnoldi residual on it, and spectral_usable=False.  Evidence:
-      the 2026-09-22 section of
-      benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md.
+      the two-mode figures in this entry (8.05x over; 1.3x over under
+      aitken and iqn-ils) are measured on the two-mode fixture of
+      tests/core/test_coupling_error_bound.py, as re-derived on the final
+      tree in commit 23d9d1e (jaxlib 0.11.0, float32).  The 2026-09-22
+      section of benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md
+      records the decision and the first measurement (7.95x and 1.22x),
+      taken before the precision-floor and Newton-Kantorovich fixes moved
+      them.
       gradient_relative_error_bound inherits all of that and adds three
       conditions of its own.  It is leading-order in the distance: the
       curvature is measured over the Newton correction and extrapolated

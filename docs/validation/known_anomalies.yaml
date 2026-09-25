@@ -119,6 +119,17 @@ anomalies:
       raises ValueError ("the Fourier number dt*alpha/dx^2 is 5, above the 0.5
       limit of the order-2 stencil").  That check is MADD-ANO-009's and it sees
       the constructor's own timestep, thermal_diffusivity and length only.
+      It covers a rod built on `grid_points` as well.  Until the
+      release-record audit of 0.4.0 it did not: the same 20 cell centres
+      given as `grid_points` at Fo = 5.0 built without a word and reached inf
+      by step 32.  A non-uniform rod is now held to `dt*alpha/min(h_L*h_R) <=
+      1/2`, where `h_L` and `h_R` are a cell's spacings to its two neighbours
+      and the end spacing repeats beyond each end.  That is the Gershgorin
+      bound of the variable-spacing stencil: exact on a uniform grid, and
+      sufficient on any.  The same round made the constructor refuse a
+      non-positive timestep and a negative thermal_diffusivity
+      (MADD-ANO-062).  Both run the heat equation backwards, and the check
+      used to be skipped for them.
       What is still live is every route around it, re-measured on that same rod
       at 0.4.0.dev0 with a half-sine initial profile and a node constructed at a
       stable Fo = 0.4:
@@ -156,10 +167,14 @@ anomalies:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0"
     workaround: >
-      The constructor checks this for you from 0.4.0; below 0.4.0, check it
-      yourself: timestep * thermal_diffusivity / dx**2 < 0.5 for
-      stencil_order=2 and < 0.3125 for stencil_order=4, with
-      dx = length / n_cells.  The constructor parameter is
+      The constructor checks this for you from 0.4.0, on a uniform grid and
+      on `grid_points`; below 0.4.0, check it yourself:
+      timestep * thermal_diffusivity / dx**2 < 0.5 for stencil_order=2 and
+      < 0.3125 for stencil_order=4, with dx = length / n_cells.  On a
+      non-uniform grid, use timestep * thermal_diffusivity / min(h_L * h_R)
+      <= 0.5 whatever stencil_order says, with h_L and h_R a cell's spacings
+      to its two neighbours and the end spacing repeated beyond each end.
+      The constructor parameter is
       `thermal_diffusivity` (there is no `alpha=` keyword — passing one is a
       TypeError), and `timestep` is the value the check applies to.
       What no version checks, and what the workaround is for at 0.4.0: apply
@@ -172,8 +187,10 @@ anomalies:
       non-finite values after the step if it can.
     resolution_status: "open"
     verification:
-      # The narrowing: the constructor's check (MADD-ANO-009's).
+      # The narrowing: the constructor's check (MADD-ANO-009's), on both grids.
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_constructor_refuses_an_unstable_configuration"
+      - "tests/nodes/test_heat_nonuniform_fourier_limit.py::test_a_non_uniform_rod_past_its_limit_is_refused"
+      - "tests/nodes/test_heat_nonuniform_fourier_limit.py::test_the_criterion_is_conservative_on_graded_grids"
       # What stays open, pinned so that a fix, or a drifted figure, fails.
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_constructor_does_refuse_the_same_fourier_number"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_dt_passed_to_update_diverges_silently"
@@ -1041,8 +1058,10 @@ anomalies:
       or `length` moved by a calibration run -- both are trainable -- bypass
       it entirely, and cannot be checked inside a traced step without a host
       callback.  MADD-ANO-002 stays open for that reason and is the right
-      place to read about it.  The check is also skipped for a non-uniform
-      grid, where `dx` is not a single number.
+      place to read about it.  Until the release-record audit of 0.4.0 the
+      check was also skipped for a non-uniform grid, where `dx` is not a
+      single number.  It now applies there too, as `dt * alpha / min(h_L *
+      h_R) <= 1/2` (see MADD-ANO-002).
     verification:
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_stencil_is_stable_up_to_five_sixteenths"
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_limit_is_below_the_three_eighths_of_its_symbol"
@@ -3157,7 +3176,13 @@ anomalies:
       "quadratic" is still "linear" to the last bit.  At timesteps 0.001
       and 0.01 with `tolerance=1e-8`: when every first sweep converges
       (`max_iterations=10`), `waveform_iterations` 1, 2 and 3 give
-      bit-identical states over three steps under both solvers.  When the
+      bit-identical states over three steps under both solvers -- the pair
+      is then stationary in float32.  Every sweep starts with one pass, so
+      each later sweep applies at least one more and moves a converged but
+      not stationary state by about one residual: at `tolerance=1e-4` the
+      states at 2 and 3 are 6.0e-08 (relative) from the one at 1 after one
+      step, and on a linear pair contracting at 0.9025, 1.2e-04 at
+      `tolerance=1e-3`.  When the
       first sweep stops at the cap, the later sweeps continue the same
       iteration like extra passes: under `acceleration="fixed"`,
       `relaxation=0.7`, `max_iterations=2`, the states at
@@ -3170,19 +3195,20 @@ anomalies:
       No state is wrong: every result is the converged solution of the
       sub-cycled scheme as it is implemented, which holds the other
       node's end-of-step value across the fast node's sub-steps, and it
-      is the result `waveform_iterations=1` gives.  What is wrong is a
+      is, to within about one residual, the result `waveform_iterations=1`
+      gives.  What is wrong is a
       numerical-method claim.  Waveform relaxation and higher-order
       sub-step interpolation exist to reduce the splitting error of a
       multi-rate coupling, and a program that chose them for that reason
       gets none of the reduction and no signal; the extra sweeps cost
-      passes and change nothing once the first sweep converges.  Graded
-      `major`, as MADD-ANO-014 is for a method that does not deliver the
-      accuracy its name states: the result silently carries the splitting
-      error the named method exists to remove.  It was `minor` until the
-      0.4.0 severity definition, because the result is the documented
-      single-pass result and the error against a uniform-rate reference
-      is the same number as without the option, which a verification run
-      would show.
+      passes and, once the first sweep converges, move the state by no
+      more than about one residual.  Graded `major`, as MADD-ANO-014 is for
+      a method that does not deliver the accuracy its name states: the
+      result silently carries the splitting error the named method exists
+      to remove.  It was `minor` until the 0.4.0 severity definition,
+      because the result is the documented single-pass result and the
+      error against a uniform-rate reference is the same number as without
+      the option, which a verification run would show.
       `context_dependent` because whether that matters depends on whether
       an accuracy argument rests on the method the parameter names.
     affected_components:
@@ -3190,8 +3216,10 @@ anomalies:
       - "maddening.core.coupling.group.CouplingGroup.boundary_interpolation"
     affected_versions: ">=0.1.0"
     workaround: >
-      Use `waveform_iterations=1`: it gives the same result with fewer
-      passes.  When the first sweep stops at `max_iterations`, raise
+      Use `waveform_iterations=1`: it gives the same result -- to within
+      about one residual, since each extra sweep applies at least one more
+      pass, and identically at exact stationarity -- with fewer passes.
+      When the first sweep stops at `max_iterations`, raise
       `max_iterations` rather than adding sweeps.  To reduce multi-rate
       splitting error, reduce the slow node's timestep or couple at a
       uniform rate; the interpolation mode changes a converged step by at
@@ -3207,7 +3235,7 @@ anomalies:
       under `solver="ift"` checks every sweep, so a step whose first
       sweep stops at the cap raises even when the last sweep converges.
     verification:
-      - "tests/core/test_coupling_waveform_report.py::test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change"
+      - "tests/core/test_coupling_waveform_report.py::test_each_later_sweep_moves_a_converged_state_by_about_one_residual"
       - "tests/core/test_coupling_waveform_report.py::test_a_capped_first_sweep_is_continued_by_the_later_ones"
       - "tests/core/test_coupling_waveform_report.py::test_the_interpolation_modes_coincide_when_the_source_is_scheduled_after"
       - "tests/core/test_phases_5_7_8.py::TestQuadraticInterpolation::test_quadratic_interpolation_is_linear_interpolation_today"
@@ -4260,11 +4288,14 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      A non-integer ratio of a member's timestep to the macro timestep is
-      rounded to a whole number of sub-steps, so such a member covers
-      `divider * node_dt` per macro step in the compiled step, not
-      `macro_dt`; the adaptive step keeps that same ratio.  That is a
-      separate, pre-existing property of sub-cycling, not addressed here.
+      None known from this fix.  The one related property it did not
+      address was separate and pre-existing: a member whose timestep does
+      not divide the macro timestep was rounded to a whole number of
+      sub-steps, so it covered `divider * node_dt` per macro step rather
+      than `macro_dt`, and the adaptive step kept that ratio.  That is
+      MADD-ANO-046, resolved in the same release.  `compile()` now refuses
+      such a group, so the configuration can reach neither the compiled
+      step nor the adaptive one.
     verification:
       - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step"
       - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_scan_advances_every_member_by_the_step"
@@ -4710,59 +4741,113 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-050"
-    title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 once the exchange converges, which each rod's constructor accepts up to 1/2"
+    title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 (stencil_order=2) or 0.226 (stencil_order=4) once the exchange converges, below the limit each rod's constructor accepts"
     description: >
       Coupling two rods by making each one's end-cell temperature the
       other's Dirichlet datum (`extract_last` into `left_temperature`,
       `extract_first` into `right_temperature`) and converging the exchange
       within the step with a coupling group gives a pair that is not one
-      continuous rod: `HeatNode` imposes the datum through the ghost
-      `2*T_b - T[0]` (the rod-end fix of MADD-ANO-007), and the converged
-      pair has an interface mode whose per-step amplification is -1 at
-      Fourier number `Fo = dt*alpha/dx**2 = 3/8` and grows past it.  Each
-      rod's constructor checks its own limit, 1/2 for fixed data, so
-      nothing refuses the pair.  Measured on the 0.4.0 development tree
-      (CPU, jaxlib 0.11.0): two rods of 8 or of 20 cells, `alpha = 0.1`,
-      length 1, started at 300 K and 360 K, `add_coupling_group(["a",
-      "b"], max_iterations=100, tolerance=1e-9)`.  After 60 steps the
-      largest departure from 330 K is 29.8 K at `Fo = 0.375`, 1.51e+06 K at
-      0.4 and 3.5e+31 K at 0.45, and the part of the field that alternates
-      in time is multiplied by -1.500 per step at 0.4 and -4.000 at 0.45 on
-      both grids; at 0.45 the field is non-finite from step 68 (8 cells) or
-      67 (20 cells).  No error or warning.  The same pair exchanging its
-      data without a coupling group (lagged by the schedule) stays within
-      its initial range at 0.45 over 200 steps.  At v0.3.1 (`git archive`, same
-      environment) the pair stays bounded at every Fourier number up to
-      0.45 with the group and without it: the old closure wrote the datum
-      into the end cell, which made the pair one continuous rod, so the
-      limit arrived with the 0.4.0 rod-end fix.  The coupling benchmark
-      fixtures refuse `Fo >= 3/8` for their heat slab pairs themselves.
+      continuous rod.  `HeatNode` imposes the datum through ghost cells (the
+      rod-end fix of MADD-ANO-007).  The converged exchange makes each datum
+      an implicit value, the other rod's end cell at the new time, while the
+      rod interiors stay explicit.  The pair then has an interface mode that
+      alternates in sign every step.  Its amplification is -1 at a Fourier
+      number `Fo = dt*alpha/dx**2` below each rod's own limit and grows past
+      it.  Each rod's constructor checks its own limit, for fixed data, so
+      nothing refuses the pair.
+      The limit depends on the stencil, because the ghost closure sets how
+      much of the exchanged datum reaches the end cell:
+        - `stencil_order=2`: exactly 3/8, against 1/2 for one rod.  The mirror
+          ghost `2*T_b - T[0]` puts 2 of the datum into the end cell's row.
+          The interface mode decays away from the interface as `(-1/3)**k`,
+          so its eigenvalue is `-16/3` and `Fo = 2 / (16/3) = 3/8`;
+        - `stencil_order=4`: 0.2261266 as `n_cells` grows (0.2261215 at 5
+          cells, the fewest the stencil accepts), against 5/16 = 0.3125 for
+          one rod.  The cubic ghost puts 16/5 of the datum into the end
+          cell's row.  The interface mode is a sum of the 5-point
+          recurrence's two decaying roots, and the two closure rows fix
+          their product `p` as the root in (-1, 0) of the irreducible sextic
+          `p**6 - 294 p**5 - 2333 p**4 + 1692 p**3 - 9 p**2 + 362 p + 5`.
+          That gives an eigenvalue of -8.8446028.  Both figures were
+          re-derived numerically too, by bisecting on the spectral radius of
+          the pair's amplification matrix built from `_compute_laplacian`
+          (5 to 256 cells per rod).
+      Measured at `stencil_order=2` on the 0.4.0 development tree (CPU,
+      jaxlib 0.11.0): two rods of 8 or of 20 cells, `alpha = 0.1`, length 1,
+      started at 300 K and 360 K, `add_coupling_group(["a", "b"],
+      max_iterations=100, tolerance=1e-9)`.  After 60 steps the largest
+      departure from 330 K is 29.8 K at `Fo = 0.375`, 1.51e+06 K at 0.4 and
+      3.5e+31 K at 0.45.  The part of the field that alternates in time is
+      multiplied by -1.500 per step at 0.4 and -4.000 at 0.45 on both grids.
+      At 0.45 the field is non-finite from step 68 (8 cells) or 67 (20
+      cells).
+      At `stencil_order=4` on the same construction (8 cells) the pair stays
+      bounded at 0.20 and 0.22, over 2000 and 1500 steps.  It is non-finite
+      from step 907 at 0.23, 258 at 0.24, 150 at 0.25, 35 at 0.30 and 21 at
+      0.31.  Each of those is inside the order-4 constructor limit, and
+      inside the 3/8 this entry used to quote for every stencil.  The measured growth per step is
+      the predicted interface mode's: -1.107 at 0.23, -1.435 at 0.24 and
+      -1.866 at 0.25.
+      A chain of three or more short rods goes unstable slightly below the
+      pair figure: 0.3730 (order 2) and 0.2248 (order 4) for a long chain of
+      5-cell rods, and 0.3749 and 0.2261 for 8-cell rods.  From about 20
+      cells per rod a chain has the pair figure.
+      No error, at either order.  Since 0.4.0 `compile()` warns: it emits a
+      UserWarning that names both rods, their Fourier numbers, the limit and
+      this entry, when a coupling group holds two uniform rods coupled this
+      way through `extract_first` / `extract_last` and either rod is past
+      the pair limit of its stencil.  The same pair exchanging its data
+      without a coupling group (lagged by the schedule) stays within its
+      initial range at 0.45 over 200 steps, at order 2.  At v0.3.1 (`git
+      archive`, same environment) the order-2 pair stays bounded at every
+      Fourier number up to 0.45, with the group and without it, and the
+      order-4 pair stays bounded at 0.23, 0.25 and 0.30 over 1000 steps.  The old
+      closure wrote the datum into the end cell, which made the pair one
+      continuous rod, so the limit arrived with the 0.4.0 rod-end fix.  The
+      coupling benchmark fixtures refuse `Fo >= 3/8` for their order-2 heat
+      slab pairs themselves.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent until it is not: a configuration every individual check
       accepts grows an oscillation that flips sign every step and leaves
-      float range in under 70 steps at `Fo = 0.45`, with nothing
-      raised before the field is visibly wrong, and it is wrong for many
-      steps before it is non-finite.  Graded `major` because the pattern is
-      the natural way to couple two rods and the limit is not the one the
-      node documents for itself.  `context_dependent` because it needs rods
-      coupled end to end through their Dirichlet inputs, a converged
-      exchange, and a Fourier number between 3/8 and 1/2; a single rod, or
-      a pair below 3/8, is unaffected.
+      float range in under 70 steps at `Fo = 0.45` (order 2) and 150 at
+      0.25 (order 4).  Nothing is raised before the field is visibly wrong,
+      and it is wrong for many steps before it is non-finite.  The warning
+      `compile()` now gives does not refuse the graph, and it sees only the
+      pattern it recognises.  Graded `major` because the pattern is the
+      natural way to couple two rods and the limit is not the one the node
+      documents for itself.  `context_dependent` because it needs rods coupled end to end through
+      their Dirichlet inputs, a converged exchange, and a Fourier number
+      between the pair limit and the single-rod one.  A single rod, or a pair below the pair
+      limit, is unaffected.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      Keep `Fo = dt*alpha/dx**2 < 3/8` on rods coupled end to end through
-      their temperature inputs, whatever each rod's own constructor
-      accepts.  A compile-time stability check of coupled groups is
+      Keep `Fo = dt*alpha/dx**2` below 3/8 at `stencil_order=2`, and below
+      0.226 at `stencil_order=4`, on rods coupled end to end through their
+      temperature inputs, whatever each rod's own constructor accepts.
+      Below those figures on both rods the pair is stable, at mixed orders
+      too.  `compile()` warns when it finds such a pair past them, but it
+      only recognises the built-in `extract_first` / `extract_last` edges
+      between uniform `HeatNode`s in one coupling group.  A custom
+      transform, a wrapped or non-uniform rod, or a sub-cycled pair of
+      different timesteps is not judged, so check those yourself.  Or
+      exchange the data without a coupling group, lagged by a step.  That
+      stays bounded.  A compile-time stability check of coupled groups is
       proposed for 0.5.0.
     resolution_status: "open"
     verification:
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_end_to_end_pair_diverges_above_three_eighths"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_pair_below_three_eighths_stays_bounded"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_one_rod_with_fixed_data_is_stable_at_the_same_fourier_number"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_order_four_pair_diverges_below_its_constructor_limit"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_order_four_pair_below_its_limit_stays_bounded"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_recorded_pair_limit_sits_under_the_pair_operator_limit"
+      # The warning (not a fix: the entry stays open).
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_compile_warns_about_a_pair_past_its_limit"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_no_warning_for_a_pair_below_its_limit"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-051"
@@ -5320,4 +5405,230 @@ anomalies:
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_outside_the_grid"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_the_default_propeller_position_needs_a_pipe_longer_than_ten_planes"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_disc_that_covers_no_cell"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-059"
+    title: "Accelerating a coupling group that holds an integer, boolean or PRNG-key state leaf failed at the first step"
+    description: >
+      A coupling group's acceleration flattens the state fields it acts on
+      into one floating vector and writes the relaxed vector back.
+      `acceleration="aitken"` and `"fixed"` flattened every field of every
+      node in the group, and the quasi-Newton accelerations every field
+      their selection named, integer, boolean and PRNG-key leaves included.
+      At v0.1.0, v0.2.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib
+      0.11.0) a group of a spring and a node holding a `uint32` key and an
+      `int32` counter beside its float field raised `TypeError: scan body
+      function carry input and carry output must have equal types` at the
+      first step under `"aitken"` and under `"fixed"`, and so did
+      `"iqn-ils"` with an `accelerated_fields` naming the integer field;
+      `acceleration="none"` stepped it.  During 0.4.0 development, before
+      release, `unflatten_coupled_state` learned to restore each field's
+      dtype and the failure turned silent: `solver="fori"` with
+      `"aitken"` or `"fixed"` returned the leaves rounded through float32
+      (`0xdeadbeef` as `0xdeadbf00`, `2**24 + 1` as `2**24`, a legacy PRNG
+      key rewritten) and kept the rounded values, and `solver="ift"` with
+      a quasi-Newton acceleration raised a broadcasting error when an
+      integer field was in its selection, named or reached through a flux
+      edge (whose producer's whole state stands in for the flux).
+      Resolved in 0.4.0: every acceleration acts on floating fields only,
+      as `solver="ift"` always iterated.  Such a leaf is recomputed from
+      the pre-step state on every pass, so its first-pass value is already
+      the converged one.  A non-floating field named in
+      `accelerated_fields` is dropped from the selection, and `compile()`
+      refuses a selection that names no floating field.  A group whose
+      state is all floating flattens exactly as before, and its floating
+      fields step bit-identically.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud in every release: the step raised before returning anything, so
+      no wrong value was reported as a right one.  The silent form existed
+      only on the 0.4.0 development tree and never shipped.  The harm was
+      that a group holding a counter, a flag or a random key could not use
+      the accelerations at all.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+      - "maddening.core.coupling.group.CouplingGroup.accelerated_fields"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep integer, boolean and PRNG-key fields out of
+      accelerated coupling groups (in a node outside the group, fed by an
+      edge), or use `acceleration="none"`; under a quasi-Newton
+      acceleration, name only floating fields in `accelerated_fields`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A field declared integer but meant to be relaxed would
+      now be left at its first-pass value; relaxation of such a field was
+      never meaningful, and the state it takes is the one
+      `acceleration="none"` gives.
+    verification:
+      - "tests/core/test_coupling_non_float_leaves.py::test_wide_integer_leaves_survive_a_coupled_step"
+      - "tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out"
+      - "tests/core/test_coupling_non_float_leaves.py::test_a_flux_edge_from_a_node_with_an_integer_field_accelerates_its_floats"
+      - "tests/core/test_coupling_non_float_leaves.py::test_accelerated_fields_naming_no_floating_field_is_refused_at_compile"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-060"
+    title: "A group-internal flux edge read by the interface norm, or by a sub-cycled member's linear boundary interpolation, failed with a bare KeyError"
+    description: >
+      A flux edge carries a value `compute_boundary_fluxes` returns, which
+      is not a field of the producer's state.  Two parts of the coupling
+      loop read an internal edge's value from the state:
+      `convergence_norm="interface"`, which measures the change of every
+      internal edge's source field between iterates, and the boundary
+      interpolation of a sub-cycled member under
+      `boundary_interpolation="linear"` (the default) or `"quadratic"`,
+      which interpolates each internal input between the pass's incoming
+      iterate and the in-pass state.  Given a flux edge, both raised
+      `KeyError` naming the flux inside the traced step, with nothing
+      saying which setting could not read it.  Measured at v0.1.0, v0.2.0
+      and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) and on the
+      0.4.0 development tree: a spring whose `spring_force` flux drives a
+      follower that drives it back, `add_flux_coupling(gm, "s", "k",
+      "spring_force", "x")`; `KeyError: 'spring_force'` under the interface
+      norm, and with the follower sub-cycled at a tenth of the spring's
+      timestep under the default interpolation.  The `"mixed"` and `"l2"`
+      norms, and `"constant"` interpolation, stepped the same graphs.
+      Resolved in 0.4.0: `validate()`, and so `compile()`, reports an error
+      for each such edge, naming it, the flux, and the setting that works:
+      `"mixed"` or `"l2"` for the norm, `"constant"` for the interpolation.
+      Only a member that sub-steps interpolates, so a flux read by the
+      slow member of a sub-cycled group is still accepted.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raised before returning anything, so no wrong value
+      was reported.  The harm was a configuration the API accepted failing
+      with an error that named a field and no cause.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.group.CouplingGroup.boundary_interpolation"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: couple through a flux edge only under the `"mixed"` or
+      `"l2"` norm, and set `boundary_interpolation="constant"` on a
+      sub-cycled group whose fast member reads a flux from inside it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The configurations are refused, not made to work: the interface norm
+      still has no reading of a flux, and linear interpolation of a flux
+      would need the flux of the incoming iterate, which the pass does not
+      compute.
+    verification:
+      - "tests/core/test_coupling_flux_edge_readers.py::test_the_interface_norm_on_a_flux_edge_is_refused_by_name"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_the_norms_the_refusal_names_step_the_same_group"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_a_sub_cycled_consumer_of_a_flux_edge_needs_constant_interpolation"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_constant_interpolation_steps_the_sub_cycled_flux_consumer"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-061"
+    title: "run_adaptive advanced its clock by dt_min when it accepted an attempt at dt_min, while the state advanced by the attempted step"
+    description: >
+      When an attempt's error is too large and the shrunk step would fall
+      to `dt_min`, `GraphManager.run_adaptive` warns and accepts the
+      attempt it has just made: the state becomes that attempt's two half
+      steps, which cover the attempted step.  The attempted step can be up
+      to `dt_min / min_factor` (5x `dt_min` at the default controller), but
+      the stepper advanced `t`, `dt_history`, `t_history` and the
+      callback's `dt` by `dt_min`.  The state then ran ahead of the time
+      reported for it, and the loop, stopping on its own clock, carried the
+      state past `t_end`.  Measured at v0.3.1 (`git archive`, CPU, jaxlib
+      0.11.0) and on the 0.4.0 development tree: a node integrating its own
+      clock beside a spring pair whose coupling diverges at `dt = 0.01`,
+      `run_adaptive(0.02, dt_initial=0.01, dt_max=0.01, dt_min=0.005)` --
+      the first attempt is rejected and accepted at `dt_min` -- reported
+      `t_history[-1] = 0.02` beside a clock state of 0.025.  The code is the
+      same at v0.1.0.  `run_adaptive_scan` accepts at `dt_min` only an
+      attempt made at `dt_min`, and was not affected.
+      Resolved in 0.4.0: the accepted step advances the clock, the
+      histories and the callback by the step it covered.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong time accounting, but only on a step the stepper
+      already warns about ("hit dt_min ... Accepting step"), and by at most
+      `dt_min / min_factor - dt_min` per such step.  `context_dependent`
+      because a run that never reaches `dt_min`, or sets `dt_min` far below
+      the steps it takes, is unaffected, while a run whose `dt_min` is
+      reached repeatedly reports a trajectory against the wrong times.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: treat a run that warned "hit dt_min" as having an
+      unreliable `t_history`, or use `run_adaptive_scan`; read the time of
+      the state from a node that integrates its own clock.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  The step accepted at `dt_min` is still the attempt the
+      controller rejected on its error estimate, as the warning says.
+    verification:
+      - "tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-062"
+    title: "HeatNode accepted a non-positive length or timestep, a negative diffusivity and grid_points out of order, and answered wrongly without a word"
+    description: >
+      Until 0.4.0 the HeatNode constructor checked none of its physical
+      constants for meaning.  The node built, compiled and stepped on each
+      of these with no error or warning:
+        - `length <= 0`: the Laplacian reads `dx**2` and was unchanged, but
+          `compute_boundary_fluxes` divides by the signed `dx`, so both
+          rod-end fluxes changed sign.  On a 10-cell rod with ends held at
+          250 K and 400 K, the left flux read +12.87 at `length=-1` against
+          -12.87 at `length=1`;
+        - `grid_points` not strictly increasing: `_laplacian_nonuniform`
+          replaces a non-positive span `x[i+1] - x[i-1]` with 1.0, so two
+          swapped points, or the whole grid in decreasing order, gave a
+          finite and wrong Laplacian, and a repeated point divided by zero;
+        - `timestep < 0` or `thermal_diffusivity < 0`: the explicit update
+          ran the heat equation backwards (anti-diffusion), and the Fourier
+          check added in 0.4.0 (MADD-ANO-009) was skipped for any
+          non-positive constant;
+        - a non-finite value of any of them.
+      Found on the 0.4.0 development tree (audit of 2026-09-25, CPU, jaxlib
+      0.11.0).  v0.3.1 (`git archive` of the tag, same environment) accepts
+      every case too.  Its flux formula differs, but the sign flip is the
+      same: -5.98 at `length=1` and +5.98 at `length=-1`, after five steps.
+      Resolved in 0.4.0: the constructor raises ValueError naming the
+      constant and what it would have done.  `timestep` and `length` must be
+      finite and greater than 0, and `thermal_diffusivity` finite and at
+      least 0; zero is a rod that does not conduct.  `grid_points` must be
+      finite and strictly increasing.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because every case was a silent wrong result, and a
+      silent wrong result is never minor.  Most cases need input with no
+      physical meaning.  The exception is grid points listed in decreasing
+      order: coordinates read along a negative axis can produce it, the
+      constructor's documentation never said it was not allowed, and the
+      rod then gave plausible, wrong temperatures.  Anti-diffusion does
+      eventually leave float range, but its finite values before that are
+      wrong.  `context_dependent` because whether a wrong temperature or
+      flux matters is a property of the program using it.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass a positive, finite `length` and `timestep`, a
+      non-negative `thermal_diffusivity`, and `grid_points` in strictly
+      increasing order.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The checks read the constructor's concrete numbers only.  A value
+      traced through the constructor is not judged.  Neither is a `dt`
+      handed to `update()`, nor a `thermal_diffusivity` or `length`
+      injected through params: that is MADD-ANO-002, which stays open.
+      `initial_temperature` is not checked for finiteness.
+    verification:
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_length_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_diffusivity_that_is_negative_or_not_finite_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_out_of_order_are_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_that_are_not_finite_are_refused"
     github_issue: null

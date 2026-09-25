@@ -9,8 +9,13 @@ Demonstrates coupling features introduced in Phases 5-8:
 3. **Additive inputs** (multiple springs on a rigid body)
 4. **IQN-IMVJ** vs IQN-ILS acceleration comparison
 5. **Interface residual norm** as convergence criterion
-6. **Subcycling interpolation** comparison (constant / linear / quadratic)
-7. **Waveform relaxation** for subcycled coupling
+6. **Subcycling interpolation** modes (constant / linear / quadratic)
+7. **Repeated sweeps** (``waveform_iterations``) of a subcycled group
+
+Sections 6 and 7 show what the sub-cycling options do today, which is
+less than their names say (MADD-ANO-027): ``waveform_iterations`` re-runs
+the same fixed-point solve rather than relaxing a boundary waveform, and
+``boundary_interpolation="quadratic"`` is exactly ``"linear"``.
 
 Run with::
 
@@ -315,11 +320,17 @@ def demo_interface_norm():
 # ======================================================================
 
 def demo_subcycling_interpolation():
-    """Compare constant, linear, and quadratic boundary interpolation
-    for subcycled coupling against a uniform-rate reference."""
+    """Run the constant, linear and quadratic boundary interpolation modes
+    of a subcycled group beside a uniform-rate reference.
+
+    ``"quadratic"`` is never given its third value and is exactly
+    ``"linear"``, and both ends of the interpolation are end-of-step
+    estimates (MADD-ANO-027), so no mode is expected to be more accurate
+    than another here.
+    """
     print()
     print("=" * 60)
-    print("6. Subcycling interpolation (constant / linear / quadratic)")
+    print("6. Subcycling interpolation modes (constant / linear / quadratic)")
     print("=" * 60)
 
     dt_fast, dt_slow = 0.001, 0.005
@@ -367,28 +378,28 @@ def demo_subcycling_interpolation():
               f"error vs ref = {err:.2e}")
 
     print(f"  {'reference':10s}: pos_fast = {ref_pos:.6f}")
-
-    # Quadratic should be at least as accurate as linear
-    assert results["quadratic"][1] <= results["constant"][1] * 1.1, \
-        "Quadratic not better than constant!"
-    print("  Quadratic <= constant error: PASS")
-    print("  (Equal results expected here: coupling converges quickly,")
-    print("   so boundary interpolation order makes no difference."
-          "  The error")
-    print("   is from time-discretisation of the slow node, not"
-          " interpolation.)")
+    print("  ('quadratic' is exactly 'linear' (MADD-ANO-027), and 'linear'")
+    print("   differs from 'constant' only by the in-pass change of a source")
+    print("   scheduled before the sub-cycled node.  The error against the")
+    print("   reference is the slow node's time discretisation, which no")
+    print("   interpolation mode reduces.)")
 
 
 # ======================================================================
-# 7. Waveform relaxation for subcycled coupling
+# 7. Repeated sweeps (``waveform_iterations``) of a subcycled group
 # ======================================================================
 
-def demo_waveform_relaxation():
-    """Waveform relaxation repeats the coupling block multiple
-    times, improving boundary data quality for subcycled groups."""
+def demo_repeated_sweeps():
+    """Run a subcycled group with ``waveform_iterations`` 1, 2 and 3.
+
+    This is not waveform relaxation (MADD-ANO-027): each sweep re-solves
+    the same fixed point from where the previous one stopped, with no
+    boundary waveform over the sub-step window, so it cannot improve the
+    boundary data.
+    """
     print()
     print("=" * 60)
-    print("7. Waveform relaxation for subcycled coupling")
+    print("7. Repeated sweeps (waveform_iterations) of a subcycled group")
     print("=" * 60)
 
     dt_fast, dt_slow = 0.001, 0.005
@@ -434,8 +445,10 @@ def demo_waveform_relaxation():
               f"pos_fast = {pos:.6f}  error vs ref = {err:.2e}")
 
     print(f"  {'reference':>23s}: pos_fast = {ref_pos:.6f}")
-    print("  (Equal results expected: coupling converges in one pass,")
-    print("   so waveform re-passes see the same boundary data.)")
+    print("  (Each sweep re-solves the same fixed point (MADD-ANO-027).  After")
+    print("   a converged first sweep a later one applies at least one more")
+    print("   pass, moving the state by about one residual: nothing here,")
+    print("   where tolerance=1e-10 leaves the pair stationary in float32.)")
 
 
 # ======================================================================
@@ -447,6 +460,6 @@ if __name__ == "__main__":
     demo_imvj_vs_ils()
     demo_interface_norm()
     demo_subcycling_interpolation()
-    demo_waveform_relaxation()
+    demo_repeated_sweeps()
     print()
     print("All demos completed successfully.")

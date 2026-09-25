@@ -61,8 +61,11 @@ Dirichlet data also sets a *time-step* limit tighter than one node's:
 the exactly coupled pair has an alternating interface mode whose
 amplification leaves the unit circle at ``Fo = 3/8`` (-1.5 per step at
 ``Fo = 0.4``, -4 at ``0.45``), where ``HeatNode`` alone is stable to
-``1/2``.  ``_HEAT_PAIR_FOURIER_LIMIT`` records it and the slab fixtures
-stay below it.
+``1/2``.  That is the figure for the default ``stencil_order=2``, the only
+order these fixtures build; a ``stencil_order=4`` pair goes at 0.226, below
+its own single-rod limit of 5/16 (MADD-ANO-050).
+``_HEAT_PAIR_FOURIER_LIMIT`` records the order-2 figure and the slab
+fixtures stay below it.
 
 Usage::
 
@@ -719,11 +722,18 @@ def build_stiff_pair(config: CouplingConfig, gain: float = 0.5,
 
 #: Largest Fourier number at which two ``HeatNode`` slabs that exchange
 #: their end-cell temperatures as Dirichlet data are stable in *time*
-#: once the exchange is solved to convergence.  The pair's interface
+#: once the exchange is solved to convergence, at the default
+#: ``stencil_order=2`` these slabs are built with.  The pair's interface
 #: mode has amplification ``-1`` exactly at ``3/8`` (derived from the
 #: coupled operator, and measured: a 200-cell pair stays bounded over
 #: 60 steps at 0.375 and grows to 4e5 at 0.4 and 1e33 at 0.45 under
 #: ``gs/none``).  ``HeatNode``'s own limit, 1/2, is for fixed data.
+#: The figure is per stencil order: a ``stencil_order=4`` pair's limit is
+#: 0.226 (0.2261266 sharp), because the cubic ghost puts 16/5 of the
+#: exchanged datum into the end cell where the mirror ghost puts 2.  A
+#: fixture that builds order-4 slabs must use that instead:
+#: ``maddening.nodes.heat._COUPLED_PAIR_MAX_FOURIER_NUMBER`` holds both,
+#: and ``compile()`` warns past either (MADD-ANO-050).
 _HEAT_PAIR_FOURIER_LIMIT = 3.0 / 8.0
 
 

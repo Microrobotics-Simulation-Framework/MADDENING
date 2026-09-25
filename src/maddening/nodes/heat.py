@@ -32,6 +32,7 @@ stencil's ghosts were built at the wrong positions (MADD-ANO-008).
 Both are fixed here; see ``docs/algorithm_guide/nodes/heat_node.md``.
 """
 
+import math
 from typing import Optional
 
 import jax.numpy as jnp
@@ -77,7 +78,151 @@ from maddening.core.params import ParamSpec
 #: bisect on ``max|1 + Fo*lambda| <= 1`` over its eigenvalues.
 #: ``tests/verification/test_mms_order.py`` pins both against runs of the
 #: node itself, on either side of the bound.
+#:
+#: A non-uniform grid (``grid_points``) always runs the 2nd-order
+#: variable-spacing stencil.  Its figure is the ``2`` entry, applied to
+#: ``dt * alpha / min(h_L * h_R)`` rather than ``dt * alpha / dx**2``.  See
+#: :func:`_nonuniform_fourier_spacing`.
 MAX_FOURIER_NUMBER = {2: 0.5, 4: 5.0 / 16.0}
+
+
+#: Largest Fourier number at which two rods coupled end to end are stable,
+#: per ``stencil_order``: each rod's end-cell temperature is the other's
+#: Dirichlet datum and a coupling group converges that exchange within the
+#: step (MADD-ANO-050).  Private: it feeds the compile-time warning
+#: (:func:`_coupled_pair_advisories`) and is not a supported constant.
+#:
+#: The converged exchange makes each rod's datum an *implicit* value, the
+#: other rod's end cell at the new time, while the rod interiors stay
+#: explicit.  The step is then ``(I - Fo Q) T' = (I + Fo P) T``, with ``P`` the two
+#: rods' own operators and ``Q`` the cross terms.  An amplification of
+#: exactly -1 needs ``(P - Q) v = -(2/Fo) v``, and the mode that reaches it
+#: first is mirror-symmetric about the interface and decays away from it.
+#: Each rod then sees a datum of minus its own end cell.
+#:
+#: * ``2`` -> exactly 3/8.  Mode ``v_k = r**k`` (``k`` cells from the
+#:   interface).  The mirror ghost gives ``1 + 1/r = -2``, so ``r = -1/3``,
+#:   the eigenvalue is ``-16/3`` and ``Fo = 2 / (16/3) = 3/8``.
+#: * ``4`` -> 0.226, conservative.  The 5-point recurrence has two decaying
+#:   roots ``r1, r2``.  The cubic ghosts put the end cell's row at
+#:   ``(-41 v0 + 10 v1 - v2) / 5`` and the next row at
+#:   ``(111 v0 - 155 v1 + 81 v2 - 5 v3) / 60``.  Requiring both rows to hold
+#:   for ``a1 r1**k + a2 r2**k`` gives an equation in ``p = r1*r2``: the
+#:   sextic ``p**6 - 294 p**5 - 2333 p**4 + 1692 p**3 - 9 p**2 + 362 p + 5 = 0``,
+#:   which is irreducible.  Its root with both ``r`` inside the unit disc is
+#:   ``p = -0.0137949``, eigenvalue ``-8.8446028``, which gives
+#:   ``Fo = 0.2261266`` as ``n_cells`` goes to infinity.  The limit is
+#:   0.2261215 at ``n_cells = 5``, the smallest rod the order-4 stencil
+#:   accepts, and 0.226 sits below every rod size.  The interface gain explains
+#:   the drop from order 2: the cubic ghost puts ``16/5`` of the datum into
+#:   the end cell's row, where the mirror ghost puts ``2``.
+#:
+#: Both figures were re-derived numerically too.  Build the pair's
+#: amplification matrix from ``_compute_laplacian``, one call per unit vector,
+#: and bisect on its spectral radius (``n_cells`` 5 to 256).  The leading
+#: eigenvalue at the crossing is -1 at both orders.  The pair stays stable
+#: when each rod is below the figure for its own stencil order, at unequal
+#: Fourier numbers and mixed orders too; checked on grids for ``n_cells`` = 5, 8 and 16.
+#: ``tests/nodes/test_heat_coupled_pair_fourier_limit.py`` pins them.
+_COUPLED_PAIR_MAX_FOURIER_NUMBER = {2: 3.0 / 8.0, 4: 0.226}
+
+
+def _concrete_float(value):
+    """``float(value)``, or ``None`` for a traced or non-numeric value."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _refuse_meaningless_constants(timestep, length, thermal_diffusivity,
+                                  grid_points):
+    """``ValueError`` for a HeatNode constant no rod can have.
+
+    ``timestep`` and ``length`` must be finite and positive, and
+    ``thermal_diffusivity`` finite and not negative (zero is a rod that
+    does not conduct).  ``grid_points``, when given, must be finite and
+    strictly increasing.  A value that is not a concrete number, a tracer
+    say, is not judged.
+    """
+    for name, value, allow_zero, why in (
+        ("timestep", timestep, False,
+         "A negative timestep runs the explicit update backwards in time, "
+         "which amplifies every mode diffusion should damp (anti-diffusion), "
+         "and a zero one never moves the rod."),
+        ("length", length, False,
+         "The cell width is length / n_cells.  A negative one leaves the "
+         "Laplacian unchanged, because it reads dx**2, but flips the sign of "
+         "both reported rod-end fluxes."),
+        ("thermal_diffusivity", thermal_diffusivity, True,
+         "A negative diffusivity runs the heat equation backwards "
+         "(anti-diffusion)."),
+    ):
+        v = _concrete_float(value)
+        if v is None:
+            continue
+        ok = math.isfinite(v) and (v >= 0.0 if allow_zero else v > 0.0)
+        if not ok:
+            bound = ">= 0" if allow_zero else "> 0"
+            raise ValueError(
+                f"{name} must be a finite number {bound}, got {value!r}.  {why}"
+            )
+    if grid_points is None:
+        return
+    bad = [i for i, x in enumerate(grid_points) if not math.isfinite(x)]
+    if bad:
+        raise ValueError(
+            f"grid_points must be finite, got {grid_points[bad[0]]!r} at "
+            f"index {bad[0]}."
+        )
+    order = [i for i in range(len(grid_points) - 1)
+             if not grid_points[i + 1] > grid_points[i]]
+    if order:
+        i = order[0]
+        raise ValueError(
+            f"grid_points must be strictly increasing, got "
+            f"{grid_points[i]!r} then {grid_points[i + 1]!r} at indices {i} "
+            f"and {i + 1}.  The variable-spacing stencil divides by the "
+            f"spacing between neighbouring points, so a repeated point gives "
+            f"inf, and it replaces a negative span with 1.0, so points out of "
+            f"order give a finite, wrong Laplacian."
+        )
+
+
+def _nonuniform_fourier_spacing(grid_points):
+    """The squared length the non-uniform stencil's Fourier number divides by.
+
+    ``_laplacian_nonuniform`` gives cell ``i`` the diagonal
+    ``-2 / (h_L h_R)`` and off-diagonal weights summing to ``2 / (h_L
+    h_R)``.  Here ``h_L`` and ``h_R`` are the spacings to the two neighbours,
+    and at the rod ends the mirrored ghost repeats the end spacing.  The
+    Dirichlet ghost ``2*T_b - T[0]`` makes the end row
+    ``(T[1] - 3 T[0] + 2 T_b) / h**2``: diagonal ``3/h**2``, off-diagonal
+    ``1/h**2``.  Gershgorin puts every eigenvalue of the operator in
+    ``[-4 / min(h_L h_R), 0]``.  The matrix is tridiagonal with positive
+    off-diagonal products, so it is similar to a symmetric one and those
+    eigenvalues are real.  Forward Euler is therefore stable when ``dt * alpha /
+    min(h_L h_R) <= 1/2``.  That is the uniform grid's own bound
+    (``h_L h_R = dx**2``), and it is sufficient on any grid.  It is less strict than
+    the square of the smallest spacing, which it never exceeds.
+
+    Returns
+    -------
+    float or None
+        ``min_i h_L(i) * h_R(i)``, or ``None`` when the points are not
+        strictly increasing (a zero or negative spacing has no Fourier
+        number; the caller refuses the grid).  Fewer than two points
+        leave no spacing; ``None`` then too.
+    """
+    x = [float(v) for v in grid_points]
+    if len(x) < 2:
+        return None
+    h = [b - a for a, b in zip(x, x[1:])]
+    if not all(s > 0.0 for s in h):
+        return None
+    # Mirrored ghosts: the spacing beyond each end repeats the end spacing.
+    padded = [h[0], *h, h[-1]]
+    return min(a * b for a, b in zip(padded, padded[1:]))
 
 
 def _laplacian_2nd_order_uniform(T_padded, dx):
@@ -483,11 +628,11 @@ class HeatNode(SimulationNode):
             "Dirichlet boundary conditions at both ends, imposed at the rod ends x=0 and x=L",
         ),
         limitations=(
-            "Stability limit depends on the stencil: Fourier number dt*alpha/dx^2 < 1/2 for stencil_order=2, < 5/16 for stencil_order=4 (MADD-ANO-009).  The constructor rejects a configuration above its limit; a dt or alpha supplied later to update() is not checked (MADD-ANO-002)",
+            "Stability limit depends on the stencil: Fourier number dt*alpha/dx^2 < 1/2 for stencil_order=2, < 5/16 for stencil_order=4 (MADD-ANO-009); on a non-uniform grid dt*alpha/min(h_L*h_R) <= 1/2, with h_L and h_R a cell's spacings to its two neighbours.  The constructor rejects a configuration above its limit on either grid; a dt or alpha supplied later to update() is not checked (MADD-ANO-002)",
             "1st-order in time -- temporal accuracy is O(dt)",
             "No convection or radiation terms",
             "Non-uniform grids are 2nd-order only; stencil_order=4 requires a uniform grid",
-            "Two rods coupled end to end -- each rod's end-cell temperature the other's Dirichlet datum, the exchange converged within the step by a coupling group -- are stable only below Fourier number 3/8, not the 1/2 each rod has for fixed data: the pair's interface mode is amplified by -1.5 per step at Fo = 0.4 and -4 at 0.45 (MADD-ANO-050).  Keep Fo < 3/8 on rods coupled that way; neither the constructor nor compile() checks it",
+            "Two rods coupled end to end -- each rod's end-cell temperature the other's Dirichlet datum, the exchange converged within the step by a coupling group -- are stable only below Fourier number 3/8 for stencil_order=2 and 0.226 for stencil_order=4, not the 1/2 and 5/16 each rod has for fixed data: the pair's interface mode is amplified by -1.5 per step at Fo = 0.4 (order 2) and by -1.87 at Fo = 0.25 (order 4) (MADD-ANO-050).  Keep Fo below those figures on rods coupled that way.  compile() warns (UserWarning) when it finds such a pair above them through extract_first/extract_last edges; nothing refuses it",
         ),
         validated_regimes=(
             ValidatedRegime("thermal_diffusivity", 1e-6, 1.0, "m^2/s"),
@@ -498,14 +643,16 @@ class HeatNode(SimulationNode):
                     "dt * alpha / dx^2 < 1/2 for the default stencil_order=2 "
                     "(exact spectral bound).  For stencil_order=4 the limit "
                     "is 5/16 = 0.3125, not 1/2 -- see MADD-ANO-009 and "
-                    "maddening.nodes.heat.MAX_FOURIER_NUMBER"
+                    "maddening.nodes.heat.MAX_FOURIER_NUMBER.  On a "
+                    "non-uniform grid the 1/2 applies to "
+                    "dt * alpha / min(h_L * h_R)"
                 ),
             ),
         ),
         hazard_hints=(
-            "CFL is checked only against the constructor's timestep, thermal_diffusivity and length; a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
+            "CFL is checked only against the constructor's timestep, thermal_diffusivity and length (grid_points on a non-uniform grid); a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
             "No runtime validation of thermal_diffusivity > 0",
-            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (MADD-ANO-050)",
+            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8 at stencil_order=2 and 0.226 at stencil_order=4, which each rod's own constructor check (limits 1/2 and 5/16) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (order 2) and about 150 at Fo = 0.25 (order 4).  compile() warns about the pattern through extract_first/extract_last edges; it is a warning, not a refusal (MADD-ANO-050)",
         ),
         implementation_map={
             "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode._compute_laplacian",
@@ -537,6 +684,32 @@ class HeatNode(SimulationNode):
                 f"got n_cells={n_cells}"
             )
 
+        # Process grid_points first: convert to list for serialisation,
+        # and so that the stability check below reads the coordinates the
+        # stencil will use.
+        gp_list = None
+        if grid_points is not None:
+            import numpy as np
+            gp_list = list(float(x) for x in np.asarray(grid_points).ravel())
+            if len(gp_list) != n_cells:
+                raise ValueError(
+                    f"grid_points length ({len(gp_list)}) must match "
+                    f"n_cells ({n_cells})"
+                )
+
+        # Refuse constants with no physical meaning.  Each of these used to
+        # build, compile and step without a word, and to answer wrongly: a
+        # negative timestep or diffusivity runs the heat equation backwards
+        # (anti-diffusion), a negative length leaves the Laplacian as it was
+        # (it reads dx**2) but flips the sign of both rod-end fluxes, and
+        # grid_points out of order gives a finite, wrong Laplacian, because
+        # ``_laplacian_nonuniform`` replaces a non-positive span with 1.0.
+        # The Fourier check below was skipped for all of them.  A traced or
+        # otherwise non-numeric argument is not judged, as below.
+        _refuse_meaningless_constants(
+            timestep, length, thermal_diffusivity, gp_list,
+        )
+
         # Reject a configuration that is unconditionally unstable.  The
         # explicit scheme above its Fourier limit does not degrade, it
         # diverges to NaN in tens of steps with no warning, and the
@@ -544,6 +717,13 @@ class HeatNode(SimulationNode):
         # guess from the literature's 1/2 -- that combination is
         # MADD-ANO-009 and it is why this is an error rather than a
         # documented caveat.  See MAX_FOURIER_NUMBER.
+        #
+        # A non-uniform grid is checked as well, since 0.4.0 (before
+        # that the check was skipped for it, and a rod at ten times its
+        # limit built without a word and reached inf in 32 steps).  Its
+        # stencil is the 2nd-order variable-spacing one whatever
+        # ``stencil_order`` says, so its limit is MAX_FOURIER_NUMBER[2],
+        # on the Fourier number ``_nonuniform_fourier_spacing`` defines.
         #
         # This covers the constructor's own numbers only.  ``dt`` passed
         # to ``update()``, and ``thermal_diffusivity`` / ``length``
@@ -561,7 +741,7 @@ class HeatNode(SimulationNode):
             # checking it.
             concrete = None
         if (
-            grid_points is None
+            gp_list is None
             and concrete is not None
             and n_cells > 0
             and all(v > 0 for v in concrete)
@@ -582,17 +762,34 @@ class HeatNode(SimulationNode):
                     f"{limit * dx * dx / alpha_f:.6g}, or more "
                     f"cells, or a smaller thermal_diffusivity."
                 )
-
-        # Process grid_points: convert to list for serialisation
-        gp_list = None
-        if grid_points is not None:
-            import numpy as np
-            gp_list = list(float(x) for x in np.asarray(grid_points).ravel())
-            if len(gp_list) != n_cells:
-                raise ValueError(
-                    f"grid_points length ({len(gp_list)}) must match "
-                    f"n_cells ({n_cells})"
-                )
+        if gp_list is not None and len(gp_list) >= 2:
+            # Strictly increasing and finite by now, so this is a number.
+            spacing = _nonuniform_fourier_spacing(gp_list)
+            if (
+                spacing is not None
+                and concrete is not None
+                and concrete[0] > 0
+                and concrete[2] > 0
+            ):
+                timestep_f, _, alpha_f = concrete
+                fourier = timestep_f * alpha_f / spacing
+                limit = MAX_FOURIER_NUMBER[2]
+                if fourier > limit:
+                    raise ValueError(
+                        f"timestep {timestep!r} is unstable for this rod: "
+                        f"on its non-uniform grid the Fourier number "
+                        f"dt*alpha/min(h_left*h_right) is {fourier:.4g}, "
+                        f"above the {limit:g} limit of the 2nd-order "
+                        f"variable-spacing stencil (h_left, h_right are a "
+                        f"cell's spacings to its two neighbours; the "
+                        f"smallest product is {spacing:.6g}, alpha = "
+                        f"{thermal_diffusivity!r}).  The explicit update "
+                        f"diverges to NaN there rather than losing "
+                        f"accuracy gracefully.  Use timestep <= "
+                        f"{limit * spacing / alpha_f:.6g}, or widen the "
+                        f"finest spacing, or a smaller "
+                        f"thermal_diffusivity."
+                    )
 
         # Which grid this rod is, fixed here with the coordinates built
         # below: see ``_is_nonuniform``.  Set before ``super().__init__``
@@ -791,6 +988,17 @@ class HeatNode(SimulationNode):
             "'right_temperature', which default to 0.0).  There is no "
             "periodic HeatNode."
         )
+
+    @staticmethod
+    def _coupling_group_advisories(**context) -> list[str]:
+        """Warnings about this node's coupling group (for ``GraphManager.validate``).
+
+        Private on purpose, for the same reason as :meth:`_halo_boundary_hint`:
+        it is an internal convention between the built-in nodes and
+        ``GraphManager``, not yet part of the node contract.  See
+        :func:`_coupled_pair_advisories` for what it warns about.
+        """
+        return _coupled_pair_advisories(**context)
 
     @property
     def _is_nonuniform(self) -> bool:
@@ -1380,3 +1588,167 @@ class HeatNode(SimulationNode):
             "left_heat_flux": -alpha * grad_left,
             "right_heat_flux": alpha * grad_right,
         }
+
+
+def _rod_fourier(node, timestep, live):
+    """``dt * alpha / dx**2`` for a uniform rod, from the values a compile uses.
+
+    ``live`` is the rod's entry of ``GraphManager.params["nodes"]``, whose
+    leaves override the constructor's at compile time.  Returns ``None``
+    when a value is not a concrete positive number (a traced leaf, say), so
+    that the caller judges nothing rather than something wrong.
+    """
+    p = {**node.params, **(live or {})}
+    try:
+        alpha = float(p["thermal_diffusivity"])
+        length = float(p["length"])
+        n_cells = int(node.params["n_cells"])
+        dt = float(timestep)
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(alpha, length, n_cells, dt) <= 0:
+        return None
+    dx = length / n_cells
+    return dt * alpha / (dx * dx)
+
+
+def _coupled_pair_advisories(*, group, nodes, timesteps, edges, feeds,
+                             live_params):
+    """``WARNING:`` strings for rods coupled end to end past their pair limit.
+
+    MADD-ANO-050.  A coupling group can converge an exchange in which one
+    rod's end-cell temperature is the other's Dirichlet datum and the other's
+    end cell is the first's datum.  That pair is stable only below
+    :data:`_COUPLED_PAIR_MAX_FOURIER_NUMBER` (3/8 at ``stencil_order=2``,
+    0.226 at ``4``), not the single-rod limit each constructor checks.  This
+    finds the pattern in the edges and warns when either rod's Fourier
+    number exceeds the pair limit of its own stencil.  It warns and never
+    refuses.
+
+    **What counts as the pattern.**  Detection is conservative: it would
+    rather miss a pair than warn about one that is not there.  Two uniform
+    ``HeatNode`` rods ``a`` and ``b`` in the group qualify when there are:
+
+    * an edge inside the group from ``a.temperature`` into one of ``b``'s
+      ``left_temperature`` / ``right_temperature``, through the built-in
+      ``extract_first`` or ``extract_last`` transform, and
+    * the reverse edge from ``b`` into ``a``,
+
+    and every one of these holds:
+
+    * each edge takes the end cell *at the end whose datum the other edge
+      sets*.  If ``a``'s last cell feeds ``b``, ``b`` must feed
+      ``a.right_temperature``, and likewise the other way;
+    * neither edge is additive or mapped;
+    * nothing else, whether an edge or an external input, writes to either
+      input.
+
+    **What it does not see**, on purpose or by construction:
+
+    * a transform other than those two built-ins, including a lambda that
+      does the same thing (``lambda T: T[-1]``) or one that scales the
+      value;
+    * a one-way feed (no instability: the pair is then a cascade);
+    * a rod built on ``grid_points`` (the pair limit is derived for the
+      uniform stencil);
+    * a ``HeatNode`` wrapped in another node, such as ``ShardedStencilNode``;
+    * a group with ``max_iterations=1``.  That is a single staggered pass,
+      the lagged exchange, which stays bounded;
+    * two rods of different timesteps in a sub-cycled group (the fast rod
+      steps several times on one datum, which is a different scheme);
+    * a Fourier number that is not a concrete number at compile time, and
+      anything supplied after compile: a ``dt`` passed at run time, or a
+      parameter injected into a run.
+
+    **How good the limit is.**  Below the limit on both rods the pair is
+    stable, at mixed stencil orders too, so a pair this does not warn about
+    is stable (short chains aside, below).  At equal Fourier numbers the
+    pair diverges above the limit.  The only exception is the sliver between
+    0.226 and the sharp order-4 figure, 0.22612 or more.  So a warning there
+    is not a false alarm.  At unequal Fourier numbers the limit is joint:
+    one rod above it can be stable beside a neighbour well below it (an
+    order-2 pair at 0.4 and 0.3 is), and the warning is then conservative.
+    A chain of three or more short rods goes unstable slightly below the
+    pair figure: at orders 2 and 4, 0.3730 and 0.2248 for a long chain of
+    5-cell rods and 0.3749 and 0.2261 for 8-cell rods.  From about 20 cells
+    a rod has the pair figure.  The warning judges each pair against the
+    pair figure.  A cap of two coupling passes stops the exchange short of
+    convergence and can leave a pair bounded above the limit; the warning
+    does not model that.
+    """
+    from maddening.core.transforms import extract_first, extract_last
+
+    if getattr(group, "max_iterations", 2) <= 1:
+        return []
+    rods = {
+        name: node for name, node in nodes.items()
+        if isinstance(node, HeatNode) and not node._is_nonuniform
+    }
+    if len(rods) < 2:
+        return []
+    datum_end = {"left_temperature": "left", "right_temperature": "right"}
+
+    # (target rod, end of the target whose datum is set)
+    #   -> (source rod, end of the source whose cell supplies it)
+    feed = {}
+    for e in edges:
+        if e.transform is extract_first:
+            source_end = "left"
+        elif e.transform is extract_last:
+            source_end = "right"
+        else:
+            continue
+        if (
+            e.source_node in rods and e.target_node in rods
+            and e.source_node != e.target_node
+            and e.source_field == "temperature"
+            and e.target_field in datum_end
+            and not e.additive and e.mapping is None
+            and feeds.get((e.target_node, e.target_field), 0) == 1
+        ):
+            feed[(e.target_node, datum_end[e.target_field])] = (
+                e.source_node, source_end)
+
+    interfaces = sorted(
+        (a, b) for b, a in feed.items() if feed.get(a) == b and a < b
+    )
+    issues = []
+    for (a, a_end), (b, b_end) in interfaces:
+        if getattr(group, "subcycling", False) and timesteps[a] != timesteps[b]:
+            continue
+        judged = {}
+        for name in (a, b):
+            fourier = _rod_fourier(rods[name], timesteps[name],
+                                   live_params.get(name))
+            order = int(rods[name].params.get("stencil_order", 2))
+            limit = _COUPLED_PAIR_MAX_FOURIER_NUMBER.get(order)
+            if fourier is None or limit is None:
+                break
+            judged[name] = (fourier, order, limit)
+        else:
+            over = [n for n, (f, _o, lim) in judged.items() if f > lim]
+            if not over:
+                continue
+            (fa, oa, la), (fb, ob, lb) = judged[a], judged[b]
+            which = ("both are" if len(over) == 2
+                     else f"{over[0]!r} is")
+            issues.append(
+                f"WARNING: HeatNode rods {a!r} and {b!r} are coupled end to "
+                f"end in the coupling group {sorted(group.nodes)}: the "
+                f"{a_end} end cell of {a!r} is the {b_end} Dirichlet datum "
+                f"of {b!r}, the {b_end} end cell of {b!r} is the {a_end} "
+                f"datum of {a!r}, and the group converges that exchange "
+                f"within the step.  Such a pair is stable while both rods' "
+                f"Fourier numbers dt*alpha/dx**2 are below the coupled-pair "
+                f"limit of their stencil (3/8 for stencil_order=2, 0.226 for "
+                f"stencil_order=4), which is lower than the single-rod limit "
+                f"each constructor checks.  {a!r} has Fo = {fa:.4g} "
+                f"(stencil_order={oa}, limit {la:g}) and {b!r} has "
+                f"Fo = {fb:.4g} (stencil_order={ob}, limit {lb:g}); {which} "
+                f"above the limit.  Past it the pair's interface mode grows, "
+                f"changing sign every step, until the field is non-finite "
+                f"(MADD-ANO-050).  Use a smaller timestep or "
+                f"thermal_diffusivity, fewer cells, or exchange the data "
+                f"without a coupling group (lagged by a step)."
+            )
+    return issues

@@ -97,7 +97,7 @@ def test_the_committed_soup_tables_match_a_fresh_generation():
 # anomaly is closed -- resolved, or a duplicate of the entry that carries it
 # -- and stays in the registry; only a closed entry, or a number no commit
 # ever recorded, can be retired.  The gate reads the last status from git.
-_HIGHEST_ANOMALY_ID = 58
+_HIGHEST_ANOMALY_ID = 62
 _RETIRED_ANOMALY_IDS: dict = {}
 
 _HIGHEST_BENCHMARK_ID = 16

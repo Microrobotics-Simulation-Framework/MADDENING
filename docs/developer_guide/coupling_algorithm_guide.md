@@ -107,7 +107,11 @@ Three settings that are nearly always right and are not in the table:
   the cap sets the size of its least-squares problem.
 * **Turn on `strict_convergence` for training and calibration runs.**
   The implicit-function-theorem gradient is only valid at a converged
-  fixed point.
+  fixed point.  It checks only the solves a step keeps: not a multi-rate
+  base step on which the group does not fire, and not the step-doubling
+  estimate's full step or a rejected attempt under `run_adaptive*`, so
+  the adaptive controller can still recover by rejecting a step whose
+  coupling did not converge.
 * **Leave `linear_solver` at `"gmres"` on anything grid-shaped.** The
   `"dense"` alternative is exact and is sometimes offered as the thing
   to try when the adjoint struggles; on a grid it cannot run at all.
@@ -434,11 +438,17 @@ one -- so no sweep sees a waveform over the sub-step window, and
 `boundary_interpolation="quadratic"` is never given its third value.
 What that means in practice:
 
-- With a converged first sweep, the later sweeps change nothing: `N` = 1,
-  2 and 3 return bit-identical states on the spring pair below.  When
-  the first sweep stops at the cap, the later sweeps act as extra
-  passes toward the same fixed point, so raising `max_iterations` does
-  the same job for less.  Use `waveform_iterations=1`.
+- Every sweep starts with one pass, so after a converged first sweep
+  each later sweep still applies at least one more pass and moves the
+  state by about one residual: within the tolerance, and identical to
+  `N` = 1 only at exact stationarity.  On the spring pair below, `N` = 1,
+  2 and 3 return bit-identical states at `tolerance=1e-8`, where the
+  pair is stationary in float32, and states 6.0e-08 apart (relative)
+  after one step at `tolerance=1e-4`; on a linear pair contracting at
+  0.9025 they are 1.2e-04 apart at `tolerance=1e-3`.  When the first
+  sweep stops at the cap, the later sweeps act as extra passes toward
+  the same fixed point, so raising `max_iterations` does the same job
+  for less.  Use `waveform_iterations=1`.
 - `boundary_interpolation` has less to work with than its name says.
   Both ends of the interpolation are end-of-step estimates, so
   "constant" and "linear" differ only by the in-pass change of a source

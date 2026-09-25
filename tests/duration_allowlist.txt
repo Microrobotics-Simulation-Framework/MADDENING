@@ -15,15 +15,9 @@
 # job. The 4x gap is runner noise: the same test varies 1.7x between runs at
 # the median, 3x at the 90th percentile.
 #
-# "pending triage" entries were already over 5 s in at least one of eight
-# green lane-runs (4 runs x 2 JAX lanes, release/0.4.0, 2026-09-24) when the
-# gate arrived. Each is to be marked slow, sped up, or kept with a reason.
-# This list only shrinks.
-#
-# The entries at the end came from the gate's own first run (PR 132, merged
-# 2026-09-24): tests added or slowed since the eight lane-runs above, over
-# 5 s on at least one lane. The first of them ran within 0.2 s of the 20 s
-# hard line, so they are listed rather than left to flake.
+# Every entry is "kept: <why>". The tests that were already over 5 s when
+# the gate arrived (2026-09-24) have all been marked slow, sped up, or kept
+# that way; add an entry only with the reason the test must run on every push.
 
 tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_the_returned_state_bit_identical[gauss-seidel-interface-ift] # kept: diagnostics=True must leave the returned state bit-identical, a claim a compiler rewrite can break and only a bit-for-bit comparison on every jaxlib sees; each ift cell compiles the spectral and gradient-bound machinery once (~6 s cold, nearly all XLA compile)
 tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_the_returned_state_bit_identical[jacobi-interface-ift] # kept: diagnostics=True must leave the returned state bit-identical, a claim a compiler rewrite can break and only a bit-for-bit comparison on every jaxlib sees; each ift cell compiles the spectral and gradient-bound machinery once (~6 s cold, nearly all XLA compile)

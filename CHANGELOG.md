@@ -167,6 +167,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`scripts/report_test_durations.py` labels each shard's compilation cache from the hits its report records**: `warm` only when a restored cache served most lookups, else `restored but unused (cold)`, with every shard's hit rate; it warns when a `--cache-mode off` run records cache lookups in more than one file, and no longer offers a skipped or failed allowlisted test as removable.
+  Action: none; compare times by a shard's label, not by whether it restored a cache. Pull requests that add or remove a slow mark, remove a test or edit the allowlist now run CI cold.
 - **`GraphManager.from_dict` warns when it rebuilds a sharded node unsharded**: a config carries no device mesh, so the node comes back as the node it wraps; the `UserWarning` names the wrapper, the settings the config recorded and the `replace_node` call that wraps it again (MADD-ANO-036, silent since 0.2.0).
   Action: re-wrap after loading when the run must be sharded; filter the warning when an unsharded reload is what you want.
 - **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;

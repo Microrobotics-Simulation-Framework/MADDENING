@@ -40,18 +40,30 @@ naming the node, the cell count and the device count; before that it
 surfaced much later as a `jax.errors.IndivisibleError` raised from inside
 `device_put`, naming none of them.
 
-Three ways out, in the order most people want them:
+The ways out, in the order most people want them:
 
 1. **Size the grid to a multiple of the device count.**  A sharded axis of
    `n_devices * k` cells is the cheapest fix and keeps the Cartesian
    performance in the table above.
 2. **Run on a device count that divides the grid.**  The error message
    lists the ones that do.
-3. **Use `ShardedUnstructuredNode`.**  It carries an explicit padded
-   layout and accepts **any** (device, cell) pair — 17 cells over 3
-   devices included — at the per-cell scatter/gather cost the table
-   above describes.  The constraint is a property of the Cartesian
-   pencil decomposition, not of the framework.
+3. **For a pointwise node only: use `ShardedUnstructuredNode`.**  It
+   carries an explicit padded layout and accepts **any** (device, cell)
+   pair — 17 cells over 3 devices included — at the per-cell
+   scatter/gather cost the table above describes.  A pointwise node reads
+   no neighbour, so a layout from `build_unstructured_partition` with an
+   empty `edges` table does.  The constraint is a property of the
+   Cartesian pencil decomposition, not of the framework.
+
+`ShardedUnstructuredNode` is **not** a way out for a stencil node (one
+that declares a `halo_width()`).  It hands `update_padded` the partition
+layout — `[the shard's own cells | ghost cells]` — where a Cartesian
+stencil node reads `[halo | interior | halo]`, so the node would read the
+wrong cells.  Since v0.4.0 it refuses such a node at construction.  Before
+that the node was accepted and stepped wrong with no error: a `HeatNode`
+rod ran 43 K off on two devices, every cell, and an `LBMNode` channel's
+velocity was 100% off.  Until v0.4.0 this section, and the stencil
+wrapper's own refusal, recommended exactly that.
 
 ## Class hierarchy
 
@@ -62,11 +74,28 @@ ShardedNode (Protocol — surface contract only)
 └── ShardedUnstructuredNode   (graph-partition, sparse halos)     v0.3.0
 ```
 
-All three share the same substrate:
+All three share the same substrate, with one difference that decides
+which wrapper a node is written for:
 
-* The wrapped inner node's `update_padded(state_padded,
-  boundary_inputs, dt, *, static_padded=None, shard_info=None)`
-  signature is identical.
+* `ShardedPointwiseNode` calls the inner node's `update`.  The other two
+  call `update_padded(state_padded, boundary_inputs, dt, *,
+  static_padded=None, shard_info=None)` — the same signature, but **not
+  the same contract**, because the padded arrays are laid out
+  differently:
+
+  | | `ShardedStencilNode` | `ShardedUnstructuredNode` |
+  |---|---|---|
+  | each padded field | `[halo \| interior \| halo]` along each axis of `halo_width()` | `[own cells \| ghost cells]` on axis 0, in the layout's order; the own block padded to `n_local_max` |
+  | `shard_info` | `{axis: (offset, extent)}` per sharded axis | `{0: (offset, n_local_max), "n_local": n_owned}` — `n_owned` (traced, v0.4.0) is where the padding starts |
+  | the node declares | a non-empty `halo_width()` | an empty `halo_width()`: the halo is the layout's ghost cells |
+
+  A node reads one layout or the other, so `ShardedUnstructuredNode`
+  refuses a node with a non-empty `halo_width()` (v0.4.0), and
+  `ShardedStencilNode` refuses one with an empty `halo_width()`.  A node
+  whose `update_padded` genuinely reads both — a pointwise update, say —
+  can tell the unstructured wrapper so with a private
+  `_reads_partition_layout = True`.  That flag is provisional and not
+  part of the node contract.
 * Outputs are classified the same way: keys in `state_fields()` have
   halo/padding stripped; keys in `domain_integral_fields()` get
   `lax.psum`-ed across the mesh — or across the subset of mesh axes
@@ -153,7 +182,11 @@ lists, ghost-cell global IDs, and the send/recv index tables the
 ``ShardedUnstructuredNode(node, mesh, layout)``.  Any
 ``StaticArray(replication="partition", partition_assignment=...)`` on
 the inner node must use the same assignment (the layout is
-authoritative).
+authoritative).  Every state field but a domain integral must have one
+row per cell of the layout: since v0.4.0 a node with more or fewer cells
+is refused at construction, naming both counts, where before the cells
+past the layout's count were silently dropped (`partition_value` refuses
+the same thing for any other caller).
 
 Reproducibility: the partition assignment is part of the experiment's
 reproducibility bundle (alongside seeds and version pins).  It is not
@@ -192,6 +225,13 @@ What 0.4.0 added:
   (see "Halo-exchange transport" above);
 * per-cell boundary inputs, sharded like state, with a global-order
   input refused;
+* `shard_info["n_local"]`, each shard's own cell count, so a domain
+  integral can leave out the padding of a short shard's block;
+* refusals of a node declaring a Cartesian `halo_width()` and of a node
+  whose cell count is not the layout's (both silently wrong before);
+* a domain integral carried in the state (a graph's second step, or an
+  initial value the node declares) is replicated rather than partitioned,
+  so such a node runs in a `GraphManager`;
 * the session runner `benchmarks/multigpu/run_pod.py` (and its CPU
   `--dry-run`).
 

@@ -90,6 +90,29 @@ class _PrefixImport(NamedTuple):
     missing_dependency: Optional[str] = None
 
 
+def _first_party_import_failure(
+    exc: BaseException, first_party: str
+) -> Optional[str]:
+    """The first-party import that failed somewhere in ``exc``'s chain.
+
+    Walks ``__cause__`` / ``__context__``, because an optional-extra guard
+    re-raises: ``maddening.viz``'s lazy loader turns *any* ``ImportError``
+    into one naming the extra, so a first-party failure can sit one link
+    down.  Returns the failed module's name when an ``ImportError`` in the
+    chain names a module of the ``first_party`` package, else ``None``.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = getattr(current, "name", None)
+        if (isinstance(current, ImportError) and name
+                and name.split(".")[0] == first_party):
+            return f"{type(current).__name__}: {current}"
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _import_longest_prefix(parts: list[str]) -> _PrefixImport:
     """Import the longest importable module prefix of a dotted name.
 
@@ -106,7 +129,14 @@ def _import_longest_prefix(parts: list[str]) -> _PrefixImport:
       ``maddening/usd/__init__.py`` raises in its place -- which carries no
       ``name`` at all, so both have to be handled.
     * anything else raised during import is a broken module, and stays a
-      hard error.
+      hard error.  That includes an ``ImportError`` naming a *first-party*
+      module anywhere in its chain -- ``cannot import name 'x' from
+      'maddening.core.solver_utils'`` is a stale internal rename, not an
+      extra somebody forgot to install.  It used to be labelled with its
+      top-level package, ``maddening``, and reported "not checked (missing
+      optional extra)", so every reference behind the broken module went
+      unverified and the anomaly gate exited 0 (audit_040_p4_1, A25).
+      First-party is the name's own top-level package (``parts[0]``).
 
     A shorter prefix almost always imports after the second kind of failure
     (``maddening`` itself always does), and the accumulated error used to be
@@ -127,6 +157,14 @@ def _import_longest_prefix(parts: list[str]) -> _PrefixImport:
             # an attribute.  Keep shortening; this is not a failure.
             if (isinstance(exc, ModuleNotFoundError)
                     and name and modpath.startswith(name)):
+                continue
+            broken = _first_party_import_failure(exc, parts[0])
+            if broken is not None:
+                # Not an optional extra: the package's own code is broken.
+                # No ``missing`` label, so callers report it as an error.
+                error = (f"importing {modpath} failed on a broken first-party "
+                         f"import ({broken}), not a missing optional extra")
+                missing = None
                 continue
             # Overwrite rather than keep the first: prefixes are tried
             # longest-first, so the last real failure is the shortest one --

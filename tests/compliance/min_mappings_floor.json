@@ -9,22 +9,24 @@
     "which is a convention and not a check (audit_040_r2/gates, finding G6).",
     "",
     "tests/compliance/test_gate_scripts.py::TestMinMappingsRatchet asserts",
-    "MIN_MAPPINGS[path] >= floor[path], so lowering a pin now takes an edit",
-    "to two files in opposite directions instead of one number in one file.",
+    "MIN_MAPPINGS[path] == floor[path] == the guide's own count, so lowering",
+    "a pin takes an edit to two files instead of one number in one file,",
+    "and a pin cannot sit below its guide: three did, two rows each, and",
+    "deleting those rows passed (audit_040_p4_1, M5-M8).",
     "",
-    "Raising a pin needs no change here. Lowering one -- which should be",
-    "rare and deliberate -- means a guide legitimately shrank, and the",
-    "reason belongs in the commit message that lowers both."
+    "Raising a pin raises its floor in the same commit. Lowering one --",
+    "which should be rare and deliberate -- means a guide legitimately",
+    "shrank, and the reason belongs in the commit message that lowers both."
   ],
   "floor": {
-    "docs/algorithm_guide/nodes/heat_node.md": 11,
+    "docs/algorithm_guide/nodes/heat_node.md": 13,
     "docs/algorithm_guide/nodes/adaptive_node.md": 12,
-    "docs/algorithm_guide/nodes/wavelet_adaptive_node.md": 24,
+    "docs/algorithm_guide/nodes/wavelet_adaptive_node.md": 26,
     "docs/algorithm_guide/solvers/explicit_integrators.md": 5,
     "docs/algorithm_guide/nodes/spring_node.md": 9,
     "docs/algorithm_guide/nodes/ball_node.md": 7,
     "docs/algorithm_guide/nodes/rigid_body_2d_node.md": 7,
     "docs/algorithm_guide/nodes/heart_pump_node.md": 9,
-    "docs/algorithm_guide/nodes/lbm_node.md": 22
+    "docs/algorithm_guide/nodes/lbm_node.md": 24
   }
 }

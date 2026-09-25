@@ -5530,6 +5530,7 @@ class GraphManager:
             elif len(group_timesteps) > 1:
                 issues.extend(_subcycling_ratio_errors(group, self._nodes))
             coupled_nodes |= group.nodes
+            issues.extend(self._coupling_group_advisories(group))
 
         # Cycle detection (only on edges with valid endpoints)
         valid_edges = [
@@ -5564,6 +5565,56 @@ class GraphManager:
                 issues.append(f"INFO: {msg}")
 
         return issues
+
+    def _coupling_group_advisories(self, group: CouplingGroup) -> list[str]:
+        """``WARNING:`` issues a member's class raises about a group as a whole.
+
+        A private convention between the built-in nodes and
+        :meth:`validate`, like ``_halo_boundary_hint`` is between them and
+        ``ShardedStencilNode``.  It is not yet part of the node contract.
+        A node class may define a static ``_coupling_group_advisories``
+        taking the keyword context below and returning ``WARNING: ...``
+        strings.  :meth:`compile` emits each one as a ``UserWarning``,
+        like every other advisory ``validate`` returns.  Each distinct hook
+        runs once per group, however many members share it.  Only warnings
+        go through here.  A hook never refuses a graph, and it sees plain
+        Python data, not the step.
+
+        ``HeatNode`` uses it for two rods coupled end to end past their
+        coupled-pair Fourier limit (MADD-ANO-050).
+        """
+        members = {
+            name: self._nodes[name] for name in sorted(group.nodes)
+            if name in self._nodes
+        }
+        hooks: list = []
+        for spec in members.values():
+            hook = getattr(type(spec.node), "_coupling_group_advisories", None)
+            if callable(hook) and not any(hook is h for h in hooks):
+                hooks.append(hook)
+        if not hooks:
+            return []
+        # How many values arrive at each (node, input) from anywhere in the
+        # graph: a hook reasoning about "this input is that node's value"
+        # needs to know nothing else writes to it.
+        feeds: dict[tuple[str, str], int] = defaultdict(int)
+        for e in self._edges:
+            feeds[(e.target_node, e.target_field)] += 1
+        for ei in self._external_inputs:
+            feeds[(ei.target_node, ei.target_field)] += 1
+        context = dict(
+            group=group,
+            nodes={name: spec.node for name, spec in members.items()},
+            timesteps={name: spec.timestep for name, spec in members.items()},
+            edges=[e for e in self._edges
+                   if e.source_node in members and e.target_node in members],
+            feeds=dict(feeds),
+            live_params=dict((self.params or {}).get("nodes") or {}),
+        )
+        out: list[str] = []
+        for hook in hooks:
+            out.extend(hook(**context))
+        return out
 
     # ------------------------------------------------------------------
     # Compilation

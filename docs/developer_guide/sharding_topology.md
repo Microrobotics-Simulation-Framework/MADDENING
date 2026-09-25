@@ -89,6 +89,18 @@ which wrapper a node is written for:
   | `shard_info` | `{axis: (offset, extent)}` per sharded axis | `{0: (offset, n_local_max), "n_local": n_owned}` — `n_owned` (traced, v0.4.0) is where the padding starts |
   | the node declares | a non-empty `halo_width()` | an empty `halo_width()`: the halo is the layout's ghost cells |
 
+  `shard_info`'s keys are `int` spatial axes, each mapped to an
+  `(offset, extent)` tuple, except `"n_local"`, which only the unstructured
+  wrapper passes and which maps to a scalar.  **Iterate over the integer
+  keys only; `n_local` is the one string key.**  A loop written as
+  `for axis, (offset, extent) in shard_info.items()` unpacks that scalar
+  as a tuple and fails under `ShardedUnstructuredNode`:
+
+  ```python
+  for axis in (k for k in shard_info if isinstance(k, int)):
+      offset, extent = shard_info[axis]
+  ```
+
   A node reads one layout or the other, so `ShardedUnstructuredNode`
   refuses a node with a non-empty `halo_width()` (v0.4.0), and
   `ShardedStencilNode` refuses one with an empty `halo_width()`.  A node

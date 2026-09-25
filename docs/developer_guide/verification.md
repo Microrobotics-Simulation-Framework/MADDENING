@@ -232,9 +232,27 @@ formality: `LBMPipeNode` declares no boundary inputs at all, a generic source
 term is not even well defined for a lattice Boltzmann collision operator (the
 forcing scheme changes the order of accuracy, so the study would measure the
 scheme rather than the operator), and a node a *user* writes will usually have
-no forcing input either.  Adding a manufactured-source hook to
-`SimulationNode` was proposed and rejected; `TODO.md`, "DECIDED AGAINST: a
-manufactured-source convention on `SimulationNode`", records the argument.
+no forcing input either.  Adding an optional manufactured-source hook to
+`SimulationNode` was proposed and rejected, for four reasons:
+
+1. **It is ill-defined for the node that prompted it.**  A source cannot be
+   added to lattice Boltzmann distribution functions without a forcing scheme
+   (Guo, Shan-Chen, exact-difference), and the choice changes the order of
+   accuracy.  A generic hook would measure the forcing scheme's error rather
+   than the collision operator's: a harness confidently reporting the wrong
+   number, which is worse than one that declines to run.
+2. **It is ill-defined for constrained systems.**  A node that projects onto a
+   manifold cannot take arbitrary forcing without violating the constraint it
+   exists to maintain.
+3. **It would be production API surface that serves only tests**, and every
+   shipped surface has to be documented and justified.
+4. **It would not deliver its own headline benefit.**  The argument for it was
+   that every user node becomes testable, but most user nodes would never
+   implement an optional hook, so coverage of user code would not improve.
+
+The one node that exposed the gap, `LBMPipeNode`, has a single scalar forcing
+input on a fixed actuator-disc mask, which says little about the nodes users
+write.
 
 **The node-authoring contract, in one line: a node with a natural forcing
 input can be MMS-tested; everything else falls back to GCI.**

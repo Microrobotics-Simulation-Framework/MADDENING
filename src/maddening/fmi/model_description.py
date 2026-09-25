@@ -115,8 +115,11 @@ class FMIVariable:
     description : str, optional
         Human-readable description.
     unit : str, optional
-        Unit string (e.g. ``"m"``, ``"N"``).  Surfaces through
-        :class:`EdgeSpec.expected_units` when available.
+        Unit string (e.g. ``"m"``, ``"N"``).  For an input,
+        :func:`build_model_description` takes it from the target node's
+        :attr:`~maddening.core.node.BoundaryInputSpec.expected_units`
+        when the node declares one; for a parameter, from its
+        :class:`~maddening.core.params.ParamSpec` ``units``.
     shape : tuple of int, optional
         Array shape, for FMI 3.0 dynamic arrays.  Empty / None means
         scalar.

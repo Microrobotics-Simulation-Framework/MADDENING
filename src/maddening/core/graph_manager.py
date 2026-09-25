@@ -8308,7 +8308,7 @@ class GraphManager:
     def save_state(self, path) -> "Path":
         """Save all node states to an ``.npz`` file.
 
-        See :func:`maddening.core.checkpoint.save_state` for details.
+        See :func:`maddening.core.simulation.checkpoint.save_state` for details.
         """
         from maddening.core.simulation.checkpoint import save_state
         self._recover_from_escaped_tracers()
@@ -8320,7 +8320,7 @@ class GraphManager:
     def load_state(self, path) -> None:
         """Load node states from an ``.npz`` file.
 
-        See :func:`maddening.core.checkpoint.load_state` for details.
+        See :func:`maddening.core.simulation.checkpoint.load_state` for details.
         """
         from maddening.core.simulation.checkpoint import load_state
         self._recover_from_escaped_tracers()

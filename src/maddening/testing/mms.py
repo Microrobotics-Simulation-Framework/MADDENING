@@ -86,9 +86,14 @@ operator: the forcing scheme changes the order of accuracy, so the
 study would measure the scheme rather than the operator), every node
 with no natural forcing input, and most nodes a *user* writes.  The
 alternative considered — an optional manufactured-source hook on
-:class:`~maddening.core.node.SimulationNode` — was rejected; see
-``TODO.md``, "DECIDED AGAINST: a manufactured-source convention on
-``SimulationNode``".
+:class:`~maddening.core.node.SimulationNode` — was rejected: a generic
+source is ill-defined for the lattice Boltzmann node that prompted it
+and for any node that projects onto a constraint, it would be
+production API surface that serves only tests, and an optional hook
+most user nodes never implement would not deliver the coverage it was
+proposed for.  ``docs/developer_guide/verification.md`` ("Grid
+convergence: the fallback where MMS cannot reach") records the
+argument.
 
 The second half of this module is what made rejecting it acceptable.
 :func:`measure_gci` runs the *same refinement ladder* as

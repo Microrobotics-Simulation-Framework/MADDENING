@@ -896,7 +896,8 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: sub-cycled it.  So the floor is this constant times the number of
 #: evaluations one coupling pass rounds like: the largest sub-cycling
 #: divider times :meth:`SimulationNode.update_evaluations` in the group
-#: (``GraphManager._group_evaluations``; a pass evaluates no node more
+#: (``maddening.core.graph_manager._group_evaluations``, a module-level
+#: function; a pass evaluates no node more
 #: often than that, so it rounds like at most that many single passes),
 #: which is ``4N`` -- 16, 40, 80, 200 and 400 units against those
 #: figures, the same 2.6x-or-more headroom the single evaluation has

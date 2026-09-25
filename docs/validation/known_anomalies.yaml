@@ -4775,17 +4775,18 @@ anomalies:
       finite and greater than 0, and `thermal_diffusivity` finite and at
       least 0; zero is a rod that does not conduct.  `grid_points` must be
       finite and strictly increasing.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Silent, but except for one case only on input with no physical
-      meaning.  The exception is grid points listed in decreasing order.
-      Coordinates read along a negative axis can produce that, and the
-      constructor's documentation never said it was not allowed; the rod
-      then gave plausible, wrong temperatures.  Minor because every other
-      case needs a constant no rod can have, and anti-diffusion eventually
-      leaves float range.  `context_dependent` because whether a wrong
-      temperature or flux matters is a property of the program using it.
+      Graded `major` because every case was a silent wrong result, and a
+      silent wrong result is never minor.  Most cases need input with no
+      physical meaning.  The exception is grid points listed in decreasing
+      order: coordinates read along a negative axis can produce it, the
+      constructor's documentation never said it was not allowed, and the
+      rod then gave plausible, wrong temperatures.  Anti-diffusion does
+      eventually leave float range, but its finite values before that are
+      wrong.  `context_dependent` because whether a wrong temperature or
+      flux matters is a property of the program using it.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0, <0.4.0"

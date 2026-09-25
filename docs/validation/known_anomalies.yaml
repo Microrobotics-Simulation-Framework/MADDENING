@@ -4035,7 +4035,9 @@ anomalies:
       tag, same environment) -- the unstructured cases from v0.3.0, where
       that wrapper first shipped, the stencil vector case from v0.2.1, where
       domain integrals did.  Loud, not silent: every failure is an
-      exception.
+      exception.  (A vector integral whose length the device count divides
+      was split without an error, and set the block size `shard_info`
+      reports; that is MADD-ANO-056.)
       Resolved in 0.4.0: in both wrappers a domain integral carried in the
       state is placed exactly as the step returns it -- replicated once
       reduced, stacked along its unreduced mesh axes otherwise, by
@@ -4059,8 +4061,17 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known.
+      The fix as first merged in the 0.4.0 development tree was incomplete
+      in two ways, both closed before 0.4.0: an integral that
+      `state_fields()` also lists -- the default lists every
+      `initial_state` key -- still failed under both wrappers (the step's
+      output was classified as a grid field first), and handing the
+      integral to each shard whole made `ShardedStencilNode` read it as the
+      block size it reports in `shard_info`, silently, where a misplaced
+      integral had mostly raised (MADD-ANO-056).  "None known", which this
+      said, was written before either was found.  None known beyond them.
     verification:
+      - "tests/cloud/multigpu/test_integral_listed_as_state_field.py::test_an_integral_listed_in_state_fields_is_summed_over_the_shards"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_domain_integral_fed_back_as_state_steps_again"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_without_an_initial_integral_steps_in_a_graph"
@@ -5041,4 +5052,174 @@ anomalies:
     verification:
       - "tests/fmi/test_fmu_state.py::TestNoPickle::test_a_pickle_payload_is_refused_rather_than_unpickled"
       - "tests/fmi/test_sidecar.py::TestWireProtocol::test_the_pickled_rpc_protocol_is_refused_unless_opted_into"
+
+  - anomaly_id: "MADD-ANO-056"
+    title: "ShardedStencilNode read the block size it hands update_padded in shard_info off a domain integral carried in the state, so a sharded HeatNode carrying a vector or per-shard energy integral never closed its right rod end"
+    description: >
+      `ShardedStencilNode` passes `update_padded` `shard_info = {axis:
+      (offset, local_extent)}`.  It read `local_extent`, inside the traced
+      step, off the first local state field long enough to have the axis,
+      in sorted key order, and did not skip a domain integral carried in
+      the state (as every other shape reader in the wrapper does), so an
+      integral whose name sorts before the grid fields set the block size,
+      and `offset = axis_index * local_extent` with it.  In the 0.4.0
+      development tree, where the fix of MADD-ANO-040 hands such an
+      integral to each shard whole and `HeatNode` closes its rod ends
+      where `shard_info` says the block holds them (the fix of
+      MADD-ANO-030), a `HeatNode` subclass carrying its thermal energy as
+      a 2-vector, or as a per-shard value, named to sort before
+      `temperature` was told its 4-cell blocks held 2 cells (or 1); no
+      block ever reached the rod's right end, which was never closed:
+      70.94 K off the unsharded rod after 40 steps on 16 cells and 4
+      devices, finite, with no error or warning (e888840 and db6ef8d, CPU,
+      jaxlib 0.11.0, 4 virtual devices).  At v0.2.1, v0.3.0 and v0.3.1
+      (`git archive` of each tag, same environment), where the integral was
+      still split like a grid field, a vector integral whose length the
+      device count divides set the extent the same way -- 1 for a 4-vector
+      and 2 for an 8-vector on 4-cell blocks -- and the step ran; no
+      built-in node read `shard_info` then, so a released version gave a
+      wrong block only to a node that did.  Resolved in 0.4.0: the extent
+      is fixed before tracing, from a grid field's global extent over the
+      devices on its mesh axis; an integral never sets it, and a node that
+      reads `shard_info` whose grid fields disagree about an axis's extent
+      is refused, naming the fields.  Such a rod matches the unsharded rod.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent and plausible: a finite field tens of kelvin off, with the
+      boundary condition the user supplied not applied, and nothing
+      raised.  Graded `major` because the configuration is a documented
+      one (an integral carried in the state, which a scan carry needs) on
+      a built-in node.  `context_dependent` because it needs a node that
+      reads `shard_info`, an integral in its state that is a vector or a
+      per-shard value, and a name that sorts before the grid fields; a
+      reduced scalar integral was never read (it has no axis).
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.1, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep a domain integral out of a sharded node's state,
+      or give it a name that sorts after every grid field.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `shard_info` describes one block per sharded axis.  A node whose grid
+      fields are split into blocks of different sizes along one axis
+      cannot be described by it, and is refused when it reads it rather
+      than supported.
+    verification:
+      - "tests/cloud/multigpu/test_shard_info_extent.py::test_a_rod_carrying_an_integral_is_the_unsharded_rod"
+      - "tests/cloud/multigpu/test_shard_info_extent.py::test_grid_fields_of_different_extents_are_refused_for_a_node_reading_shard_info"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-057"
+    title: "A sharded HeatNode or LBMNode applied, on every shard, a heat_source or body_force of a shape the unsharded node refuses"
+    description: >
+      `ShardedStencilNode` shards a boundary input that is grid-shaped and
+      hands anything else to every shard whole, where it cannot be told
+      from a local one.  `HeatNode.update_padded` broadcast any 1-D
+      `heat_source` of the block's length, so on a 16-cell rod split over
+      4 devices a source of 4 values was applied on every block: one
+      pattern repeated along the rod, where `update` refuses 4 values for
+      16 cells.  `LBMNode.update_padded` zero-padded any `body_force` that
+      was neither `(D,)` nor the padded block, so a `(4, 8, 2)` force on a
+      `(16, 8)` grid split over 4 devices was applied on every slab, where
+      `update` refuses it.  Both are reachable through
+      `GraphManager.add_external_input`.  Reproduced at v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0, 4
+      virtual devices) and on the 0.4.0 development tree (e888840,
+      db6ef8d), where a `heat_source` of the padded block's length (6 on
+      that rod) was also taken, as a padded block.  Resolved in 0.4.0: the
+      wrapper refuses a replicated input the node declares per cell unless
+      it broadcasts to the declared shape, naming the shape it was given,
+      and both nodes' `update_padded` take only the forms their `update`
+      takes, translated to the block (a scalar or `(1,)` source, a `(D,)`
+      or `(1,)` force, a per-cell field as the wrapper delivers it, and on
+      a direct call holding the whole grid the whole-grid field).  A
+      whole-grid body force on such a direct call is now padded
+      periodically, as the node's halo fill is; it was zero-padded.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent, but it needs an input the unsharded node refuses: a caller
+      who runs the same graph unsharded gets an error.  Graded `minor`
+      because the wrong result follows from a mis-shaped input rather than
+      a correct one.  `context_dependent` because a sharded-only workflow
+      that passes a per-shard-length source would take the repeated
+      pattern for the intended one.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.nodes.heat.HeatNode"
+      - "maddening.nodes.lbm.LBMNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `heat_source` as a scalar or as one value per cell
+      of the whole rod, and `body_force` as a `(D,)` vector; check a
+      sharded graph's inputs against the unsharded node first.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The wrapper's check reads the node's `boundary_input_spec()`: an input
+      a node does not declare, or declares with a shape that is not per
+      cell, is left to the node.  A force that broadcasts along a grid axis
+      (a profile such as `(8, 2)` on a `(16, 8)` grid), which `update`
+      takes, is refused by the sharded `LBMNode` rather than translated.
+    verification:
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_a_heat_source_the_rod_refuses_is_refused_sharded"
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_update_padded_refuses_an_unpadded_block_source_on_a_split_rod"
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_a_mis_shaped_external_heat_source_is_refused_by_a_sharded_graph"
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_a_body_force_the_node_refuses_is_refused_sharded"
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_update_padded_refuses_an_unpadded_block_force_on_a_split_grid"
+      - "tests/cloud/multigpu/test_sharded_input_shapes.py::test_update_padded_on_the_whole_grid_fills_a_per_cell_force_periodically"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-058"
+    title: "The LBM constructors accepted a non-finite viscosity or relaxation time, and LBMPipeNode a propeller disc outside the grid, each running a different model with no error"
+    description: >
+      `LBMNode` checked `tau = 0.5 + viscosity / cs2 > 0.5` only, so
+      `viscosity=inf` gave `tau = inf`, which passes, and the node ran with
+      no collision at all (`(f - f_eq) / tau` is 0); `nan` passes every
+      comparison.  `LBMPipeNode` had the same gap for `tau` and
+      `tau_tracer`.  `LBMPipeNode` built its actuator disc with
+      `mask.at[propeller_x]`, which drops an index outside the grid
+      without a word, so `propeller_x=99` on an 8-plane pipe ran with no
+      propeller: `max|u|` 3.7e-9 after 10 steps, where `propeller_x=4`
+      reached 5.2e-3.  The default, `propeller_x=10`, is outside every pipe
+      of 10 planes or fewer, and a disc radius that takes in no cell
+      centre built an empty disc the same way.  Reproduced at v0.1.0 and
+      v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) and on the
+      0.4.0 development tree (e888840, db6ef8d): every case accepted, the
+      disc empty.  Resolved in 0.4.0: `LBMNode` refuses a non-finite
+      viscosity, `LBMPipeNode` a non-finite `tau` or `tau_tracer`, a
+      `propeller_x` that is not an integer index in `[0, nx)` (naming the
+      default when it is the one outside the grid), and a disc that covers
+      no cell of the cross-section.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the model that runs is not the one configured, and nothing
+      says so.  Graded `minor` because each case is a configuration value
+      outside what the node documents (a finite viscosity; a disc on the
+      grid), and a pipe with no propeller visibly does not flow.
+      `context_dependent` because a small test pipe built with the default
+      `propeller_x` gives no sign that its propeller is missing.
+    affected_components:
+      - "maddening.nodes.lbm.LBMNode"
+      - "maddening.nodes.lbm_pipe.LBMPipeNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass finite relaxation parameters, and a `propeller_x`
+      inside the pipe (the default needs `nx > 10`).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A disc wider than the pipe (`propeller_radius > 1`) still puts force
+      in wall cells; the parameter is documented as a fraction from 0 to 1
+      and is not refused above it.
+    verification:
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_node_refuses_a_non_finite_viscosity"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_non_finite_relaxation_time"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_outside_the_grid"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_the_default_propeller_position_needs_a_pipe_longer_than_ten_planes"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_disc_that_covers_no_cell"
     github_issue: null

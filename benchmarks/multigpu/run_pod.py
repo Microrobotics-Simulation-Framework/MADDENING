@@ -63,9 +63,16 @@ read complete.  ``--summarise DIR`` reads the JSON files back and prints
 the checklist verdict, the per-goal tables and the ``ppermute`` vs
 ``all_to_all`` recommendation.  It re-derives every check's pass/fail from
 its value, limit and sense rather than trusting the recorded flag, and
-fails a record that disagrees.  A checklist item reads ``CLOSED`` only
-when every goal deciding it passed with every check run, on real GPUs,
-not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4) devices.  It does
+fails a record that disagrees.  It also refuses to take a file's own word
+for what it checked (:func:`record_problems`): a file decides nothing
+unless it is on the current ``SCHEMA_VERSION``, its ``n_devices`` is no
+more than the devices its environment saw, its results hold every case
+this runner runs for the file's own config, and its checks are exactly
+the ones this runner derives from its results (``GOAL_CHECKS``), limits
+from ``LIMITS`` included.  A checklist item reads ``CLOSED`` only when
+every goal deciding it passed with every check run and every file valid,
+on real GPUs, not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4)
+devices, and every deciding file records the same git commit.  It does
 not import JAX, so it works on a laptop without a usable jaxlib.
 
 Every timed callable receives inputs that were placed on the device mesh

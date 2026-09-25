@@ -109,7 +109,7 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
-from maddening.fmi.sidecar import FmuSidecar, _not_tunable_error
+from maddening.fmi.sidecar import FmuSidecar, _checked_value, _not_tunable_error
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
 
@@ -377,6 +377,10 @@ def checked_value(arr, dtype, *, what: str) -> np.ndarray:
     install a value a ``set`` of the same variable would refuse -- which
     it could until 0.4.0, because the two paths each had their own idea
     of what a valid value was and only one of them had any.
+    :meth:`FmuSidecar.set_params <maddening.fmi.sidecar.FmuSidecar.set_params>`
+    applies the same check (the implementation lives in the sidecar
+    module, which this one imports), so the in-process door into the
+    parameters is no wider than the wire.
 
     Parameters
     ----------
@@ -400,20 +404,7 @@ def checked_value(arr, dtype, *, what: str) -> np.ndarray:
         it: a float32 field set to ``1e308`` would be stored (and read
         back) as ``inf``, and an integer would wrap silently.
     """
-    a = np.asarray(arr)
-    if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
-        raise ValueError(f"{what}: value must be finite")
-    with np.errstate(over="ignore", invalid="ignore"):
-        cast = a.astype(dtype)
-    if np.issubdtype(cast.dtype, np.floating):
-        fits = bool(np.all(np.isfinite(cast)))
-    elif np.issubdtype(cast.dtype, np.integer):
-        fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
-    else:
-        fits = True                                       # bool
-    if not fits:
-        raise ValueError(f"{what}: value does not fit its type {dtype}")
-    return cast
+    return _checked_value(arr, dtype, what=what)
 
 
 @stability(StabilityLevel.EVOLVING)

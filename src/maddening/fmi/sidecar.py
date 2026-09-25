@@ -106,6 +106,39 @@ def _same_leaf(a: Any, b: Any) -> bool:
     return x.shape == y.shape and bool(np.array_equal(x, y))
 
 
+def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
+    """``arr`` cast to ``dtype``, refused unless the model can hold it.
+
+    The one value check on every write path into a sidecar's parameters
+    and state: :meth:`FmuSidecar.set_params` here, and the TCP bridge's
+    ``set`` and ``set_state`` through
+    :func:`maddening.fmi.tcp_bridge.checked_value`, which delegates to
+    this function.  It lives in this module because the bridge imports
+    the sidecar and not the other way round.
+
+    Raises
+    ------
+    ValueError
+        If the incoming value is not finite, or if ``dtype`` cannot hold
+        it: a float32 leaf set to ``1e39`` would be stored (and read back)
+        as ``inf``, and an integer would wrap or truncate silently.
+    """
+    a = np.asarray(arr)
+    if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
+        raise ValueError(f"{what}: value must be finite")
+    with np.errstate(over="ignore", invalid="ignore"):
+        cast = a.astype(dtype)
+    if np.issubdtype(cast.dtype, np.floating):
+        fits = bool(np.all(np.isfinite(cast)))
+    elif np.issubdtype(cast.dtype, np.integer):
+        fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
+    else:
+        fits = True                                       # bool
+    if not fits:
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
+    return cast
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
@@ -247,12 +280,17 @@ class FmuSidecar:
         parameter value reference) into the pytree the next step uses.
 
         Keys are ``"<node>.params.<key>"``; an unknown name, a shape
-        that differs from the current leaf, a new value for a parameter the
+        that differs from the current leaf, a value that is not finite or
+        that the leaf's dtype cannot hold (a float32 leaf set to ``1e39``
+        would read back as ``inf``), a new value for a parameter the
         step cannot read (``SidecarConfig.fixed_params``), or a value
         outside the leaf's ``ParamSpec.bounds`` (when the config carries
         ``param_specs``) is an error, so an importer cannot silently
         tune a constant the step never reads or declares invalid.  The
-        call is atomic: nothing is written unless every update is valid.
+        value check is the TCP bridge's own, so ``set_params`` refuses
+        what the bridge's ``set`` refuses, with or without
+        ``param_specs``.  The call is atomic: nothing is written unless
+        every update is valid.
         """
         if self._params is None:
             raise RuntimeError(
@@ -269,7 +307,11 @@ class FmuSidecar:
                     f"unknown parameter {name!r}; known: {sorted(self.get_params())}",
                 )
             current = nodes[node][key]
-            new = jnp.asarray(value, dtype=current.dtype)
+            # Checked before the cast, not after: ``jnp.asarray(1e39,
+            # dtype=float32)`` is ``inf``, NaN passes straight through, and
+            # without ``param_specs`` nothing below looks at the value.
+            new = jnp.asarray(_checked_value(
+                value, current.dtype, what=f"parameter {name!r}"))
             if new.shape != current.shape:
                 raise ValueError(
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",

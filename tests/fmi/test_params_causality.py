@@ -139,6 +139,58 @@ class TestSidecar:
         with pytest.raises(ValueError, match="shape"):
             sc.set_params({"spring.params.stiffness": [1.0, 2.0]})
 
+    @pytest.mark.parametrize("with_specs", [False, True], ids=["no_specs", "specs"])
+    @pytest.mark.parametrize("value, refusal", [
+        (float("nan"), "must be finite"),
+        (float("inf"), "must be finite"),
+        (float("-inf"), "must be finite"),
+        (1e39, "does not fit its type float32"),     # finite float64, inf as float32
+        (-1e39, "does not fit its type float32"),
+    ])
+    def test_set_params_refuses_values_the_leaf_cannot_hold(self, gm, with_specs, value,
+                                                            refusal):
+        """The bridge's ``set`` refused these; ``set_params`` checked them
+        only through ``ParamSpec.check``, so a sidecar built without
+        ``param_specs`` stored NaN, and ``1e39`` as float32 ``inf``.  The
+        refusal is atomic: the valid update beside it is not written."""
+        md = build_model_description(gm, model_name="m")
+        sc = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params,
+            param_specs=gm.param_specs() if with_specs else None))
+        with pytest.raises(ValueError,
+                           match=rf"parameter 'spring.params.stiffness': value {refusal}"):
+            sc.set_params({"spring.params.damping": 3.0, "spring.params.stiffness": value})
+        got = sc.get_params()
+        assert float(got["spring.params.stiffness"]) == 30.0
+        assert float(got["spring.params.damping"]) == 2.0
+        # the largest float32 is a value the leaf can hold, and is accepted
+        big = float(np.finfo(np.float32).max)
+        sc.set_params({"spring.params.stiffness": big})
+        assert float(sc.get_params()["spring.params.stiffness"]) == big
+
+    def test_set_params_refuses_what_the_bridge_set_refuses(self, gm):
+        """One value check for both doors, with the same words."""
+        from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+        md = build_model_description(gm, model_name="m")
+        sc = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params))
+        bridge = FmuTcpBridge(sc, md, master_dt=1e-2)
+        try:
+            k = next(v.value_reference for v in md.variables
+                     if v.name == "spring.params.stiffness")
+            for value in (1e39, float("nan")):
+                reply = bridge.handle({"op": "set", "vr": [k], "values": [value]})
+                assert reply["ok"] is False
+                with pytest.raises(ValueError) as exc:
+                    sc.set_params({"spring.params.stiffness": value})
+                tail = str(exc.value).split(": ", 1)[1]
+                assert reply["error"].endswith(tail), (reply["error"], str(exc.value))
+        finally:
+            bridge.stop()
+
     def test_set_params_without_params_config_errors(self):
         sc = FmuSidecar(SidecarConfig(
             schema_token="t", step_fn=lambda s, e: s,

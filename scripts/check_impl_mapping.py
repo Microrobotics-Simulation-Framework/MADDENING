@@ -28,6 +28,13 @@ Four things this gate has to get right, because each was a hole:
   convention for a term a JAX primitive or third-party function handles:
   a Notes cell that *begins* ``JAX primitive`` or ``Third-party`` declares
   the row's unqualified spans as such.  They are reported, not verified.
+* **A function, method or property -- not a class.**  A class is callable,
+  so a row re-pointed from ``HeatNode.update`` to ``HeatNode`` kept
+  resolving, and traced its equation term to a whole class
+  (audit_040_p4_2, M5).  A row that does mean a class -- its constructor,
+  say -- begins its Notes cell ``Class `Name```, naming it; the gate then
+  accepts that one class in the row, and fails the marker when no span in
+  the row resolves to it.
 * **A pinned minimum per guide**, so a table that vanishes fails instead of
   quietly lowering the count.  The pins sit at the current counts; a guide
   that gains rows should raise its pin, or the slack reopens for row
@@ -136,6 +143,10 @@ _INHERITED_MARKER = re.compile(r"Inherited from `([A-Za-z_][\w.]*)`")
 #: primitive or third-party call rather than a MADDENING symbol
 #: (``docs/developer_guide/documentation_standards.md``); anchored likewise.
 _PRIMITIVE_MARKER = re.compile(r"(?:JAX primitive|Third-party)\b")
+#: The only spelling that lets a row trace a term to a class rather than to
+#: a function, method or property: a Notes cell that *starts* with it,
+#: naming the class (bare or qualified); anchored likewise.
+_CLASS_MARKER = re.compile(r"Class `([A-Za-z_][\w.]*)`")
 # A Markdown table cell may contain an escaped pipe.  Splitting on a bare
 # ``|`` mangled every row holding LaTeX like ``\|g\|``, which shifted the
 # Implementation column out of cell 1 and made the row invisible to the gate.
@@ -253,16 +264,27 @@ def check_guide(
             None,
         )
         marker_base = marker.rsplit(".", 1)[-1] if marker else None
+        class_marker = next(
+            (m.group(1) for m in (_CLASS_MARKER.match(c) for c in cells[2:])
+             if m),
+            None,
+        )
+        class_name = class_marker.rsplit(".", 1)[-1] if class_marker else None
         row_inherited = False
         row_checked = False
+        row_names_the_class = False
         for match in _QNAME.finditer(row_text):
             qname = match.group(1).rstrip("`).,( ")
             checked += 1
+            maps_the_class = qname.rsplit(".", 1)[-1] == class_name
             res = resolve_dotted_name(
                 qname,
                 require_own=marker_base is None,
                 require_callable=True,
+                require_routine=not maps_the_class,
             )
+            if maps_the_class and res.ok:
+                row_names_the_class = True
             if res.unavailable:
                 # An optional subpackage this environment cannot import.
                 # Not checked is not the same as not there; saying "stale"
@@ -281,6 +303,10 @@ def check_guide(
                     hint = (f"; if the row means the inherited behaviour, "
                             f"begin its Notes cell with "
                             f"'Inherited from `{res.inherited_from}`'")
+                elif "resolves to the class" in (res.reason or ""):
+                    hint = (f"; name the method the term is computed in, or, "
+                            f"if the row means the class itself, begin its "
+                            f"Notes cell with 'Class `{qname.rsplit('.', 1)[-1]}`'")
                 errors.append(
                     f"{relpath}: '{qname}' (for term '{term}') does not "
                     f"resolve: {res.reason}{hint}"
@@ -299,6 +325,15 @@ def check_guide(
                         f"inherited from {res.inherited_from}, as the row "
                         f"states"
                     )
+        if class_name is not None and row_checked and not row_names_the_class:
+            # Like the inherited marker, a claim about the code that has to
+            # stay true: a marker naming a class no span in the row resolves
+            # to would otherwise be a switch left on.
+            errors.append(
+                f"{relpath}: row '{term}' says 'Class `{class_marker}`', but "
+                f"no code span in it resolves to a class of that name; drop "
+                f"the marker or name the class"
+            )
         if marker_base is not None and row_checked and not row_inherited:
             # The marker is a claim about the code.  When the class now
             # defines the symbol itself, the claim is stale -- and it is the

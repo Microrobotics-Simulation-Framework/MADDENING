@@ -30,7 +30,7 @@ Please include:
 
 MADDENING monitors its core dependencies for known security vulnerabilities using two mechanisms:
 
-1. **GitHub Dependabot** — enabled on the repository; automatically monitors PyPI dependencies for published CVEs and creates pull requests for security-relevant version bumps.
+1. **GitHub Dependabot alerts** — enabled on the repository; they flag a dependency with a published advisory (CVE / GHSA). Automated security-fix pull requests are **not** enabled and the repository has no `dependabot.yml`, so nothing opens a pull request by itself: an alert is acted on by hand.
 
 2. **Manual changelog review** — JAX ecosystem libraries (JAX, jaxlib, Equinox, Optax) are reviewed at each MADDENING release for correctness-affecting changes (XLA compiler changes, numerical behaviour changes) that may not be classified as security vulnerabilities.
 
@@ -59,11 +59,27 @@ The primary security concerns are:
 ### The rule for listening sockets, and its one exception
 
 **A loopback bind is unauthenticated; any other bind demands a
-credential.** One credential, `MADDENING_API_TOKEN`, covers the HTTP API
-(as a bearer token) and the ZeroMQ transports (as the seed for their
-CURVE keypairs). The signaling socket has its own,
-`MADDENING_STREAM_SECRET`. No surface falls back to cleartext when its
-credential is missing -- it refuses to start.
+credential.** Each surface has its own:
+
+- **HTTP API: `MADDENING_API_TOKEN`**, as a bearer token. Unset, the
+  server generates one at start-up and logs it once.
+- **ZeroMQ transports: `MADDENING_TRANSPORT_TOKEN`**, the seed for their
+  CURVE keypairs. `TransportAuth` reads it first and falls back to
+  `MADDENING_API_TOKEN` only when it is unset. With neither, a socket on
+  a reachable address refuses to open rather than falling back to
+  cleartext.
+- **WebRTC signaling: `MADDENING_STREAM_SECRET`**. Unset, the session
+  uses a random secret nobody holds, and every client is rejected.
+
+**Set `MADDENING_API_TOKEN` and `MADDENING_TRANSPORT_TOKEN` both, to
+different values**, whenever the API port and a ZeroMQ port are reachable
+from the same network. The API has no TLS, so its token crosses the
+network in cleartext on every request; while that token is also the
+CURVE seed, one observed request yields both CURVE keypairs and the
+"encrypted" streams can be read (`MADD-ANO-015`). A `MADDENING_API_TOKEN`
+or `MADDENING_TRANSPORT_TOKEN` that is set but blank is a configuration
+error and refuses to start; an empty `MADDENING_STREAM_SECRET` is read as
+unset.
 
 **The FMU TCP bridge is the exception: it authenticates nobody, on any
 bind.** Any process that can reach its port can read, write, step and
@@ -79,6 +95,9 @@ they are not on loopback.
 
 Before v0.4.0 the ZeroMQ transports bound every interface with no
 authentication or encryption at all; see `MADD-ANO-015` in
-`docs/validation/known_anomalies.yaml`.
+`docs/validation/known_anomalies.yaml`.  The HTTP API authenticated
+nobody either (`MADD-ANO-051`), its checkpoint routes took any server path
+(`MADD-ANO-052`), and the signaling socket's token check admitted every
+client (`MADD-ANO-053`).
 
 MADDENING assumes trusted inputs (Section 2 of `docs/regulatory/intended_use.md`). Input sanitization and validation is the responsibility of the downstream integration layer.

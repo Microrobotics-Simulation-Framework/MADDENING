@@ -994,6 +994,49 @@ class TestAnAdditiveChangeIsNotReportedAsABreak:
         )
         assert len(breaking) == 1 and compatible == []
 
+    # -- a recorded variadic already catches what a new parameter binds ----
+
+    _ARGS = {"name": "args", "kind": "VAR_POSITIONAL"}
+    _KWARGS = {"name": "kwargs", "kind": "VAR_KEYWORD"}
+
+    def _pair(self, guard, before, after):
+        base = self._with(*before)
+        breaking, compatible, _ = guard.compare(
+            self._snap(base), self._snap(self._with(*after)))
+        return "breaking" if breaking else "compatible" if compatible else "unchanged"
+
+    def test_a_defaulted_positional_before_a_recorded_var_positional_is_breaking(
+            self, guard):
+        """audit_040_p4_2, G3: ``f(a, *args)`` to ``f(a, b=1, *args)`` --
+        ``f(1, 2, 3)`` bound ``args=(2, 3)`` and now binds ``b=2``."""
+        new = {"name": "b", "kind": "POSITIONAL_OR_KEYWORD", "default": "1"}
+        assert self._pair(guard, [self._ARGS], [new, self._ARGS]) == "breaking"
+        assert guard.is_additive(
+            {"kind": "function", "parameters": [
+                {"name": "a", "kind": "POSITIONAL_OR_KEYWORD"}, self._ARGS]},
+            {"kind": "function", "parameters": [
+                {"name": "a", "kind": "POSITIONAL_OR_KEYWORD"},
+                {"name": "b", "kind": "POSITIONAL_OR_KEYWORD", "default": "1"},
+                self._ARGS]}) is False
+
+    def test_a_keyword_only_after_a_recorded_var_positional_is_compatible(
+            self, guard):
+        """Positional callers cannot reach it; only a new keyword can."""
+        new = {"name": "strict", "kind": "KEYWORD_ONLY", "default": "False"}
+        assert self._pair(guard, [self._ARGS], [self._ARGS, new]) == "compatible"
+
+    @pytest.mark.parametrize("kind", ["POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY"])
+    def test_a_defaulted_keyword_beside_a_recorded_var_keyword_is_breaking(
+            self, guard, kind):
+        """``f(a, **kwargs)`` to ``f(a, b=1, **kwargs)``: ``f(1, b=2)`` put
+        ``b`` in ``kwargs`` and now binds the parameter."""
+        new = {"name": "b", "kind": kind, "default": "1"}
+        assert self._pair(guard, [self._KWARGS], [new, self._KWARGS]) == "breaking"
+
+    def test_growing_a_variadic_beside_a_recorded_one_is_compatible(self, guard):
+        assert self._pair(guard, [self._ARGS], [self._ARGS, self._KWARGS]) \
+            == "compatible"
+
     def test_changing_the_return_annotation_is_breaking(self, guard):
         assert self._classify(guard, dict(self.BASE, returns="dict")) == "breaking"
 

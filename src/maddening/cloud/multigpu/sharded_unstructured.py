@@ -584,10 +584,10 @@ class ShardedUnstructuredNode(SimulationNode):
         cells -- the shape cannot say which order an array is in.  If the
         partition keeps cells in global order (shard ``d`` owns the
         ``d``-th contiguous block, ascending) the two orders are the same
-        array and it is accepted.  Otherwise it is refused: until 0.4.0 it
-        was read as partition layout, so a global-order input -- what an
-        edge from an unsharded node delivers -- gave each cell another
-        cell's value (an interleaved 8-cell, 2-device partition read
+        array and it is accepted.  Otherwise it is refused: before the
+        refusal it was read as partition layout, so a global-order input
+        -- what an edge from an unsharded node delivers -- gave each cell
+        another cell's value (an interleaved 8-cell, 2-device partition read
         ``[1..8]`` as ``[1, 5, 2, 6, 3, 7, 4, 8]``).  Renumber the cells so
         that each shard owns a contiguous ascending block, and both
         readings agree.

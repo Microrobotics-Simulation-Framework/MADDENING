@@ -283,13 +283,20 @@ def test_a_float64_node_steps_with_a_float64_dt_when_sharded():
 
 
 @pytest.mark.skipif(not _HAS_4_DEVICES, reason=_SKIP_4)
-def test_a_float32_node_still_steps_in_float32_when_sharded():
+@pytest.mark.parametrize("x64", [False, True], ids=["x32", "x64"])
+def test_a_float32_node_still_steps_in_float32_when_sharded(x64):
     """Without the cast a Python ``dt`` arrives weakly typed, so a float32
-    state stays float32 -- the dtype the wrapper's out_specs were built for."""
-    node = _Decay1D(jnp.float32)
-    sharded = ShardedStencilNode(node, create_device_mesh(shape=(4,)),
-                                 axis_map={"devices": 0}, boundary="periodic")
-    got = sharded.update(sharded.initial_state(), {}, 0.1)["u"]
-    assert got.dtype == jnp.float32
-    np.testing.assert_array_equal(
-        np.asarray(got), np.asarray(jax.jit(node.update)(node.initial_state(), {}, 0.1)["u"]))
+    state stays float32 -- as unwrapped, and under x64 too, where a strongly
+    typed float64 ``dt`` would promote the step."""
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", x64)
+    try:
+        node = _Decay1D(jnp.float32)
+        sharded = ShardedStencilNode(node, create_device_mesh(shape=(4,)),
+                                     axis_map={"devices": 0}, boundary="periodic")
+        got = sharded.update(sharded.initial_state(), {}, 0.1)["u"]
+        want = jax.jit(node.update)(node.initial_state(), {}, 0.1)["u"]
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+    assert got.dtype == want.dtype == jnp.float32
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(want))

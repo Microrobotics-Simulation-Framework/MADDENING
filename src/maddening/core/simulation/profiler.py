@@ -42,6 +42,7 @@ import os
 import tarfile
 import tempfile
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -54,7 +55,7 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.coupling.acceleration import (
     convergence_criterion,
-    reported_error_estimate,
+    reported_converged,
 )
 
 
@@ -577,17 +578,35 @@ def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, float, int]]:
     return out
 
 
+def _group_rate_dividers(gm) -> dict[str, int]:
+    """``{group_key: rate divider}``: every how many base steps a group solves.
+
+    ``1`` on a uniform-rate graph.  Every member of a group shares one
+    divider (a sub-cycling group is scheduled at its macro timestep).
+    """
+    if not gm.is_multirate:
+        return {}
+    dividers = gm.rate_dividers
+    return {"+".join(sorted(g.nodes)): int(dividers[sorted(g.nodes)[0]])
+            for g in gm._coupling_groups}
+
+
 def _meta_converged(meta: dict, res_key: str, amp_key: str,
                     threshold: float, step_scale: float) -> bool:
     """One group's ``converged`` for the step whose ``_meta`` this is.
 
-    Read from the slots by the arithmetic ``coupling_diagnostics()``
-    uses (:func:`~maddening.core.coupling.acceleration.reported_error_estimate`),
-    so ``converged_fraction`` counts exactly the steps the report calls
-    converged.
+    Read from the slots by the rule ``coupling_diagnostics()`` uses
+    (:func:`~maddening.core.coupling.acceleration.reported_converged`),
+    in the dtype the slots are stored in -- which is the dtype the loop,
+    ``strict_convergence`` and the sysid mask compared in -- so
+    ``converged_fraction`` counts exactly the steps the report calls
+    converged.  It used to compare the float64 product of the slots,
+    which disagreed with the loop within half a float32 ulp of the
+    threshold.
     """
-    amp = float(meta.get(amp_key, 0.0))
-    return reported_error_estimate(float(meta[res_key]), amp, step_scale) <= threshold
+    residual = np.asarray(meta[res_key])
+    amp = np.asarray(meta.get(amp_key, 0.0))
+    return reported_converged(residual, amp, step_scale, threshold)
 
 
 def _time_steps(gm, external_inputs, n: int) -> np.ndarray:
@@ -619,10 +638,20 @@ def _one_iteration_variant(gm):
         saved_params = gm.params
         saved_step = gm._compiled_step
         try:
-            gm._coupling_groups = [
-                dataclasses.replace(g, max_iterations=1, strict_convergence=False)
-                for g in saved_groups
-            ]
+            # ``dataclasses.replace`` re-runs ``__post_init__``, whose
+            # inert-knob rules then warn that the *user's* acceleration
+            # settings are ignored under ``max_iterations=1`` -- a cap
+            # the user never wrote -- and a ``solver="fori"`` group
+            # repeats its deprecation.  The variant is this profiler's
+            # own construction, so what its constructor says is not the
+            # caller's business; the groups were validated, and warned
+            # about, when the caller built them.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                gm._coupling_groups = [
+                    dataclasses.replace(g, max_iterations=1, strict_convergence=False)
+                    for g in saved_groups
+                ]
             gm.compile()
             gm._state = jax.tree.map(lambda x: x, saved_state)
             yield
@@ -805,7 +834,10 @@ def profile_graph(
         any caller that shortens a timing run believing the iteration
         counts are properties of the step.  Passing a value pins both:
         the state is reset and re-warmed first, so the statistics come
-        from the same window whatever ``n_steps`` is.
+        from the same window whatever ``n_steps`` is.  On a multi-rate
+        graph a group solves only on the base steps its rate divider
+        fires on, and it is sampled only on those: its ``"n"`` counts
+        solves, not base steps.
     counts : bool
         Measure :class:`CompileCounts` -- retraces, jaxpr primitives and
         lowered HLO ops.  Cheap (no device work) and, unlike every
@@ -909,10 +941,19 @@ def profile_graph(
             jax.block_until_ready(jax.tree.leaves(gm._state))
         iters = {k[0]: [] for k in group_keys}
         conv = {k[0]: [] for k in group_keys}
+        # On a multi-rate graph a group solves only on the base steps its
+        # rate divider fires on, and its ``_meta`` slots hold that solve
+        # until the next one.  Sampled on every base step, one solve was
+        # counted ``divider`` times -- and before the slots were gated,
+        # the steps in between reported the solves the step discarded.
+        dividers = _group_rate_dividers(gm)
         for _ in range(n_stat):
+            step_count = int(gm._state.get("_meta", {}).get("step_count", 0))
             gm.step(external_inputs)
             meta = gm._state.get("_meta", {})
             for key, iter_key, res_key, amp_key, thr, scale, cap in group_keys:
+                if step_count % dividers.get(key, 1) != 0:
+                    continue    # the group did not solve on this base step
                 if iter_key in meta:
                     iters[key].append(int(meta[iter_key]))
                     conv[key].append(_meta_converged(meta, res_key, amp_key, thr, scale))

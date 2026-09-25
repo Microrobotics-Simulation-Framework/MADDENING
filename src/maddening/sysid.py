@@ -254,6 +254,32 @@ def _group_thresholds(gm) -> list[tuple[str, str, float, float]]:
     return out
 
 
+def _refuse_unmaskable_groups(gm, meta0, thresholds) -> None:
+    """Raise if ``mask_unconverged=True`` has no verdict to read for a group.
+
+    The mask reads each group's residual slot; a group without one --
+    ``solver="fori"`` with ``diagnostics=False``, which records nothing
+    -- was skipped by an ``if key in meta`` and so never masked, with
+    no sign that the mask was inert for it.
+    """
+    meta0 = meta0 or {}
+    for group, (res_key, _amp_key, _thr, _scale) in zip(
+            gm._coupling_groups, thresholds):  # noqa: SLF001
+        if res_key in meta0:
+            continue
+        why = ("it runs solver='fori' with diagnostics=False, which records "
+               "no convergence verdict"
+               if group.solver == "fori" and not group.diagnostics else
+               "its state carries no residual slot to read")
+        raise ValueError(
+            f"mask_unconverged=True cannot mask coupling group "
+            f"{sorted(group.nodes)}: {why}, so the mask would be silently "
+            "inert for it.  Set diagnostics=True on the group, or use "
+            "solver='ift' (whose verdict is always recorded), or pass "
+            "mask_unconverged=False."
+        )
+
+
 @stability(StabilityLevel.EVOLVING)
 def windowed_loss(
     gm,
@@ -314,7 +340,13 @@ def windowed_loss(
     mask_unconverged : bool
         Multiply a window's loss by 0 when any coupling group exited at
         ``max_iterations`` unconverged during it (the IFT gradient is
-        unreliable there).  Uses the always-on residual in ``_meta``.
+        unreliable there).  Reads each group's residual and
+        amplification slots in ``_meta``, which ``solver="ift"`` always
+        writes and ``solver="fori"`` writes only with
+        ``diagnostics=True``: a group with no such slots would never be
+        masked, so it is refused (``ValueError``) rather than silently
+        skipped.  On a multi-rate graph a group's slots hold its most
+        recent applied solve between the base steps it fires on.
     window_states : pytree, optional
         Multiple shooting: free initial **user states** per window, a
         pytree whose every leaf has leading axis
@@ -363,6 +395,7 @@ def windowed_loss(
 
     meta0 = gm._state.get(_META_KEY)  # noqa: SLF001
     thresholds = _group_thresholds(gm) if mask_unconverged else []
+    _refuse_unmaskable_groups(gm, meta0, thresholds)
 
     def _state_from_obs(obs_k, k):
         s = {nn: dict(fields) for nn, fields in obs_k.items()}
